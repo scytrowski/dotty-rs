@@ -38,6 +38,9 @@ use dotty_typer::SourceTyper;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static NEXT_TWO_LOCAL_SCALA_READER_ID: AtomicUsize = AtomicUsize::new(0);
 
 const SOURCE: &str =
     include_str!("fixtures/jvm_tasty_factory_result_arguments/CounterOwnerFactory.scala");
@@ -622,10 +625,15 @@ fn assert_formal_local_pair_tasty(
     }
 }
 
-fn assert_two_local_pair_tasty(bytes: &[u8], order: [usize; 2]) {
+fn assert_two_local_pair_tasty(
+    bytes: &[u8],
+    method_name: &str,
+    expected_local_names: [&str; 2],
+    order: [usize; 2],
+) {
     let file = tasty(bytes);
     let index = file.ast_address_index().unwrap();
-    let (method_address, method) = method_body(&file, "create");
+    let (method_address, method) = method_body(&file, method_name);
     let RawTree::LengthNode(method_body) = method.rhs.unwrap() else {
         panic!("method preserves the original result body")
     };
@@ -706,7 +714,7 @@ fn assert_two_local_pair_tasty(bytes: &[u8], order: [usize; 2]) {
         assert_eq!(seed_ref.address, method_parameters[local_index]);
         local_names.push(file.names().render(name).unwrap().to_owned());
     }
-    assert_eq!(local_names, ["first", "second"]);
+    assert_eq!(local_names, expected_local_names);
 
     let RawTree::LengthNode(pair_apply) = block.expression else {
         panic!("BLOCK result is the Pair constructor APPLY")
@@ -725,16 +733,18 @@ fn assert_two_local_pair_tasty(bytes: &[u8], order: [usize; 2]) {
         pair_apply_address < local_addresses[0] && local_addresses[0] < local_addresses[1],
         "wire order is Pair result, then source-ordered VALDEFs"
     );
-    assert_eq!(
-        (
-            method_address,
-            block_address,
-            pair_apply_address,
-            local_addresses.as_slice()
-        ),
-        (29, 54, 56, [72, 97].as_slice()),
-        "frozen source preserves its deterministic Rust TASTy addresses"
-    );
+    if method_name == "create" && expected_local_names == ["first", "second"] {
+        assert_eq!(
+            (
+                method_address,
+                block_address,
+                pair_apply_address,
+                local_addresses.as_slice()
+            ),
+            (29, 54, 56, [72, 97].as_slice()),
+            "frozen source preserves its deterministic Rust TASTy addresses"
+        );
+    }
     let pair_apply = pair_apply.decode_apply().unwrap();
     let [first, second] = pair_apply.arguments.as_slice() else {
         panic!("Pair receives exactly two arguments")
@@ -871,7 +881,11 @@ fn run_pinned_two_local_pair_reader(bytes: &[u8], expected_pair_call: &str) {
         std::env::var_os("DOTTY_TASTY_PICKLER_ORACLE_TMP")
             .expect("task-local Scala scratch is required"),
     );
-    let root = scratch.join(format!("issue-2125-scala-reader-{}", std::process::id()));
+    let invocation = NEXT_TWO_LOCAL_SCALA_READER_ID.fetch_add(1, Ordering::Relaxed);
+    let root = scratch.join(format!(
+        "issue-2125-scala-reader-{}-{invocation}",
+        std::process::id()
+    ));
     let candidate = root.join("candidate");
     let reconstructed = root.join("from-tasty");
     fs::create_dir_all(candidate.join("example")).unwrap();
@@ -3321,7 +3335,7 @@ fn two_immutable_counter_locals_pickle_in_source_order_for_local_pair_arguments(
             bytes, repeated,
             "each source variant serializes deterministically"
         );
-        assert_two_local_pair_tasty(&bytes, expected_order);
+        assert_two_local_pair_tasty(&bytes, "create", ["first", "second"], expected_order);
         if expected_order == [0, 1]
             && std::env::var_os("DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE").as_deref()
                 == Some(std::ffi::OsStr::new("1"))
@@ -3335,19 +3349,98 @@ fn two_immutable_counter_locals_pickle_in_source_order_for_local_pair_arguments(
 fn two_local_pair_emits_deterministic_six_artifact_batches_for_all_argument_orders() {
     let original =
         include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
-    for (variant, source, expected_loads) in [
-        ("original", original.to_owned(), [0usize, 1usize]),
+    let renamed = original
+        .replace("package example", "package renamed")
+        .replace("Counter", "Gauge")
+        .replace("PairFactory", "CoupleFactory")
+        .replace("Pair", "Couple")
+        .replace("firstSeed", "primarySeed")
+        .replace("secondSeed", "backupSeed")
+        .replace("first", "leftRef")
+        .replace("second", "rightRef")
+        .replace("create", "assemble");
+    let pair_start = original.find("\nclass Pair(").unwrap();
+    let factory_start = original.find("\nclass PairFactory:").unwrap();
+    let reordered = format!(
+        "{}{}{}",
+        &original[..pair_start],
+        &original[factory_start..],
+        &original[pair_start..factory_start]
+    );
+
+    for (
+        variant,
+        source,
+        expected_loads,
+        method_name,
+        local_names,
+        factory_class_name,
+        scala_pair_call,
+    ) in [
+        (
+            "original",
+            original.to_owned(),
+            [0usize, 1usize],
+            "create",
+            ["first", "second"],
+            "PairFactory",
+            Some("new example.Pair(first, second)"),
+        ),
         (
             "reversed",
             original.replace("new Pair(first, second)", "new Pair(second, first)"),
             [1, 0],
+            "create",
+            ["first", "second"],
+            "PairFactory",
+            Some("new example.Pair(second, first)"),
         ),
         (
             "repeat-first",
             original.replace("new Pair(first, second)", "new Pair(first, first)"),
             [0, 0],
+            "create",
+            ["first", "second"],
+            "PairFactory",
+            Some("new example.Pair(first, first)"),
+        ),
+        (
+            "renamed-package-classes-method-formals-and-locals",
+            renamed,
+            [0, 1],
+            "assemble",
+            ["leftRef", "rightRef"],
+            "CoupleFactory",
+            None,
+        ),
+        (
+            "class-declaration-reordered",
+            reordered,
+            [0, 1],
+            "create",
+            ["first", "second"],
+            "PairFactory",
+            None,
         ),
     ] {
+        let package = source
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("package "))
+            .expect("each variant retains one package declaration");
+        let expected_classfiles = source
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("class "))
+            .map(|definition| {
+                let name = definition
+                    .split(|character: char| {
+                        character == '(' || character == ':' || character.is_whitespace()
+                    })
+                    .next()
+                    .unwrap();
+                format!("{package}/{name}.class")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(expected_classfiles.len(), 3, "{variant} source classes");
         let first =
             emit_paired_jvm_tasty_batch(&source, "TwoLocals.scala", SourceId::from_index(21260))
                 .unwrap_or_else(|error| {
@@ -3360,11 +3453,6 @@ fn two_local_pair_emits_deterministic_six_artifact_batches_for_all_argument_orde
                 });
         assert_eq!(first.classes().len(), 3, "{variant}");
         assert_eq!(second.classes().len(), 3, "{variant}");
-        let expected_classfiles = [
-            "example/Counter.class",
-            "example/Pair.class",
-            "example/PairFactory.class",
-        ];
         for (((left, right), expected_path), expected_index) in first
             .classes()
             .iter()
@@ -3376,6 +3464,11 @@ fn two_local_pair_emits_deterministic_six_artifact_batches_for_all_argument_orde
             assert_eq!(right.classfile_path(), expected_path, "{variant}");
             assert_eq!(
                 left.tasty_path(),
+                expected_path.replace(".class", ".tasty"),
+                "{variant}"
+            );
+            assert_eq!(
+                right.tasty_path(),
                 expected_path.replace(".class", ".tasty"),
                 "{variant}"
             );
@@ -3429,27 +3522,26 @@ fn two_local_pair_emits_deterministic_six_artifact_batches_for_all_argument_orde
                     fs::create_dir_all(path.parent().unwrap()).unwrap();
                     fs::write(path, bytes).unwrap();
                 }
-                let link = left.tasty_link_id();
-                {
-                    let uuid = link
-                        .as_bytes()
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect::<String>();
-                    println!("issue-2126 {} TASTY_UUID={uuid}", left.classfile_path());
-                }
+                let uuid = left
+                    .tasty_link_id()
+                    .as_bytes()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                println!("issue-2126 {} TASTY_UUID={uuid}", left.classfile_path());
             }
-            if expected_index == 2 {
-                assert_two_local_pair_tasty(left.tasty_bytes(), expected_loads);
-                if std::env::var_os("DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE").as_deref()
-                    == Some(std::ffi::OsStr::new("1"))
+            if left.classfile_path() == format!("{package}/{factory_class_name}.class") {
+                assert_two_local_pair_tasty(
+                    left.tasty_bytes(),
+                    method_name,
+                    local_names,
+                    expected_loads,
+                );
+                if let (Some(expected_pair_call), Ok(strict)) = (
+                    scala_pair_call,
+                    std::env::var("DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE"),
+                ) && strict == "1"
                 {
-                    let expected_pair_call = match variant {
-                        "original" => "new example.Pair(first, second)",
-                        "reversed" => "new example.Pair(second, first)",
-                        "repeat-first" => "new example.Pair(first, first)",
-                        _ => unreachable!(),
-                    };
                     run_pinned_two_local_pair_reader(left.tasty_bytes(), expected_pair_call);
                 }
             }
