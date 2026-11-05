@@ -405,12 +405,13 @@ then loads slot 3 twice at PCs 23 and 24. `javap` confirms the explicit-index
 slot-4 instructions and their PCs for all variants.
 
 The independent Java harness observes primary results `7/3`, `3/7`, and
-`-9/42`, verifies equal-seed-independent object identity through field
-references and separate mutations, and verifies repeated calls allocate fresh
-objects. It observes reversed field ownership for the reversed source. For the
-alias source it observes `left == right`, sees a mutation through either
-reference in both getter results, and also confirms the second local's
-initializer ran and repeated calls allocate a fresh aliased object pair.
+`-9/42`, and makes an actual `create(7, 7)` call. Reflection confirms those
+equal-seed Pair fields refer to distinct Counters; after mutating the left
+Counter, the right remains `7`, and after mutating the right, the left remains
+`100`. Repeated calls allocate fresh objects. It observes reversed field
+ownership for the reversed source. For the alias source it observes
+`left == right`, sees a mutation through either reference in both getter
+results, and confirms repeated calls allocate a fresh aliased object pair.
 
 The six original Rust artifacts remain unchanged before and after harness
 compilation, disassembly, runtime, and isolated negative copies. Primary SHA-256
@@ -435,17 +436,26 @@ hashes are
 
 Isolated primary-batch controls observed their first failure at the actual
 layer. The source-authenticated Rust paired contract rejects the swapped local
-loads in its `cross-class invocation` phase; an isolated JVM-valid swapped
-clone and a same-local-twice clone reach the Java identity assertion. Wrong or
-missing slot-4 stores, missing second allocation or constructor calls, a wrong
-Pair constructor Methodref, and `max_stack=3` or `max_locals=4` fail with JVM
-`VerifyError`. Renaming Pair's `leftValue` method in a classfile clone yields
+loads in its `cross-class invocation` phase. A balanced extra Counter
+allocation and constructor is also rejected there by the paired contract; the
+isolated classfile preserves verifier-valid stack shape. An isolated JVM-valid
+swapped clone and same-local-twice clone reach the Java identity assertion.
+Wrong or missing slot-4 stores, missing second allocation or constructor calls,
+load-before-store, storing an uninitialized Counter that is later passed to
+`Pair.<init>`, wrong Pair constructor owner or descriptor, and `max_stack=3` or
+`max_locals=4` fail with JVM `VerifyError`. The uninitialized escape reports
+`VerifyError: Bad type on operand stack` at the Pair construction path.
+Renaming Pair's `leftValue` method in a classfile clone yields
 `NoSuchMethodError`; omitting Counter, Pair, or PairFactory yields
-`NoClassDefFoundError`. The swapped-load case is verifier-valid and is not
-classified as a verifier error. All mutations use isolated class directories;
-the six original hashes are rechecked after each variant run. Existing one-local
-strict runtime tests remain in the same integration target and continue as
-inherited regressions.
+`NoClassDefFoundError`. Each case runs from an isolated class directory and
+records its observed first failure layer; the six original hashes are
+rechecked. Existing one-local strict runtime tests remain inherited regressions.
+
+The strict two-local runtime gate checks that `java -version` reports Temurin
+21.0.13+9 and that `java`, `javac`, and `javap` all report 21.0.13. Required
+mode rejects a same-version `OtherVendor-21.0.13+9` runtime; optional mode
+skips it. The observed local receipt was `java: OpenJDK Runtime Environment
+Temurin-21.0.13+9 (build 21.0.13+9-LTS)`, `javac 21.0.13`, and `javap 21.0.13`.
 
 The strict two-local runtime test, the full `jvm_tasty_mixed_origin_runtime`
 target, mandatory `DOTTY_CLASSFILE_REQUIRE_JDK=1` gate, and complete
@@ -456,3 +466,23 @@ JVM-only issue gate. `cargo fmt --all -- --check`, the frontend boundary guard,
 workspace Clippy with warnings denied, workspace rustdoc with warnings denied,
 and `git diff --check` also passed. No Scala source-consumer or TASTy
 interoperability claim is made here.
+
+### Review-fix evidence
+
+The review correction test tree at `1298f3218c2ee968762e11ca4db6645f40a5215b`
+ran the five-test `jvm_tasty_mixed_origin_runtime` target on the required
+Temurin `21.0.13+9` toolchain. The strict guard recorded Java's exact
+`Temurin-21.0.13+9 (build 21.0.13+9-LTS)`, `javac 21.0.13`, and
+`javap 21.0.13`; its isolated controls reject both a same-patch other vendor
+and a Temurin `+10` build in required mode. Equal-seed `create(7, 7)` was
+executed and both reflected Counters were mutated independently. Negative
+controls observed the extra balanced Counter allocation/constructor first
+rejected by the paired Rust contract; load-before-store, uninitialized
+Counter escape into `Pair.<init>`, and the wrong Pair constructor descriptor
+first failed with JVM `VerifyError`.
+
+At that code/test SHA, the mandatory classfile/JVM/source JDK gate and
+`cargo test --workspace --all-targets --locked -- --test-threads=2` passed
+with `DOTTY_CLASSFILE_REQUIRE_JDK=1`. Formatting, frontend-boundary, Clippy,
+rustdoc, and `git diff --check` also passed. The evidence-only edit in this
+section followed those checks.
