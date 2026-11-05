@@ -437,6 +437,9 @@ pub enum TastyDecodeError {
     /// More than one top-level definition claims the requested module
     /// identity in the same TASTy package.
     AmbiguousModuleIdentity,
+    /// More than one direct class definition claims a bounded encoded
+    /// classpath identity in the same TASTy package.
+    AmbiguousTypeDef,
     /// The pinned Predef module does not contain the one address-backed
     /// `String` type alias required by the bounded module projection.
     InvalidPredefStringAlias(&'static str),
@@ -474,6 +477,9 @@ impl fmt::Display for TastyDecodeError {
             }
             Self::AmbiguousModuleIdentity => {
                 write!(formatter, "TASTy has ambiguous top-level module identities")
+            }
+            Self::AmbiguousTypeDef => {
+                write!(formatter, "TASTy has ambiguous top-level class identities")
             }
             Self::InvalidPredefStringAlias(reason) => {
                 write!(
@@ -513,6 +519,7 @@ impl std::error::Error for TastyDecodeError {
             | Self::MissingModuleSuperclass
             | Self::UnresolvedSupertype(_)
             | Self::AmbiguousModuleIdentity
+            | Self::AmbiguousTypeDef
             | Self::InvalidPredefStringAlias(_)
             | Self::AmbiguousPredefStringAlias => None,
         }
@@ -532,6 +539,7 @@ impl TastyDecodeError {
             Self::MissingModuleSuperclass => "tasty.missing_module_superclass",
             Self::UnresolvedSupertype(_) => "tasty.unresolved_supertype",
             Self::AmbiguousModuleIdentity => "tasty.ambiguous_module_identity",
+            Self::AmbiguousTypeDef => "tasty.ambiguous_type_def",
             Self::InvalidPredefStringAlias(_) => "tasty.invalid_predef_string_alias",
             Self::AmbiguousPredefStringAlias => "tasty.ambiguous_predef_string_alias",
         }
@@ -579,6 +587,7 @@ impl TastyDecodeError {
             | Self::MissingModuleSuperclass
             | Self::UnresolvedSupertype(_)
             | Self::AmbiguousModuleIdentity
+            | Self::AmbiguousTypeDef
             | Self::InvalidPredefStringAlias(_)
             | Self::AmbiguousPredefStringAlias => ClassLoadCategory::Conditional,
         }
@@ -849,6 +858,7 @@ pub(crate) fn profile_parent_references(
                 &file,
                 parent,
                 package,
+                requested.as_internal() == "scala/Tuple2" && parent_index == 0,
                 &mut |owner, alias| {
                     alias_attempted = true;
                     let result = resolve_alias(owner, alias);
@@ -923,6 +933,37 @@ pub(crate) fn parse_classloader_tasty(bytes: &[u8]) -> Result<TastyFile<'_>, Tas
     Ok(file)
 }
 
+const TUPLE2_TIMES_COLON_INTERNAL: &str = "scala/$times$colon";
+
+fn is_tuple2_times_colon_identity(requested: &BinaryName) -> bool {
+    requested.as_internal() == TUPLE2_TIMES_COLON_INTERNAL
+}
+
+fn matches_requested_type_definition(
+    file: &TastyFile<'_>,
+    index: &dotty_tasty::tasty::AstAddressIndex<'_>,
+    node: &dotty_tasty::tasty::RawNode<'_>,
+    requested: &BinaryName,
+    simple_name: &str,
+) -> bool {
+    let Ok(StructuredNode::TypeDef(DefinitionBody::TypeDef {
+        name,
+        tail,
+        type_or_template,
+    })) = node.decode_structured()
+    else {
+        return false;
+    };
+    if is_tuple2_times_colon_identity(requested) {
+        wire_name(file, name).as_deref() == Some("*:")
+            && !has_modifier(&tail, OBJECT_TAG)
+            && is_in_requested_top_level_package(file, index, node.offset, "scala")
+            && matches!(type_or_template, RawTree::LengthNode(template) if template.tag == TEMPLATE_TAG)
+    } else {
+        wire_name(file, name).as_deref() == Some(simple_name)
+    }
+}
+
 pub(crate) fn decode_identity(
     bytes: &[u8],
     requested: &BinaryName,
@@ -934,18 +975,16 @@ pub(crate) fn decode_identity(
         .rsplit('/')
         .next()
         .unwrap_or(requested_internal);
-    let node = index
-        .iter()
-        .find(|node| {
-            if node.tag != TYPEDEF_TAG {
-                return false;
-            }
-            let Ok(definition) = node.decode_definition() else {
-                return false;
-            };
-            wire_name(&file, definition.name()).as_deref() == Some(simple_name)
-        })
+    let mut matching_nodes = index.iter().filter(|node| {
+        node.tag == TYPEDEF_TAG
+            && matches_requested_type_definition(&file, &index, node, requested, simple_name)
+    });
+    let node = matching_nodes
+        .next()
         .ok_or(TastyDecodeError::MissingTypeDef)?;
+    if is_tuple2_times_colon_identity(requested) && matching_nodes.next().is_some() {
+        return Err(TastyDecodeError::AmbiguousTypeDef);
+    }
 
     let StructuredNode::TypeDef(DefinitionBody::TypeDef {
         tail,
@@ -1398,14 +1437,18 @@ where
                     )
                     && matches!(type_or_template, RawTree::LengthNode(template) if template.tag == TEMPLATE_TAG)
             } else {
-                wire_name(&file, name).as_deref() == Some(simple_name)
+                matches_requested_type_definition(&file, &index, node, requested, simple_name)
             }
         });
     let node = matching_nodes
         .next()
         .ok_or(TastyDecodeError::MissingTypeDef)?;
     if matching_nodes.next().is_some() {
-        return Err(TastyDecodeError::AmbiguousModuleIdentity);
+        return Err(if is_tuple2_times_colon_identity(requested) {
+            TastyDecodeError::AmbiguousTypeDef
+        } else {
+            TastyDecodeError::AmbiguousModuleIdentity
+        });
     }
 
     let StructuredNode::TypeDef(DefinitionBody::TypeDef {
@@ -1495,6 +1538,7 @@ where
                             &file,
                             parent,
                             package,
+                            requested.as_internal() == "scala/Tuple2" && parent_index == 0,
                             &mut profiled_alias,
                             &mut profiled_bare,
                         );
@@ -1526,6 +1570,7 @@ where
                         &file,
                         parent,
                         package,
+                        false,
                         &mut profiled_alias,
                         &mut profiled_bare,
                     );
@@ -3976,9 +4021,15 @@ fn resolve_parent_name_with_alias(
     file: &TastyFile<'_>,
     parent: &RawTree<'_>,
     package: &str,
+    allow_tuple2_constructor_parent: bool,
     resolve_alias: &mut impl FnMut(&BinaryName, &str) -> Option<BinaryName>,
     resolve_bare: &mut impl FnMut(&str, &str) -> Option<BinaryName>,
 ) -> Option<BinaryName> {
+    if allow_tuple2_constructor_parent
+        && let Some(name) = resolve_tuple2_times_colon_constructor_parent(file, parent, package)
+    {
+        return Some(name);
+    }
     if let Some((owner, alias)) = unresolved_alias_reference(file, parent) {
         if matches!(owner.simple_name(), "package" | "package$") {
             return resolve_alias(&owner, &alias);
@@ -4007,6 +4058,125 @@ fn resolve_parent_name_with_alias(
         }
     }
     resolve_parent_name_with_bare(file, parent, package, resolve_bare)
+}
+
+/// Resolves only the pinned first applied constructor parent in Scala 3.9's
+/// `scala/Tuple2.tasty`. The source spelling is accepted only when the exact
+/// Apply/TypeApply/SelectIn wrapper, package-qualified shared type reference,
+/// and repeated reference in the constructor qualifier all agree.
+fn resolve_tuple2_times_colon_constructor_parent(
+    file: &TastyFile<'_>,
+    parent: &RawTree<'_>,
+    package: &str,
+) -> Option<BinaryName> {
+    if package != "scala" {
+        return None;
+    }
+    let StructuredTree::Length(StructuredNode::Apply(apply)) = parent.decode_structured().ok()?
+    else {
+        return None;
+    };
+    let StructuredTree::Length(StructuredNode::TypeApply(type_apply)) =
+        apply.function.decode_structured().ok()?
+    else {
+        return None;
+    };
+    let StructuredTree::Length(StructuredNode::SelectIn(selection)) =
+        type_apply.function.decode_structured().ok()?
+    else {
+        return None;
+    };
+    if selection.tag != SELECTIN_TAG
+        || render_member_name(file, selection.name)?.as_str() != "<init>"
+    {
+        return None;
+    }
+    let RawTree::Leaf(underlying) = &selection.underlying_type else {
+        return None;
+    };
+    if underlying.tag != SHAREDTYPE_TAG {
+        return None;
+    }
+    let shared_reference = underlying.ast_ref()?.address;
+    if !contains_shared_type_reference(&selection.qualifier, shared_reference, 0) {
+        return None;
+    }
+    match resolve_reference_name_in_package(file, &selection.underlying_type, Some("scala")) {
+        ReferenceResolution::Resolved(name)
+            if name.as_internal() == "scala/*:" && name.package_path() == "scala" =>
+        {
+            Some(BinaryName::from_internal(TUPLE2_TIMES_COLON_INTERNAL))
+        }
+        _ => None,
+    }
+}
+
+fn contains_shared_type_reference(tree: &RawTree<'_>, expected: u32, depth: usize) -> bool {
+    const MAX_SHARED_REFERENCE_DEPTH: usize = 128;
+    if depth >= MAX_SHARED_REFERENCE_DEPTH {
+        return false;
+    }
+    if let RawTree::Leaf(term) = tree
+        && term.tag == SHAREDTYPE_TAG
+        && term
+            .ast_ref()
+            .is_some_and(|reference| reference.address == expected)
+    {
+        return true;
+    }
+    match tree.decode_structured() {
+        Ok(StructuredTree::AstChild(child)) => {
+            contains_shared_type_reference(&child.child, expected, depth + 1)
+        }
+        Ok(StructuredTree::Ident(ident)) => {
+            contains_shared_type_reference(&ident.type_tree, expected, depth + 1)
+        }
+        Ok(StructuredTree::Reference(reference)) => {
+            contains_shared_type_reference(&reference.qualifier, expected, depth + 1)
+        }
+        Ok(StructuredTree::Select(selection)) => {
+            contains_shared_type_reference(&selection.qualifier, expected, depth + 1)
+        }
+        Ok(StructuredTree::Length(StructuredNode::AppliedType(applied))) => {
+            contains_shared_type_reference(&applied.tycon, expected, depth + 1)
+                || applied
+                    .arguments
+                    .iter()
+                    .any(|argument| contains_shared_type_reference(argument, expected, depth + 1))
+        }
+        Ok(StructuredTree::Length(StructuredNode::Apply(apply))) => {
+            contains_shared_type_reference(&apply.function, expected, depth + 1)
+                || apply
+                    .arguments
+                    .iter()
+                    .any(|argument| contains_shared_type_reference(argument, expected, depth + 1))
+        }
+        Ok(StructuredTree::Length(StructuredNode::TypeApply(apply))) => {
+            contains_shared_type_reference(&apply.function, expected, depth + 1)
+                || apply
+                    .type_arguments
+                    .iter()
+                    .any(|argument| contains_shared_type_reference(argument, expected, depth + 1))
+        }
+        Ok(StructuredTree::Length(StructuredNode::SelectIn(selection))) => {
+            contains_shared_type_reference(&selection.qualifier, expected, depth + 1)
+                || contains_shared_type_reference(&selection.underlying_type, expected, depth + 1)
+        }
+        Ok(StructuredTree::Length(StructuredNode::SelectOuter(selection))) => {
+            contains_shared_type_reference(&selection.qualifier, expected, depth + 1)
+                || contains_shared_type_reference(&selection.underlying_type, expected, depth + 1)
+        }
+        Ok(StructuredTree::Length(StructuredNode::Typed(typed))) => {
+            contains_shared_type_reference(&typed.type_tree, expected, depth + 1)
+                || contains_shared_type_reference(&typed.expression, expected, depth + 1)
+        }
+        _ => match tree {
+            RawTree::Ast { child, .. } | RawTree::NatAst { child, .. } => {
+                contains_shared_type_reference(child, expected, depth + 1)
+            }
+            _ => false,
+        },
+    }
 }
 
 fn is_rooted_scala_serializable_parent(
@@ -5633,7 +5803,7 @@ mod tests {
     }
 
     #[test]
-    fn does_not_flatten_nested_select_in_owner_or_accept_operator_source_name() {
+    fn does_not_flatten_nested_select_in_owner_or_accept_unmapped_operator_name() {
         let unicode_child = fixture_bytes("scala3-parent-unicode/review/Child.tasty");
         let decoded = decode_with_resolvers(
             &unicode_child,
@@ -5668,24 +5838,32 @@ mod tests {
                 if parent.parent_index == 0 && parent.reference_name.as_deref() == Some("Phase")
         ));
 
-        for tuple in ["Tuple2", "Tuple3"] {
-            let bytes = fixture_bytes(&format!("scala3-library/scala/{tuple}.tasty"));
-            let error = decode_with_resolvers(
-                &bytes,
-                &BinaryName::from_internal(format!("scala/{tuple}")),
-                |_, _| None,
-                |_, _| None,
-            )
-            .expect_err("source operator spelling is not a binary constructor name");
-            assert!(
-                matches!(
-                    error,
-                    TastyDecodeError::UnresolvedSupertype(ref parent)
-                        if parent.parent_index == 0 && parent.reference_name.as_deref() == Some("*:")
-                ),
-                "{tuple}: {error:?}"
-            );
-        }
+        let tuple2 = fixture_bytes("scala3-library/scala/Tuple2.tasty");
+        let decoded = decode_with_resolvers(
+            &tuple2,
+            &BinaryName::from_internal("scala/Tuple2"),
+            |_, _| None,
+            |_, _| None,
+        )
+        .expect("only the authenticated Tuple2 constructor shape receives its encoded identity");
+        assert_eq!(decoded.super_class.as_internal(), "scala/$times$colon");
+
+        let tuple3 = fixture_bytes("scala3-library/scala/Tuple3.tasty");
+        let error = decode_with_resolvers(
+            &tuple3,
+            &BinaryName::from_internal("scala/Tuple3"),
+            |_, _| None,
+            |_, _| None,
+        )
+        .expect_err("the neighboring Tuple3 source operator name remains unsupported");
+        assert!(
+            matches!(
+                error,
+                TastyDecodeError::UnresolvedSupertype(ref parent)
+                    if parent.parent_index == 0 && parent.reference_name.as_deref() == Some("*:")
+            ),
+            "Tuple3: {error:?}"
+        );
     }
 
     #[test]
@@ -6474,8 +6652,9 @@ mod tests {
 
     #[test]
     fn tuple2_applied_parent_profile_freezes_the_pinned_constructor_shape() {
+        let bytes = fixture_bytes("scala3-library/scala/Tuple2.tasty");
         let profiles = profile_parent_references(
-            &fixture_bytes("scala3-library/scala/Tuple2.tasty"),
+            &bytes,
             &BinaryName::from_internal("scala/Tuple2"),
             false,
             |_, _| None,
@@ -6492,6 +6671,10 @@ mod tests {
         assert_eq!(
             constructor.reference.reference_prefix.as_deref(),
             Some("scala")
+        );
+        assert_eq!(
+            constructor.resolved_binary_name.as_deref(),
+            Some("scala/$times$colon")
         );
         assert!(
             constructor
@@ -6528,6 +6711,133 @@ mod tests {
             profiles[3].resolved_binary_name.as_deref(),
             Some("scala/Serializable")
         );
+        let tuple3_profiles = profile_parent_references(
+            &fixture_bytes("scala3-library/scala/Tuple3.tasty"),
+            &BinaryName::from_internal("scala/Tuple3"),
+            false,
+            |_, _| None,
+            |_, _| None,
+        )
+        .unwrap();
+        assert!(
+            tuple3_profiles
+                .iter()
+                .all(|parent| parent.resolved_binary_name.as_deref() != Some("scala/$times$colon"))
+        );
+        let decoded = decode_with_resolvers(
+            &bytes,
+            &BinaryName::from_internal("scala/Tuple2"),
+            |owner, alias| {
+                Some(
+                    if owner.as_internal() == "scala/package$" && alias == "Serializable" {
+                        BinaryName::from_internal("java/io/Serializable")
+                    } else {
+                        BinaryName::from_internal(format!("{}/{alias}", owner.as_internal()))
+                    },
+                )
+            },
+            |package, simple_name| {
+                Some(BinaryName::from_internal(format!(
+                    "{package}/{simple_name}"
+                )))
+            },
+        )
+        .unwrap();
+        assert_eq!(decoded.super_class.as_internal(), "scala/$times$colon");
+        assert_eq!(
+            decoded.interfaces,
+            [
+                BinaryName::from_internal("scala/Product2"),
+                BinaryName::from_internal("scala/Product"),
+                BinaryName::from_internal("java/io/Serializable"),
+            ]
+        );
+
+        let times_colon_bytes = fixture_bytes("scala3-library/scala/$times$colon.tasty");
+        decode_identity(
+            &times_colon_bytes,
+            &BinaryName::from_internal("scala/$times$colon"),
+        )
+        .expect("encoded request must select the direct scala.*: class declaration");
+        assert!(matches!(
+            decode_identity(
+                &times_colon_bytes,
+                &BinaryName::from_internal("elsewhere/$times$colon")
+            ),
+            Err(TastyDecodeError::MissingTypeDef)
+        ));
+    }
+
+    #[test]
+    fn tuple2_constructor_mapping_rejects_other_owners_and_mismatched_shared_references() {
+        let bytes = fixture_bytes("scala3-library/scala/Tuple2.tasty");
+        let file = parse_classloader_tasty(&bytes).unwrap();
+        let index = file.ast_address_index().unwrap();
+        let definition = index
+            .iter()
+            .find(|node| {
+                if node.tag != TYPEDEF_TAG {
+                    return false;
+                }
+                let Ok(StructuredNode::TypeDef(DefinitionBody::TypeDef { name, .. })) =
+                    node.decode_structured()
+                else {
+                    return false;
+                };
+                wire_name(&file, name).as_deref() == Some("Tuple2")
+                    && is_in_requested_top_level_package(&file, &index, node.offset, "scala")
+            })
+            .unwrap();
+        let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+            type_or_template, ..
+        }) = definition.decode_structured().unwrap()
+        else {
+            panic!("Tuple2 definition should decode");
+        };
+        let RawTree::LengthNode(template_node) = type_or_template else {
+            panic!("Tuple2 definition should have a template");
+        };
+        let StructuredNode::Template(template) = template_node.decode_structured().unwrap() else {
+            panic!("Tuple2 template should decode");
+        };
+        let parent = &template.parents[0];
+        assert_eq!(
+            resolve_tuple2_times_colon_constructor_parent(&file, parent, "scala")
+                .as_ref()
+                .map(BinaryName::as_internal),
+            Some("scala/$times$colon")
+        );
+        assert!(resolve_tuple2_times_colon_constructor_parent(&file, parent, "foreign").is_none());
+
+        let StructuredTree::Length(StructuredNode::Apply(apply)) =
+            parent.decode_structured().unwrap()
+        else {
+            panic!("Tuple2 parent should be an application");
+        };
+        let StructuredTree::Length(StructuredNode::TypeApply(type_apply)) =
+            apply.function.decode_structured().unwrap()
+        else {
+            panic!("Tuple2 constructor should have a type application");
+        };
+        let StructuredTree::Length(StructuredNode::SelectIn(selection)) =
+            type_apply.function.decode_structured().unwrap()
+        else {
+            panic!("Tuple2 type application should select the constructor");
+        };
+        let RawTree::Leaf(underlying) = selection.underlying_type else {
+            panic!("Tuple2 constructor should keep its shared underlying type reference");
+        };
+        let shared_reference = underlying.ast_ref().unwrap().address;
+        assert!(contains_shared_type_reference(
+            &selection.qualifier,
+            shared_reference,
+            0
+        ));
+        assert!(!contains_shared_type_reference(
+            &selection.qualifier,
+            shared_reference.wrapping_add(1),
+            0
+        ));
     }
 
     /// The same fixture as `decodes_a_case_class_with_cross_package_mixins`,

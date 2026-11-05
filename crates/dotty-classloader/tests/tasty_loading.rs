@@ -1919,6 +1919,264 @@ fn enters_a_tasty_class_into_its_package_scope() {
     );
 }
 
+#[test]
+fn loads_pinned_tuple2_with_authenticated_applied_constructor_parent() {
+    let mut store = SemanticStore::new();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let scala_library = root.join("../dotty-tasty/tests/fixtures/scala3-library");
+    let jdk = JdkClassPath::new(
+        PathBuf::from(std::env::var_os("JAVA_HOME").expect("JDK 21 JAVA_HOME is required"))
+            .join("jmods"),
+    )
+    .expect("JDK 21 jmods are readable");
+    let class_path = CompositeClassPath::new(vec![
+        Box::new(DirectoryClassPath::new(scala_library.clone())),
+        Box::new(jdk),
+    ]);
+    let tuple2 = BinaryName::from_internal("scala/Tuple2");
+    let mut loader = ClassLoader::new(class_path, &mut store);
+    let class = loader
+        .load_class(&tuple2)
+        .expect("pinned Tuple2 and all four classpath parents should complete");
+    assert_eq!(
+        loader.load_class(&tuple2).unwrap(),
+        class,
+        "a repeated same-session load must preserve Tuple2 identity"
+    );
+    let tuple2_origin = loader.origin(class).cloned();
+    let times_colon = loader
+        .load_class(&BinaryName::from_internal("scala/$times$colon"))
+        .unwrap();
+    let times_colon_origin = loader.origin(times_colon).cloned();
+    let product2 = loader
+        .load_class(&BinaryName::from_internal("scala/Product2"))
+        .unwrap();
+    let product2_origin = loader.origin(product2).cloned();
+    let definitions = loader.definitions();
+    let session = loader.into_session();
+    let mut second_loader = ClassLoader::with_definitions(
+        CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(scala_library.clone())),
+            Box::new(
+                JdkClassPath::new(
+                    PathBuf::from(
+                        std::env::var_os("JAVA_HOME").expect("JDK 21 JAVA_HOME is required"),
+                    )
+                    .join("jmods"),
+                )
+                .expect("JDK 21 jmods are readable"),
+            ),
+        ]),
+        &mut store,
+        definitions,
+        session,
+    );
+    assert_eq!(
+        second_loader.load_class(&tuple2).unwrap(),
+        class,
+        "a loader handoff must reuse the same session identity"
+    );
+    drop(second_loader);
+
+    let info = class_info(&store, class);
+    assert_eq!(info.parents.len(), 4);
+    let parent_symbols = info
+        .parents
+        .iter()
+        .map(|parent| match store.types.get(*parent) {
+            Type::Applied { tycon, .. } => store
+                .types
+                .get(*tycon)
+                .reference_symbol()
+                .expect("applied parent tycon should retain its class identity"),
+            _ => parent_symbol(&store, *parent),
+        })
+        .collect::<Vec<_>>();
+    let parent_names = parent_symbols
+        .iter()
+        .map(|parent| {
+            store
+                .names
+                .resolve(store.symbols.get(*parent).name.text())
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        parent_names,
+        ["$times$colon", "Product2", "Product", "Serializable"]
+    );
+    assert_eq!(
+        tuple2_origin,
+        Some(ClassOrigin::Directory(scala_library.clone()))
+    );
+    assert_eq!(
+        times_colon_origin,
+        Some(ClassOrigin::Directory(scala_library.clone())),
+        "the encoded identity must resolve to the authentic Scala library resource"
+    );
+    assert_eq!(
+        product2_origin,
+        Some(ClassOrigin::Directory(scala_library.clone())),
+        "the independent Product2 parent must keep its own classpath identity"
+    );
+
+    let Type::Applied { tycon, args } = store.types.get(info.parents[1]) else {
+        panic!("Tuple2 parent 1 should retain its applied Product2 view");
+    };
+    assert_eq!(
+        store.types.get(*tycon).reference_symbol(),
+        Some(parent_symbols[1])
+    );
+    assert_eq!(args.len(), 2);
+    let argument_symbols = args
+        .iter()
+        .map(|argument| store.types.get(*argument).reference_symbol())
+        .collect::<Vec<_>>();
+    assert!(argument_symbols.iter().all(Option::is_some));
+    let argument_names = argument_symbols
+        .iter()
+        .map(|symbol| {
+            store
+                .names
+                .resolve(store.symbols.get(symbol.unwrap()).name.text())
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(argument_names, ["T1", "T2"]);
+
+    let mut fresh_store = SemanticStore::new();
+    let fresh = ClassLoader::new(
+        CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(scala_library)),
+            Box::new(
+                JdkClassPath::new(
+                    PathBuf::from(
+                        std::env::var_os("JAVA_HOME").expect("JDK 21 JAVA_HOME is required"),
+                    )
+                    .join("jmods"),
+                )
+                .expect("JDK 21 jmods are readable"),
+            ),
+        ]),
+        &mut fresh_store,
+    )
+    .load_class(&tuple2)
+    .expect("a fresh semantic session should load the same pinned Tuple2");
+    let fresh_info = class_info(&fresh_store, fresh);
+    let fresh_parent_names = fresh_info
+        .parents
+        .iter()
+        .map(|parent| match fresh_store.types.get(*parent) {
+            Type::Applied { tycon, .. } => fresh_store
+                .types
+                .get(*tycon)
+                .reference_symbol()
+                .expect("fresh applied parent tycon has a canonical identity"),
+            _ => parent_symbol(&fresh_store, *parent),
+        })
+        .map(|parent| {
+            fresh_store
+                .names
+                .resolve(fresh_store.symbols.get(parent).name.text())
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(fresh_parent_names, parent_names);
+    let Type::Applied { args, .. } = fresh_store.types.get(fresh_info.parents[1]) else {
+        panic!("fresh Tuple2 parent 1 should retain its applied Product2 view");
+    };
+    let fresh_argument_names = args
+        .iter()
+        .map(|argument| {
+            let symbol = fresh_store
+                .types
+                .get(*argument)
+                .reference_symbol()
+                .expect("fresh Product2 argument should remain a type parameter reference");
+            fresh_store
+                .names
+                .resolve(fresh_store.symbols.get(symbol).name.text())
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(fresh_argument_names, argument_names);
+}
+
+struct MaskedTimesColonClassPath {
+    inner: CompositeClassPath,
+}
+
+impl ClassPathEntry for MaskedTimesColonClassPath {
+    fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+        if name.as_internal() == "scala/$times$colon" {
+            return Ok(None);
+        }
+        self.inner.find_class(name)
+    }
+
+    fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        self.inner.contains_package(package)
+    }
+
+    fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        self.inner.contains_package_prefix(package)
+    }
+}
+
+#[test]
+fn missing_tuple2_constructor_target_rolls_back_and_same_session_retry_succeeds() {
+    let mut store = SemanticStore::new();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let scala_library = root.join("../dotty-tasty/tests/fixtures/scala3-library");
+    let jdk = || {
+        Box::new(
+            JdkClassPath::new(
+                PathBuf::from(std::env::var_os("JAVA_HOME").expect("JDK 21 JAVA_HOME"))
+                    .join("jmods"),
+            )
+            .expect("JDK 21 jmods are readable"),
+        ) as Box<dyn ClassPathEntry>
+    };
+    let scala =
+        || Box::new(DirectoryClassPath::new(scala_library.clone())) as Box<dyn ClassPathEntry>;
+    let masked = CompositeClassPath::new(vec![Box::new(MaskedTimesColonClassPath {
+        inner: CompositeClassPath::new(vec![scala(), jdk()]),
+    })]);
+    let tuple2 = BinaryName::from_internal("scala/Tuple2");
+    let definitions = Definitions::bootstrap(&mut store);
+    let checkpoint = store.checkpoint();
+    let mut first_loader =
+        ClassLoader::with_definitions(masked, &mut store, definitions, LoadingSession::new());
+    let error = first_loader
+        .load_class(&tuple2)
+        .expect_err("the authenticated encoded target must be required on the classpath");
+    assert!(
+        format!("{error:?}").contains("scala/$times$colon"),
+        "missing target error should identify the encoded nominal dependency: {error:?}"
+    );
+    let session = first_loader.into_session();
+    assert_eq!(
+        store.checkpoint(),
+        checkpoint,
+        "a late missing-parent failure must roll back every allocated symbol/type/scope"
+    );
+
+    let mut retry_loader = ClassLoader::with_definitions(
+        CompositeClassPath::new(vec![scala(), jdk()]),
+        &mut store,
+        definitions,
+        session,
+    );
+    let class = retry_loader
+        .load_class(&tuple2)
+        .expect("the same session should retry once the authentic target is present");
+    assert_eq!(
+        retry_loader.load_class(&tuple2).unwrap(),
+        class,
+        "the successful retry should commit one stable Tuple2 identity"
+    );
+}
+
 fn tasty_visibility_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tasty_visibility")
 }
