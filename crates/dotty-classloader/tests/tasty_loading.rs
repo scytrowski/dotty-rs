@@ -17,7 +17,10 @@ use dotty_core::{
     ResolverCheckpoint, SemanticStore, SymbolId, SymbolInfo, SymbolKind, SymbolResolver, Type,
     TypeId, Visibility,
 };
-use dotty_tasty::tasty::{StructuredNode, TastyFile};
+use dotty_tasty::tasty::{
+    DefinitionBody, EncodedSection, LambdaTptNode, PackageNode, ParameterNode, RawNode, RawNodes,
+    Reader, StandardSection, StructuredNode, StructuredTree, TastyFile, TastyFileBuilder, Writer,
+};
 use dotty_tasty_unpickler::tasty_unpickler::{
     TastySession, TastySessionError, TastyUnpickler, UnpickleError,
 };
@@ -51,6 +54,203 @@ impl Drop for TemporaryDirectory {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+fn encoded_tree<'a>(bytes: &'a [u8]) -> dotty_tasty::tasty::RawTree<'a> {
+    let mut reader = Reader::new(bytes);
+    dotty_tasty::tasty::RawTree::decode(&mut reader).expect("encoded tree should decode")
+}
+
+fn encoded_raw_node<'a>(bytes: &'a [u8]) -> RawNode<'a> {
+    match encoded_tree(bytes) {
+        dotty_tasty::tasty::RawTree::LengthNode(node) => RawNode {
+            tag: node.tag,
+            offset: 0,
+            payload: node.payload,
+        },
+        _ => panic!("encoded category-five node expected"),
+    }
+}
+
+/// Wraps the authentic package alias RHS in a one-parameter type lambda and
+/// re-encodes the enclosing bounded AST nodes and file sections.
+fn parameterize_authentic_serializable_alias(bytes: &[u8]) -> Vec<u8> {
+    let file = TastyFile::parse_scala_3_9(bytes).expect("authentic package fixture should parse");
+    let roots = file.asts().expect("AST section should decode");
+    assert_eq!(roots.len(), 1, "package fixture has one root package node");
+    let StructuredNode::Package(mut root_package) = roots
+        .get(0)
+        .expect("package root exists")
+        .decode_structured()
+        .expect("package root should decode")
+    else {
+        panic!("package fixture root should be a package")
+    };
+
+    let nested_package_index = root_package
+        .stats
+        .iter()
+        .position(|node| node.tag == dotty_tasty::tasty::PACKAGE_TAG)
+        .expect("scala package node should be nested below root package");
+    let StructuredNode::Package(mut package) = root_package
+        .stats
+        .get(nested_package_index)
+        .expect("nested package node exists")
+        .decode_structured()
+        .expect("scala package node should decode")
+    else {
+        panic!("nested scala node should be a package")
+    };
+    let package_object_index = package
+        .stats
+        .iter()
+        .position(|node| {
+            let Ok(StructuredNode::TypeDef(DefinitionBody::TypeDef { name, .. })) =
+                node.decode_structured()
+            else {
+                return false;
+            };
+            matches!(
+                file.render_name(name).ok().as_deref(),
+                Some("package" | "package$")
+            )
+        })
+        .expect("rooted package object declaration exists");
+    let StructuredNode::TypeDef(mut package_object) = package
+        .stats
+        .get(package_object_index)
+        .expect("package object node exists")
+        .decode_structured()
+        .expect("package object should decode")
+    else {
+        panic!("package object should be a type definition")
+    };
+    let DefinitionBody::TypeDef {
+        type_or_template, ..
+    } = &mut package_object
+    else {
+        unreachable!("type definition already matched")
+    };
+    let StructuredTree::Length(StructuredNode::Template(mut template)) = type_or_template
+        .decode_structured()
+        .expect("package object body should decode as a template")
+    else {
+        panic!("package object body should be a template")
+    };
+
+    let alias_index = template
+        .stats
+        .iter()
+        .position(|tree| {
+            let Ok(StructuredTree::Length(StructuredNode::TypeDef(DefinitionBody::TypeDef {
+                name,
+                ..
+            }))) = tree.decode_structured()
+            else {
+                return false;
+            };
+            file.render_name(name).ok().as_deref() == Some("Serializable")
+        })
+        .expect("direct Serializable alias exists in package object template");
+    let StructuredTree::Length(StructuredNode::TypeDef(mut alias)) = template.stats[alias_index]
+        .decode_structured()
+        .expect("Serializable alias should decode")
+    else {
+        panic!("Serializable declaration should be a type definition")
+    };
+    let DefinitionBody::TypeDef {
+        type_or_template: rhs,
+        ..
+    } = &mut alias
+    else {
+        unreachable!("type definition already matched")
+    };
+    assert!(matches!(
+        rhs.decode_structured(),
+        Ok(StructuredTree::Select(selection))
+            if selection.tag == dotty_tasty::tasty::SELECTTPT_TAG
+    ));
+
+    let parameter = file
+        .ast_address_index()
+        .expect("AST addresses should index")
+        .iter()
+        .find(|node| node.tag == dotty_tasty::tasty::TYPEPARAM_TAG)
+        .expect("authentic package fixture should contain a type parameter")
+        .decode_parameter()
+        .expect("authentic type parameter should decode");
+    assert!(matches!(parameter, ParameterNode::TypeParam { .. }));
+
+    let mut lambda_writer = Writer::new();
+    LambdaTptNode {
+        type_params: vec![parameter],
+        body: rhs.clone(),
+    }
+    .encode(&mut lambda_writer)
+    .expect("parameterized alias type lambda should encode");
+    *rhs = encoded_tree(lambda_writer.as_slice());
+
+    let mut alias_writer = Writer::new();
+    alias
+        .encode_self(&mut alias_writer)
+        .expect("wrapped alias should encode");
+    template.stats[alias_index] = encoded_tree(alias_writer.as_slice());
+    let mut template_writer = Writer::new();
+    template
+        .encode(&mut template_writer)
+        .expect("updated package template should encode");
+    *type_or_template = encoded_tree(template_writer.as_slice());
+
+    let mut package_object_writer = Writer::new();
+    package_object
+        .encode_self(&mut package_object_writer)
+        .expect("updated package object should encode");
+    let package_object_bytes = package_object_writer.into_inner();
+    let mut package_stats = package.stats.iter().cloned().collect::<Vec<_>>();
+    package_stats[package_object_index] = encoded_raw_node(&package_object_bytes);
+    package.stats =
+        RawNodes::from_entries(package_stats).expect("updated package stats should encode");
+
+    let mut nested_package_writer = Writer::new();
+    PackageNode {
+        path: package.path,
+        stats: package.stats,
+    }
+    .encode(&mut nested_package_writer)
+    .expect("updated scala package should encode");
+    let nested_package_bytes = nested_package_writer.into_inner();
+    let mut root_stats = root_package.stats.iter().cloned().collect::<Vec<_>>();
+    root_stats[nested_package_index] = encoded_raw_node(&nested_package_bytes);
+    root_package.stats =
+        RawNodes::from_entries(root_stats).expect("updated root package stats should encode");
+
+    let mut root_writer = Writer::new();
+    PackageNode {
+        path: root_package.path,
+        stats: root_package.stats,
+    }
+    .encode(&mut root_writer)
+    .expect("updated root package should encode");
+    let root_bytes = root_writer.into_inner();
+    let roots = RawNodes::from_entries(vec![encoded_raw_node(&root_bytes)])
+        .expect("updated AST roots should encode");
+    let ast_section = file
+        .section(StandardSection::Asts)
+        .expect("AST section exists");
+    let mut builder = TastyFileBuilder::new(file.header().clone(), file.names().clone());
+    for section in file.sections().iter() {
+        if section.name == ast_section.name {
+            builder.push_section(
+                EncodedSection::asts(section.name, &roots)
+                    .expect("wrapped AST section should encode"),
+            );
+        } else {
+            builder.push_section(EncodedSection::raw(section.name, section.payload.to_vec()));
+        }
+    }
+    builder
+        .encode()
+        .expect("wrapped package fixture should encode")
 }
 
 fn tasty_sample_dir() -> PathBuf {
@@ -1490,6 +1690,49 @@ fn rejects_term_selection_in_authentic_serializable_alias_rhs() {
                 if matches!(source.as_ref(), ClassLoadError::InvalidTastyFile(name, _) if name.as_internal() == "scala/Option")
         ),
         "the malformed package alias should remain a typed TASTy failure: {error:?}"
+    );
+}
+
+#[test]
+fn rejects_parameterized_wrapper_around_authentic_serializable_alias_rhs() {
+    let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+    let original = fs::read(published_scala39_library_dir().join("scala/package.tasty"))
+        .expect("pinned scala/package.tasty fixture");
+    let parameterized = parameterize_authentic_serializable_alias(&original);
+
+    let mut positive_store = SemanticStore::new();
+    let positive_path = CompositeClassPath::new(vec![
+        Box::new(DirectoryClassPath::new(published_scala39_library_dir())),
+        Box::new(JdkClassPath::new(java_home.join("jmods")).expect("genuine JDK jmods")),
+    ]);
+    let mut positive_loader = ClassLoader::new(positive_path, &mut positive_store);
+    positive_loader
+        .load_class(&BinaryName::from_internal("scala/Some"))
+        .expect("authentic parameterless alias and real JDK target should load");
+
+    let mutated_library = TemporaryDirectory::new("parameterized-serializable-alias");
+    let package_path = mutated_library.path().join("scala/package.tasty");
+    fs::create_dir_all(package_path.parent().expect("scala package directory"))
+        .expect("mutated fixture directory should be created");
+    fs::write(package_path, parameterized).expect("wrapped authentic fixture should be written");
+
+    let class_path = CompositeClassPath::new(vec![
+        Box::new(DirectoryClassPath::new(mutated_library.path().clone())),
+        Box::new(DirectoryClassPath::new(published_scala39_library_dir())),
+        Box::new(JdkClassPath::new(java_home.join("jmods")).expect("genuine JDK jmods")),
+    ]);
+    let mut store = SemanticStore::new();
+    let mut loader = ClassLoader::new(class_path, &mut store);
+    let error = loader
+        .load_class(&BinaryName::from_internal("scala/Some"))
+        .expect_err("a type-parameter wrapper must not be erased into the package alias");
+    assert!(
+        matches!(
+            error,
+            ClassLoadError::DependencyFailure { ref source, .. }
+                if matches!(source.as_ref(), ClassLoadError::InvalidTastyFile(name, _) if name.as_internal() == "scala/Option")
+        ),
+        "the unsupported alias wrapper should fail as a typed TASTy error: {error:?}"
     );
 }
 

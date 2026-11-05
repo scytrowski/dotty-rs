@@ -4347,6 +4347,14 @@ pub(crate) fn resolve_type_alias_target(
         if file.render_name(name).ok().as_deref() != Some(alias_name) {
             continue;
         }
+        if rooted_serializable_alias.is_some()
+            && (!tail.is_empty() || !has_one_terminal_type_selection(file, &type_or_template, 0))
+        {
+            // This pinned alias must be a parameterless direct type
+            // selection. Authenticate its original shape before the generic
+            // alias path below unwraps a type lambda's body.
+            return Ok(None);
+        }
         let rhs = match type_or_template {
             RawTree::LengthNode(lambda) if lambda.tag == dotty_tasty::tasty::LAMBDATPT_TAG => {
                 lambda.decode_lambda_tpt()?.body
