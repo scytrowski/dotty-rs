@@ -622,6 +622,133 @@ fn assert_formal_local_pair_tasty(
     }
 }
 
+fn assert_two_local_pair_tasty(bytes: &[u8], order: [usize; 2]) {
+    let file = tasty(bytes);
+    let index = file.ast_address_index().unwrap();
+    let (method_address, method) = method_body(&file, "create");
+    let RawTree::LengthNode(method_body) = method.rhs.unwrap() else {
+        panic!("method preserves the original result body")
+    };
+    assert_eq!(method_body.tag, BLOCK_TAG);
+    let block_address = index
+        .iter_nodes_with_tag(BLOCK_TAG)
+        .find(|node| {
+            std::iter::successors(index.parent_of(node.offset as u32), |parent| {
+                index.parent_of(parent.offset as u32)
+            })
+            .any(|parent| parent.offset as u32 == method_address)
+        })
+        .unwrap()
+        .offset as u32;
+    let method_parameters = index
+        .iter_nodes_with_tag(PARAM_TAG)
+        .filter(|node| {
+            std::iter::successors(index.parent_of(node.offset as u32), |parent| {
+                index.parent_of(parent.offset as u32)
+            })
+            .any(|parent| parent.offset as u32 == method_address)
+        })
+        .map(|node| node.offset as u32)
+        .collect::<Vec<_>>();
+    assert_eq!(method_parameters.len(), 2);
+    let block = index.get(block_address).unwrap().decode_block().unwrap();
+    assert_eq!(block.stats.len(), 2);
+    let locals = index
+        .iter_nodes_with_tag(VALDEF_TAG)
+        .filter(|node| {
+            index
+                .parent_of(node.offset as u32)
+                .is_some_and(|parent| parent.offset as u32 == block_address)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        locals.len(),
+        2,
+        "both original local declarations are emitted"
+    );
+    let local_addresses = locals
+        .iter()
+        .map(|node| node.offset as u32)
+        .collect::<Vec<_>>();
+    assert_ne!(local_addresses[0], local_addresses[1]);
+    let mut local_names = Vec::new();
+    for (local_index, node) in locals.iter().enumerate() {
+        let DefinitionBody::ValDef { name, rhs, .. } = index
+            .get(node.offset as u32)
+            .unwrap()
+            .decode_definition_body()
+            .unwrap()
+        else {
+            panic!("block declaration is a VALDEF")
+        };
+        let Some(initializer) = rhs else {
+            panic!("both locals retain their initializers")
+        };
+        let RawTree::LengthNode(initializer) = initializer else {
+            panic!("Counter initializer is an APPLY")
+        };
+        assert_eq!(initializer.tag, APPLY_TAG);
+        let initializer = initializer.decode_apply().unwrap();
+        let RawTree::LengthNode(select) = initializer.function else {
+            panic!("Counter initializer selects its constructor")
+        };
+        assert_eq!(select.tag, SELECTIN_TAG);
+        let select = select.decode_select_in().unwrap();
+        assert_eq!(raw_tree_tag(&select.qualifier), NEW_TAG);
+        let [seed] = initializer.arguments.as_slice() else {
+            panic!("each Counter initializer has one formal argument")
+        };
+        let seed_refs = seed.ast_refs();
+        let [seed_ref] = seed_refs.as_slice() else {
+            panic!("each seed is one direct TERMREF")
+        };
+        assert_eq!(seed_ref.kind, AstRefKind::TermRefDirect);
+        assert_eq!(seed_ref.address, method_parameters[local_index]);
+        local_names.push(file.names().render(name).unwrap().to_owned());
+    }
+    assert_eq!(local_names, ["first", "second"]);
+
+    let RawTree::LengthNode(pair_apply) = block.expression else {
+        panic!("BLOCK result is the Pair constructor APPLY")
+    };
+    assert_eq!(pair_apply.tag, APPLY_TAG);
+    let pair_apply_address = index
+        .iter_nodes_with_tag(APPLY_TAG)
+        .find(|node| {
+            index
+                .parent_of(node.offset as u32)
+                .is_some_and(|parent| parent.offset as u32 == block_address)
+        })
+        .expect("BLOCK contains the Pair result APPLY")
+        .offset as u32;
+    assert!(
+        pair_apply_address < local_addresses[0] && local_addresses[0] < local_addresses[1],
+        "wire order is Pair result, then source-ordered VALDEFs"
+    );
+    assert_eq!(
+        (
+            method_address,
+            block_address,
+            pair_apply_address,
+            local_addresses.as_slice()
+        ),
+        (29, 54, 56, [72, 97].as_slice()),
+        "frozen source preserves its deterministic Rust TASTy addresses"
+    );
+    let pair_apply = pair_apply.decode_apply().unwrap();
+    let [first, second] = pair_apply.arguments.as_slice() else {
+        panic!("Pair receives exactly two arguments")
+    };
+    for (argument, local_index) in [first, second].into_iter().zip(order) {
+        let references = argument.ast_refs();
+        let [reference] = references.as_slice() else {
+            panic!("Pair argument is one direct TERMREF")
+        };
+        assert_eq!(reference.kind, AstRefKind::TermRefDirect);
+        assert_eq!(reference.address, local_addresses[local_index]);
+    }
+}
+
 fn run_pinned_formal_local_pair_reader(bytes: &[u8], method_name: &str, reversed: bool) {
     let scala_root = PathBuf::from(
         std::env::var_os("SCALA39_ROOT").expect("pinned Scala 3.9 checkout is required"),
@@ -716,6 +843,103 @@ fn run_pinned_formal_local_pair_reader(bytes: &[u8], method_name: &str, reversed
     assert!(
         from_tasty.status.success(),
         "Scala -from-tasty rejected the original Rust sidecar: {}",
+        String::from_utf8_lossy(&from_tasty.stderr)
+    );
+    assert!(reconstructed.join("example/PairFactory.class").is_file());
+    fs::remove_dir_all(root).unwrap();
+}
+
+fn run_pinned_two_local_pair_reader(bytes: &[u8], expected_pair_call: &str) {
+    let scala_root = PathBuf::from(
+        std::env::var_os("SCALA39_ROOT").expect("pinned Scala 3.9 checkout is required"),
+    );
+    let revision = Command::new("git")
+        .arg("-C")
+        .arg(&scala_root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    assert!(revision.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&revision.stdout).trim(),
+        "777528f19a58e794c9954a42f433373472ec57f8"
+    );
+    let compiler = std::env::var_os("SCALA39_SCALAC")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| scala_root.join("dist/target/universal/stage/bin/scalac"));
+    let scratch = PathBuf::from(
+        std::env::var_os("DOTTY_TASTY_PICKLER_ORACLE_TMP")
+            .expect("task-local Scala scratch is required"),
+    );
+    let root = scratch.join(format!("issue-2125-scala-reader-{}", std::process::id()));
+    let candidate = root.join("candidate");
+    let reconstructed = root.join("from-tasty");
+    fs::create_dir_all(candidate.join("example")).unwrap();
+    fs::create_dir_all(&reconstructed).unwrap();
+    let oracle = PathBuf::from(
+        "tests/fixtures/jvm_tasty_two_immutable_reference_locals/scala39/primary/example",
+    );
+    for name in ["Counter.class", "Counter.tasty", "Pair.class", "Pair.tasty"] {
+        fs::copy(oracle.join(name), candidate.join("example").join(name)).unwrap();
+    }
+    let factory = candidate.join("example/PairFactory.tasty");
+    fs::write(&factory, bytes).unwrap();
+    let decompile = Command::new(&compiler)
+        .args(["-color:never", "-decompile"])
+        .arg(&factory)
+        .output()
+        .unwrap();
+    assert!(
+        decompile.status.success(),
+        "Scala -decompile rejected Rust's two-local TASTy: {}",
+        String::from_utf8_lossy(&decompile.stderr)
+    );
+    let decompiled = String::from_utf8_lossy(&decompile.stdout);
+    assert!(
+        decompiled.contains("val first: example.Counter"),
+        "{decompiled}"
+    );
+    assert!(
+        decompiled.contains("val second: example.Counter"),
+        "{decompiled}"
+    );
+    assert!(
+        decompiled.contains("new example.Counter(firstSeed)"),
+        "{decompiled}"
+    );
+    assert!(
+        decompiled.contains("new example.Counter(secondSeed)"),
+        "{decompiled}"
+    );
+    assert!(decompiled.contains(expected_pair_call), "{decompiled}");
+    let printed = Command::new(&compiler)
+        .args(["-color:never", "-print-tasty"])
+        .arg(&factory)
+        .output()
+        .unwrap();
+    assert!(
+        printed.status.success(),
+        "Scala -print-tasty rejected Rust's two-local TASTy: {}",
+        String::from_utf8_lossy(&printed.stderr)
+    );
+    assert!(String::from_utf8_lossy(&printed.stdout).contains("version: 28.9.0"));
+    let from_tasty = Command::new(&compiler)
+        .args([
+            "-color:never",
+            "-release",
+            "21",
+            "-from-tasty",
+            "-classpath",
+        ])
+        .arg(&candidate)
+        .arg("-d")
+        .arg(&reconstructed)
+        .arg(&factory)
+        .output()
+        .unwrap();
+    assert!(
+        from_tasty.status.success(),
+        "Scala -from-tasty rejected Rust's two-local TASTy: {}",
         String::from_utf8_lossy(&from_tasty.stderr)
     );
     assert!(reconstructed.join("example/PairFactory.class").is_file());
@@ -2895,6 +3119,173 @@ fn formal_local_pair_pickles_both_original_argument_orders() {
                 method_name,
                 method_name == "createReversed",
             );
+        }
+    }
+}
+
+#[test]
+fn two_immutable_counter_locals_pickle_in_source_order_for_local_pair_arguments() {
+    let original =
+        include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
+    for (source, expected_order, source_id) in [
+        (original.to_owned(), [0usize, 1usize], 21250u32),
+        (
+            original.replace("new Pair(first, second)", "new Pair(second, first)"),
+            [1, 0],
+            21252,
+        ),
+        (
+            original.replace("new Pair(first, second)", "new Pair(first, first)"),
+            [0, 0],
+            21254,
+        ),
+    ] {
+        let bytes = with_paired_jvm_tasty_batch_plan(
+            &source,
+            "TwoLocals.scala",
+            SourceId::from_index(source_id),
+            |batch| {
+                let proof = batch
+                    .constructor_call_proofs
+                    .iter()
+                    .find(|proof| {
+                        proof.argument_proof().kind()
+                            == dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind::LocalValPair
+                    })
+                    .expect("the method has its source-backed LocalValPair proof");
+                let owner = batch.jvm_unit.store.symbols.get(proof.method()).owner.unwrap();
+                let factory = batch
+                    .classes
+                    .iter()
+                    .find(|class| class.class == owner)
+                    .expect("the original factory class is in the source batch");
+                let plan = factory.tasty_plan.plan();
+                let locals = plan
+                    .typed_bindings
+                    .local_value_bindings(plan.source.id, proof.method());
+                let initializers = plan
+                    .typed_bindings
+                    .local_counter_initializers(plan.source.id, proof.method());
+                let arguments = plan
+                    .typed_bindings
+                    .formal_local_constructor_call_pair(plan.source.id, proof.method())
+                    .expect("both source local references have an ordered binding")
+                    .arguments;
+                assert_eq!(locals.len(), 2);
+                assert_eq!(initializers.len(), 2);
+                assert_ne!(locals[0].symbol, locals[1].symbol);
+                assert_eq!(locals[0].source_tree, initializers[0].source_declaration);
+                assert_eq!(locals[1].source_tree, initializers[1].source_declaration);
+                assert_eq!(locals[0].scope, locals[1].scope);
+                assert_eq!(initializers[0].scope, initializers[1].scope);
+                for (index, argument) in arguments.iter().enumerate() {
+                    let dotty_tasty_pickler::FormalLocalConstructorCallArgumentOrigin::LocalValue {
+                        symbol,
+                        ..
+                    } = argument.origin else {
+                        panic!("both Pair arguments refer to original locals");
+                    };
+                    assert_eq!(symbol, locals[expected_order[index]].symbol);
+                }
+                if expected_order == [0, 1] {
+                    let mut typed_only = clone_typed_ast(plan.typed_ast);
+                    let TreeKind::Ident(typed_second) =
+                        &mut typed_only.get_mut(arguments[1].typed_argument).kind
+                    else {
+                        panic!("the original second Pair argument is an Ident");
+                    };
+                    typed_second.name = batch.jvm_unit.store.symbols.get(locals[0].symbol).name;
+                    assert!(validate_with_formal_local_fault_and_ast(
+                        plan,
+                        plan.typed_bindings,
+                        &typed_only,
+                    )
+                    .is_err(), "a typed-only local mutation is rejected against the unchanged source");
+
+                    let pair = plan
+                        .typed_bindings
+                        .formal_local_constructor_call_pair(plan.source.id, proof.method())
+                        .unwrap();
+                    let mut wrong_second_seed = clone_typed_ast(plan.typed_ast);
+                    let TreeKind::Ident(seed) = &mut wrong_second_seed
+                        .get_mut(initializers[1].call.typed_argument)
+                        .kind
+                    else {
+                        panic!("the second initializer retains its original formal Ident");
+                    };
+                    seed.name = batch
+                        .jvm_unit
+                        .store
+                        .symbols
+                        .get(pair.method_formals[0])
+                        .name;
+                    assert!(validate_with_formal_local_fault_and_ast(
+                        plan,
+                        plan.typed_bindings,
+                        &wrong_second_seed,
+                    )
+                    .is_err(), "a typed-only second-initializer mutation is rejected");
+                }
+                factory
+                    .tasty_plan
+                    .validate_method_bodies()
+                    .expect("the exact two-local Block validates");
+                let mut bounded = PickleLimits::default();
+                bounded.projection.max_expression_depth = 0;
+                assert!(matches!(
+                    factory.tasty_plan.pickle_with_limits(bounded),
+                    Err(PickleError::LimitExceeded {
+                        kind: LimitKind::ExpressionDepth,
+                        ..
+                    })
+                ), "the two-local body remains subject to the recursive depth budget");
+                bounded.projection.max_items = 1;
+                assert!(matches!(
+                    factory.tasty_plan.pickle_with_limits(bounded),
+                    Err(PickleError::LimitExceeded {
+                        kind: LimitKind::Items,
+                        ..
+                    })
+                ), "both declarations and the result share the item budget");
+                let output = factory
+                    .tasty_plan
+                    .pickle()
+                    .expect("both VALDEFs and the Pair result serialize");
+                TastyFile::parse_and_validate_scala_3_9(output.bytes())
+                    .expect("the Rust-produced TASTy sidecar is structurally valid");
+                output.bytes().to_vec()
+            },
+        )
+        .expect("the original source/typed session produces a paired plan");
+        let repeated = with_paired_jvm_tasty_batch_plan(
+            &source,
+            "TwoLocals.scala",
+            SourceId::from_index(source_id + 1),
+            |batch| {
+                let proof = batch
+                    .constructor_call_proofs
+                    .iter()
+                    .find(|proof| {
+                        proof.argument_proof().kind()
+                            == dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind::LocalValPair
+                    })
+                    .unwrap();
+                let owner = batch.jvm_unit.store.symbols.get(proof.method()).owner.unwrap();
+                let factory = batch.classes.iter().find(|class| class.class == owner).unwrap();
+                factory.tasty_plan.pickle().unwrap().bytes().to_vec()
+            },
+        )
+        .expect("fresh source sessions repeat the accepted shape");
+        assert_eq!(
+            bytes, repeated,
+            "each source variant serializes deterministically"
+        );
+        assert_two_local_pair_tasty(&bytes, expected_order);
+        if expected_order == [0, 1]
+            && std::env::var_os("DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE").as_deref()
+                == Some(std::ffi::OsStr::new("1"))
+        {
+            run_pinned_two_local_pair_reader(&bytes, "new example.Pair(first, second)");
         }
     }
 }
