@@ -605,3 +605,93 @@ version and tools remained enabled. The standard repository gates also passed:
 and `DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo +1.98.1 test --workspace --all-targets
 --locked -- --test-threads=2`. `git diff --check` passed after the evidence
 ledger update.
+
+## #2128 official Scala source consumer for the Rust two-local batch
+
+The strict linked Scala consumer now also runs with
+`DOTTY_REQUIRE_SCALA_TASTY_TWO_IMMUTABLE_REFERENCE_LOCALS_CONSUMER=1`. It
+produces the original six `Counter`, `Pair`, and `PairFactory` class/TASTy
+artifacts through one Rust source session, then compiles an independent Scala
+client against those outputs and the approved Scala libraries. The client
+classpath and runtime classpath contain the original Rust outputs; Scala
+`-from-tasty` classes are written to a separate inspection-only directory.
+
+The primary source SHA-256 is
+`e2411637c892feb474d6d70526d471b524cd7de49a3db2565923cd69736f73c3`; the
+independent primary Scala client SHA-256 is
+`d0ecf8a1183b95508da88f75a06175c2b01dacc575c9b44498d00b030572d00c`. The
+successful local strict run used Scala source revision
+`777528f19a58e794c9954a42f433373472ec57f8` (`3.9.0-bin-SNAPSHOT-git-777528f`)
+and Eclipse Temurin `21.0.13+9`, Java binary SHA-256
+`9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155`. The
+published runtime JARs were checked against the approved hashes recorded in
+the preceding oracle section. The Rust output classfile/TASTy fingerprints
+were:
+
+| Rust output | SHA-256 | Paired TASTy UUID |
+| --- | --- | --- |
+| `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | `008071c3-c009-68ac-0000-000000008193` |
+| `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | — |
+| `example/Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` | `000b7d8d-7441-c7f0-0000-000000008198` |
+| `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | — |
+| `example/PairFactory.class` | `16f734ec97d054a2ff1ec40400b6583b9d60476babcf0ba8617fd98dc0feebea` | `000a7216-f3d1-05c8-0000-00000000819a` |
+| `example/PairFactory.tasty` | `9415f52a7476d72554ba8943b9b657d588385fc339b3ff639a3c7d51e3d685e4` | — |
+
+The classfile UUID is the corresponding sidecar UUID. `PairFactory.create`
+has two original formal references, two declaration-ordered local addresses
+`[72, 97]`, and final Pair argument references `[72, 97]`; the final `APPLY`
+may precede the `VALDEF` wire entries. Reversed arguments resolve to the same
+original locals in reverse order, and repeated-first arguments point twice to
+the first local. Runtime output confirmed `7/3`, `3/7`, independent mutation,
+fresh references and deliberate repeated-first aliasing. Every primary
+class/sidecar hash matched after client compilation, execution and sidecar
+inspection.
+
+The original source, reversed Pair argument source, repeated-first-local
+source, renamed package/class/method/local source, and reordered declarations
+each receive their own Rust producer session and matching Scala client. The
+client covers independent seeds, equal-seed reference identity, separate
+mutation, fresh references across repeated calls, positional reversal, and
+the intentional alias produced by `new Pair(first, first)`. Re-emitting each
+source in a fresh Rust session compares every class and sidecar byte and UUID.
+The six artifact hashes are checked after Scala compilation and runtime; the
+three original sidecars are also hashed around Scala inspection and
+reconstruction.
+
+For the primary source, `-decompile`, `-print-tasty`, and inspection-only
+`-from-tasty` run on all original sidecars. The Rust-produced `PairFactory`
+sidecar is checked for its two formal parameters, source-ordered `first` and
+`second` local declarations and initializers, and final `Pair` argument
+references to the corresponding local AST addresses. Masked classfile members
+are compiled once with the valid Rust TASTy sidecar and once without the TASTy
+marker/sidecar; all seven TASTy-backed required lookups succeeded while their
+matched classfile-only controls failed. The observed classfile-only first
+diagnostics were `[E173]` for Counter and Pair constructors and `[E008]` for
+Counter `get`/`set`, Pair `leftValue`/`rightValue`, and Factory `create`.
+Isolated missing/misplaced sidecars first failed as “.tasty file is missing”;
+truncated sidecars first failed as broken `ArrayIndexOutOfBoundsException`
+TASTy; mismatched classfile UUIDs first failed as “out of sync with its TASTy
+file”. A dangling first or second local reference and a local-to-BLOCK
+reference were accepted during lazy signature lookup, then failed with
+`TreeWithoutOwner` during `-decompile`. Wrong local types, the single-reference
+alias mutation, and the constructor-type mutation were accepted by Scala
+`-from-tasty` and `-decompile`; their decompiled forms are recorded by the
+test. Wrong factory formal counts/types/results first failed source compilation
+with `[E007]`; malformed JVM descriptors first failed compilation with
+`[E007]`. These controls never replace the accepted runtime artifacts.
+
+The target remains registered once in the existing four-shard strict Scala
+workflow and its fail-closed aggregate. The required environment name above is
+included in each shard declaration and in the aggregate's required-environment
+inventory. Run locally with:
+
+```sh
+DOTTY_REQUIRE_SCALA_TASTY_TWO_IMMUTABLE_REFERENCE_LOCALS_CONSUMER=1 \
+  cargo test -p dotty --test jvm_tasty_immutable_reference_local_pair_scala_consumer \
+  --locked -- --nocapture
+```
+
+The strict log records the variant producer/client hashes, all original Rust
+artifact hashes and UUIDs, compiler/JDK versions, observed Scala outcomes, and
+elapsed test time. The focused strict Rust-produced two-local consumer test
+completed in 175.83 seconds in the recorded local run. This was the full six-test target run, including both the existing one-local consumer and the new two-local strict matrix.
