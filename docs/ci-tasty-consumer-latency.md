@@ -112,3 +112,36 @@ different. Per-target serial time sums to 1,421.9s and Cargo build to 76s,
 accounting for the 1,498s strict step. Parallel shard command steps each
 include their reported Cargo build phase; do not add build time to those step
 wall times a second time.
+
+## Report validation and reproduction
+
+The inventory and partition can be reproduced from the repository root with:
+
+```sh
+python3 tools/ci/validate_strict_tasty_targets.py
+python3 tools/ci/validate_strict_tasty_targets.py --shard shard-1
+python3 tools/ci/validate_strict_tasty_targets.py --shard shard-2
+python3 tools/ci/validate_strict_tasty_targets.py --shard shard-3
+python3 tools/ci/validate_strict_tasty_targets.py --shard shard-4
+```
+
+The negative inventory and aggregate cases exercised by the existing CI test
+suite can be checked with:
+
+```sh
+python3 -m unittest discover -s tools/ci-test-timing -p 'test_*strict_tasty*.py'
+python3 -m unittest discover -s tools/ci-test-timing -p 'test_aggregate_strict_tasty_shards.py'
+```
+
+For this report, the manifest validator passed for all 24 targets; the focused
+validator tests passed (32 tests), and aggregate success/failure/cancel/skip/
+missing-result tests passed (8 tests). The representative step values above
+come from the linked Actions job and step records, not rounded prose estimates.
+The warm-run means and per-shard distributions link to the fixed-SHA attempt
+series in the [existing sharding report](strict-tasty-target-sharding.md):
+[2-way attempt 2](https://github.com/scytrowski/dotty-rs/actions/runs/41833599053/attempts/2),
+[attempt 3](https://github.com/scytrowski/dotty-rs/actions/runs/41833599053/attempts/3),
+[attempt 4](https://github.com/scytrowski/dotty-rs/actions/runs/41833599053/attempts/4),
+and [4-way attempt 2](https://github.com/scytrowski/dotty-rs/actions/runs/41873333835/attempts/2),
+[attempt 3](https://github.com/scytrowski/dotty-rs/actions/runs/41873333835/attempts/3),
+[attempt 4](https://github.com/scytrowski/dotty-rs/actions/runs/41873333835/attempts/4).
