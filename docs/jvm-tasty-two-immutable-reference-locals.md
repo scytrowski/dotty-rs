@@ -289,3 +289,42 @@ The inherited one-local and #2077 paired-local tests still pass. The existing
 two-local sidecar with pinned Scala 3.9 `-decompile`, `-print-tasty`, and an
 isolated `-from-tasty` invocation. This establishes TASTy reader compatibility;
 it does not claim a Scala runtime consumer for linked Rust classfiles.
+
+## #2126 linked six-artifact paired batch
+
+Issue #2126 integrates the two authenticated initializer receipts, ordered Pair
+constructor argument proof, and existing TASTy writer through the existing
+paired JVM/TASTy plan and batch publisher. The plan borrows the same canonical
+session identity and projects both `TypedLocalBinding`s in original Block
+order; it does not reconstruct locals from names. The shared JVM local allocator
+assigns slots 3 and 4 after `this` and the two `Int` formals. Both the source
+and typed roots are retained through contract validation, and the existing
+artifact validator checks the six class/sidecar outputs and all three classfile
+`TASTY` UUID links before publication.
+
+The focused Rust regression produces actual batches for `Pair(first, second)`,
+`Pair(second, first)`, and `Pair(first, first)`. Each case runs in two fresh
+sessions and compares paths, bytes, and UUID links across sessions. The batch
+contains exactly the six expected class/sidecar paths; classfiles decode as
+major version 65, sidecars as TASTy 28.9.0, and the emitted PairFactory body
+uses `(II)Lexample/Pair;`, `max_stack=4`, `max_locals=5`. The local declaration
+sequence remains first then second for all variants, while final reference
+loads follow the requested argument order. Under the required Scala 3.9 mode,
+each produced PairFactory sidecar is separately accepted by `-decompile`,
+`-print-tasty`, and `-from-tasty`.
+
+The batch-level mutation regression rejects changes to the second seed load,
+second local store slot, second Pair argument load, Counter allocation owner,
+Pair constructor owner/reference, and stack/local bounds. The existing publisher
+fault matrix now also runs against the six-file two-local batch and verifies
+that staged write, promotion, and unsafe-path failures do not expose a partial
+batch or alter sentinel destinations. The pair remains subject to the existing
+transactional publisher and is not exposed through a new public publisher API.
+
+Required validation completed on Rust 1.98.1 and Temurin 21.0.13+9 with a
+task-local Cargo target directory and `TMPDIR`: the full workspace test suite,
+strict JDK backend gate, pinned Scala 3.9 sidecar checks, strict TASTy target
+manifest validator (24 targets), frontend boundary guard, formatting, Clippy,
+and rustdoc warnings gate. The strict manifest is unchanged. Hosted strict
+shard aggregation remains a CI workflow result and is not represented as a
+local run.
