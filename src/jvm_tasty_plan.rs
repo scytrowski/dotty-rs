@@ -1120,10 +1120,12 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                     let locals = match &parsed.ast.get(rhs).kind {
                         TreeKind::Block(block)
                             if (1..=2).contains(&block.stats.len())
-                                && block.stats.iter().all(|declaration| matches!(
-                                    parsed.ast.try_get(*declaration).map(|node| &node.kind),
-                                    Some(TreeKind::ValDef(_))
-                                )) =>
+                                && block.stats.iter().all(|declaration| {
+                                    matches!(
+                                        parsed.ast.try_get(*declaration).map(|node| &node.kind),
+                                        Some(TreeKind::ValDef(_))
+                                    )
+                                }) =>
                         {
                             let final_constructor_uses_local = matches!(
                                 parsed.ast.try_get(block.expr).map(|node| &node.kind),
@@ -1137,18 +1139,27 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                             if !final_constructor_uses_local {
                                 Vec::new()
                             } else {
-                                block.stats.iter().filter_map(|declaration| {
-                                    typer
-                                        .typed_local_binding_at(source_id, *declaration)
-                                        .filter(|binding| {
-                                            typer.store().symbols.get(binding.symbol()).flags.is_empty()
-                                        })
-                                        .map(|binding| JvmLocalBinding {
-                                            declaration: binding.declaration(),
-                                            symbol: binding.symbol(),
-                                            mutable: false,
-                                        })
-                                }).collect()
+                                block
+                                    .stats
+                                    .iter()
+                                    .filter_map(|declaration| {
+                                        typer
+                                            .typed_local_binding_at(source_id, *declaration)
+                                            .filter(|binding| {
+                                                typer
+                                                    .store()
+                                                    .symbols
+                                                    .get(binding.symbol())
+                                                    .flags
+                                                    .is_empty()
+                                            })
+                                            .map(|binding| JvmLocalBinding {
+                                                declaration: binding.declaration(),
+                                                symbol: binding.symbol(),
+                                                mutable: false,
+                                            })
+                                    })
+                                    .collect()
                             }
                         }
                         _ => Vec::new(),

@@ -3331,7 +3331,131 @@ fn two_immutable_counter_locals_pickle_in_source_order_for_local_pair_arguments(
     }
 }
 
-
+#[test]
+fn two_local_pair_emits_deterministic_six_artifact_batches_for_all_argument_orders() {
+    let original =
+        include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
+    for (variant, source, expected_loads) in [
+        ("original", original.to_owned(), [0usize, 1usize]),
+        (
+            "reversed",
+            original.replace("new Pair(first, second)", "new Pair(second, first)"),
+            [1, 0],
+        ),
+        (
+            "repeat-first",
+            original.replace("new Pair(first, second)", "new Pair(first, first)"),
+            [0, 0],
+        ),
+    ] {
+        let first =
+            emit_paired_jvm_tasty_batch(&source, "TwoLocals.scala", SourceId::from_index(21260))
+                .unwrap_or_else(|error| {
+                    panic!("{variant} emits one complete linked batch: {error:?}")
+                });
+        let second =
+            emit_paired_jvm_tasty_batch(&source, "TwoLocals.scala", SourceId::from_index(21261))
+                .unwrap_or_else(|error| {
+                    panic!("fresh {variant} session emits one complete linked batch: {error:?}")
+                });
+        assert_eq!(first.classes().len(), 3, "{variant}");
+        assert_eq!(second.classes().len(), 3, "{variant}");
+        let expected_classfiles = [
+            "example/Counter.class",
+            "example/Pair.class",
+            "example/PairFactory.class",
+        ];
+        for (((left, right), expected_path), expected_index) in first
+            .classes()
+            .iter()
+            .zip(second.classes())
+            .zip(expected_classfiles)
+            .zip([0usize, 1, 2])
+        {
+            assert_eq!(left.classfile_path(), expected_path, "{variant}");
+            assert_eq!(right.classfile_path(), expected_path, "{variant}");
+            assert_eq!(
+                left.tasty_path(),
+                expected_path.replace(".class", ".tasty"),
+                "{variant}"
+            );
+            assert_eq!(
+                left.classfile_bytes(),
+                right.classfile_bytes(),
+                "{variant} class {expected_index}"
+            );
+            assert_eq!(
+                left.tasty_bytes(),
+                right.tasty_bytes(),
+                "{variant} TASTy {expected_index}"
+            );
+            assert_eq!(
+                left.tasty_link_id(),
+                right.tasty_link_id(),
+                "{variant} UUID {expected_index}"
+            );
+            let decoded_class = decode_class(left.classfile_bytes());
+            assert_eq!(
+                (decoded_class.version.major, decoded_class.version.minor),
+                (65, 0),
+                "{variant} class-file target {expected_index}",
+            );
+            let parsed_tasty = tasty(left.tasty_bytes());
+            assert_eq!(
+                (
+                    parsed_tasty.header().major_version,
+                    parsed_tasty.header().minor_version
+                ),
+                (28, 9),
+                "{variant} TASTy target {expected_index}",
+            );
+            assert_eq!(
+                decoded_class.tasty_link_id().unwrap().unwrap().as_bytes(),
+                &parsed_tasty.header().uuid,
+                "{variant} class/sidecar UUID link {expected_index}",
+            );
+            TastyFile::parse_and_validate_scala_3_9(left.tasty_bytes()).unwrap_or_else(|error| {
+                panic!("{variant} sidecar {expected_index} validates: {error:?}")
+            });
+            if variant == "original"
+                && let Some(root) = std::env::var_os("DOTTY_ISSUE_2126_ARTIFACT_SCRATCH")
+            {
+                let root = PathBuf::from(root).join("primary");
+                for (relative, bytes) in [
+                    (left.classfile_path(), left.classfile_bytes()),
+                    (left.tasty_path(), left.tasty_bytes()),
+                ] {
+                    let path = root.join(relative);
+                    fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    fs::write(path, bytes).unwrap();
+                }
+                let link = left.tasty_link_id();
+                {
+                    let uuid = link
+                        .as_bytes()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>();
+                    println!("issue-2126 {} TASTY_UUID={uuid}", left.classfile_path());
+                }
+            }
+            if expected_index == 2 {
+                assert_two_local_pair_tasty(left.tasty_bytes(), expected_loads);
+                if std::env::var_os("DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE").as_deref()
+                    == Some(std::ffi::OsStr::new("1"))
+                {
+                    let expected_pair_call = match variant {
+                        "original" => "new example.Pair(first, second)",
+                        "reversed" => "new example.Pair(second, first)",
+                        "repeat-first" => "new example.Pair(first, first)",
+                        _ => unreachable!(),
+                    };
+                    run_pinned_two_local_pair_reader(left.tasty_bytes(), expected_pair_call);
+                }
+            }
+        }
+    }
+}
 
 fn observe_reference_local_constructor_flow(
     source_id: SourceId,

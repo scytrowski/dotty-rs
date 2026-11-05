@@ -72,6 +72,8 @@ const IMMUTABLE_LOCAL_PAIR_BATCH: &str =
     include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactory.scala");
 const IMMUTABLE_LOCAL_PAIR_REVERSED_BATCH: &str =
     include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactoryReversed.scala");
+const TWO_IMMUTABLE_LOCAL_PAIR_BATCH: &str =
+    include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
 const COUNTER_FACTORY_IDENTITY_ONLY: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n";
 const COUNTER_FACTORY_PRIMITIVE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n  def create(seed: Int): Int = seed\n";
 const COUNTER_FACTORY_REFERENCE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def create(counter: Counter): Counter = counter\n";
@@ -7197,11 +7199,11 @@ fn immutable_local_pair_batches_emit_deterministic_authenticated_artifacts() {
 #[test]
 fn immutable_local_pair_batch_publisher_rejects_partial_and_unsafe_outputs() {
     let batch = emit_paired_jvm_tasty_batch(
-        IMMUTABLE_LOCAL_PAIR_BATCH,
-        "PairFactory.scala",
-        SourceId::from_index(20771),
+        TWO_IMMUTABLE_LOCAL_PAIR_BATCH,
+        "TwoLocals.scala",
+        SourceId::from_index(21270),
     )
-    .expect("emit the authentic immutable-local Pair producer batch");
+    .expect("emit the authentic two-local Pair producer batch");
     let pairs = batch_publish_pairs(&batch);
     assert_eq!(pairs.len(), 3);
 
