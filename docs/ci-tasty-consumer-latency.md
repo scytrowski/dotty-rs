@@ -63,3 +63,52 @@ The six slowest target durations in the current serial sample, from the manifest
 | 6 | `jvm_tasty_reference_local_scala_consumer` | 87.71 |
 
 These are the serial sample's per-target execution durations, not complete workflow critical-path times. Four-way's observed critical shard duration includes setup and shard 4's mandatory follow-ups; it should not be compared directly to a single target duration.
+
+## Upstream optimization outcomes and retained gates
+
+The prerequisites are not all performance wins and should be described separately:
+
+- [#2092](https://github.com/scytrowski/dotty-rs/issues/2092) added per-target timing for an earlier 23-target sample. Its top target timings belong to that historical cohort; the current 24-target per-target profile is the manifest data from run #41819990007.
+- [#2093](https://github.com/scytrowski/dotty-rs/issues/2093), [#2094](https://github.com/scytrowski/dotty-rs/issues/2094), and [#2096](https://github.com/scytrowski/dotty-rs/issues/2096) added opt-in subprocess timing. The timer records diagnostics only and does not change ordinary test behavior.
+- [#2099](https://github.com/scytrowski/dotty-rs/issues/2099) closed with a measured no-go in [PR #2131](https://github.com/scytrowski/dotty-rs/pull/2131): the separate expected-failure probes had distinct diagnostic purposes, so no safe redundant invocation was removed.
+- [#2100](https://github.com/scytrowski/dotty-rs/issues/2100) adopted a bounded optimization in [PR #2139](https://github.com/scytrowski/dotty-rs/pull/2139). It batches six independent positive lookups while retaining a per-member assertion and all six independent negative first-diagnostic controls. Three paired runs measured `lookup_probes()` falling from 33.742s to 21.340s on average (36.8%); the test's mean wall time fell from 227.19s to 190.88s and its subprocess count from 36 to 21. These commits landed after the serial and sharding samples above, so those timings are pre-optimization evidence and must not be mixed with later measurements.
+- [#2097](https://github.com/scytrowski/dotty-rs/issues/2097) introduced two shards and [#2098](https://github.com/scytrowski/dotty-rs/issues/2098) evaluated/adopted four. Both retained all 24 targets, strict environment checks, checksum controls, follow-up gates and aggregate failure behavior.
+
+## Decision and operating guidance
+
+**Evidence decision: no-go on claiming the requested PR-to-last-green speedup from this dataset.** The fixed-SHA warm workflow-attempt samples favor four shards over two on critical-path duration, with a modest measured runner-time increase and substantial duplicated cache archives. That is a useful operational signal, but only one current-suite serial run exists, the warm reruns are attempt-level rather than PR-level latency observations, and the PR-level windows include unrelated iteration and scheduling. The historical 23-target sample cannot fill the missing serial cohort. This report therefore does not assert a statistically comparable serial-to-parallel speedup or treat PR creation-to-merge time as CI latency.
+
+The repository currently retains the four-shard gate as adopted by [PR #2121](https://github.com/scytrowski/dotty-rs/pull/2121). That operational decision is recorded with its original evidence; this report qualifies its latency interpretation rather than changing the workflow or manufacturing another layout. A future re-evaluation should collect at least three current-inventory serial runs and, for each layout, record both (a) workflow attempt wall/cost from the same fixed source and cache classification and (b) the actual time from a ready PR revision to the last of its automatic checks. Capture run creation, job start/completion, aggregate completion, and every concurrent PR workflow needed for that last-green timestamp. Do not subtract setup or queue delay from a user-visible PR latency unless reporting that component separately.
+
+Rollback of the four-shard topology is to restore the prior serial command from the recorded 24-target manifest, keep every strict environment and four follow-up gate, and retain the aggregate required-check identity. Do not remove or disable a target to reduce wall time.
+
+For every future strict TASTy target, the PR author should:
+
+1. Add its exact Cargo target to the manifest and exactly one fixed shard; run the validator and inspect the resulting shard assignments.
+2. Record a pinned per-target duration and compare the new critical shard with the previous profile; rebalance only with measured evidence.
+3. Preserve `--locked`, `--nocapture`, `--test-threads=1`, all required-mode environment variables, pinned source/JDK/Rust/JAR checks, negative controls, all follow-up gates, and aggregate failure propagation.
+4. Link successful warm and cold runs separately, record exact SHA/cache state, and recalculate both workflow wall/runner cost and PR-to-last-green rather than reusing a prior sample.
+
+No runtime tests, compiler pins, Rust test profile, or hosted full Typer corpus audit were changed or launched for this report.
+
+For a concrete stage-level audit, the Actions job/step timing records for one
+successful current 24-target run in each layout provide this decomposition.
+These are single-run details on different PR revisions, kept separate from the
+three-attempt fixed-SHA averages above:
+
+| Run | Queue to first job | Setup and pinned inputs | Scala stage | Cargo build | Strict target execution | Follow-ups | Critical job / gate | Runner total incl. aggregate |
+| --- | ---: | --- | ---: | ---: | ---: | --- | ---: | ---: |
+| Serial [41819990007](https://github.com/scytrowski/dotty-rs/actions/runs/41819990007) | 76s | Checkout 6s; JDK 8s; Rust 9s; cache and exact-output restores 24s; sbt runner 4s; compiler artifacts verify 1s | 67s | 76s | 1,421.9s summed across 24 targets | 310s across the four gates | 1,950s whole job | 1,950s |
+| Two-way [41862325198](https://github.com/scytrowski/dotty-rs/actions/runs/41862325198) | 3s | Two jobs: checkout 13s combined; JDK 7s; Rust 16s; dependency/Rust and exact-output restores 38s; sbt runner 7s | 108s across shards | 28.8s reported Cargo profile-build time | Shard command steps: 555s + 816s | 328s, once on shard 2 | Shard 2: 1,265s; aggregate: 6s | 1,921s (31m55s shard jobs + 6s aggregate) |
+| Four-way [41888319758](https://github.com/scytrowski/dotty-rs/actions/runs/41888319758) | 2s | Four jobs: checkout 30s combined; JDK 16s; Rust 34s; dependency/Rust and exact-output restores 91s; sbt runner 19s | 217s across shards | 43.0s reported Cargo profile-build time | Shard command steps: 301s + 367s + 395s + 416s | 325s, once on shard 4 | Shard 4: 862s; aggregate: 6s | 2,270s (2,264s shard jobs + 6s aggregate) |
+
+The first serial job started 76 seconds after workflow creation. The two- and
+four-way examples had 3s and 2s to first job, respectively. Queue is separated
+from job execution; the full-job/critical-job columns are wall time, while
+runner totals sum concurrent job durations and therefore are not user-visible
+latency. The two- and four-way cost rows are not substituted for the fixed-SHA
+warm means because their source revisions and individual cache contents are
+different. Per-target serial time sums to 1,421.9s and Cargo build to 76s,
+accounting for the 1,498s strict step. Parallel shard command steps each
+include their reported Cargo build phase; do not add build time to those step
+wall times a second time.
