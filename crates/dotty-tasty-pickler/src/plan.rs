@@ -111,15 +111,27 @@ pub trait SourceTypedBindings {
         Vec::new()
     }
 
-    /// Authenticated direct-New initializer for the one local admitted by a
-    /// FormalLocalPair constructor receipt. This is separate from the legacy
-    /// PlannedCallBinding path used by helper-local values.
+    /// Authenticated direct-New initializer for a local admitted by a
+    /// FormalLocalPair or LocalValPair constructor receipt. This is separate
+    /// from the legacy PlannedCallBinding path used by helper-local values.
     fn local_counter_initializer(
         &self,
         _source: SourceId,
         _method: SymbolId,
     ) -> Option<LocalCounterInitializerBinding> {
         None
+    }
+
+    /// Authenticated direct-New initializers for the bounded immutable-local
+    /// constructor body. The default preserves existing single-local users.
+    fn local_counter_initializers(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Vec<LocalCounterInitializerBinding> {
+        self.local_counter_initializer(source, method)
+            .into_iter()
+            .collect()
     }
 
     /// Exact ordered direct-formal/local pair receipt from the source proof.
@@ -304,7 +316,7 @@ pub struct MethodPicklePlan {
     pub body: Option<TreeId<Typed>>,
 }
 
-/// Exact source/typed/symbol/scope evidence for one method-local Int `val` or `var`.
+/// Exact source/typed/symbol/scope evidence for one supported method-local value.
 ///
 /// The source integration obtains this tuple from its `SourceTyper` session;
 /// the pickler never reconstructs local identity from names or allocation order.
@@ -331,7 +343,7 @@ pub struct PicklePlan<'a> {
     pub class_tree: TreeId<Untyped>,
     pub constructor: DefaultConstructorPlan,
     pub methods: &'a [MethodPicklePlan],
-    /// Canonical bindings for supported local Int `val` and `var` declarations across methods.
+    /// Canonical bindings for supported method-local value declarations across methods.
     pub local_values: &'a [LocalValueBinding],
 }
 
