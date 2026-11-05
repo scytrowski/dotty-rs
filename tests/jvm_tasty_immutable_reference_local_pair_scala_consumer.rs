@@ -1,12 +1,17 @@
 use dotty::jvm_tasty_artifacts::{PairedJvmTastyBatchArtifacts, emit_paired_jvm_tasty_batch};
+use dotty::jvm_tasty_plan::with_paired_jvm_tasty_batch_plan;
 use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::ConstantPoolIndex;
 use dotty_classfile::reader::Reader;
 use dotty_core::SourceId;
+use dotty_jvm_tasty_contract::{
+    JvmTastyBatchArtifacts, JvmTastyClassFileArtifact, JvmTastySidecarArtifact,
+    validate_jvm_tasty_batch, validate_jvm_tasty_batch_artifacts,
+};
 use dotty_tasty::ast::{
-    APPLY_TAG, BLOCK_TAG, DEFDEF_TAG, SELECTIN_TAG, SHAREDTYPE_TAG, TERMREFDIRECT_TAG, TYPEREF_TAG,
-    VALDEF_TAG,
+    APPLY_TAG, BLOCK_TAG, DEFDEF_TAG, PARAM_TAG, SELECTIN_TAG, SHAREDTYPE_TAG, TERMREFDIRECT_TAG,
+    TYPEREF_TAG, VALDEF_TAG,
 };
 use dotty_tasty::reader::Reader as TastyReader;
 use dotty_tasty::section::StandardSection;
@@ -14,11 +19,12 @@ use dotty_tasty::tasty::TastyFile;
 use dotty_tasty::term::{RawTree, TermValue};
 use dotty_tasty::writer::Writer;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const REQUIRE: &str = "DOTTY_REQUIRE_SCALA_TASTY_IMMUTABLE_REFERENCE_LOCAL_PAIR_CONSUMER";
+const REQUIRE: &str = "DOTTY_REQUIRE_SCALA_TASTY_TWO_IMMUTABLE_REFERENCE_LOCALS_CONSUMER";
 const SCALA_REVISION: &str = "777528f19a58e794c9954a42f433373472ec57f8";
 const SOURCES: [&str; 2] = [
     include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactory.scala"),
@@ -38,6 +44,38 @@ const TWO_LOCAL_CLIENT: &str =
     include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/Consumer.scala");
 const TWO_LOCAL_REVERSED_CLIENT: &str =
     include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/ConsumerReversed.scala");
+const TWO_LOCAL_RUST_REVERSED_CLIENT: &str =
+    include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/ConsumerRustReversed.scala");
+const TWO_LOCAL_ALIAS_CLIENT: &str =
+    include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/ConsumerAlias.scala");
+const LEGACY_FACTORY_SIGNATURE_CONTROLS: [(&str, &str); 3] = [
+    (
+        "wrong-formal-count",
+        "package example\nclass PairFactory:\n  def create(existing: Counter): Pair = new Pair(existing, new Counter(2))\n",
+    ),
+    (
+        "wrong-formal-type",
+        "package example\nclass PairFactory:\n  def create(existing: String, seed: Int): Pair = new Pair(new Counter(seed), new Counter(seed))\n",
+    ),
+    (
+        "wrong-result-type",
+        "package example\nclass PairFactory:\n  def create(existing: Counter, seed: Int): Counter = new Counter(seed)\n",
+    ),
+];
+const TWO_LOCAL_FACTORY_SIGNATURE_CONTROLS: [(&str, &str); 3] = [
+    (
+        "wrong-formal-count",
+        "package example\nclass PairFactory:\n  def create(firstSeed: Int): Pair = new Pair(new Counter(firstSeed), new Counter(2))\n",
+    ),
+    (
+        "wrong-formal-type",
+        "package example\nclass PairFactory:\n  def create(firstSeed: String, secondSeed: Int): Pair = new Pair(new Counter(secondSeed), new Counter(secondSeed))\n",
+    ),
+    (
+        "wrong-result-type",
+        "package example\nclass PairFactory:\n  def create(firstSeed: Int, secondSeed: Int): Counter = new Counter(firstSeed)\n",
+    ),
+];
 
 fn required() -> bool {
     match std::env::var(REQUIRE).as_deref() {
@@ -68,6 +106,29 @@ fn hash(path: &Path) -> String {
         .next()
         .unwrap()
         .to_owned()
+}
+
+fn hash_bytes(bytes: &[u8]) -> String {
+    let mut child = Command::new("sha256sum")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("run sha256sum for Rust artifact bytes");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(bytes)
+        .expect("write artifact bytes to sha256sum");
+    String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout)
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned()
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn plain(text: &str) -> String {
@@ -332,14 +393,8 @@ fn local_address(tasty_bytes: &[u8], method_name: &str) -> u32 {
             index
                 .get(node.offset as u32)
                 .and_then(|node| node.decode_defdef_body().ok())
-                .and_then(|body| {
-                    tasty
-                        .names()
-                        .render(body.name)
-                        .ok()
-                        .map(|name| name == method_name)
-                })
-                .unwrap_or(false)
+                .and_then(|body| tasty.names().render(body.name).ok())
+                .is_some_and(|name| name == method_name)
         })
         .expect("factory method exists")
         .offset as u32;
@@ -362,6 +417,49 @@ fn local_address(tasty_bytes: &[u8], method_name: &str) -> u32 {
         })
         .expect("BLOCK owns the immutable local VALDEF")
         .offset as u32
+}
+
+fn local_addresses(tasty_bytes: &[u8], method_name: &str) -> Vec<u32> {
+    let tasty = TastyFile::parse_and_validate_scala_3_9(tasty_bytes).expect("parse Rust TASTy");
+    let index = tasty.ast_address_index().unwrap();
+    let method = index
+        .iter_nodes_with_tag(DEFDEF_TAG)
+        .find(|node| {
+            index
+                .get(node.offset as u32)
+                .and_then(|node| node.decode_defdef_body().ok())
+                .and_then(|body| {
+                    tasty
+                        .names()
+                        .render(body.name)
+                        .ok()
+                        .map(|name| name == method_name)
+                })
+                .unwrap_or(false)
+        })
+        .expect("factory method exists")
+        .offset as u32;
+    let block = index
+        .iter_nodes_with_tag(BLOCK_TAG)
+        .find(|node| {
+            std::iter::successors(Some(*node), |current| {
+                index.parent_of(current.offset as u32)
+            })
+            .any(|parent| parent.offset as u32 == method)
+        })
+        .expect("factory body is BLOCK")
+        .offset as u32;
+    let locals: Vec<u32> = index
+        .iter_nodes_with_tag(VALDEF_TAG)
+        .filter(|node| {
+            index
+                .parent_of(node.offset as u32)
+                .is_some_and(|parent| parent.offset as u32 == block)
+        })
+        .map(|node| node.offset as u32)
+        .collect();
+    assert!(!locals.is_empty(), "BLOCK owns an immutable local VALDEF");
+    locals
 }
 
 fn block_address(tasty_bytes: &[u8], method_name: &str) -> u32 {
@@ -411,13 +509,20 @@ fn change_termref_target(tasty_bytes: &[u8], address: u32, replacement: u32) -> 
 fn change_local_type_ref(
     tasty_bytes: &[u8],
     method_name: &str,
+    local_ordinal: usize,
     reference_index: usize,
     replacement_name: &str,
 ) -> Vec<u8> {
     let tasty = TastyFile::parse_and_validate_scala_3_9(tasty_bytes).expect("parse Rust TASTy");
     let index = tasty.ast_address_index().unwrap();
     let section = tasty.section(StandardSection::Asts).unwrap();
-    let local = local_address(tasty_bytes, method_name);
+    let local = if local_ordinal == 0 {
+        local_address(tasty_bytes, method_name)
+    } else {
+        *local_addresses(tasty_bytes, method_name)
+            .get(local_ordinal)
+            .expect("local VALDEF ordinal exists")
+    };
     let replacement = tasty
         .names()
         .find_utf8(replacement_name)
@@ -524,8 +629,23 @@ fn change_initializer_constructor(tasty_bytes: &[u8], method_name: &str) -> Vec<
     let mut changed = tasty_bytes.to_vec();
     let start = section.offset + shared_type.offset + 1;
     changed[start..start + replacement_encoded.len()].copy_from_slice(&replacement_encoded);
-    TastyFile::parse_and_validate_scala_3_9(&changed)
+    let changed_file = TastyFile::parse_and_validate_scala_3_9(&changed)
         .expect("constructor-mutated TASTy remains structurally valid");
+    let changed_section = changed_file.section(StandardSection::Asts).unwrap();
+    let mut reader = TastyReader::with_range(
+        changed_section.payload,
+        shared_type.offset,
+        changed_section.payload.len(),
+    )
+    .expect("mutated initializer shared type remains addressable");
+    let RawTree::Leaf(reference) = RawTree::decode(&mut reader).unwrap() else {
+        panic!("mutated initializer retains SHAREDTYPE reference")
+    };
+    assert_eq!(
+        reference.value,
+        TermValue::AstRef(pair_type),
+        "first local initializer now targets the exact Pair TYPEREF AST address"
+    );
     changed
 }
 
@@ -638,6 +758,389 @@ fn assert_same_batch(a: &PairedJvmTastyBatchArtifacts, b: &PairedJvmTastyBatchAr
     }
 }
 
+fn source_contract_result(
+    source: &str,
+    batch: &PairedJvmTastyBatchArtifacts,
+    replaced_tasty: Option<(&str, &[u8])>,
+) -> Result<(), String> {
+    with_paired_jvm_tasty_batch_plan(source, "PairFactory.scala", batch.source_id(), |plan| {
+        let tasty_plans = plan
+            .classes
+            .iter()
+            .map(|class| class.tasty_plan)
+            .collect::<Vec<_>>();
+        let validated = validate_jvm_tasty_batch(plan.jvm_unit, &tasty_plans)
+            .map_err(|error| format!("{error:?}"))?;
+        let artifacts = JvmTastyBatchArtifacts {
+            classfiles: batch
+                .classes()
+                .iter()
+                .map(|artifact| JvmTastyClassFileArtifact {
+                    classfile_path: artifact.classfile_path().to_owned(),
+                    classfile_bytes: artifact.classfile_bytes().to_vec(),
+                })
+                .collect(),
+            sidecars: batch
+                .classes()
+                .iter()
+                .map(|artifact| {
+                    let (tasty_path, tasty_bytes) = replaced_tasty
+                        .filter(|(path, _)| *path == artifact.tasty_path())
+                        .unwrap_or((artifact.tasty_path(), artifact.tasty_bytes()));
+                    JvmTastySidecarArtifact {
+                        tasty_path: tasty_path.to_owned(),
+                        tasty_bytes: tasty_bytes.to_vec(),
+                    }
+                })
+                .collect(),
+        };
+        validate_jvm_tasty_batch_artifacts(&validated, artifacts)
+            .map_err(|error| format!("{error:?}"))
+    })
+    .map_err(|error| format!("{error:?}"))?
+}
+
+fn rust_two_local_graph(
+    tasty_bytes: &[u8],
+    expected_names: [&str; 2],
+    expected_arg_ordinals: Option<[usize; 2]>,
+) -> (u32, Vec<u32>, Vec<u32>) {
+    let tasty = TastyFile::parse_and_validate_scala_3_9(tasty_bytes)
+        .expect("Rust PairFactory TASTy is valid Scala 3.9 TASTy");
+    let index = tasty
+        .ast_address_index()
+        .expect("PairFactory has AST index");
+    let method = index
+        .iter_nodes_with_tag(DEFDEF_TAG)
+        .find(|node| {
+            index
+                .get(node.offset as u32)
+                .and_then(|raw| raw.decode_defdef_body().ok())
+                .and_then(|body| tasty.names().render(body.name).ok())
+                .is_some_and(|name| name == "create")
+        })
+        .expect("original PairFactory.create method");
+    let method_address = method.offset as u32;
+    let body = index
+        .get(method_address)
+        .unwrap()
+        .decode_defdef_body()
+        .expect("decode create signature");
+    assert_eq!(body.parameters.len(), 2, "create retains both Int formals");
+    let parameter_addresses = index
+        .iter_nodes_with_tag(PARAM_TAG)
+        .filter(|node| {
+            std::iter::successors(Some(*node), |current| {
+                index.parent_of(current.offset as u32)
+            })
+            .any(|parent| parent.offset as u32 == method_address)
+        })
+        .map(|node| node.offset as u32)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        parameter_addresses.len(),
+        2,
+        "the two source PARAM addresses exist"
+    );
+    let block = index
+        .iter_nodes_with_tag(BLOCK_TAG)
+        .find(|node| {
+            std::iter::successors(Some(*node), |current| {
+                index.parent_of(current.offset as u32)
+            })
+            .any(|parent| parent.offset as u32 == method_address)
+        })
+        .expect("create has its source BLOCK");
+    let block_address = block.offset as u32;
+    let locals = index
+        .iter_nodes_with_tag(VALDEF_TAG)
+        .filter(|node| {
+            index
+                .parent_of(node.offset as u32)
+                .is_some_and(|parent| parent.offset as u32 == block_address)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(locals.len(), 2, "BLOCK owns exactly two VALDEF locals");
+    let names = locals
+        .iter()
+        .map(|node| {
+            match index
+                .get(node.offset as u32)
+                .unwrap()
+                .decode_definition_body()
+                .unwrap()
+            {
+                dotty_tasty::ast::DefinitionBody::ValDef { name, rhs, .. } => {
+                    assert!(rhs.is_some(), "each local retains its initializer");
+                    tasty.names().render(name).unwrap()
+                }
+                other => panic!("BLOCK child is a VALDEF: {other:?}"),
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names, expected_names,
+        "source declaration order is preserved"
+    );
+    let asts = tasty.section(StandardSection::Asts).unwrap();
+    for (local, parameter) in locals.iter().zip(parameter_addresses) {
+        let initializer_refs = index
+            .iter_nodes_with_tag(TERMREFDIRECT_TAG)
+            .filter(|node| {
+                std::iter::successors(Some(*node), |current| {
+                    index.parent_of(current.offset as u32)
+                })
+                .any(|parent| parent.offset as u32 == local.offset as u32)
+            })
+            .map(|node| {
+                let mut reader =
+                    TastyReader::with_range(asts.payload, node.offset, asts.payload.len()).unwrap();
+                match RawTree::decode(&mut reader).unwrap() {
+                    RawTree::Leaf(term) if term.tag == TERMREFDIRECT_TAG => {
+                        let TermValue::AstRef(address) = term.value else {
+                            panic!("initializer seed is a direct formal address")
+                        };
+                        address
+                    }
+                    other => panic!("initializer formal is TERMREFdirect: {other:?}"),
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            initializer_refs,
+            [parameter],
+            "each local uses its matching seed formal"
+        );
+    }
+    let pair_apply = index
+        .iter_nodes_with_tag(APPLY_TAG)
+        .find(|node| {
+            index
+                .parent_of(node.offset as u32)
+                .is_some_and(|parent| parent.offset as u32 == block_address)
+        })
+        .expect("BLOCK final expression is Pair constructor APPLY");
+    let references = index
+        .iter_nodes_with_tag(TERMREFDIRECT_TAG)
+        .filter(|node| {
+            index
+                .parent_of(node.offset as u32)
+                .is_some_and(|parent| parent.offset == pair_apply.offset)
+        })
+        .map(|node| {
+            let mut reader =
+                TastyReader::with_range(asts.payload, node.offset, asts.payload.len()).unwrap();
+            match RawTree::decode(&mut reader).unwrap() {
+                RawTree::Leaf(term) if term.tag == TERMREFDIRECT_TAG => {
+                    let TermValue::AstRef(address) = term.value else {
+                        panic!("Pair constructor argument is a direct local address")
+                    };
+                    address
+                }
+                other => panic!("Pair constructor argument is TERMREFdirect: {other:?}"),
+            }
+        })
+        .collect::<Vec<_>>();
+    let local_addresses = locals
+        .iter()
+        .map(|node| node.offset as u32)
+        .collect::<Vec<_>>();
+    if let Some(expected_arg_ordinals) = expected_arg_ordinals {
+        assert_eq!(
+            references,
+            expected_arg_ordinals
+                .map(|ordinal| local_addresses[ordinal])
+                .to_vec(),
+            "final Pair arguments point directly to expected local VALDEF addresses"
+        );
+    }
+    (block_address, local_addresses, references)
+}
+
+fn assert_two_local_body_types(tasty_bytes: &[u8], local_types: [&str; 2]) {
+    let tasty = TastyFile::parse_and_validate_scala_3_9(tasty_bytes)
+        .expect("type-mutated PairFactory remains valid Scala 3.9 TASTy");
+    let index = tasty.ast_address_index().expect("PairFactory AST index");
+    let asts = tasty.section(StandardSection::Asts).unwrap();
+    let block = index
+        .iter_nodes_with_tag(BLOCK_TAG)
+        .find(|node| {
+            std::iter::successors(Some(*node), |current| {
+                index.parent_of(current.offset as u32)
+            })
+            .any(|parent| {
+                index
+                    .get(parent.offset as u32)
+                    .and_then(|node| node.decode_defdef_body().ok())
+                    .and_then(|body| tasty.names().render(body.name).ok())
+                    .is_some_and(|name| name == "create")
+            })
+        })
+        .expect("PairFactory.create has a BLOCK")
+        .offset as u32;
+    let locals = index
+        .iter_nodes_with_tag(VALDEF_TAG)
+        .filter(|node| {
+            index
+                .parent_of(node.offset as u32)
+                .is_some_and(|parent| parent.offset as u32 == block)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(locals.len(), 2, "create still declares both source locals");
+    for (ordinal, node) in locals.into_iter().enumerate() {
+        let definition = index
+            .get(node.offset as u32)
+            .unwrap()
+            .decode_definition_body()
+            .unwrap();
+        let dotty_tasty::ast::DefinitionBody::ValDef {
+            name,
+            type_tree,
+            rhs: Some(initializer),
+            ..
+        } = definition
+        else {
+            panic!("each create local retains its initializer")
+        };
+        let local_name = tasty.names().render(name).unwrap();
+        let local_address = node.offset as u32;
+        let type_names = index
+            .iter_nodes_with_tag(TYPEREF_TAG)
+            .filter(|reference| {
+                std::iter::successors(Some(*reference), |current| {
+                    index.parent_of(current.offset as u32)
+                })
+                .any(|parent| parent.offset as u32 == local_address)
+            })
+            .filter_map(|reference| {
+                let mut reader =
+                    TastyReader::with_range(asts.payload, reference.offset, asts.payload.len())
+                        .ok()?;
+                match RawTree::decode(&mut reader).ok()? {
+                    RawTree::NatAst { value, .. } => tasty.names().render(value).ok(),
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            type_names
+                .iter()
+                .any(|name| name.ends_with(local_types[ordinal])),
+            "{local_name} VALDEF type tree {type_names:?} does not name {}; raw={type_tree:?}",
+            local_types[ordinal]
+        );
+        assert!(
+            !initializer.nodes().is_empty(),
+            "{local_name} retains its initializer graph"
+        );
+    }
+}
+
+fn inspect_rust_two_local_batch(
+    scala: &Scala,
+    root: &Path,
+    producer: &Path,
+    expected_names: [&str; 2],
+    expected_arg_ordinals: [usize; 2],
+) {
+    let mut original_hashes = Vec::new();
+    for class_name in ["Counter", "Pair", "PairFactory"] {
+        let class_path = producer.join(format!("example/{class_name}.class"));
+        let tasty_path = producer.join(format!("example/{class_name}.tasty"));
+        let class_bytes = fs::read(&class_path).unwrap();
+        let tasty_bytes = fs::read(&tasty_path).unwrap();
+        let class = decode_class(&class_bytes);
+        let tasty = TastyFile::parse_and_validate_scala_3_9(&tasty_bytes).unwrap();
+        assert_eq!(class.version.major, 65, "{class_name} is Java 21 bytecode");
+        assert_eq!(
+            class.tasty_link_id().unwrap().unwrap().as_bytes(),
+            &tasty.header().uuid,
+            "{class_name} retains its Rust classfile/TASTy UUID link"
+        );
+        original_hashes.push((
+            class_path,
+            hash(&producer.join(format!("example/{class_name}.class"))),
+        ));
+        original_hashes.push((
+            tasty_path,
+            hash(&producer.join(format!("example/{class_name}.tasty"))),
+        ));
+
+        let sidecar = producer.join(format!("example/{class_name}.tasty"));
+        let decompiled = plain(&String::from_utf8_lossy(
+            &output(scala.command().arg("-decompile").arg(&sidecar)).stdout,
+        ));
+        let printed = String::from_utf8_lossy(
+            &output(scala.command().arg("-print-tasty").arg(&sidecar)).stdout,
+        )
+        .into_owned();
+        assert!(
+            printed.contains("version: 28.9.0"),
+            "{class_name}: {printed}"
+        );
+        match class_name {
+            "Counter" => assert!(decompiled.contains("get") && decompiled.contains("set")),
+            "Pair" => {
+                assert!(decompiled.contains("leftValue") && decompiled.contains("rightValue"))
+            }
+            "PairFactory" => {
+                assert!(
+                    decompiled.contains("first") && decompiled.contains("second"),
+                    "{decompiled}"
+                );
+                assert!(
+                    decompiled.contains("val first: example.Counter")
+                        && decompiled.contains("val second: example.Counter")
+                        && decompiled.contains("new example.Counter(firstSeed)")
+                        && decompiled.contains("new example.Counter(secondSeed)"),
+                    "both Counter VALDEFs retain their original formal-seeded initializers: {decompiled}"
+                );
+                let pair_call = match expected_arg_ordinals {
+                    [0, 1] => "new example.Pair(first, second)",
+                    [1, 0] => "new example.Pair(second, first)",
+                    [0, 0] => "new example.Pair(first, first)",
+                    _ => unreachable!("expected two-local argument variant"),
+                };
+                assert!(decompiled.contains(pair_call), "{decompiled}");
+                let (block, locals, targets) =
+                    rust_two_local_graph(&tasty_bytes, expected_names, Some(expected_arg_ordinals));
+                assert_eq!(locals.len(), 2);
+                eprintln!(
+                    "RUST_TASTY_GRAPH class=PairFactory block={block} local_addresses={locals:?} pair_arguments={targets:?}"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+    let reconstructed = root.join("rust-from-tasty-inspection-only");
+    fs::create_dir_all(&reconstructed).unwrap();
+    let sidecars = ["Counter", "Pair", "PairFactory"]
+        .map(|class| producer.join(format!("example/{class}.tasty")));
+    output(
+        scala
+            .command()
+            .args(["-release", "21", "-from-tasty", "-classpath"])
+            .arg(format!("{}:{}", producer.display(), scala.libraries))
+            .arg("-d")
+            .arg(&reconstructed)
+            .args(&sidecars),
+    );
+    for class in ["Counter", "Pair", "PairFactory"] {
+        assert!(
+            reconstructed
+                .join(format!("example/{class}.class"))
+                .is_file()
+        );
+    }
+    for (path, expected) in original_hashes {
+        assert_eq!(
+            hash(&path),
+            expected,
+            "inspection leaves original artifacts unchanged"
+        );
+    }
+}
+
 fn compile_and_run(
     scala: &Scala,
     root: &Path,
@@ -740,6 +1243,62 @@ fn compile_and_run(
         assert_eq!(fs::read(actual).unwrap(), *bytes);
     }
     eprintln!("RUST_ORIGINALS_UNCHANGED after Scala compile/runtime; {stdout}");
+}
+
+fn assert_client_compiles_and_runs(
+    scala: &Scala,
+    root: &Path,
+    batch: &PairedJvmTastyBatchArtifacts,
+    client_source: &str,
+    entry: &str,
+    label: &str,
+) {
+    let producer = root.join(format!("{label}-control-classes"));
+    let out = root.join(format!("{label}-control-out"));
+    fs::create_dir_all(&producer).unwrap();
+    fs::create_dir_all(&out).unwrap();
+    write_batch(&producer, batch);
+    let client = root.join(format!("{label}-control-Consumer.scala"));
+    fs::write(&client, client_source).unwrap();
+    let compile = scala.compile_result(
+        &format!("{}:{}", producer.display(), scala.libraries),
+        &out,
+        &client,
+    );
+    assert!(
+        compile.status.success(),
+        "matching {label} client fails against the unmodified Rust batch: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let classpath = format!(
+        "{}:{}:{}",
+        out.display(),
+        producer.display(),
+        scala.libraries
+    );
+    let runtime = Command::new(&scala.java)
+        .env(
+            "JAVA_TOOL_OPTIONS",
+            format!(
+                "-XX:-UsePerfData -Djava.io.tmpdir={}",
+                std::env::var_os("TMPDIR").unwrap().to_string_lossy()
+            ),
+        )
+        .args(["-Xverify:all", "-ea", "-classpath"])
+        .arg(classpath)
+        .arg(entry)
+        .output()
+        .expect("run matching client against unmodified Rust batch");
+    assert!(
+        runtime.status.success(),
+        "matching {label} client fails at runtime against the unmodified Rust batch: {}",
+        String::from_utf8_lossy(&runtime.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&runtime.stdout);
+    assert!(
+        stdout.contains("scala39-immutable-reference-local-pair"),
+        "matching {label} control did not reach its runtime assertion marker: {stdout}"
+    );
 }
 
 fn inspect_original_sidecars(scala: &Scala, root: &Path, producer: &Path, reversed: bool) {
@@ -846,6 +1405,7 @@ fn lookup_probes(
     batch: &PairedJvmTastyBatchArtifacts,
     method: &str,
     method_desc: &str,
+    factory_expression: &str,
 ) {
     let cases = [
         (
@@ -910,7 +1470,7 @@ fn lookup_probes(
             (
                 method,
                 method_desc,
-                format!("new PairFactory().{method}(new Counter(1), 2)"),
+                factory_expression.replace("{method}", method),
             )
         } else {
             (member, descriptor, expression.to_owned())
@@ -972,7 +1532,12 @@ fn lookup_probes(
     }
 }
 
-fn sidecar_negative_probes(scala: &Scala, root: &Path, batch: &PairedJvmTastyBatchArtifacts) {
+fn sidecar_negative_probes(
+    scala: &Scala,
+    root: &Path,
+    batch: &PairedJvmTastyBatchArtifacts,
+    client_source: &str,
+) {
     for class in ["Counter", "Pair", "PairFactory"] {
         for corruption in ["missing", "misplaced", "corrupt", "mismatched-uuid"] {
             let label = format!("{class}-{corruption}");
@@ -1011,7 +1576,7 @@ fn sidecar_negative_probes(scala: &Scala, root: &Path, batch: &PairedJvmTastyBat
                 _ => unreachable!(),
             }
             let source = case.join("Consumer.scala");
-            fs::write(&source, CLIENTS[0]).unwrap();
+            fs::write(&source, client_source).unwrap();
             let result = scala.compile_result(
                 &format!("{}:{}", classes.display(), scala.libraries),
                 &out,
@@ -1044,6 +1609,7 @@ fn malformed_local_reference_probe(
     scala: &Scala,
     root: &Path,
     batch: &PairedJvmTastyBatchArtifacts,
+    client_source: &str,
 ) {
     let case = root.join("negative-dangling-fresh-termref");
     let classes = case.join("classes");
@@ -1063,7 +1629,7 @@ fn malformed_local_reference_probe(
     let client = case.join("Consumer.scala");
     let out = case.join("client-out");
     fs::create_dir_all(&out).unwrap();
-    fs::write(&client, CLIENTS[0]).unwrap();
+    fs::write(&client, client_source).unwrap();
     let lookup = scala.compile_result(
         &format!("{}:{}", classes.display(), scala.libraries),
         &out,
@@ -1094,7 +1660,117 @@ fn malformed_local_reference_probe(
     );
 }
 
-fn malformed_local_body_probe(scala: &Scala, root: &Path, batch: &PairedJvmTastyBatchArtifacts) {
+fn second_local_reference_negative_probes(
+    scala: &Scala,
+    root: &Path,
+    batch: &PairedJvmTastyBatchArtifacts,
+    client_source: &str,
+) {
+    let factory = batch
+        .classes()
+        .iter()
+        .find(|artifact| artifact.tasty_path() == "example/PairFactory.tasty")
+        .unwrap();
+    let locals = local_addresses(factory.tasty_bytes(), "create");
+    assert_eq!(locals.len(), 2);
+    assert_eq!(
+        source_contract_result(TWO_LOCAL_SOURCE, batch, None),
+        Ok(()),
+        "the authentic two-local graph satisfies its original source contract"
+    );
+    for (label, replacement) in [
+        ("dangling-second-local", 127),
+        ("duplicate-first-local-address", locals[0]),
+    ] {
+        let case = root.join(format!("negative-{label}"));
+        let classes = case.join("classes");
+        let output_dir = case.join("consumer-out");
+        fs::create_dir_all(&classes).unwrap();
+        fs::create_dir_all(&output_dir).unwrap();
+        write_batch(&classes, batch);
+        let changed_tasty = change_termref_target(factory.tasty_bytes(), locals[1], replacement);
+        let (block, changed_locals, changed_arguments) = rust_two_local_graph(
+            &changed_tasty,
+            ["first", "second"],
+            (label != "dangling-second-local").then_some([0, 0]),
+        );
+        if label == "dangling-second-local" {
+            assert_eq!(changed_locals, locals);
+            assert_eq!(changed_arguments, [locals[0], 127]);
+        } else {
+            assert_eq!(changed_locals, locals);
+            assert_eq!(changed_arguments, [locals[0], locals[0]]);
+            let contract_error = source_contract_result(
+                TWO_LOCAL_SOURCE,
+                batch,
+                Some((factory.tasty_path(), &changed_tasty)),
+            )
+            .expect_err("original new Pair(first, second) source rejects same-local twice");
+            assert!(
+                contract_error.contains("TASTy plan identity")
+                    && contract_error.contains("decoded sidecar bytes differ"),
+                "alias mutation failed outside the source-authenticated TASTy-plan identity contract: {contract_error}"
+            );
+            eprintln!(
+                "RUST_SOURCE_CONTRACT_REJECTED duplicate-first-local-address block={block} local_addresses={changed_locals:?} pair_arguments={changed_arguments:?}: {contract_error}"
+            );
+        }
+        fs::write(classes.join(factory.tasty_path()), &changed_tasty).unwrap();
+        let client = case.join("Consumer.scala");
+        fs::write(&client, client_source).unwrap();
+        let lookup = scala.compile_result(
+            &format!("{}:{}", classes.display(), scala.libraries),
+            &output_dir,
+            &client,
+        );
+        assert!(
+            lookup.status.success(),
+            "Scala rejected {label} before forced method-body decompilation: {}",
+            String::from_utf8_lossy(&lookup.stderr)
+        );
+        let inspection = scala
+            .command()
+            .arg("-decompile")
+            .arg(classes.join(factory.tasty_path()))
+            .output()
+            .expect("inspect mutated two-local TASTy");
+        if label == "dangling-second-local" {
+            assert!(
+                !inspection.status.success(),
+                "Scala -decompile accepted dangling second-local TERMREFdirect"
+            );
+            let stderr = plain(&String::from_utf8_lossy(&inspection.stderr));
+            assert!(
+                stderr.contains("TreeWithoutOwner"),
+                "unexpected first decompiler error for dangling second local: {stderr}"
+            );
+            eprintln!(
+                "SCALA_NEGATIVE_FIRST_FAILURE dangling-second-local lazy-signature-lookup=accepted; -decompile first error=TreeWithoutOwner"
+            );
+        } else {
+            assert!(
+                inspection.status.success(),
+                "Scala should accept the structurally valid duplicate-local reference: {}",
+                String::from_utf8_lossy(&inspection.stderr)
+            );
+            let dump = plain(&String::from_utf8_lossy(&inspection.stdout));
+            assert!(
+                dump.contains("new example.Pair(first, first)"),
+                "Scala did not decompile the exact same-local mutated Pair call: {dump}"
+            );
+            eprintln!(
+                "SCALA_ALIAS_MUTATION_ACCEPTED_BY_SCALA but rejected by original Rust source contract; observed=new example.Pair(first, first)"
+            );
+        }
+    }
+}
+
+fn malformed_local_body_probe(
+    scala: &Scala,
+    root: &Path,
+    batch: &PairedJvmTastyBatchArtifacts,
+    client_source: &str,
+) {
     let factory = batch
         .classes()
         .iter()
@@ -1102,10 +1778,11 @@ fn malformed_local_body_probe(scala: &Scala, root: &Path, batch: &PairedJvmTasty
         .unwrap();
     let local = local_address(factory.tasty_bytes(), "create");
     let block = block_address(factory.tasty_bytes(), "create");
-    let cases = [
+    let local_count = local_addresses(factory.tasty_bytes(), "create").len();
+    let mut cases = vec![
         (
             "wrong-local-type",
-            change_local_type_ref(factory.tasty_bytes(), "create", 0, "Pair"),
+            change_local_type_ref(factory.tasty_bytes(), "create", 0, 0, "Pair"),
             "from-TASTy",
         ),
         (
@@ -1119,7 +1796,31 @@ fn malformed_local_body_probe(scala: &Scala, root: &Path, batch: &PairedJvmTasty
             "from-TASTy",
         ),
     ];
+    if local_addresses(factory.tasty_bytes(), "create").len() > 1 {
+        cases.push((
+            "wrong-second-local-type",
+            change_local_type_ref(factory.tasty_bytes(), "create", 1, 0, "Pair"),
+            "from-TASTy",
+        ));
+    }
     for (label, changed_tasty, stage) in cases {
+        match label {
+            "wrong-local-type" => {
+                if local_count > 1 {
+                    rust_two_local_graph(&changed_tasty, ["first", "second"], Some([0, 1]));
+                    assert_two_local_body_types(&changed_tasty, ["Pair", "Counter"]);
+                }
+            }
+            "wrong-second-local-type" => {
+                rust_two_local_graph(&changed_tasty, ["first", "second"], Some([0, 1]));
+                assert_two_local_body_types(&changed_tasty, ["Counter", "Pair"]);
+            }
+            "wrong-initializer-constructor" if local_count > 1 => {
+                rust_two_local_graph(&changed_tasty, ["first", "second"], Some([0, 1]));
+                assert_two_local_body_types(&changed_tasty, ["Counter", "Counter"]);
+            }
+            _ => {}
+        }
         let case = root.join(format!("negative-{label}"));
         let classes = case.join("classes");
         let lookup_out = case.join("lookup-out");
@@ -1128,9 +1829,9 @@ fn malformed_local_body_probe(scala: &Scala, root: &Path, batch: &PairedJvmTasty
         fs::create_dir_all(&lookup_out).unwrap();
         fs::create_dir_all(&reconstructed).unwrap();
         write_batch(&classes, batch);
-        fs::write(classes.join(factory.tasty_path()), changed_tasty).unwrap();
+        fs::write(classes.join(factory.tasty_path()), &changed_tasty).unwrap();
         let client = case.join("Consumer.scala");
-        fs::write(&client, CLIENTS[0]).unwrap();
+        fs::write(&client, client_source).unwrap();
         let classpath = format!("{}:{}", classes.display(), scala.libraries);
         let lookup = scala.compile_result(&classpath, &lookup_out, &client);
         assert!(
@@ -1170,21 +1871,59 @@ fn malformed_local_body_probe(scala: &Scala, root: &Path, batch: &PairedJvmTasty
                 String::from_utf8_lossy(&decompiled.stderr)
             );
             let dump = plain(&String::from_utf8_lossy(&decompiled.stdout));
-            let observed = if label == "wrong-local-type" {
-                dump.lines()
-                    .find(|line| line.contains("fresh"))
-                    .unwrap_or(&dump)
-            } else {
-                dump.lines()
-                    .find(|line| line.contains("new Pair"))
-                    .unwrap_or(&dump)
-            };
+            let contract_error = source_contract_result(
+                if local_count > 1 {
+                    TWO_LOCAL_SOURCE
+                } else {
+                    SOURCES[0]
+                },
+                batch,
+                Some((factory.tasty_path(), &changed_tasty)),
+            )
+            .expect_err("original source rejects a mutated local body");
             assert!(
-                observed.contains("Pair"),
-                "mutated local body was not visible to official Scala: {label}: {dump}"
+                contract_error.contains("TASTy plan identity")
+                    && contract_error.contains("decoded sidecar bytes differ"),
+                "{label} body mutation was rejected outside the source-authenticated plan-identity check: {contract_error}"
             );
+            let observed = match label {
+                "wrong-local-type" => {
+                    let line = if local_count > 1 {
+                        "val first: example.Pair = new example.Counter(firstSeed)"
+                    } else {
+                        "val fresh: example.Pair = new example.Counter(seed)"
+                    };
+                    assert!(
+                        dump.contains(line),
+                        "mutated first local not visible: {dump}"
+                    );
+                    line
+                }
+                "wrong-second-local-type" => {
+                    let line = "val second: example.Pair = new example.Counter(secondSeed)";
+                    assert!(
+                        dump.contains(line),
+                        "mutated second local not visible: {dump}"
+                    );
+                    line
+                }
+                "wrong-initializer-constructor" => {
+                    let line = if local_count > 1 {
+                        "val first: example.Counter = new example.Counter(firstSeed)"
+                    } else {
+                        "val fresh: example.Counter = new example.Counter(seed)"
+                    };
+                    assert!(dump.contains(line), "unexpected decompile syntax: {dump}");
+                    if local_count > 1 {
+                        "TASTy initializer shared-type target=Pair; decompiled source syntax remains new Counter(firstSeed)"
+                    } else {
+                        "TASTy initializer shared-type target=Pair; decompiled source syntax remains new Counter(seed)"
+                    }
+                }
+                _ => unreachable!(),
+            };
             eprintln!(
-                "SCALA_NEGATIVE_FIRST_OUTCOME {label} lazy-signature-lookup=accepted; -from-tasty=accepted; -decompile=accepted with mutated body: {observed}"
+                "SCALA_ACCEPTED_SOURCE_CONTRACT_REJECTED {label} lazy-lookup=accepted; -from-tasty=accepted; -decompile=accepted; graph-checked; observed={observed}; source-contract={contract_error}"
             );
             continue;
         }
@@ -1221,6 +1960,9 @@ fn factory_signature_negative_probes(
     scala: &Scala,
     root: &Path,
     batch: &PairedJvmTastyBatchArtifacts,
+    client_source: &str,
+    entry: &str,
+    controls: &[(&str, &str)],
 ) {
     let factory = batch
         .classes()
@@ -1232,22 +1974,9 @@ fn factory_signature_negative_probes(
         .iter()
         .find(|artifact| artifact.tasty_path() == "example/PairFactory.tasty")
         .unwrap();
-    let cases = [
-        (
-            "wrong-formal-count",
-            "package example\nclass PairFactory:\n  def create(existing: Counter): Pair = new Pair(existing, new Counter(2))\n",
-        ),
-        (
-            "wrong-formal-type",
-            "package example\nclass PairFactory:\n  def create(existing: String, seed: Int): Pair = new Pair(new Counter(seed), new Counter(seed))\n",
-        ),
-        (
-            "wrong-result-type",
-            "package example\nclass PairFactory:\n  def create(existing: Counter, seed: Int): Counter = new Counter(seed)\n",
-        ),
-    ];
-    let client = "package example\nobject Probe:\n  val pair: Pair = new PairFactory().create(new Counter(7), 8)\n";
-    for (label, control_source) in cases {
+    let client = client_source;
+    assert_client_compiles_and_runs(scala, root, batch, client, entry, "factory-signature");
+    for &(label, control_source) in controls {
         let case = root.join(format!("negative-factory-{label}"));
         let dependencies = case.join("dependencies");
         let generated = case.join("generated");
@@ -1295,6 +2024,27 @@ fn factory_signature_negative_probes(
             diagnostic.contains("[E007]"),
             "wrong first failure for {label}: {stderr}"
         );
+        let distinguishes_mutation = match label {
+            "wrong-formal-count" if entry == "client.Consumer" => {
+                stderr.contains("Found:    (Int, Int)") && stderr.contains("Required: Int")
+            }
+            "wrong-formal-count" => {
+                stderr.contains("Found:    (example.Counter, Int)")
+                    && stderr.contains("Required: example.Counter")
+            }
+            "wrong-formal-type" if entry == "client.Consumer" => {
+                stderr.contains("Int") && stderr.contains("Required: String")
+            }
+            "wrong-formal-type" => {
+                stderr.contains("example.Counter") && stderr.contains("Required: String")
+            }
+            "wrong-result-type" => stderr.contains("Counter") && stderr.contains("Pair"),
+            _ => unreachable!(),
+        };
+        assert!(
+            distinguishes_mutation,
+            "{label} failure does not identify its single changed signature property: {stderr}"
+        );
         eprintln!("SCALA_NEGATIVE_FIRST_FAILURE {label}: {diagnostic}");
         assert_eq!(
             fs::read(classes.join("example/PairFactory.class")).unwrap(),
@@ -1308,6 +2058,9 @@ fn abi_descriptor_negative_probes(
     scala: &Scala,
     root: &Path,
     batch: &PairedJvmTastyBatchArtifacts,
+    factory_descriptor: &str,
+    client_source: &str,
+    entry: &str,
 ) {
     let cases = [
         ("counter-get", "example/Counter.class", "get", "()I"),
@@ -1316,7 +2069,7 @@ fn abi_descriptor_negative_probes(
             "factory-create",
             "example/PairFactory.class",
             "create",
-            "(Lexample/Counter;I)Lexample/Pair;",
+            factory_descriptor,
         ),
         (
             "pair-constructor",
@@ -1325,6 +2078,7 @@ fn abi_descriptor_negative_probes(
             "(Lexample/Counter;Lexample/Counter;)V",
         ),
     ];
+    assert_client_compiles_and_runs(scala, root, batch, client_source, entry, "descriptor");
     for (label, class_path, method, descriptor) in cases {
         let case = root.join(format!("negative-invalid-descriptor-{label}"));
         let classes = case.join("classes");
@@ -1336,23 +2090,17 @@ fn abi_descriptor_negative_probes(
         let changed = wrong_method_descriptor(&fs::read(&class_file).unwrap(), method, descriptor);
         fs::write(&class_file, changed).unwrap();
         let client = case.join("Consumer.scala");
-        fs::write(&client, CLIENTS[0]).unwrap();
+        fs::write(&client, client_source).unwrap();
         let compile = scala.compile_result(
             &format!("{}:{}", classes.display(), scala.libraries),
             &out,
             &client,
         );
-        if !compile.status.success() {
-            let diagnostic = plain(&String::from_utf8_lossy(&compile.stderr));
-            eprintln!(
-                "SCALA_NEGATIVE_FIRST_FAILURE invalid-descriptor-{label} at compile: {}",
-                diagnostic
-                    .lines()
-                    .find(|line| line.contains("[E"))
-                    .unwrap_or(&diagnostic)
-            );
-            continue;
-        }
+        assert!(
+            compile.status.success(),
+            "matching {label} client must compile against the unchanged TASTy signature: {}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
         let classpath = format!(
             "{}:{}:{}",
             out.display(),
@@ -1369,7 +2117,7 @@ fn abi_descriptor_negative_probes(
             )
             .args(["-Xverify:all", "-ea", "-classpath"])
             .arg(classpath)
-            .arg("example.Consumer")
+            .arg(entry)
             .output()
             .expect("run negative ABI client");
         assert!(
@@ -1495,13 +2243,34 @@ fn official_scala_consumes_original_rust_immutable_local_pair_batch() {
         } else {
             ("createReversed", "(Lexample/Counter;I)Lexample/Pair;")
         };
-        lookup_probes(&scala, &root, &batch, method, descriptor);
+        lookup_probes(
+            &scala,
+            &root,
+            &batch,
+            method,
+            descriptor,
+            "new PairFactory().{method}(new Counter(1), 2)",
+        );
         if i == 0 {
-            sidecar_negative_probes(&scala, &root, &batch);
-            malformed_local_reference_probe(&scala, &root, &batch);
-            malformed_local_body_probe(&scala, &root, &batch);
-            factory_signature_negative_probes(&scala, &root, &batch);
-            abi_descriptor_negative_probes(&scala, &root, &batch);
+            sidecar_negative_probes(&scala, &root, &batch, CLIENTS[0]);
+            malformed_local_reference_probe(&scala, &root, &batch, CLIENTS[0]);
+            malformed_local_body_probe(&scala, &root, &batch, CLIENTS[0]);
+            factory_signature_negative_probes(
+                &scala,
+                &root,
+                &batch,
+                CLIENTS[0],
+                "example.Consumer",
+                &LEGACY_FACTORY_SIGNATURE_CONTROLS,
+            );
+            abi_descriptor_negative_probes(
+                &scala,
+                &root,
+                &batch,
+                "(Lexample/Counter;I)Lexample/Pair;",
+                CLIENTS[0],
+                "example.Consumer",
+            );
             wrong_package_probe(&scala, &root);
         }
     }
@@ -1537,6 +2306,215 @@ fn official_scala_consumes_original_rust_immutable_local_pair_batch() {
         "example.Consumer",
         20790,
     );
+}
+
+#[test]
+fn rust_two_local_tasty_graph_uses_two_original_local_addresses() {
+    let batch = emit_paired_jvm_tasty_batch(
+        TWO_LOCAL_SOURCE,
+        "PairFactory.scala",
+        SourceId::from_index(21270),
+    )
+    .expect("Rust two-local source batch");
+    assert_eq!(batch.classes().len(), 3);
+    let factory = batch
+        .classes()
+        .iter()
+        .find(|artifact| artifact.tasty_path() == "example/PairFactory.tasty")
+        .unwrap();
+    let (block, locals, pair_arguments) =
+        rust_two_local_graph(factory.tasty_bytes(), ["first", "second"], Some([0, 1]));
+    eprintln!("RUST_TWO_LOCAL_SOURCE_SHA256 {}", {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
+        hash(&path)
+    });
+    for artifact in batch.classes() {
+        eprintln!(
+            "RUST_TWO_LOCAL_ARTIFACT file={} sha256_class={} sha256_tasty={} tasty_uuid={}",
+            artifact.classfile_path(),
+            hash_bytes(artifact.classfile_bytes()),
+            hash_bytes(artifact.tasty_bytes()),
+            hex(artifact.tasty_link_id().as_bytes())
+        );
+    }
+    eprintln!(
+        "RUST_TWO_LOCAL_GRAPH block={block} local_addresses={locals:?} pair_arguments={pair_arguments:?}"
+    );
+}
+
+#[test]
+fn rust_two_local_body_corruptions_are_source_contract_negatives() {
+    let batch = emit_paired_jvm_tasty_batch(
+        TWO_LOCAL_SOURCE,
+        "PairFactory.scala",
+        SourceId::from_index(21370),
+    )
+    .expect("Rust two-local source batch");
+    let factory = batch
+        .classes()
+        .iter()
+        .find(|artifact| artifact.tasty_path() == "example/PairFactory.tasty")
+        .unwrap();
+    assert_two_local_body_types(factory.tasty_bytes(), ["Counter", "Counter"]);
+    let mutations = [
+        (
+            "wrong-local-type",
+            change_local_type_ref(factory.tasty_bytes(), "create", 0, 0, "Pair"),
+            ["Pair", "Counter"],
+        ),
+        (
+            "wrong-second-local-type",
+            change_local_type_ref(factory.tasty_bytes(), "create", 1, 0, "Pair"),
+            ["Counter", "Pair"],
+        ),
+        (
+            "wrong-initializer-constructor",
+            change_initializer_constructor(factory.tasty_bytes(), "create"),
+            ["Counter", "Counter"],
+        ),
+    ];
+    for (label, changed_tasty, local_types) in mutations {
+        rust_two_local_graph(&changed_tasty, ["first", "second"], Some([0, 1]));
+        assert_two_local_body_types(&changed_tasty, local_types);
+        let contract_error = source_contract_result(
+            TWO_LOCAL_SOURCE,
+            &batch,
+            Some((factory.tasty_path(), &changed_tasty)),
+        )
+        .expect_err("original two-local source rejects each independently mutated body");
+        assert!(
+            contract_error.contains("TASTy plan identity")
+                && contract_error.contains("decoded sidecar bytes differ"),
+            "{label} must fail the source-authenticated plan-identity contract: {contract_error}"
+        );
+        eprintln!(
+            "RUST_SOURCE_CONTRACT_REJECTED {label} local_types={local_types:?}: {contract_error}"
+        );
+    }
+}
+
+#[test]
+fn official_scala_consumes_original_rust_two_immutable_local_artifacts() {
+    if !required() {
+        return;
+    }
+    let scala = Scala::required();
+    let root = task_dir();
+    fs::create_dir_all(&root).unwrap();
+    let aliased_source =
+        TWO_LOCAL_SOURCE.replace("new Pair(first, second)", "new Pair(first, first)");
+    assert_ne!(aliased_source, TWO_LOCAL_SOURCE);
+    let (renamed_source, renamed_client) = {
+        let rename = |text: &str| {
+            text.replace("example", "renamed.example")
+                .replace("Counter", "Ledger")
+                .replace("PairFactory", "Factory")
+                .replace("Pair", "Duo")
+                .replace("firstSeed", "leftSeed")
+                .replace("secondSeed", "rightSeed")
+                .replace("first", "leftLocal")
+                .replace("second", "rightLocal")
+                .replace("create", "makePair")
+        };
+        (rename(TWO_LOCAL_SOURCE), rename(TWO_LOCAL_CLIENT))
+    };
+    let reordered_source = reordered_variant(TWO_LOCAL_SOURCE);
+    let cases = [
+        (
+            "primary",
+            TWO_LOCAL_SOURCE,
+            TWO_LOCAL_CLIENT,
+            "client.Consumer",
+            [0, 1],
+        ),
+        (
+            "reversed",
+            TWO_LOCAL_REVERSED_SOURCE,
+            TWO_LOCAL_RUST_REVERSED_CLIENT,
+            "client.Consumer",
+            [1, 0],
+        ),
+        (
+            "repeated-first",
+            aliased_source.as_str(),
+            TWO_LOCAL_ALIAS_CLIENT,
+            "client.Consumer",
+            [0, 0],
+        ),
+        (
+            "renamed",
+            renamed_source.as_str(),
+            renamed_client.as_str(),
+            "client.Consumer",
+            [0, 1],
+        ),
+        (
+            "reordered-declarations",
+            reordered_source.as_str(),
+            TWO_LOCAL_CLIENT,
+            "client.Consumer",
+            [0, 1],
+        ),
+    ];
+    for (index, (label, source, client, entry, arguments)) in cases.into_iter().enumerate() {
+        let source_id = 21280 + index as u32 * 10;
+        let batch = emit_paired_jvm_tasty_batch(
+            source,
+            "PairFactory.scala",
+            SourceId::from_index(source_id),
+        )
+        .unwrap_or_else(|error| panic!("Rust producer rejects {label} source: {error:?}"));
+        if label == "repeated-first" {
+            assert_eq!(
+                source_contract_result(source, &batch, None),
+                Ok(()),
+                "separately produced new Pair(first, first) source is the positive alias control"
+            );
+            let factory = batch
+                .classes()
+                .iter()
+                .find(|artifact| artifact.tasty_path() == "example/PairFactory.tasty")
+                .unwrap();
+            rust_two_local_graph(factory.tasty_bytes(), ["first", "second"], Some([0, 0]));
+        }
+        compile_and_run(&scala, &root, &batch, source, client, entry, source_id);
+        if index < 3 {
+            let producer = root.join(format!("original-{source_id}"));
+            inspect_rust_two_local_batch(&scala, &root, &producer, ["first", "second"], arguments);
+        }
+        eprintln!("SCALA_TWO_LOCAL_RUST_CONSUMER variant={label} source_id={source_id}");
+        if index == 0 {
+            lookup_probes(
+                &scala,
+                &root,
+                &batch,
+                "create",
+                "(II)Lexample/Pair;",
+                "new PairFactory().{method}(1, 2)",
+            );
+            sidecar_negative_probes(&scala, &root, &batch, TWO_LOCAL_CLIENT);
+            malformed_local_reference_probe(&scala, &root, &batch, TWO_LOCAL_CLIENT);
+            second_local_reference_negative_probes(&scala, &root, &batch, TWO_LOCAL_CLIENT);
+            malformed_local_body_probe(&scala, &root, &batch, TWO_LOCAL_CLIENT);
+            factory_signature_negative_probes(
+                &scala,
+                &root,
+                &batch,
+                TWO_LOCAL_CLIENT,
+                "client.Consumer",
+                &TWO_LOCAL_FACTORY_SIGNATURE_CONTROLS,
+            );
+            abi_descriptor_negative_probes(
+                &scala,
+                &root,
+                &batch,
+                "(II)Lexample/Pair;",
+                TWO_LOCAL_CLIENT,
+                "client.Consumer",
+            );
+        }
+    }
 }
 
 #[test]
