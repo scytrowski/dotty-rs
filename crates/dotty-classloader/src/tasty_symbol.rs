@@ -9,7 +9,7 @@ use dotty_tasty::tasty::{
     ABSTRACT_TAG, APPLIEDTPT_TAG, APPLIEDTYPE_TAG, ARTIFACT_TAG, AppliedTypeNode, ApplyNode,
     AstError, BYNAMETPT_TAG, CASEACCESSOR_TAG, CONTRAVARIANT_TAG, COVARIANT_TAG, DEFDEF_TAG,
     DefDefBody, DefinitionBody, DefinitionTail, EMPTYCLAUSE_TAG, FIELDACCESSOR_TAG, FINAL_TAG,
-    IDENTTPT_TAG, IdentNode, LOCAL_TAG, MUTABLE_TAG, OBJECT_TAG, PACKAGE_TAG, PRIVATE_TAG,
+    IDENTTPT_TAG, IdentNode, LOCAL_TAG, MUTABLE_TAG, NEW_TAG, OBJECT_TAG, PACKAGE_TAG, PRIVATE_TAG,
     PRIVATEQUALIFIED_TAG, PROTECTED_TAG, PROTECTEDQUALIFIED_TAG, ParameterNode, RawName, RawTree,
     Reader, ReferenceNode, RenderedSignedName, SELECTIN_TAG, SHAREDTERM_TAG, SHAREDTYPE_TAG,
     STABLE_TAG, STATIC_TAG, SYNTHETIC_TAG, SelectNode, StandardSection, StructuredNode,
@@ -4062,8 +4062,8 @@ fn resolve_parent_name_with_alias(
 
 /// Resolves only the pinned first applied constructor parent in Scala 3.9's
 /// `scala/Tuple2.tasty`. The source spelling is accepted only when the exact
-/// Apply/TypeApply/SelectIn wrapper, package-qualified shared type reference,
-/// and repeated reference in the constructor qualifier all agree.
+/// Apply/TypeApply/SelectIn wrapper, package-qualified applied type
+/// constructor, and underlying shared type reference all agree.
 fn resolve_tuple2_times_colon_constructor_parent(
     file: &TastyFile<'_>,
     parent: &RawTree<'_>,
@@ -4091,19 +4091,40 @@ fn resolve_tuple2_times_colon_constructor_parent(
     {
         return None;
     }
-    let RawTree::Leaf(underlying) = &selection.underlying_type else {
+    resolve_tuple2_constructor_owner(file, &selection.qualifier, &selection.underlying_type)
+}
+
+fn resolve_tuple2_constructor_owner(
+    file: &TastyFile<'_>,
+    qualifier: &RawTree<'_>,
+    underlying_type: &RawTree<'_>,
+) -> Option<BinaryName> {
+    let StructuredTree::AstChild(new) = qualifier.decode_structured().ok()? else {
         return None;
     };
-    if underlying.tag != SHAREDTYPE_TAG {
+    if new.tag != NEW_TAG {
         return None;
     }
-    let shared_reference = underlying.ast_ref()?.address;
-    if !contains_shared_type_reference(&selection.qualifier, shared_reference, 0) {
+    let StructuredTree::Length(StructuredNode::AppliedType(applied)) =
+        new.child.decode_structured().ok()?
+    else {
+        return None;
+    };
+    if applied.tag != APPLIEDTYPE_TAG {
         return None;
     }
-    match resolve_reference_name_in_package(file, &selection.underlying_type, Some("scala")) {
-        ReferenceResolution::Resolved(name)
-            if name.as_internal() == "scala/*:" && name.package_path() == "scala" =>
+
+    if !has_direct_shared_type_reference(underlying_type) {
+        return None;
+    }
+
+    let underlying_name = resolve_reference_name_in_package(file, underlying_type, Some("scala"));
+    let constructor_name = resolve_reference_name_in_package(file, &applied.tycon, Some("scala"));
+    match (underlying_name, constructor_name) {
+        (ReferenceResolution::Resolved(underlying), ReferenceResolution::Resolved(constructor))
+            if underlying.as_internal() == "scala/*:"
+                && constructor == underlying
+                && underlying.package_path() == "scala" =>
         {
             Some(BinaryName::from_internal(TUPLE2_TIMES_COLON_INTERNAL))
         }
@@ -4111,72 +4132,11 @@ fn resolve_tuple2_times_colon_constructor_parent(
     }
 }
 
-fn contains_shared_type_reference(tree: &RawTree<'_>, expected: u32, depth: usize) -> bool {
-    const MAX_SHARED_REFERENCE_DEPTH: usize = 128;
-    if depth >= MAX_SHARED_REFERENCE_DEPTH {
+fn has_direct_shared_type_reference(tree: &RawTree<'_>) -> bool {
+    let RawTree::Leaf(term) = tree else {
         return false;
-    }
-    if let RawTree::Leaf(term) = tree
-        && term.tag == SHAREDTYPE_TAG
-        && term
-            .ast_ref()
-            .is_some_and(|reference| reference.address == expected)
-    {
-        return true;
-    }
-    match tree.decode_structured() {
-        Ok(StructuredTree::AstChild(child)) => {
-            contains_shared_type_reference(&child.child, expected, depth + 1)
-        }
-        Ok(StructuredTree::Ident(ident)) => {
-            contains_shared_type_reference(&ident.type_tree, expected, depth + 1)
-        }
-        Ok(StructuredTree::Reference(reference)) => {
-            contains_shared_type_reference(&reference.qualifier, expected, depth + 1)
-        }
-        Ok(StructuredTree::Select(selection)) => {
-            contains_shared_type_reference(&selection.qualifier, expected, depth + 1)
-        }
-        Ok(StructuredTree::Length(StructuredNode::AppliedType(applied))) => {
-            contains_shared_type_reference(&applied.tycon, expected, depth + 1)
-                || applied
-                    .arguments
-                    .iter()
-                    .any(|argument| contains_shared_type_reference(argument, expected, depth + 1))
-        }
-        Ok(StructuredTree::Length(StructuredNode::Apply(apply))) => {
-            contains_shared_type_reference(&apply.function, expected, depth + 1)
-                || apply
-                    .arguments
-                    .iter()
-                    .any(|argument| contains_shared_type_reference(argument, expected, depth + 1))
-        }
-        Ok(StructuredTree::Length(StructuredNode::TypeApply(apply))) => {
-            contains_shared_type_reference(&apply.function, expected, depth + 1)
-                || apply
-                    .type_arguments
-                    .iter()
-                    .any(|argument| contains_shared_type_reference(argument, expected, depth + 1))
-        }
-        Ok(StructuredTree::Length(StructuredNode::SelectIn(selection))) => {
-            contains_shared_type_reference(&selection.qualifier, expected, depth + 1)
-                || contains_shared_type_reference(&selection.underlying_type, expected, depth + 1)
-        }
-        Ok(StructuredTree::Length(StructuredNode::SelectOuter(selection))) => {
-            contains_shared_type_reference(&selection.qualifier, expected, depth + 1)
-                || contains_shared_type_reference(&selection.underlying_type, expected, depth + 1)
-        }
-        Ok(StructuredTree::Length(StructuredNode::Typed(typed))) => {
-            contains_shared_type_reference(&typed.type_tree, expected, depth + 1)
-                || contains_shared_type_reference(&typed.expression, expected, depth + 1)
-        }
-        _ => match tree {
-            RawTree::Ast { child, .. } | RawTree::NatAst { child, .. } => {
-                contains_shared_type_reference(child, expected, depth + 1)
-            }
-            _ => false,
-        },
-    }
+    };
+    term.tag == SHAREDTYPE_TAG && term.ast_ref().is_some()
 }
 
 fn is_rooted_scala_serializable_parent(
@@ -6769,7 +6729,7 @@ mod tests {
     }
 
     #[test]
-    fn tuple2_constructor_mapping_rejects_other_owners_and_mismatched_shared_references() {
+    fn tuple2_constructor_mapping_rejects_a_contradictory_qualifier_tycon() {
         let bytes = fixture_bytes("scala3-library/scala/Tuple2.tasty");
         let file = parse_classloader_tasty(&bytes).unwrap();
         let index = file.ast_address_index().unwrap();
@@ -6824,20 +6784,47 @@ mod tests {
         else {
             panic!("Tuple2 type application should select the constructor");
         };
-        let RawTree::Leaf(underlying) = selection.underlying_type else {
-            panic!("Tuple2 constructor should keep its shared underlying type reference");
+        let StructuredTree::AstChild(new) = selection.qualifier.decode_structured().unwrap() else {
+            panic!("Tuple2 constructor qualifier should be a NEW node");
         };
-        let shared_reference = underlying.ast_ref().unwrap().address;
-        assert!(contains_shared_type_reference(
-            &selection.qualifier,
-            shared_reference,
-            0
-        ));
-        assert!(!contains_shared_type_reference(
-            &selection.qualifier,
-            shared_reference.wrapping_add(1),
-            0
-        ));
+        let StructuredTree::Length(StructuredNode::AppliedType(applied)) =
+            new.child.decode_structured().unwrap()
+        else {
+            panic!("Tuple2 NEW qualifier should contain APPLIEDTYPE");
+        };
+        let StructuredTree::Length(StructuredNode::AppliedType(product2)) =
+            template.parents[1].decode_structured().unwrap()
+        else {
+            panic!("Tuple2 parent 1 should be the independent Product2 application");
+        };
+
+        let contradictory_applied = AppliedTypeNode {
+            tag: applied.tag,
+            tycon: product2.tycon,
+            arguments: applied.arguments.clone(),
+        };
+        assert_eq!(
+            contradictory_applied.arguments, applied.arguments,
+            "the malformed owner control preserves the original nested arguments"
+        );
+        let mut writer = dotty_tasty::tasty::Writer::new();
+        contradictory_applied.encode(&mut writer).unwrap();
+        let contradictory_bytes = writer.into_inner();
+        let mut reader = Reader::new(&contradictory_bytes);
+        let contradictory_applied = RawTree::decode(&mut reader).unwrap();
+        let contradictory_qualifier = RawTree::Ast {
+            tag: NEW_TAG,
+            offset: 0,
+            child: Box::new(contradictory_applied),
+        };
+        assert!(
+            resolve_tuple2_constructor_owner(
+                &file,
+                &contradictory_qualifier,
+                &selection.underlying_type
+            )
+            .is_none()
+        );
     }
 
     /// The same fixture as `decodes_a_case_class_with_cross_package_mixins`,
