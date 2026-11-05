@@ -4152,14 +4152,35 @@ fn resolve_tuple2_package_type_reference(
         return None;
     };
     let name = resolve_qualified_name(file, reference)?;
-    let package = resolve_reference_prefix_in_package(file, &qualifier, Some("scala"))?;
-    let package = package.trim_matches('/');
-    let internal = if package.is_empty() {
-        name
-    } else {
-        format!("{package}/{name}")
+    let package = resolve_tuple2_package_prefix(file, &qualifier, depth + 1)?;
+    Some(BinaryName::from_internal(format!("{package}/{name}")))
+}
+
+fn resolve_tuple2_package_prefix(
+    file: &TastyFile<'_>,
+    prefix: &RawTree<'_>,
+    depth: usize,
+) -> Option<String> {
+    const MAX_TUPLE2_PACKAGE_PREFIX_DEPTH: usize = 128;
+    if depth >= MAX_TUPLE2_PACKAGE_PREFIX_DEPTH {
+        return None;
+    }
+    if let RawTree::Leaf(term) = prefix
+        && matches!(term.tag, SHAREDTERM_TAG | SHAREDTYPE_TAG)
+    {
+        let reference = term.ast_ref()?;
+        let target = decode_shared_tree(file, reference.address)?;
+        return resolve_tuple2_package_prefix(file, &target, depth + 1);
+    }
+
+    let RawTree::Leaf(term) = prefix else {
+        return None;
     };
-    Some(BinaryName::from_internal(internal))
+    if term.tag != TERMREFPKG_TAG {
+        return None;
+    }
+    let package = resolve_qualified_name(file, term.name_ref()?)?;
+    (package == "scala").then_some(package)
 }
 
 fn is_rooted_scala_serializable_parent(
@@ -6859,12 +6880,27 @@ mod tests {
             panic!("Tuple2 applied constructor tycon should be a named reference");
         };
         assert_eq!(tag, TYPEREF_TAG);
+        let StructuredTree::Reference(ReferenceNode {
+            tag: root_type_tag,
+            qualifier: package_prefix,
+            ..
+        }) = applied.tycon.decode_structured().unwrap()
+        else {
+            panic!("Tuple2 constructor tycon should decode as a reference");
+        };
+        assert_eq!(root_type_tag, TYPEREF_TAG);
+        assert_eq!(
+            resolve_tuple2_package_prefix(&file, &package_prefix, 0).as_deref(),
+            Some("scala")
+        );
+        assert!(resolve_tuple2_package_prefix(&file, &applied.tycon, 0).is_none());
         let term_tycon = RawTree::NatAst {
             tag: dotty_tasty::tasty::TERMREF_TAG,
             offset,
             value,
             child,
         };
+        assert!(resolve_tuple2_package_prefix(&file, &term_tycon, 0).is_none());
         let term_applied = AppliedTypeNode {
             tag: applied.tag,
             tycon: term_tycon,

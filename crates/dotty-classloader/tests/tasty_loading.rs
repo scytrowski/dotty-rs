@@ -2123,12 +2123,12 @@ impl ClassPathEntry for MaskedTimesColonClassPath {
     }
 }
 
-struct TermMutatedTuple2ClassPath {
+struct MutatedTuple2ClassPath {
     inner: DirectoryClassPath,
     mutated_tuple2: Vec<u8>,
 }
 
-impl ClassPathEntry for TermMutatedTuple2ClassPath {
+impl ClassPathEntry for MutatedTuple2ClassPath {
     fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
         if name.as_internal() == "scala/Tuple2" {
             let Some(resource) = self.inner.find_class(name)? else {
@@ -2156,10 +2156,32 @@ impl ClassPathEntry for TermMutatedTuple2ClassPath {
 fn term_reference_at_tuple2_constructor_target_fails_closed_through_classloader() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let scala_library = root.join("../dotty-tasty/tests/fixtures/scala3-library");
-    assert_term_mutated_tuple2_rejected(&scala_library, 162);
+    assert_mutated_tuple2_rejected(
+        &scala_library,
+        162,
+        dotty_tasty::tasty::TYPEREF_TAG,
+        dotty_tasty::tasty::TERMREF_TAG,
+    );
 }
 
-fn assert_term_mutated_tuple2_rejected(scala_library: &Path, address: u32) {
+#[test]
+fn string_constant_at_tuple2_package_prefix_fails_closed_through_classloader() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let scala_library = root.join("../dotty-tasty/tests/fixtures/scala3-library");
+    assert_mutated_tuple2_rejected(
+        &scala_library,
+        27,
+        dotty_tasty::tasty::TERMREFPKG_TAG,
+        dotty_tasty::tasty::STRINGCONST_TAG,
+    );
+}
+
+fn assert_mutated_tuple2_rejected(
+    scala_library: &Path,
+    address: u32,
+    expected_tag: u8,
+    replacement_tag: u8,
+) {
     let tuple2_path = scala_library.join("scala/Tuple2.tasty");
     let mut mutated_tuple2 = fs::read(&tuple2_path).expect("pinned Tuple2 fixture");
     let target_tag_offset = {
@@ -2168,19 +2190,16 @@ fn assert_term_mutated_tuple2_rejected(scala_library: &Path, address: u32) {
         let target = index.get_node(address).unwrap_or_else(|| {
             panic!("the tuple constructor reference lives at AST address {address}")
         });
-        assert_eq!(target.tag, dotty_tasty::tasty::TYPEREF_TAG);
+        assert_eq!(target.tag, expected_tag);
         file.section(StandardSection::Asts)
             .expect("Tuple2 has an AST section")
             .offset
             + target.offset
     };
-    assert_eq!(
-        mutated_tuple2[target_tag_offset],
-        dotty_tasty::tasty::TYPEREF_TAG
-    );
-    mutated_tuple2[target_tag_offset] = dotty_tasty::tasty::TERMREF_TAG;
+    assert_eq!(mutated_tuple2[target_tag_offset], expected_tag);
+    mutated_tuple2[target_tag_offset] = replacement_tag;
     let mutated_file = TastyFile::parse(&mutated_tuple2)
-        .expect("the one-byte term-reference mutation remains structurally parseable");
+        .expect("the one-byte reference-tag mutation remains structurally parseable");
     assert_eq!(
         mutated_file
             .ast_address_index()
@@ -2188,7 +2207,7 @@ fn assert_term_mutated_tuple2_rejected(scala_library: &Path, address: u32) {
             .get_node(address)
             .unwrap()
             .tag,
-        dotty_tasty::tasty::TERMREF_TAG
+        replacement_tag
     );
 
     let jdk = JdkClassPath::new(
@@ -2196,7 +2215,7 @@ fn assert_term_mutated_tuple2_rejected(scala_library: &Path, address: u32) {
     )
     .expect("JDK 21 jmods are readable");
     let class_path = CompositeClassPath::new(vec![
-        Box::new(TermMutatedTuple2ClassPath {
+        Box::new(MutatedTuple2ClassPath {
             inner: DirectoryClassPath::new(scala_library),
             mutated_tuple2,
         }),
@@ -2209,10 +2228,12 @@ fn assert_term_mutated_tuple2_rejected(scala_library: &Path, address: u32) {
         ClassLoader::with_definitions(class_path, &mut store, definitions, LoadingSession::new());
     let error = loader
         .load_class(&BinaryName::from_internal("scala/Tuple2"))
-        .expect_err("a TERMREF constructor reference must not authenticate the nominal *: parent");
+        .expect_err(
+            "a one-byte-mutated Tuple2 reference must not authenticate the nominal *: parent",
+        );
     assert!(
         format!("{error:?}").contains("UnresolvedSupertype"),
-        "the malformed type namespace remains a typed unresolved-parent error: {error:?}"
+        "the malformed reference namespace remains a typed unresolved-parent error: {error:?}"
     );
     drop(loader);
     assert_eq!(
