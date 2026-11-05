@@ -1646,11 +1646,21 @@ fn two_original_immutable_local_initializers_prove_atomically_in_one_block() {
         &TWO_IMMUTABLE_LOCALS_SOURCE[pair_at..factory_at],
         &TWO_IMMUTABLE_LOCALS_SOURCE[counter_at..pair_at],
     );
+    let reversed_declarations = TWO_IMMUTABLE_LOCALS_SOURCE.replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
+        "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
+    );
+    let swapped_initializers = TWO_IMMUTABLE_LOCALS_SOURCE
+        .replace("new Counter(firstSeed)", "new Counter($swap)")
+        .replace("new Counter(secondSeed)", "new Counter(firstSeed)")
+        .replace("new Counter($swap)", "new Counter(secondSeed)");
     for (source, source_number) in [
         (TWO_IMMUTABLE_LOCALS_SOURCE, 2123),
         (TWO_IMMUTABLE_LOCALS_REVERSED_SOURCE, 2124),
         (renamed.as_str(), 2125),
         (reordered.as_str(), 2130),
+        (reversed_declarations.as_str(), 2134),
+        (swapped_initializers.as_str(), 2136),
     ] {
         with_two_local_proof_session(
             source,
@@ -1750,6 +1760,60 @@ fn two_original_immutable_local_initializers_prove_atomically_in_one_block() {
                     assert_eq!(
                         store.symbols.get(receipt.constructor()).owner,
                         Some(counter)
+                    );
+                }
+                if source_number == 2134 {
+                    let TreeKind::DefDef(method) = &source_ast.get(method_tree).kind else {
+                        unreachable!();
+                    };
+                    let original_formals = method.value_param_clauses[0]
+                        .iter()
+                        .map(|tree| source_index.symbol_at(source_id, *tree).unwrap())
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        store
+                            .names
+                            .resolve(store.symbols.get(receipts[0].symbol()).name.text()),
+                        "second"
+                    );
+                    assert_eq!(
+                        store
+                            .names
+                            .resolve(store.symbols.get(receipts[1].symbol()).name.text()),
+                        "first"
+                    );
+                    assert_eq!(
+                        store
+                            .names
+                            .resolve(store.symbols.get(receipts[0].seed_formal()).name.text()),
+                        "secondSeed"
+                    );
+                    assert_eq!(
+                        store
+                            .names
+                            .resolve(store.symbols.get(receipts[1].seed_formal()).name.text()),
+                        "firstSeed"
+                    );
+                    assert_eq!(receipts[0].seed_formal(), original_formals[1]);
+                    assert_eq!(receipts[1].seed_formal(), original_formals[0]);
+                    assert_eq!(
+                        receipts.map(|receipt| receipt.source_declaration()),
+                        [block.stats[0], block.stats[1]]
+                    );
+                }
+                if source_number == 2136 {
+                    let TreeKind::DefDef(method) = &source_ast.get(method_tree).kind else {
+                        unreachable!();
+                    };
+                    let original_formals = method.value_param_clauses[0]
+                        .iter()
+                        .map(|tree| source_index.symbol_at(source_id, *tree).unwrap())
+                        .collect::<Vec<_>>();
+                    assert_eq!(receipts[0].seed_formal(), original_formals[1]);
+                    assert_eq!(receipts[1].seed_formal(), original_formals[0]);
+                    assert_eq!(
+                        receipts.map(|receipt| receipt.source_declaration()),
+                        [block.stats[0], block.stats[1]]
                     );
                 }
             },
@@ -2007,6 +2071,36 @@ fn two_local_initializer_receipt_rejects_stale_and_swapped_typed_edges() {
             let TreeKind::Block(block) = &source_ast.get(method.rhs.unwrap()).kind else {
                 panic!("method body is Block");
             };
+            let declaration_seed = |declaration| {
+                let TreeKind::ValDef(local) = &source_ast.get(declaration).kind else {
+                    unreachable!();
+                };
+                let TreeKind::Apply(apply) = &source_ast.get(local.rhs.unwrap()).kind else {
+                    unreachable!();
+                };
+                apply.args[0]
+            };
+            let first_seed = declaration_seed(block.stats[0]);
+            let second_seed = declaration_seed(block.stats[1]);
+            let first_typed_seed = source_typed_index.get(source_id, first_seed).unwrap();
+            let second_typed_seed = source_typed_index.get(source_id, second_seed).unwrap();
+            let mut swapped_seed_edges = source_typed_index.clone();
+            swapped_seed_edges.remove(source_id, first_seed).unwrap();
+            swapped_seed_edges.remove(source_id, second_seed).unwrap();
+            swapped_seed_edges
+                .insert(source_id, first_seed, second_typed_seed)
+                .unwrap();
+            swapped_seed_edges
+                .insert(source_id, second_seed, first_typed_seed)
+                .unwrap();
+            assert_eq!(
+                validate_immutable_local_initializer_pair_proof(proof_input!(&swapped_seed_edges))
+                    .err()
+                    .unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceShape(
+                    "initializer must use the original seed formal"
+                )
+            );
             let TreeKind::Apply(final_apply) = &source_ast.get(block.expr).kind else {
                 panic!("final expression is a constructor Apply");
             };
@@ -2146,7 +2240,7 @@ fn two_local_initializer_receipt_rejects_mutable_and_wrong_formal_initializers()
                 .err()
                 .unwrap(),
                 dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceShape(
-                    "initializer must use the original seed formal"
+                    "two local initializers must use distinct original method formals"
                 )
             );
         },

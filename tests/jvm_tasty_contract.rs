@@ -109,6 +109,10 @@ fn two_immutable_reference_locals_variations_record_first_observed_rejection() {
         &exact[counter_start..pair_start],
         &exact[factory_start..]
     );
+    let reversed_declarations = exact.replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
+        "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
+    );
     let reversed_pair_args = exact.replace("new Pair(first, second)", "new Pair(second, first)");
     let aliased_pair_args = exact.replace("new Pair(first, second)", "new Pair(first, first)");
     let swapped_initializer_args = exact
@@ -165,13 +169,6 @@ fn two_immutable_reference_locals_variations_record_first_observed_rejection() {
         class_and_declaration: Option<(usize, usize)>,
     }
     let cases = [
-        ExpectedFailure {
-            label: "swapped initializer formals",
-            source: swapped_initializer_args,
-            phase: "cross-class constructor-call identity proof",
-            reason_prefix: "SourceShape(\"initializer must use the original seed formal\")",
-            class_and_declaration: None,
-        },
         ExpectedFailure {
             label: "third local",
             source: third_local,
@@ -323,9 +320,16 @@ fn two_immutable_reference_locals_variations_record_first_observed_rejection() {
             expected.label, expected.phase
         );
     }
-    for (index, source) in [renamed, reordered, reversed_pair_args, aliased_pair_args]
-        .into_iter()
-        .enumerate()
+    for (index, source) in [
+        renamed,
+        reordered,
+        reversed_pair_args,
+        aliased_pair_args,
+        swapped_initializer_args,
+        reversed_declarations,
+    ]
+    .into_iter()
+    .enumerate()
     {
         let mut callback_reached = false;
         with_paired_jvm_tasty_batch_plan(

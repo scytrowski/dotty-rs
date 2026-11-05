@@ -4756,6 +4756,84 @@ pub fn validate_immutable_local_initialization_proof<'session>(
     })
 }
 
+fn original_initializer_seed_formal(
+    source_id: SourceId,
+    declaration: TreeId<Untyped>,
+    source_ast: &AstArena<Untyped>,
+    typed_ast: &TypedAst,
+    source_typed_index: &SourceTypedIndex,
+    method_formals: &[SymbolId],
+    store: &SemanticStore,
+) -> Result<SymbolId, CrossClassConstructorCallProofError> {
+    let source_error = |message| CrossClassConstructorCallProofError::SourceShape(message);
+    let typed_error = |message| CrossClassConstructorCallProofError::TypedBinding(message);
+    let TreeKind::ValDef(local) = &source_ast
+        .try_get(declaration)
+        .ok_or_else(|| source_error("local declaration tree is stale"))?
+        .kind
+    else {
+        return Err(source_error(
+            "factory Block statistic must be the original ValDef",
+        ));
+    };
+    let initializer = local
+        .rhs
+        .ok_or_else(|| source_error("local must have one initializer"))?;
+    let TreeKind::Apply(apply) = &source_ast
+        .try_get(initializer)
+        .ok_or_else(|| source_error("local initializer tree is stale"))?
+        .kind
+    else {
+        return Err(source_error(
+            "local initializer must be the original direct constructor Apply",
+        ));
+    };
+    if apply.kind != ApplyKind::Regular || apply.args.len() != 1 {
+        return Err(source_error(
+            "local initializer must be one regular one-argument Apply",
+        ));
+    }
+    let source_argument = apply.args[0];
+    if !matches!(
+        source_ast.try_get(source_argument).map(|tree| &tree.kind),
+        Some(TreeKind::Ident(_))
+    ) {
+        return Err(source_error(
+            "initializer argument must be the original seed Ident",
+        ));
+    }
+    let typed_argument = source_typed_index
+        .get(source_id, source_argument)
+        .ok_or_else(|| typed_error("initializer seed has no typed mapping"))?;
+    let TreeKind::Ident(_) = &typed_ast
+        .try_get(typed_argument)
+        .ok_or_else(|| typed_error("typed seed Ident is stale"))?
+        .kind
+    else {
+        return Err(typed_error("typed initializer seed must remain Ident"));
+    };
+    let Some(Type::TermRef {
+        target: TermRefTarget::Symbol(formal),
+        ..
+    }) = store.types.try_get(
+        typed_ast
+            .try_get(typed_argument)
+            .ok_or_else(|| typed_error("typed seed Ident is stale"))?
+            .ty,
+    )
+    else {
+        return Err(source_error(
+            "initializer must use the original seed formal",
+        ));
+    };
+    if !method_formals.contains(formal) {
+        return Err(source_error(
+            "initializer must use the original seed formal",
+        ));
+    }
+    Ok(*formal)
+}
+
 #[allow(clippy::too_many_arguments)]
 /// Validate exactly two original, ordered immutable local initializers from one
 /// straight-line source Block. The returned pair is created only after both
@@ -5267,6 +5345,31 @@ pub fn validate_immutable_local_initializer_pair_proof<'session>(
             "two locals must have distinct names without shadowing method formals",
         ));
     }
+    let seed_formals = [
+        original_initializer_seed_formal(
+            source_id,
+            block.stats[0],
+            source_ast,
+            typed_ast,
+            source_typed_index,
+            &formals,
+            store,
+        )?,
+        original_initializer_seed_formal(
+            source_id,
+            block.stats[1],
+            source_ast,
+            typed_ast,
+            source_typed_index,
+            &formals,
+            store,
+        )?,
+    ];
+    if seed_formals[0] == seed_formals[1] {
+        return Err(source_error(
+            "two local initializers must use distinct original method formals",
+        ));
+    }
     let first_core = validate_immutable_local_declaration_core(
         source_id,
         method,
@@ -5279,7 +5382,7 @@ pub fn validate_immutable_local_initializer_pair_proof<'session>(
         Some(bindings[0]),
         counter,
         package,
-        formals[0],
+        seed_formals[0],
     )?;
     let second_core = validate_immutable_local_declaration_core(
         source_id,
@@ -5293,7 +5396,7 @@ pub fn validate_immutable_local_initializer_pair_proof<'session>(
         Some(bindings[1]),
         counter,
         package,
-        formals[1],
+        seed_formals[1],
     )?;
     if first_core.scope != second_core.scope {
         return Err(identity_error(
@@ -5344,7 +5447,6 @@ pub fn validate_immutable_local_initializer_pair_proof<'session>(
     if first_decl_pos.span().range().start() >= second_decl_pos.span().range().start()
         || first_decl_pos.span().range().start() >= first_init_pos.span().range().start()
         || second_decl_pos.span().range().start() >= second_init_pos.span().range().start()
-        || first_init_pos.span().range().start() >= second_init_pos.span().range().start()
         || first_init_pos.span().range().end() > second_decl_pos.span().range().start()
         || second_init_pos.span().range().end() > final_pos.span().range().start()
     {
@@ -5436,7 +5538,7 @@ pub fn validate_immutable_local_initializer_pair_proof<'session>(
     let receipts = [
         ImmutableLocalInitializerReceipt {
             declaration: first_core,
-            seed_formal: formals[0],
+            seed_formal: seed_formals[0],
             seed_formal_type: definitions.int,
             initializer_result_type: first_initializer_result_type,
             constructor_formal,
@@ -5444,7 +5546,7 @@ pub fn validate_immutable_local_initializer_pair_proof<'session>(
         },
         ImmutableLocalInitializerReceipt {
             declaration: second_core,
-            seed_formal: formals[1],
+            seed_formal: seed_formals[1],
             seed_formal_type: definitions.int,
             initializer_result_type: second_initializer_result_type,
             constructor_formal,

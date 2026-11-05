@@ -414,15 +414,20 @@ individual receipts and the shared Block/scope/order checks succeed.
 | constructor | selected original Counter primary constructor and its Int formal |
 | caller input | exact corresponding original method formal SymbolId and Int type |
 
-The focused authentic frontend test proves the frozen source and reversed
-argument source in independent sessions, plus consistently renamed and
-class-reordered sessions. Negative controls cover stale and swapped typed
-edges, a missing Typer binding, mutable locals, an initializer using the wrong
-formal, a conditional initializer, and a third local. The same frozen
-two-local source still fails at the existing paired-planning cross-class proof
-gate. This aggregate receipt does not prove Pair argument order or origins and
-is not consumed by TASTy planning, class emission, or a CLI. It does not
-change emitted bytes.
+The focused authentic frontend test proves the frozen source, reversed
+argument source, and reversed local declaration order in independent sessions,
+plus consistently renamed and class-reordered sessions. Receipts retain source
+declaration order while each initializer's original typed `TermRef` retains its
+actual method formal; independently-authored sources may assign the two
+distinct formals in either order.
+Negative controls cover stale and swapped typed edges, a missing Typer binding,
+mutable locals, duplicate use of one formal, a conditional initializer, and a
+third local. This aggregate receipt does not prove Pair argument order or
+origins. The later paired planner applies its separate final-argument proof;
+on the current base, both reversed-declaration and swapped-initializer
+variants pass that downstream planner without changes to its contract. This
+follow-up does not change TASTy planning, class emission, or a CLI, and it does
+not change emitted bytes.
 
 The updated cross-contract first-error matrix records the now-reached boundary:
 
