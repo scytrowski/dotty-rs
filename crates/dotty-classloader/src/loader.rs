@@ -18874,6 +18874,56 @@ mod tests {
     }
 
     #[test]
+    fn scala_serializable_package_alias_requires_authentic_package_and_target_evidence() {
+        let package_bytes = dotty_tasty_fixture_bytes("scala3-library/scala/package.tasty");
+        let package_name = BinaryName::from_internal("scala/package");
+        let alias_owner = BinaryName::from_internal("scala/package$");
+        let target_name = BinaryName::from_internal("java/io/Serializable");
+
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(InMemoryTastyClassPath(HashMap::from([(
+                package_name.clone(),
+                package_bytes.clone(),
+            )]))),
+            Box::new(InMemoryClassPath(HashMap::from([(
+                target_name.clone(),
+                synthetic_class(target_name.as_internal(), None),
+            )]))),
+        ]);
+        assert_eq!(
+            resolve_tasty_alias(&class_path, &alias_owner, "Serializable").unwrap(),
+            Some(target_name.clone())
+        );
+
+        let missing_target = CompositeClassPath::new(vec![Box::new(InMemoryTastyClassPath(
+            HashMap::from([(package_name.clone(), package_bytes.clone())]),
+        ))]);
+        assert_eq!(
+            resolve_tasty_alias(&missing_target, &alias_owner, "Serializable").unwrap(),
+            None,
+            "an alias declaration alone cannot manufacture its target"
+        );
+        assert_eq!(
+            resolve_tasty_alias(
+                &class_path,
+                &BinaryName::from_internal("scala/Predef$"),
+                "Serializable"
+            )
+            .unwrap(),
+            None,
+            "a similarly named alias under another owner is not package evidence"
+        );
+
+        let malformed_package = CompositeClassPath::new(vec![Box::new(InMemoryTastyClassPath(
+            HashMap::from([(package_name, b"not a TASTy file".to_vec())]),
+        ))]);
+        assert!(matches!(
+            resolve_tasty_alias(&malformed_package, &alias_owner, "Serializable"),
+            Err(TastyAliasResolutionError::InvalidTasty(..))
+        ));
+    }
+
+    #[test]
     fn follows_a_two_hop_package_alias_chain() {
         let first_owner = BinaryName::from_internal("scala/package$");
         let second_owner = BinaryName::from_internal("library/package$");

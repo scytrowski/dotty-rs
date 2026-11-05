@@ -857,8 +857,98 @@ fn assert_live_report_matches_frozen_with_selected_option_member_delta(
         .zip(historical.iter().skip(1))
         .filter(|(current, frozen)| current != frozen)
         .collect::<Vec<_>>();
-    assert_eq!(changed.len(), 1, "only the selected member row may change");
-    let (current, frozen) = changed[0];
+    assert_eq!(
+        changed.len(),
+        10,
+        "the selected Option member row and the newly loadable Some class fields are the only changes"
+    );
+
+    let mut some_fields = HashSet::new();
+    let mut option_member_delta = None;
+    for (current, frozen) in changed {
+        match (current[0].as_str(), current[1].as_str()) {
+            ("some", field) => {
+                some_fields.insert(field);
+                assert_eq!(frozen[2], "UNRESOLVED_EXTERNAL");
+                assert!(frozen[4].contains("scala/Serializable"));
+                assert_eq!(current[4], "");
+                assert_eq!(current[5], frozen[5]);
+                assert_eq!(&current[6..10], &frozen[6..10]);
+                let (outcome, value, delta) = match field {
+                    "identity" => ("MATCH", "scala.Some|Class|Some", "equal"),
+                    "visibility" => ("MATCH", "public", "equal"),
+                    "flags" => ("MATCH", "final", "different"),
+                    "hierarchy" => (
+                        "MATCH",
+                        "scala.Option&scala.Product&java.io.Serializable",
+                        "different",
+                    ),
+                    "type_parameters" => {
+                        ("MATCH", "[A:None:bounds(Nothing,Any)]", "not-comparable")
+                    }
+                    "parameter_clauses" => (
+                        "MATCH",
+                        "<init>:Constructor:public:[A:None:bounds(Nothing,Any)]=>(ParamRef[0])Plain:Unit",
+                        "not-comparable",
+                    ),
+                    "companion" => ("MATCH", "none", "different"),
+                    "annotations" => ("MATCH", "", "equal"),
+                    "member_signatures" => {
+                        assert_eq!(current[2], "LOADER_UNSUPPORTED");
+                        let names = current[3]
+                            .split(';')
+                            .map(|member| member.split(':').next().unwrap_or_default())
+                            .collect::<Vec<_>>();
+                        assert_eq!(
+                            names,
+                            [
+                                "<init>",
+                                "A",
+                                "canEqual",
+                                "copy",
+                                "equals",
+                                "get",
+                                "hashCode",
+                                "productArity",
+                                "productElement",
+                                "productElementName",
+                                "productPrefix",
+                                "toString",
+                                "value"
+                            ],
+                            "resolving the class parent exposes exactly Some's declared members"
+                        );
+                        assert!(current[3].contains("scala/Predef/String"));
+                        assert_eq!(current[10], "not-comparable");
+                        continue;
+                    }
+                    other => panic!("unexpected changed Some parity field {other}"),
+                };
+                assert_eq!(current[2], outcome, "Some {field} outcome");
+                assert_eq!(current[3], value, "Some {field} value");
+                assert_eq!(current[10], delta, "Some {field} comparison");
+            }
+            ("option", "member_signatures") => option_member_delta = Some((current, frozen)),
+            key => panic!("unexpected frozen parity delta {key:?}"),
+        }
+    }
+    assert_eq!(
+        some_fields,
+        HashSet::from([
+            "identity",
+            "visibility",
+            "flags",
+            "hierarchy",
+            "type_parameters",
+            "parameter_clauses",
+            "member_signatures",
+            "companion",
+            "annotations",
+        ]),
+        "the alias change should expose exactly the nine Some fields"
+    );
+
+    let (current, frozen) = option_member_delta.expect("the existing Option member delta");
     assert_eq!(
         (current[0].as_str(), current[1].as_str()),
         ("option", "member_signatures")
