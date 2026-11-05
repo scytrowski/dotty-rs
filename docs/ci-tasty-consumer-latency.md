@@ -20,6 +20,35 @@ separate immutable-local Scala consumer swimlane: it was added in
 record all 24 names and the fixed four-way partition. We retain the 23-target
 sample below as historical evidence; it is not used as a 24-target baseline.
 
+The verified current target set is:
+
+```text
+jvm_tasty_scala_consumer
+jvm_tasty_multiclass_scala_consumer
+jvm_tasty_cross_class_scala_consumer
+jvm_tasty_factory_scala_consumer
+jvm_tasty_object_composition_scala_consumer
+jvm_tasty_constructor_injection_scala_consumer
+jvm_tasty_reference_constructor_scala_consumer
+jvm_tasty_nested_constructor_scala_consumer
+jvm_tasty_multi_argument_constructor_calls
+jvm_tasty_multi_argument_constructor_scala_consumer
+jvm_tasty_factory_result_scala_consumer
+jvm_tasty_reference_local_scala_consumer
+jvm_tasty_dual_reference_signature
+jvm_tasty_dual_reference_artifacts
+jvm_tasty_dual_reference_forwarding
+jvm_tasty_dual_reference_forwarding_scala_consumer
+jvm_tasty_mixed_origin_constructor_scala_consumer
+jvm_tasty_immutable_reference_local_pair_scala_consumer
+jvm_tasty_direct_formal_constructor_pair
+jvm_tasty_dual_reference_scala_consumer
+jvm_tasty_dual_reference_rust_consumer
+jvm_tasty_cross_class_factories
+jvm_tasty_factory_result_arguments
+tasty_source_pickling
+```
+
 | Cohort / sample | Tested source | Exact suite and cache | Result and use |
 | --- | --- | --- | --- |
 | Historical serial: [run 41734662249](https://github.com/scytrowski/dotty-rs/actions/runs/41734662249) | `356bb699888cd89bf106f3a1f012ccaa643a7112` | 23 targets, before the immutable-local consumer was introduced; old timing/manifest context | Successful, 31m45s whole job and 24m07s strict step per [#2092](https://github.com/scytrowski/dotty-rs/issues/2092). Historical only; not compared numerically to the current suite. |
@@ -35,7 +64,7 @@ The manifest and workflow independently enumerate the suite. Successful run logs
 
 The [two-way rollout PR](https://github.com/scytrowski/dotty-rs/pull/2118) records validator and aggregate regression cases for success, failure, cancellation, skip and missing results. Its aggregate requires every shard and follow-up result. The four-way rollout reused the validator/aggregate contract and retained those negative cases. The safe negative-control evidence is these local validator/aggregation tests; no hosted failing-shard run was manufactured.
 
-The serial evidence run and all selected parallel workflow runs used the pinned Scala 3.9.0 source, JDK 21.0.13 and Rust 1.98.1. The workflow verifies the Scala source SHA and pinned compiler artifact SHA-256 values before the tests. The manifest records the per-target serial sample and profile remains `--test-threads=1`; no Rust profile or runtime test was changed for this report.
+The serial evidence run and all selected parallel workflow runs used Scala source revision `777528f19a58e794c9954a42f433373472ec57f8`, JDK `21.0.13+9.0.LTS` and Rust `1.98.1`. The workflow checks out that Scala revision, verifies the JDK release version, and verifies seven inlined compiler/library artifact SHA-256 values before testing; for example, `scala3-compiler_3-3.9.0.jar` is pinned to `3e2c09a5ca6cef17a55f2f66e123815f9c4ea061fce20d0e9d2371989405a61a` in the [workflow](../.github/workflows/jvm-tasty-factory-scala-consumer.yml). The manifest records the per-target serial sample and profile remains `--test-threads=1`; no Rust profile or runtime test was changed for this report.
 
 ## Latency and runner cost
 
@@ -48,6 +77,29 @@ The four-way report's three warm attempt-to-green values average 15m09s. Per-att
 Thus the hosted data gives a useful attempt-level signal: the three four-way attempts were faster than the three two-way attempts by a mean 5m21s (about 26%), while adding about 2m05s (about 6%) of shard runner time and more concurrent cache transfer. The comparison keeps fixed-SHA warm attempts together and cold attempts separate.
 
 That signal is **not** the issue's requested PR-to-last-green result. The table values above measure a workflow attempt from start to its aggregate result. For example, PR #2118 was opened at 12:03Z, while its selected later successful workflow run #41862325198 started at 15:53Z; PR #2121 was opened at 17:01Z, while selected later run #41888319758 started at 18:33Z. The intervals include author iteration, workflow scheduling and other PR activity, so they cannot be substituted for an attempt duration or treated as repeated comparable latency samples. The 24-target serial cohort has only one run, and no three matched PR-level serial observations are available. We therefore make no quantitative claim that two- or four-way sharding improved PR-to-last-green latency.
+
+For a concrete stage-level audit, the Actions job/step timing records for one
+successful current 24-target run in each layout provide this decomposition.
+These are single-run details on different PR revisions, kept separate from the
+three-attempt fixed-SHA averages above:
+
+| Run | Queue to first job | Setup and pinned inputs | Scala stage | Cargo build | Strict target execution | Follow-ups | Critical job / gate | Runner total incl. aggregate |
+| --- | ---: | --- | ---: | ---: | ---: | --- | ---: | ---: |
+| Serial [41819990007](https://github.com/scytrowski/dotty-rs/actions/runs/41819990007) | 76s | Checkout 6s; JDK 8s; Rust 9s; cache and exact-output restores 24s; sbt runner 4s; compiler artifacts verify 1s | 67s | 76s | 1,421.9s summed across 24 targets | 310s across the four gates | 1,950s whole job | 1,950s |
+| Two-way [41862325198](https://github.com/scytrowski/dotty-rs/actions/runs/41862325198) | 3s | Two jobs: checkout 13s combined; JDK 7s; Rust 16s; dependency/Rust and exact-output restores 38s; sbt runner 7s | 108s across shards | 28.8s reported Cargo profile-build time | Shard command steps: 555s + 816s | 328s, once on shard 2 | Shard 2: 1,265s; aggregate: 6s | 1,921s (31m55s shard jobs + 6s aggregate) |
+| Four-way [41888319758](https://github.com/scytrowski/dotty-rs/actions/runs/41888319758) | 2s | Four jobs: checkout 30s combined; JDK 16s; Rust 34s; dependency/Rust and exact-output restores 91s; sbt runner 19s | 217s across shards | 43.0s reported Cargo profile-build time | Shard command steps: 301s + 367s + 395s + 416s | 325s, once on shard 4 | Shard 4: 862s; aggregate: 6s | 2,270s (2,264s shard jobs + 6s aggregate) |
+
+The first serial job started 76 seconds after workflow creation. The two- and
+four-way examples had 3s and 2s to first job, respectively. Queue is separated
+from job execution; the full-job/critical-job columns are wall time, while
+runner totals sum concurrent job durations and therefore are not user-visible
+latency. The two- and four-way cost rows are not substituted for the fixed-SHA
+warm means because their source revisions and individual cache contents are
+different. Per-target serial time sums to 1,421.9s and Cargo build to 76s,
+accounting for the 1,498s strict step. Parallel shard command steps each
+include their reported Cargo build phase; do not add build time to those step
+wall times a second time.
+
 
 ## Serial target profile
 
@@ -89,29 +141,6 @@ For every future strict TASTy target, the PR author should:
 3. Preserve `--locked`, `--nocapture`, `--test-threads=1`, all required-mode environment variables, pinned source/JDK/Rust/JAR checks, negative controls, all follow-up gates, and aggregate failure propagation.
 4. Link successful warm and cold runs separately, record exact SHA/cache state, and recalculate both workflow wall/runner cost and PR-to-last-green rather than reusing a prior sample.
 
-No runtime tests, compiler pins, Rust test profile, or hosted full Typer corpus audit were changed or launched for this report.
-
-For a concrete stage-level audit, the Actions job/step timing records for one
-successful current 24-target run in each layout provide this decomposition.
-These are single-run details on different PR revisions, kept separate from the
-three-attempt fixed-SHA averages above:
-
-| Run | Queue to first job | Setup and pinned inputs | Scala stage | Cargo build | Strict target execution | Follow-ups | Critical job / gate | Runner total incl. aggregate |
-| --- | ---: | --- | ---: | ---: | ---: | --- | ---: | ---: |
-| Serial [41819990007](https://github.com/scytrowski/dotty-rs/actions/runs/41819990007) | 76s | Checkout 6s; JDK 8s; Rust 9s; cache and exact-output restores 24s; sbt runner 4s; compiler artifacts verify 1s | 67s | 76s | 1,421.9s summed across 24 targets | 310s across the four gates | 1,950s whole job | 1,950s |
-| Two-way [41862325198](https://github.com/scytrowski/dotty-rs/actions/runs/41862325198) | 3s | Two jobs: checkout 13s combined; JDK 7s; Rust 16s; dependency/Rust and exact-output restores 38s; sbt runner 7s | 108s across shards | 28.8s reported Cargo profile-build time | Shard command steps: 555s + 816s | 328s, once on shard 2 | Shard 2: 1,265s; aggregate: 6s | 1,921s (31m55s shard jobs + 6s aggregate) |
-| Four-way [41888319758](https://github.com/scytrowski/dotty-rs/actions/runs/41888319758) | 2s | Four jobs: checkout 30s combined; JDK 16s; Rust 34s; dependency/Rust and exact-output restores 91s; sbt runner 19s | 217s across shards | 43.0s reported Cargo profile-build time | Shard command steps: 301s + 367s + 395s + 416s | 325s, once on shard 4 | Shard 4: 862s; aggregate: 6s | 2,270s (2,264s shard jobs + 6s aggregate) |
-
-The first serial job started 76 seconds after workflow creation. The two- and
-four-way examples had 3s and 2s to first job, respectively. Queue is separated
-from job execution; the full-job/critical-job columns are wall time, while
-runner totals sum concurrent job durations and therefore are not user-visible
-latency. The two- and four-way cost rows are not substituted for the fixed-SHA
-warm means because their source revisions and individual cache contents are
-different. Per-target serial time sums to 1,421.9s and Cargo build to 76s,
-accounting for the 1,498s strict step. Parallel shard command steps each
-include their reported Cargo build phase; do not add build time to those step
-wall times a second time.
 
 ## Report validation and reproduction
 
@@ -145,3 +174,5 @@ series in the [existing sharding report](strict-tasty-target-sharding.md):
 and [4-way attempt 2](https://github.com/scytrowski/dotty-rs/actions/runs/41873333835/attempts/2),
 [attempt 3](https://github.com/scytrowski/dotty-rs/actions/runs/41873333835/attempts/3),
 [attempt 4](https://github.com/scytrowski/dotty-rs/actions/runs/41873333835/attempts/4).
+
+No runtime tests, compiler pins, Rust test profile, or hosted full Typer corpus audit were changed or launched for this report.
