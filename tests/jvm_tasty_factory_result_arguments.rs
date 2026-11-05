@@ -3198,6 +3198,22 @@ fn two_immutable_counter_locals_pickle_in_source_order_for_local_pair_arguments(
                     .arguments;
                 assert_eq!(locals.len(), 2);
                 assert_eq!(initializers.len(), 2);
+                let factory_jvm_plan = batch
+                    .jvm_unit
+                    .classes
+                    .iter()
+                    .find(|class| class.class == owner)
+                    .expect("the factory has its canonical JVM class plan");
+                let caller_jvm_plan = factory_jvm_plan
+                    .methods
+                    .iter()
+                    .find(|method| method.method == proof.method())
+                    .expect("the original method has its JVM plan");
+                assert_eq!(
+                    caller_jvm_plan.locals().iter().map(|local| local.symbol).collect::<Vec<_>>(),
+                    locals.iter().map(|local| local.symbol).collect::<Vec<_>>(),
+                    "both canonical local declarations are projected in source order",
+                );
                 assert_ne!(locals[0].symbol, locals[1].symbol);
                 assert_eq!(locals[0].source_tree, initializers[0].source_declaration);
                 assert_eq!(locals[1].source_tree, initializers[1].source_declaration);
@@ -3314,6 +3330,8 @@ fn two_immutable_counter_locals_pickle_in_source_order_for_local_pair_arguments(
         }
     }
 }
+
+
 
 fn observe_reference_local_constructor_flow(
     source_id: SourceId,
