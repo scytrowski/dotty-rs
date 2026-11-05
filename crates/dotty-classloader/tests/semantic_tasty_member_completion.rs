@@ -1049,6 +1049,72 @@ fn four_frozen_members_are_explicitly_completed_in_fresh_deterministic_runs() {
 }
 
 #[test]
+fn external_option_is_empty_uses_the_canonical_boolean_definition() {
+    let path =
+        workspace().join("crates/dotty-tasty/tests/fixtures/scala3-library/scala/Option.tasty");
+    let bytes = fs::read(&path).expect("pinned Scala 3.9 Option fixture exists");
+    let file =
+        TastyFile::parse_and_validate_scala_3_9(&bytes).expect("Scala 3.9 Option TASTy parses");
+    assert!(member_address(&file, "isEmpty").is_some());
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut loader =
+        ClassLoader::with_definitions(classpath(), &mut store, definitions, LoadingSession::new());
+    let option = loader
+        .load_class(&BinaryName::from_internal("scala/Option"))
+        .expect("external Option TASTy loads through the classloader");
+    assert!(
+        matches!(
+            loader.origin(option),
+            Some(ClassOrigin::Directory(origin)) if origin.ends_with("scala3-library")
+        ),
+        "Option origin: {:?}",
+        loader.origin(option)
+    );
+    drop(loader);
+    let SymbolInfo::Complete(option_info) = store.symbols.get(option).info else {
+        panic!("Option class information is complete");
+    };
+    let Type::ClassInfo(option_info) = store.types.get(option_info) else {
+        panic!("Option has class information");
+    };
+    let method = store
+        .scopes
+        .get(option_info.declarations)
+        .entered_symbols()
+        .find(|symbol| store.names.resolve(store.symbols.get(*symbol).name.text()) == "isEmpty")
+        .expect("Option.isEmpty declaration is entered");
+    let SymbolInfo::Complete(method_info) = store.symbols.get(method).info else {
+        panic!("Option.isEmpty has completed method information");
+    };
+    let Type::ByName { result } = store.types.get(method_info) else {
+        panic!("Option.isEmpty preserves its parameterless by-name type");
+    };
+    let boolean_class = store
+        .types
+        .get(definitions.boolean)
+        .reference_symbol()
+        .expect("canonical Boolean is class-backed");
+    assert!(matches!(
+        store.types.get(*result),
+        Type::TypeRef {
+            target: dotty_core::TypeRefTarget::Symbol(symbol),
+            ..
+        } if *symbol == boolean_class
+    ));
+    assert_eq!(store.symbols.get(boolean_class).owner, None);
+    assert_eq!(
+        store.symbols.get(boolean_class).origin,
+        dotty_core::SymbolOrigin::Builtin
+    );
+    assert!(
+        definitions
+            .boolean_primitive_operator_symbols(&store)
+            .is_some()
+    );
+}
+
+#[test]
 fn normalized_param_refs_distinguish_their_binder() {
     let mut store = SemanticStore::new();
     let correct = store.types.reserve();
