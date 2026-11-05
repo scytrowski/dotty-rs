@@ -3983,11 +3983,21 @@ fn resolve_parent_name_with_alias(
         if matches!(owner.simple_name(), "package" | "package$") {
             return resolve_alias(&owner, &alias);
         }
-        if parent_reference_shape(file, parent) == "selected-qualified"
+        let selected_package_alias = parent_reference_shape(file, parent) == "selected-qualified"
             && unresolved_alias_qualifier_is_package(file, parent, 0)
             && unresolved_alias_package_prefix(file, parent)
-                .is_some_and(|package_owner| package_owner == owner.as_internal())
-        {
+                .is_some_and(|package_owner| package_owner == owner.as_internal());
+        // Scala 3.9's `scala.Serializable` parent records `_root_` in the
+        // package qualifier. Authenticate this one rooted alias shape before
+        // removing only its root marker; arbitrary selected owners must not
+        // be normalized into package paths.
+        let rooted_scala_serializable = is_rooted_scala_serializable_parent(
+            &owner,
+            &alias,
+            &parent_reference_shape(file, parent),
+            unresolved_alias_package_prefix(file, parent).as_deref(),
+        );
+        if selected_package_alias || rooted_scala_serializable {
             let package_object =
                 BinaryName::from_internal(format!("{}/package$", owner.as_internal()));
             if let Some(resolved) = resolve_alias(&package_object, &alias) {
@@ -3996,6 +4006,18 @@ fn resolve_parent_name_with_alias(
         }
     }
     resolve_parent_name_with_bare(file, parent, package, resolve_bare)
+}
+
+fn is_rooted_scala_serializable_parent(
+    owner: &BinaryName,
+    alias: &str,
+    shape: &str,
+    package_prefix: Option<&str>,
+) -> bool {
+    owner.as_internal() == "scala"
+        && alias == "Serializable"
+        && shape == "selected-qualified"
+        && package_prefix == Some("_root_/scala")
 }
 
 fn unresolved_alias_qualifier_is_package(
@@ -4293,8 +4315,22 @@ pub(crate) fn resolve_type_alias_target(
     current_package: &str,
 ) -> Result<Option<TypeAliasTarget>, TastyDecodeError> {
     let index = file.ast_address_index()?;
+    let rooted_serializable_alias = if alias_name == "Serializable" && current_package == "scala" {
+        scala_package_serializable_alias_address(file, &index)
+    } else {
+        None
+    };
+    if alias_name == "Serializable"
+        && current_package == "scala"
+        && rooted_serializable_alias.is_none()
+    {
+        return Ok(None);
+    }
     for node in index.iter() {
         if node.tag != TYPEDEF_TAG {
+            continue;
+        }
+        if rooted_serializable_alias.is_some_and(|address| address != node.offset as u32) {
             continue;
         }
         let StructuredNode::TypeDef(DefinitionBody::TypeDef {
@@ -4344,6 +4380,84 @@ pub(crate) fn resolve_type_alias_target(
         return Ok(candidate.map(TypeAliasTarget::Candidate));
     }
     Ok(None)
+}
+
+fn unique_alias_address(addresses: &[u32]) -> Option<u32> {
+    match addresses {
+        [address] => Some(*address),
+        _ => None,
+    }
+}
+
+fn scala_package_serializable_alias_address(
+    file: &TastyFile<'_>,
+    index: &dotty_tasty::tasty::AstAddressIndex<'_>,
+) -> Option<u32> {
+    let package_objects = index
+        .iter()
+        .filter(|node| node.tag == TYPEDEF_TAG)
+        .filter_map(|node| {
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef { name, tail, .. }) =
+                node.decode_structured().ok()?
+            else {
+                return None;
+            };
+            (module_class_wire_name(file, name).as_deref() == Some("package$")
+                && has_modifier(&tail, OBJECT_TAG)
+                && is_in_rooted_scala_package(file, index, node.offset))
+            .then(|| u32::try_from(node.offset).ok())
+            .flatten()
+        })
+        .collect::<Vec<_>>();
+    let [package_object] = package_objects.as_slice() else {
+        return None;
+    };
+    let template_address = index
+        .children_of(*package_object)
+        .find(|child| child.tag == TEMPLATE_TAG)
+        .and_then(|child| u32::try_from(child.offset).ok())?;
+    let aliases = index
+        .children_of(template_address)
+        .filter(|child| child.tag == TYPEDEF_TAG)
+        .filter_map(|child| {
+            let node = index.get(u32::try_from(child.offset).ok()?)?;
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef { name, .. }) =
+                node.decode_structured().ok()?
+            else {
+                return None;
+            };
+            (wire_name(file, name).as_deref() == Some("Serializable"))
+                .then(|| u32::try_from(child.offset).ok())
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    unique_alias_address(&aliases)
+}
+
+fn is_in_rooted_scala_package(
+    file: &TastyFile<'_>,
+    index: &dotty_tasty::tasty::AstAddressIndex<'_>,
+    address: usize,
+) -> bool {
+    let Ok(address) = u32::try_from(address) else {
+        return false;
+    };
+    let Some(parent) = index
+        .parent_of(address)
+        .filter(|node| node.tag == PACKAGE_TAG)
+    else {
+        return false;
+    };
+    let Some(package_node) = index.get(parent.offset as u32) else {
+        return false;
+    };
+    let Ok(package) = package_node.decode_package() else {
+        return false;
+    };
+    matches!(
+        parent_wire_path(file, &package.path, 0).as_deref(),
+        Some("scala" | "_root_/scala")
+    )
 }
 
 fn direct_term_alias_reference(
@@ -5993,6 +6107,82 @@ mod tests {
             resolve_type_alias_candidate(&file, "Iterator", "scala"),
             Some(BinaryName::from_internal("collection/Iterator"))
         );
+    }
+
+    #[test]
+    fn authentic_scala_package_serializable_alias_targets_java_io() {
+        let bytes = fixture_bytes("scala3-library/scala/package.tasty");
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .expect("the pinned scala/package.tasty fixture should parse");
+
+        assert_eq!(
+            resolve_type_alias_target(&file, "Serializable", "scala")
+                .expect("the authentic package alias should decode"),
+            Some(TypeAliasTarget::Candidate(BinaryName::from_internal(
+                "java/io/Serializable"
+            )))
+        );
+        assert_eq!(
+            resolve_type_alias_target(&file, "NotSerializable", "scala").unwrap(),
+            None,
+            "a missing declaration must not be guessed from its spelling"
+        );
+    }
+
+    #[test]
+    fn rooted_serializable_alias_requires_one_direct_declaration() {
+        assert_eq!(unique_alias_address(&[]), None);
+        assert_eq!(unique_alias_address(&[42]), Some(42));
+        assert_eq!(
+            unique_alias_address(&[42, 84]),
+            None,
+            "ambiguous declarations must remain unresolved"
+        );
+    }
+
+    #[test]
+    fn rooted_serializable_parent_requires_the_exact_authenticated_selection() {
+        let scala = BinaryName::from_internal("scala");
+        assert!(is_rooted_scala_serializable_parent(
+            &scala,
+            "Serializable",
+            "selected-qualified",
+            Some("_root_/scala")
+        ));
+        for (owner, alias, shape, prefix) in [
+            (
+                "scala",
+                "Cloneable",
+                "selected-qualified",
+                Some("_root_/scala"),
+            ),
+            (
+                "scala/Owner",
+                "Serializable",
+                "selected-qualified",
+                Some("_root_/scala"),
+            ),
+            (
+                "scala",
+                "Serializable",
+                "package-qualified",
+                Some("_root_/scala"),
+            ),
+            (
+                "scala",
+                "Serializable",
+                "selected-qualified",
+                Some("_root_/other"),
+            ),
+            ("scala", "Serializable", "selected-qualified", Some("scala")),
+        ] {
+            assert!(!is_rooted_scala_serializable_parent(
+                &BinaryName::from_internal(owner),
+                alias,
+                shape,
+                prefix
+            ));
+        }
     }
 
     #[test]

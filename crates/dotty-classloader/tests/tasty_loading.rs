@@ -25,6 +25,7 @@ use std::cell::{Cell, RefCell};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[path = "support/cross_adapter_annotations.rs"]
@@ -1319,6 +1320,156 @@ fn loads_scala39_function1_with_a_shared_anyref_parent() {
         store.names.resolve(store.symbols.get(parent).name.text()),
         "Object"
     );
+}
+
+#[test]
+fn loads_scala39_some_with_rooted_serializable_alias_from_real_jdk() {
+    let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+    let java_base = java_home.join("jmods/java.base.jmod");
+    let serializable_resource = JdkClassPath::new(java_home.join("jmods"))
+        .expect("genuine JDK jmods")
+        .find_class(&BinaryName::from_internal("java/io/Serializable"))
+        .expect("JDK lookup should succeed")
+        .expect("real JDK must provide java.io.Serializable");
+    assert_eq!(
+        serializable_resource.origin(),
+        &ClassOrigin::Jmod(java_base.clone())
+    );
+    let mut store = SemanticStore::new();
+    let class_path = CompositeClassPath::new(vec![
+        Box::new(DirectoryClassPath::new(published_scala39_library_dir())),
+        Box::new(JdkClassPath::new(java_home.join("jmods")).expect("genuine JDK jmods")),
+    ]);
+    let mut loader = ClassLoader::new(class_path, &mut store);
+
+    let some = loader
+        .load_class(&BinaryName::from_internal("scala/Some"))
+        .expect("Some's rooted scala.Serializable parent should resolve via scala/package.tasty");
+    assert_eq!(
+        loader
+            .load_class(&BinaryName::from_internal("scala/Some"))
+            .expect("the same class should be cached in this session"),
+        some
+    );
+    let serializable = loader
+        .load_class(&BinaryName::from_internal("java/io/Serializable"))
+        .expect("the alias target should have a canonical class identity");
+    assert_eq!(
+        loader.origin(serializable),
+        Some(&ClassOrigin::Jmod(java_base.clone())),
+        "the loaded Java interface should retain its JDK resource origin"
+    );
+    drop(loader);
+
+    assert!(
+        class_info(&store, some)
+            .parents
+            .iter()
+            .any(|parent| { store.types.get(*parent).reference_symbol() == Some(serializable) })
+    );
+    let java_io = store
+        .symbols
+        .get(serializable)
+        .owner
+        .expect("java.io package");
+    assert_eq!(
+        store.names.resolve(store.symbols.get(java_io).name.text()),
+        "io"
+    );
+    let java = store.symbols.get(java_io).owner.expect("java package");
+    assert_eq!(
+        store.names.resolve(store.symbols.get(java).name.text()),
+        "java"
+    );
+    assert!(matches!(
+        store.symbols.get(serializable).origin,
+        dotty_core::SymbolOrigin::Classfile(_)
+    ));
+
+    let parent_names = |store: &SemanticStore, class: SymbolId| {
+        class_info(store, class)
+            .parents
+            .iter()
+            .map(|parent| {
+                let symbol = store
+                    .types
+                    .get(*parent)
+                    .reference_symbol()
+                    .expect("class parent");
+                store
+                    .names
+                    .resolve(store.symbols.get(symbol).name.text())
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected_parents = parent_names(&store, some);
+    let mut fresh_store = SemanticStore::new();
+    let fresh_path = CompositeClassPath::new(vec![
+        Box::new(DirectoryClassPath::new(published_scala39_library_dir())),
+        Box::new(JdkClassPath::new(java_home.join("jmods")).expect("genuine JDK jmods")),
+    ]);
+    let mut fresh_loader = ClassLoader::new(fresh_path, &mut fresh_store);
+    let fresh_some = fresh_loader
+        .load_class(&BinaryName::from_internal("scala/Some"))
+        .expect("a fresh session should resolve the same authentic library class");
+    drop(fresh_loader);
+    assert_eq!(parent_names(&fresh_store, fresh_some), expected_parents);
+}
+
+struct HideSerializableOnce {
+    inner: CompositeClassPath,
+    hide: Arc<AtomicBool>,
+}
+
+impl ClassPathEntry for HideSerializableOnce {
+    fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+        if name.as_internal() == "java/io/Serializable" && self.hide.swap(false, Ordering::SeqCst) {
+            return Ok(None);
+        }
+        self.inner.find_class(name)
+    }
+
+    fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        self.inner.contains_package(package)
+    }
+
+    fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        self.inner.contains_package_prefix(package)
+    }
+}
+
+#[test]
+fn failed_serializable_alias_load_can_retry_after_classpath_evidence_appears() {
+    let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+    let hide = Arc::new(AtomicBool::new(true));
+    let make_class_path = || HideSerializableOnce {
+        inner: CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(published_scala39_library_dir())),
+            Box::new(JdkClassPath::new(java_home.join("jmods")).expect("genuine JDK jmods")),
+        ]),
+        hide: Arc::clone(&hide),
+    };
+    let mut store = SemanticStore::new();
+    {
+        let mut loader = ClassLoader::new(make_class_path(), &mut store);
+        assert!(
+            loader
+                .load_class(&BinaryName::from_internal("scala/Some"))
+                .is_err(),
+            "an alias target absent from the classpath must fail closed"
+        );
+    }
+
+    let mut loader = ClassLoader::new(make_class_path(), &mut store);
+    let some = loader
+        .load_class(&BinaryName::from_internal("scala/Some"))
+        .expect("the same session store should accept a valid retry");
+    drop(loader);
+    assert!(matches!(
+        store.symbols.get(some).info,
+        SymbolInfo::Complete(info) if matches!(store.types.get(info), Type::ClassInfo(_))
+    ));
 }
 
 #[test]
