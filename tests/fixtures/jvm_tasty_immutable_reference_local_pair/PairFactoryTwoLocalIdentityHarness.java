@@ -59,6 +59,19 @@ public final class PairFactoryTwoLocalIdentityHarness {
         }
         check(factory.create(3, 7), alias ? 3 : (reversed ? 7 : 3), alias ? 3 : (reversed ? 3 : 7));
         check(factory.create(-9, 42), alias ? -9 : (reversed ? 42 : -9), alias ? -9 : (reversed ? -9 : 42));
-        System.out.println(mode + "=identity:true;mutations=isolated;repeat=fresh;seeds=7/3,3/7,-9/42");
+        if (!alias) {
+            Pair equalSeeds = factory.create(7, 7);
+            Counter equalLeft = field(equalSeeds, "left");
+            Counter equalRight = field(equalSeeds, "right");
+            require(equalLeft != equalRight, "equal seeds still allocate distinct Counters");
+            check(equalSeeds, 7, 7);
+            equalLeft.set(100);
+            require(equalSeeds.leftValue() == 100 && equalSeeds.rightValue() == 7,
+                    "equal-seed left mutation is isolated");
+            equalRight.set(-5);
+            require(equalSeeds.leftValue() == 100 && equalSeeds.rightValue() == -5,
+                    "equal-seed right mutation is isolated");
+        }
+        System.out.println(mode + "=identity:true;mutations=isolated;repeat=fresh;seeds=7/3,3/7,-9/42;equalSeeds=" + (alias ? "n/a" : "distinct-isolated"));
     }
 }

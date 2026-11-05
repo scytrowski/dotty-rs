@@ -46,6 +46,7 @@ const TWO_LOCAL_IDENTITY_HARNESS: &[u8] = include_bytes!(
 );
 
 fn require_exact_jdk_21_or_skip() -> bool {
+    let mut observed = Vec::new();
     let unavailable = ["java", "javac", "javap"]
         .into_iter()
         .filter_map(|tool| {
@@ -61,19 +62,31 @@ fn require_exact_jdk_21_or_skip() -> bool {
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
-            (!text.contains("21.0.13")).then(|| format!("{tool} reports {text:?}"))
+            observed.push(format!("{tool}={:?}", text.trim()));
+            let matches_pin = match tool {
+                "java" => {
+                    text.contains("openjdk version \"21.0.13\"")
+                        && text.contains("Temurin-21.0.13+9 (build 21.0.13+9-LTS)")
+                }
+                "javac" | "javap" => text.contains("21.0.13"),
+                _ => false,
+            };
+            (!matches_pin).then(|| format!("{tool} reports {text:?}"))
         })
         .collect::<Vec<_>>();
     if unavailable.is_empty() {
+        eprintln!("strict-jdk-provenance {}", observed.join("; "));
         true
     } else if std::env::var("DOTTY_CLASSFILE_REQUIRE_JDK").as_deref() == Ok("1") {
         panic!(
-            "strict mixed runtime requires java, javac, and javap from JDK 21.0.13; unavailable: {}",
+            "strict mixed runtime requires Eclipse Temurin JDK 21.0.13+9; observed [{}]; mismatches: {}",
+            observed.join("; "),
             unavailable.join("; ")
         );
     } else {
         eprintln!(
-            "skipping optional mixed runtime JDK test: {}",
+            "skipping optional mixed runtime JDK test; observed [{}]; mismatches: {}",
+            observed.join("; "),
             unavailable.join("; ")
         );
         false
@@ -161,8 +174,7 @@ fn missing_jdk_tools_skip_optional_run_and_fail_required_run() {
     );
     assert!(!required.status.success(), "{required_output}");
     assert!(
-        required_output
-            .contains("strict mixed runtime requires java, javac, and javap from JDK 21.0.13"),
+        required_output.contains("strict mixed runtime requires Eclipse Temurin JDK 21.0.13+9"),
         "{required_output}"
     );
     for tool in ["java", "javac", "javap"] {
@@ -171,6 +183,91 @@ fn missing_jdk_tools_skip_optional_run_and_fail_required_run() {
             "{required_output}"
         );
     }
+}
+
+#[test]
+fn strict_jdk_pin_rejects_other_vendor_in_required_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let fake_bin = TestDirectory::new("fake-jdk-vendor");
+    let script = r#"#!/bin/sh
+case "${0##*/}" in
+  java) echo 'openjdk version "21.0.13"'; echo 'OpenJDK Runtime Environment OtherVendor-21.0.13+9 (build 21.0.13+9)';;
+  javac) echo 'javac 21.0.13';;
+  javap) echo '21.0.13';;
+esac
+"#;
+    for tool in ["java", "javac", "javap"] {
+        let path = fake_bin.path().join(tool);
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let test_binary = std::env::current_exe().expect("current integration test binary");
+    let run = |required: bool| {
+        let mut command = Command::new(&test_binary);
+        command
+            .args([
+                "--exact",
+                "two_immutable_local_pair_identity_and_decoded_flow_on_strict_jdk21",
+                "--nocapture",
+            ])
+            .env("PATH", fake_bin.path());
+        if required {
+            command.env("DOTTY_CLASSFILE_REQUIRE_JDK", "1");
+        } else {
+            command.env_remove("DOTTY_CLASSFILE_REQUIRE_JDK");
+        }
+        command
+            .output()
+            .expect("run strict test with simulated non-Temurin tools")
+    };
+    let optional = run(false);
+    let optional_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&optional.stdout),
+        String::from_utf8_lossy(&optional.stderr)
+    );
+    assert!(optional.status.success(), "{optional_text}");
+    assert!(
+        optional_text.contains("skipping optional mixed runtime JDK test"),
+        "{optional_text}"
+    );
+    assert!(
+        optional_text.contains("OtherVendor-21.0.13+9"),
+        "{optional_text}"
+    );
+    let required = run(true);
+    let required_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&required.stdout),
+        String::from_utf8_lossy(&required.stderr)
+    );
+    assert!(!required.status.success(), "{required_text}");
+    assert!(
+        required_text.contains("requires Eclipse Temurin JDK 21.0.13+9"),
+        "{required_text}"
+    );
+    assert!(
+        required_text.contains("OtherVendor-21.0.13+9"),
+        "{required_text}"
+    );
+    let java = fake_bin.path().join("java");
+    std::fs::write(
+        &java,
+        "#!/bin/sh\necho 'openjdk version \"21.0.13\"'\necho 'OpenJDK Runtime Environment Temurin-21.0.13+10 (build 21.0.13+10-LTS)'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let wrong_build = run(true);
+    let wrong_build_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&wrong_build.stdout),
+        String::from_utf8_lossy(&wrong_build.stderr)
+    );
+    assert!(!wrong_build.status.success(), "{wrong_build_text}");
+    assert!(
+        wrong_build_text.contains("Temurin-21.0.13+10"),
+        "{wrong_build_text}"
+    );
 }
 
 fn batch_class_name<'a>(class: &'a ClassFile<'a>, index: ConstantPoolIndex) -> &'a str {
@@ -1126,7 +1223,7 @@ fn mixed_origin_counter_identity_and_allocation_order_on_strict_jdk21() {
 
 #[test]
 fn two_immutable_local_pair_identity_and_decoded_flow_on_strict_jdk21() {
-    if !require_jdk_21_or_skip() {
+    if !require_exact_jdk_21_or_skip() {
         return;
     }
 
@@ -1353,7 +1450,12 @@ fn two_immutable_local_pair_identity_and_decoded_flow_on_strict_jdk21() {
             String::from_utf8_lossy(&java.stderr)
         );
         let expected = format!(
-            "{harness_mode}=identity:true;mutations=isolated;repeat=fresh;seeds=7/3,3/7,-9/42"
+            "{harness_mode}=identity:true;mutations=isolated;repeat=fresh;seeds=7/3,3/7,-9/42;equalSeeds={}",
+            if label == "alias" {
+                "n/a"
+            } else {
+                "distinct-isolated"
+            }
         );
         assert_eq!(String::from_utf8_lossy(&java.stdout).trim(), expected);
         if label == "primary" {
@@ -1399,7 +1501,17 @@ fn two_immutable_local_pair_identity_and_decoded_flow_on_strict_jdk21() {
                     !text.contains("VerifyError") || expected.contains("VerifyError"),
                     "misclassified verifier result for {case}: {text}"
                 );
-                eprintln!("two-local-negative {case} first-stage={expected}");
+                if case == "uninitialized-counter-escapes-into-pair" {
+                    assert!(
+                        text.to_ascii_lowercase().contains("uninitialized"),
+                        "must fail because the uninitialized Counter escapes: {text}"
+                    );
+                    assert!(
+                        text.contains("Pair.<init>") || text.contains("@26: invokespecial"),
+                        "failure must identify Pair constructor escape point: {text}"
+                    );
+                }
+                eprintln!("two-local-negative {case} first-stage={expected}: {text}");
             };
             let (_, primary_instructions, _, _, primary_code_start, _) =
                 mixed_factory_code(factory, "create");
@@ -1458,6 +1570,90 @@ fn two_immutable_local_pair_identity_and_decoded_flow_on_strict_jdk21() {
                     eprintln!("two-local-negative swapped-pair-loads first-stage=Rust paired contract: {error:?}");
                 },
             ).expect("authenticate the same original two-local source session");
+
+            let mut extra_counter = factory.to_vec();
+            let counter_new_ref = primary_instructions
+                .iter()
+                .find(|i| i.opcode == 0xbb)
+                .unwrap()
+                .operand
+                .unwrap();
+            let counter_ctor_ref = primary_instructions
+                .iter()
+                .find(|i| {
+                    i.opcode == 0xb7
+                        && batch_method_ref(&class, i.operand.unwrap()).0 == "example/Counter"
+                })
+                .unwrap()
+                .operand
+                .unwrap();
+            let pair_init_insert_pc = primary_instructions
+                .iter()
+                .find(|i| {
+                    i.opcode == 0xb7
+                        && batch_method_ref(&class, i.operand.unwrap()).0 == "example/Pair"
+                })
+                .unwrap()
+                .pc;
+            let extra = [
+                0xbb,
+                (counter_new_ref.0 >> 8) as u8,
+                counter_new_ref.0 as u8,
+                0x59,
+                0x1b,
+                0xb7,
+                (counter_ctor_ref.0 >> 8) as u8,
+                counter_ctor_ref.0 as u8,
+                0x57,
+            ];
+            let old_code_len = u32::from_be_bytes(
+                extra_counter[primary_code_start - 4..primary_code_start]
+                    .try_into()
+                    .unwrap(),
+            );
+            let old_attribute_len = u32::from_be_bytes(
+                extra_counter[primary_code_start - 12..primary_code_start - 8]
+                    .try_into()
+                    .unwrap(),
+            );
+            extra_counter.splice(
+                primary_code_start + pair_init_insert_pc..primary_code_start + pair_init_insert_pc,
+                extra,
+            );
+            extra_counter[primary_code_start - 4..primary_code_start]
+                .copy_from_slice(&(old_code_len + 9).to_be_bytes());
+            extra_counter[primary_code_start - 12..primary_code_start - 8]
+                .copy_from_slice(&(old_attribute_len + 9).to_be_bytes());
+            let extra_artifacts = JvmTastyBatchArtifacts {
+                classfiles: batch
+                    .classes()
+                    .iter()
+                    .map(|artifact| JvmTastyClassFileArtifact {
+                        classfile_path: artifact.classfile_path().to_owned(),
+                        classfile_bytes: if artifact.classfile_path() == "example/PairFactory.class"
+                        {
+                            extra_counter.clone()
+                        } else {
+                            artifact.classfile_bytes().to_vec()
+                        },
+                    })
+                    .collect(),
+                sidecars: batch
+                    .classes()
+                    .iter()
+                    .map(|artifact| JvmTastySidecarArtifact {
+                        tasty_path: artifact.tasty_path().to_owned(),
+                        tasty_bytes: artifact.tasty_bytes().to_vec(),
+                    })
+                    .collect(),
+            };
+            with_paired_jvm_tasty_batch_plan(TWO_LOCAL_PRIMARY_BATCH, "PairFactory.scala", SourceId::from_index(21280), |plan| {
+                let tasty = plan.classes.iter().map(|class| class.tasty_plan).collect::<Vec<_>>();
+                let validated = validate_jvm_tasty_batch(plan.jvm_unit, &tasty).unwrap();
+                let error = validate_jvm_tasty_batch_artifacts(&validated, extra_artifacts)
+                    .expect_err("paired Rust contract rejects extra Counter allocation and constructor");
+                eprintln!("two-local-negative extra-counter-allocation-and-constructor first-stage=Rust paired contract: {error:?}");
+            }).expect("authenticate source session for extra Counter control");
 
             let mut same_local = factory.to_vec();
             same_local[primary_code_start + load3..primary_code_start + load4 + 2]
@@ -1522,6 +1718,52 @@ fn two_immutable_local_pair_identity_and_decoded_flow_on_strict_jdk21() {
                 "VerifyError",
             );
 
+            let load_before_store = {
+                let mut bytes = factory.to_vec();
+                let load4_pc = primary_instructions
+                    .iter()
+                    .find(|i| i.opcode == 0x19)
+                    .unwrap()
+                    .pc;
+                let load4_bytes = bytes
+                    [primary_code_start + load4_pc..primary_code_start + load4_pc + 2]
+                    .to_vec();
+                let store4_bytes =
+                    bytes[primary_code_start + store4..primary_code_start + store4 + 2].to_vec();
+                bytes[primary_code_start + load4_pc..primary_code_start + load4_pc + 2]
+                    .copy_from_slice(&store4_bytes);
+                bytes[primary_code_start + store4..primary_code_start + store4 + 2]
+                    .copy_from_slice(&load4_bytes);
+                bytes
+            };
+            run_negative(
+                "load-before-second-local-store",
+                Some(&load_before_store),
+                None,
+                "VerifyError",
+            );
+
+            let mut uninitialized_escape = factory.to_vec();
+            uninitialized_escape[primary_code_start + second_new..primary_code_start + store4 + 2]
+                .copy_from_slice(&[
+                    0xbb,
+                    (counter_new_ref.0 >> 8) as u8,
+                    counter_new_ref.0 as u8,
+                    0x3a,
+                    4,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ]);
+            run_negative(
+                "uninitialized-counter-escapes-into-pair",
+                Some(&uninitialized_escape),
+                None,
+                "VerifyError",
+            );
+
             let mut wrong_pair_owner = factory.to_vec();
             let pair_init_pc = primary_instructions
                 .iter()
@@ -1546,6 +1788,39 @@ fn two_immutable_local_pair_identity_and_decoded_flow_on_strict_jdk21() {
             run_negative(
                 "wrong-pair-constructor-reference",
                 Some(&wrong_pair_owner),
+                None,
+                "VerifyError",
+            );
+            let mut wrong_pair_descriptor = factory.to_vec();
+            let pair_methodref = primary_instructions
+                .iter()
+                .find(|i| {
+                    i.opcode == 0xb7
+                        && batch_method_ref(&class, i.operand.unwrap()).0 == "example/Pair"
+                })
+                .unwrap()
+                .operand
+                .unwrap();
+            let name_and_type = match class.constant_pool.get(pair_methodref).unwrap() {
+                ConstantPoolEntry::Methodref {
+                    name_and_type_index,
+                    ..
+                } => *name_and_type_index,
+                other => panic!("Pair constructor reference is a methodref: {other:?}"),
+            };
+            let wrong_descriptor = (1..=u16::from_be_bytes([factory[8], factory[9]]))
+                .map(ConstantPoolIndex)
+                .find(|index| {
+                    class.constant_pool.get(*index)
+                        == Some(&ConstantPoolEntry::Utf8("(I)V".to_owned()))
+                })
+                .expect("Counter constructor descriptor exists");
+            let descriptor_offset = constant_pool_entry_offset(factory, name_and_type) + 3;
+            wrong_pair_descriptor[descriptor_offset..descriptor_offset + 2]
+                .copy_from_slice(&wrong_descriptor.0.to_be_bytes());
+            run_negative(
+                "wrong-pair-constructor-descriptor",
+                Some(&wrong_pair_descriptor),
                 None,
                 "VerifyError",
             );
