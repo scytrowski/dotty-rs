@@ -4151,7 +4151,12 @@ fn resolve_tuple2_package_type_reference(
     else {
         return None;
     };
-    let name = resolve_qualified_name(file, reference)?;
+    // The Tuple2 parent is authenticated from the nominal class-name entry
+    // itself. Resolving a Signed name through its result signature would let
+    // a method signature impersonate the class name.
+    let dotty_tasty::tasty::RawName::Utf8(name) = file.name(reference)? else {
+        return None;
+    };
     let package = resolve_tuple2_package_prefix(file, &qualifier, depth + 1)?;
     Some(BinaryName::from_internal(format!("{package}/{name}")))
 }
@@ -4179,8 +4184,12 @@ fn resolve_tuple2_package_prefix(
     if term.tag != TERMREFPKG_TAG {
         return None;
     }
-    let package = resolve_qualified_name(file, term.name_ref()?)?;
-    (package == "scala").then_some(package)
+    // Package owners in this bounded Scala 3.9 shape are direct package-name
+    // entries. Do not accept method/result signatures or other name forms.
+    let dotty_tasty::tasty::RawName::Utf8(package) = file.name(term.name_ref()?)? else {
+        return None;
+    };
+    (package == "scala").then(|| package.clone())
 }
 
 fn is_rooted_scala_serializable_parent(

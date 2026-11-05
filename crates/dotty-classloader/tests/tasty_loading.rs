@@ -18,8 +18,9 @@ use dotty_core::{
     TypeId, Visibility,
 };
 use dotty_tasty::tasty::{
-    DefinitionBody, EncodedSection, LambdaTptNode, PackageNode, ParameterNode, RawNode, RawNodes,
-    Reader, StandardSection, StructuredNode, StructuredTree, TastyFile, TastyFileBuilder, Writer,
+    DefinitionBody, EncodedSection, LambdaTptNode, NameTable, PackageNode, ParameterNode, RawName,
+    RawNode, RawNodes, Reader, StandardSection, StructuredNode, StructuredTree, TastyFile,
+    TastyFileBuilder, Writer,
 };
 use dotty_tasty_unpickler::tasty_unpickler::{
     TastySession, TastySessionError, TastyUnpickler, UnpickleError,
@@ -2176,6 +2177,64 @@ fn string_constant_at_tuple2_package_prefix_fails_closed_through_classloader() {
     );
 }
 
+#[test]
+fn signed_result_name_cannot_authenticate_tuple2_constructor_through_classloader() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let scala_library = root.join("../dotty-tasty/tests/fixtures/scala3-library");
+    let tuple2_path = scala_library.join("scala/Tuple2.tasty");
+    let original = fs::read(&tuple2_path).expect("pinned Tuple2 fixture");
+    let file = TastyFile::parse(&original).expect("pinned Tuple2 TASTy");
+    let address_index = file.ast_address_index().expect("Tuple2 AST address index");
+    assert_eq!(
+        address_index
+            .get_node(162)
+            .expect("constructor type reference")
+            .tag,
+        dotty_tasty::tasty::TYPEREF_TAG
+    );
+
+    let mut names = file.names().entries().to_vec();
+    let star_refs = names
+        .iter()
+        .enumerate()
+        .filter_map(|(index, name)| {
+            matches!(name, RawName::Utf8(value) if value == "*:").then_some(index)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(star_refs.len(), 1, "fixture has one direct *: name entry");
+    let star_ref = star_refs[0] as u32;
+    let product2_ref = names
+        .iter()
+        .position(|name| matches!(name, RawName::Utf8(value) if value == "Product2"))
+        .expect("Tuple2 parent uses Product2") as u32;
+    let result_signature_ref = names.len() as u32;
+    names.push(RawName::Utf8("*:".to_owned()));
+    names[star_ref as usize] = RawName::Signed {
+        original: product2_ref,
+        result_signature: result_signature_ref,
+        parameter_signatures: Vec::new(),
+    };
+    let names = NameTable::from_entries(names).expect("mutated name table is valid");
+    let mut builder = TastyFileBuilder::new(file.header().clone(), names);
+    for section in file.sections().iter() {
+        builder.push_section(EncodedSection::raw(section.name, section.payload.to_vec()));
+    }
+    let mutated = builder.encode().expect("mutated Tuple2 fixture encodes");
+    let mutated_file = TastyFile::parse(&mutated).expect("mutated Tuple2 TASTy parses");
+    assert_eq!(
+        mutated_file
+            .section(StandardSection::Asts)
+            .expect("Tuple2 AST section")
+            .payload,
+        file.section(StandardSection::Asts)
+            .expect("original Tuple2 AST section")
+            .payload,
+        "the reproducer changes only name-table interpretation"
+    );
+
+    assert_tuple2_bytes_rejected(&scala_library, mutated);
+}
+
 fn assert_mutated_tuple2_rejected(
     scala_library: &Path,
     address: u32,
@@ -2210,6 +2269,10 @@ fn assert_mutated_tuple2_rejected(
         replacement_tag
     );
 
+    assert_tuple2_bytes_rejected(scala_library, mutated_tuple2);
+}
+
+fn assert_tuple2_bytes_rejected(scala_library: &Path, mutated_tuple2: Vec<u8>) {
     let jdk = JdkClassPath::new(
         PathBuf::from(std::env::var_os("JAVA_HOME").expect("JDK 21 JAVA_HOME")).join("jmods"),
     )
