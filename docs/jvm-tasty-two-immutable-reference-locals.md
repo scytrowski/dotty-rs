@@ -360,3 +360,100 @@ The artifacts were emitted by Rust 1.98.1 and checked with Scala 3.9.0 at
 `777528f19a58e794c9954a42f433373472ec57f8` and Temurin 21.0.13+9. These are
 producer observations; they are not the Scala oracle hashes recorded earlier
 in this document.
+
+## #2127 Rust JVM runtime identity gate
+
+The #2127 gate extends the existing JDK runtime integration target. It emits
+three independent six-artifact batches through the genuine Rust source
+frontend and paired JVM/TASTy producer: the primary `new Pair(first, second)`
+source, the reversed `new Pair(second, first)` source, and the deliberate
+`new Pair(first, first)` alias source. Each batch has its own `SourceId` and
+canonical emission session. The Java 21 harness is compiled separately with
+`javac --release 21`; runtime classpaths contain the original Rust `.class`
+files and that harness only. No Scala-produced classes or sidecars are used by
+the runtime client. The run used Temurin 21.0.13+9, Java class-file major 65,
+and `-Xverify:all -ea`.
+
+For primary `PairFactory.create(II)Lexample/Pair;`, Rust decoding and
+`javap -v -p -c` agree on `max_stack=4`, `max_locals=5`, formal slots 1 and 2,
+and this measured instruction flow (PCs are bytecode offsets):
+
+| PC | Instruction | Constant-pool reference / local effect |
+| ---: | --- | --- |
+| 0 | `new Counter` | Class #12 |
+| 3 | `dup` | |
+| 4 | `iload_1` | first seed formal, slot 1 |
+| 5 | `invokespecial Counter.<init>(I)V` | Methodref #15 |
+| 8 | `astore_3` | initialized first Counter, slot 3 |
+| 9 | `new Counter` | Class #12 |
+| 12 | `dup` | |
+| 13 | `iload_2` | second seed formal, slot 2 |
+| 14 | `invokespecial Counter.<init>(I)V` | Methodref #15 |
+| 17 | `astore 4` | initialized second Counter, slot 4 |
+| 19 | `new Pair` | Class #17 |
+| 22 | `dup` | |
+| 23 | `aload_3` | first Pair argument, slot 3 |
+| 24 | `aload 4` | second Pair argument, slot 4 |
+| 26 | `invokespecial Pair.<init>(Counter,Counter)V` | Methodref #20 |
+| 29 | `areturn` | |
+
+The CFG analyzer accepts the original method and confirms both initialized
+reference locals are available at their Pair loads. The reversed source retains
+both initializer evaluations and stores but loads slots 4 then 3 at PCs 23 and
+25. The alias source still initializes/stores the second Counter in slot 4,
+then loads slot 3 twice at PCs 23 and 24. `javap` confirms the explicit-index
+slot-4 instructions and their PCs for all variants.
+
+The independent Java harness observes primary results `7/3`, `3/7`, and
+`-9/42`, verifies equal-seed-independent object identity through field
+references and separate mutations, and verifies repeated calls allocate fresh
+objects. It observes reversed field ownership for the reversed source. For the
+alias source it observes `left == right`, sees a mutation through either
+reference in both getter results, and also confirms the second local's
+initializer ran and repeated calls allocate a fresh aliased object pair.
+
+The six original Rust artifacts remain unchanged before and after harness
+compilation, disassembly, runtime, and isolated negative copies. Primary SHA-256
+values are:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` |
+| `Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` |
+| `Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` |
+| `Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` |
+| `PairFactory.class` | `16f734ec97d054a2ff1ec40400b6583b9d60476babcf0ba8617fd98dc0feebea` |
+| `PairFactory.tasty` | `9415f52a7476d72554ba8943b9b657d588385fc339b3ff639a3c7d51e3d685e4` |
+
+The reversed and alias sessions retain the same Counter and Pair artifact
+hashes. Reversed `PairFactory.class` / `.tasty` hashes are
+`e04948fc761273bd68ea698e20ed9af574bc2f4f10f8361c4a6b089cc5f72dde` /
+`5eb6397aa8561be0e710c8af2087b7eb4561d002da89df540446cc4cd1dc1377`; alias
+hashes are
+`3064553d2e44ec26c265490b6b0ffad08f46ae929634f1c60ddfa999e081ccc2` /
+`7a5332c3b2ee991624a4219a7347f3e928357c29f2f44d50ad027f6feae8a879`.
+
+Isolated primary-batch controls observed their first failure at the actual
+layer. The source-authenticated Rust paired contract rejects the swapped local
+loads in its `cross-class invocation` phase; an isolated JVM-valid swapped
+clone and a same-local-twice clone reach the Java identity assertion. Wrong or
+missing slot-4 stores, missing second allocation or constructor calls, a wrong
+Pair constructor Methodref, and `max_stack=3` or `max_locals=4` fail with JVM
+`VerifyError`. Renaming Pair's `leftValue` method in a classfile clone yields
+`NoSuchMethodError`; omitting Counter, Pair, or PairFactory yields
+`NoClassDefFoundError`. The swapped-load case is verifier-valid and is not
+classified as a verifier error. All mutations use isolated class directories;
+the six original hashes are rechecked after each variant run. Existing one-local
+strict runtime tests remain in the same integration target and continue as
+inherited regressions.
+
+The strict two-local runtime test, the full `jvm_tasty_mixed_origin_runtime`
+target, mandatory `DOTTY_CLASSFILE_REQUIRE_JDK=1` gate, and complete
+`cargo test --workspace --all-targets --locked` run were performed on code/test
+commit `883bb28674` (full SHA `883bb28674f9d1de` recorded in the PR commit
+history). The workspace run completed with 538 passed and 4 ignored; the ignored
+tests require separate optional JDK/classpath fixtures and are outside this
+JVM-only issue gate. `cargo fmt --all -- --check`, the frontend boundary guard,
+workspace Clippy with warnings denied, workspace rustdoc with warnings denied,
+and `git diff --check` also passed. No Scala source-consumer or TASTy
+interoperability claim is made here.
