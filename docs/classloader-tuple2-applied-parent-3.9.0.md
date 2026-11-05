@@ -10,12 +10,14 @@ remain unchanged:
 | `scala/$times$colon.tasty` | `a9bea01c727e9521bbc2c04b7c7f77de5e8e797f685614144f7b8edefdcc9139` |
 
 In the authentic `Tuple2` declaration, parent 0 is an applied constructor
-whose selected method is `<init>` and whose qualifier contains the shared
-reference to the direct package type `scala/*:`. The classloader authenticates
-that exact shape and declaration before exposing the nominal encoded identity
-`scala/$times$colon`. Parent 1 remains the independent applied parent
-`scala/Product2[T1, T2]`; parents 2 and 3 remain `scala/Product` and
-`scala/Serializable`. The mapping is limited to parent 0 of the authentic
+whose selected method is `<init>`. Its `NEW/APPLIEDTYPE` qualifier has a root
+tycon that resolves to package-qualified `scala/*:`; this must match the
+selection's underlying shared type reference. References found only inside
+applied arguments do not authenticate the constructor owner. The classloader
+authenticates that exact shape and declaration before exposing the nominal
+encoded identity `scala/$times$colon`. Parent 1 remains the independent
+applied parent `scala/Product2[T1, T2]`; parents 2 and 3 remain `scala/Product`
+and `scala/Serializable`. The mapping is limited to parent 0 of the authentic
 `scala/Tuple2` request and does not define general operator-name encoding or
 applied/higher-kinded type support.
 
