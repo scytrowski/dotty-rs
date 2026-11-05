@@ -189,6 +189,12 @@ impl Validator<'_, '_> {
                     });
             let one_local_shape = source_block.stats.len() == 1
                 && initializers.len() <= 1
+                && initializers.iter().all(|initializer| {
+                    initializer.source_block == source_id
+                        && initializer.typed_block == typed_id
+                        && initializer.source_declaration == source_block.stats[0]
+                        && initializer.typed_declaration == typed_block.stats[0]
+                })
                 && self.source_tree(source_block.stats[0])?.position.is_some();
             if !(two_local_shape || one_local_shape) {
                 return Err(
