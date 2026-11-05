@@ -676,9 +676,15 @@ reference were accepted during lazy signature lookup, then failed with
 `TreeWithoutOwner` during `-decompile`. Wrong local types, the single-reference
 alias mutation, and the constructor-type mutation were accepted by Scala
 `-from-tasty` and `-decompile`; their decompiled forms are recorded by the
-test. Wrong factory formal counts/types/results first failed source compilation
-with `[E007]`; malformed JVM descriptors first failed compilation with
-`[E007]`. These controls never replace the accepted runtime artifacts.
+test. The duplicate-address mutation decodes as `new Pair(first, first)` and
+is rejected by the source-authenticated Rust batch contract against the
+original `new Pair(first, second)` input at TASTy plan identity. A separately
+produced `new Pair(first, first)` source remains the positive source-contract
+and runtime alias control. Matching clients against the wrong factory formal
+count/type/result controls first fail compilation with `[E007]`; all four
+malformed JVM descriptor clients compile against the unchanged sidecars and
+then first fail Java `-Xverify:all` with `VerifyError`. These controls never
+replace the accepted runtime artifacts.
 
 The target remains registered once in the existing four-shard strict Scala
 workflow and its fail-closed aggregate. The required environment name above is
