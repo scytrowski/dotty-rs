@@ -54,7 +54,9 @@ pub use error::{
 pub use plan::{
     ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan, DefaultConstructorPlan,
     DirectFormalConstructorCallPairBinding, DistinctReferenceMethodParameter,
-    DistinctReferenceMethodSignature, LocalValueBinding, MethodPicklePlan,
+    DistinctReferenceMethodSignature, FormalLocalConstructorCallArgumentBinding,
+    FormalLocalConstructorCallArgumentOrigin, FormalLocalConstructorCallPairBinding,
+    LocalCounterInitializerBinding, LocalValueBinding, MethodPicklePlan,
     NestedConstructorCallBinding, NestedConstructorCallPairBinding,
     OrderedConstructorCallArgumentBinding, OrderedConstructorCallArgumentOrigin,
     OrderedConstructorCallArgumentPairBinding, PicklePlan, PlannedCallBinding,

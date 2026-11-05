@@ -1,0 +1,32 @@
+-- [E007] Type Mismatch Error: WrongMethodResult.scala:16:25 -------------------
+16 |      case Num(value) => value
+   |                         ^^^^^
+   |                         Found:    (value : Int)
+   |                         Required: adt.Expr
+   |
+   | longer explanation available when compiling with `-explain`
+-- [E134] Type Error: WrongMethodResult.scala:18:14 ----------------------------
+18 |        value + sum(right)
+   |        ^^^^^^^
+   | None of the overloaded alternatives of method + in class Int with types
+   |  (x: Double): Double
+   |  (x: Float): Float
+   |  (x: Long): Long
+   |  (x: Int): Int
+   |  (x: Char): Int
+   |  (x: Short): Int
+   |  (x: Byte): Int
+   |  (x: String): String
+   | match arguments (adt.Expr)
+-- [E008] Not Found Error: WrongMethodResult.scala:20:18 -----------------------
+20 |        sum(left) + sum(right)
+   |        ^^^^^^^^^^^
+   |value + is not a member of adt.Expr, but could be made available as an extension method.
+   |
+   |One of the following imports might make progress towards fixing the problem:
+   |
+   |  import scala.math.Fractional.Implicits.infixFractionalOps
+   |  import scala.math.Integral.Implicits.infixIntegralOps
+   |  import scala.math.Numeric.Implicits.infixNumericOps
+   |
+3 errors found

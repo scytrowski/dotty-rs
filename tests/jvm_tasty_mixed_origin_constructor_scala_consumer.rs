@@ -13,6 +13,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[path = "support/command_timing.rs"]
+mod command_timing;
+
 const REQUIRE: &str = "DOTTY_REQUIRE_SCALA_TASTY_MIXED_ORIGIN_CONSTRUCTOR_CONSUMER";
 const SCALA_REVISION: &str = "777528f19a58e794c9954a42f433373472ec57f8";
 const FORWARD: &str = include_str!(
@@ -38,10 +41,9 @@ fn required() -> bool {
     }
 }
 
-fn output(command: &mut Command) -> Output {
+fn output(operation: &'static str, command: &mut Command) -> Output {
     let rendered = format!("{command:?}");
-    let result = command
-        .output()
+    let result = command_timing::output(operation, command)
         .unwrap_or_else(|error| panic!("run {rendered}: {error}"));
     assert!(
         result.status.success(),
@@ -52,8 +54,13 @@ fn output(command: &mut Command) -> Output {
     result
 }
 
+fn timed_output(operation: &str, command: &mut Command) -> Output {
+    command_timing::output(operation, command)
+        .unwrap_or_else(|error| panic!("run {operation}: {error}"))
+}
+
 fn sha256(path: &Path) -> String {
-    String::from_utf8_lossy(&output(Command::new("sha256sum").arg(path)).stdout)
+    String::from_utf8_lossy(&output("sha256", Command::new("sha256sum").arg(path)).stdout)
         .split_whitespace()
         .next()
         .expect("sha256sum emits a hash")
@@ -114,6 +121,7 @@ impl Scala {
             );
         }
         let revision = output(
+            "scala-revision",
             Command::new("git")
                 .arg("-C")
                 .arg(&root)
@@ -124,7 +132,7 @@ impl Scala {
             SCALA_REVISION
         );
         let scalac = root.join("dist/target/universal/stage/bin/scalac");
-        let version = output(Command::new(&scalac).arg("-version"));
+        let version = output("scalac-version", Command::new(&scalac).arg("-version"));
         let version_text = format!(
             "{}{}",
             String::from_utf8_lossy(&version.stdout),
@@ -141,7 +149,7 @@ impl Scala {
             compiler_jar.display()
         );
         let java = java_home.join("bin/java");
-        let java_version = output(Command::new(&java).arg("-version"));
+        let java_version = output("java-version", Command::new(&java).arg("-version"));
         let java_text = format!(
             "{}{}",
             String::from_utf8_lossy(&java_version.stdout),
@@ -186,8 +194,9 @@ impl Scala {
         command
     }
 
-    fn compile(&self, classpath: &str, out: &Path, source: &Path) {
+    fn compile(&self, operation: &'static str, classpath: &str, out: &Path, source: &Path) {
         output(
+            operation,
             self.command()
                 .args(["-Werror", "-release", "21", "-classpath"])
                 .arg(classpath)
@@ -197,15 +206,23 @@ impl Scala {
         );
     }
 
-    fn compile_result(&self, classpath: &str, out: &Path, source: &Path) -> Output {
-        self.command()
-            .args(["-Werror", "-release", "21", "-classpath"])
-            .arg(classpath)
-            .arg("-d")
-            .arg(out)
-            .arg(source)
-            .output()
-            .expect("run pinned Scala compile probe")
+    fn compile_result(
+        &self,
+        operation: &str,
+        classpath: &str,
+        out: &Path,
+        source: &Path,
+    ) -> Output {
+        command_timing::output(
+            operation,
+            self.command()
+                .args(["-Werror", "-release", "21", "-classpath"])
+                .arg(classpath)
+                .arg("-d")
+                .arg(out)
+                .arg(source),
+        )
+        .expect("run pinned Scala compile probe")
     }
 }
 
@@ -622,6 +639,72 @@ fn lookup_probes(
             "[E008] Not Found Error",
         ),
     ];
+    let positive_case = root.join("lookup-combined-positive");
+    let positive_sidecar_dir = positive_case.join("original-sidecar");
+    let positive_out = positive_case.join("out");
+    fs::create_dir_all(&positive_sidecar_dir).unwrap();
+    fs::create_dir_all(&positive_out).unwrap();
+    write_batch(&positive_sidecar_dir, batch);
+    for (label, class_path, original_member, descriptor, _, _) in cases {
+        let member = if label == "factory-wrap-and-create" {
+            factory_method
+        } else {
+            original_member
+        };
+        let classfile = positive_sidecar_dir.join(class_path);
+        let masked = without_method(&fs::read(&classfile).unwrap(), member, descriptor);
+        fs::write(&classfile, masked).unwrap();
+    }
+    let positive_source = positive_case.join("Lookup.scala");
+    let mut positive_definitions = String::new();
+    for (label, _, _, _, original_expression, _) in cases {
+        let expression = original_expression.replace("wrapAndCreate", factory_method);
+        let probe_name = label.replace('-', "_");
+        let result_type = match label {
+            "counter-set" => "Unit",
+            "counter-get" | "pair-left" | "pair-right" => "Int",
+            "pair-constructor" | "factory-wrap-and-create" => "example.Pair",
+            _ => unreachable!("known lookup case"),
+        };
+        positive_definitions.push_str(&format!(
+            "  def probe_{probe_name}(): {result_type} = {expression}\n"
+        ));
+    }
+    fs::write(
+        &positive_source,
+        format!("package example\nobject Lookup {{\n{positive_definitions}}}\n"),
+    )
+    .unwrap();
+    let classpath = format!("{}:{}", positive_sidecar_dir.display(), scala.libraries);
+    let positive_result = scala.compile_result(
+        "lookup-tasty-combined-positive",
+        &classpath,
+        &positive_out,
+        &positive_source,
+    );
+    assert!(
+        positive_result.status.success(),
+        "combined original TASTy lookup failed: {}",
+        String::from_utf8_lossy(&positive_result.stderr)
+    );
+    assert_unchanged(producer, before, "during combined TASTy lookup probe");
+    let compiled_bytes = fs::read(positive_out.join("example/Lookup$.class")).unwrap();
+    let compiled = decode_class(&compiled_bytes);
+    for (label, _, _, _, _, _) in cases {
+        let probe_name = label.replace('-', "_");
+        let method = compiled.methods.iter().find(|method| {
+            compiled.constant_pool.utf8(method.name_index).unwrap() == format!("probe_{probe_name}")
+        });
+        assert!(
+            method.is_some_and(|method| method
+                .attributes
+                .iter()
+                .any(|attribute| matches!(attribute, Attribute::Code(_)))),
+            "combined TASTy lookup did not emit probe_{probe_name}"
+        );
+        eprintln!("TASTY_LOOKUP_ACCEPTED {label}; combined positive method emitted");
+    }
+
     for (label, class_path, original_member, descriptor, original_expression, missing) in cases {
         let member = if label == "factory-wrap-and-create" {
             factory_method
@@ -630,34 +713,21 @@ fn lookup_probes(
         };
         let expression = original_expression.replace("wrapAndCreate", factory_method);
         let case = root.join(format!("lookup-{label}"));
-        let sidecar_dir = case.join("original-sidecar");
-        let sidecar_out = case.join("original-sidecar-out");
         let classfile_dir = case.join("classfile-only");
         let classfile_out = case.join("classfile-only-out");
-        for dir in [&sidecar_dir, &sidecar_out, &classfile_dir, &classfile_out] {
+        for dir in [&classfile_dir, &classfile_out] {
             fs::create_dir_all(dir).unwrap();
         }
-        write_batch(&sidecar_dir, batch);
         write_batch(&classfile_dir, batch);
-        for dir in [&sidecar_dir, &classfile_dir] {
-            let classfile = dir.join(class_path);
-            let masked = without_method(&fs::read(&classfile).unwrap(), member, descriptor);
-            fs::write(&classfile, masked).unwrap();
-        }
+        let classfile = classfile_dir.join(class_path);
+        let masked = without_method(&fs::read(&classfile).unwrap(), member, descriptor);
+        fs::write(&classfile, masked).unwrap();
         let source = case.join("Lookup.scala");
         fs::write(
             &source,
             format!("package example\nobject Lookup {{ val selected = {{ {expression} }} }}\n"),
         )
         .unwrap();
-        let classpath = format!("{}:{}", sidecar_dir.display(), scala.libraries);
-        let sidecar_result = scala.compile_result(&classpath, &sidecar_out, &source);
-        assert!(
-            sidecar_result.status.success(),
-            "original TASTy lookup for {member}{descriptor} failed: {}",
-            String::from_utf8_lossy(&sidecar_result.stderr)
-        );
-
         let classfile = classfile_dir.join(class_path);
         fs::write(
             &classfile,
@@ -666,6 +736,7 @@ fn lookup_probes(
         .unwrap();
         fs::remove_file(classfile_dir.join(class_path.replace(".class", ".tasty"))).unwrap();
         let control = scala.compile_result(
+            &format!("lookup-classfile-only-{label}"),
             &format!("{}:{}", classfile_dir.display(), scala.libraries),
             &classfile_out,
             &source,
@@ -682,7 +753,6 @@ fn lookup_probes(
         eprintln!("TASTY_LOOKUP_ACCEPTED {label}; CLASSFILE_ONLY_FIRST_REJECTION {diagnostic}");
         assert_unchanged(producer, before, "during TASTy lookup probes");
     }
-    let _ = batch;
 }
 
 fn inspect_original_tasty(
@@ -703,12 +773,10 @@ fn inspect_original_tasty(
         .into_iter()
         .zip(&sidecars)
     {
-        let decompile = scala
-            .command()
-            .arg("-decompile")
-            .arg(sidecar)
-            .output()
-            .expect("run official Scala -decompile");
+        let decompile = timed_output(
+            &format!("reader-decompile-original-{name}"),
+            scala.command().arg("-decompile").arg(sidecar),
+        );
         assert!(
             decompile.status.success(),
             "Scala -decompile rejected Rust {name}.tasty: {}",
@@ -756,12 +824,10 @@ fn inspect_original_tasty(
             }
             _ => unreachable!(),
         }
-        let printed = scala
-            .command()
-            .arg("-print-tasty")
-            .arg(sidecar)
-            .output()
-            .expect("run official Scala -print-tasty");
+        let printed = timed_output(
+            &format!("reader-print-tasty-original-{name}"),
+            scala.command().arg("-print-tasty").arg(sidecar),
+        );
         assert!(
             printed.status.success(),
             "Scala -print-tasty rejected Rust {name}.tasty: {}",
@@ -793,15 +859,16 @@ fn inspect_original_tasty(
         }
         eprintln!("SCALA_PRINT_TASTY {name} sha256={}", sha256(sidecar));
     }
-    let reconstructed = scala
-        .command()
-        .args(["-release", "21", "-from-tasty", "-classpath"])
-        .arg(format!("{}:{}", producer.display(), scala.libraries))
-        .arg("-d")
-        .arg(&from_tasty_dir)
-        .args(&sidecars)
-        .output()
-        .expect("run official Scala -from-tasty");
+    let reconstructed = timed_output(
+        "reader-from-tasty-original",
+        scala
+            .command()
+            .args(["-release", "21", "-from-tasty", "-classpath"])
+            .arg(format!("{}:{}", producer.display(), scala.libraries))
+            .arg("-d")
+            .arg(&from_tasty_dir)
+            .args(&sidecars),
+    );
     assert!(
         reconstructed.status.success(),
         "Scala -from-tasty rejected original Rust sidecars: {}",
@@ -843,12 +910,10 @@ fn inspect_renamed_tasty(scala: &Scala, producer: &Path, root: &Path, before: &[
             .iter()
             .find(|path| path.file_name().unwrap().to_string_lossy() == format!("{name}.tasty"))
             .unwrap();
-        let decompiled = scala
-            .command()
-            .arg("-decompile")
-            .arg(path)
-            .output()
-            .expect("run Scala decompiler for renamed Rust sidecar");
+        let decompiled = timed_output(
+            &format!("reader-decompile-renamed-{name}"),
+            scala.command().arg("-decompile").arg(path),
+        );
         assert!(
             decompiled.status.success(),
             "Scala -decompile rejected renamed {name}.tasty: {}",
@@ -859,12 +924,10 @@ fn inspect_renamed_tasty(scala: &Scala, producer: &Path, root: &Path, before: &[
             "renamed {name} TASTy omits {expected}: {}",
             String::from_utf8_lossy(&decompiled.stdout)
         );
-        let printed = scala
-            .command()
-            .arg("-print-tasty")
-            .arg(path)
-            .output()
-            .expect("run Scala TASTy printer for renamed Rust sidecar");
+        let printed = timed_output(
+            &format!("reader-print-tasty-renamed-{name}"),
+            scala.command().arg("-print-tasty").arg(path),
+        );
         assert!(
             printed.status.success(),
             "Scala -print-tasty rejected renamed {name}: {}",
@@ -874,15 +937,16 @@ fn inspect_renamed_tasty(scala: &Scala, producer: &Path, root: &Path, before: &[
     }
     let reconstructed = root.join("renamed-from-tasty-inspection-only");
     fs::create_dir_all(&reconstructed).unwrap();
-    let result = scala
-        .command()
-        .args(["-release", "21", "-from-tasty", "-classpath"])
-        .arg(format!("{}:{}", producer.display(), scala.libraries))
-        .arg("-d")
-        .arg(&reconstructed)
-        .args(&sidecars)
-        .output()
-        .expect("run Scala -from-tasty for renamed sidecars");
+    let result = timed_output(
+        "reader-from-tasty-renamed",
+        scala
+            .command()
+            .args(["-release", "21", "-from-tasty", "-classpath"])
+            .arg(format!("{}:{}", producer.display(), scala.libraries))
+            .arg("-d")
+            .arg(&reconstructed)
+            .args(&sidecars),
+    );
     assert!(
         result.status.success(),
         "Scala -from-tasty rejected renamed Rust sidecars: {}",
@@ -954,6 +1018,7 @@ fn compile_and_run(
         source_path.display()
     );
     scala.compile(
+        "compile-positive-consumer",
         &format!("{}:{}", producer.display(), scala.libraries),
         &client_out,
         &source_path,
@@ -971,6 +1036,7 @@ fn compile_and_run(
     );
     eprintln!("RUNTIME_CLASSPATH {classpath}");
     let java = output(
+        "runtime-positive",
         Command::new(&scala.java)
             .env(
                 "JAVA_TOOL_OPTIONS",
@@ -1077,6 +1143,7 @@ fn sidecar_negative_probes(scala: &Scala, root: &Path, batch: &PairedJvmTastyBat
             let client = case.join("Consumer.scala");
             fs::write(&client, CLIENT).unwrap();
             let result = scala.compile_result(
+                &format!("compile-negative-{label}"),
                 &format!("{}:{}", classes.display(), scala.libraries),
                 &out,
                 &client,
@@ -1133,6 +1200,7 @@ fn source_negative_probes(scala: &Scala, root: &Path, batch: &PairedJvmTastyBatc
         let client = case.join("Probe.scala");
         fs::write(&client, source).unwrap();
         let result = scala.compile_result(
+            &format!("compile-negative-{label}"),
             &format!("{}:{}", classes.display(), scala.libraries),
             &out,
             &client,
@@ -1166,6 +1234,7 @@ fn source_negative_probes(scala: &Scala, root: &Path, batch: &PairedJvmTastyBatc
     let client = case.join("Consumer.scala");
     fs::write(&client, CLIENT).unwrap();
     let result = scala.compile_result(
+        "compile-negative-corrupt-formal-termref",
         &format!("{}:{}", classes.display(), scala.libraries),
         &out,
         &client,
@@ -1175,12 +1244,13 @@ fn source_negative_probes(scala: &Scala, root: &Path, batch: &PairedJvmTastyBatc
         "signature-only Scala lookup unexpectedly forced factory body: {}",
         String::from_utf8_lossy(&result.stderr)
     );
-    let forced = scala
-        .command()
-        .arg("-decompile")
-        .arg(classes.join(factory.tasty_path()))
-        .output()
-        .expect("run official Scala reader against corrupted formal reference");
+    let forced = timed_output(
+        "reader-decompile-corrupt-formal",
+        scala
+            .command()
+            .arg("-decompile")
+            .arg(classes.join(factory.tasty_path())),
+    );
     assert!(
         !forced.status.success(),
         "official reader accepted an invalid original formal TERMREF address"
@@ -1208,12 +1278,13 @@ fn source_negative_probes(scala: &Scala, root: &Path, batch: &PairedJvmTastyBatc
         change_formal_target(factory.tasty_bytes(), seed_address, 127),
     )
     .unwrap();
-    let seed_forced = scala
-        .command()
-        .arg("-decompile")
-        .arg(seed_classes.join(factory.tasty_path()))
-        .output()
-        .expect("run official Scala reader against corrupted seed reference");
+    let seed_forced = timed_output(
+        "reader-decompile-corrupt-seed",
+        scala
+            .command()
+            .arg("-decompile")
+            .arg(seed_classes.join(factory.tasty_path())),
+    );
     assert!(
         !seed_forced.status.success(),
         "official reader accepted invalid seed TERMREF address"
@@ -1250,6 +1321,7 @@ fn source_negative_probes(scala: &Scala, root: &Path, batch: &PairedJvmTastyBatc
     let client = case.join("Consumer.scala");
     fs::write(&client, CLIENT).unwrap();
     let result = scala.compile_result(
+        "compile-negative-renamed-factory-method",
         &format!("{}:{}", classes.display(), scala.libraries),
         &out,
         &client,
@@ -1275,6 +1347,7 @@ fn source_negative_probes(scala: &Scala, root: &Path, batch: &PairedJvmTastyBatc
     let missing_counter_client = missing_counter_case.join("Consumer.scala");
     fs::write(&missing_counter_client, CLIENT).unwrap();
     let missing_counter = scala.compile_result(
+        "compile-negative-missing-counter-class",
         &format!("{}:{}", missing_counter_classes.display(), scala.libraries),
         &missing_counter_out,
         &missing_counter_client,
@@ -1309,6 +1382,7 @@ fn source_negative_probes(scala: &Scala, root: &Path, batch: &PairedJvmTastyBatc
     let ctor_client = ctor_case.join("Consumer.scala");
     fs::write(&ctor_client, CLIENT).unwrap();
     let ctor_compile = scala.compile_result(
+        "compile-positive-missing-constructor-runtime-control",
         &format!("{}:{}", ctor_classes.display(), scala.libraries),
         &ctor_out,
         &ctor_client,
@@ -1324,12 +1398,13 @@ fn source_negative_probes(scala: &Scala, root: &Path, batch: &PairedJvmTastyBatc
         ctor_classes.display(),
         scala.libraries
     );
-    let ctor_runtime = Command::new(&scala.java)
-        .args(["-Xverify:all", "-ea", "-classpath"])
-        .arg(classpath)
-        .arg("Consumer")
-        .output()
-        .expect("run client against missing Counter constructor");
+    let ctor_runtime = timed_output(
+        "runtime-missing-counter-constructor",
+        Command::new(&scala.java)
+            .args(["-Xverify:all", "-ea", "-classpath"])
+            .arg(classpath)
+            .arg("Consumer"),
+    );
     assert!(
         !ctor_runtime.status.success(),
         "missing Counter constructor unexpectedly linked"
@@ -1357,6 +1432,7 @@ fn source_negative_probes(scala: &Scala, root: &Path, batch: &PairedJvmTastyBatc
     let external_client = external_case.join("Probe.scala");
     fs::write(&external_client, "package foreign:\n  class Counter(val value: Int)\npackage example:\n  object Probe:\n    val pair = new PairFactory().wrapAndCreate(new foreign.Counter(1), 2)\n").unwrap();
     let external = scala.compile_result(
+        "compile-negative-foreign-counter-owner",
         &format!("{}:{}", external_classes.display(), scala.libraries),
         &external_out,
         &external_client,
@@ -1391,6 +1467,7 @@ fn source_negative_probes(scala: &Scala, root: &Path, batch: &PairedJvmTastyBatc
     let methodref_client = methodref_case.join("Consumer.scala");
     fs::write(&methodref_client, CLIENT).unwrap();
     let methodref_compile = scala.compile_result(
+        "compile-positive-wrong-methodref-runtime-control",
         &format!("{}:{}", methodref_classes.display(), scala.libraries),
         &methodref_out,
         &methodref_client,
@@ -1406,12 +1483,13 @@ fn source_negative_probes(scala: &Scala, root: &Path, batch: &PairedJvmTastyBatc
         methodref_classes.display(),
         scala.libraries
     );
-    let runtime = Command::new(&scala.java)
-        .args(["-Xverify:all", "-ea", "-classpath"])
-        .arg(classpath)
-        .arg("Consumer")
-        .output()
-        .expect("run client against wrong classfile constructor Methodref");
+    let runtime = timed_output(
+        "runtime-wrong-constructor-methodref",
+        Command::new(&scala.java)
+            .args(["-Xverify:all", "-ea", "-classpath"])
+            .arg(classpath)
+            .arg("Consumer"),
+    );
     assert!(
         !runtime.status.success(),
         "wrong classfile constructor Methodref unexpectedly ran"
@@ -1448,6 +1526,7 @@ fn source_negative_probes(scala: &Scala, root: &Path, batch: &PairedJvmTastyBatc
     let descriptor_client = descriptor_case.join("Consumer.scala");
     fs::write(&descriptor_client, CLIENT).unwrap();
     let descriptor_compile = scala.compile_result(
+        "compile-positive-wrong-descriptor-runtime-control",
         &format!("{}:{}", descriptor_classes.display(), scala.libraries),
         &descriptor_out,
         &descriptor_client,
@@ -1463,12 +1542,13 @@ fn source_negative_probes(scala: &Scala, root: &Path, batch: &PairedJvmTastyBatc
         descriptor_classes.display(),
         scala.libraries
     );
-    let runtime = Command::new(&scala.java)
-        .args(["-Xverify:all", "-ea", "-classpath"])
-        .arg(classpath)
-        .arg("Consumer")
-        .output()
-        .expect("run client against wrong Factory classfile descriptor");
+    let runtime = timed_output(
+        "runtime-wrong-factory-descriptor",
+        Command::new(&scala.java)
+            .args(["-Xverify:all", "-ea", "-classpath"])
+            .arg(classpath)
+            .arg("Consumer"),
+    );
     assert!(
         !runtime.status.success(),
         "wrong Factory classfile descriptor unexpectedly linked"
@@ -1508,6 +1588,7 @@ fn source_negative_probes(scala: &Scala, root: &Path, batch: &PairedJvmTastyBatc
     let fieldref_client = fieldref_case.join("Consumer.scala");
     fs::write(&fieldref_client, CLIENT).unwrap();
     let fieldref_compile = scala.compile_result(
+        "compile-positive-wrong-fieldref-runtime-control",
         &format!("{}:{}", fieldref_classes.display(), scala.libraries),
         &fieldref_out,
         &fieldref_client,
@@ -1523,12 +1604,13 @@ fn source_negative_probes(scala: &Scala, root: &Path, batch: &PairedJvmTastyBatc
         fieldref_classes.display(),
         scala.libraries
     );
-    let runtime = Command::new(&scala.java)
-        .args(["-Xverify:all", "-ea", "-classpath"])
-        .arg(classpath)
-        .arg("Consumer")
-        .output()
-        .expect("run client against same-typed but wrong Pair Fieldref");
+    let runtime = timed_output(
+        "runtime-wrong-pair-fieldref",
+        Command::new(&scala.java)
+            .args(["-Xverify:all", "-ea", "-classpath"])
+            .arg(classpath)
+            .arg("Consumer"),
+    );
     assert!(
         !runtime.status.success(),
         "wrong Pair Fieldref escaped the original-object identity assertions"
@@ -1592,6 +1674,7 @@ fn factory_signature_negative_probes(
         let factory_path = case.join("FactoryControl.scala");
         fs::write(&factory_path, factory_source).unwrap();
         scala.compile(
+            "compile-scala-signature-control",
             &format!("{}:{}", dependencies.display(), scala.libraries),
             &generated,
             &factory_path,
@@ -1619,6 +1702,7 @@ fn factory_signature_negative_probes(
         let client_path = case.join("Consumer.scala");
         fs::write(&client_path, client_source).unwrap();
         let result = scala.compile_result(
+            &format!("compile-negative-{label}"),
             &format!("{}:{}", classes.display(), scala.libraries),
             &out,
             &client_path,

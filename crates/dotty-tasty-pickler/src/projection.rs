@@ -292,6 +292,36 @@ impl<'a> EncodingContext<'a> {
                 registered_classes.push(class);
             }
         }
+        for local in p.local_values {
+            let Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(class),
+                ..
+            }) = context.store.types.try_get(context.complete(local.symbol)?)
+            else {
+                continue;
+            };
+            let class = *class;
+            if class == p.class
+                || !p.typed_bindings.planned_class_symbols().contains(&class)
+                || registered_classes.contains(&class)
+            {
+                continue;
+            }
+            let Some(SourceDefinition::Canonical { source, tree }) =
+                p.source_index.definition_of(class)
+            else {
+                return Err(PickleError::SourceDefinition { symbol: class });
+            };
+            if source != p.source.id {
+                return Err(PickleError::SourceDefinition { symbol: class });
+            }
+            context.register_planned_source_class(
+                class,
+                tree,
+                p.typed_bindings.planned_class_symbols(),
+            )?;
+            registered_classes.push(class);
+        }
         if include_local_values {
             for local in p.local_values {
                 let owner = context

@@ -13,8 +13,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[path = "support/command_timing.rs"]
+mod command_timing;
+#[path = "support/scala39_toolchain.rs"]
+mod scala39_toolchain;
+use scala39_toolchain::SCALA_REVISION;
+
 const REQUIRE: &str = "DOTTY_REQUIRE_SCALA_TASTY_MULTI_ARGUMENT_CONSTRUCTOR_CONSUMER";
-const SCALA_REVISION: &str = "777528f19a58e794c9954a42f433373472ec57f8";
 const SOURCE: &str =
     include_str!("fixtures/jvm_tasty_multi_argument_constructor_calls/PairFactory.scala");
 const CLIENT: &str =
@@ -34,9 +39,34 @@ fn required() -> bool {
 
 fn output(command: &mut Command) -> Output {
     let rendered = format!("{command:?}");
-    let result = command
-        .output()
-        .unwrap_or_else(|error| panic!("run {rendered}: {error}"));
+    let program = Path::new(command.get_program())
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let args = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy())
+        .collect::<Vec<_>>();
+    let operation = match program {
+        "java" if !args.iter().any(|arg| arg == "-version") => Some("multi-argument-runtime"),
+        "scalac" if args.iter().any(|arg| arg == "-decompile") => Some("multi-argument-decompile"),
+        "scalac" if args.iter().any(|arg| arg == "-print-tasty") => {
+            Some("multi-argument-print-tasty")
+        }
+        "scalac" if args.iter().any(|arg| arg == "-from-tasty") => {
+            Some("multi-argument-from-tasty")
+        }
+        _ => None,
+    };
+    let result = match operation {
+        Some(operation) => command_timing::output(operation, command),
+        None => command.output(),
+    }
+    .unwrap_or_else(|error| panic!("run {rendered}: {error}"));
+    assert_success(rendered, result)
+}
+
+fn assert_success(rendered: String, result: Output) -> Output {
     assert!(
         result.status.success(),
         "command failed: {rendered}\nstdout:\n{}\nstderr:\n{}",
@@ -44,6 +74,17 @@ fn output(command: &mut Command) -> Output {
         String::from_utf8_lossy(&result.stderr)
     );
     result
+}
+
+fn timed_output(operation: &str, command: &mut Command) -> Output {
+    command_timing::output(operation, command)
+        .unwrap_or_else(|error| panic!("run {operation}: {error}"))
+}
+
+fn successful_timed_output(operation: &str, command: &mut Command) -> Output {
+    let rendered = format!("{command:?}");
+    let result = timed_output(operation, command);
+    assert_success(rendered, result)
 }
 
 fn task_dir() -> PathBuf {
@@ -61,11 +102,7 @@ fn task_dir() -> PathBuf {
 }
 
 fn sha256(path: &Path) -> String {
-    String::from_utf8_lossy(&output(Command::new("sha256sum").arg(path)).stdout)
-        .split_whitespace()
-        .next()
-        .expect("sha256sum emits a hash")
-        .to_owned()
+    scala39_toolchain::sha256(path, &mut output)
 }
 
 struct Scala {
@@ -77,111 +114,22 @@ struct Scala {
 
 impl Scala {
     fn from_environment() -> Self {
-        let root =
-            PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT is required"));
-        let java_home =
-            PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME is required"));
-        let maven = PathBuf::from(
-            std::env::var_os("COURSIER_MAVEN_ROOT").expect("COURSIER_MAVEN_ROOT is required"),
-        );
-        let libraries = [
-            (
-                maven.join("org/scala-lang/scala3-library_3/3.9.0/scala3-library_3-3.9.0.jar"),
-                "9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba",
-            ),
-            (
-                maven.join("org/scala-lang/scala-library/3.9.0/scala-library-3.9.0.jar"),
-                "b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd",
-            ),
-        ];
-        for (path, expected) in &libraries {
-            assert!(
-                path.is_file(),
-                "pinned published Scala runtime exists: {}",
-                path.display()
-            );
-            assert_eq!(
-                sha256(path),
-                *expected,
-                "published Scala runtime hash {}",
-                path.display()
-            );
-        }
-        let revision = output(
-            Command::new("git")
-                .args(["-C"])
-                .arg(&root)
-                .args(["rev-parse", "HEAD"]),
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&revision.stdout).trim(),
-            SCALA_REVISION
-        );
-        let scalac = root.join("dist/target/universal/stage/bin/scalac");
-        let version = output(Command::new(&scalac).arg("-version"));
-        let version_text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&version.stdout),
-            String::from_utf8_lossy(&version.stderr)
-        );
-        assert!(
-            version_text.contains("3.9.0-bin-SNAPSHOT-git-777528f"),
-            "{version_text}"
-        );
-        let compiler_jar = root.join("dist/target/universal/stage/lib/with_compiler.jar");
-        assert!(
-            compiler_jar.is_file(),
-            "staged pinned compiler jar exists: {}",
-            compiler_jar.display()
-        );
-        let java = java_home.join("bin/java");
-        let java_version = output(Command::new(&java).arg("-version"));
-        let java_text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&java_version.stdout),
-            String::from_utf8_lossy(&java_version.stderr)
-        );
-        assert!(java_text.contains("21.0.13"), "{java_text}");
-        assert_eq!(
-            sha256(&java),
-            "9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155"
-        );
-        eprintln!(
-            "SCALA_PROVENANCE revision={SCALA_REVISION} compiler={} compiler_sha256={} java={} java_sha256={}",
-            version_text.trim(),
-            sha256(&compiler_jar),
-            java.display(),
-            sha256(&java)
-        );
+        let pinned = scala39_toolchain::from_environment(output, |_| {});
         Self {
-            java_home,
-            scalac,
-            java,
-            libraries: libraries
-                .iter()
-                .map(|(path, _)| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join(":"),
+            java_home: pinned.java_home,
+            scalac: pinned.scalac,
+            java: pinned.java,
+            libraries: pinned.libraries,
         }
     }
 
     fn scalac(&self) -> Command {
-        let mut command = Command::new(&self.scalac);
-        command.env("JAVA_HOME", &self.java_home);
-        command.env(
-            "JAVA_TOOL_OPTIONS",
-            format!("-XX:-UsePerfData -Djava.io.tmpdir={}", task_dir().display()),
-        );
-        if let Some(path) = std::env::var_os("PATH") {
-            let mut paths = vec![self.java_home.join("bin")];
-            paths.extend(std::env::split_paths(&path));
-            command.env("PATH", std::env::join_paths(paths).expect("PATH is valid"));
-        }
-        command
+        scala39_toolchain::scalac(&self.java_home, &self.scalac, task_dir())
     }
 
     fn compile(&self, classpath: &str, out: &Path, source: &Path) -> Output {
-        output(
+        successful_timed_output(
+            "multi-argument-source-compile",
             self.scalac()
                 .args(["-Werror", "-release", "21", "-classpath"])
                 .arg(classpath)
@@ -192,14 +140,15 @@ impl Scala {
     }
 
     fn compile_result(&self, classpath: &str, out: &Path, source: &Path) -> Output {
-        self.scalac()
-            .args(["-Werror", "-release", "21", "-classpath"])
-            .arg(classpath)
-            .arg("-d")
-            .arg(out)
-            .arg(source)
-            .output()
-            .expect("run pinned scalac probe")
+        timed_output(
+            "multi-argument-negative-probe",
+            self.scalac()
+                .args(["-Werror", "-release", "21", "-classpath"])
+                .arg(classpath)
+                .arg("-d")
+                .arg(out)
+                .arg(source),
+        )
     }
 }
 
@@ -652,12 +601,10 @@ fn inspect_original_tasty(
         .into_iter()
         .zip(&sidecars)
     {
-        let decompiled = scala
-            .scalac()
-            .arg("-decompile")
-            .arg(sidecar)
-            .output()
-            .expect("run pinned Scala decompiler");
+        let decompiled = timed_output(
+            "multi-argument-decompile",
+            scala.scalac().arg("-decompile").arg(sidecar),
+        );
         assert!(
             decompiled.status.success(),
             "Scala -decompile rejected Rust {name}.tasty: {}",
@@ -717,12 +664,10 @@ fn inspect_original_tasty(
             }
             _ => unreachable!(),
         }
-        let printed = scala
-            .scalac()
-            .arg("-print-tasty")
-            .arg(sidecar)
-            .output()
-            .expect("run pinned Scala -print-tasty");
+        let printed = timed_output(
+            "multi-argument-print-tasty",
+            scala.scalac().arg("-print-tasty").arg(sidecar),
+        );
         assert!(
             printed.status.success(),
             "Scala -print-tasty rejected Rust {name}.tasty: {}",
@@ -740,15 +685,16 @@ fn inspect_original_tasty(
         );
     }
     assert!(factory_dump.contains("first") && factory_dump.contains("second"));
-    let from_tasty = scala
-        .scalac()
-        .args(["-release", "21", "-from-tasty", "-classpath"])
-        .arg(format!("{}:{}", producer.display(), scala.libraries))
-        .arg("-d")
-        .arg(&reconstructed)
-        .args(&sidecars)
-        .output()
-        .expect("run pinned Scala -from-tasty on original Rust sidecars");
+    let from_tasty = timed_output(
+        "multi-argument-from-tasty",
+        scala
+            .scalac()
+            .args(["-release", "21", "-from-tasty", "-classpath"])
+            .arg(format!("{}:{}", producer.display(), scala.libraries))
+            .arg("-d")
+            .arg(&reconstructed)
+            .args(&sidecars),
+    );
     assert!(
         from_tasty.status.success(),
         "Scala -from-tasty rejected Rust sidecars: {}",
@@ -998,12 +944,13 @@ fn negative_reader_probes(
         descriptor_classes.display(),
         scala.libraries
     );
-    let descriptor_runtime = Command::new(&scala.java)
-        .args(["-Xverify:all", "-ea", "-classpath"])
-        .arg(classpath)
-        .arg("example.RustArtifactConsumer")
-        .output()
-        .expect("run stale Pair constructor descriptor control");
+    let descriptor_runtime = timed_output(
+        "multi-argument-runtime",
+        Command::new(&scala.java)
+            .args(["-Xverify:all", "-ea", "-classpath"])
+            .arg(classpath)
+            .arg("example.RustArtifactConsumer"),
+    );
     assert!(!descriptor_runtime.status.success());
     let descriptor_error = format!(
         "{}{}",
@@ -1044,12 +991,13 @@ fn negative_reader_probes(
         classes.display(),
         scala.libraries
     );
-    let runtime = Command::new(&scala.java)
-        .args(["-Xverify:all", "-ea", "-classpath"])
-        .arg(classpath)
-        .arg("example.RustArtifactConsumer")
-        .output()
-        .expect("run against missing-classfile control");
+    let runtime = timed_output(
+        "multi-argument-runtime",
+        Command::new(&scala.java)
+            .args(["-Xverify:all", "-ea", "-classpath"])
+            .arg(classpath)
+            .arg("example.RustArtifactConsumer"),
+    );
     assert!(
         !runtime.status.success(),
         "runtime unexpectedly found missing original Counter classfile"
@@ -1097,12 +1045,13 @@ fn negative_reader_probes(
         "Scala accepts a type-correct wire mutation without validating its argument identity: {}",
         String::from_utf8_lossy(&swapped_compile.stderr)
     );
-    let swapped_decompile = scala
-        .scalac()
-        .arg("-decompile")
-        .arg(swapped_classes.join("example/PairFactory.tasty"))
-        .output()
-        .expect("decompile swapped source-formal wire copy");
+    let swapped_decompile = timed_output(
+        "multi-argument-decompile",
+        scala
+            .scalac()
+            .arg("-decompile")
+            .arg(swapped_classes.join("example/PairFactory.tasty")),
+    );
     assert!(swapped_decompile.status.success());
     let swapped_text = strip_ansi(&String::from_utf8_lossy(&swapped_decompile.stdout));
     assert!(
@@ -1135,12 +1084,13 @@ fn negative_reader_probes(
         "consumer signature lookup is lazy and does not force the malformed Factory body: {}",
         String::from_utf8_lossy(&corrupt_compile.stderr)
     );
-    let corrupt_read = scala
-        .scalac()
-        .arg("-decompile")
-        .arg(corrupt_classes.join("example/PairFactory.tasty"))
-        .output()
-        .expect("force official Scala readTasty of corrupted nested reference");
+    let corrupt_read = timed_output(
+        "multi-argument-decompile",
+        scala
+            .scalac()
+            .arg("-decompile")
+            .arg(corrupt_classes.join("example/PairFactory.tasty")),
+    );
     assert!(
         !corrupt_read.status.success(),
         "Scala -decompile accepted an absent nested AST reference"
@@ -1187,12 +1137,13 @@ fn negative_reader_probes(
         methodref_classes.display(),
         scala.libraries
     );
-    let methodref_runtime = Command::new(&scala.java)
-        .args(["-Xverify:all", "-ea", "-classpath"])
-        .arg(classpath)
-        .arg("example.RustArtifactConsumer")
-        .output()
-        .expect("run Factory with a stale Pair constructor Methodref");
+    let methodref_runtime = timed_output(
+        "multi-argument-runtime",
+        Command::new(&scala.java)
+            .args(["-Xverify:all", "-ea", "-classpath"])
+            .arg(classpath)
+            .arg("example.RustArtifactConsumer"),
+    );
     assert!(
         !methodref_runtime.status.success(),
         "wrong Factory Pair constructor Methodref unexpectedly ran"

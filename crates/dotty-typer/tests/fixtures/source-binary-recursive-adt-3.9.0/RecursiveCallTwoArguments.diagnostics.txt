@@ -1,0 +1,8 @@
+-- [E007] Type Mismatch Error: RecursiveCallTwoArguments.scala:17:36 -----------
+17 |      case Add(left, right) => eval(left, right) + eval(right)
+   |                                    ^^^^^^^^^^^
+   |                                    Found:    (adt.Expr, adt.Expr)
+   |                                    Required: adt.Expr
+   |
+   | longer explanation available when compiling with `-explain`
+1 error found

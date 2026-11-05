@@ -108,17 +108,20 @@ impl Validator<'_, '_> {
                     ty: typed.ty,
                 });
             }
-            let exact_shape = source_block.stats.len() == 1
-                && matches!(
-                    self.source_tree(source_block.stats[0])?.kind,
-                    TreeKind::ValDef(_)
-                )
-                && matches!(
-                    self.plan
-                        .typed_ast
-                        .try_get(typed_block.stats[0])
-                        .map(|tree| &tree.kind),
-                    Some(TreeKind::ValDef(_))
+            let exact_shape = (1..=2).contains(&source_block.stats.len())
+                && source_block.stats.iter().zip(&typed_block.stats).all(
+                    |(&source_stat, &typed_stat)| {
+                        matches!(
+                            self.source_tree(source_stat).map(|tree| &tree.kind),
+                            Ok(TreeKind::ValDef(_))
+                        ) && matches!(
+                            self.plan
+                                .typed_ast
+                                .try_get(typed_stat)
+                                .map(|tree| &tree.kind),
+                            Some(TreeKind::ValDef(_))
+                        )
+                    },
                 )
                 && matches!(
                     self.source_tree(source_block.expr)?.kind,
@@ -134,42 +137,102 @@ impl Validator<'_, '_> {
             else {
                 unreachable!("reference block shape was checked")
             };
-            let (TreeKind::ValDef(source_local), TreeKind::ValDef(typed_local)) = (
-                &self.source_tree(source_block.stats[0])?.kind,
-                &self
-                    .plan
-                    .typed_ast
-                    .try_get(typed_block.stats[0])
-                    .ok_or(PickleError::InvalidTypedTree {
-                        tree: typed_block.stats[0],
-                    })?
-                    .kind,
-            ) else {
-                unreachable!("reference block shape was checked")
-            };
-            if source_result_apply.args.len() != 1
-                || source_local.rhs.is_none()
-                || typed_local.rhs.is_none()
-            {
+            let pair = self
+                .plan
+                .typed_bindings
+                .formal_local_constructor_call_pair(self.plan.source.id, method.symbol);
+            let local_argument_indices = pair
+                .map(|pair| {
+                    pair.arguments
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, argument)| {
+                            matches!(
+                                argument.origin,
+                                crate::FormalLocalConstructorCallArgumentOrigin::LocalValue { .. }
+                            )
+                            .then_some(index)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if !matches!(
+                (
+                    source_result_apply.args.len(),
+                    local_argument_indices.first()
+                ),
+                (1, None) | (2, Some(_))
+            ) {
                 return Err(
                     self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
                 );
             }
-            let source_use = self.source_tree(source_result_apply.args[0])?;
+            let initializers = self
+                .plan
+                .typed_bindings
+                .local_counter_initializers(self.plan.source.id, method.symbol);
+            let two_local_shape = source_block.stats.len() == 2
+                && local_argument_indices.len() == 2
+                && initializers.len() == 2
+                && initializers[0].local != initializers[1].local
+                && initializers[0].scope == initializers[1].scope
+                && source_block
+                    .stats
+                    .iter()
+                    .zip(&typed_block.stats)
+                    .zip(&initializers)
+                    .all(|((&source_stat, &typed_stat), initializer)| {
+                        initializer.source_block == source_id
+                            && initializer.typed_block == typed_id
+                            && initializer.source_declaration == source_stat
+                            && initializer.typed_declaration == typed_stat
+                    });
+            let one_local_shape = source_block.stats.len() == 1
+                && initializers.len() <= 1
+                && initializers.iter().all(|initializer| {
+                    initializer.source_block == source_id
+                        && initializer.typed_block == typed_id
+                        && initializer.source_declaration == source_block.stats[0]
+                        && initializer.typed_declaration == typed_block.stats[0]
+                })
+                && self.source_tree(source_block.stats[0])?.position.is_some();
+            if !(two_local_shape || one_local_shape) {
+                return Err(
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                );
+            }
+            let use_index = local_argument_indices.first().copied().unwrap_or(0);
+            let source_use = self.source_tree(source_result_apply.args[use_index])?;
             let typed_result_apply = match &typed_result.kind {
-                TreeKind::Apply(application) if application.args.len() == 1 => application,
+                TreeKind::Apply(application)
+                    if application.args.len() == source_result_apply.args.len() =>
+                {
+                    application
+                }
                 _ => {
                     return Err(
                         self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
                     );
                 }
             };
+            if two_local_shape {
+                let pair = pair.expect("two-local shape has a pair receipt");
+                for index in 0..2 {
+                    let argument = pair.arguments[index];
+                    if argument.source_argument != source_result_apply.args[index]
+                        || argument.typed_argument != typed_result_apply.args[index]
+                    {
+                        return Err(self
+                            .unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+                    }
+                }
+            }
             let typed_use = self
                 .plan
                 .typed_ast
-                .try_get(typed_result_apply.args[0])
+                .try_get(typed_result_apply.args[use_index])
                 .ok_or(PickleError::InvalidTypedTree {
-                    tree: typed_result_apply.args[0],
+                    tree: typed_result_apply.args[use_index],
                 })?;
             let (TreeKind::Ident(_), Some(declaration_span), Some(use_span)) = (
                 &source_use.kind,

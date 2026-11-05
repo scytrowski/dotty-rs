@@ -1,0 +1,10 @@
+requirement	evidence
+immutable-positive-input	crates/dotty-typer/tests/fixtures/source-binary-recursive-adt-3.9.0/Expr.scala; source SHA-256 1d788b3bd570df83ce2a053c29f4e48145a93815c7dea5880c71d46573dd0b0a
+pinned-scala-jdk-artifacts	crates/dotty-typer/tests/fixtures/source-binary-recursive-adt-3.9.0/run; verifies Scala 777528f19a58e794c9954a42f433373472ec57f8, Temurin 21.0.8+9, eight artifact digests, 23 sources and diagnostic output hashes
+two-add-binders-and-two-calls	crates/dotty-typer/tests/source_binary_recursive_adt_baseline.rs::binary_recursive_eval_preserves_two_independent_add_binders_and_calls
+complete-late-failure-rollback-and-recovery	crates/dotty-typer/src/typer/tests/recursive_adt_rollback.rs::binary_late_failure_restores_complete_state_retries_then_types_both_original_roots
+named-source-negative-deferred-controls	crates/dotty-typer/tests/fixtures/source-binary-recursive-adt-3.9.0/scala-matrix.tsv; rust-control-roots.tsv; rust-control-matrix.tsv
+rust-only-structural-corruption	crates/dotty-typer/tests/source_binary_recursive_adt_baseline.rs::corrupted_reference_product2_identities_reject_then_retry_original_select_left; rust-structural-controls.tsv
+existing-positive-and-protected-cohorts	cargo test -p dotty-typer --locked
+focused-format-and-boundaries	cargo fmt --all -- --check; python3 tools/check-frontend-boundaries.py
+reviewed-pr	One PR for issue #2079; independent review remains assigned to the orchestrator

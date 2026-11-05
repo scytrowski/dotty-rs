@@ -1,0 +1,248 @@
+{
+  "schema_version": 1,
+  "purpose": "Scala compiler oracle artifacts only. No Rust/Scala interoperability claim.",
+  "source": "TwoLocals.scala",
+  "source_sha256": "e2411637c892feb474d6d70526d471b524cd7de49a3db2565923cd69736f73c3",
+  "scala": {
+    "version": "3.9.0",
+    "revision": "777528f19a58e794c9954a42f433373472ec57f8",
+    "launcher": "dist/target/universal/stage/bin/scalac",
+    "launcher_sha256_observed": "2981fa689c25ac031e1d923387c07ca65506ed7d8d88454e5d4dcd8e11726120",
+    "staged_compiler_jar": "dist/target/universal/stage/lib/with_compiler.jar",
+    "staged_compiler_jar_sha256_observed_only": "048f38662a47f66dc0d7c5e0d2308c20d0419ab1bf4018ef09a9e3831a13e2c9"
+  },
+  "jdk": {
+    "vendor": "Eclipse Temurin",
+    "version": "21.0.13+9",
+    "release": 21,
+    "classfile_major": 65,
+    "java_sha256": "9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155",
+    "javac_sha256": "2cc288a26beebc50ca7cd924847dffbfb38ef3314e105bba6d4ebce03a0bcb6b",
+    "javap_sha256": "b2146e8dcfe5662c04d14f3fad68756a1a597d01461ca475a2cdbeb44c84a678"
+  },
+  "published_runtimes": {
+    "scala3-library_3-3.9.0.jar_sha256": "9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba",
+    "scala-library-3.9.0.jar_sha256": "b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd"
+  },
+  "classes": [
+    {
+      "name": "example.Counter",
+      "classfile": "scala39/primary/example/Counter.class",
+      "tasty": "scala39/primary/example/Counter.tasty",
+      "classfile_sha256": "9eb3889ab1c2519dfa8e464ba072d158737ca668d2b0293f9f45e4a74dbc4c7a",
+      "tasty_sha256": "70ef40d6deea6885f91ccdf97f5fbdf5e756bf120a396b2cfceba675f3f512f0",
+      "classfile_size": 645,
+      "tasty_size": 600,
+      "classfile_major": 65,
+      "classfile_tasty_link_hex": "00dabd03b3be93e800fa19de2cc39a1b",
+      "tasty_uuid": "00dabd03-b3be-93e8-00fa-19de2cc39a1b",
+      "classfile_tasty_link_matches": true
+    },
+    {
+      "name": "example.Pair",
+      "classfile": "scala39/primary/example/Pair.class",
+      "tasty": "scala39/primary/example/Pair.tasty",
+      "classfile_sha256": "a6c21b071df15f0aec6dee67842a40d7c5d9daed041782594e28d630cbd1729c",
+      "tasty_sha256": "0fd919abf69e4f8871f8348b787dd1bdb18ef4921bdd03546e0d9b06ce66c696",
+      "classfile_size": 769,
+      "tasty_size": 700,
+      "classfile_major": 65,
+      "classfile_tasty_link_hex": "00594cc7d7fc9bd300074c37e0f2fb5b",
+      "tasty_uuid": "00594cc7-d7fc-9bd3-0007-4c37e0f2fb5b",
+      "classfile_tasty_link_matches": true
+    },
+    {
+      "name": "example.PairFactory",
+      "classfile": "scala39/primary/example/PairFactory.class",
+      "tasty": "scala39/primary/example/PairFactory.tasty",
+      "classfile_sha256": "7c0b61dc7d4ed458b18c85a4c176f866fed2f0037579a195c8d3b092a4a0f98d",
+      "tasty_sha256": "d8332a287ab9c38e8132a016c99e3f732dce60368d23d904d79378ed556c0f0e",
+      "classfile_size": 757,
+      "tasty_size": 681,
+      "classfile_major": 65,
+      "classfile_tasty_link_hex": "00b1cde2a7a387d10057e6d1258c7222",
+      "tasty_uuid": "00b1cde2-a7a3-87d1-0057-e6d1258c7222",
+      "classfile_tasty_link_matches": true
+    }
+  ],
+  "controls": {
+    "reversed_source_sha256": "e14a4135cf781c8d4c6c003503ab254af74f33391c943b9cccf9849fce91c987",
+    "alias_source_sha256": "6d59f703957dd8aa75b36ba1ae7488eba9a1cb935a392166ab82161ec83f1e76",
+    "consumer_source_sha256": "0c8e64fe3b91dcd82947ced60584dbdd68b0cf2e18c72386ae28aa46a10e20c5",
+    "reversed_consumer_source_sha256": "23ff349a8933d84bf6ab2b3c7b484cd844da8cfc5c987e99a1da83b708db6be2",
+    "alias_runtime": "compiled PairFactoryAlias.create(first, second) returns a Pair whose left and right fields are the same original Counter reference"
+  },
+  "variation_matrix": [
+    {
+      "name": "renamed-package-classes-locals",
+      "generated_source_sha256": "7f86db1ffbee7cad169a2b002bddf10ff772d5501e330b957104c93639147e25",
+      "scala": "accepted",
+      "scala_first_diagnostic": null,
+      "rust_first_error": "BatchUnit cross-class constructor-call identity proof: SourceShape(\"factory body must be a direct Apply or one-local Block\")"
+    },
+    {
+      "name": "reordered-class-declarations",
+      "generated_source_sha256": "10b20646bba05cf7ca48767c196c7ccda8dcb57b4f8f7d26d903625ec35c3499",
+      "scala": "accepted",
+      "scala_first_diagnostic": null,
+      "rust_first_error": "BatchUnit cross-class constructor-call identity proof: SourceShape(\"factory body must be a direct Apply or one-local Block\")"
+    },
+    {
+      "name": "swapped-initializer-formals",
+      "generated_source_sha256": "7707da3de467de0afb05974389b05f04fc3c178addc476e1ab2789584f6c5ad5",
+      "scala": "accepted",
+      "scala_first_diagnostic": null,
+      "rust_first_error": "BatchUnit cross-class constructor-call identity proof: SourceShape(\"factory body must be a direct Apply or one-local Block\")"
+    },
+    {
+      "name": "third-local",
+      "generated_source_sha256": "54e50908c397dac69974175f7126431a0638a93eff2c9ad93c3d345f4f4fed7c",
+      "scala": "accepted",
+      "scala_first_diagnostic": null,
+      "rust_first_error": "BatchUnit cross-class constructor-call identity proof: SourceShape(\"factory body must be a direct Apply or one-local Block\")"
+    },
+    {
+      "name": "mutable-local",
+      "generated_source_sha256": "f77eb1975aa243b17855240e62e35b91433269967b59ce3acf9cc161408b0ddc",
+      "scala": "accepted",
+      "scala_first_diagnostic": null,
+      "rust_first_error": "BatchUnit cross-class constructor-call identity proof: SourceShape(\"factory body must be a direct Apply or one-local Block\")"
+    },
+    {
+      "name": "helper-initializer",
+      "generated_source_sha256": "09f0e3953edb46ccdfd95432c4e5cde3471d5bdb54ba97449a1ebb61a479a629",
+      "scala": "accepted",
+      "scala_first_diagnostic": null,
+      "rust_first_error": "BatchUnit cross-class constructor-call identity proof: SourceShape(\"factory body must be a direct Apply or one-local Block\")"
+    },
+    {
+      "name": "conditional-initializer",
+      "generated_source_sha256": "84717b73dcad99689e6d7b1aa34203f3eb99d5401ca0618c7e320e0e2685981b",
+      "scala": "accepted",
+      "scala_first_diagnostic": null,
+      "rust_first_error": "BatchUnit cross-class constructor-call identity proof: SourceShape(\"factory body must be a direct Apply or one-local Block\")"
+    },
+    {
+      "name": "nested-initializer",
+      "generated_source_sha256": "540f1d3438684292c1ceac4030141e0719ade88f93c4091ec71bb9781d142f99",
+      "scala": "accepted",
+      "scala_first_diagnostic": null,
+      "rust_first_error": "BatchUnit cross-class constructor-call identity proof: SourceShape(\"factory body must be a direct Apply or one-local Block\")"
+    },
+    {
+      "name": "branch-local",
+      "generated_source_sha256": "428099919aa6836433dd23dc51700fbb29f2f82ddff37e072fbc9c0a29c72dcb",
+      "scala": "accepted",
+      "scala_first_diagnostic": null,
+      "rust_first_error": "BatchClass class_index=2 JVM/TASTy cross-contract validation: TastyPlan(BodyType)"
+    },
+    {
+      "name": "reversed-pair-arguments",
+      "generated_source_sha256": "e14a4135cf781c8d4c6c003503ab254af74f33391c943b9cccf9849fce91c987",
+      "scala": "accepted",
+      "scala_first_diagnostic": null,
+      "rust_first_error": "BatchUnit cross-class constructor-call identity proof: SourceShape(\"factory body must be a direct Apply or one-local Block\")"
+    },
+    {
+      "name": "aliased-pair-arguments",
+      "generated_source_sha256": "c704e79240cc400ca2b48952ec477f6ef3619c96478c74dc89c9e6d1d8974d43",
+      "scala": "accepted",
+      "scala_first_diagnostic": null,
+      "rust_first_error": "BatchUnit cross-class constructor-call identity proof: SourceShape(\"factory body must be a direct Apply or one-local Block\")"
+    },
+    {
+      "name": "missing-initializer",
+      "generated_source_sha256": "f6353f375e361b22bb15b061df8d17a5201f15fadbb307e7be7769818346c29f",
+      "scala": "rejected",
+      "scala_first_diagnostic": "[E067] Syntax Error",
+      "rust_first_error": "BatchClass class_index=2 method body typing: LocalValueRightHandSideMissing"
+    },
+    {
+      "name": "duplicate-local-name",
+      "generated_source_sha256": "a70a10e6b159d574e53bafae68a4f4e4255cf174d125581b80d88bf305e127ac",
+      "scala": "rejected",
+      "scala_first_diagnostic": "[E161] Naming Error",
+      "rust_first_error": "BatchClass class_index=2 method body typing: DuplicateLocalValue"
+    },
+    {
+      "name": "use-before-declaration",
+      "generated_source_sha256": "bca11b85a6992ad4272a7cd06ccc9d7051ec351aed8e6a46a6abbf21961c170f",
+      "scala": "rejected",
+      "scala_first_diagnostic": "[E039] Reference Error",
+      "rust_first_error": "BatchClass class_index=2 method body typing: TermNameNotFound"
+    },
+    {
+      "name": "shadowed-formal",
+      "generated_source_sha256": "2d2de555936928aadc3487245b1bbf3eb00fd9a7dbfdc4d920b129138e3961d5",
+      "scala": "rejected",
+      "scala_first_diagnostic": "[E007] Type Mismatch Error",
+      "rust_first_error": "BatchClass class_index=2 method body typing: RecursiveLocalValueInitializer"
+    },
+    {
+      "name": "wrong-local-type",
+      "generated_source_sha256": "fdf332489d7fe520bf221cc880f95108c0ba0c10e73bddd9de3f82c140e2800a",
+      "scala": "rejected",
+      "scala_first_diagnostic": "[E007] Type Mismatch Error",
+      "rust_first_error": "BatchClass class_index=2 method body typing: TypeNameNotFound"
+    },
+    {
+      "name": "wrong-pair-constructor-signature",
+      "generated_source_sha256": "54f88b4107a1d09cc61f431fa38c30d6157b0b2171a2dd7a512b64a543b84a2d",
+      "scala": "rejected",
+      "scala_first_diagnostic": "[E007] Type Mismatch Error",
+      "rust_first_error": "BatchClass class_index=2 method body typing: ApplicationArgumentTypeMismatch"
+    }
+  ],
+  "rust_audit": {
+    "source_id": 21220,
+    "method_symbol": 60,
+    "method_formals": [
+      61,
+      62
+    ],
+    "local_symbols": [
+      63,
+      64
+    ],
+    "local_scope": 18,
+    "local_source_trees": [
+      55,
+      62
+    ],
+    "local_typed_trees": [
+      19,
+      26
+    ],
+    "initializer_source_trees": [
+      54,
+      61
+    ],
+    "initializer_typed_trees": [
+      17,
+      24
+    ],
+    "initializer_constructor_symbol": 44,
+    "final_pair_apply_source_tree": 68,
+    "final_pair_apply_typed_tree": 32,
+    "pair_constructor_symbol": 52,
+    "jvm_only_descriptor": "(II)Lexample/Pair;",
+    "jvm_only_max_stack": 4,
+    "jvm_only_max_locals": 5,
+    "jvm_only_code_hex": "bb000c591bb7000f4ebb000c591cb7000f3a04bb0011592d1904b70014b0",
+    "paired_plan_first_error": "BatchUnit phase=cross-class constructor-call identity proof reason=SourceShape(\"factory body must be a direct Apply or one-local Block\")",
+    "later_stages": "TASTy pickler validation/encoding and JVM/TASTy contract unmeasured because the paired plan returns the recorded first source-shape error"
+  },
+  "binary_mutations": {
+    "wrong_signed_constructor_name": {
+      "mutation": "first Counter initializer SELECTin name changed from observed signed Counter(Int) name slot 23 to observed Pair(Counter,Counter) name slot 20",
+      "structural_tasty": "accepted",
+      "scala_from_tasty": "accepted"
+    },
+    "truncated_pairfactory_tasty": {
+      "rust_structural_tasty": "rejected",
+      "scala_from_tasty": "rejected",
+      "scala_first_error": "java.lang.IndexOutOfBoundsException"
+    },
+    "foreign_or_stale_source_typed_bindings": "masked at paired-plan source-shape first error; unmeasured"
+  }
+}

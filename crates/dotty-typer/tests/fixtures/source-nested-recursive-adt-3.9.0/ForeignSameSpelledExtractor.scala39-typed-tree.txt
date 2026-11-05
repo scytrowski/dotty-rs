@@ -1,0 +1,210 @@
+[[syntax trees at end of                     typer]] // ForeignSameSpelledExtractor.scala
+<package <<root>.this.adt:<root>.this.adt> {
+  @Child[adt.this.Add] @Child[adt.this.Num] sealed trait Expr() extends Object {
+    }
+  final case class Num([owner = constructor <init>]value: <root>.this.scala.Int)
+     extends <<<new Object:Object>.<init>:((): Object)>():Object>,
+    adt.this.Expr, _root_.scala.Product, scala.this.package.Serializable {
+    [owner = class Num]val value: <root>.this.scala.Int
+    [owner = class Num]def copy(
+      [owner = method copy]value: <root>.this.scala.Int): adt.this.Num =
+      <
+        <<new adt.this.Num:adt.this.Num>.<init>:
+          ((value: <root>.this.scala.Int): adt.this.Num)>
+      (<value:<root>.this.scala.Int>):adt.this.Num>
+    [owner = class Num]def copy$default$1:
+      <root>.this.scala.Int @uncheckedVariance =
+      <Num.this.value:<root>.this.scala.Int>
+    [owner = class Num]def _1: <root>.this.scala.Int =
+      <<this:(Num.this : adt.this.Num)>.value:<root>.this.scala.Int>
+  }
+  [owner = package adt]final lazy module val Num: adt.this.Num$ =
+    <<<new adt.this.Num$:adt.this.Num$>.<init>:((): adt.this.Num$)>():
+      adt.this.Num$>
+  final module class Num$() extends <
+    <<new scala.this.AnyRef:scala.this.AnyRef>.<init>:((): Object)>():Object> {
+    this: adt.this.Num.type =>
+    [owner = object Num$]def apply(
+      [owner = method apply]value: <root>.this.scala.Int): adt.this.Num =
+      <
+        <<new adt.this.Num:adt.this.Num>.<init>:
+          ((value: <root>.this.scala.Int): adt.this.Num)>
+      (<value:<root>.this.scala.Int>):adt.this.Num>
+    [owner = object Num$]def unapply([owner = method unapply]x$1: adt.this.Num)
+      : adt.this.Num = <x$1:adt.this.Num>
+    [owner = object Num$]override def toString: String =
+      <"Num":("Num" : String)>
+  }
+  final case class Add([owner = constructor <init>]left: adt.this.Expr,
+    [owner = constructor <init>]right: adt.this.Expr) extends
+    <<<new Object:Object>.<init>:((): Object)>():Object>, adt.this.Expr,
+    _root_.scala.Product, scala.this.package.Serializable {
+    [owner = class Add]val left: adt.this.Expr
+    [owner = class Add]val right: adt.this.Expr
+    [owner = class Add]def copy([owner = method copy]left: adt.this.Expr,
+      [owner = method copy]right: adt.this.Expr): adt.this.Add =
+      <
+        <<new adt.this.Add:adt.this.Add>.<init>:
+          ((left: adt.this.Expr, right: adt.this.Expr): adt.this.Add)>
+      (<left:adt.this.Expr>, <right:adt.this.Expr>):adt.this.Add>
+    [owner = class Add]def copy$default$1: adt.this.Expr @uncheckedVariance =
+      <Add.this.left:adt.this.Expr>
+    [owner = class Add]def copy$default$2: adt.this.Expr @uncheckedVariance =
+      <Add.this.right:adt.this.Expr>
+    [owner = class Add]def _1: adt.this.Expr =
+      <<this:(Add.this : adt.this.Add)>.left:adt.this.Expr>
+    [owner = class Add]def _2: adt.this.Expr =
+      <<this:(Add.this : adt.this.Add)>.right:adt.this.Expr>
+  }
+  [owner = package adt]final lazy module val Add: adt.this.Add$ =
+    <<<new adt.this.Add$:adt.this.Add$>.<init>:((): adt.this.Add$)>():
+      adt.this.Add$>
+  final module class Add$() extends <
+    <<new scala.this.AnyRef:scala.this.AnyRef>.<init>:((): Object)>():Object> {
+    this: adt.this.Add.type =>
+    [owner = object Add$]def apply([owner = method apply]left: adt.this.Expr,
+      [owner = method apply]right: adt.this.Expr): adt.this.Add =
+      <
+        <<new adt.this.Add:adt.this.Add>.<init>:
+          ((left: adt.this.Expr, right: adt.this.Expr): adt.this.Add)>
+      (<left:adt.this.Expr>, <right:adt.this.Expr>):adt.this.Add>
+    [owner = object Add$]def unapply([owner = method unapply]x$1: adt.this.Add)
+      : adt.this.Add = <x$1:adt.this.Add>
+    [owner = object Add$]override def toString: String =
+      <"Add":("Add" : String)>
+  }
+  [owner = package adt]final lazy module val Foreign: adt.this.Foreign$ =
+    <<<new adt.this.Foreign$:adt.this.Foreign$>.<init>:((): adt.this.Foreign$)>(
+      ):adt.this.Foreign$>
+  final module class Foreign$() extends <
+    <<new Object:Object>.<init>:((): Object)>():Object> {
+    this: adt.this.Foreign.type =>
+    [owner = object Foreign$]final lazy module val Add: Foreign$.this.Add$ =
+      <
+        <<new Foreign$.this.Add$:Foreign$.this.Add$>.<init>:
+          ((): Foreign$.this.Add$)>
+      ():Foreign$.this.Add$>
+    final module class Add$() extends <<<new Object:Object>.<init>:((): Object)>
+      ():Object> { this: Foreign$.this.Add.type =>
+      [owner = object Add$]def unapply(
+        [owner = method unapply]value: adt.this.Expr):
+        <root>.this.scala.Option[scala.this.Tuple2[adt.this.Expr, adt.this.Expr]
+          ]
+       =
+        <
+          <
+            <<<root>.this.scala.Some:<root>.this.scala.Some$>.apply:
+              ([A](value: A): <root>.this.scala.Some[A])>
+          [<root>.this.scala.Tuple2[adt.this.Num, adt.this.Num]^]:
+            ((value: <root>.this.scala.Tuple2[adt.this.Num, adt.this.Num]^):
+              <root>.this.scala.Some[
+                <root>.this.scala.Tuple2[adt.this.Num, adt.this.Num]^]
+            )
+          >
+        (
+          <
+            <
+              <<scala.this.Tuple2:<root>.this.scala.Tuple2$>.apply:
+                ([T1, T2](_1: T1, _2: T2): <root>.this.scala.Tuple2[T1, T2])>
+            [adt.this.Num^, adt.this.Num^]:
+              ((_1: adt.this.Num^, _2: adt.this.Num^):
+                <root>.this.scala.Tuple2[adt.this.Num^, adt.this.Num^])
+            >
+          (
+            <
+              <<adt.this.Num:adt.this.Num$>.apply:
+                ((value: <root>.this.scala.Int): adt.this.Num)>
+            (<0:(0 : scala.this.Int)>):adt.this.Num>,
+            <
+              <<adt.this.Num:adt.this.Num$>.apply:
+                ((value: <root>.this.scala.Int): adt.this.Num)>
+            (<0:(0 : scala.this.Int)>):adt.this.Num>
+          ):<root>.this.scala.Tuple2[adt.this.Num, adt.this.Num]>
+        ):
+          <root>.this.scala.Some[
+            <root>.this.scala.Tuple2[adt.this.Num, adt.this.Num]]
+        >
+    }
+  }
+  [owner = package adt]final lazy module val Evaluator: adt.this.Evaluator$ =
+    <
+      <<new adt.this.Evaluator$:adt.this.Evaluator$>.<init>:
+        ((): adt.this.Evaluator$)>
+    ():adt.this.Evaluator$>
+  final module class Evaluator$() extends <
+    <<new Object:Object>.<init>:((): Object)>():Object> {
+    this: adt.this.Evaluator.type =>
+    [owner = object Evaluator$]def peelLeft(
+      [owner = method peelLeft]expr: adt.this.Expr): adt.this.Expr =
+      <<expr:adt.this.Expr> match
+        {
+          <case
+            <<<adt.this.Foreign:adt.this.Foreign$>.Add:Foreign$.this.Add$>(
+              <
+                <<adt.this.Add:adt.this.Add$>(
+                  [owner = method peelLeft]left @ <_:adt.this.Expr>,
+                  <_:adt.this.Expr>):adt.this.Add>
+               :adt.this.Add:adt.this.Add>,
+            <_:adt.this.Expr>):adt.this.Expr>
+           =>
+            <<left:adt.this.Expr> :adt.this.Expr:adt.this.Expr>
+          :adt.this.Expr>
+          <case <_:adt.this.Expr> =>
+            <expr:adt.this.Expr>
+          :(expr : adt.this.Expr)>
+        }
+      :adt.this.Expr>
+    [owner = object Evaluator$]def sum([owner = method sum]expr: adt.this.Expr)
+      : <root>.this.scala.Int =
+      <<expr:adt.this.Expr> match
+        {
+          <case
+            <
+              <<adt.this.Num:adt.this.Num$>(
+                [owner = method sum]value @ <_:<root>.this.scala.Int>):
+                adt.this.Num>
+             :adt.this.Num:adt.this.Num>
+           =>
+            <<value:<root>.this.scala.Int> :<root>.this.scala.Int:
+              <root>.this.scala.Int>
+          :<root>.this.scala.Int>
+          <case
+            <<<adt.this.Foreign:adt.this.Foreign$>.Add:Foreign$.this.Add$>(
+              <
+                <<adt.this.Num:adt.this.Num$>(
+                  [owner = method sum]value @ <_:<root>.this.scala.Int>):
+                  adt.this.Num>
+               :adt.this.Num:adt.this.Num>,
+              [owner = method sum]right @ <_:adt.this.Expr>):adt.this.Expr>
+           =>
+            <<value:<root>.this.scala.Int> +
+              <
+                <Evaluator$.this.sum:
+                  ((expr: adt.this.Expr): <root>.this.scala.Int)>
+              (<right:adt.this.Expr>):<root>.this.scala.Int>
+            :<root>.this.scala.Int>
+          :<root>.this.scala.Int>
+          <case
+            <<<adt.this.Foreign:adt.this.Foreign$>.Add:Foreign$.this.Add$>(
+              [owner = method sum]left @ <_:adt.this.Expr>,
+              [owner = method sum]right @ <_:adt.this.Expr>):adt.this.Expr>
+           =>
+            <
+              <
+                <Evaluator$.this.sum:
+                  ((expr: adt.this.Expr): <root>.this.scala.Int)>
+              (<left:adt.this.Expr>):<root>.this.scala.Int>
+             +
+              <
+                <Evaluator$.this.sum:
+                  ((expr: adt.this.Expr): <root>.this.scala.Int)>
+              (<right:adt.this.Expr>):<root>.this.scala.Int>
+            :<root>.this.scala.Int>
+          :<root>.this.scala.Int>
+          <case <_:adt.this.Expr> =>
+            <0:(0 : scala.this.Int)>
+          :(0 : scala.this.Int)>
+        }
+      :<root>.this.scala.Int>
+  }
+}:<root>.this.adt.type>

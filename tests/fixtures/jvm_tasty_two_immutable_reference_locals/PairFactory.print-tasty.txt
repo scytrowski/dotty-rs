@@ -1,0 +1,159 @@
+--------------------------------------------------------------------------------
+tests/fixtures/jvm_tasty_two_immutable_reference_locals/scala39/primary/example/PairFactory.tasty
+--------------------------------------------------------------------------------
+Header:
+  version: 28.9.0
+  tooling: Scala 3.9.0-bin-SNAPSHOT-git-777528f
+     UUID: 00b1cde2-a7a3-87d1-0057-e6d1258c7222
+
+Names (341 bytes, starting from 60):
+     0: ASTs
+     1: example
+     2: PairFactory
+     3: <init>
+     4: java
+     5: lang
+     6: java[Qualified . lang]
+     7: Object
+     8: java[Qualified . lang][Qualified . Object]
+     9: <init>[Signed Signature(List(),java.lang.Object) @<init>]
+    10: Unit
+    11: scala
+    12: create
+    13: firstSeed
+    14: Int
+    15: secondSeed
+    16: Pair
+    17: example[Qualified . Pair]
+    18: Counter
+    19: example[Qualified . Counter]
+    20: <init>[Signed Signature(List(example.Counter, example.Counter),example.Pair) @<init>]
+    21: first
+    22: scala[Qualified . Int]
+    23: <init>[Signed Signature(List(scala.Int),example.Counter) @<init>]
+    24: second
+    25: SourceFile
+    26: annotation
+    27: scala[Qualified . annotation]
+    28: internal
+    29: scala[Qualified . annotation][Qualified . internal]
+    30: scala[Qualified . annotation][Qualified . internal][Qualified . SourceFile]
+    31: String
+    32: java[Qualified . lang][Qualified . String]
+    33: <init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]
+    34: tests/fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala
+    35: Positions
+    36: Comments
+    37: Attributes
+
+Trees (137 bytes, starting from 404):
+     0: PACKAGE(134)
+     3:   TERMREFpkg 1 [example]
+     5:   TYPEDEF(129) 2 [PairFactory]
+     9:     TEMPLATE(108)
+    11:       APPLY(10)
+    13:         SELECTin(8) 9 [<init>[Signed Signature(List(),java.lang.Object) @<init>]]
+    16:           NEW
+    17:             TYPEREF 7 [Object]
+    19:               TERMREFpkg 6 [java[Qualified . lang]]
+    21:           SHAREDtype 17
+    23:       DEFDEF(7) 3 [<init>]
+    26:         EMPTYCLAUSE
+    27:         TYPEREF 10 [Unit]
+    29:           TERMREFpkg 11 [scala]
+    31:         STABLE
+    32:       DEFDEF(85) 12 [create]
+    35:         PARAM(7) 13 [firstSeed]
+    38:           IDENTtpt 14 [Int]
+    40:             TYPEREF 14 [Int]
+    42:               TERMREFpkg 11 [scala]
+    44:         PARAM(5) 15 [secondSeed]
+    47:           IDENTtpt 14 [Int]
+    49:             SHAREDtype 40
+    51:         IDENTtpt 16 [Pair]
+    53:           TYPEREF 16 [Pair]
+    55:             TERMREFpkg 1 [example]
+    57:         BLOCK(60)
+    59:           APPLY(14)
+    61:             SELECTin(8) 20 [<init>[Signed Signature(List(example.Counter, example.Counter),example.Pair) @<init>]]
+    64:               NEW
+    65:                 IDENTtpt 16 [Pair]
+    67:                   SHAREDtype 53
+    69:               SHAREDtype 53
+    71:             TERMREFdirect 75
+    73:             TERMREFdirect 98
+    75:           VALDEF(21) 21 [first]
+    78:             IDENTtpt 18 [Counter]
+    80:               TYPEREF 18 [Counter]
+    82:                 SHAREDtype 55
+    84:             APPLY(12)
+    86:               SELECTin(8) 23 [<init>[Signed Signature(List(scala.Int),example.Counter) @<init>]]
+    89:                 NEW
+    90:                   IDENTtpt 18 [Counter]
+    92:                     SHAREDtype 80
+    94:                 SHAREDtype 80
+    96:               TERMREFdirect 35
+    98:           VALDEF(19) 24 [second]
+   101:             IDENTtpt 18 [Counter]
+   103:               SHAREDtype 80
+   105:             APPLY(12)
+   107:               SELECTin(8) 23 [<init>[Signed Signature(List(scala.Int),example.Counter) @<init>]]
+   110:                 NEW
+   111:                   IDENTtpt 18 [Counter]
+   113:                     SHAREDtype 80
+   115:                 SHAREDtype 80
+   117:               TERMREFdirect 44
+   119:     ANNOTATION(16)
+   121:       TYPEREF 25 [SourceFile]
+   123:         TERMREFpkg 29 [scala[Qualified . annotation][Qualified . internal]]
+   125:       APPLY(10)
+   127:         SELECTin(6) 33 [<init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]]
+   130:           NEW
+   131:             SHAREDtype 121
+   133:           SHAREDtype 121
+   135:         STRINGconst 34 [tests/fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala]
+   137:
+
+Positions (131 bytes, starting from 544):
+  lines: 19
+  line sizes:
+     15, 0, 26, 34, 26, 45, 0, 44, 35, 37, 35, 37, 0, 18, 53, 47, 49, 27, 0
+  positions:
+     0: 0 .. 545
+     5: 347 .. 545
+     9: 368 .. 545
+    17: 353 .. 353
+    23: 368 .. 368
+    27: 368 .. 368
+    32: 368 .. 545
+    35: 379 .. 393
+    38: 390 .. 393
+    44: 395 .. 410
+    47: 407 .. 410
+    51: 413 .. 417
+    59: 522 .. 545
+    65: 526 .. 530
+    71: 531 .. 536
+    73: 538 .. 544
+    75: 424 .. 467
+    78: 435 .. 442
+    84: 445 .. 467
+    90: 449 .. 456
+    96: 457 .. 466
+    98: 472 .. 517
+   101: 484 .. 491
+   105: 494 .. 517
+   111: 498 .. 505
+   117: 506 .. 516
+   125: 347 .. 545
+   131: 347 .. 347
+   135: 347 .. 347
+
+  source paths:
+     0: 34 [tests/fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala]
+
+Attributes (2 bytes, starting from 679):
+  SOURCEFILEattr 34 [tests/fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala]
+
+
+--------------------------------------------------------------------------------

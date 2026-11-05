@@ -1,12 +1,15 @@
 use dotty::jvm_tasty_cross_class::{
-    CrossClassConstructorCallProofInput, ValidatedCrossClassConstructorCallProof,
-    validate_cross_class_constructor_call_proofs,
+    CrossClassConstructorCallProofInput, ImmutableLocalInitializationProofInput,
+    ImmutableLocalInitializerPairProofInput, ValidatedCrossClassConstructorCallProof,
+    validate_cross_class_constructor_call_proofs, validate_immutable_local_initialization_proof,
+    validate_immutable_local_initializer_pair_proof,
+    validate_ordered_constructor_argument_bindings,
 };
 use dotty::jvm_tasty_plan::{PairedPlanError, with_paired_jvm_tasty_batch_plan};
 use dotty_core::ast::{AstArena, AstPhase, TreeKind};
 use dotty_core::{
     Definitions, Packages, SemanticStore, SourceDefinition, SourceId, SourceSpan, SourceText,
-    SymbolOrigin, TermRefTarget, Type, TypeRefTarget,
+    SymbolInfo, SymbolOrigin, TermRefTarget, Type, TypeRefTarget,
 };
 use dotty_jvm::{
     JvmClassInitializationPlan, JvmClassPlan, JvmCompilationUnit, JvmMethodPlan,
@@ -15,7 +18,7 @@ use dotty_jvm::{
 use dotty_lexer::ContextualScanner;
 use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty_parser::parse_compilation_unit;
-use dotty_typer::SourceTyper;
+use dotty_typer::{SourceTyper, TypedLocalBinding};
 
 const SOURCE: &str =
     include_str!("fixtures/jvm_tasty_reference_constructor_calls/CounterOwnerFactory.scala");
@@ -24,6 +27,14 @@ const TWO_ARGUMENT_SOURCE: &str =
 const MIXED_ORIGIN_SOURCE: &str = include_str!(
     "fixtures/jvm_tasty_mixed_origin_constructor_arguments/wrap-and-create/PairFactory.scala"
 );
+const IMMUTABLE_LOCAL_PAIR_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactory.scala");
+const IMMUTABLE_LOCAL_PAIR_REVERSED_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactoryReversed.scala");
+const TWO_IMMUTABLE_LOCALS_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
+const TWO_IMMUTABLE_LOCALS_REVERSED_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocalsReversed.scala");
 
 fn clone_arena<P: AstPhase + Clone>(source: &AstArena<P>) -> AstArena<P> {
     let mut cloned = AstArena::new();
@@ -31,6 +42,384 @@ fn clone_arena<P: AstPhase + Clone>(source: &AstArena<P>) -> AstArena<P> {
         cloned.alloc(tree.clone());
     }
     cloned
+}
+
+fn with_two_local_proof_session<R>(
+    source: &str,
+    source_number: u32,
+    consume: impl for<'session> FnOnce(
+        &SemanticStore,
+        &Definitions,
+        &AstArena<dotty_core::ast::Untyped>,
+        &dotty_core::ast::TypedAst,
+        &dotty_core::SourceSemanticIndex,
+        &dotty_core::SourceTypedIndex,
+        SourceId,
+        dotty_core::TreeId<dotty_core::ast::Untyped>,
+        [TypedLocalBinding; 2],
+        Option<TypedLocalBinding>,
+        Option<&SourceTyper<'session>>,
+        &JvmCompilationUnit<'session>,
+    ) -> R,
+) -> R {
+    with_two_local_proof_session_internal(source, source_number, |_, _| {}, false, consume)
+}
+
+fn with_two_local_proof_session_retaining_typer<R>(
+    source: &str,
+    source_number: u32,
+    consume: impl for<'session> FnOnce(
+        &SemanticStore,
+        &Definitions,
+        &AstArena<dotty_core::ast::Untyped>,
+        &dotty_core::ast::TypedAst,
+        &dotty_core::SourceSemanticIndex,
+        &dotty_core::SourceTypedIndex,
+        SourceId,
+        dotty_core::TreeId<dotty_core::ast::Untyped>,
+        [TypedLocalBinding; 2],
+        Option<TypedLocalBinding>,
+        Option<&SourceTyper<'session>>,
+        &JvmCompilationUnit<'session>,
+    ) -> R,
+) -> R {
+    with_two_local_proof_session_internal(source, source_number, |_, _| {}, true, consume)
+}
+
+fn with_two_local_proof_session_mutating<R>(
+    source: &str,
+    source_number: u32,
+    mutate_store: impl FnOnce(&mut SemanticStore, [TypedLocalBinding; 2]),
+    consume: impl for<'session> FnOnce(
+        &SemanticStore,
+        &Definitions,
+        &AstArena<dotty_core::ast::Untyped>,
+        &dotty_core::ast::TypedAst,
+        &dotty_core::SourceSemanticIndex,
+        &dotty_core::SourceTypedIndex,
+        SourceId,
+        dotty_core::TreeId<dotty_core::ast::Untyped>,
+        [TypedLocalBinding; 2],
+        Option<TypedLocalBinding>,
+        Option<&SourceTyper<'session>>,
+        &JvmCompilationUnit<'session>,
+    ) -> R,
+) -> R {
+    with_two_local_proof_session_internal(source, source_number, mutate_store, false, consume)
+}
+
+fn with_two_local_proof_session_internal<R>(
+    source: &str,
+    source_number: u32,
+    mutate_store: impl FnOnce(&mut SemanticStore, [TypedLocalBinding; 2]),
+    retain_typer: bool,
+    consume: impl for<'session> FnOnce(
+        &SemanticStore,
+        &Definitions,
+        &AstArena<dotty_core::ast::Untyped>,
+        &dotty_core::ast::TypedAst,
+        &dotty_core::SourceSemanticIndex,
+        &dotty_core::SourceTypedIndex,
+        SourceId,
+        dotty_core::TreeId<dotty_core::ast::Untyped>,
+        [TypedLocalBinding; 2],
+        Option<TypedLocalBinding>,
+        Option<&SourceTyper<'session>>,
+        &JvmCompilationUnit<'session>,
+    ) -> R,
+) -> R {
+    let source_id = SourceId::from_index(source_number);
+    let source_text = SourceText::new(source).unwrap();
+    let scanner = ContextualScanner::new(source).unwrap();
+    assert!(scanner.diagnostics().is_empty());
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let parsed = parse_compilation_unit(source_text, source_id, scanner, &mut store.names);
+    assert!(parsed.diagnostics.is_empty());
+    let mut packages = Packages::new();
+    let source_index = match name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source_id,
+        "two-local-initializer-proof.scala",
+        SourceParseStatus::Clean,
+        &mut store,
+        &mut packages,
+    )
+    .unwrap()
+    {
+        NamingOutcome::Named { index, diagnostics } if diagnostics.is_empty() => index,
+        result => panic!("source names without diagnostics: {result:?}"),
+    };
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("source has one package root");
+    };
+    let mut class_data = Vec::new();
+    for &class_tree in &package.stats {
+        let TreeKind::TypeDef(definition) = &parsed.ast.get(class_tree).kind else {
+            continue;
+        };
+        let class = source_index.symbol_at(source_id, class_tree).unwrap();
+        let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind else {
+            panic!("class has an ordinary template");
+        };
+        let constructor = source_index
+            .symbol_at(source_id, template.constructor)
+            .unwrap();
+        let TreeKind::DefDef(constructor_definition) = &parsed.ast.get(template.constructor).kind
+        else {
+            panic!("primary constructor has a source definition");
+        };
+        let parameters = constructor_definition
+            .value_param_clauses
+            .iter()
+            .flatten()
+            .map(|tree| {
+                source_index
+                    .derived_symbol_at(constructor, source_id, *tree)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        class_data.push((class_tree, class, constructor, parameters));
+    }
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source_id,
+        &source_index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for (_, class, constructor, parameters) in &class_data {
+        typer.complete_symbol(*class).unwrap();
+        typer.complete_symbol(*constructor).unwrap();
+        for parameter in parameters {
+            typer.complete_symbol(*parameter).unwrap();
+        }
+    }
+    let mut found = None;
+    for (class_tree, _, _, _) in &class_data {
+        let TreeKind::TypeDef(definition) = &parsed.ast.get(*class_tree).kind else {
+            unreachable!();
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind else {
+            unreachable!();
+        };
+        for &member in &template.body {
+            let TreeKind::DefDef(method_definition) = &parsed.ast.get(member).kind else {
+                continue;
+            };
+            let is_create = typer
+                .store()
+                .names
+                .resolve(method_definition.name.as_name().text())
+                == "create";
+            let Some(rhs) = method_definition.rhs else {
+                continue;
+            };
+            let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+                continue;
+            };
+            if block.stats.len() < 2 {
+                continue;
+            }
+            let method = source_index.symbol_at(source_id, member).unwrap();
+            typer.complete_symbol(method).unwrap();
+            let formal_trees = method_definition.value_param_clauses[0].clone();
+            let formals = formal_trees
+                .iter()
+                .map(|tree| source_index.symbol_at(source_id, *tree).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(formals.len(), 2);
+            for formal in &formals {
+                typer.complete_symbol(*formal).unwrap();
+            }
+            let context = typer.expression_context_for(method).unwrap();
+            let typed_body = typer.type_expression(rhs, context).unwrap();
+            let local_bindings = [
+                typer
+                    .typed_local_binding_at(source_id, block.stats[0])
+                    .unwrap(),
+                typer
+                    .typed_local_binding_at(source_id, block.stats[1])
+                    .unwrap(),
+            ];
+            let all_local_bindings = block
+                .stats
+                .iter()
+                .map(|declaration| {
+                    typer
+                        .typed_local_binding_at(source_id, *declaration)
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            if is_create || found.is_none() {
+                found = Some((
+                    member,
+                    method,
+                    formals,
+                    local_bindings,
+                    all_local_bindings,
+                    typed_body,
+                ));
+            }
+        }
+    }
+    let (method_tree, method, formals, local_bindings, all_local_bindings, typed_body) =
+        found.expect("fixture has one two-local factory method");
+    let mut other_local_binding = None;
+    for (class_tree, _, _, _) in &class_data {
+        let TreeKind::TypeDef(definition) = &parsed.ast.get(*class_tree).kind else {
+            unreachable!();
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind else {
+            unreachable!();
+        };
+        for &member in &template.body {
+            let TreeKind::DefDef(other_definition) = &parsed.ast.get(member).kind else {
+                continue;
+            };
+            if typer
+                .store()
+                .names
+                .resolve(other_definition.name.as_name().text())
+                != "other"
+            {
+                continue;
+            }
+            let other_rhs = other_definition
+                .rhs
+                .expect("other method fixture includes a block body");
+            let TreeKind::Block(other_block) = &parsed.ast.get(other_rhs).kind else {
+                panic!("other method fixture includes a Block");
+            };
+            assert!(!other_block.stats.is_empty());
+            let other_method = source_index.symbol_at(source_id, member).unwrap();
+            typer.complete_symbol(other_method).unwrap();
+            for formal_tree in other_definition.value_param_clauses.iter().flatten() {
+                let formal = source_index.symbol_at(source_id, *formal_tree).unwrap();
+                typer.complete_symbol(formal).unwrap();
+            }
+            let context = typer.expression_context_for(other_method).unwrap();
+            typer.type_expression(other_rhs, context).unwrap();
+            other_local_binding = Some(
+                typer
+                    .typed_local_binding_at(source_id, other_block.stats[0])
+                    .unwrap(),
+            );
+        }
+    }
+    let mut method_plans = Vec::new();
+    for (class_tree, class, _, _) in &class_data {
+        let TreeKind::TypeDef(definition) = &parsed.ast.get(*class_tree).kind else {
+            unreachable!();
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind else {
+            unreachable!();
+        };
+        for &member in &template.body {
+            if source_index.symbol_at(source_id, member) != Some(method) {
+                continue;
+            }
+            let local_plan = all_local_bindings
+                .iter()
+                .map(|binding| dotty_jvm::JvmLocalBinding {
+                    declaration: binding.declaration(),
+                    symbol: binding.symbol(),
+                    mutable: typer
+                        .store()
+                        .symbols
+                        .get(binding.symbol())
+                        .flags
+                        .contains(dotty_core::SymbolFlags::MUTABLE),
+                })
+                .collect();
+            method_plans.push((
+                *class,
+                JvmMethodPlan {
+                    method,
+                    parameters: formals.clone(),
+                    locals: local_plan,
+                    body: Some(typed_body),
+                },
+            ));
+        }
+    }
+    let classes: Vec<JvmClassPlan> = class_data
+        .iter()
+        .map(|(_, class, constructor, parameters)| JvmClassPlan {
+            class: *class,
+            methods: method_plans
+                .iter()
+                .filter(|(owner, _)| owner == class)
+                .map(|(_, plan)| plan.clone())
+                .collect(),
+            fields: Vec::new(),
+            initialization: JvmClassInitializationPlan::PrimaryConstructor(
+                JvmPrimaryConstructorPlan::from_source(
+                    *class,
+                    *constructor,
+                    parameters.clone(),
+                    &parsed.ast,
+                    &source_index,
+                )
+                .unwrap(),
+            ),
+        })
+        .collect();
+    let typed_ast = clone_arena(typer.typed_ast());
+    let source_typed_index = typer.source_typed_index().clone();
+    let metadata_check = JvmCompilationUnit {
+        store: typer.store(),
+        typed_ast: typer.typed_ast(),
+        classes: classes.clone(),
+    };
+    metadata_check.metadata(&definitions).unwrap();
+    drop(metadata_check);
+    let _ = typed_body;
+    if retain_typer {
+        let jvm_unit = JvmCompilationUnit {
+            store: typer.store(),
+            typed_ast: typer.typed_ast(),
+            classes,
+        };
+        consume(
+            typer.store(),
+            &definitions,
+            &parsed.ast,
+            &typed_ast,
+            &source_index,
+            &source_typed_index,
+            source_id,
+            method_tree,
+            local_bindings,
+            other_local_binding,
+            Some(&typer),
+            &jvm_unit,
+        )
+    } else {
+        drop(typer);
+        mutate_store(&mut store, local_bindings);
+        let jvm_unit = JvmCompilationUnit {
+            store: &store,
+            typed_ast: &typed_ast,
+            classes,
+        };
+        consume(
+            &store,
+            &definitions,
+            &parsed.ast,
+            &typed_ast,
+            &source_index,
+            &source_typed_index,
+            source_id,
+            method_tree,
+            local_bindings,
+            other_local_binding,
+            None,
+            &jvm_unit,
+        )
+    }
 }
 
 fn assert_generic_proof(source: &str, source_number: u32, expected_descriptor: &str) {
@@ -660,7 +1049,14 @@ fn with_two_argument_proof<R>(
             let Some(rhs) = method_definition.rhs else {
                 continue;
             };
-            if !matches!(parsed.ast.get(rhs).kind, TreeKind::Apply(_)) {
+            let candidate = match &parsed.ast.get(rhs).kind {
+                TreeKind::Apply(_) => true,
+                TreeKind::Block(block) => {
+                    matches!(parsed.ast.get(block.expr).kind, TreeKind::Apply(_))
+                }
+                _ => false,
+            };
+            if !candidate {
                 continue;
             }
             let method = source_index.symbol_at(source_id, member).unwrap();
@@ -676,12 +1072,28 @@ fn with_two_argument_proof<R>(
             }
             let context = typer.expression_context_for(method).unwrap();
             let typed_rhs = typer.type_expression(rhs, context).unwrap();
+            let locals = match &parsed.ast.get(rhs).kind {
+                TreeKind::Block(block) => block
+                    .stats
+                    .iter()
+                    .filter_map(|declaration| {
+                        typer
+                            .typed_local_binding_at(source_id, *declaration)
+                            .map(|binding| dotty_jvm::JvmLocalBinding {
+                                declaration: binding.declaration(),
+                                symbol: binding.symbol(),
+                                mutable: false,
+                            })
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
             method_plans.push((
                 *class,
                 JvmMethodPlan {
                     method,
                     parameters,
-                    locals: Vec::new(),
+                    locals,
                     body: Some(typed_rhs),
                 },
             ));
@@ -718,20 +1130,195 @@ fn with_two_argument_proof<R>(
     };
     jvm_unit.metadata(&definitions).unwrap();
     let proofs =
-        validate_cross_class_constructor_call_proofs(CrossClassConstructorCallProofInput {
-            source_id,
-            source_root: parsed.root,
-            store: typer.store(),
-            definitions: &definitions,
-            source_ast: &parsed.ast,
-            typed_ast: typer.typed_ast(),
-            source_index: &source_index,
-            source_typed_index: typer.source_typed_index(),
-            jvm_unit: &jvm_unit,
-        })
+        dotty::jvm_tasty_cross_class::validate_cross_class_constructor_call_proofs_with_typer(
+            CrossClassConstructorCallProofInput {
+                source_id,
+                source_root: parsed.root,
+                store: typer.store(),
+                definitions: &definitions,
+                source_ast: &parsed.ast,
+                typed_ast: typer.typed_ast(),
+                source_index: &source_index,
+                source_typed_index: typer.source_typed_index(),
+                jvm_unit: &jvm_unit,
+            },
+            &typer,
+        )
         .unwrap();
+    if let Some(pair) = proofs[0].argument_proof().ordered_pair() {
+        let arguments = pair.arguments();
+        if arguments
+            .iter()
+            .any(|argument| argument.local_val().is_some())
+        {
+            let mut missing_local_edge = typer.source_typed_index().clone();
+            let local = arguments
+                .iter()
+                .find_map(|argument| argument.local_val())
+                .unwrap();
+            assert_eq!(
+                missing_local_edge.remove(source_id, local.source_use()),
+                Some(local.typed_use())
+            );
+            let method_tree = match source_index.definition_of(proofs[0].method()) {
+                Some(SourceDefinition::Canonical { source, tree }) if source == source_id => tree,
+                _ => panic!("local proof method retains its original source declaration"),
+            };
+            let missing_result = validate_immutable_local_initialization_proof(
+                ImmutableLocalInitializationProofInput {
+                    source_id,
+                    method_tree,
+                    store: typer.store(),
+                    definitions: &definitions,
+                    source_ast: &parsed.ast,
+                    typed_ast: typer.typed_ast(),
+                    source_index: &source_index,
+                    source_typed_index: &missing_local_edge,
+                    local_binding: typer
+                        .typed_local_binding_at(source_id, local.source_declaration()),
+                    jvm_unit: &jvm_unit,
+                },
+            );
+            assert_eq!(
+                missing_result.err().unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+                    "final local Ident has no original typed mapping"
+                )
+            );
+
+            let [first, second] = arguments;
+            let missing_argument_result = validate_ordered_constructor_argument_bindings(
+                &missing_local_edge,
+                source_id,
+                [first.source_argument(), second.source_argument()],
+                [first.typed_argument(), second.typed_argument()],
+            );
+            assert_eq!(
+                missing_argument_result.unwrap_err(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+                    if first.source_argument() == local.source_use() {
+                        "first outer argument has no exact typed binding"
+                    } else {
+                        "second outer argument has no exact typed binding"
+                    }
+                )
+            );
+            let mut swapped_edges = typer.source_typed_index().clone();
+            swapped_edges.remove(source_id, first.source_argument());
+            swapped_edges.remove(source_id, second.source_argument());
+            swapped_edges
+                .insert(source_id, first.source_argument(), second.typed_argument())
+                .unwrap();
+            swapped_edges
+                .insert(source_id, second.source_argument(), first.typed_argument())
+                .unwrap();
+            assert_eq!(
+                validate_ordered_constructor_argument_bindings(
+                    &swapped_edges,
+                    source_id,
+                    [first.source_argument(), second.source_argument()],
+                    [first.typed_argument(), second.typed_argument()],
+                )
+                .unwrap_err(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+                    "typed outer Apply must preserve exact ordered source mappings"
+                )
+            );
+
+            let foreign_index = typer.source_typed_index().clone();
+            let foreign_index_result =
+                dotty::jvm_tasty_cross_class::validate_cross_class_constructor_call_proofs_with_typer(
+                    CrossClassConstructorCallProofInput {
+                        source_id,
+                        source_root: parsed.root,
+                        store: typer.store(),
+                        definitions: &definitions,
+                        source_ast: &parsed.ast,
+                        typed_ast: typer.typed_ast(),
+                        source_index: &source_index,
+                        source_typed_index: &foreign_index,
+                        jvm_unit: &jvm_unit,
+                    },
+                    &typer,
+                );
+            assert_eq!(
+                foreign_index_result.err().unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+                    "local binding resolver must borrow the exact proof session stores and indexes"
+                )
+            );
+            let mut two_local_source = clone_arena(&parsed.ast);
+            let rhs = match &two_local_source.get(method_tree).kind {
+                TreeKind::DefDef(definition) => definition.rhs.unwrap(),
+                _ => panic!("factory method remains a method"),
+            };
+            let TreeKind::Block(block) = &mut two_local_source.get_mut(rhs).kind else {
+                panic!("factory source remains the original Block")
+            };
+            block.stats.push(block.stats[0]);
+            let two_local_result =
+                dotty::jvm_tasty_cross_class::validate_cross_class_constructor_call_proofs_with_typer(
+                    CrossClassConstructorCallProofInput {
+                        source_id,
+                        source_root: parsed.root,
+                        store: typer.store(),
+                        definitions: &definitions,
+                        source_ast: &two_local_source,
+                        typed_ast: typer.typed_ast(),
+                        source_index: &source_index,
+                        source_typed_index: typer.source_typed_index(),
+                        jvm_unit: &jvm_unit,
+                    },
+                    &typer,
+                );
+            assert!(matches!(
+                two_local_result,
+                Err(
+                    dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SemanticIdentity(
+                        "factory signature must preserve its two canonical Int formals"
+                    )
+                )
+            ));
+        }
+    }
     assert_eq!(proofs.len(), 1, "one source factory body has one proof");
-    consume(
+    let ownership_probe = proofs[0]
+        .argument_proof()
+        .ordered_pair()
+        .and_then(|pair| {
+            pair.arguments()
+                .iter()
+                .find_map(|argument| argument.local_val())
+        })
+        .map(|local| {
+            let method = proofs[0].method();
+            let method_tree = match source_index.definition_of(method) {
+                Some(SourceDefinition::Canonical { source, tree }) if source == source_id => tree,
+                _ => panic!("local proof method retains its original source declaration"),
+            };
+            let binding = typer
+                .typed_local_binding_at(source_id, local.source_declaration())
+                .expect("proof local retains its canonical typed binding");
+            let local_symbol = binding.symbol();
+            let pair_class = typer
+                .store()
+                .symbols
+                .get(proofs[0].constructor())
+                .owner
+                .expect("proof constructor has its canonical class owner");
+            assert_ne!(pair_class, method);
+            assert_ne!(pair_class, local_symbol);
+            (
+                method,
+                method_tree,
+                binding,
+                pair_class,
+                clone_arena(typer.typed_ast()),
+                typer.source_typed_index().clone(),
+                jvm_unit.classes.clone(),
+            )
+        });
+    let result = consume(
         &proofs[0],
         typer.store(),
         &parsed.ast,
@@ -742,7 +1329,93 @@ fn with_two_argument_proof<R>(
         parsed.root,
         &definitions,
         &jvm_unit,
-    )
+    );
+
+    drop(proofs);
+    drop(jvm_unit);
+    drop(typer);
+
+    if let Some((
+        method,
+        method_tree,
+        binding,
+        pair_class,
+        typed_ast,
+        source_typed_index,
+        classes,
+    )) = ownership_probe
+    {
+        let local_symbol = binding.symbol();
+        let local_scope = binding.scope();
+        assert_eq!(store.symbols.get(local_symbol).owner, Some(method));
+        assert_eq!(store.scopes.get(local_scope).owner, Some(method));
+
+        // Keep the canonical source/typed roots and valid references intact;
+        // corrupt only each owner edge before the authoritative proof check.
+        let original_symbol_owner = store.symbols.get(local_symbol).owner;
+        store.symbols.get_mut(local_symbol).owner = Some(pair_class);
+        assert_eq!(store.symbols.get(local_symbol).owner, Some(pair_class));
+        let wrong_symbol_owner_unit = JvmCompilationUnit {
+            store: &store,
+            typed_ast: &typed_ast,
+            classes: classes.clone(),
+        };
+        let wrong_symbol_owner =
+            validate_immutable_local_initialization_proof(ImmutableLocalInitializationProofInput {
+                source_id,
+                method_tree,
+                store: &store,
+                definitions: &definitions,
+                source_ast: &parsed.ast,
+                typed_ast: &typed_ast,
+                source_index: &source_index,
+                source_typed_index: &source_typed_index,
+                local_binding: Some(binding),
+                jvm_unit: &wrong_symbol_owner_unit,
+            });
+        assert_eq!(
+            wrong_symbol_owner
+                .err()
+                .expect("wrong symbol owner is rejected"),
+            dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(
+                "local must be the original immutable method-owned local"
+            )
+        );
+        store.symbols.get_mut(local_symbol).owner = original_symbol_owner;
+
+        let original_scope_owner = store.scopes.get(local_scope).owner;
+        store.scopes.get_mut(local_scope).owner = Some(pair_class);
+        assert_eq!(store.scopes.get(local_scope).owner, Some(pair_class));
+        let wrong_scope_owner_unit = JvmCompilationUnit {
+            store: &store,
+            typed_ast: &typed_ast,
+            classes,
+        };
+        let wrong_scope_owner =
+            validate_immutable_local_initialization_proof(ImmutableLocalInitializationProofInput {
+                source_id,
+                method_tree,
+                store: &store,
+                definitions: &definitions,
+                source_ast: &parsed.ast,
+                typed_ast: &typed_ast,
+                source_index: &source_index,
+                source_typed_index: &source_typed_index,
+                local_binding: Some(binding),
+                jvm_unit: &wrong_scope_owner_unit,
+            });
+        assert_eq!(
+            wrong_scope_owner
+                .err()
+                .expect("wrong scope owner is rejected"),
+            dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(
+                "local must occupy its exact single-entry method-owned Block scope"
+            )
+        );
+        store.scopes.get_mut(local_scope).owner = original_scope_owner;
+    }
+
+    result
 }
 
 struct PairReceiptContext<'a> {
@@ -952,6 +1625,1226 @@ fn assert_ordered_pair_receipt(
             Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == receipt.argument_formal()
         ));
     }
+}
+
+#[test]
+fn two_original_immutable_local_initializers_prove_atomically_in_one_block() {
+    let renamed = TWO_IMMUTABLE_LOCALS_SOURCE
+        .replace("PairFactory", "Assembler")
+        .replace("create", "assemble")
+        .replace("first", "left")
+        .replace("second", "right");
+    let counter_at = TWO_IMMUTABLE_LOCALS_SOURCE.find("class Counter(").unwrap();
+    let pair_at = TWO_IMMUTABLE_LOCALS_SOURCE.find("class Pair(").unwrap();
+    let factory_at = TWO_IMMUTABLE_LOCALS_SOURCE
+        .find("class PairFactory:")
+        .unwrap();
+    let reordered = format!(
+        "{}{}{}{}",
+        &TWO_IMMUTABLE_LOCALS_SOURCE[..counter_at],
+        &TWO_IMMUTABLE_LOCALS_SOURCE[factory_at..],
+        &TWO_IMMUTABLE_LOCALS_SOURCE[pair_at..factory_at],
+        &TWO_IMMUTABLE_LOCALS_SOURCE[counter_at..pair_at],
+    );
+    for (source, source_number) in [
+        (TWO_IMMUTABLE_LOCALS_SOURCE, 2123),
+        (TWO_IMMUTABLE_LOCALS_REVERSED_SOURCE, 2124),
+        (renamed.as_str(), 2125),
+        (reordered.as_str(), 2130),
+    ] {
+        with_two_local_proof_session(
+            source,
+            source_number,
+            |store,
+             definitions,
+             source_ast,
+             typed_ast,
+             source_index,
+             source_typed_index,
+             source_id,
+             method_tree,
+             bindings,
+             _other_local_binding,
+             _typer,
+             jvm_unit| {
+                let proof = validate_immutable_local_initializer_pair_proof(
+                    ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast,
+                        source_index,
+                        source_typed_index,
+                        local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                        jvm_unit,
+                    },
+                )
+                .unwrap();
+                let TreeKind::DefDef(method) = &source_ast.get(method_tree).kind else {
+                    panic!("proof root is the original factory method");
+                };
+                let source_block = method.rhs.unwrap();
+                let TreeKind::Block(block) = &source_ast.get(source_block).kind else {
+                    panic!("method body remains the original Block");
+                };
+                assert_eq!(proof.source_id(), source_id);
+                assert_eq!(proof.source_block(), source_block);
+                assert_eq!(
+                    proof.typed_block(),
+                    source_typed_index.get(source_id, source_block).unwrap()
+                );
+                assert_eq!(proof.source_final_expression(), block.expr);
+                assert_eq!(
+                    proof.typed_final_expression(),
+                    source_typed_index.get(source_id, block.expr).unwrap()
+                );
+                let receipts = proof.initializers();
+                let counter = proof.counter();
+                assert_ne!(counter, proof.method());
+                assert_ne!(receipts[0].symbol(), receipts[1].symbol());
+                assert_eq!(receipts[0].source_declaration(), block.stats[0]);
+                assert_eq!(receipts[1].source_declaration(), block.stats[1]);
+                assert_eq!(
+                    receipts.map(|receipt| receipt.typed_declaration()),
+                    [bindings[0].declaration(), bindings[1].declaration()]
+                );
+                assert_eq!(receipts[0].scope(), receipts[1].scope());
+                assert_eq!(
+                    store.scopes.get(receipts[0].scope()).owner,
+                    Some(proof.method())
+                );
+                for (index, receipt) in receipts.into_iter().enumerate() {
+                    let TreeKind::ValDef(local) = &source_ast.get(block.stats[index]).kind else {
+                        panic!("receipt declaration is a ValDef");
+                    };
+                    let initializer = local.rhs.unwrap();
+                    let TreeKind::Apply(apply) = &source_ast.get(initializer).kind else {
+                        panic!("initializer is an Apply");
+                    };
+                    assert_eq!(receipt.source_initializer(), initializer);
+                    assert_eq!(receipt.source_select(), apply.function);
+                    assert_eq!(receipt.source_argument(), apply.args[0]);
+                    assert_eq!(
+                        receipt.typed_initializer(),
+                        source_typed_index.get(source_id, initializer).unwrap()
+                    );
+                    assert_eq!(
+                        receipt.typed_argument(),
+                        source_typed_index.get(source_id, apply.args[0]).unwrap()
+                    );
+                    for ty in [receipt.local_type(), receipt.initializer_result_type()] {
+                        assert!(matches!(
+                            store.types.try_get(ty),
+                            Some(Type::TypeRef { target: TypeRefTarget::Symbol(class), .. })
+                                if *class == counter
+                        ));
+                    }
+                    assert_eq!(receipt.seed_formal_type(), definitions.int);
+                    assert_eq!(receipt.constructor_formal_type(), definitions.int);
+                    assert_eq!(
+                        store.symbols.get(receipt.seed_formal()).owner,
+                        Some(proof.method())
+                    );
+                    assert_eq!(
+                        store.symbols.get(receipt.constructor()).owner,
+                        Some(counter)
+                    );
+                }
+            },
+        );
+    }
+    with_paired_jvm_tasty_batch_plan(
+        TWO_IMMUTABLE_LOCALS_SOURCE,
+        "TwoLocals.scala",
+        SourceId::from_index(2126),
+        |batch| {
+            let proof = batch
+                .constructor_call_proofs
+                .iter()
+                .find(|proof| {
+                    proof.argument_proof().kind()
+                        == dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind::LocalValPair
+                })
+                .expect("the original source retains its LocalValPair proof");
+            let owner = batch
+                .jvm_unit
+                .store
+                .symbols
+                .get(proof.method())
+                .owner
+                .unwrap();
+            let factory = batch
+                .classes
+                .iter()
+                .find(|class| class.class == owner)
+                .expect("the source batch retains PairFactory");
+            factory
+                .tasty_plan
+                .validate_method_bodies()
+                .expect("the authenticated two-local method body validates");
+            assert!(
+                !factory
+                    .tasty_plan
+                    .pickle()
+                    .expect("the two-local body now emits its TASTy sidecar")
+                    .bytes()
+                    .is_empty()
+            );
+        },
+    )
+    .expect("the authenticated two-local source/typed body reaches TASTy output");
+}
+
+#[test]
+fn ordered_two_local_pair_arguments_reuse_initializer_receipts_without_authorizing_output() {
+    let aliased =
+        TWO_IMMUTABLE_LOCALS_SOURCE.replace("new Pair(first, second)", "new Pair(first, first)");
+    let cases = [
+        (TWO_IMMUTABLE_LOCALS_SOURCE, 21240, [0usize, 1usize]),
+        (
+            TWO_IMMUTABLE_LOCALS_REVERSED_SOURCE,
+            21241,
+            [1usize, 0usize],
+        ),
+        (aliased.as_str(), 21242, [0usize, 0usize]),
+    ];
+    let mut normalized = Vec::new();
+    for (source, source_number, expected_positions) in cases {
+        with_two_local_proof_session_retaining_typer(
+            source,
+            source_number,
+            |store,
+             definitions,
+             source_ast,
+             _typed_ast,
+             source_index,
+             _source_typed_index,
+             source_id,
+             method_tree,
+             bindings,
+             _other_local_binding,
+             typer,
+             jvm_unit| {
+                let typer = typer.expect("unmodified session retains its original Typer");
+                let source_root = source_ast
+                    .iter()
+                    .find_map(|(tree, node)| {
+                        matches!(node.kind, TreeKind::PackageDef(_)).then_some(tree)
+                    })
+                    .expect("fixture retains its original package root");
+                let proofs = dotty::jvm_tasty_cross_class::
+                    validate_cross_class_constructor_call_proofs_with_typer(
+                        CrossClassConstructorCallProofInput {
+                            source_id,
+                            source_root,
+                            store,
+                            definitions,
+                            source_ast,
+                            typed_ast: typer.typed_ast(),
+                            source_index,
+                            source_typed_index: typer.source_typed_index(),
+                            jvm_unit,
+                        },
+                        typer,
+                    )
+                    .unwrap();
+                let method = source_index.symbol_at(source_id, method_tree).unwrap();
+                let proof = proofs
+                    .iter()
+                    .find(|proof| proof.method() == method)
+                    .expect("the original factory method has a proof");
+                let argument_proof = proof.argument_proof();
+                assert_eq!(
+                    argument_proof.kind(),
+                    dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind::LocalValPair
+                );
+                let pair = argument_proof
+                    .ordered_pair()
+                    .expect("both local arguments retain ordered receipts");
+                let arguments = pair.arguments();
+                let local_symbols = [bindings[0].symbol(), bindings[1].symbol()];
+                let initializer_symbols = pair
+                    .local_initializers()
+                    .expect("the pair proof retains both initializer receipts")
+                    .map(|receipt| receipt.symbol());
+                assert_eq!(initializer_symbols, local_symbols);
+                let initializer_positions = initializer_symbols.map(|symbol| {
+                    local_symbols
+                        .iter()
+                        .position(|candidate| *candidate == symbol)
+                        .expect("initializer receipt is one of the original local declarations")
+                });
+                assert_eq!(initializer_positions, [0, 1]);
+                let actual = arguments.map(|argument| {
+                    argument
+                        .local_val()
+                        .expect("each Pair position is an initialized local")
+                        .symbol()
+                });
+                assert_eq!(actual, expected_positions.map(|index| local_symbols[index]));
+                let actual_positions = actual.map(|symbol| {
+                    local_symbols
+                        .iter()
+                        .position(|candidate| *candidate == symbol)
+                        .expect("argument target is one of the original local symbols")
+                });
+                assert_eq!(actual_positions, expected_positions);
+                assert!(local_symbols.contains(&actual[0]));
+                assert!(local_symbols.contains(&actual[1]));
+                assert!(!local_symbols.contains(&pair.constructor_formals()[0]));
+                assert!(!local_symbols.contains(&pair.constructor_formals()[1]));
+                assert_ne!(pair.constructor_formals()[0], pair.constructor_formals()[1]);
+                assert!(arguments.iter().all(|argument| {
+                    argument.formal().is_none() && argument.nested_new().is_none()
+                }));
+                normalized.push(actual_positions);
+            },
+        );
+    }
+    assert_eq!(normalized, [[0, 1], [1, 0], [0, 0]]);
+}
+
+#[test]
+fn two_local_pair_rejects_nested_argument_even_when_other_local_is_authenticated() {
+    let nested = TWO_IMMUTABLE_LOCALS_SOURCE.replace(
+        "new Pair(first, second)",
+        "new Pair(new Counter(firstSeed), second)",
+    );
+    with_two_local_proof_session_retaining_typer(
+        &nested,
+        21243,
+        |store,
+         definitions,
+         source_ast,
+         _typed_ast,
+         source_index,
+         _source_typed_index,
+         source_id,
+         _method_tree,
+         _bindings,
+         _other_local_binding,
+         typer,
+         jvm_unit| {
+            let typer = typer.expect("the authentic source session retains its Typer");
+            let source_root = source_ast
+                .iter()
+                .find_map(|(tree, node)| {
+                    matches!(node.kind, TreeKind::PackageDef(_)).then_some(tree)
+                })
+                .expect("fixture retains its package root");
+            let result = dotty::jvm_tasty_cross_class::
+                validate_cross_class_constructor_call_proofs_with_typer(
+                    CrossClassConstructorCallProofInput {
+                        source_id,
+                        source_root,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast: typer.typed_ast(),
+                        source_index,
+                        source_typed_index: typer.source_typed_index(),
+                        jvm_unit,
+                    },
+                    typer,
+                );
+            let error = match result {
+                Ok(_) => panic!("a nested argument cannot borrow the second local receipt"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error,
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceShape(
+                    "two-local Pair arguments must be direct original local Idents"
+                )
+            );
+        },
+    );
+}
+
+#[test]
+fn two_local_initializer_receipt_rejects_stale_and_swapped_typed_edges() {
+    with_two_local_proof_session(
+        TWO_IMMUTABLE_LOCALS_SOURCE,
+        2127,
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         _other_local_binding,
+         _typer,
+         jvm_unit| {
+            macro_rules! proof_input {
+                ($index:expr) => {
+                    ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast,
+                        source_index,
+                        source_typed_index: $index,
+                        local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                        jvm_unit,
+                    }
+                };
+            }
+            let proof =
+                validate_immutable_local_initializer_pair_proof(proof_input!(source_typed_index))
+                    .unwrap();
+            let second_select = proof.initializers()[1].source_select();
+            let second_typed_select = proof.initializers()[1].typed_select();
+            let TreeKind::DefDef(method) = &source_ast.get(method_tree).kind else {
+                panic!("method root is DefDef");
+            };
+            let TreeKind::Block(block) = &source_ast.get(method.rhs.unwrap()).kind else {
+                panic!("method body is Block");
+            };
+            let TreeKind::Apply(final_apply) = &source_ast.get(block.expr).kind else {
+                panic!("final expression is a constructor Apply");
+            };
+            let final_select = final_apply.function;
+            let mut wrong_final_select = source_typed_index.clone();
+            wrong_final_select.remove(source_id, final_select).unwrap();
+            wrong_final_select
+                .insert(
+                    source_id,
+                    final_select,
+                    proof.initializers()[0].typed_select(),
+                )
+                .unwrap();
+            assert_eq!(
+                validate_immutable_local_initializer_pair_proof(proof_input!(&wrong_final_select))
+                    .err()
+                    .unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+                    "typed final constructor Apply must retain its original Select edge"
+                )
+            );
+
+            let mut missing_edge = source_typed_index.clone();
+            assert_eq!(
+                missing_edge.remove(source_id, second_select),
+                Some(second_typed_select)
+            );
+            assert_eq!(
+                validate_immutable_local_initializer_pair_proof(proof_input!(&missing_edge))
+                    .err()
+                    .unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+                    "initializer Select has no typed mapping"
+                )
+            );
+
+            let TreeKind::DefDef(method) = &source_ast.get(method_tree).kind else {
+                panic!("method root is DefDef");
+            };
+            let TreeKind::Block(block) = &source_ast.get(method.rhs.unwrap()).kind else {
+                panic!("method body is Block");
+            };
+            let mut swapped = source_typed_index.clone();
+            let first_typed = swapped.remove(source_id, block.stats[0]).unwrap();
+            let second_typed = swapped.remove(source_id, block.stats[1]).unwrap();
+            swapped
+                .insert(source_id, block.stats[0], second_typed)
+                .unwrap();
+            swapped
+                .insert(source_id, block.stats[1], first_typed)
+                .unwrap();
+            assert_eq!(
+                validate_immutable_local_initializer_pair_proof(proof_input!(&swapped))
+                    .err()
+                    .unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+                    "typed Block must preserve both original ValDefs and final expression"
+                )
+            );
+        },
+    );
+}
+
+#[test]
+fn two_local_initializer_receipt_rejects_mutable_and_wrong_formal_initializers() {
+    let mutable = TWO_IMMUTABLE_LOCALS_SOURCE.replace("val second: Counter", "var second: Counter");
+    with_two_local_proof_session(
+        &mutable,
+        2128,
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         _other_local_binding,
+         _typer,
+         jvm_unit| {
+            assert_eq!(
+                validate_immutable_local_initializer_pair_proof(
+                    ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast,
+                        source_index,
+                        source_typed_index,
+                        local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                        jvm_unit,
+                    }
+                )
+                .err()
+                .unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(
+                    "local must be the original immutable method-owned local"
+                )
+            );
+        },
+    );
+    let swapped_formal =
+        TWO_IMMUTABLE_LOCALS_SOURCE.replace("new Counter(secondSeed)", "new Counter(firstSeed)");
+    with_two_local_proof_session(
+        &swapped_formal,
+        2129,
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         _other_local_binding,
+         _typer,
+         jvm_unit| {
+            assert_eq!(
+                validate_immutable_local_initializer_pair_proof(
+                    ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast,
+                        source_index,
+                        source_typed_index,
+                        local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                        jvm_unit,
+                    }
+                )
+                .err()
+                .unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceShape(
+                    "initializer must use the original seed formal"
+                )
+            );
+        },
+    );
+    let conditional = TWO_IMMUTABLE_LOCALS_SOURCE.replace(
+        "new Counter(firstSeed)",
+        "if firstSeed > 0 then new Counter(firstSeed) else new Counter(secondSeed)",
+    );
+    with_two_local_proof_session(
+        &conditional,
+        2133,
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         _other_local_binding,
+         _typer,
+         jvm_unit| {
+            assert_eq!(
+                validate_immutable_local_initializer_pair_proof(
+                    ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast,
+                        source_index,
+                        source_typed_index,
+                        local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                        jvm_unit,
+                    }
+                )
+                .err()
+                .unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceShape(
+                    "local initializer must be the original direct constructor Apply"
+                )
+            );
+        },
+    );
+}
+
+#[test]
+fn two_local_initializer_receipt_rejects_third_local_and_missing_binding() {
+    let third_local = TWO_IMMUTABLE_LOCALS_SOURCE.replace(
+        "    new Pair(first, second)",
+        "    val third: Counter = new Counter(firstSeed)\n    new Pair(first, second)",
+    );
+    with_two_local_proof_session(
+        &third_local,
+        2131,
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         _other_local_binding,
+         _typer,
+         jvm_unit| {
+            let error = validate_immutable_local_initializer_pair_proof(
+                ImmutableLocalInitializerPairProofInput {
+                    source_id,
+                    method_tree,
+                    store,
+                    definitions,
+                    source_ast,
+                    typed_ast,
+                    source_index,
+                    source_typed_index,
+                    local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                    jvm_unit,
+                },
+            )
+            .err()
+            .unwrap();
+            assert_eq!(
+                error,
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceShape(
+                    "factory Block must contain exactly two local ValDefs"
+                )
+            );
+        },
+    );
+    with_two_local_proof_session(
+        TWO_IMMUTABLE_LOCALS_SOURCE,
+        2132,
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         _other_local_binding,
+         _typer,
+         jvm_unit| {
+            assert_eq!(
+                validate_immutable_local_initializer_pair_proof(
+                    ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast,
+                        source_index,
+                        source_typed_index,
+                        local_bindings: [None, Some(bindings[1])],
+                        jvm_unit,
+                    }
+                )
+                .err()
+                .unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(
+                    "first local declaration has no original Typer binding"
+                )
+            );
+        },
+    );
+}
+
+#[test]
+fn two_local_initializer_receipt_rejects_a_non_constructor_final_apply() {
+    let wrong_result = TWO_IMMUTABLE_LOCALS_SOURCE
+        .replace(
+            "def create(firstSeed: Int, secondSeed: Int): Pair =",
+            "def create(firstSeed: Int, secondSeed: Int): Int =",
+        )
+        .replace("new Pair(first, second)", "first.get()");
+    with_two_local_proof_session(
+        &wrong_result,
+        2140,
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         _other_local_binding,
+         _typer,
+         jvm_unit| {
+            assert_eq!(
+                validate_immutable_local_initializer_pair_proof(
+                    ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast,
+                        source_index,
+                        source_typed_index,
+                        local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                        jvm_unit,
+                    }
+                )
+                .err()
+                .unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceShape(
+                    "final Block expression must select a primary constructor"
+                )
+            );
+        },
+    );
+}
+
+#[test]
+fn two_local_initializer_receipt_rejects_three_argument_result_constructors() {
+    let three_argument = TWO_IMMUTABLE_LOCALS_SOURCE
+        .replace(
+            "class Pair(first: Counter, second: Counter):",
+            "class Pair(first: Counter, second: Counter, extra: Int):",
+        )
+        .replace(
+            "new Pair(first, second)",
+            "new Pair(first, second, firstSeed)",
+        );
+    with_two_local_proof_session(
+        &three_argument,
+        2147,
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         _,
+         _typer,
+         jvm_unit| {
+            assert_eq!(
+                validate_immutable_local_initializer_pair_proof(
+                    ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast,
+                        source_index,
+                        source_typed_index,
+                        local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                        jvm_unit,
+                    },
+                )
+                .err()
+                .unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceShape(
+                    "final constructor Apply must have exactly two arguments"
+                )
+            );
+        },
+    );
+}
+
+#[test]
+fn two_local_initializer_receipt_rejects_out_of_range_and_other_owner_bindings() {
+    // The foreign binding is created from another genuine Typer session with
+    // the same Counter declaration name as this session.
+    let mut padded = (0..40)
+        .map(|index| format!("class Padding{index}\n"))
+        .collect::<String>();
+    padded.push_str("class PairFactory:\n  def other(seed: Int): Counter =\n    val outsider: Counter = new Counter(seed)\n    outsider\n");
+    let foreign_source = TWO_IMMUTABLE_LOCALS_SOURCE.replace("class PairFactory:\n", &padded);
+    let foreign_binding = with_two_local_proof_session(
+        &foreign_source,
+        2141,
+        |_, _, _, _, _, _, _, _, _, other_local_binding, _, _| {
+            other_local_binding.expect("helper method exposes its authentic Typer binding")
+        },
+    );
+    with_two_local_proof_session(
+        TWO_IMMUTABLE_LOCALS_SOURCE,
+        2142,
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         _other_local_binding,
+         _typer,
+         jvm_unit| {
+            assert!(!store.symbols.contains(foreign_binding.symbol()));
+            assert_eq!(
+                validate_immutable_local_initializer_pair_proof(
+                    ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast,
+                        source_index,
+                        source_typed_index,
+                        local_bindings: [Some(foreign_binding), Some(bindings[1])],
+                        jvm_unit,
+                    }
+                )
+                .err()
+                .unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(
+                    "Typer local binding names a stale or foreign symbol"
+                )
+            );
+        },
+    );
+
+    let wrong_owner_source = TWO_IMMUTABLE_LOCALS_SOURCE.replace(
+        "class PairFactory:\n",
+        "class PairFactory:\n  def other(seed: Int): Counter =\n    val outsider: Counter = new Counter(seed)\n    outsider\n",
+    );
+    with_two_local_proof_session(
+        &wrong_owner_source,
+        2143,
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         other_local_binding,
+         _typer,
+         jvm_unit| {
+            let foreign_scope = other_local_binding.unwrap();
+            assert!(store.symbols.contains(foreign_scope.symbol()));
+            assert_ne!(foreign_scope.scope(), bindings[0].scope());
+            assert_eq!(
+                validate_immutable_local_initializer_pair_proof(
+                    ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast,
+                        source_index,
+                        source_typed_index,
+                        local_bindings: [Some(foreign_scope), Some(bindings[1])],
+                        jvm_unit,
+                    }
+                )
+                .err()
+                .unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(
+                    "Typer local binding must name this exact original ValDef"
+                )
+            );
+        },
+    );
+}
+
+#[test]
+fn two_local_initializer_receipt_rejects_owner_scope_constructor_and_foreign_counter() {
+    with_two_local_proof_session_mutating(
+        TWO_IMMUTABLE_LOCALS_SOURCE,
+        2148,
+        |store, bindings| {
+            store.symbols.get_mut(bindings[0].symbol()).owner = Some(bindings[1].symbol());
+        },
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         _,
+         _typer,
+         jvm_unit| {
+            assert_eq!(
+                validate_immutable_local_initializer_pair_proof(
+                    ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast,
+                        source_index,
+                        source_typed_index,
+                        local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                        jvm_unit,
+                    },
+                )
+                .err()
+                .unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(
+                    "local must be the original immutable method-owned local"
+                )
+            );
+        },
+    );
+    with_two_local_proof_session_mutating(
+        TWO_IMMUTABLE_LOCALS_SOURCE,
+        2149,
+        |store, bindings| {
+            store.scopes.get_mut(bindings[0].scope()).owner = Some(bindings[1].symbol());
+        },
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         _,
+         _typer,
+         jvm_unit| {
+            assert_eq!(
+                validate_immutable_local_initializer_pair_proof(
+                    ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast,
+                        source_index,
+                        source_typed_index,
+                        local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                        jvm_unit,
+                    },
+                )
+                .err()
+                .unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(
+                    "local must occupy its exact method-owned Block scope"
+                )
+            );
+        },
+    );
+    with_two_local_proof_session(
+        TWO_IMMUTABLE_LOCALS_SOURCE,
+        2150,
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         _,
+         _typer,
+         jvm_unit| {
+            let TreeKind::DefDef(method) = &source_ast.get(method_tree).kind else {
+                unreachable!()
+            };
+            let TreeKind::Block(block) = &source_ast.get(method.rhs.unwrap()).kind else {
+                unreachable!()
+            };
+            let TreeKind::ValDef(first) = &source_ast.get(block.stats[0]).kind else {
+                unreachable!()
+            };
+            let initializer = first.rhs.unwrap();
+            let TreeKind::Apply(apply) = &source_ast.get(initializer).kind else {
+                unreachable!()
+            };
+            let typed_select = source_typed_index.get(source_id, apply.function).unwrap();
+            let TreeKind::Apply(final_apply) = &source_ast.get(block.expr).kind else {
+                unreachable!()
+            };
+            let typed_final_select = source_typed_index
+                .get(source_id, final_apply.function)
+                .unwrap();
+            let mut wrong_constructor_ast = clone_arena(typed_ast);
+            wrong_constructor_ast.get_mut(typed_select).ty = typed_ast.get(typed_final_select).ty;
+            let wrong_constructor_unit = JvmCompilationUnit {
+                store,
+                typed_ast: &wrong_constructor_ast,
+                classes: jvm_unit.classes.clone(),
+            };
+            assert_eq!(
+                validate_immutable_local_initializer_pair_proof(
+                    ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast: &wrong_constructor_ast,
+                        source_index,
+                        source_typed_index,
+                        local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                        jvm_unit: &wrong_constructor_unit,
+                    },
+                )
+                .err()
+                .unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SemanticIdentity(
+                    "selected constructor must belong to the canonical Counter class"
+                )
+            );
+        },
+    );
+    with_two_local_proof_session_mutating(
+        TWO_IMMUTABLE_LOCALS_SOURCE,
+        2151,
+        |store, bindings| {
+            let SymbolInfo::Complete(local_type) = store.symbols.get(bindings[0].symbol()).info
+            else {
+                panic!("local type is complete");
+            };
+            let Type::TypeRef {
+                prefix,
+                target: TypeRefTarget::Symbol(counter),
+            } = store.types.get(local_type)
+            else {
+                panic!("local type is Counter TypeRef");
+            };
+            let mut foreign_counter = store.symbols.get(*counter).clone();
+            foreign_counter.origin = SymbolOrigin::Source(SourceId::from_index(999_991));
+            let foreign_counter_id = store.symbols.alloc(foreign_counter);
+            let foreign_type = store.types.alloc(Type::TypeRef {
+                prefix: *prefix,
+                target: TypeRefTarget::Symbol(foreign_counter_id),
+            });
+            store.symbols.get_mut(bindings[0].symbol()).info = SymbolInfo::Complete(foreign_type);
+        },
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         _,
+         _typer,
+         jvm_unit| {
+            assert_eq!(
+                validate_immutable_local_initializer_pair_proof(
+                    ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast,
+                        source_index,
+                        source_typed_index,
+                        local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                        jvm_unit,
+                    },
+                )
+                .err()
+                .unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(
+                    "Counter must be a canonical class in the original source batch"
+                )
+            );
+        },
+    );
+}
+
+#[test]
+fn two_local_initializer_receipt_rejects_duplicate_roots_and_missing_rhs() {
+    with_two_local_proof_session(
+        TWO_IMMUTABLE_LOCALS_SOURCE,
+        2146,
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         _,
+         _typer,
+         jvm_unit| {
+            let TreeKind::DefDef(method) = &source_ast.get(method_tree).kind else {
+                panic!("method root is DefDef");
+            };
+            let TreeKind::Block(block) = &source_ast.get(method.rhs.unwrap()).kind else {
+                panic!("method body is Block");
+            };
+            let validate = |source: &AstArena<dotty_core::ast::Untyped>,
+                            typed_index: &dotty_core::SourceTypedIndex| {
+                validate_immutable_local_initializer_pair_proof(
+                    ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast: source,
+                        typed_ast,
+                        source_index,
+                        source_typed_index: typed_index,
+                        local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                        jvm_unit,
+                    },
+                )
+                .err()
+            };
+            let mut duplicate_declaration = clone_arena(source_ast);
+            if let TreeKind::Block(block) =
+                &mut duplicate_declaration.get_mut(method.rhs.unwrap()).kind
+            {
+                block.stats[1] = block.stats[0];
+            }
+            assert_eq!(
+                validate(&duplicate_declaration, source_typed_index).unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(
+                    "two local declarations must have distinct original source roots"
+                )
+            );
+            let first_initializer = match &source_ast.get(block.stats[0]).kind {
+                TreeKind::ValDef(local) => local.rhs.unwrap(),
+                _ => unreachable!(),
+            };
+            let second_initializer = match &source_ast.get(block.stats[1]).kind {
+                TreeKind::ValDef(local) => local.rhs.unwrap(),
+                _ => unreachable!(),
+            };
+            let mut use_before_initialization = clone_arena(source_ast);
+            use_before_initialization
+                .get_mut(first_initializer)
+                .position = source_ast.get(second_initializer).position;
+            assert_eq!(
+                validate(&use_before_initialization, source_typed_index).unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceShape(
+                    "two local initializers must be sequential and precede the final expression"
+                )
+            );
+            let mut missing_rhs = clone_arena(source_ast);
+            if let TreeKind::ValDef(local) = &mut missing_rhs.get_mut(block.stats[0]).kind {
+                local.rhs = None;
+            }
+            assert_eq!(
+                validate(&missing_rhs, source_typed_index).unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceShape(
+                    "local must have one initializer"
+                )
+            );
+            let mut duplicate_mapping = source_typed_index.clone();
+            duplicate_mapping.remove(source_id, block.stats[1]).unwrap();
+            duplicate_mapping
+                .insert(source_id, block.stats[1], bindings[0].declaration())
+                .unwrap();
+            assert_eq!(
+                validate(source_ast, &duplicate_mapping).unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+                    "two source ValDefs must retain distinct typed roots"
+                )
+            );
+        },
+    );
+}
+
+#[test]
+fn two_local_initializer_receipt_rejects_wrong_local_type() {
+    let wrong_local_type = TWO_IMMUTABLE_LOCALS_SOURCE
+        .replace(
+            "class Counter(start: Int):",
+            "class Base\n\nclass Counter(start: Int) extends Base:",
+        )
+        .replace(
+            "class Pair(first: Counter, second: Counter):",
+            "class Pair(first: Base, second: Base):",
+        )
+        .replace("private val left: Counter", "private val left: Base")
+        .replace("private val right: Counter", "private val right: Base")
+        .replace("val first: Counter", "val first: Base")
+        .replace("val second: Counter", "val second: Base")
+        .replace(
+            "new Pair(first, second)",
+            "new Pair(new Counter(firstSeed), new Counter(secondSeed))",
+        );
+    with_two_local_proof_session(
+        &wrong_local_type,
+        2144,
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         _other_local_binding,
+         _typer,
+         jvm_unit| {
+            assert_eq!(
+                validate_immutable_local_initializer_pair_proof(
+                    ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast,
+                        source_index,
+                        source_typed_index,
+                        local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                        jvm_unit,
+                    }
+                )
+                .err()
+                .unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+                    "typed New must retain the canonical Counter TypeRef"
+                )
+            );
+        },
+    );
 }
 
 #[test]
@@ -1304,6 +3197,117 @@ fn two_ordered_nested_arguments_keep_distinct_source_and_typed_provenance() {
             );
         },
     );
+}
+
+#[test]
+fn one_initialized_local_and_one_formal_keep_both_argument_orders() {
+    use dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind;
+
+    for (source, source_number, local_first) in [
+        (IMMUTABLE_LOCAL_PAIR_SOURCE, 20681, false),
+        (IMMUTABLE_LOCAL_PAIR_REVERSED_SOURCE, 20682, true),
+    ] {
+        for fresh_session in 0..2 {
+            with_two_argument_proof(
+                source,
+                source_number + fresh_session,
+                |proof, store, source_ast, typed_ast, _index, bindings, source_id, _, _, _| {
+                    let argument_proof = proof.argument_proof();
+                    assert_eq!(
+                        argument_proof.kind(),
+                        ConstructorArgumentProofKind::FormalLocalPair
+                    );
+                    assert_eq!(
+                        proof.method_descriptor(),
+                        "(Lexample/Counter;I)Lexample/Pair;"
+                    );
+                    assert_eq!(
+                        proof.constructor_descriptor(),
+                        "(Lexample/Counter;Lexample/Counter;)V"
+                    );
+                    let pair = argument_proof.ordered_pair().unwrap();
+                    let [first, second] = pair.arguments();
+                    let ordered = [first, second];
+                    for (index, argument) in ordered.into_iter().enumerate() {
+                        if (index == 0) == local_first {
+                            let local = argument
+                                .local_val()
+                                .expect("the corresponding ordered argument is the proven local");
+                            assert_eq!(argument.source_argument(), local.source_use());
+                            assert_eq!(argument.typed_argument(), local.typed_use());
+                            assert!(matches!(
+                                store.types.get(typed_ast.get(local.typed_use()).ty),
+                                Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == local.symbol()
+                            ));
+                            assert_eq!(
+                                source_ast.get(local.source_block()).position,
+                                typed_ast.get(local.typed_block()).position
+                            );
+                            assert_eq!(
+                                bindings.get(source_id, local.source_initializer()),
+                                Some(local.typed_initializer())
+                            );
+                            assert!(store.scopes.contains(local.scope()));
+                            assert_eq!(
+                                store.symbols.get(local.symbol()).owner,
+                                Some(proof.method())
+                            );
+                            assert_ne!(local.constructor(), proof.constructor());
+                        } else {
+                            let formal = argument.formal().expect(
+                                "the corresponding ordered argument is the original method formal",
+                            );
+                            assert_eq!(formal.formal(), pair.method_formals()[0]);
+                            assert_eq!(formal.source_argument(), argument.source_argument());
+                            assert_eq!(formal.typed_argument(), argument.typed_argument());
+                        }
+                    }
+                },
+            );
+        }
+    }
+}
+
+#[test]
+fn local_pair_proof_survives_fresh_sessions_renames_and_class_reordering() {
+    use dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind;
+
+    for (source, method_name, local_first) in [
+        (IMMUTABLE_LOCAL_PAIR_SOURCE, "create", false),
+        (IMMUTABLE_LOCAL_PAIR_REVERSED_SOURCE, "createReversed", true),
+    ] {
+        let renamed = source
+            .replace("PairFactory", "Builder")
+            .replace(method_name, "assemble")
+            .replace("fresh", "allocated");
+        let counter = source.find("class Counter").unwrap();
+        let pair = source.find("class Pair(").unwrap();
+        let factory = source.find("class PairFactory:").unwrap();
+        let reordered = format!(
+            "{}{}{}{}",
+            &source[..counter],
+            &source[pair..factory],
+            &source[counter..pair],
+            &source[factory..]
+        );
+        for (variant, source_number) in [(&renamed, 20691), (&reordered, 20692)] {
+            with_two_argument_proof(
+                variant,
+                source_number,
+                |proof, _, _, _, _, _, _, _, _, _| {
+                    assert_eq!(
+                        proof.argument_proof().kind(),
+                        ConstructorArgumentProofKind::FormalLocalPair
+                    );
+                    let arguments = proof.argument_proof().ordered_pair().unwrap().arguments();
+                    let local_index = if local_first { 0 } else { 1 };
+                    let formal_index = 1 - local_index;
+                    assert!(arguments[local_index].local_val().is_some());
+                    assert!(arguments[formal_index].formal().is_some());
+                },
+            );
+        }
+    }
 }
 
 #[test]

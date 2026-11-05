@@ -85,8 +85,30 @@ struct OpenBuiltinAliasSnapshot {
 struct TastyTopLevelSelection {
     binary_name: BinaryName,
     class_address: u32,
+    header_field_address: Option<u32>,
     constructor_address: u32,
     constructor_parameter_address: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TastyHeaderFieldSelection {
+    binary_name: BinaryName,
+    class_address: u32,
+    field_address: u32,
+    constructor_address: u32,
+    constructor_parameter_address: u32,
+}
+
+type HeaderFieldProjection = (SymbolId, SymbolId, SymbolId, ScopeId);
+type HeaderFieldProjectionFailure = (SemanticTastyLoadError, Option<SymbolId>);
+type HeaderFieldProjectionResult = Result<HeaderFieldProjection, HeaderFieldProjectionFailure>;
+
+fn uniquely_declares_header_field(scope: &Scope, name: Name, field: SymbolId) -> bool {
+    scope.entered_symbols().any(|member| member == field) && scope.lookup_all(&name) == [field]
+}
+
+fn has_supported_immutable_field_flags(flags: SymbolFlags) -> bool {
+    flags == SymbolFlags::EMPTY
 }
 
 fn is_compiler_source_file_annotation(
@@ -607,6 +629,9 @@ pub struct ClassLoader<'store, E> {
     definitions: Definitions,
     #[allow(dead_code)]
     semantic_tasty_loaded: HashMap<BinaryName, SymbolId>,
+    header_field_tasty_loaded: HashMap<BinaryName, SymbolId>,
+    header_field_tasty_formals: HashMap<BinaryName, SymbolId>,
+    header_field_tasty_scopes: HashMap<BinaryName, ScopeId>,
     option_get_or_else_tasty_loaded: Option<(SymbolId, SymbolId)>,
 }
 
@@ -880,6 +905,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             collect_load_profiles: false,
             definitions,
             semantic_tasty_loaded: HashMap::new(),
+            header_field_tasty_loaded: HashMap::new(),
+            header_field_tasty_formals: HashMap::new(),
+            header_field_tasty_scopes: HashMap::new(),
             option_get_or_else_tasty_loaded: None,
         }
     }
@@ -929,6 +957,249 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         self.load_semantic_class_with_tasty_unpickler(name)
     }
 
+    /// Completes and publishes only the authentic immutable class-header
+    /// field selected from an indexed TASTy unit. The class and constructor
+    /// remain uncompleted; whole-class eligibility is unchanged.
+    #[allow(dead_code)]
+    fn project_immutable_header_field_with_tasty_unpickler(
+        &mut self,
+        name: &BinaryName,
+    ) -> Result<SymbolId, SemanticTastyLoadError> {
+        self.project_immutable_header_field_with_options(name, false, None)
+    }
+
+    #[cfg(test)]
+    fn project_immutable_header_field_with_failure(
+        &mut self,
+        name: &BinaryName,
+        inject_late_failure: bool,
+    ) -> Result<SymbolId, SemanticTastyLoadError> {
+        self.project_immutable_header_field_with_options(name, inject_late_failure, None)
+    }
+
+    fn project_immutable_header_field_with_options(
+        &mut self,
+        name: &BinaryName,
+        inject_late_failure: bool,
+        field_address_override: Option<u32>,
+    ) -> Result<SymbolId, SemanticTastyLoadError> {
+        if let Some(&field) = self.header_field_tasty_loaded.get(name) {
+            return Ok(field);
+        }
+        if self.session.identified.contains_key(name)
+            || self.session.resolved.contains_key(name)
+            || self.repository.get(name).is_some()
+            || self.open_package_contains_type_declaration(name)
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the selected field owner already has a loader identity or package declaration",
+            ));
+        }
+        let resource = self
+            .class_path
+            .find_class(name)
+            .map_err(|error| {
+                SemanticTastyLoadError::ClassLoad(ClassLoadError::Io(name.clone(), Rc::new(error)))
+            })?
+            .ok_or_else(|| {
+                SemanticTastyLoadError::ClassLoad(ClassLoadError::NotFound(name.clone()))
+            })?;
+        if resource.format() != ClassFormat::Tasty {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the selected field resource is not TASTy",
+            ));
+        }
+        let file = tasty_symbol::parse_classloader_tasty(resource.bytes()).map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(name.clone(), error))
+        })?;
+        let mut selection = Self::validate_immutable_header_field_shape(&file, name)?;
+        if let Some(address) = field_address_override {
+            selection.field_address = address;
+        }
+        let aliases_before = self.snapshot_open_builtin_aliases();
+        let store_checkpoint = self.store.checkpoint();
+        let session_checkpoint = self.session.checkpoint();
+        let result = self.project_immutable_header_field_transaction(
+            &file,
+            name,
+            &selection,
+            inject_late_failure,
+        );
+        match result {
+            Ok((class, field, formal, scope)) => {
+                // Retain the indexed owner through the field and its private
+                // scope receipt, without publishing an incomplete class as a
+                // loader-visible package declaration.
+                self.remove_open_root_from_package_scope(class);
+                self.session.record_origin(class, resource.origin().clone());
+                self.session.record_origin(field, resource.origin().clone());
+                self.header_field_tasty_loaded.insert(name.clone(), field);
+                self.header_field_tasty_formals.insert(name.clone(), formal);
+                self.header_field_tasty_scopes.insert(name.clone(), scope);
+                Ok(field)
+            }
+            Err((error, entered_class)) => {
+                if let Some(class) = entered_class {
+                    self.remove_open_root_from_package_scope(class);
+                }
+                self.session.rollback_to(self.store, session_checkpoint);
+                self.restore_open_builtin_aliases(aliases_before);
+                self.store.rollback_to(store_checkpoint);
+                self.repository.discard_rolled_back_symbols(self.store);
+                Err(error)
+            }
+        }
+    }
+
+    fn project_immutable_header_field_transaction(
+        &mut self,
+        file: &dotty_tasty::tasty::TastyFile<'_>,
+        name: &BinaryName,
+        selection: &TastyHeaderFieldSelection,
+        inject_late_failure: bool,
+    ) -> HeaderFieldProjectionResult {
+        if selection.binary_name != *name {
+            return Err((
+                SemanticTastyLoadError::UnsupportedShape(
+                    "the selected header field belongs to a different requested class",
+                ),
+                None,
+            ));
+        }
+        if let Err(error) = self.bind_open_primitive("Int", self.definitions.int) {
+            return Err((error, None));
+        }
+        let packages = self.session.packages.take_packages();
+        let mut unpickler =
+            TastyUnpickler::with_packages(file, self.store, self.definitions, packages);
+        let result = (|| {
+            unpickler
+                .enter_symbols()
+                .map_err(|error| SemanticTastyLoadError::Unpickle { address: 0, error })?;
+            let index = unpickler.index();
+            let class = index.symbol_at(selection.class_address).ok_or(
+                SemanticTastyLoadError::UnsupportedShape(
+                    "the selected class address is absent from the entered semantic index",
+                ),
+            )?;
+            let field = index.symbol_at(selection.field_address).ok_or(
+                SemanticTastyLoadError::UnsupportedShape(
+                    "the selected header field address is absent from the entered semantic index",
+                ),
+            )?;
+            let constructor = index.symbol_at(selection.constructor_address).ok_or(
+                SemanticTastyLoadError::UnsupportedShape(
+                    "the selected constructor address is absent from the entered semantic index",
+                ),
+            )?;
+            let formal = index
+                .symbol_at(selection.constructor_parameter_address)
+                .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                    "the selected constructor formal address is absent from the entered semantic index",
+                ))?;
+            let class_scope =
+                index
+                    .scope_of(class)
+                    .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                        "the selected class has no indexed declaration scope",
+                    ))?;
+            if !matches!(
+                unpickler.symbol_state_at(selection.field_address),
+                Some((SymbolKind::Field, _))
+            ) {
+                return Err(SemanticTastyLoadError::UnsupportedShape(
+                    "the indexed header declaration is not a field",
+                ));
+            }
+            if !matches!(
+                unpickler.symbol_state_at(selection.constructor_parameter_address),
+                Some((SymbolKind::Parameter, _))
+            ) {
+                return Err(SemanticTastyLoadError::UnsupportedShape(
+                    "the indexed constructor declaration is not a formal parameter",
+                ));
+            }
+            unpickler
+                .complete_symbol(selection.field_address)
+                .map_err(|error| SemanticTastyLoadError::Unpickle {
+                    address: selection.field_address,
+                    error,
+                })?;
+            unpickler
+                .complete_symbol(selection.constructor_parameter_address)
+                .map_err(|error| SemanticTastyLoadError::Unpickle {
+                    address: selection.constructor_parameter_address,
+                    error,
+                })?;
+            if inject_late_failure {
+                if !matches!(
+                    unpickler.symbol_state_at(selection.field_address),
+                    Some((SymbolKind::Field, SymbolInfo::Complete(_)))
+                ) {
+                    return Err(SemanticTastyLoadError::UnsupportedShape(
+                        "injected field failure must follow field completion",
+                    ));
+                }
+                return Err(SemanticTastyLoadError::UnsupportedShape(
+                    "injected failure after indexed field completion",
+                ));
+            }
+            Ok((class, field, constructor, formal, class_scope))
+        })();
+        let (index, mut packages) = unpickler.into_parts();
+        self.session.packages.swap_packages(&mut packages);
+        let result = result.and_then(|(class, field, constructor, formal, class_scope)| {
+            let class_info = self.store.symbols.get(class);
+            let constructor_info = self.store.symbols.get(constructor);
+            let field_info = self.store.symbols.get(field);
+            let formal_info = self.store.symbols.get(formal);
+            let scope = self.store.scopes.get(class_scope);
+            let field_name = field_info.name;
+            if class == field
+                || field == formal
+                || class_info.kind != SymbolKind::Class
+                || !symbol_matches_binary_name(self.store, class, name)
+                || constructor_info.kind != SymbolKind::Constructor
+                || constructor_info.owner != Some(class)
+                || formal_info.owner != Some(constructor)
+                || formal_info.kind != SymbolKind::Parameter
+                || field_info.owner != Some(class)
+                || field_info.kind != SymbolKind::Field
+                || field_info.name.namespace() != Namespace::Term
+                || field_info.name != formal_info.name
+                || field_info.visibility != Visibility::Public
+                || !has_supported_immutable_field_flags(field_info.flags)
+                || !uniquely_declares_header_field(scope, field_name, field)
+                || !matches!(class_info.info, SymbolInfo::Missing)
+            {
+                return Err(SemanticTastyLoadError::UnsupportedShape(
+                    "the indexed field, constructor formal, owner, flags, or declaration membership differ",
+                ));
+            }
+            let canonical_int = type_ref_symbol(self.store, self.definitions.int);
+            let SymbolInfo::Complete(field_type) = field_info.info else {
+                return Err(SemanticTastyLoadError::UnsupportedShape(
+                    "the indexed class field did not complete",
+                ));
+            };
+            let SymbolInfo::Complete(formal_type) = formal_info.info else {
+                return Err(SemanticTastyLoadError::UnsupportedShape(
+                    "the indexed constructor formal did not complete",
+                ));
+            };
+            if canonical_int.is_none()
+                || type_ref_symbol(self.store, field_type) != canonical_int
+                || type_ref_symbol(self.store, formal_type) != canonical_int
+            {
+                return Err(SemanticTastyLoadError::UnsupportedShape(
+                    "the indexed field and constructor formal must use canonical Int",
+                ));
+            }
+            Ok((class, field, formal, class_scope))
+        });
+        result.map_err(|error| (error, index.symbol_at(selection.class_address)))
+    }
+
     /// Opt-in semantic projection for the audited simple top-level class
     /// subset. The ordinary `load_class` path remains the legacy decoder.
     /// Structural eligibility is validated before the bounded transaction;
@@ -937,6 +1208,22 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     pub(crate) fn load_semantic_class_with_tasty_unpickler(
         &mut self,
         name: &BinaryName,
+    ) -> Result<SymbolId, SemanticTastyLoadError> {
+        self.load_semantic_class_with_tasty_unpickler_injected(name, false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn load_semantic_class_with_tasty_unpickler_injected_failure(
+        &mut self,
+        name: &BinaryName,
+    ) -> Result<SymbolId, SemanticTastyLoadError> {
+        self.load_semantic_class_with_tasty_unpickler_injected(name, true)
+    }
+
+    fn load_semantic_class_with_tasty_unpickler_injected(
+        &mut self,
+        name: &BinaryName,
+        inject_late_failure: bool,
     ) -> Result<SymbolId, SemanticTastyLoadError> {
         if let Some(&symbol) = self.semantic_tasty_loaded.get(name) {
             return Ok(symbol);
@@ -972,15 +1259,16 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             name,
             &selection,
             resource.origin().clone(),
-            false,
+            inject_late_failure,
         )
     }
 
     /// The bounded commit/rollback boundary for the audited simple class.
     /// Its write plan is deliberately explicit: the classpath resolver may
     /// enter packages/classes and update `Object`; the unpickler may enter the
-    /// selected root and bind canonical `Unit`. Other mutations are rejected
-    /// by `validate_semantic_class_shape` before reaching this operation.
+    /// selected root, its optional indexed immutable header field and formal,
+    /// and bind canonical `Unit`/`Int`. Other mutations are rejected by
+    /// `validate_semantic_class_shape` before reaching this operation.
     fn load_semantic_class_transaction(
         &mut self,
         file: &dotty_tasty::tasty::TastyFile<'_>,
@@ -1002,6 +1290,15 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .load_semantic_class_semantics(file, name, selection)
             .and_then(|class| {
                 materialized_class = Some(class);
+                if !self
+                    .session
+                    .packages
+                    .track_existing_class(self.store, class)
+                {
+                    return Err(SemanticTastyLoadError::UnsupportedShape(
+                        "the semantic root is missing from its canonical package scope",
+                    ));
+                }
                 if inject_late_failure {
                     #[cfg(test)]
                     {
@@ -1029,6 +1326,32 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                             self.store.symbols.get(constructor).info,
                             SymbolInfo::Complete(_)
                         ));
+                        if selection.header_field_address.is_some() {
+                            let SymbolInfo::Complete(class_info) =
+                                self.store.symbols.get(class).info
+                            else {
+                                panic!("injected field failure follows class completion");
+                            };
+                            let Type::ClassInfo(class_info) = self.store.types.get(class_info)
+                            else {
+                                panic!("completed field-bearing class has class info");
+                            };
+                            let field = self
+                                .store
+                                .scopes
+                                .get(class_info.declarations)
+                                .lookup(&Name::new(self.store.names.intern("x"), Namespace::Term))
+                                .expect("injected failure follows indexed field completion");
+                            assert_eq!(self.store.symbols.get(field).kind, SymbolKind::Field);
+                            assert_eq!(self.store.symbols.get(field).owner, Some(class));
+                            assert!(matches!(
+                                self.store.symbols.get(field).info,
+                                SymbolInfo::Complete(ty)
+                                    if type_ref_symbol(self.store, ty)
+                                        == type_ref_symbol(self.store, self.definitions.int)
+                            ));
+                            assert_ne!(field, constructor);
+                        }
                         let scala = self
                             .session
                             .packages
@@ -1054,7 +1377,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                         );
                     }
                     return Err(SemanticTastyLoadError::UnsupportedShape(
-                        "injected failure after class and constructor completion",
+                        if selection.header_field_address.is_some() {
+                            "injected failure after indexed member and whole-class completion"
+                        } else {
+                            "injected failure after class and constructor completion"
+                        },
                     ));
                 }
                 Ok(class)
@@ -2217,6 +2544,266 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// The opt-in path accepts only the audited simple-class shape. This
     /// check happens before the unpickler enters package scopes, so a
     /// multi-declaration unit cannot publish partially supported siblings.
+    fn validate_immutable_header_field_shape(
+        file: &dotty_tasty::tasty::TastyFile<'_>,
+        name: &BinaryName,
+    ) -> Result<TastyHeaderFieldSelection, SemanticTastyLoadError> {
+        use dotty_tasty::tasty::{
+            DefDefHeaderItem, DefinitionBody, ParameterNode, RawTree, TEMPLATE_TAG, TYPEDEF_TAG,
+        };
+
+        let asts = file.asts().map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                name.clone(),
+                tasty_symbol::TastyDecodeError::Parse(error),
+            ))
+        })?;
+        let package = asts
+            .get(0)
+            .filter(|node| asts.len() == 1 && node.tag == dotty_tasty::tasty::PACKAGE_TAG)
+            .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                "the field projection requires one package tree",
+            ))?
+            .decode_package()
+            .map_err(|error| {
+                SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                    name.clone(),
+                    tasty_symbol::TastyDecodeError::Ast(error),
+                ))
+            })?;
+        let package_name = package
+            .path_name()
+            .and_then(|reference| file.render_name(reference).ok());
+        if package_name.as_deref() != Some(name.package_path().replace('/', ".").as_str())
+            || package.stats.len() != 1
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the field projection requires one matching top-level class",
+            ));
+        }
+        let root = package
+            .stats
+            .get(0)
+            .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                "the field projection requires one matching top-level class",
+            ))?;
+        if root.tag != TYPEDEF_TAG {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the selected field owner must be a class",
+            ));
+        }
+        let definition = root.decode_definition().map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                name.clone(),
+                tasty_symbol::TastyDecodeError::Ast(error),
+            ))
+        })?;
+        if file.names().get_utf8(definition.name()) != Some(name.simple_name()) {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the field owner must match the requested binary name",
+            ));
+        }
+        let DefinitionBody::TypeDef {
+            type_or_template,
+            tail,
+            ..
+        } = root.decode_definition_body().map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                name.clone(),
+                tasty_symbol::TastyDecodeError::Ast(error),
+            ))
+        })?
+        else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the selected field owner must be a class",
+            ));
+        };
+        if has_unsupported_class_annotations(file, &tail)
+            || !matches!(&type_or_template, RawTree::LengthNode(template) if template.tag == TEMPLATE_TAG)
+            || tail.iter().any(|modifier| {
+                matches!(modifier, dotty_tasty::tasty::DefinitionTail::Modifier(tag)
+                    if matches!(*tag, dotty_tasty::tasty::OBJECT_TAG | dotty_tasty::tasty::TRAIT_TAG))
+            })
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the selected field owner must be an unannotated class template",
+            ));
+        }
+        let RawTree::LengthNode(template) = &type_or_template else {
+            unreachable!("class template checked above")
+        };
+        let shape = template.decode_template_structure().map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                name.clone(),
+                tasty_symbol::TastyDecodeError::Ast(error),
+            ))
+        })?;
+        let [
+            ParameterNode::TermParam {
+                name: field_name, ..
+            },
+        ] = shape.term_params.as_slice()
+        else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the field projection supports exactly one class-header term field",
+            ));
+        };
+        let field = shape.term_params[0].decode_body().map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                name.clone(),
+                tasty_symbol::TastyDecodeError::Ast(error),
+            ))
+        })?;
+        if !field.tail.is_empty() {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the selected class-header field must be immutable and unannotated",
+            ));
+        }
+        if !shape.type_params.is_empty() || shape.stats.len() != 1 {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the field projection supports one constructor and no other class members",
+            ));
+        }
+        let Some(RawTree::LengthNode(constructor_node)) = shape.stats.first() else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the field projection requires one primary constructor",
+            ));
+        };
+        if constructor_node.tag != dotty_tasty::tasty::DEFDEF_TAG {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the field projection requires one primary constructor",
+            ));
+        }
+        let constructor = constructor_node.decode_defdef_body().map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                name.clone(),
+                tasty_symbol::TastyDecodeError::Ast(error),
+            ))
+        })?;
+        let [
+            ParameterNode::TermParam {
+                name: formal_name, ..
+            },
+        ] = constructor.parameters.as_slice()
+        else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the field projection requires one ordinary constructor parameter",
+            ));
+        };
+        if field_name != formal_name
+            || file.names().get_utf8(constructor.name) != Some("<init>")
+            || constructor.header_items.len() != 1
+            || !matches!(constructor.header_items.first(), Some(DefDefHeaderItem::Parameter(ParameterNode::TermParam { name, .. })) if name == formal_name)
+            || !constructor.clauses.is_empty()
+            || !Self::constructor_parameter_is_ordinary(constructor.parameters.first())
+            || has_unsupported_definition_annotations(&constructor.tail)
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the field projection requires matching immutable field and ordinary Int formal",
+            ));
+        }
+
+        let address_index = file.ast_address_index().map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                name.clone(),
+                tasty_symbol::TastyDecodeError::Parse(error),
+            ))
+        })?;
+        let class_node = address_index
+            .iter()
+            .find(|node| {
+                node.tag == TYPEDEF_TAG
+                    && node.payload.as_ptr() == root.payload.as_ptr()
+                    && node.payload.len() == root.payload.len()
+            })
+            .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                "the selected field owner is absent from the AST address index",
+            ))?;
+        let class_address = u32::try_from(class_node.offset).map_err(|_| {
+            SemanticTastyLoadError::UnsupportedShape(
+                "the class address exceeds the supported wire range",
+            )
+        })?;
+        let class_tree_node = address_index.get_node(class_address).ok_or(
+            SemanticTastyLoadError::UnsupportedShape(
+                "the class is absent from the structural address index",
+            ),
+        )?;
+        let template_node = address_index
+            .iter()
+            .find(|node| {
+                node.tag == TEMPLATE_TAG
+                    && node.payload.as_ptr() == template.payload.as_ptr()
+                    && node.payload.len() == template.payload.len()
+                    && address_index.parent_of(node.offset as u32) == Some(class_tree_node)
+            })
+            .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                "the selected class template is absent from the AST address index",
+            ))?;
+        let template_address = u32::try_from(template_node.offset).map_err(|_| {
+            SemanticTastyLoadError::UnsupportedShape(
+                "the template address exceeds the supported wire range",
+            )
+        })?;
+        let template_tree_node = address_index.get_node(template_address).ok_or(
+            SemanticTastyLoadError::UnsupportedShape(
+                "the template is absent from the structural address index",
+            ),
+        )?;
+        let field_node = address_index
+            .iter()
+            .find(|node| {
+                node.tag == dotty_tasty::tasty::PARAM_TAG
+                    && node.payload.as_ptr() == shape.term_params[0].payload().as_ptr()
+                    && node.payload.len() == shape.term_params[0].payload().len()
+            })
+            .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                "the selected header field is absent from the AST address index",
+            ))?;
+        let field_address = u32::try_from(field_node.offset).map_err(|_| {
+            SemanticTastyLoadError::UnsupportedShape(
+                "the field address exceeds the supported wire range",
+            )
+        })?;
+        let Some(RawTree::LengthNode(stat)) = shape.stats.first() else {
+            unreachable!("constructor shape checked above")
+        };
+        let constructor_address =
+            direct_template_stat_address(&address_index, template_tree_node, stat).ok_or(
+                SemanticTastyLoadError::UnsupportedShape(
+                    "the selected constructor is absent from the AST address index",
+                ),
+            )?;
+        let constructor_tree_node = address_index.get_node(constructor_address).ok_or(
+            SemanticTastyLoadError::UnsupportedShape(
+                "the constructor is absent from the structural address index",
+            ),
+        )?;
+        let formal_node = address_index
+            .iter()
+            .find(|node| {
+                node.tag == dotty_tasty::tasty::PARAM_TAG
+                    && node.payload.as_ptr() == constructor.parameters[0].payload().as_ptr()
+                    && node.payload.len() == constructor.parameters[0].payload().len()
+                    && address_index.parent_of(node.offset as u32) == Some(constructor_tree_node)
+            })
+            .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                "the constructor formal is absent from the AST address index",
+            ))?;
+        let constructor_parameter_address = u32::try_from(formal_node.offset).map_err(|_| {
+            SemanticTastyLoadError::UnsupportedShape(
+                "the constructor formal address exceeds the supported wire range",
+            )
+        })?;
+        Ok(TastyHeaderFieldSelection {
+            binary_name: name.clone(),
+            class_address,
+            field_address,
+            constructor_address,
+            constructor_parameter_address,
+        })
+    }
+
     fn validate_semantic_class_shape(
         file: &dotty_tasty::tasty::TastyFile<'_>,
         name: &BinaryName,
@@ -2322,15 +2909,23 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 tasty_symbol::TastyDecodeError::Ast(error),
             ))
         })?;
-        let has_single_term_parameter = match template_shape.term_params.as_slice() {
-            [] => false,
-            [dotty_tasty::tasty::ParameterNode::TermParam { .. }] => true,
+        let header_field_selection = match template_shape.term_params.as_slice() {
+            [] => None,
+            [parameter @ dotty_tasty::tasty::ParameterNode::TermParam { .. }]
+                if Self::template_parameter_is_plain(Some(parameter)) =>
+            {
+                None
+            }
+            [dotty_tasty::tasty::ParameterNode::TermParam { .. }] => {
+                Some(Self::validate_immutable_header_field_shape(file, name)?)
+            }
             _ => {
                 return Err(SemanticTastyLoadError::UnsupportedShape(
-                    "the class template may have at most one ordinary constructor parameter",
+                    "the class template may have at most one ordinary constructor parameter or immutable field",
                 ));
             }
         };
+        let has_single_term_parameter = !template_shape.term_params.is_empty();
         if !template_shape.type_params.is_empty()
             || template_shape.stats.len() != 1
             || !matches!(
@@ -2483,7 +3078,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                         )
                         && constructor.clauses.is_empty()
                         && Self::constructor_parameter_is_ordinary(constructor.parameters.first())
-                        && Self::template_parameter_is_plain(template_shape.term_params.first())
+                        && (header_field_selection.is_some()
+                            || Self::template_parameter_is_plain(
+                                template_shape.term_params.first(),
+                            ))
                 }
                 _ => false,
             }
@@ -2521,9 +3119,20 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         } else {
             None
         };
+        if let Some(field_selection) = &header_field_selection
+            && (field_selection.class_address != class_address
+                || field_selection.constructor_address != constructor_address
+                || Some(field_selection.constructor_parameter_address)
+                    != constructor_parameter_address)
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the indexed immutable field, constructor, and formal roles do not match",
+            ));
+        }
         Ok(TastyTopLevelSelection {
             binary_name: name.clone(),
             class_address,
+            header_field_address: header_field_selection.map(|selection| selection.field_address),
             constructor_address,
             constructor_parameter_address,
         })
@@ -2779,6 +3388,32 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     "the selected DEFDEF is not the entered class constructor",
                 ));
             }
+            if let Some(field_address) = selection.header_field_address {
+                if !matches!(
+                    unpickler.symbol_state_at(field_address),
+                    Some((SymbolKind::Field, _))
+                ) {
+                    return Err(SemanticTastyLoadError::UnsupportedShape(
+                        "the selected class-header role is not an entered field",
+                    ));
+                }
+                unpickler.complete_symbol(field_address).map_err(|error| {
+                    SemanticTastyLoadError::Unpickle {
+                        address: field_address,
+                        error,
+                    }
+                })?;
+            }
+            if selection.header_field_address.is_some()
+                && let Some(parameter_address) = selection.constructor_parameter_address
+            {
+                unpickler
+                    .complete_symbol(parameter_address)
+                    .map_err(|error| SemanticTastyLoadError::Unpickle {
+                        address: parameter_address,
+                        error,
+                    })?;
+            }
             unpickler.complete_symbol(root_address).map_err(|error| {
                 SemanticTastyLoadError::Unpickle {
                     address: root_address,
@@ -2831,6 +3466,86 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 return Err(error);
             }
         };
+        let field_check = if let Some(field_address) = selection.header_field_address {
+            (|| {
+                let field = index.symbol_at(field_address).ok_or(
+                    SemanticTastyLoadError::UnsupportedShape(
+                        "the selected class-header field is absent from the semantic index",
+                    ),
+                )?;
+                let formal = selection
+                    .constructor_parameter_address
+                    .and_then(|address| index.symbol_at(address))
+                    .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                        "the selected constructor formal is absent from the semantic index",
+                    ))?;
+                let class_info = self.store.symbols.get(class);
+                let field_info = self.store.symbols.get(field);
+                let formal_info = self.store.symbols.get(formal);
+                let class_scope = match class_info.info {
+                    SymbolInfo::Complete(info) => match self.store.types.get(info) {
+                        Type::ClassInfo(info) => info.declarations,
+                        _ => {
+                            return Err(SemanticTastyLoadError::UnsupportedShape(
+                                "the selected root does not have a class declaration scope",
+                            ));
+                        }
+                    },
+                    _ => {
+                        return Err(SemanticTastyLoadError::UnsupportedShape(
+                            "the selected root has no completed class declaration scope",
+                        ));
+                    }
+                };
+                let field_type = match field_info.info {
+                    SymbolInfo::Complete(ty) => ty,
+                    _ => {
+                        return Err(SemanticTastyLoadError::UnsupportedShape(
+                            "the indexed immutable class field did not complete",
+                        ));
+                    }
+                };
+                let formal_type = match formal_info.info {
+                    SymbolInfo::Complete(ty) => ty,
+                    _ => {
+                        return Err(SemanticTastyLoadError::UnsupportedShape(
+                            "the indexed constructor formal did not complete",
+                        ));
+                    }
+                };
+                if field == class
+                    || field == formal
+                    || field_info.kind != SymbolKind::Field
+                    || field_info.owner != Some(class)
+                    || field_info.name.namespace() != Namespace::Term
+                    || field_info.visibility != Visibility::Public
+                    || !has_supported_immutable_field_flags(field_info.flags)
+                    || formal_info.kind != SymbolKind::Parameter
+                    || formal_info.owner != Some(constructor)
+                    || field_info.name != formal_info.name
+                    || !uniquely_declares_header_field(
+                        self.store.scopes.get(class_scope),
+                        field_info.name,
+                        field,
+                    )
+                    || type_ref_symbol(self.store, field_type)
+                        != type_ref_symbol(self.store, self.definitions.int)
+                    || type_ref_symbol(self.store, formal_type)
+                        != type_ref_symbol(self.store, self.definitions.int)
+                {
+                    return Err(SemanticTastyLoadError::UnsupportedShape(
+                        "the indexed field and constructor formal must retain distinct canonical Int owners and one class declaration",
+                    ));
+                }
+                Ok(())
+            })()
+        } else {
+            Ok(())
+        };
+        if let Err(error) = field_check {
+            self.remove_open_root_from_package_scope(class);
+            return Err(error);
+        }
         let class_symbol = self.store.symbols.get(class);
         let constructor_symbol = self.store.symbols.get(constructor);
         let supported_visibility = match class_symbol.visibility {
@@ -7538,11 +8253,18 @@ mod tests {
     }
 
     fn constructor_parameter_test_class_path() -> CompositeClassPath {
-        let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorPlain");
+        let plain = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorPlain");
+        let with_val = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorWithVal");
         let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../dotty-tasty-unpickler/tests/fixtures/semantic");
         let semantic_fixture = ConstructorFixtureClassPath(
-            HashMap::from([(name, semantic_unpickler_fixture_bytes("CtorPlain.tasty"))]),
+            HashMap::from([
+                (plain, semantic_unpickler_fixture_bytes("CtorPlain.tasty")),
+                (
+                    with_val,
+                    semantic_unpickler_fixture_bytes("CtorWithVal.tasty"),
+                ),
+            ]),
             fixture_root,
         );
         let visibility_root =
@@ -9210,7 +9932,7 @@ mod tests {
 
     #[test]
     fn semantic_adapter_loads_one_plain_int_constructor_between_visibility_roots() {
-        fn normalized_session() -> Vec<String> {
+        fn normalized_session(val_before_plain: bool) -> Vec<String> {
             let mut store = SemanticStore::new();
             let mut loader = ClassLoader::new(constructor_parameter_test_class_path(), &mut store);
             let definitions = loader.definitions();
@@ -9218,19 +9940,29 @@ mod tests {
                 .join("../dotty-tasty-unpickler/tests/fixtures/semantic");
             let visibility_fixture_root =
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tasty_visibility");
-            let cases = [
-                (open_binary_name(), "Open", false),
-                (
-                    BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorPlain"),
-                    "CtorPlain",
-                    true,
-                ),
-                (plain_private_binary_name(), "PlainPrivate", false),
-            ];
+            let open = (open_binary_name(), "Open", false, false);
+            let plain = (
+                BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorPlain"),
+                "CtorPlain",
+                true,
+                false,
+            );
+            let with_val = (
+                BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorWithVal"),
+                "CtorWithVal",
+                true,
+                true,
+            );
+            let private = (plain_private_binary_name(), "PlainPrivate", false, false);
+            let cases = if val_before_plain {
+                [open, with_val, plain, private]
+            } else {
+                [open, plain, with_val, private]
+            };
             let mut classes = Vec::new();
             let mut summaries = Vec::new();
 
-            for (name, simple_name, has_int_parameter) in cases {
+            for (name, simple_name, has_int_parameter, has_immutable_field) in cases {
                 let class = loader
                     .load_semantic_class_with_tasty_unpickler(&name)
                     .unwrap_or_else(|error| panic!("{simple_name} load failed: {error:?}"));
@@ -9298,6 +10030,52 @@ mod tests {
                         "plain formal uses canonical Int"
                     );
                 }
+                if has_immutable_field {
+                    let field_name = Name::new(loader.store.names.intern("x"), Namespace::Term);
+                    let field = loader
+                        .store
+                        .scopes
+                        .get(info.declarations)
+                        .lookup(&field_name)
+                        .expect("the indexed immutable header field is in the class scope");
+                    let field_symbol = loader.store.symbols.get(field);
+                    assert_eq!(field_symbol.kind, SymbolKind::Field);
+                    assert_eq!(field_symbol.owner, Some(class));
+                    assert_eq!(field_symbol.visibility, Visibility::Public);
+                    assert!(has_supported_immutable_field_flags(field_symbol.flags));
+                    assert_eq!(
+                        loader
+                            .store
+                            .scopes
+                            .get(info.declarations)
+                            .lookup_all(&field_name),
+                        &[field],
+                        "same-store cache hits do not duplicate the field declaration"
+                    );
+                    assert_ne!(field, constructor);
+                    assert_eq!(field_symbol.name, *method.params[0].name.as_name());
+                    assert_eq!(
+                        type_ref_symbol(
+                            loader.store,
+                            match field_symbol.info {
+                                SymbolInfo::Complete(ty) => ty,
+                                _ => panic!("the immutable field is complete"),
+                            }
+                        ),
+                        type_ref_symbol(loader.store, definitions.int)
+                    );
+                } else {
+                    assert!(
+                        loader
+                            .store
+                            .scopes
+                            .get(info.declarations)
+                            .entered_symbols()
+                            .all(
+                                |member| loader.store.symbols.get(member).kind != SymbolKind::Field
+                            )
+                    );
+                }
                 assert_eq!(
                     unit_type_ref_target(loader.store, method.result),
                     Some(class)
@@ -9309,21 +10087,23 @@ mod tests {
                     method.params.len()
                 ));
             }
+            assert_eq!(classes.len(), 4);
+            assert_eq!(loader.semantic_tasty_loaded.len(), 4);
             assert_ne!(classes[0], classes[1]);
             assert_ne!(classes[1], classes[2]);
             assert_eq!(
                 loader.store.symbols.get(classes[0]).owner,
-                loader.store.symbols.get(classes[2]).owner,
+                loader.store.symbols.get(classes[3]).owner,
                 "Open and PlainPrivate retain their shared package identity"
             );
-            assert_eq!(loader.semantic_tasty_loaded.len(), 3);
+            summaries.sort();
             summaries
         }
 
         assert_eq!(
-            normalized_session(),
-            normalized_session(),
-            "fresh sessions preserve semantic roles and relationships"
+            normalized_session(false),
+            normalized_session(true),
+            "both supported loading orders in fresh sessions preserve normalized roles"
         );
     }
 
@@ -9447,14 +10227,14 @@ mod tests {
                     "me/cytrowski/tastyfixtures/semantic/CtorWithVal",
                 ),
                 semantic_unpickler_fixture_bytes("CtorWithVal.tasty"),
-                "the primary constructor must have one empty clause or one ordinary Int clause",
+                "the configured classpath cannot resolve java.lang",
             ),
             (
                 BinaryName::from_internal(
                     "me/cytrowski/tastyfixtures/semantic/CtorTwoTermClauses",
                 ),
                 semantic_unpickler_fixture_bytes("CtorTwoTermClauses.tasty"),
-                "the class template may have at most one ordinary constructor parameter",
+                "the class template may have at most one ordinary constructor parameter or immutable field",
             ),
         ];
 
@@ -9484,7 +10264,7 @@ mod tests {
     }
 
     #[test]
-    fn authentic_constructor_rejections_preserve_committed_ctor_plain_state() {
+    fn authentic_ctor_with_val_loads_and_unsupported_neighbors_preserve_state() {
         let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../dotty-tasty-unpickler/tests/fixtures/semantic");
         let plain_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorPlain");
@@ -9548,16 +10328,56 @@ mod tests {
             SymbolInfo::Complete(_)
         ));
 
-        for (name, expected) in [
-            (
-                with_val_name.clone(),
-                "the primary constructor must have one empty clause or one ordinary Int clause",
-            ),
-            (
-                wrong_owner_name.clone(),
-                "the TASTy package must match the requested binary name",
-            ),
-        ] {
+        let with_val = loader
+            .load_semantic_class_with_tasty_unpickler(&with_val_name)
+            .expect("the authentic immutable Int field loads through the semantic path");
+        assert_eq!(
+            loader.semantic_tasty_loaded.get(&with_val_name),
+            Some(&with_val)
+        );
+        assert_eq!(loader.session.resolved.get(&with_val_name), Some(&with_val));
+        assert_eq!(
+            loader.origin(with_val),
+            Some(&ClassOrigin::Directory(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../dotty-tasty-unpickler/tests/fixtures/semantic")
+            ))
+        );
+        let with_val_declarations = class_info(loader.store, with_val).declarations;
+        let field_name = Name::new(loader.store.names.intern("x"), Namespace::Term);
+        let field = loader
+            .store
+            .scopes
+            .get(with_val_declarations)
+            .lookup(&field_name)
+            .expect("the original class-owned x field is declared exactly once");
+        let field_symbol = loader.store.symbols.get(field);
+        assert_ne!(field, plain);
+        assert_eq!(field_symbol.kind, SymbolKind::Field);
+        assert_eq!(field_symbol.owner, Some(with_val));
+        assert_eq!(field_symbol.visibility, Visibility::Public);
+        assert_eq!(field_symbol.flags, SymbolFlags::EMPTY);
+        assert_eq!(
+            loader
+                .store
+                .scopes
+                .get(with_val_declarations)
+                .lookup_all(&field_name),
+            &[field]
+        );
+        let SymbolInfo::Complete(field_type) = field_symbol.info else {
+            panic!("the immutable field is complete before class publication");
+        };
+        assert_eq!(
+            type_ref_symbol(loader.store, field_type),
+            type_ref_symbol(loader.store, loader.definitions.int)
+        );
+
+        let (name, expected) = (
+            wrong_owner_name.clone(),
+            "the TASTy package must match the requested binary name",
+        );
+        {
             let store_mark = loader.store.checkpoint();
             let session_mark = loader.session.checkpoint();
             let package_mark = loader.session.packages.checkpoint();
@@ -9572,6 +10392,10 @@ mod tests {
             assert_eq!(loader.session.checkpoint(), session_mark);
             assert_eq!(loader.session.packages.checkpoint(), package_mark);
             assert_eq!(loader.semantic_tasty_loaded.get(&plain_name), Some(&plain));
+            assert_eq!(
+                loader.semantic_tasty_loaded.get(&with_val_name),
+                Some(&with_val)
+            );
             assert_eq!(loader.session.resolved.get(&plain_name), Some(&plain));
             assert!(!loader.semantic_tasty_loaded.contains_key(&name));
             assert!(loader.repository.get(&name).is_none());
@@ -9596,8 +10420,401 @@ mod tests {
         assert_eq!(loader.session.checkpoint(), session_mark);
         assert_eq!(loader.session.packages.checkpoint(), package_mark);
         assert_eq!(loader.semantic_tasty_loaded.get(&plain_name), Some(&plain));
+        assert_eq!(
+            loader.semantic_tasty_loaded.get(&with_val_name),
+            Some(&with_val)
+        );
         assert_eq!(loader.session.resolved.get(&plain_name), Some(&plain));
         assert!(loader.repository.get(&malformed_name).is_none());
+    }
+
+    #[test]
+    fn semantic_ctor_with_val_late_failure_rolls_back_field_and_retries_same_resource() {
+        let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorWithVal");
+        let plain_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorPlain");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(constructor_parameter_test_class_path(), &mut store);
+        let plain = loader
+            .load_semantic_class_with_tasty_unpickler(&plain_name)
+            .expect("CtorPlain commits before the injected field-bearing failure");
+        let plain_before = loader.store.symbols.get(plain).clone();
+        let resource = loader
+            .class_path
+            .find_class(&name)
+            .expect("fixture lookup")
+            .expect("original CtorWithVal TASTy");
+        let original_bytes = semantic_unpickler_fixture_bytes("CtorWithVal.tasty");
+        assert_eq!(resource.bytes(), original_bytes);
+        let selection = ClassLoader::<CompositeClassPath>::validate_semantic_class_shape(
+            &tasty_symbol::parse_classloader_tasty(resource.bytes()).expect("valid fixture"),
+            &name,
+        )
+        .expect("supported indexed field shape");
+        let store_mark = loader.store.checkpoint();
+        let session_mark = loader.session.checkpoint();
+        let package_mark = loader.session.packages.checkpoint();
+        let object_before = loader
+            .store
+            .symbols
+            .get(loader.definitions.object_class)
+            .clone();
+
+        for invalid_field_address in [
+            selection
+                .constructor_parameter_address
+                .expect("one Int formal"),
+            u32::MAX,
+        ] {
+            let mut substituted = selection.clone();
+            substituted.header_field_address = Some(invalid_field_address);
+            let store_mark = loader.store.checkpoint();
+            let session_mark = loader.session.checkpoint();
+            let package_mark = loader.session.packages.checkpoint();
+            assert!(matches!(
+                loader.load_semantic_class_transaction(
+                    &tasty_symbol::parse_classloader_tasty(resource.bytes())
+                        .expect("valid original fixture"),
+                    &name,
+                    &substituted,
+                    resource.origin().clone(),
+                    false,
+                ),
+                Err(SemanticTastyLoadError::UnsupportedShape(_))
+            ));
+            assert_eq!(loader.store.checkpoint(), store_mark);
+            assert_eq!(loader.session.checkpoint(), session_mark);
+            assert_eq!(loader.session.packages.checkpoint(), package_mark);
+            assert_eq!(
+                loader.store.symbols.get(loader.definitions.object_class),
+                &object_before
+            );
+            assert_eq!(loader.semantic_tasty_loaded.get(&plain_name), Some(&plain));
+            assert_eq!(loader.store.symbols.get(plain), &plain_before);
+            assert!(!loader.semantic_tasty_loaded.contains_key(&name));
+            assert!(loader.repository.get(&name).is_none());
+        }
+
+        assert!(matches!(
+            loader.load_semantic_class_transaction(
+                &tasty_symbol::parse_classloader_tasty(resource.bytes()).expect("valid fixture"),
+                &name,
+                &selection,
+                resource.origin().clone(),
+                true,
+            ),
+            Err(SemanticTastyLoadError::UnsupportedShape(
+                "injected failure after indexed member and whole-class completion"
+            ))
+        ));
+        assert_eq!(loader.store.checkpoint(), store_mark);
+        assert_eq!(loader.session.checkpoint(), session_mark);
+        assert_eq!(loader.session.packages.checkpoint(), package_mark);
+        assert_eq!(
+            loader.store.symbols.get(loader.definitions.object_class),
+            &object_before
+        );
+        assert_eq!(loader.store.symbols.get(plain), &plain_before);
+        assert_eq!(loader.semantic_tasty_loaded.get(&plain_name), Some(&plain));
+        assert_eq!(loader.session.resolved.get(&plain_name), Some(&plain));
+        assert!(!loader.semantic_tasty_loaded.contains_key(&name));
+        assert!(!loader.session.identified.contains_key(&name));
+        assert!(!loader.session.resolved.contains_key(&name));
+        assert!(loader.repository.get(&name).is_none());
+
+        let retried = loader
+            .load_semantic_class_with_tasty_unpickler(&name)
+            .expect("same-session retry reuses the original indexed TASTy resource");
+        assert_eq!(loader.semantic_tasty_loaded.get(&name), Some(&retried));
+        assert_eq!(loader.session.resolved.get(&name), Some(&retried));
+        assert_eq!(
+            loader.repository.get(&name).and_then(ClassEntry::symbol),
+            Some(retried)
+        );
+        assert_eq!(loader.origin(retried), Some(resource.origin()));
+        assert_eq!(loader.store.symbols.get(plain), &plain_before);
+        assert!(matches!(
+            loader.store.symbols.get(retried).info,
+            SymbolInfo::Complete(_)
+        ));
+    }
+
+    #[test]
+    fn authentic_immutable_header_field_selection_is_integrated_into_whole_class_loading() {
+        let with_val_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorWithVal");
+        let bytes = semantic_unpickler_fixture_bytes("CtorWithVal.tasty");
+        let file = tasty_symbol::parse_classloader_tasty(&bytes).expect("authentic fixture parses");
+        let selection =
+            ClassLoader::<InMemoryTastyClassPath>::validate_immutable_header_field_shape(
+                &file,
+                &with_val_name,
+            )
+            .expect("one immutable class-owned header field and its constructor formal");
+        assert_eq!(
+            selection,
+            TastyHeaderFieldSelection {
+                binary_name: with_val_name.clone(),
+                class_address: 4,
+                field_address: 9,
+                constructor_address: 28,
+                constructor_parameter_address: 31,
+            }
+        );
+        let whole_class = ClassLoader::<InMemoryTastyClassPath>::validate_semantic_class_shape(
+            &file,
+            &with_val_name,
+        )
+        .expect("the indexed field and constructor roles form the supported class shape");
+        assert_eq!(whole_class.class_address, selection.class_address);
+        assert_eq!(
+            whole_class.header_field_address,
+            Some(selection.field_address)
+        );
+        assert_eq!(
+            whole_class.constructor_address,
+            selection.constructor_address
+        );
+        assert_eq!(
+            whole_class.constructor_parameter_address,
+            Some(selection.constructor_parameter_address)
+        );
+
+        let plain_bytes = semantic_unpickler_fixture_bytes("CtorPlain.tasty");
+        let plain_file = tasty_symbol::parse_classloader_tasty(&plain_bytes)
+            .expect("plain constructor fixture parses");
+        let plain_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorPlain");
+        assert!(matches!(
+            ClassLoader::<InMemoryTastyClassPath>::validate_immutable_header_field_shape(
+                &plain_file,
+                &plain_name,
+            ),
+            Err(SemanticTastyLoadError::UnsupportedShape(_))
+        ));
+        let wrong_owner = BinaryName::from_internal("other/package/CtorWithVal");
+        assert!(matches!(
+            ClassLoader::<InMemoryTastyClassPath>::validate_immutable_header_field_shape(
+                &file,
+                &wrong_owner,
+            ),
+            Err(SemanticTastyLoadError::UnsupportedShape(_))
+        ));
+    }
+
+    #[test]
+    fn header_field_publication_rejects_duplicate_scope_names_and_mutable_flags() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let name = Name::new(store.names.intern("x"), Namespace::Term);
+        let field = store
+            .types
+            .get(definitions.int)
+            .reference_symbol()
+            .expect("canonical Int symbol");
+        let duplicate = definitions.any_class;
+        let mut scope = Scope::new(None);
+        scope.enter(name, field);
+        assert!(uniquely_declares_header_field(&scope, name, field));
+        scope.enter(name, duplicate);
+        assert!(!uniquely_declares_header_field(&scope, name, field));
+        assert!(has_supported_immutable_field_flags(SymbolFlags::EMPTY));
+        assert!(!has_supported_immutable_field_flags(SymbolFlags::MUTABLE));
+    }
+
+    #[test]
+    fn authentic_header_field_projection_reuses_indexed_identity_and_canonical_int() {
+        fn receipt() -> (String, SymbolId, SymbolId) {
+            let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorWithVal");
+            let bytes = semantic_unpickler_fixture_bytes("CtorWithVal.tasty");
+            let mut store = SemanticStore::new();
+            let mut loader = ClassLoader::new(
+                InMemoryTastyClassPath(HashMap::from([(name.clone(), bytes)])),
+                &mut store,
+            );
+            let field = loader
+                .project_immutable_header_field_with_tasty_unpickler(&name)
+                .expect("authentic field projection");
+            let repeated = loader
+                .project_immutable_header_field_with_tasty_unpickler(&name)
+                .expect("same-session projection is idempotent");
+            assert_eq!(field, repeated);
+            assert!(!loader.semantic_tasty_loaded.contains_key(&name));
+            assert!(!loader.open_package_contains_type_declaration(&name));
+            assert!(matches!(
+                loader.load_semantic_class_with_tasty_unpickler(&name),
+                Err(SemanticTastyLoadError::UnsupportedShape(_))
+            ));
+            let formal = loader.header_field_tasty_formals[&name];
+            let scope = loader.header_field_tasty_scopes[&name];
+            let field_info = loader.store.symbols.get(field);
+            let formal_info = loader.store.symbols.get(formal);
+            let class = field_info.owner.expect("field has a class owner");
+            let constructor = formal_info.owner.expect("formal has a constructor owner");
+            let int = loader
+                .store
+                .types
+                .get(loader.definitions.int)
+                .reference_symbol()
+                .expect("canonical Int symbol");
+            assert_eq!(field_info.kind, SymbolKind::Field);
+            assert_eq!(field_info.visibility, Visibility::Public);
+            assert_eq!(field_info.flags, SymbolFlags::EMPTY);
+            assert_eq!(field_info.name.namespace(), Namespace::Term);
+            assert_ne!(field, formal);
+            assert_eq!(formal_info.kind, SymbolKind::Parameter);
+            assert_eq!(formal_info.name, field_info.name);
+            assert_eq!(formal_info.owner, Some(constructor));
+            assert_eq!(
+                loader.store.symbols.get(constructor).kind,
+                SymbolKind::Constructor
+            );
+            assert_eq!(loader.store.symbols.get(constructor).owner, Some(class));
+            assert!(matches!(
+                loader.store.symbols.get(class).info,
+                SymbolInfo::Missing
+            ));
+            for symbol in [field, formal] {
+                let SymbolInfo::Complete(ty) = loader.store.symbols.get(symbol).info else {
+                    panic!("the field and formal are completed");
+                };
+                assert_eq!(type_ref_symbol(loader.store, ty), Some(int));
+            }
+            let class_scope = loader.store.scopes.get(scope);
+            assert!(class_scope.entered_symbols().any(|symbol| symbol == field));
+            assert_eq!(class_scope.lookup_all(&field_info.name), [field]);
+            let normalized = format!(
+                "{}|{}|{:?}|{:?}|{:?}|{}|{}|{}",
+                symbol_name(loader.store, class),
+                symbol_name(loader.store, constructor),
+                field_info.visibility,
+                field_info.flags,
+                field_info.kind,
+                loader.store.names.resolve(field_info.name.text()),
+                symbol_name(loader.store, formal),
+                symbol_name(loader.store, int),
+            );
+            (normalized, class, field)
+        }
+
+        let first = receipt();
+        let second = receipt();
+        assert_eq!(first.0, second.0, "fresh-store field receipts are stable");
+        assert_ne!(first.1, first.2);
+    }
+
+    #[test]
+    fn header_field_projection_rejects_substitutions_and_rolls_back_late_failure_for_retry() {
+        let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorWithVal");
+        let plain_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorPlain");
+        let bytes = semantic_unpickler_fixture_bytes("CtorWithVal.tasty");
+        let file = tasty_symbol::parse_classloader_tasty(&bytes).expect("authentic fixture parses");
+        let selection =
+            ClassLoader::<InMemoryTastyClassPath>::validate_immutable_header_field_shape(
+                &file, &name,
+            )
+            .expect("authentic field shape");
+        let java_home = std::env::var_os("JAVA_HOME").expect("JAVA_HOME for CtorPlain control");
+        let jdk = crate::jdk_class_path::JdkClassPath::new(PathBuf::from(java_home).join("jmods"))
+            .expect("JDK 21 modules");
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(InMemoryTastyClassPath(HashMap::from([
+                (name.clone(), bytes),
+                (
+                    plain_name.clone(),
+                    semantic_unpickler_fixture_bytes("CtorPlain.tasty"),
+                ),
+            ]))),
+            Box::new(jdk),
+        ]);
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(class_path, &mut store);
+        let plain = loader
+            .load_semantic_class_with_tasty_unpickler(&plain_name)
+            .expect("committed CtorPlain control");
+        let plain_before = loader.store.symbols.get(plain).clone();
+
+        for address in [selection.constructor_parameter_address, u32::MAX] {
+            let store_checkpoint = loader.store.checkpoint();
+            let session_checkpoint = loader.session.checkpoint();
+            let package_checkpoint = loader.session.packages.checkpoint();
+            assert!(matches!(
+                loader.project_immutable_header_field_with_options(&name, false, Some(address)),
+                Err(SemanticTastyLoadError::UnsupportedShape(_))
+            ));
+            assert_eq!(loader.store.checkpoint(), store_checkpoint);
+            assert_eq!(loader.session.checkpoint(), session_checkpoint);
+            assert_eq!(loader.session.packages.checkpoint(), package_checkpoint);
+            assert!(loader.header_field_tasty_loaded.is_empty());
+            assert!(loader.header_field_tasty_scopes.is_empty());
+            assert_eq!(loader.semantic_tasty_loaded.get(&plain_name), Some(&plain));
+        }
+
+        let store_checkpoint = loader.store.checkpoint();
+        let session_checkpoint = loader.session.checkpoint();
+        let package_checkpoint = loader.session.packages.checkpoint();
+        let int_symbol = loader
+            .store
+            .types
+            .get(loader.definitions.int)
+            .reference_symbol()
+            .expect("canonical Int symbol");
+        let int_before = loader.store.symbols.get(int_symbol).clone();
+        assert!(matches!(
+            loader.project_immutable_header_field_with_failure(&name, true),
+            Err(SemanticTastyLoadError::UnsupportedShape(
+                "injected failure after indexed field completion"
+            ))
+        ));
+        assert_eq!(loader.store.checkpoint(), store_checkpoint);
+        assert_eq!(loader.session.checkpoint(), session_checkpoint);
+        assert_eq!(loader.session.packages.checkpoint(), package_checkpoint);
+        assert_eq!(loader.store.symbols.get(int_symbol), &int_before);
+        assert!(loader.header_field_tasty_loaded.is_empty());
+        assert_eq!(loader.semantic_tasty_loaded.get(&plain_name), Some(&plain));
+        assert_eq!(loader.store.symbols.get(plain), &plain_before);
+
+        let field = loader
+            .project_immutable_header_field_with_tasty_unpickler(&name)
+            .expect("retry publishes the original indexed field");
+        assert_eq!(loader.store.symbols.get(field).kind, SymbolKind::Field);
+        assert_eq!(
+            loader
+                .load_semantic_class_with_tasty_unpickler(&plain_name)
+                .expect("committed CtorPlain remains usable after projection retry"),
+            plain
+        );
+    }
+
+    #[test]
+    fn header_field_projection_rejects_malformed_and_neighboring_unsupported_fixtures() {
+        let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorWithVal");
+        let bytes = semantic_unpickler_fixture_bytes("CtorWithVal.tasty");
+        let malformed_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorWithValMalformed");
+        let neighbor_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorTwoTermClauses");
+        let mut malformed = bytes.clone();
+        malformed.pop();
+        let classes = HashMap::from([
+            (malformed_name.clone(), malformed),
+            (
+                neighbor_name.clone(),
+                semantic_unpickler_fixture_bytes("CtorTwoTermClauses.tasty"),
+            ),
+        ]);
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryTastyClassPath(classes), &mut store);
+        assert!(matches!(
+            loader.project_immutable_header_field_with_tasty_unpickler(&malformed_name),
+            Err(SemanticTastyLoadError::ClassLoad(
+                ClassLoadError::InvalidTastyFile(_, _)
+            ))
+        ));
+        assert!(matches!(
+            loader.project_immutable_header_field_with_tasty_unpickler(&neighbor_name),
+            Err(SemanticTastyLoadError::UnsupportedShape(_))
+        ));
+        assert!(!loader.header_field_tasty_loaded.contains_key(&name));
+        assert!(loader.semantic_tasty_loaded.is_empty());
     }
 
     #[test]

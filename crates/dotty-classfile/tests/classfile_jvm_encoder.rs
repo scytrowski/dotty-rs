@@ -48,7 +48,14 @@ fn parse_tool_major_version(executable: &str, version_output: &str) -> Option<u3
         if version_lines.len() == 1 {
             return parse_version_major(version_lines[0], true);
         }
-        return None;
+        return version_lines.into_iter().find_map(|line| {
+            (line.contains('.')
+                && line
+                    .chars()
+                    .all(|character| character.is_ascii_digit() || character == '.'))
+            .then(|| parse_version_major(line, false))
+            .flatten()
+        });
     }
 
     version_output.lines().find_map(|line| {
@@ -179,6 +186,13 @@ fn parses_jdk_version_formats_and_rejects_older_major_versions() {
             "OpenJDK warning: shared memory file failed (pid=21)\n   3343610\nTry setting java.io.tmpdir"
         ),
         None
+    );
+    assert_eq!(
+        parse_tool_major_version(
+            "javap",
+            "21.0.13\nOpenJDK warning: shared memory file failed (pid=21)\n   3343610\nTry setting java.io.tmpdir"
+        ),
+        Some(21)
     );
     assert_eq!(parse_tool_major_version("javap", "21-ea"), Some(21));
 }

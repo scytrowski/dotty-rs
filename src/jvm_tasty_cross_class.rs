@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-use dotty_core::ast::{ApplyKind, AstArena, TreeKind, Typed, TypedAst, Untyped};
+use dotty_core::ast::{ApplyKind, AstArena, TreeKind, Typed, TypedAst, TypedTreeId, Untyped};
 use dotty_core::{
     Definitions, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex, SourceTypedIndex,
     SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, TermRefTarget, TreeId, Type,
@@ -108,10 +108,14 @@ pub enum ConstructorArgumentProofKind {
     DirectFormalPair,
     /// The outer constructor receives one original method formal and one nested call.
     FormalNestedPair,
+    /// The outer constructor receives one original formal and one initialized local.
+    FormalLocalPair,
     /// The outer constructor receives a same-instance planned method result.
     PlannedCall,
     /// The outer constructor receives one initialized immutable local val.
     LocalVal,
+    /// The outer constructor receives two initialized immutable local vals.
+    LocalValPair,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,6 +128,10 @@ struct FormalConstructorArgumentProof {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// These proof variants are intentionally Copy: validation returns immutable
+// identity receipts to read-only consumers without allocating or transferring
+// the borrowed session stores.
+#[allow(clippy::large_enum_variant)]
 enum ConstructorArgumentProofShape {
     Formal(FormalConstructorArgumentProof),
     NestedNew(NestedConstructorArgumentProof),
@@ -141,6 +149,7 @@ struct OrderedConstructorArgumentPairProof {
     constructor_formals: [SymbolId; 2],
     constructor_formal_types: [TypeId; 2],
     arguments: [OrderedConstructorArgumentProof; 2],
+    local_initializers: Option<[ImmutableLocalInitializerReceipt; 2]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,6 +163,37 @@ struct OrderedConstructorArgumentProof {
 enum OrderedConstructorArgumentOrigin {
     Formal(FormalConstructorArgumentProof),
     NestedNew(NestedConstructorArgumentProof),
+    LocalVal(ImmutableLocalArgumentProof),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ImmutableLocalArgumentProof {
+    source_block: TreeId<Untyped>,
+    source_declaration: TreeId<Untyped>,
+    source_initializer: TreeId<Untyped>,
+    source_initializer_select: TreeId<Untyped>,
+    source_initializer_new: TreeId<Untyped>,
+    source_seed_argument: TreeId<Untyped>,
+    source_use: TreeId<Untyped>,
+    typed_block: TreeId<Typed>,
+    typed_declaration: TreeId<Typed>,
+    typed_initializer: TreeId<Typed>,
+    typed_initializer_select: TreeId<Typed>,
+    typed_initializer_new: TreeId<Typed>,
+    typed_seed_argument: TreeId<Typed>,
+    typed_use: TreeId<Typed>,
+    symbol: SymbolId,
+    scope: dotty_core::ScopeId,
+    constructor: SymbolId,
+    local_type: TypeId,
+    result_type: TypeId,
+    seed_formal: SymbolId,
+    seed_formal_type: TypeId,
+    source_type_tree: TreeId<Untyped>,
+    typed_type_tree: TreeId<Typed>,
+    initializer_result_type: TypeId,
+    constructor_formal: SymbolId,
+    constructor_formal_type: TypeId,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -189,6 +229,204 @@ pub struct ImmutableLocalInitializationProofInput<'session> {
     /// Result of `typed_local_binding_at` from the original source Typer.
     pub local_binding: Option<TypedLocalBinding>,
     pub jvm_unit: &'session JvmCompilationUnit<'session>,
+}
+
+/// Borrowed inputs for the proof-only aggregate of two immutable local
+/// initializers in one original straight-line method Block.
+pub struct ImmutableLocalInitializerPairProofInput<'session> {
+    pub source_id: SourceId,
+    pub method_tree: TreeId<Untyped>,
+    pub store: &'session SemanticStore,
+    pub definitions: &'session Definitions,
+    pub source_ast: &'session AstArena<Untyped>,
+    pub typed_ast: &'session TypedAst,
+    pub source_index: &'session SourceSemanticIndex,
+    pub source_typed_index: &'session SourceTypedIndex,
+    /// Original Typer bindings for the first and second source ValDefs.
+    pub local_bindings: [Option<TypedLocalBinding>; 2],
+    pub jvm_unit: &'session JvmCompilationUnit<'session>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ImmutableLocalInitializerReceipt {
+    declaration: ImmutableLocalDeclarationCore,
+    seed_formal: SymbolId,
+    seed_formal_type: TypeId,
+    initializer_result_type: TypeId,
+    constructor_formal: SymbolId,
+    constructor_formal_type: TypeId,
+}
+
+fn immutable_local_argument_from_initializer(
+    source_block: TreeId<Untyped>,
+    typed_block: TreeId<Typed>,
+    receipt: ImmutableLocalInitializerReceipt,
+    source_use: TreeId<Untyped>,
+    typed_use: TreeId<Typed>,
+    result_type: TypeId,
+) -> ImmutableLocalArgumentProof {
+    let declaration = receipt.declaration;
+    ImmutableLocalArgumentProof {
+        source_block,
+        source_declaration: declaration.declaration,
+        source_initializer: declaration.initializer,
+        source_initializer_select: declaration.source_select,
+        source_initializer_new: declaration.source_new,
+        source_seed_argument: declaration.source_argument,
+        source_use,
+        typed_block,
+        typed_declaration: declaration.typed_declaration,
+        typed_initializer: declaration.typed_initializer,
+        typed_initializer_select: declaration.typed_select,
+        typed_initializer_new: declaration.typed_new,
+        typed_seed_argument: declaration.typed_argument,
+        typed_use,
+        symbol: declaration.symbol,
+        scope: declaration.scope,
+        constructor: declaration.constructor,
+        local_type: declaration.local_type,
+        result_type,
+        seed_formal: receipt.seed_formal,
+        seed_formal_type: receipt.seed_formal_type,
+        source_type_tree: declaration.source_type_tree,
+        typed_type_tree: declaration.typed_type_tree,
+        initializer_result_type: receipt.initializer_result_type,
+        constructor_formal: receipt.constructor_formal,
+        constructor_formal_type: receipt.constructor_formal_type,
+    }
+}
+
+/// Opaque all-or-error proof of exactly two original immutable Counter
+/// initializers in a single Block. This is a borrowed identity receipt only;
+/// it does not validate Pair argument origins or authorize emission.
+pub struct ValidatedImmutableLocalInitializerPairProof<'session> {
+    _store: &'session SemanticStore,
+    _source_ast: &'session AstArena<Untyped>,
+    _typed_ast: &'session TypedAst,
+    _source_index: &'session SourceSemanticIndex,
+    _source_typed_index: &'session SourceTypedIndex,
+    _jvm_unit: &'session JvmCompilationUnit<'session>,
+    source_id: SourceId,
+    method: SymbolId,
+    counter: SymbolId,
+    source_block: TreeId<Untyped>,
+    typed_block: TreeId<Typed>,
+    source_final_expression: TreeId<Untyped>,
+    typed_final_expression: TreeId<Typed>,
+    initializers: [ImmutableLocalInitializerReceipt; 2],
+}
+
+#[derive(Clone, Copy)]
+pub struct ImmutableLocalInitializerReceiptView {
+    receipt: ImmutableLocalInitializerReceipt,
+}
+
+impl ImmutableLocalInitializerReceiptView {
+    pub const fn source_declaration(self) -> TreeId<Untyped> {
+        self.receipt.declaration.declaration
+    }
+    pub const fn typed_declaration(self) -> TreeId<Typed> {
+        self.receipt.declaration.typed_declaration
+    }
+    pub const fn symbol(self) -> SymbolId {
+        self.receipt.declaration.symbol
+    }
+    pub const fn scope(self) -> dotty_core::ScopeId {
+        self.receipt.declaration.scope
+    }
+    pub const fn local_type(self) -> TypeId {
+        self.receipt.declaration.local_type
+    }
+    pub const fn source_type_tree(self) -> TreeId<Untyped> {
+        self.receipt.declaration.source_type_tree
+    }
+    pub const fn typed_type_tree(self) -> TreeId<Typed> {
+        self.receipt.declaration.typed_type_tree
+    }
+    pub const fn source_initializer(self) -> TreeId<Untyped> {
+        self.receipt.declaration.initializer
+    }
+    pub const fn typed_initializer(self) -> TreeId<Typed> {
+        self.receipt.declaration.typed_initializer
+    }
+    pub const fn source_select(self) -> TreeId<Untyped> {
+        self.receipt.declaration.source_select
+    }
+    pub const fn typed_select(self) -> TreeId<Typed> {
+        self.receipt.declaration.typed_select
+    }
+    pub const fn source_new(self) -> TreeId<Untyped> {
+        self.receipt.declaration.source_new
+    }
+    pub const fn typed_new(self) -> TreeId<Typed> {
+        self.receipt.declaration.typed_new
+    }
+
+    pub const fn source_new_type_tree(self) -> TreeId<Untyped> {
+        self.receipt.declaration.source_new_type_tree
+    }
+
+    pub const fn typed_new_type_tree(self) -> TreeId<Typed> {
+        self.receipt.declaration.typed_new_type_tree
+    }
+    pub const fn source_argument(self) -> TreeId<Untyped> {
+        self.receipt.declaration.source_argument
+    }
+    pub const fn typed_argument(self) -> TreeId<Typed> {
+        self.receipt.declaration.typed_argument
+    }
+    pub const fn constructor(self) -> SymbolId {
+        self.receipt.declaration.constructor
+    }
+    pub const fn seed_formal(self) -> SymbolId {
+        self.receipt.seed_formal
+    }
+    pub const fn seed_formal_type(self) -> TypeId {
+        self.receipt.seed_formal_type
+    }
+    pub const fn initializer_result_type(self) -> TypeId {
+        self.receipt.initializer_result_type
+    }
+    pub const fn constructor_formal(self) -> SymbolId {
+        self.receipt.constructor_formal
+    }
+    pub const fn constructor_formal_type(self) -> TypeId {
+        self.receipt.constructor_formal_type
+    }
+}
+
+impl<'session> ValidatedImmutableLocalInitializerPairProof<'session> {
+    pub const fn source_id(&self) -> SourceId {
+        self.source_id
+    }
+    pub const fn method(&self) -> SymbolId {
+        self.method
+    }
+    pub const fn counter(&self) -> SymbolId {
+        self.counter
+    }
+    pub const fn source_block(&self) -> TreeId<Untyped> {
+        self.source_block
+    }
+    pub const fn typed_block(&self) -> TreeId<Typed> {
+        self.typed_block
+    }
+    pub const fn source_final_expression(&self) -> TreeId<Untyped> {
+        self.source_final_expression
+    }
+    pub const fn typed_final_expression(&self) -> TreeId<Typed> {
+        self.typed_final_expression
+    }
+    pub const fn initializers(&self) -> [ImmutableLocalInitializerReceiptView; 2] {
+        [
+            ImmutableLocalInitializerReceiptView {
+                receipt: self.initializers[0],
+            },
+            ImmutableLocalInitializerReceiptView {
+                receipt: self.initializers[1],
+            },
+        ]
+    }
 }
 
 /// Opaque proof for one exact immutable method local initialized by its
@@ -227,6 +465,350 @@ pub struct ValidatedImmutableLocalInitializationProof<'session> {
     typed_use: TreeId<Typed>,
     local_type: TypeId,
     initializer_result_type: TypeId,
+    seed_formal: SymbolId,
+    seed_formal_type: TypeId,
+    constructor_formal: SymbolId,
+    constructor_formal_type: TypeId,
+}
+
+/// Shared original-declaration invariants used by proof-only immutable local
+/// initializer receipts. This intentionally records identities borrowed from
+/// the one canonical frontend session; it does not authorize a constructor
+/// argument origin or producer plan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ImmutableLocalDeclarationCore {
+    declaration: TreeId<Untyped>,
+    typed_declaration: TreeId<Typed>,
+    symbol: SymbolId,
+    scope: dotty_core::ScopeId,
+    local_type: TypeId,
+    source_type_tree: TreeId<Untyped>,
+    typed_type_tree: TreeId<Typed>,
+    initializer: TreeId<Untyped>,
+    typed_initializer: TreeId<Typed>,
+    source_select: TreeId<Untyped>,
+    typed_select: TreeId<Typed>,
+    source_new: TreeId<Untyped>,
+    typed_new: TreeId<Typed>,
+    source_new_type_tree: TreeId<Untyped>,
+    typed_new_type_tree: TreeId<Typed>,
+    source_argument: TreeId<Untyped>,
+    typed_argument: TreeId<Typed>,
+    constructor: SymbolId,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_immutable_local_declaration_core(
+    source_id: SourceId,
+    method: SymbolId,
+    declaration: TreeId<Untyped>,
+    store: &SemanticStore,
+    definitions: &Definitions,
+    source_ast: &AstArena<Untyped>,
+    typed_ast: &TypedAst,
+    source_typed_index: &SourceTypedIndex,
+    local_binding: Option<TypedLocalBinding>,
+    counter: SymbolId,
+    package: SymbolId,
+    seed_formal: SymbolId,
+) -> Result<ImmutableLocalDeclarationCore, CrossClassConstructorCallProofError> {
+    let source_error = |s| CrossClassConstructorCallProofError::SourceShape(s);
+    let identity_error = |s| CrossClassConstructorCallProofError::SourceIdentity(s);
+    let semantic_error = |s| CrossClassConstructorCallProofError::SemanticIdentity(s);
+    let typed_error = |s| CrossClassConstructorCallProofError::TypedBinding(s);
+    let TreeKind::ValDef(local_def) = &source_ast
+        .try_get(declaration)
+        .ok_or_else(|| source_error("local declaration tree is stale"))?
+        .kind
+    else {
+        return Err(source_error(
+            "factory Block statistic must be the original ValDef",
+        ));
+    };
+    let initializer = local_def
+        .rhs
+        .ok_or_else(|| source_error("local must have one initializer"))?;
+    if matches!(
+        source_ast.try_get(local_def.tpt).map(|n| &n.kind),
+        Some(TreeKind::TypeTree(_))
+    ) {
+        return Err(source_error("local must have an explicit source type"));
+    }
+    let binding = local_binding
+        .ok_or_else(|| identity_error("local declaration has no original Typer local binding"))?;
+    let local = binding.symbol();
+    let typed_declaration = source_typed_index.get(source_id, declaration).ok_or(
+        CrossClassConstructorCallProofError::TypedBinding(
+            "original ValDef has no source-to-typed binding",
+        ),
+    )?;
+    if binding.declaration() != typed_declaration {
+        return Err(identity_error(
+            "Typer local binding must name this exact original ValDef",
+        ));
+    }
+    if !store.symbols.contains(local)
+        || !has_source_origin(store, local, source_id)
+        || store.symbols.get(local).kind != SymbolKind::Local
+        || store.symbols.get(local).owner != Some(method)
+        || store
+            .symbols
+            .get(local)
+            .flags
+            .contains(SymbolFlags::MUTABLE)
+    {
+        return Err(identity_error(
+            "local must be the original immutable method-owned local",
+        ));
+    }
+    let scope_id = binding.scope();
+    let local_name = store.symbols.get(local).name;
+    if !store.scopes.contains(scope_id) {
+        return Err(identity_error("local block scope is stale"));
+    }
+    let scope = store.scopes.get(scope_id);
+    if scope.owner != Some(method) || scope.lookup(&local_name) != Some(local) {
+        return Err(identity_error(
+            "local must occupy its exact method-owned Block scope",
+        ));
+    }
+    let SymbolInfo::Complete(local_type) = store.symbols.get(local).info else {
+        return Err(semantic_error("local type is incomplete"));
+    };
+    if !is_canonical_class_type_ref(store, local_type, counter, package, definitions.no_prefix) {
+        return Err(semantic_error(
+            "local explicit type must be the canonical Counter TypeRef",
+        ));
+    }
+    let typed_type_tree = source_typed_index
+        .get(source_id, local_def.tpt)
+        .ok_or_else(|| typed_error("explicit source type tree has no typed mapping"))?;
+    let typed_initializer = source_typed_index
+        .get(source_id, initializer)
+        .ok_or_else(|| typed_error("original initializer has no typed mapping"))?;
+    let TreeKind::Apply(source_apply) = &source_ast
+        .try_get(initializer)
+        .ok_or_else(|| source_error("local initializer tree is stale"))?
+        .kind
+    else {
+        return Err(source_error(
+            "local initializer must be the original direct constructor Apply",
+        ));
+    };
+    if source_apply.kind != ApplyKind::Regular || source_apply.args.len() != 1 {
+        return Err(source_error(
+            "local initializer must be one regular one-argument Apply",
+        ));
+    }
+    let source_select = source_apply.function;
+    let TreeKind::Select(source_selection) = &source_ast
+        .try_get(source_select)
+        .ok_or_else(|| source_error("initializer Select is stale"))?
+        .kind
+    else {
+        return Err(source_error(
+            "initializer function must be the constructor Select",
+        ));
+    };
+    if store.names.resolve(source_selection.name.text()) != "<init>" {
+        return Err(source_error(
+            "initializer must select the primary Counter constructor",
+        ));
+    }
+    let source_new = source_selection.qualifier;
+    let TreeKind::New(source_new_tree) = &source_ast
+        .try_get(source_new)
+        .ok_or_else(|| source_error("initializer New is stale"))?
+        .kind
+    else {
+        return Err(source_error("initializer constructor receiver must be New"));
+    };
+    let source_argument = source_apply.args[0];
+    let TreeKind::Ident(source_seed) = &source_ast
+        .try_get(source_argument)
+        .ok_or_else(|| source_error("initializer seed tree is stale"))?
+        .kind
+    else {
+        return Err(source_error(
+            "initializer argument must be the original seed Ident",
+        ));
+    };
+    if store.names.resolve(source_seed.name.text())
+        != store
+            .names
+            .resolve(store.symbols.get(seed_formal).name.text())
+    {
+        return Err(source_error(
+            "initializer must use the original seed formal",
+        ));
+    }
+    let typed_select = source_typed_index
+        .get(source_id, source_select)
+        .ok_or_else(|| typed_error("initializer Select has no typed mapping"))?;
+    let typed_new = source_typed_index
+        .get(source_id, source_new)
+        .ok_or_else(|| typed_error("initializer New has no typed mapping"))?;
+    let typed_new_type_tree = source_typed_index
+        .get(source_id, source_new_tree.tpt)
+        .ok_or_else(|| typed_error("initializer type tree has no typed mapping"))?;
+    let typed_argument = source_typed_index
+        .get(source_id, source_argument)
+        .ok_or_else(|| typed_error("initializer seed has no typed mapping"))?;
+    let TreeKind::Apply(typed_apply) = &typed_ast
+        .try_get(typed_initializer)
+        .ok_or_else(|| typed_error("typed initializer is stale"))?
+        .kind
+    else {
+        return Err(typed_error("typed initializer must remain Apply"));
+    };
+    if typed_apply.kind != ApplyKind::Regular
+        || typed_apply.args != [typed_argument]
+        || typed_apply.function != typed_select
+    {
+        return Err(typed_error(
+            "typed initializer Apply must retain exact Select and seed roots",
+        ));
+    }
+    let TreeKind::Select(typed_selection) = &typed_ast
+        .try_get(typed_select)
+        .ok_or_else(|| typed_error("typed constructor Select is stale"))?
+        .kind
+    else {
+        return Err(typed_error("typed initializer function must remain Select"));
+    };
+    let TreeKind::New(typed_new_tree) = &typed_ast
+        .try_get(typed_new)
+        .ok_or_else(|| typed_error("typed New is stale"))?
+        .kind
+    else {
+        return Err(typed_error("typed constructor receiver must remain New"));
+    };
+    if typed_selection.qualifier != typed_new || typed_new_tree.tpt != typed_new_type_tree {
+        return Err(typed_error(
+            "typed initializer must preserve exact source Select/New/type roots",
+        ));
+    }
+    if !is_canonical_class_type_ref(
+        store,
+        typed_ast
+            .try_get(typed_new_type_tree)
+            .ok_or_else(|| typed_error("typed New type tree is stale"))?
+            .ty,
+        counter,
+        package,
+        definitions.no_prefix,
+    ) || !is_canonical_class_type_ref(
+        store,
+        typed_ast
+            .try_get(typed_new)
+            .ok_or_else(|| typed_error("typed New is stale"))?
+            .ty,
+        counter,
+        package,
+        definitions.no_prefix,
+    ) {
+        return Err(typed_error(
+            "typed New must retain the canonical Counter TypeRef",
+        ));
+    }
+    if !matches!(
+        store.types.try_get(
+            typed_ast
+                .try_get(typed_initializer)
+                .ok_or_else(|| typed_error("typed initializer is stale"))?
+                .ty
+        ),
+        Some(Type::TypeRef { target: TypeRefTarget::Symbol(class), .. }) if *class == counter
+    ) {
+        return Err(typed_error(
+            "typed initializer result must retain the Counter TypeRef",
+        ));
+    }
+    let constructor = match store.types.try_get(
+        typed_ast
+            .try_get(typed_select)
+            .ok_or_else(|| typed_error("typed Select is stale"))?
+            .ty,
+    ) {
+        Some(Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        }) => *symbol,
+        _ => {
+            return Err(typed_error(
+                "typed constructor Select must retain its canonical TermRef",
+            ));
+        }
+    };
+    if !store.symbols.contains(constructor)
+        || store.symbols.get(constructor).kind != SymbolKind::Constructor
+        || store.symbols.get(constructor).owner != Some(counter)
+        || !has_source_origin(store, constructor, source_id)
+    {
+        return Err(semantic_error(
+            "selected constructor must belong to the canonical Counter class",
+        ));
+    }
+    let TreeKind::Ident(typed_seed) = &typed_ast
+        .try_get(typed_argument)
+        .ok_or_else(|| typed_error("typed seed Ident is stale"))?
+        .kind
+    else {
+        return Err(typed_error("typed initializer seed must remain Ident"));
+    };
+    let typed_seed_type = typed_ast
+        .try_get(typed_argument)
+        .ok_or_else(|| typed_error("typed seed Ident is stale"))?
+        .ty;
+    if store.names.resolve(typed_seed.name.text())
+        != store
+            .names
+            .resolve(store.symbols.get(seed_formal).name.text())
+        || !matches!(store.types.try_get(typed_seed_type), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == seed_formal)
+    {
+        return Err(typed_error(
+            "typed initializer seed must retain the original Int formal TermRef",
+        ));
+    }
+    let TreeKind::ValDef(typed_local_def) = &typed_ast
+        .try_get(typed_declaration)
+        .ok_or_else(|| typed_error("typed ValDef is stale"))?
+        .kind
+    else {
+        return Err(typed_error("typed local declaration must remain ValDef"));
+    };
+    if typed_local_def.rhs != Some(typed_initializer) {
+        return Err(typed_error("typed ValDef initializer mismatch"));
+    }
+    if typed_local_def.tpt != typed_type_tree {
+        return Err(typed_error("typed ValDef declared-type edge mismatch"));
+    }
+    if typed_ast
+        .try_get(typed_type_tree)
+        .is_none_or(|tree| tree.ty != local_type)
+    {
+        return Err(typed_error("typed ValDef declared-type identity mismatch"));
+    }
+    Ok(ImmutableLocalDeclarationCore {
+        declaration,
+        typed_declaration,
+        symbol: local,
+        scope: scope_id,
+        local_type,
+        source_type_tree: local_def.tpt,
+        typed_type_tree,
+        initializer,
+        typed_initializer,
+        source_select,
+        typed_select,
+        source_new,
+        typed_new,
+        source_new_type_tree: source_new_tree.tpt,
+        typed_new_type_tree,
+        source_argument,
+        typed_argument,
+        constructor,
+    })
 }
 
 impl ValidatedImmutableLocalInitializationProof<'_> {
@@ -305,6 +887,18 @@ impl ValidatedImmutableLocalInitializationProof<'_> {
     pub const fn initializer_result_type(&self) -> TypeId {
         self.initializer_result_type
     }
+    pub const fn seed_formal(&self) -> SymbolId {
+        self.seed_formal
+    }
+    pub const fn seed_formal_type(&self) -> TypeId {
+        self.seed_formal_type
+    }
+    pub const fn constructor_formal(&self) -> SymbolId {
+        self.constructor_formal
+    }
+    pub const fn constructor_formal_type(&self) -> TypeId {
+        self.constructor_formal_type
+    }
 }
 
 /// Opaque receipt for one validated constructor-argument expression shape.
@@ -330,6 +924,18 @@ impl ConstructorArgumentProof {
                         OrderedConstructorArgumentOrigin::Formal(_),
                         OrderedConstructorArgumentOrigin::Formal(_),
                     ) => ConstructorArgumentProofKind::DirectFormalPair,
+                    (
+                        OrderedConstructorArgumentOrigin::Formal(_),
+                        OrderedConstructorArgumentOrigin::LocalVal(_),
+                    )
+                    | (
+                        OrderedConstructorArgumentOrigin::LocalVal(_),
+                        OrderedConstructorArgumentOrigin::Formal(_),
+                    ) => ConstructorArgumentProofKind::FormalLocalPair,
+                    (
+                        OrderedConstructorArgumentOrigin::LocalVal(_),
+                        OrderedConstructorArgumentOrigin::LocalVal(_),
+                    ) => ConstructorArgumentProofKind::LocalValPair,
                     _ => ConstructorArgumentProofKind::FormalNestedPair,
                 }
             }
@@ -468,13 +1074,109 @@ impl OrderedConstructorArgumentProofView {
                 })
             }
             OrderedConstructorArgumentOrigin::NestedNew(_) => None,
+            OrderedConstructorArgumentOrigin::LocalVal(_) => None,
         }
     }
     pub const fn nested_new(self) -> Option<NestedConstructorArgumentProof> {
         match self.proof.origin {
             OrderedConstructorArgumentOrigin::NestedNew(proof) => Some(proof),
             OrderedConstructorArgumentOrigin::Formal(_) => None,
+            OrderedConstructorArgumentOrigin::LocalVal(_) => None,
         }
+    }
+    pub const fn local_val(self) -> Option<ImmutableLocalArgumentProofView> {
+        match self.proof.origin {
+            OrderedConstructorArgumentOrigin::LocalVal(proof) => {
+                Some(ImmutableLocalArgumentProofView { proof })
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImmutableLocalArgumentProofView {
+    proof: ImmutableLocalArgumentProof,
+}
+
+impl ImmutableLocalArgumentProofView {
+    pub const fn source_block(self) -> TreeId<Untyped> {
+        self.proof.source_block
+    }
+    pub const fn source_declaration(self) -> TreeId<Untyped> {
+        self.proof.source_declaration
+    }
+    pub const fn source_initializer(self) -> TreeId<Untyped> {
+        self.proof.source_initializer
+    }
+    pub const fn source_use(self) -> TreeId<Untyped> {
+        self.proof.source_use
+    }
+    pub const fn typed_block(self) -> TreeId<Typed> {
+        self.proof.typed_block
+    }
+    pub const fn typed_declaration(self) -> TreeId<Typed> {
+        self.proof.typed_declaration
+    }
+    pub const fn typed_initializer(self) -> TreeId<Typed> {
+        self.proof.typed_initializer
+    }
+    pub const fn typed_use(self) -> TreeId<Typed> {
+        self.proof.typed_use
+    }
+    pub const fn symbol(self) -> SymbolId {
+        self.proof.symbol
+    }
+    pub const fn scope(self) -> dotty_core::ScopeId {
+        self.proof.scope
+    }
+    pub const fn constructor(self) -> SymbolId {
+        self.proof.constructor
+    }
+    pub const fn local_type(self) -> TypeId {
+        self.proof.local_type
+    }
+    pub const fn result_type(self) -> TypeId {
+        self.proof.result_type
+    }
+    pub const fn seed_formal(self) -> SymbolId {
+        self.proof.seed_formal
+    }
+    pub const fn seed_formal_type(self) -> TypeId {
+        self.proof.seed_formal_type
+    }
+    pub const fn constructor_formal(self) -> SymbolId {
+        self.proof.constructor_formal
+    }
+    pub const fn constructor_formal_type(self) -> TypeId {
+        self.proof.constructor_formal_type
+    }
+    pub const fn source_initializer_select(self) -> TreeId<Untyped> {
+        self.proof.source_initializer_select
+    }
+    pub const fn source_initializer_new(self) -> TreeId<Untyped> {
+        self.proof.source_initializer_new
+    }
+    pub const fn source_seed_argument(self) -> TreeId<Untyped> {
+        self.proof.source_seed_argument
+    }
+    pub const fn typed_initializer_select(self) -> TreeId<Typed> {
+        self.proof.typed_initializer_select
+    }
+    pub const fn typed_initializer_new(self) -> TreeId<Typed> {
+        self.proof.typed_initializer_new
+    }
+    pub const fn typed_seed_argument(self) -> TreeId<Typed> {
+        self.proof.typed_seed_argument
+    }
+    pub const fn source_type_tree(self) -> TreeId<Untyped> {
+        self.proof.source_type_tree
+    }
+    pub const fn typed_type_tree(self) -> TreeId<Typed> {
+        self.proof.typed_type_tree
+    }
+    pub const fn initializer_result_type(self) -> TypeId {
+        self.proof.initializer_result_type
     }
 }
 
@@ -513,6 +1215,21 @@ impl OrderedConstructorArgumentPairProofView {
                 proof: self.proof.arguments[1],
             },
         ]
+    }
+    /// Original immutable-local initializer receipts in source declaration order.
+    /// This remains distinct from `arguments()`, whose positions may repeat an alias.
+    pub const fn local_initializers(self) -> Option<[ImmutableLocalInitializerReceiptView; 2]> {
+        match self.proof.local_initializers {
+            Some(receipts) => Some([
+                ImmutableLocalInitializerReceiptView {
+                    receipt: receipts[0],
+                },
+                ImmutableLocalInitializerReceiptView {
+                    receipt: receipts[1],
+                },
+            ]),
+            None => None,
+        }
     }
 }
 
@@ -1078,6 +1795,7 @@ fn validate_cross_class_constructor_call_proofs_inner<'session>(
                     method_def,
                     method,
                     source_rhs,
+                    typer,
                     store,
                     definitions,
                     source_ast,
@@ -1165,6 +1883,7 @@ fn validate_two_argument_constructor_call_candidate<'session>(
     method_def: &dotty_core::ast::DefDef<Untyped>,
     method: SymbolId,
     source_rhs: TreeId<Untyped>,
+    typer: Option<&SourceTyper<'_>>,
     store: &'session SemanticStore,
     definitions: &'session Definitions,
     source_ast: &'session AstArena<Untyped>,
@@ -1342,8 +2061,90 @@ fn validate_two_argument_constructor_call_candidate<'session>(
         ));
     }
 
+    let (source_apply_tree, source_block) =
+        match source_ast.try_get(source_rhs).map(|node| &node.kind) {
+            Some(TreeKind::Apply(_)) => (source_rhs, None),
+            Some(TreeKind::Block(block)) if matches!(block.stats.len(), 1 | 2) => {
+                (block.expr, Some(block))
+            }
+            _ => {
+                return Err(source_error(
+                    "factory body must be a direct Apply or a one- or two-local Block",
+                ));
+            }
+        };
+    let typer_for_locals = if source_block.is_some() {
+        Some(typer.ok_or_else(|| {
+            typed_error("local Pair call requires the original Typer binding resolver")
+        })?)
+    } else {
+        None
+    };
+    let immutable_local = if let Some(block) = source_block.filter(|block| block.stats.len() == 1) {
+        let declaration = block.stats[0];
+        if !matches!(
+            source_ast.try_get(declaration).map(|node| &node.kind),
+            Some(TreeKind::ValDef(_))
+        ) {
+            return Err(source_error(
+                "local Pair call block must contain one val declaration",
+            ));
+        }
+        Some(validate_immutable_local_initialization_proof(
+            ImmutableLocalInitializationProofInput {
+                source_id,
+                method_tree,
+                store,
+                definitions,
+                source_ast,
+                typed_ast,
+                source_index,
+                source_typed_index,
+                local_binding: typer_for_locals
+                    .ok_or_else(|| typed_error("one-local Pair call requires its original Typer"))?
+                    .typed_local_binding_at(source_id, declaration),
+                jvm_unit,
+            },
+        )?)
+    } else {
+        None
+    };
+    let immutable_local_pair =
+        if let Some(block) = source_block.filter(|block| block.stats.len() == 2) {
+            if block.stats.iter().any(|declaration| {
+                !matches!(
+                    source_ast.try_get(*declaration).map(|node| &node.kind),
+                    Some(TreeKind::ValDef(_))
+                )
+            }) {
+                return Err(source_error(
+                    "two-local Pair call block must contain exactly two val declarations",
+                ));
+            }
+            let typer = typer_for_locals
+                .ok_or_else(|| typed_error("two-local Pair call requires its original Typer"))?;
+            Some(validate_immutable_local_initializer_pair_proof(
+                ImmutableLocalInitializerPairProofInput {
+                    source_id,
+                    method_tree,
+                    store,
+                    definitions,
+                    source_ast,
+                    typed_ast,
+                    source_index,
+                    source_typed_index,
+                    local_bindings: [
+                        typer.typed_local_binding_at(source_id, block.stats[0]),
+                        typer.typed_local_binding_at(source_id, block.stats[1]),
+                    ],
+                    jvm_unit,
+                },
+            )?)
+        } else {
+            None
+        };
     let TreeKind::Apply(outer_apply) = &source_ast
-        .try_get(source_rhs)
+        .try_get(source_apply_tree)
         .ok_or_else(|| source_error("factory method RHS is stale"))?
         .kind
     else {
@@ -1464,22 +2265,27 @@ fn validate_two_argument_constructor_call_candidate<'session>(
     let typed_new_tpt = source_typed_index
         .get(source_id, source_new_node.tpt)
         .ok_or_else(|| typed_error("outer New type tree has no exact typed binding"))?;
-    let typed_outer_args = [
-        source_typed_index
-            .get(source_id, outer_apply.args[0])
-            .ok_or_else(|| typed_error("first outer argument has no exact typed binding"))?,
-        source_typed_index
-            .get(source_id, outer_apply.args[1])
-            .ok_or_else(|| typed_error("second outer argument has no exact typed binding"))?,
-    ];
-    if outer_apply.args[0] == outer_apply.args[1] || typed_outer_args[0] == typed_outer_args[1] {
-        return Err(typed_error(
-            "sibling outer arguments must retain distinct source and typed roots",
-        ));
+    let typed_outer_args = map_ordered_constructor_argument_bindings(
+        source_typed_index,
+        source_id,
+        [outer_apply.args[0], outer_apply.args[1]],
+    )?;
+    let typed_apply_tree = source_typed_index
+        .get(source_id, source_apply_tree)
+        .ok_or_else(|| typed_error("final constructor Apply has no exact typed binding"))?;
+    if source_block.is_some() {
+        require_matching_source_typed_positions(
+            source_ast,
+            typed_ast,
+            source_id,
+            source_apply_tree,
+            typed_apply_tree,
+            "final Pair constructor Apply",
+        )?;
     }
     let typed_root = typed_ast
-        .try_get(typed_rhs)
-        .ok_or_else(|| typed_error("factory typed RHS is stale"))?;
+        .try_get(typed_apply_tree)
+        .ok_or_else(|| typed_error("factory typed final expression is stale"))?;
     let typed_apply = match &typed_root.kind {
         TreeKind::Apply(application) if application.kind == ApplyKind::Regular => application,
         _ => {
@@ -1488,11 +2294,22 @@ fn validate_two_argument_constructor_call_candidate<'session>(
             ));
         }
     };
-    if typed_apply.function != typed_select || typed_apply.args != typed_outer_args {
+    if typed_apply.args.len() != 2 {
         return Err(typed_error(
             "typed outer Apply must preserve exact ordered source mappings",
         ));
     }
+    if typed_apply.function != typed_select {
+        return Err(typed_error(
+            "typed outer Apply must preserve exact ordered source mappings",
+        ));
+    }
+    validate_ordered_constructor_argument_bindings(
+        source_typed_index,
+        source_id,
+        [outer_apply.args[0], outer_apply.args[1]],
+        [typed_apply.args[0], typed_apply.args[1]],
+    )?;
     let typed_selection = match &typed_ast
         .try_get(typed_select)
         .ok_or_else(|| typed_error("outer typed Select is stale"))?
@@ -1859,12 +2676,18 @@ fn validate_two_argument_constructor_call_candidate<'session>(
         ));
     }
 
-    let direct_formal_arguments = outer_apply.args.iter().all(|argument| {
-        matches!(
-            source_ast.try_get(*argument).map(|node| &node.kind),
-            Some(TreeKind::Ident(_))
-        )
-    });
+    let direct_formal_arguments = outer_apply.args.iter().copied().zip(typed_outer_args).all(
+        |(source_argument, typed_argument)| {
+            matches!(
+                source_ast.try_get(source_argument).map(|node| &node.kind),
+                Some(TreeKind::Ident(_))
+            ) && matches!(
+                typed_ast.try_get(typed_argument).and_then(|node| store.types.try_get(node.ty)),
+                Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. })
+                    if method_formals.contains(symbol)
+            )
+        },
+    );
     let mut ordered_argument_proofs = Vec::with_capacity(2);
     if direct_formal_arguments {
         for (index, typed_argument) in typed_outer_args.iter().copied().enumerate() {
@@ -1993,6 +2816,18 @@ fn validate_two_argument_constructor_call_candidate<'session>(
         let mut nested_proofs = Vec::with_capacity(2);
         for (index, typed_outer_argument) in typed_outer_args.iter().copied().enumerate() {
             let source_outer_argument = outer_apply.args[index];
+            if immutable_local_pair.is_some()
+                && !matches!(
+                    source_ast
+                        .try_get(source_outer_argument)
+                        .map(|node| &node.kind),
+                    Some(TreeKind::Ident(_))
+                )
+            {
+                return Err(source_error(
+                    "two-local Pair arguments must be direct original local Idents",
+                ));
+            }
             if matches!(
                 source_ast
                     .try_get(source_outer_argument)
@@ -2021,6 +2856,161 @@ fn validate_two_argument_constructor_call_candidate<'session>(
                     .ok_or_else(|| typed_error("Pair formal argument typed root is stale"))?;
                 if !matches!(typed_argument_node.kind, TreeKind::Ident(_)) {
                     return Err(typed_error("Pair formal argument typed root must be Ident"));
+                }
+                if let Some(local) = immutable_local.as_ref()
+                    && matches!(
+                        store.types.try_get(typed_argument_node.ty),
+                        Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. })
+                            if *symbol == local.local()
+                    )
+                {
+                    if local.source_use() != source_outer_argument
+                        || local.typed_use() != typed_outer_argument
+                    {
+                        return Err(typed_error(
+                            "local Pair argument must preserve the exact original source and typed use roots",
+                        ));
+                    }
+                    let TreeKind::Ident(local_ident) = &source_ast.get(source_outer_argument).kind
+                    else {
+                        unreachable!("the local receipt authenticates an Ident use")
+                    };
+                    let target = match store.types.try_get(typed_argument_node.ty) {
+                        Some(Type::TermRef {
+                            target: TermRefTarget::Symbol(target),
+                            ..
+                        }) => *target,
+                        _ => {
+                            return Err(typed_error(
+                                "local Pair argument must retain its exact local TermRef",
+                            ));
+                        }
+                    };
+                    if target != local.local()
+                        || store.names.resolve(local_ident.name.text())
+                            != store
+                                .names
+                                .resolve(store.symbols.get(local.local()).name.text())
+                        || store.symbols.get(local.local()).info
+                            != SymbolInfo::Complete(local.local_type())
+                    {
+                        return Err(typed_error(
+                            "ordered local Pair argument must retain its exact initialized local identity and type",
+                        ));
+                    }
+                    let proof = ImmutableLocalArgumentProof {
+                        source_block: local.source_block(),
+                        source_declaration: local.source_declaration(),
+                        source_initializer: local.source_initializer(),
+                        source_use: local.source_use(),
+                        typed_block: local.typed_block(),
+                        typed_declaration: local.typed_declaration(),
+                        typed_initializer: local.typed_initializer(),
+                        typed_use: local.typed_use(),
+                        symbol: local.local(),
+                        scope: local.scope(),
+                        constructor: local.constructor(),
+                        local_type: local.local_type(),
+                        result_type: typed_argument_node.ty,
+                        seed_formal: local.seed_formal(),
+                        seed_formal_type: local.seed_formal_type(),
+                        source_initializer_select: local.source_initializer_select(),
+                        source_initializer_new: local.source_initializer_new(),
+                        source_seed_argument: local.source_seed_argument(),
+                        typed_initializer_select: local.typed_initializer_select(),
+                        typed_initializer_new: local.typed_initializer_new(),
+                        typed_seed_argument: local.typed_seed_argument(),
+                        source_type_tree: local.source_type_tree(),
+                        typed_type_tree: local.typed_type_tree(),
+                        initializer_result_type: local.initializer_result_type(),
+                        constructor_formal: local.constructor_formal(),
+                        constructor_formal_type: local.constructor_formal_type(),
+                    };
+                    ordered_argument_proofs.push(OrderedConstructorArgumentProof {
+                        source_argument: source_outer_argument,
+                        typed_argument: typed_outer_argument,
+                        origin: OrderedConstructorArgumentOrigin::LocalVal(proof),
+                    });
+                    continue;
+                }
+                if let Some(local_pair) = immutable_local_pair.as_ref() {
+                    if !matches!(typed_argument_node.kind, TreeKind::Ident(_)) {
+                        return Err(typed_error(
+                            "two-local Pair arguments must retain direct typed local Idents",
+                        ));
+                    }
+                    let target = match store.types.try_get(typed_argument_node.ty) {
+                        Some(Type::TermRef {
+                            target: TermRefTarget::Symbol(target),
+                            ..
+                        }) => *target,
+                        _ => {
+                            return Err(typed_error(
+                                "local Pair argument must retain its exact local TermRef",
+                            ));
+                        }
+                    };
+                    if let Some(receipt) = local_pair
+                        .initializers
+                        .iter()
+                        .copied()
+                        .find(|receipt| receipt.declaration.symbol == target)
+                    {
+                        let TreeKind::Ident(local_ident) = &source_ast
+                            .try_get(source_outer_argument)
+                            .ok_or_else(|| source_error("local Pair use is stale"))?
+                            .kind
+                        else {
+                            return Err(source_error("local Pair argument must be an Ident"));
+                        };
+                        let local_name = store.symbols.get(receipt.declaration.symbol).name;
+                        if store.names.resolve(local_ident.name.text())
+                            != store.names.resolve(local_name.text())
+                            || store.symbols.get(receipt.declaration.symbol).owner != Some(method)
+                            || store.symbols.get(receipt.declaration.symbol).info
+                                != SymbolInfo::Complete(receipt.declaration.local_type)
+                        {
+                            return Err(typed_error(
+                                "ordered local Pair argument must retain its exact initialized local identity and type",
+                            ));
+                        }
+                        if source_typed_index.get(source_id, source_outer_argument)
+                            != Some(typed_outer_argument)
+                        {
+                            return Err(typed_error(
+                                "local Pair argument must retain its exact source-to-typed binding",
+                            ));
+                        }
+                        require_matching_source_typed_positions(
+                            source_ast,
+                            typed_ast,
+                            source_id,
+                            source_outer_argument,
+                            typed_outer_argument,
+                            if index == 0 {
+                                "first initialized local Pair argument"
+                            } else {
+                                "second initialized local Pair argument"
+                            },
+                        )?;
+                        let proof = immutable_local_argument_from_initializer(
+                            local_pair.source_block,
+                            local_pair.typed_block,
+                            receipt,
+                            source_outer_argument,
+                            typed_outer_argument,
+                            typed_argument_node.ty,
+                        );
+                        ordered_argument_proofs.push(OrderedConstructorArgumentProof {
+                            source_argument: source_outer_argument,
+                            typed_argument: typed_outer_argument,
+                            origin: OrderedConstructorArgumentOrigin::LocalVal(proof),
+                        });
+                        continue;
+                    }
+                    return Err(typed_error(
+                        "each two-local Pair argument must resolve to one of its original local receipts",
+                    ));
                 }
                 let formal = match store.types.try_get(typed_argument_node.ty) {
                     Some(Type::TermRef {
@@ -2629,6 +3619,7 @@ fn validate_two_argument_constructor_call_candidate<'session>(
                     constructor_formals: target_formals,
                     constructor_formal_types: pair_formal_types,
                     arguments: ordered_argument_proofs,
+                    local_initializers: immutable_local_pair.map(|proof| proof.initializers),
                 },
             ),
         },
@@ -2638,6 +3629,49 @@ fn validate_two_argument_constructor_call_candidate<'session>(
         method_descriptor: method_descriptor.to_owned(),
         constructor_descriptor: constructor_descriptor.to_owned(),
     })
+}
+
+/// Resolve the canonical typed roots for two source-ordered constructor
+/// arguments. Keeping this check separate lets callers exercise the argument
+/// provenance validator without replacing a Typer-owned session index.
+pub fn map_ordered_constructor_argument_bindings(
+    source_typed_index: &SourceTypedIndex,
+    source_id: SourceId,
+    source_arguments: [TreeId<Untyped>; 2],
+) -> Result<[TypedTreeId; 2], CrossClassConstructorCallProofError> {
+    let typed_error = |message| CrossClassConstructorCallProofError::TypedBinding(message);
+    let typed_arguments = [
+        source_typed_index
+            .get(source_id, source_arguments[0])
+            .ok_or_else(|| typed_error("first outer argument has no exact typed binding"))?,
+        source_typed_index
+            .get(source_id, source_arguments[1])
+            .ok_or_else(|| typed_error("second outer argument has no exact typed binding"))?,
+    ];
+    if source_arguments[0] == source_arguments[1] || typed_arguments[0] == typed_arguments[1] {
+        return Err(typed_error(
+            "sibling outer arguments must retain distinct source and typed roots",
+        ));
+    }
+    Ok(typed_arguments)
+}
+
+/// Check that source argument edges retain their exact original order in the
+/// typed Apply. This is shared by the proof path and focused provenance tests.
+pub fn validate_ordered_constructor_argument_bindings(
+    source_typed_index: &SourceTypedIndex,
+    source_id: SourceId,
+    source_arguments: [TreeId<Untyped>; 2],
+    typed_arguments: [TypedTreeId; 2],
+) -> Result<(), CrossClassConstructorCallProofError> {
+    let expected =
+        map_ordered_constructor_argument_bindings(source_typed_index, source_id, source_arguments)?;
+    if expected != typed_arguments {
+        return Err(CrossClassConstructorCallProofError::TypedBinding(
+            "typed outer Apply must preserve exact ordered source mappings",
+        ));
+    }
+    Ok(())
 }
 
 fn is_direct_constructor_call_candidate(ast: &AstArena<Untyped>, rhs: TreeId<Untyped>) -> bool {
@@ -3663,6 +4697,23 @@ pub fn validate_immutable_local_initialization_proof<'session>(
     ] {
         require_matching_source_typed_positions(source_ast, typed_ast, source_id, s, t, desc)?;
     }
+    // Keep the original wrapper's error ordering and exact diagnostics above,
+    // then capture the shared borrowed declaration/initializer contract used
+    // by both one-local and two-local receipts.
+    let local_core = validate_immutable_local_declaration_core(
+        source_id,
+        method,
+        declaration,
+        store,
+        definitions,
+        source_ast,
+        typed_ast,
+        source_typed_index,
+        Some(binding),
+        counter,
+        package,
+        formals[1].0,
+    )?;
     Ok(ValidatedImmutableLocalInitializationProof {
         _store: store,
         _source_ast: source_ast,
@@ -3672,32 +4723,811 @@ pub fn validate_immutable_local_initialization_proof<'session>(
         _jvm_unit: jvm_unit,
         source_id,
         method,
-        local,
-        scope: scope_id,
-        constructor,
+        local: local_core.symbol,
+        scope: local_core.scope,
+        constructor: local_core.constructor,
         source_block: rhs,
-        source_declaration: declaration,
-        source_type_tree: local_def.tpt,
-        source_initializer: initializer,
-        source_initializer_select: source_select,
-        source_initializer_new: source_new,
-        source_seed_argument: source_argument,
+        source_declaration: local_core.declaration,
+        source_type_tree: local_core.source_type_tree,
+        source_initializer: local_core.initializer,
+        source_initializer_select: local_core.source_select,
+        source_initializer_new: local_core.source_new,
+        source_seed_argument: local_core.source_argument,
         source_final_expression: block.expr,
         source_use: local_arg,
         typed_block,
-        typed_declaration: typed_decl,
-        typed_type_tree: typed_local_def.tpt,
-        typed_initializer: typed_init,
-        typed_initializer_select: typed_select,
-        typed_initializer_new: typed_new,
-        typed_seed_argument: typed_seed,
+        typed_declaration: local_core.typed_declaration,
+        typed_type_tree: local_core.typed_type_tree,
+        typed_initializer: local_core.typed_initializer,
+        typed_initializer_select: local_core.typed_select,
+        typed_initializer_new: local_core.typed_new,
+        typed_seed_argument: local_core.typed_argument,
         typed_final_expression: typed_use,
         typed_use: typed_local_use,
-        local_type,
+        local_type: local_core.local_type,
         initializer_result_type: typed_ast
             .try_get(typed_init)
             .ok_or_else(|| typed_error("typed initializer became stale"))?
             .ty,
+        seed_formal: formals[1].0,
+        seed_formal_type: formals[1].1,
+        constructor_formal: ctor_formal,
+        constructor_formal_type: definitions.int,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Validate exactly two original, ordered immutable local initializers from one
+/// straight-line source Block. The returned pair is created only after both
+/// local receipts and their shared scope/order invariants have passed.
+pub fn validate_immutable_local_initializer_pair_proof<'session>(
+    input: ImmutableLocalInitializerPairProofInput<'session>,
+) -> Result<
+    ValidatedImmutableLocalInitializerPairProof<'session>,
+    CrossClassConstructorCallProofError,
+> {
+    let source_error = |s| CrossClassConstructorCallProofError::SourceShape(s);
+    let identity_error = |s| CrossClassConstructorCallProofError::SourceIdentity(s);
+    let semantic_error = |s| CrossClassConstructorCallProofError::SemanticIdentity(s);
+    let typed_error = |s| CrossClassConstructorCallProofError::TypedBinding(s);
+    let ImmutableLocalInitializerPairProofInput {
+        source_id,
+        method_tree,
+        store,
+        definitions,
+        source_ast,
+        typed_ast,
+        source_index,
+        source_typed_index,
+        local_bindings,
+        jvm_unit,
+    } = input;
+    if !std::ptr::eq(jvm_unit.store, store) || !std::ptr::eq(jvm_unit.typed_ast, typed_ast) {
+        return Err(semantic_error(
+            "JVM unit and source proof must borrow the same semantic and typed stores",
+        ));
+    }
+    let TreeKind::DefDef(method_def) = &source_ast
+        .try_get(method_tree)
+        .ok_or_else(|| source_error("factory method tree is stale"))?
+        .kind
+    else {
+        return Err(source_error("factory source root must be a method"));
+    };
+    require_source_position(
+        source_ast,
+        source_id,
+        method_tree,
+        "factory method has a foreign source position",
+    )?;
+    let method = source_index
+        .symbol_at(source_id, method_tree)
+        .ok_or_else(|| identity_error("factory method has no canonical source symbol"))?;
+    if source_index.definition_of(method)
+        != Some(SourceDefinition::Canonical {
+            source: source_id,
+            tree: method_tree,
+        })
+        || !store.symbols.contains(method)
+        || !has_source_origin(store, method, source_id)
+        || store.symbols.get(method).kind != SymbolKind::Method
+    {
+        return Err(identity_error(
+            "factory method is not the original canonical method",
+        ));
+    }
+    if !method_def.type_params.is_empty()
+        || method_def.value_param_clauses.len() != 1
+        || method_def.value_param_clauses[0].len() != 2
+    {
+        return Err(source_error(
+            "factory method must have exactly two ordinary Int formals",
+        ));
+    }
+    let owner = store
+        .symbols
+        .get(method)
+        .owner
+        .ok_or_else(|| identity_error("factory method has no source class owner"))?;
+    if !store.symbols.contains(owner)
+        || store.symbols.get(owner).kind != SymbolKind::Class
+        || !has_source_origin(store, owner, source_id)
+        || source_index.definition_of(owner).is_none_or(
+            |d| !matches!(d, SourceDefinition::Canonical { source, .. } if source == source_id),
+        )
+    {
+        return Err(identity_error(
+            "factory method owner must be its canonical source class",
+        ));
+    }
+    let package = store
+        .symbols
+        .get(owner)
+        .owner
+        .ok_or_else(|| identity_error("factory class has no package owner"))?;
+    let SymbolInfo::Complete(method_type) = store.symbols.get(method).info else {
+        return Err(semantic_error("factory method signature is incomplete"));
+    };
+    let Some(Type::Method(signature)) = store.types.try_get(method_type) else {
+        return Err(semantic_error(
+            "factory method must have one plain signature",
+        ));
+    };
+    if signature.kind != dotty_core::MethodKind::Plain
+        || signature.params.len() != 2
+        || signature
+            .params
+            .iter()
+            .any(|param| param.ty != definitions.int)
+    {
+        return Err(semantic_error(
+            "factory signature must preserve its two canonical Int formals",
+        ));
+    }
+    let mut formals = Vec::with_capacity(2);
+    for source_formal in &method_def.value_param_clauses[0] {
+        let TreeKind::ValDef(formal_def) = &source_ast
+            .try_get(*source_formal)
+            .ok_or_else(|| source_error("factory formal tree is stale"))?
+            .kind
+        else {
+            return Err(source_error("factory parameters must be value formals"));
+        };
+        if formal_def.rhs.is_some() {
+            return Err(source_error("factory formals cannot have defaults"));
+        }
+        if matches!(
+            source_ast.try_get(formal_def.tpt).map(|tree| &tree.kind),
+            Some(TreeKind::TypeTree(_))
+        ) {
+            return Err(source_error(
+                "factory formals must retain explicit source types",
+            ));
+        }
+        let formal = source_index
+            .symbol_at(source_id, *source_formal)
+            .ok_or_else(|| identity_error("factory formal has no canonical source symbol"))?;
+        if !store.symbols.contains(formal)
+            || !has_source_origin(store, formal, source_id)
+            || store.symbols.get(formal).kind != SymbolKind::Parameter
+            || store.symbols.get(formal).owner != Some(method)
+        {
+            return Err(identity_error(
+                "factory formal is not owned by the canonical method",
+            ));
+        }
+        if !matches!(store.symbols.get(formal).info, SymbolInfo::Complete(ty) if ty == definitions.int)
+        {
+            return Err(semantic_error(
+                "factory formals must retain the canonical Int type",
+            ));
+        }
+        require_source_position(
+            source_ast,
+            source_id,
+            *source_formal,
+            "factory formal has a foreign source span",
+        )?;
+        formals.push(formal);
+    }
+    let rhs = method_def
+        .rhs
+        .ok_or_else(|| source_error("factory method must have a body"))?;
+    let TreeKind::Block(block) = &source_ast
+        .try_get(rhs)
+        .ok_or_else(|| source_error("factory body is stale"))?
+        .kind
+    else {
+        return Err(source_error("factory body must be the original Block"));
+    };
+    if block.stats.len() != 2 {
+        return Err(source_error(
+            "factory Block must contain exactly two local ValDefs",
+        ));
+    }
+    if block.stats[0] == block.stats[1] {
+        return Err(identity_error(
+            "two local declarations must have distinct original source roots",
+        ));
+    }
+    let typed_block = source_typed_index
+        .get(source_id, rhs)
+        .ok_or_else(|| typed_error("original Block has no typed mapping"))?;
+    let typed_final_expression = source_typed_index
+        .get(source_id, block.expr)
+        .ok_or_else(|| typed_error("final Block expression has no typed mapping"))?;
+    let typed_declarations = [
+        source_typed_index
+            .get(source_id, block.stats[0])
+            .ok_or_else(|| typed_error("first ValDef has no typed mapping"))?,
+        source_typed_index
+            .get(source_id, block.stats[1])
+            .ok_or_else(|| typed_error("second ValDef has no typed mapping"))?,
+    ];
+    if typed_declarations[0] == typed_declarations[1] {
+        return Err(typed_error(
+            "two source ValDefs must retain distinct typed roots",
+        ));
+    }
+    let TreeKind::Block(typed_block_tree) = &typed_ast
+        .try_get(typed_block)
+        .ok_or_else(|| typed_error("typed Block is stale"))?
+        .kind
+    else {
+        return Err(typed_error("original source Block must remain typed Block"));
+    };
+    if typed_block_tree.stats != typed_declarations
+        || typed_block_tree.expr != typed_final_expression
+    {
+        return Err(typed_error(
+            "typed Block must preserve both original ValDefs and final expression",
+        ));
+    }
+    let TreeKind::Apply(final_apply) = &source_ast
+        .try_get(block.expr)
+        .ok_or_else(|| source_error("final Block expression is stale"))?
+        .kind
+    else {
+        return Err(source_error(
+            "final Block expression must be the enclosing constructor Apply",
+        ));
+    };
+    if final_apply.kind != ApplyKind::Regular {
+        return Err(source_error(
+            "final Block expression must be one regular constructor Apply",
+        ));
+    }
+    let source_final_select = final_apply.function;
+    let TreeKind::Select(source_final_selection) = &source_ast
+        .try_get(source_final_select)
+        .ok_or_else(|| source_error("final constructor Select is stale"))?
+        .kind
+    else {
+        return Err(source_error(
+            "final constructor Apply function must be Select",
+        ));
+    };
+    if store.names.resolve(source_final_selection.name.text()) != "<init>" {
+        return Err(source_error(
+            "final Block expression must select a primary constructor",
+        ));
+    }
+    let source_final_new = source_final_selection.qualifier;
+    let TreeKind::New(source_final_new_tree) = &source_ast
+        .try_get(source_final_new)
+        .ok_or_else(|| source_error("final constructor New is stale"))?
+        .kind
+    else {
+        return Err(source_error(
+            "final constructor Select qualifier must be New",
+        ));
+    };
+    if final_apply.args.len() != 2 {
+        return Err(source_error(
+            "final constructor Apply must have exactly two arguments",
+        ));
+    }
+    let typed_final_select = source_typed_index
+        .get(source_id, source_final_select)
+        .ok_or_else(|| typed_error("final constructor Select has no typed mapping"))?;
+    let typed_final_new = source_typed_index
+        .get(source_id, source_final_new)
+        .ok_or_else(|| typed_error("final constructor New has no typed mapping"))?;
+    let typed_final_new_type = source_typed_index
+        .get(source_id, source_final_new_tree.tpt)
+        .ok_or_else(|| typed_error("final constructor type tree has no typed mapping"))?;
+    let TreeKind::Apply(typed_final_apply) = &typed_ast
+        .try_get(typed_final_expression)
+        .ok_or_else(|| typed_error("typed final expression is stale"))?
+        .kind
+    else {
+        return Err(typed_error("final source Apply must remain a typed Apply"));
+    };
+    if typed_final_apply.kind != ApplyKind::Regular
+        || typed_final_apply.args.len() != 2
+        || typed_final_apply.function != typed_final_select
+    {
+        return Err(typed_error(
+            "typed final constructor Apply must retain its original Select edge",
+        ));
+    }
+    let TreeKind::Select(typed_final_selection) = &typed_ast
+        .try_get(typed_final_select)
+        .ok_or_else(|| typed_error("typed final constructor Select is stale"))?
+        .kind
+    else {
+        return Err(typed_error(
+            "typed final constructor function must remain Select",
+        ));
+    };
+    let TreeKind::New(typed_final_new_tree) = &typed_ast
+        .try_get(typed_final_new)
+        .ok_or_else(|| typed_error("typed final constructor New is stale"))?
+        .kind
+    else {
+        return Err(typed_error(
+            "typed final constructor receiver must remain New",
+        ));
+    };
+    if typed_final_selection.qualifier != typed_final_new
+        || typed_final_new_tree.tpt != typed_final_new_type
+    {
+        return Err(typed_error(
+            "typed final constructor must preserve exact Select/New/type edges",
+        ));
+    }
+    let Type::TypeRef {
+        target: TypeRefTarget::Symbol(result_class),
+        ..
+    } = store
+        .types
+        .try_get(signature.result)
+        .ok_or_else(|| semantic_error("factory result type is stale"))?
+    else {
+        return Err(semantic_error(
+            "factory result type must be a canonical class TypeRef",
+        ));
+    };
+    if !store.symbols.contains(*result_class)
+        || store.symbols.get(*result_class).kind != SymbolKind::Class
+        || !has_source_origin(store, *result_class, source_id)
+        || source_index.definition_of(*result_class).is_none_or(|definition| {
+            !matches!(definition, SourceDefinition::Canonical { source, .. } if source == source_id)
+        })
+        || !is_canonical_class_type_ref(
+            store,
+            signature.result,
+            *result_class,
+            package,
+            definitions.no_prefix,
+        )
+    {
+        return Err(identity_error(
+            "factory result class must be canonical in the original source package",
+        ));
+    }
+    let typed_final_new_type_value = typed_ast
+        .try_get(typed_final_new_type)
+        .ok_or_else(|| typed_error("typed final constructor type tree is stale"))?
+        .ty;
+    let typed_final_new_value = typed_ast
+        .try_get(typed_final_new)
+        .ok_or_else(|| typed_error("typed final constructor New is stale"))?
+        .ty;
+    let typed_final_apply_value = typed_ast
+        .try_get(typed_final_expression)
+        .ok_or_else(|| typed_error("typed final constructor Apply is stale"))?
+        .ty;
+    if !is_canonical_class_type_ref(
+        store,
+        typed_final_new_type_value,
+        *result_class,
+        package,
+        definitions.no_prefix,
+    ) || !matches!(
+        store.types.try_get(typed_final_new_value),
+        Some(Type::TypeRef { target: TypeRefTarget::Symbol(class), .. }) if *class == *result_class
+    ) || !matches!(
+        store.types.try_get(typed_final_apply_value),
+        Some(Type::TypeRef { target: TypeRefTarget::Symbol(class), .. }) if *class == *result_class
+    ) {
+        return Err(typed_error(
+            "typed final constructor must preserve the canonical method result class",
+        ));
+    }
+    let final_constructor = match store.types.try_get(
+        typed_ast
+            .try_get(typed_final_select)
+            .ok_or_else(|| typed_error("typed final constructor Select is stale"))?
+            .ty,
+    ) {
+        Some(Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        }) => *symbol,
+        _ => {
+            return Err(typed_error(
+                "typed final constructor Select must retain its canonical TermRef",
+            ));
+        }
+    };
+    let result_class_tree = match source_index.definition_of(*result_class) {
+        Some(SourceDefinition::Canonical { source, tree }) if source == source_id => tree,
+        _ => {
+            return Err(identity_error(
+                "factory result class is not canonical source",
+            ));
+        }
+    };
+    let TreeKind::TypeDef(result_class_def) = &source_ast
+        .try_get(result_class_tree)
+        .ok_or_else(|| identity_error("factory result class tree is stale"))?
+        .kind
+    else {
+        return Err(identity_error("factory result source root must be TypeDef"));
+    };
+    let TreeKind::Template(result_class_template) = &source_ast
+        .try_get(result_class_def.rhs)
+        .ok_or_else(|| identity_error("factory result class template is stale"))?
+        .kind
+    else {
+        return Err(identity_error("factory result class must have Template"));
+    };
+    let expected_final_constructor = source_index
+        .symbol_at(source_id, result_class_template.constructor)
+        .ok_or_else(|| identity_error("factory result constructor is not canonical"))?;
+    if final_constructor != expected_final_constructor
+        || !store.symbols.contains(final_constructor)
+        || store.symbols.get(final_constructor).kind != SymbolKind::Constructor
+        || store.symbols.get(final_constructor).owner != Some(*result_class)
+    {
+        return Err(semantic_error(
+            "typed final Apply must select the original result-class constructor",
+        ));
+    }
+    let bindings = [
+        local_bindings[0].ok_or_else(|| {
+            identity_error("first local declaration has no original Typer binding")
+        })?,
+        local_bindings[1].ok_or_else(|| {
+            identity_error("second local declaration has no original Typer binding")
+        })?,
+    ];
+    let local_symbols = [bindings[0].symbol(), bindings[1].symbol()];
+    if local_symbols[0] == local_symbols[1] {
+        return Err(identity_error(
+            "two local declarations must have distinct original symbols",
+        ));
+    }
+    if local_symbols
+        .iter()
+        .any(|symbol| !store.symbols.contains(*symbol))
+    {
+        return Err(identity_error(
+            "Typer local binding names a stale or foreign symbol",
+        ));
+    }
+    let first_type = match store.symbols.get(local_symbols[0]).info {
+        SymbolInfo::Complete(ty) => ty,
+        _ => return Err(semantic_error("first local type is incomplete")),
+    };
+    let final_constructor_definition = source_ast
+        .try_get(result_class_template.constructor)
+        .ok_or_else(|| identity_error("factory result constructor tree is stale"))?;
+    let TreeKind::DefDef(final_constructor_source) = &final_constructor_definition.kind else {
+        return Err(identity_error(
+            "factory result primary constructor must be a source DefDef",
+        ));
+    };
+    if !final_constructor_source.type_params.is_empty()
+        || final_constructor_source.value_param_clauses.len() != 1
+        || final_constructor_source.value_param_clauses[0].len() != 2
+    {
+        return Err(source_error(
+            "result primary constructor must have exactly two ordinary formals",
+        ));
+    }
+    let SymbolInfo::Complete(final_constructor_type) =
+        store.symbols.get(expected_final_constructor).info
+    else {
+        return Err(semantic_error(
+            "result primary constructor signature is incomplete",
+        ));
+    };
+    let Some(Type::Method(final_constructor_signature)) =
+        store.types.try_get(final_constructor_type)
+    else {
+        return Err(semantic_error(
+            "result primary constructor must have a method signature",
+        ));
+    };
+    let counter = canonical_class_type_symbol(store, first_type, package, definitions.no_prefix)
+        .ok_or_else(|| semantic_error("first local type must be a canonical Counter TypeRef"))?;
+    if !has_source_origin(store, counter, source_id)
+        || store.symbols.get(counter).kind != SymbolKind::Class
+        || source_index.definition_of(counter).is_none_or(
+            |d| !matches!(d, SourceDefinition::Canonical { source, .. } if source == source_id),
+        )
+    {
+        return Err(identity_error(
+            "Counter must be a canonical class in the original source batch",
+        ));
+    }
+    if final_constructor_signature.kind != dotty_core::MethodKind::Plain
+        || final_constructor_signature.params.len() != 2
+        || final_constructor_signature.params.iter().any(|parameter| {
+            canonical_class_type_symbol(store, parameter.ty, package, definitions.no_prefix)
+                != Some(counter)
+        })
+    {
+        return Err(semantic_error(
+            "result primary constructor must take exactly two canonical Counter formals",
+        ));
+    }
+    if !matches!(
+        source_ast.try_get(block.stats[0]).map(|node| &node.kind),
+        Some(TreeKind::ValDef(_))
+    ) || !matches!(
+        source_ast.try_get(block.stats[1]).map(|node| &node.kind),
+        Some(TreeKind::ValDef(_))
+    ) {
+        return Err(source_error(
+            "factory Block statistics must be the original ValDefs",
+        ));
+    }
+    let first_name = store.symbols.get(local_symbols[0]).name;
+    let second_name = store.symbols.get(local_symbols[1]).name;
+    if store.names.resolve(first_name.text()) == store.names.resolve(second_name.text())
+        || formals.iter().any(|formal| {
+            store.symbols.get(*formal).name == first_name
+                || store.symbols.get(*formal).name == second_name
+        })
+    {
+        return Err(identity_error(
+            "two locals must have distinct names without shadowing method formals",
+        ));
+    }
+    let first_core = validate_immutable_local_declaration_core(
+        source_id,
+        method,
+        block.stats[0],
+        store,
+        definitions,
+        source_ast,
+        typed_ast,
+        source_typed_index,
+        Some(bindings[0]),
+        counter,
+        package,
+        formals[0],
+    )?;
+    let second_core = validate_immutable_local_declaration_core(
+        source_id,
+        method,
+        block.stats[1],
+        store,
+        definitions,
+        source_ast,
+        typed_ast,
+        source_typed_index,
+        Some(bindings[1]),
+        counter,
+        package,
+        formals[1],
+    )?;
+    if first_core.scope != second_core.scope {
+        return Err(identity_error(
+            "both immutable locals must belong to the same original Block scope",
+        ));
+    }
+    let scope = store.scopes.get(first_core.scope);
+    let scope_entries = scope.entered_symbols().collect::<Vec<_>>();
+    if scope.owner != Some(method)
+        || scope_entries.len() != 2
+        || !scope_entries.contains(&local_symbols[0])
+        || !scope_entries.contains(&local_symbols[1])
+    {
+        return Err(identity_error(
+            "both locals must occupy the exact two-entry method-owned Block scope",
+        ));
+    }
+    let first_decl_pos = require_source_position(
+        source_ast,
+        source_id,
+        block.stats[0],
+        "first local ValDef has a foreign source span",
+    )?;
+    let second_decl_pos = require_source_position(
+        source_ast,
+        source_id,
+        block.stats[1],
+        "second local ValDef has a foreign source span",
+    )?;
+    let first_init_pos = require_source_position(
+        source_ast,
+        source_id,
+        first_core.initializer,
+        "first local initializer has a foreign source span",
+    )?;
+    let second_init_pos = require_source_position(
+        source_ast,
+        source_id,
+        second_core.initializer,
+        "second local initializer has a foreign source span",
+    )?;
+    let final_pos = require_source_position(
+        source_ast,
+        source_id,
+        block.expr,
+        "final Block expression has a foreign source span",
+    )?;
+    if first_decl_pos.span().range().start() >= second_decl_pos.span().range().start()
+        || first_decl_pos.span().range().start() >= first_init_pos.span().range().start()
+        || second_decl_pos.span().range().start() >= second_init_pos.span().range().start()
+        || first_init_pos.span().range().start() >= second_init_pos.span().range().start()
+        || first_init_pos.span().range().end() > second_decl_pos.span().range().start()
+        || second_init_pos.span().range().end() > final_pos.span().range().start()
+    {
+        return Err(source_error(
+            "two local initializers must be sequential and precede the final expression",
+        ));
+    }
+    let constructor_tree = match source_index.definition_of(counter) {
+        Some(SourceDefinition::Canonical { source, tree }) if source == source_id => tree,
+        _ => return Err(identity_error("Counter source definition is not canonical")),
+    };
+    let TreeKind::TypeDef(counter_def) = &source_ast
+        .try_get(constructor_tree)
+        .ok_or_else(|| identity_error("Counter definition tree is stale"))?
+        .kind
+    else {
+        return Err(identity_error("Counter source definition must be TypeDef"));
+    };
+    let TreeKind::Template(counter_template) = &source_ast
+        .try_get(counter_def.rhs)
+        .ok_or_else(|| identity_error("Counter template is stale"))?
+        .kind
+    else {
+        return Err(identity_error("Counter definition must have a Template"));
+    };
+    let constructor = source_index
+        .symbol_at(source_id, counter_template.constructor)
+        .ok_or_else(|| identity_error("Counter primary constructor has no canonical symbol"))?;
+    if first_core.constructor != constructor || second_core.constructor != constructor {
+        return Err(identity_error(
+            "both local initializers must select the original Counter primary constructor",
+        ));
+    }
+    let TreeKind::DefDef(constructor_def) = &source_ast
+        .try_get(counter_template.constructor)
+        .ok_or_else(|| identity_error("Counter primary constructor tree is stale"))?
+        .kind
+    else {
+        return Err(identity_error(
+            "Counter primary constructor source tree must be DefDef",
+        ));
+    };
+    if constructor_def.value_param_clauses.len() != 1
+        || constructor_def.value_param_clauses[0].len() != 1
+    {
+        return Err(source_error(
+            "Counter primary constructor must have one Int formal",
+        ));
+    }
+    let constructor_formal = source_index
+        .derived_symbol_at(
+            constructor,
+            source_id,
+            constructor_def.value_param_clauses[0][0],
+        )
+        .ok_or_else(|| identity_error("Counter constructor formal is not canonically derived"))?;
+    let SymbolInfo::Complete(constructor_type) = store.symbols.get(constructor).info else {
+        return Err(semantic_error(
+            "Counter constructor signature is incomplete",
+        ));
+    };
+    let Some(Type::Method(constructor_signature)) = store.types.try_get(constructor_type) else {
+        return Err(semantic_error(
+            "Counter constructor must have a method signature",
+        ));
+    };
+    if !store.symbols.contains(constructor_formal)
+        || store.symbols.get(constructor_formal).owner != Some(constructor)
+        || store.symbols.get(constructor_formal).kind != SymbolKind::Parameter
+        || !matches!(store.symbols.get(constructor_formal).info, SymbolInfo::Complete(ty) if ty == definitions.int)
+        || constructor_signature.kind != dotty_core::MethodKind::Plain
+        || constructor_signature.params.len() != 1
+        || constructor_signature.params[0].ty != definitions.int
+    {
+        return Err(semantic_error(
+            "Counter primary constructor must retain its canonical Int signature",
+        ));
+    }
+    unique_constructor_call_class_plan(jvm_unit, owner)?;
+    unique_constructor_call_class_plan(jvm_unit, counter)?;
+    let first_initializer_result_type = typed_ast
+        .try_get(first_core.typed_initializer)
+        .ok_or_else(|| typed_error("first typed initializer became stale"))?
+        .ty;
+    let second_initializer_result_type = typed_ast
+        .try_get(second_core.typed_initializer)
+        .ok_or_else(|| typed_error("second typed initializer became stale"))?
+        .ty;
+    let receipts = [
+        ImmutableLocalInitializerReceipt {
+            declaration: first_core,
+            seed_formal: formals[0],
+            seed_formal_type: definitions.int,
+            initializer_result_type: first_initializer_result_type,
+            constructor_formal,
+            constructor_formal_type: definitions.int,
+        },
+        ImmutableLocalInitializerReceipt {
+            declaration: second_core,
+            seed_formal: formals[1],
+            seed_formal_type: definitions.int,
+            initializer_result_type: second_initializer_result_type,
+            constructor_formal,
+            constructor_formal_type: definitions.int,
+        },
+    ];
+    for core in [first_core, second_core] {
+        for (source_tree, typed_tree, label) in [
+            (core.declaration, core.typed_declaration, "local ValDef"),
+            (core.source_type_tree, core.typed_type_tree, "local type"),
+            (core.initializer, core.typed_initializer, "initializer"),
+            (core.source_select, core.typed_select, "constructor Select"),
+            (core.source_new, core.typed_new, "constructor New"),
+            (
+                core.source_new_type_tree,
+                core.typed_new_type_tree,
+                "constructor New type",
+            ),
+            (core.source_argument, core.typed_argument, "seed formal"),
+        ] {
+            require_matching_source_typed_positions(
+                source_ast,
+                typed_ast,
+                source_id,
+                source_tree,
+                typed_tree,
+                label,
+            )?;
+        }
+    }
+    require_matching_source_typed_positions(
+        source_ast,
+        typed_ast,
+        source_id,
+        rhs,
+        typed_block,
+        "Block",
+    )?;
+    require_matching_source_typed_positions(
+        source_ast,
+        typed_ast,
+        source_id,
+        block.expr,
+        typed_final_expression,
+        "final Block expression",
+    )?;
+    for (source_tree, typed_tree, description) in [
+        (
+            source_final_select,
+            typed_final_select,
+            "final constructor Select",
+        ),
+        (source_final_new, typed_final_new, "final constructor New"),
+        (
+            source_final_new_tree.tpt,
+            typed_final_new_type,
+            "final constructor New type",
+        ),
+    ] {
+        require_matching_source_typed_positions(
+            source_ast,
+            typed_ast,
+            source_id,
+            source_tree,
+            typed_tree,
+            description,
+        )?;
+    }
+    Ok(ValidatedImmutableLocalInitializerPairProof {
+        _store: store,
+        _source_ast: source_ast,
+        _typed_ast: typed_ast,
+        _source_index: source_index,
+        _source_typed_index: source_typed_index,
+        _jvm_unit: jvm_unit,
+        source_id,
+        method,
+        counter,
+        source_block: rhs,
+        typed_block,
+        source_final_expression: block.expr,
+        typed_final_expression,
+        initializers: receipts,
     })
 }
 
