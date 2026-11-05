@@ -3057,7 +3057,7 @@ impl Validator<'_, '_> {
             Origin::Formal { .. } => 0,
             Origin::LocalValue { .. } => 1,
         });
-        if origins != [0, 1] && origins != [1, 0] {
+        if origins != [0, 1] && origins != [1, 0] && origins != [1, 1] {
             return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
         }
         for (index, argument) in binding.arguments.into_iter().enumerate() {
@@ -3144,7 +3144,9 @@ impl Validator<'_, '_> {
                         .ok_or(PickleError::SourceDefinition { symbol })?;
                     let initializer = p
                         .typed_bindings
-                        .local_counter_initializer(p.source.id, method.symbol)
+                        .local_counter_initializers(p.source.id, method.symbol)
+                        .into_iter()
+                        .find(|initializer| initializer.local == symbol)
                         .ok_or(PickleError::SourceDefinition { symbol })?;
                     if local.source_tree != initializer.source_declaration
                         || local.typed_declaration != initializer.typed_declaration

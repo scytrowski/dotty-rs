@@ -210,10 +210,14 @@ impl Validator<'_, '_> {
                     self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
                 );
             }
-            if let Some(initializer) = self
+            let initializers = self
                 .plan
                 .typed_bindings
-                .local_counter_initializer(self.plan.source.id, method.symbol)
+                .local_counter_initializers(self.plan.source.id, method.symbol);
+            if let Some(initializer) = initializers
+                .iter()
+                .find(|initializer| initializer.source_declaration == source_id)
+                .copied()
             {
                 let pair = self
                     .plan
@@ -222,17 +226,17 @@ impl Validator<'_, '_> {
                     .ok_or_else(|| {
                         self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
                     })?;
-                let paired_local = pair.arguments.iter().any(|argument| {
-                    matches!(
-                        argument.origin,
-                        crate::FormalLocalConstructorCallArgumentOrigin::LocalValue {
-                            symbol,
-                            ..
-                        } if symbol == initializer.local
-                    )
-                });
-                if initializer.source_declaration != source_id
-                    || initializer.typed_declaration != typed_id
+                let paired_local = initializers.len() == 2
+                    || pair.arguments.iter().any(|argument| {
+                        matches!(
+                            argument.origin,
+                            crate::FormalLocalConstructorCallArgumentOrigin::LocalValue {
+                                symbol,
+                                ..
+                            } if symbol == initializer.local
+                        )
+                    });
+                if initializer.typed_declaration != typed_id
                     || initializer.source_initializer != source_rhs
                     || initializer.typed_initializer != typed_rhs
                     || initializer.call.source_apply != source_rhs

@@ -259,3 +259,33 @@ The required-mode Scala tests use
 `DOTTY_REQUIRE_SCALA_TASTY_IMMUTABLE_REFERENCE_LOCAL_PAIR_CONSUMER=1`, the
 pinned Scala checkout and JDK, approved runtime JAR hashes, and a task-local
 `TMPDIR`. No hosted Scala corpus audit is run.
+
+## #2125 Rust TASTy two-local BLOCK producer
+
+Issue #2125 extends only the authenticated PairFactory body to its two original
+immutable locals. The producer borrows the same `SourceId`, source and typed
+arenas, semantic store, source index, method/formal/local symbols, and shared
+method `ScopeId` recorded above. It consumes both ordered initializer receipts
+independently of the final Pair argument origins. The two local declarations
+remain in source order (`first`, `second`) when the final arguments are reversed
+or both target `first`.
+
+The focused Rust TASTy test inspects the emitted address index. Its deterministic
+`create` method is at address 29, its `BLOCK` at 54, the result `APPLY` at 56,
+and the two `VALDEF`s at 72 and 97. The wire order is result expression first,
+then the VALDEFs, while the BLOCK statistics retain source declaration order.
+Each VALDEF retains a separate `APPLY(SELECTin(NEW(...)))` Counter initializer.
+The test verifies that each seed points directly to its original method
+`PARAM`. The result's direct local references target `[72, 97]` for
+`Pair(first, second)`, `[97, 72]` for the reversed source, and `[72, 72]` for
+`Pair(first, first)`. The repeated-first case still emits VALDEF 97 and its
+initializer; reusing the first local does not erase the separately
+authenticated second declaration.
+
+The pickler rejects typed-only mutations of the second final Pair argument and
+the second Counter initializer while the original source roots remain fixed.
+The inherited one-local and #2077 paired-local tests still pass. The existing
+`jvm_tasty_factory_result_arguments` strict Scala shard now reads the emitted
+two-local sidecar with pinned Scala 3.9 `-decompile`, `-print-tasty`, and an
+isolated `-from-tasty` invocation. This establishes TASTy reader compatibility;
+it does not claim a Scala runtime consumer for linked Rust classfiles.
