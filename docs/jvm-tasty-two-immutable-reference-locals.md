@@ -437,9 +437,14 @@ hashes are
 Isolated primary-batch controls observed their first failure at the actual
 layer. The source-authenticated Rust paired contract rejects the swapped local
 loads in its `cross-class invocation` phase. A balanced extra Counter
-allocation and constructor is also rejected there by the paired contract; the
-isolated classfile preserves verifier-valid stack shape. An isolated JVM-valid
-swapped clone and same-local-twice clone reach the Java identity assertion.
+allocation and constructor is inserted at PC 19, before `Pair NEW` with an
+empty operand stack. Its peak stack depth is 3, within the unchanged
+`max_stack=4`. The isolated clone independently passes `java -Xverify:all`,
+executes the harness successfully, and prints the same result as the original.
+The paired contract rejects it in `cross-class invocation` because the extra
+constructor seed `iload_1` (opcode `0x1b`) appears where the validated first
+Pair argument `aload_3` is expected. An isolated JVM-valid swapped clone and
+same-local-twice clone reach the Java identity assertion.
 Wrong or missing slot-4 stores, missing second allocation or constructor calls,
 load-before-store, storing an uninitialized Counter that is later passed to
 `Pair.<init>`, wrong Pair constructor owner or descriptor, and `max_stack=3` or
@@ -469,20 +474,27 @@ interoperability claim is made here.
 
 ### Review-fix evidence
 
-The review correction test tree at `1298f3218c2ee968762e11ca4db6645f40a5215b`
-ran the five-test `jvm_tasty_mixed_origin_runtime` target on the required
-Temurin `21.0.13+9` toolchain. The strict guard recorded Java's exact
-`Temurin-21.0.13+9 (build 21.0.13+9-LTS)`, `javac 21.0.13`, and
-`javap 21.0.13`; its isolated controls reject both a same-patch other vendor
-and a Temurin `+10` build in required mode. Equal-seed `create(7, 7)` was
-executed and both reflected Counters were mutated independently. Negative
-controls observed the extra balanced Counter allocation/constructor first
-rejected by the paired Rust contract; load-before-store, uninitialized
-Counter escape into `Pair.<init>`, and the wrong Pair constructor descriptor
-first failed with JVM `VerifyError`.
+The final reviewed test tree at
+`882c80ee6835854bd88c93efa791aea49e89d9cb` ran the five-test
+`jvm_tasty_mixed_origin_runtime` target on Temurin `21.0.13+9`. The strict
+JDK guard recorded `Temurin-21.0.13+9 (build 21.0.13+9-LTS)`, `javac 21.0.13`,
+and `javap 21.0.13`; isolated required-mode controls reject both a same-patch
+other vendor and Temurin `+10`. Equal-seed `create(7, 7)` was executed and the
+reflected Counters were mutated independently.
 
-At that code/test SHA, the mandatory classfile/JVM/source JDK gate and
+The extra balanced Counter allocation and constructor are inserted at PC 19,
+before `Pair NEW` with an empty operand stack. The clone's peak stack depth is
+3 within `max_stack=4`; it independently passes `java -Xverify:all`, executes
+the harness, and prints the same result as the original. The authenticated
+paired contract rejects it in phase `cross-class invocation` with
+`expected aload_3 in bounded call bytecode, found opcode 0x1b`, identifying the
+extra constructor seed load where the validated Pair argument load was
+expected. Load-before-store, uninitialized Counter escape into `Pair.<init>`,
+and wrong Pair constructor descriptor controls fail with observed JVM
+`VerifyError`.
+
+At this test SHA, the mandatory classfile/JVM/source JDK gate and
 `cargo test --workspace --all-targets --locked -- --test-threads=2` passed
 with `DOTTY_CLASSFILE_REQUIRE_JDK=1`. Formatting, frontend-boundary, Clippy,
-rustdoc, and `git diff --check` also passed. The evidence-only edit in this
-section followed those checks.
+rustdoc, and `git diff --check` also passed. The evidence update followed
+these checks.
