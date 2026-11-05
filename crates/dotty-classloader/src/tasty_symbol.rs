@@ -4114,29 +4114,52 @@ fn resolve_tuple2_constructor_owner(
         return None;
     }
 
-    if !has_direct_shared_type_reference(underlying_type) {
-        return None;
-    }
-
-    let underlying_name = resolve_reference_name_in_package(file, underlying_type, Some("scala"));
-    let constructor_name = resolve_reference_name_in_package(file, &applied.tycon, Some("scala"));
-    match (underlying_name, constructor_name) {
-        (ReferenceResolution::Resolved(underlying), ReferenceResolution::Resolved(constructor))
-            if underlying.as_internal() == "scala/*:"
-                && constructor == underlying
-                && underlying.package_path() == "scala" =>
-        {
-            Some(BinaryName::from_internal(TUPLE2_TIMES_COLON_INTERNAL))
-        }
-        _ => None,
+    let underlying_name = resolve_tuple2_package_type_reference(file, underlying_type, 0)?;
+    let constructor_name = resolve_tuple2_package_type_reference(file, &applied.tycon, 0)?;
+    if underlying_name.as_internal() == "scala/*:"
+        && constructor_name == underlying_name
+        && underlying_name.package_path() == "scala"
+    {
+        Some(BinaryName::from_internal(TUPLE2_TIMES_COLON_INTERNAL))
+    } else {
+        None
     }
 }
 
-fn has_direct_shared_type_reference(tree: &RawTree<'_>) -> bool {
-    let RawTree::Leaf(term) = tree else {
-        return false;
+fn resolve_tuple2_package_type_reference(
+    file: &TastyFile<'_>,
+    tree: &RawTree<'_>,
+    depth: usize,
+) -> Option<BinaryName> {
+    const MAX_TUPLE2_TYPE_REFERENCE_DEPTH: usize = 128;
+    if depth >= MAX_TUPLE2_TYPE_REFERENCE_DEPTH {
+        return None;
+    }
+    if let RawTree::Leaf(term) = tree
+        && term.tag == SHAREDTYPE_TAG
+    {
+        let reference = term.ast_ref()?;
+        let target = decode_shared_tree(file, reference.address)?;
+        return resolve_tuple2_package_type_reference(file, &target, depth + 1);
+    }
+
+    let StructuredTree::Reference(ReferenceNode {
+        tag: TYPEREF_TAG,
+        reference,
+        qualifier,
+    }) = tree.decode_structured().ok()?
+    else {
+        return None;
     };
-    term.tag == SHAREDTYPE_TAG && term.ast_ref().is_some()
+    let name = resolve_qualified_name(file, reference)?;
+    let package = resolve_reference_prefix_in_package(file, &qualifier, Some("scala"))?;
+    let package = package.trim_matches('/');
+    let internal = if package.is_empty() {
+        name
+    } else {
+        format!("{package}/{name}")
+    };
+    Some(BinaryName::from_internal(internal))
 }
 
 fn is_rooted_scala_serializable_parent(
@@ -6824,6 +6847,43 @@ mod tests {
                 &selection.underlying_type
             )
             .is_none()
+        );
+
+        let RawTree::NatAst {
+            tag,
+            offset,
+            value,
+            child,
+        } = applied.tycon.clone()
+        else {
+            panic!("Tuple2 applied constructor tycon should be a named reference");
+        };
+        assert_eq!(tag, TYPEREF_TAG);
+        let term_tycon = RawTree::NatAst {
+            tag: dotty_tasty::tasty::TERMREF_TAG,
+            offset,
+            value,
+            child,
+        };
+        let term_applied = AppliedTypeNode {
+            tag: applied.tag,
+            tycon: term_tycon,
+            arguments: applied.arguments,
+        };
+        let mut writer = dotty_tasty::tasty::Writer::new();
+        term_applied.encode(&mut writer).unwrap();
+        let term_applied_bytes = writer.into_inner();
+        let mut reader = Reader::new(&term_applied_bytes);
+        let term_applied = RawTree::decode(&mut reader).unwrap();
+        let term_qualifier = RawTree::Ast {
+            tag: NEW_TAG,
+            offset: 0,
+            child: Box::new(term_applied),
+        };
+        assert!(
+            resolve_tuple2_constructor_owner(&file, &term_qualifier, &selection.underlying_type)
+                .is_none(),
+            "a TERMREF root tycon must not be accepted as the nominal class constructor"
         );
     }
 

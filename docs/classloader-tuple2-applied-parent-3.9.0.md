@@ -11,9 +11,10 @@ remain unchanged:
 
 In the authentic `Tuple2` declaration, parent 0 is an applied constructor
 whose selected method is `<init>`. Its `NEW/APPLIEDTYPE` qualifier has a root
-tycon that resolves to package-qualified `scala/*:`; this must match the
-selection's underlying shared type reference. References found only inside
-applied arguments do not authenticate the constructor owner. The classloader
+tycon and underlying shared target that must each resolve through the
+supported package-qualified `TYPEREF` shape to `scala/*:`. Those identities
+must match. Term references and references found only inside applied arguments
+do not authenticate the constructor owner. The classloader
 authenticates that exact shape and declaration before exposing the nominal
 encoded identity `scala/$times$colon`. Parent 1 remains the independent
 applied parent `scala/Product2[T1, T2]`; parents 2 and 3 remain `scala/Product`
