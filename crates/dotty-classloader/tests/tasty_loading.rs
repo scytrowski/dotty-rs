@@ -2127,6 +2127,7 @@ impl ClassPathEntry for MaskedTimesColonClassPath {
 struct MutatedTuple2ClassPath {
     inner: DirectoryClassPath,
     mutated_tuple2: Vec<u8>,
+    mutated_times_colon: Option<Vec<u8>>,
 }
 
 impl ClassPathEntry for MutatedTuple2ClassPath {
@@ -2137,6 +2138,18 @@ impl ClassPathEntry for MutatedTuple2ClassPath {
             };
             return Ok(Some(ClassResource::new(
                 self.mutated_tuple2.clone(),
+                ClassFormat::Tasty,
+                resource.origin().clone(),
+            )));
+        }
+        if name.as_internal() == "scala/$times$colon"
+            && let Some(mutated_times_colon) = &self.mutated_times_colon
+        {
+            let Some(resource) = self.inner.find_class(name)? else {
+                return Ok(None);
+            };
+            return Ok(Some(ClassResource::new(
+                mutated_times_colon.clone(),
                 ClassFormat::Tasty,
                 resource.origin().clone(),
             )));
@@ -2235,6 +2248,57 @@ fn signed_result_name_cannot_authenticate_tuple2_constructor_through_classloader
     assert_tuple2_bytes_rejected(&scala_library, mutated);
 }
 
+#[test]
+fn signed_package_name_cannot_authenticate_tuple2_target_through_classloader() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let scala_library = root.join("../dotty-tasty/tests/fixtures/scala3-library");
+    let target_path = scala_library.join("scala/$times$colon.tasty");
+    let original = fs::read(&target_path).expect("pinned *: target fixture");
+    let file = TastyFile::parse(&original).expect("pinned *: target TASTy");
+    let mut names = file.names().entries().to_vec();
+    let scala_refs = names
+        .iter()
+        .enumerate()
+        .filter_map(|(index, name)| {
+            matches!(name, RawName::Utf8(value) if value == "scala").then_some(index)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        scala_refs.len(),
+        1,
+        "fixture has one direct scala name entry"
+    );
+    let scala_ref = scala_refs[0] as u32;
+    let foreign_ref = names.len() as u32;
+    let result_signature_ref = foreign_ref + 1;
+    names.push(RawName::Utf8("foreign".to_owned()));
+    names.push(RawName::Utf8("scala".to_owned()));
+    names[scala_ref as usize] = RawName::Signed {
+        original: foreign_ref,
+        result_signature: result_signature_ref,
+        parameter_signatures: Vec::new(),
+    };
+    let names = NameTable::from_entries(names).expect("mutated target name table is valid");
+    let mut builder = TastyFileBuilder::new(file.header().clone(), names);
+    for section in file.sections().iter() {
+        builder.push_section(EncodedSection::raw(section.name, section.payload.to_vec()));
+    }
+    let mutated = builder.encode().expect("mutated target fixture encodes");
+    let mutated_file = TastyFile::parse(&mutated).expect("mutated target TASTy parses");
+    assert_eq!(
+        mutated_file
+            .section(StandardSection::Asts)
+            .expect("target AST section")
+            .payload,
+        file.section(StandardSection::Asts)
+            .expect("original target AST section")
+            .payload,
+        "the reproducer changes only target name-table interpretation"
+    );
+
+    assert_tuple2_bytes_and_target_rejected(&scala_library, None, Some(mutated), "MissingTypeDef");
+}
+
 fn assert_mutated_tuple2_rejected(
     scala_library: &Path,
     address: u32,
@@ -2273,6 +2337,20 @@ fn assert_mutated_tuple2_rejected(
 }
 
 fn assert_tuple2_bytes_rejected(scala_library: &Path, mutated_tuple2: Vec<u8>) {
+    assert_tuple2_bytes_and_target_rejected(
+        scala_library,
+        Some(mutated_tuple2),
+        None,
+        "UnresolvedSupertype",
+    );
+}
+
+fn assert_tuple2_bytes_and_target_rejected(
+    scala_library: &Path,
+    mutated_tuple2: Option<Vec<u8>>,
+    mutated_times_colon: Option<Vec<u8>>,
+    expected_error: &str,
+) {
     let jdk = JdkClassPath::new(
         PathBuf::from(std::env::var_os("JAVA_HOME").expect("JDK 21 JAVA_HOME")).join("jmods"),
     )
@@ -2280,7 +2358,10 @@ fn assert_tuple2_bytes_rejected(scala_library: &Path, mutated_tuple2: Vec<u8>) {
     let class_path = CompositeClassPath::new(vec![
         Box::new(MutatedTuple2ClassPath {
             inner: DirectoryClassPath::new(scala_library),
-            mutated_tuple2,
+            mutated_tuple2: mutated_tuple2.unwrap_or_else(|| {
+                fs::read(scala_library.join("scala/Tuple2.tasty")).expect("pinned Tuple2 fixture")
+            }),
+            mutated_times_colon,
         }),
         Box::new(jdk),
     ]);
@@ -2294,10 +2375,7 @@ fn assert_tuple2_bytes_rejected(scala_library: &Path, mutated_tuple2: Vec<u8>) {
         .expect_err(
             "a one-byte-mutated Tuple2 reference must not authenticate the nominal *: parent",
         );
-    assert!(
-        format!("{error:?}").contains("UnresolvedSupertype"),
-        "the malformed reference namespace remains a typed unresolved-parent error: {error:?}"
-    );
+    assert!(format!("{error:?}").contains(expected_error), "{error:?}");
     drop(loader);
     assert_eq!(
         store.checkpoint(),

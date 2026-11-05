@@ -957,7 +957,7 @@ fn matches_requested_type_definition(
     if is_tuple2_times_colon_identity(requested) {
         wire_name(file, name).as_deref() == Some("*:")
             && !has_modifier(&tail, OBJECT_TAG)
-            && is_in_requested_top_level_package(file, index, node.offset, "scala")
+            && is_in_tuple2_scala_package(file, index, node.offset)
             && matches!(type_or_template, RawTree::LengthNode(template) if template.tag == TEMPLATE_TAG)
     } else {
         wire_name(file, name).as_deref() == Some(simple_name)
@@ -1322,6 +1322,38 @@ fn is_in_requested_top_level_package(
         return false;
     };
     resolve_qualified_name(file, reference).as_deref() == Some(requested_package)
+}
+
+fn is_in_tuple2_scala_package(
+    file: &TastyFile<'_>,
+    index: &dotty_tasty::tasty::AstAddressIndex<'_>,
+    address: usize,
+) -> bool {
+    let Ok(address) = u32::try_from(address) else {
+        return false;
+    };
+    let Some(parent) = index.parent_of(address) else {
+        return false;
+    };
+    if parent.tag != PACKAGE_TAG {
+        return false;
+    }
+    let Some(package_node) = index.get(parent.offset as u32) else {
+        return false;
+    };
+    let Ok(package) = package_node.decode_package() else {
+        return false;
+    };
+    let RawTree::Leaf(term) = package.path else {
+        return false;
+    };
+    if term.tag != TERMREFPKG_TAG {
+        return false;
+    }
+    let TermValue::NameRef(reference) = term.value else {
+        return false;
+    };
+    matches!(file.name(reference), Some(RawName::Utf8(name)) if name == "scala")
 }
 
 fn has_modifier(tail: &[DefinitionTail<'_>], tag: u8) -> bool {
