@@ -49,25 +49,41 @@ const TWO_IMMUTABLE_REFERENCE_LOCALS_BATCH: &str =
     include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
 
 #[test]
-fn two_immutable_reference_locals_record_first_paired_plan_error_without_bypassing_it() {
+fn two_immutable_reference_locals_reach_paired_tasty_output() {
     let mut callback_reached = false;
-    let error = with_paired_jvm_tasty_batch_plan(
+    with_paired_jvm_tasty_batch_plan(
         TWO_IMMUTABLE_REFERENCE_LOCALS_BATCH,
         "TwoLocals.scala",
         SourceId::from_index(21221),
-        |_| callback_reached = true,
+        |batch| {
+            let proof = batch
+                .constructor_call_proofs
+                .iter()
+                .find(|proof| {
+                    proof.argument_proof().kind()
+                        == dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind::LocalValPair
+                })
+                .expect("both Pair arguments preserve LocalValPair provenance");
+            let owner = batch
+                .jvm_unit
+                .store
+                .symbols
+                .get(proof.method())
+                .owner
+                .unwrap();
+            let factory = batch
+                .classes
+                .iter()
+                .find(|class| class.class == owner)
+                .unwrap();
+            factory.tasty_plan.validate_method_bodies().unwrap();
+            let output = factory.tasty_plan.pickle().unwrap();
+            assert!(!output.bytes().is_empty());
+            callback_reached = true;
+        },
     )
-    .expect_err("proof construction alone must not authorize paired output");
-    assert!(
-        !callback_reached,
-        "unsupported body cannot reach output callback"
-    );
-    let observed = format!("{error:?}");
-    eprintln!("TWO_IMMUTABLE_LOCALS_PAIRED_PLAN_FIRST_ERROR {observed}");
-    assert!(
-        observed.contains("TastyPlan(Unsupported { feature: BodyExpression"),
-        "LocalVal+LocalVal proof must remain outside paired output support: {observed}"
-    );
+    .expect("the authenticated two-local method emits TASTy");
+    assert!(callback_reached, "the accepted output callback was reached");
 }
 
 #[test]
@@ -148,36 +164,7 @@ fn two_immutable_reference_locals_variations_record_first_observed_rejection() {
         reason_prefix: &'static str,
         class_and_declaration: Option<(usize, usize)>,
     }
-    let body_expression_rejection = "TastyPlan(Unsupported { feature: BodyExpression";
     let cases = [
-        ExpectedFailure {
-            label: "renamed",
-            source: renamed,
-            phase: "JVM/TASTy cross-contract validation",
-            reason_prefix: body_expression_rejection,
-            class_and_declaration: Some((2, 74)),
-        },
-        ExpectedFailure {
-            label: "reordered declarations",
-            source: reordered,
-            phase: "JVM/TASTy cross-contract validation",
-            reason_prefix: body_expression_rejection,
-            class_and_declaration: Some((2, 74)),
-        },
-        ExpectedFailure {
-            label: "reversed Pair arguments",
-            source: reversed_pair_args,
-            phase: "JVM/TASTy cross-contract validation",
-            reason_prefix: body_expression_rejection,
-            class_and_declaration: Some((2, 74)),
-        },
-        ExpectedFailure {
-            label: "alias Pair arguments",
-            source: aliased_pair_args,
-            phase: "JVM/TASTy cross-contract validation",
-            reason_prefix: body_expression_rejection,
-            class_and_declaration: Some((2, 74)),
-        },
         ExpectedFailure {
             label: "swapped initializer formals",
             source: swapped_initializer_args,
@@ -335,6 +322,34 @@ fn two_immutable_reference_locals_variations_record_first_observed_rejection() {
             "TWO_LOCAL_VARIATION {}: phase={} reason={reason} later_paired_plan_stages=masked",
             expected.label, expected.phase
         );
+    }
+    for (index, source) in [renamed, reordered, reversed_pair_args, aliased_pair_args]
+        .into_iter()
+        .enumerate()
+    {
+        let mut callback_reached = false;
+        with_paired_jvm_tasty_batch_plan(
+            &source,
+            "TwoLocals.scala",
+            SourceId::from_index(21260 + index as u32),
+            |batch| {
+                let proof = batch
+                    .constructor_call_proofs
+                    .iter()
+                    .find(|proof| {
+                        proof.argument_proof().kind()
+                            == dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind::LocalValPair
+                    })
+                    .expect("valid source variants retain their LocalValPair proof");
+                let owner = batch.jvm_unit.store.symbols.get(proof.method()).owner.unwrap();
+                let factory = batch.classes.iter().find(|class| class.class == owner).unwrap();
+                factory.tasty_plan.validate_method_bodies().unwrap();
+                assert!(!factory.tasty_plan.pickle().unwrap().bytes().is_empty());
+                callback_reached = true;
+            },
+        )
+        .expect("rename, class order and local argument order preserve the narrow body shape");
+        assert!(callback_reached);
     }
 }
 
