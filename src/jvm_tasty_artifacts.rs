@@ -568,6 +568,8 @@ mod batch_artifact_regressions {
     const REFERENCE_LOCAL_SOURCE: &str = include_str!(
         "../tests/fixtures/jvm_tasty_reference_local_constructor_flows/CounterOwnerFactory.scala"
     );
+    const TWO_LOCAL_SOURCE: &str =
+        include_str!("../tests/fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
 
     #[test]
     fn nested_batch_rejects_corrupted_constructor_methodref_and_max_stack() {
@@ -680,6 +682,150 @@ mod batch_artifact_regressions {
                             }
                         ),
                         "corruption {corruption} must be rejected by the cross-class validator"
+                    );
+                }
+                Ok::<_, JvmTastyContractError>(())
+            },
+        )
+        .unwrap()
+        .unwrap();
+    }
+
+    #[test]
+    fn two_local_batch_rejects_seed_slot_allocation_constructor_and_bound_mutations() {
+        with_paired_jvm_tasty_batch_plan(
+            TWO_LOCAL_SOURCE,
+            "TwoLocals.scala",
+            SourceId::from_index(21280),
+            |plan| {
+                let tasty_plans = plan
+                    .classes
+                    .iter()
+                    .map(|class| class.tasty_plan)
+                    .collect::<Vec<_>>();
+                let validated_batch =
+                    validate_jvm_tasty_batch(plan.jvm_unit, &tasty_plans).unwrap();
+                let mut class_artifacts = Vec::new();
+                for class in plan.classes {
+                    let tasty_output =
+                        emit_tasty_output(class.tasty_plan, &class.tasty_path).unwrap();
+                    class_artifacts.push(
+                        emit_classfile_for_pair(
+                            ValidatedPairInput {
+                                jvm_unit: plan.jvm_unit,
+                                class: class.class,
+                                source_id: plan.source_id,
+                                source_member_order: class.source_member_order.clone(),
+                                classfile_path: class.classfile_path.clone(),
+                                tasty_path: class.tasty_path.clone(),
+                                tasty_plan: class.tasty_plan,
+                                compatibility: class.compatibility,
+                            },
+                            tasty_output,
+                        )
+                        .unwrap(),
+                    );
+                }
+                let artifacts = JvmTastyBatchArtifacts {
+                    classfiles: class_artifacts
+                        .iter()
+                        .map(|class| JvmTastyClassFileArtifact {
+                            classfile_path: class.classfile_path.clone(),
+                            classfile_bytes: class.classfile_bytes.clone(),
+                        })
+                        .collect(),
+                    sidecars: class_artifacts
+                        .iter()
+                        .map(|class| JvmTastySidecarArtifact {
+                            tasty_path: class.tasty_path.clone(),
+                            tasty_bytes: class.tasty_bytes.clone(),
+                        })
+                        .collect(),
+                };
+                let factory_index = artifacts
+                    .classfiles
+                    .iter()
+                    .position(|class| class.classfile_path.ends_with("PairFactory.class"))
+                    .unwrap();
+                let (original_code, code_position) = {
+                    let factory = &artifacts.classfiles[factory_index];
+                    let mut reader = Reader::new(&factory.classfile_bytes);
+                    let decoded = ClassFile::decode(&mut reader).unwrap();
+                    let create = decoded
+                        .methods
+                        .iter()
+                        .find(|method| {
+                            decoded.constant_pool.utf8(method.name_index).unwrap() == "create"
+                        })
+                        .unwrap();
+                    let [Attribute::Code(code)] = create.attributes.as_slice() else {
+                        panic!("PairFactory.create has one Code attribute");
+                    };
+                    assert_eq!(code.max_stack, 4);
+                    assert_eq!(code.max_locals, 5);
+                    assert_eq!(
+                        &code.code[0..9],
+                        &[0xbb, 0, 12, 0x59, 0x1b, 0xb7, 0, 15, 0x4e]
+                    );
+                    assert_eq!(
+                        &code.code[9..19],
+                        &[0xbb, 0, 12, 0x59, 0x1c, 0xb7, 0, 15, 0x3a, 4]
+                    );
+                    assert_eq!(
+                        &code.code[19..],
+                        &[0xbb, 0, 17, 0x59, 0x2d, 0x19, 4, 0xb7, 0, 20, 0xb0]
+                    );
+                    let code = code.code.to_vec();
+                    let code_position = factory
+                        .classfile_bytes
+                        .windows(code.len())
+                        .position(|window| window == code)
+                        .expect("create's original bytecode occurs in PairFactory.class");
+                    (code, code_position)
+                };
+                for mutation in [
+                    "second seed source slot",
+                    "second initialized store slot",
+                    "second Pair load slot",
+                    "second allocation owner",
+                    "Pair constructor owner and descriptor",
+                    "max_stack",
+                    "max_locals",
+                ] {
+                    let mut corrupted = artifacts.clone();
+                    let classfile = &mut corrupted.classfiles[factory_index].classfile_bytes;
+                    match mutation {
+                        "second seed source slot" => classfile[code_position + 13] = 0x1b,
+                        "second initialized store slot" => classfile[code_position + 18] = 3,
+                        "second Pair load slot" => classfile[code_position + 25] = 3,
+                        "second allocation owner" => {
+                            classfile[code_position + 10..code_position + 12]
+                                .copy_from_slice(&original_code[20..22]);
+                        }
+                        "Pair constructor owner and descriptor" => {
+                            classfile[code_position + 27..code_position + 29]
+                                .copy_from_slice(&original_code[14..16]);
+                        }
+                        "max_stack" => {
+                            classfile[code_position - 8..code_position - 6].copy_from_slice(&[0, 3])
+                        }
+                        "max_locals" => {
+                            classfile[code_position - 6..code_position - 4].copy_from_slice(&[0, 4])
+                        }
+                        _ => unreachable!(),
+                    }
+                    let error = validate_jvm_tasty_batch_artifacts(&validated_batch, corrupted)
+                        .expect_err("cross-contract bytecode mutation must fail before acceptance");
+                    assert!(
+                        matches!(
+                            error,
+                            JvmTastyContractError::BatchArtifact {
+                                class_index: 2,
+                                phase: "cross-class invocation",
+                                ..
+                            }
+                        ),
+                        "{mutation} fails at the first joint contract stage: {error:?}"
                     );
                 }
                 Ok::<_, JvmTastyContractError>(())

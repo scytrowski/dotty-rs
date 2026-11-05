@@ -1114,26 +1114,23 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                         symbol: method,
                         source_tree: tree,
                     });
-                    // The only reference local projected by this paired
-                    // adapter is the exact immutable ValDef consumed by the
-                    // final constructor application. The
-                    // cross-class proof below revalidates the complete shape;
-                    // this projection only makes its canonical local
-                    // identity available to the existing JVM layout/codegen.
+                    // Project only the original immutable ValDefs in a bounded
+                    // constructor-result Block. The cross-class contract below
+                    // authenticates their initializer receipts and final uses.
                     let locals = match &parsed.ast.get(rhs).kind {
                         TreeKind::Block(block)
-                            if block.stats.len() == 1
-                                && matches!(
-                                    parsed.ast.try_get(block.stats[0]).map(|node| &node.kind),
-                                    Some(TreeKind::ValDef(_))
-                                ) =>
+                            if (1..=2).contains(&block.stats.len())
+                                && block.stats.iter().all(|declaration| {
+                                    matches!(
+                                        parsed.ast.try_get(*declaration).map(|node| &node.kind),
+                                        Some(TreeKind::ValDef(_))
+                                    )
+                                }) =>
                         {
-                            let declaration = block.stats[0];
                             let final_constructor_uses_local = matches!(
                                 parsed.ast.try_get(block.expr).map(|node| &node.kind),
                                 Some(TreeKind::Apply(application))
-                                    if (application.args.len() == 1
-                                        || application.args.len() == 2)
+                                    if (application.args.len() == 1 || application.args.len() == 2)
                                         && application.args.iter().any(|argument| matches!(
                                             parsed.ast.try_get(*argument).map(|node| &node.kind),
                                             Some(TreeKind::Ident(_))
@@ -1142,20 +1139,27 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                             if !final_constructor_uses_local {
                                 Vec::new()
                             } else {
-                                let binding = typer
-                                    .typed_local_binding_at(source_id, declaration)
-                                    .filter(|binding| {
-                                        typer.store().symbols.get(binding.symbol()).flags.is_empty()
-                                    });
-                                binding
-                                    .map(|binding| {
-                                        vec![JvmLocalBinding {
-                                            declaration: binding.declaration(),
-                                            symbol: binding.symbol(),
-                                            mutable: false,
-                                        }]
+                                block
+                                    .stats
+                                    .iter()
+                                    .filter_map(|declaration| {
+                                        typer
+                                            .typed_local_binding_at(source_id, *declaration)
+                                            .filter(|binding| {
+                                                typer
+                                                    .store()
+                                                    .symbols
+                                                    .get(binding.symbol())
+                                                    .flags
+                                                    .is_empty()
+                                            })
+                                            .map(|binding| JvmLocalBinding {
+                                                declaration: binding.declaration(),
+                                                symbol: binding.symbol(),
+                                                mutable: false,
+                                            })
                                     })
-                                    .unwrap_or_default()
+                                    .collect()
                             }
                         }
                         _ => Vec::new(),
