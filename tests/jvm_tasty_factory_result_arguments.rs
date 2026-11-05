@@ -3013,6 +3013,31 @@ fn formal_local_pair_pickles_both_original_argument_orders() {
                     .typed_bindings
                     .local_value_bindings(plan.source.id, proof.method());
 
+                for stale_initializer in [
+                    LocalCounterInitializerBinding {
+                        source_block: initializer.source_declaration,
+                        ..initializer
+                    },
+                    LocalCounterInitializerBinding {
+                        typed_block: initializer.typed_declaration,
+                        ..initializer
+                    },
+                ] {
+                    let stale_block_receipt = FormalLocalFaultBindings {
+                        base: plan.typed_bindings,
+                        pair: Some(pair),
+                        initializer: Some(stale_initializer),
+                        locals: locals.clone(),
+                    };
+                    assert!(validate_with_formal_local_fault(plan, &stale_block_receipt).is_err());
+                    assert!(pickle_with_formal_local_fault_and_ast(
+                        plan,
+                        &stale_block_receipt,
+                        plan.typed_ast,
+                    )
+                    .is_err());
+                }
+
                 let formal_argument = pair
                     .arguments
                     .iter()
