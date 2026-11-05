@@ -402,6 +402,7 @@ impl ValidatedClassStatePlan<'_, '_> {
         }
 
         let mut method_inputs = Vec::new();
+        let mut registered_classes = std::collections::HashSet::new();
         for member in p.members {
             if let ClassMemberPicklePlan::Method {
                 symbol,
@@ -466,7 +467,10 @@ impl ValidatedClassStatePlan<'_, '_> {
                 else {
                     continue;
                 };
-                if !p.typed_bindings.planned_class_symbols().contains(class) || *class == p.class {
+                if !p.typed_bindings.planned_class_symbols().contains(class)
+                    || *class == p.class
+                    || registered_classes.contains(class)
+                {
                     continue;
                 }
                 let Some(dotty_core::SourceDefinition::Canonical { source, tree }) =
@@ -482,7 +486,36 @@ impl ValidatedClassStatePlan<'_, '_> {
                     tree,
                     p.typed_bindings.planned_class_symbols(),
                 )?;
+                registered_classes.insert(*class);
             }
+        }
+        for local in &local_values {
+            let Some(Type::TypeRef {
+                target: dotty_core::TypeRefTarget::Symbol(class),
+                ..
+            }) = p.store.types.try_get(complete_type(p.store, local.symbol)?)
+            else {
+                continue;
+            };
+            if !p.typed_bindings.planned_class_symbols().contains(class)
+                || *class == p.class
+                || !registered_classes.insert(*class)
+            {
+                continue;
+            }
+            let Some(dotty_core::SourceDefinition::Canonical { source, tree }) =
+                p.source_index.definition_of(*class)
+            else {
+                return Err(PickleError::SourceDefinition { symbol: *class });
+            };
+            if source != p.source.id {
+                return Err(PickleError::SourceDefinition { symbol: *class });
+            }
+            context.register_planned_source_class(
+                *class,
+                tree,
+                p.typed_bindings.planned_class_symbols(),
+            )?;
         }
         for member in p.members {
             let ClassMemberPicklePlan::Method { symbol, .. } = *member else {
