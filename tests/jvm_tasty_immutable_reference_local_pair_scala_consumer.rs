@@ -629,8 +629,23 @@ fn change_initializer_constructor(tasty_bytes: &[u8], method_name: &str) -> Vec<
     let mut changed = tasty_bytes.to_vec();
     let start = section.offset + shared_type.offset + 1;
     changed[start..start + replacement_encoded.len()].copy_from_slice(&replacement_encoded);
-    TastyFile::parse_and_validate_scala_3_9(&changed)
+    let changed_file = TastyFile::parse_and_validate_scala_3_9(&changed)
         .expect("constructor-mutated TASTy remains structurally valid");
+    let changed_section = changed_file.section(StandardSection::Asts).unwrap();
+    let mut reader = TastyReader::with_range(
+        changed_section.payload,
+        shared_type.offset,
+        changed_section.payload.len(),
+    )
+    .expect("mutated initializer shared type remains addressable");
+    let RawTree::Leaf(reference) = RawTree::decode(&mut reader).unwrap() else {
+        panic!("mutated initializer retains SHAREDTYPE reference")
+    };
+    assert_eq!(
+        reference.value,
+        TermValue::AstRef(pair_type),
+        "first local initializer now targets the exact Pair TYPEREF AST address"
+    );
     changed
 }
 
@@ -940,6 +955,85 @@ fn rust_two_local_graph(
         );
     }
     (block_address, local_addresses, references)
+}
+
+fn assert_two_local_body_types(tasty_bytes: &[u8], local_types: [&str; 2]) {
+    let tasty = TastyFile::parse_and_validate_scala_3_9(tasty_bytes)
+        .expect("type-mutated PairFactory remains valid Scala 3.9 TASTy");
+    let index = tasty.ast_address_index().expect("PairFactory AST index");
+    let asts = tasty.section(StandardSection::Asts).unwrap();
+    let block = index
+        .iter_nodes_with_tag(BLOCK_TAG)
+        .find(|node| {
+            std::iter::successors(Some(*node), |current| {
+                index.parent_of(current.offset as u32)
+            })
+            .any(|parent| {
+                index
+                    .get(parent.offset as u32)
+                    .and_then(|node| node.decode_defdef_body().ok())
+                    .and_then(|body| tasty.names().render(body.name).ok())
+                    .is_some_and(|name| name == "create")
+            })
+        })
+        .expect("PairFactory.create has a BLOCK")
+        .offset as u32;
+    let locals = index
+        .iter_nodes_with_tag(VALDEF_TAG)
+        .filter(|node| {
+            index
+                .parent_of(node.offset as u32)
+                .is_some_and(|parent| parent.offset as u32 == block)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(locals.len(), 2, "create still declares both source locals");
+    for (ordinal, node) in locals.into_iter().enumerate() {
+        let definition = index
+            .get(node.offset as u32)
+            .unwrap()
+            .decode_definition_body()
+            .unwrap();
+        let dotty_tasty::ast::DefinitionBody::ValDef {
+            name,
+            type_tree,
+            rhs: Some(initializer),
+            ..
+        } = definition
+        else {
+            panic!("each create local retains its initializer")
+        };
+        let local_name = tasty.names().render(name).unwrap();
+        let local_address = node.offset as u32;
+        let type_names = index
+            .iter_nodes_with_tag(TYPEREF_TAG)
+            .filter(|reference| {
+                std::iter::successors(Some(*reference), |current| {
+                    index.parent_of(current.offset as u32)
+                })
+                .any(|parent| parent.offset as u32 == local_address)
+            })
+            .filter_map(|reference| {
+                let mut reader =
+                    TastyReader::with_range(asts.payload, reference.offset, asts.payload.len())
+                        .ok()?;
+                match RawTree::decode(&mut reader).ok()? {
+                    RawTree::NatAst { value, .. } => tasty.names().render(value).ok(),
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            type_names
+                .iter()
+                .any(|name| name.ends_with(local_types[ordinal])),
+            "{local_name} VALDEF type tree {type_names:?} does not name {}; raw={type_tree:?}",
+            local_types[ordinal]
+        );
+        assert!(
+            !initializer.nodes().is_empty(),
+            "{local_name} retains its initializer graph"
+        );
+    }
 }
 
 fn inspect_rust_two_local_batch(
@@ -1621,7 +1715,7 @@ fn second_local_reference_negative_probes(
                 "RUST_SOURCE_CONTRACT_REJECTED duplicate-first-local-address block={block} local_addresses={changed_locals:?} pair_arguments={changed_arguments:?}: {contract_error}"
             );
         }
-        fs::write(classes.join(factory.tasty_path()), changed_tasty).unwrap();
+        fs::write(classes.join(factory.tasty_path()), &changed_tasty).unwrap();
         let client = case.join("Consumer.scala");
         fs::write(&client, client_source).unwrap();
         let lookup = scala.compile_result(
@@ -1684,6 +1778,7 @@ fn malformed_local_body_probe(
         .unwrap();
     let local = local_address(factory.tasty_bytes(), "create");
     let block = block_address(factory.tasty_bytes(), "create");
+    let local_count = local_addresses(factory.tasty_bytes(), "create").len();
     let mut cases = vec![
         (
             "wrong-local-type",
@@ -1709,6 +1804,23 @@ fn malformed_local_body_probe(
         ));
     }
     for (label, changed_tasty, stage) in cases {
+        match label {
+            "wrong-local-type" => {
+                if local_count > 1 {
+                    rust_two_local_graph(&changed_tasty, ["first", "second"], Some([0, 1]));
+                    assert_two_local_body_types(&changed_tasty, ["Pair", "Counter"]);
+                }
+            }
+            "wrong-second-local-type" => {
+                rust_two_local_graph(&changed_tasty, ["first", "second"], Some([0, 1]));
+                assert_two_local_body_types(&changed_tasty, ["Counter", "Pair"]);
+            }
+            "wrong-initializer-constructor" if local_count > 1 => {
+                rust_two_local_graph(&changed_tasty, ["first", "second"], Some([0, 1]));
+                assert_two_local_body_types(&changed_tasty, ["Counter", "Counter"]);
+            }
+            _ => {}
+        }
         let case = root.join(format!("negative-{label}"));
         let classes = case.join("classes");
         let lookup_out = case.join("lookup-out");
@@ -1717,7 +1829,7 @@ fn malformed_local_body_probe(
         fs::create_dir_all(&lookup_out).unwrap();
         fs::create_dir_all(&reconstructed).unwrap();
         write_batch(&classes, batch);
-        fs::write(classes.join(factory.tasty_path()), changed_tasty).unwrap();
+        fs::write(classes.join(factory.tasty_path()), &changed_tasty).unwrap();
         let client = case.join("Consumer.scala");
         fs::write(&client, client_source).unwrap();
         let classpath = format!("{}:{}", classes.display(), scala.libraries);
@@ -1759,21 +1871,59 @@ fn malformed_local_body_probe(
                 String::from_utf8_lossy(&decompiled.stderr)
             );
             let dump = plain(&String::from_utf8_lossy(&decompiled.stdout));
-            let observed = if label.contains("local-type") {
-                dump.lines()
-                    .find(|line| line.contains("fresh"))
-                    .unwrap_or(&dump)
-            } else {
-                dump.lines()
-                    .find(|line| line.contains("new Pair"))
-                    .unwrap_or(&dump)
-            };
+            let contract_error = source_contract_result(
+                if local_count > 1 {
+                    TWO_LOCAL_SOURCE
+                } else {
+                    SOURCES[0]
+                },
+                batch,
+                Some((factory.tasty_path(), &changed_tasty)),
+            )
+            .expect_err("original source rejects a mutated local body");
             assert!(
-                observed.contains("Pair"),
-                "mutated local body was not visible to official Scala: {label}: {dump}"
+                contract_error.contains("TASTy plan identity")
+                    && contract_error.contains("decoded sidecar bytes differ"),
+                "{label} body mutation was rejected outside the source-authenticated plan-identity check: {contract_error}"
             );
+            let observed = match label {
+                "wrong-local-type" => {
+                    let line = if local_count > 1 {
+                        "val first: example.Pair = new example.Counter(firstSeed)"
+                    } else {
+                        "val fresh: example.Pair = new example.Counter(seed)"
+                    };
+                    assert!(
+                        dump.contains(line),
+                        "mutated first local not visible: {dump}"
+                    );
+                    line
+                }
+                "wrong-second-local-type" => {
+                    let line = "val second: example.Pair = new example.Counter(secondSeed)";
+                    assert!(
+                        dump.contains(line),
+                        "mutated second local not visible: {dump}"
+                    );
+                    line
+                }
+                "wrong-initializer-constructor" => {
+                    let line = if local_count > 1 {
+                        "val first: example.Counter = new example.Counter(firstSeed)"
+                    } else {
+                        "val fresh: example.Counter = new example.Counter(seed)"
+                    };
+                    assert!(dump.contains(line), "unexpected decompile syntax: {dump}");
+                    if local_count > 1 {
+                        "TASTy initializer shared-type target=Pair; decompiled source syntax remains new Counter(firstSeed)"
+                    } else {
+                        "TASTy initializer shared-type target=Pair; decompiled source syntax remains new Counter(seed)"
+                    }
+                }
+                _ => unreachable!(),
+            };
             eprintln!(
-                "SCALA_NEGATIVE_FIRST_OUTCOME {label} lazy-signature-lookup=accepted; -from-tasty=accepted; -decompile=accepted with mutated body: {observed}"
+                "SCALA_ACCEPTED_SOURCE_CONTRACT_REJECTED {label} lazy-lookup=accepted; -from-tasty=accepted; -decompile=accepted; graph-checked; observed={observed}; source-contract={contract_error}"
             );
             continue;
         }
@@ -2191,6 +2341,57 @@ fn rust_two_local_tasty_graph_uses_two_original_local_addresses() {
     eprintln!(
         "RUST_TWO_LOCAL_GRAPH block={block} local_addresses={locals:?} pair_arguments={pair_arguments:?}"
     );
+}
+
+#[test]
+fn rust_two_local_body_corruptions_are_source_contract_negatives() {
+    let batch = emit_paired_jvm_tasty_batch(
+        TWO_LOCAL_SOURCE,
+        "PairFactory.scala",
+        SourceId::from_index(21370),
+    )
+    .expect("Rust two-local source batch");
+    let factory = batch
+        .classes()
+        .iter()
+        .find(|artifact| artifact.tasty_path() == "example/PairFactory.tasty")
+        .unwrap();
+    assert_two_local_body_types(factory.tasty_bytes(), ["Counter", "Counter"]);
+    let mutations = [
+        (
+            "wrong-local-type",
+            change_local_type_ref(factory.tasty_bytes(), "create", 0, 0, "Pair"),
+            ["Pair", "Counter"],
+        ),
+        (
+            "wrong-second-local-type",
+            change_local_type_ref(factory.tasty_bytes(), "create", 1, 0, "Pair"),
+            ["Counter", "Pair"],
+        ),
+        (
+            "wrong-initializer-constructor",
+            change_initializer_constructor(factory.tasty_bytes(), "create"),
+            ["Counter", "Counter"],
+        ),
+    ];
+    for (label, changed_tasty, local_types) in mutations {
+        rust_two_local_graph(&changed_tasty, ["first", "second"], Some([0, 1]));
+        assert_two_local_body_types(&changed_tasty, local_types);
+        let contract_error = source_contract_result(
+            TWO_LOCAL_SOURCE,
+            &batch,
+            Some((factory.tasty_path(), &changed_tasty)),
+        )
+        .expect_err("original two-local source rejects each independently mutated body");
+        assert!(
+            contract_error.contains("TASTy plan identity")
+                && contract_error.contains("decoded sidecar bytes differ"),
+            "{label} must fail the source-authenticated plan-identity contract: {contract_error}"
+        );
+        eprintln!(
+            "RUST_SOURCE_CONTRACT_REJECTED {label} local_types={local_types:?}: {contract_error}"
+        );
+    }
 }
 
 #[test]

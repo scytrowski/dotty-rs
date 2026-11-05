@@ -673,10 +673,15 @@ truncated sidecars first failed as broken `ArrayIndexOutOfBoundsException`
 TASTy; mismatched classfile UUIDs first failed as “out of sync with its TASTy
 file”. A dangling first or second local reference and a local-to-BLOCK
 reference were accepted during lazy signature lookup, then failed with
-`TreeWithoutOwner` during `-decompile`. Wrong local types, the single-reference
-alias mutation, and the constructor-type mutation were accepted by Scala
-`-from-tasty` and `-decompile`; their decompiled forms are recorded by the
-test. The duplicate-address mutation decodes as `new Pair(first, first)` and
+`TreeWithoutOwner` during `-decompile`. Scala accepted wrong first/second local
+types and a constructor-type mutation through lazy lookup, `-from-tasty`, and
+`-decompile`. The test checks each local's decoded declared type, records the
+observed decompile form, and requires the source-authenticated Rust batch
+contract to reject each mutation against the original two-local source. The
+initializer mutation targets the `Pair` type reference in the first local's
+constructor graph. The single-reference alias and duplicate-address mutations
+are also checked against source-authenticated contracts. The duplicate-address
+mutation decodes as `new Pair(first, first)` and
 is rejected by the source-authenticated Rust batch contract against the
 original `new Pair(first, second)` input at TASTy plan identity. A separately
 produced `new Pair(first, first)` source remains the positive source-contract
