@@ -8,9 +8,9 @@
 //! in isolation.
 
 use dotty_classloader::classloader::{
-    BinaryName, ClassFormat, ClassLoader, ClassOrigin, ClassPathEntry, ClassPathError,
-    ClassResource, ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, JdkClassPath,
-    LoadingSession,
+    BinaryName, ClassFormat, ClassLoadError, ClassLoader, ClassOrigin, ClassPathEntry,
+    ClassPathError, ClassResource, ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath,
+    JdkClassPath, LoadingSession,
 };
 use dotty_core::{
     ClassInfo, Definitions, MemberRequest, Name, Namespace, Packages, ResolutionError,
@@ -1415,6 +1415,42 @@ fn loads_scala39_some_with_rooted_serializable_alias_from_real_jdk() {
         .expect("a fresh session should resolve the same authentic library class");
     drop(fresh_loader);
     assert_eq!(parent_names(&fresh_store, fresh_some), expected_parents);
+}
+
+#[test]
+fn rejects_term_selection_instead_of_following_serializable_type_alias() {
+    const SOME_SERIALIZABLE_SELECTION_OFFSET: usize = 1013;
+    let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+    let original = fs::read(published_scala39_library_dir().join("scala/Some.tasty"))
+        .expect("pinned scala/Some.tasty fixture");
+    assert_eq!(
+        original[SOME_SERIALIZABLE_SELECTION_OFFSET],
+        dotty_tasty::tasty::SELECTTPT_TAG,
+        "the pinned Serializable parent is a terminal type selection"
+    );
+
+    let mut term_selection = original;
+    term_selection[SOME_SERIALIZABLE_SELECTION_OFFSET] = dotty_tasty::tasty::SELECT_TAG;
+    let mutated_library = TemporaryDirectory::new("some-term-serializable-selection");
+    let some_path = mutated_library.path().join("scala/Some.tasty");
+    fs::create_dir_all(some_path.parent().expect("scala package directory"))
+        .expect("mutated fixture directory should be created");
+    fs::write(some_path, term_selection).expect("mutated authentic fixture should be written");
+
+    let class_path = CompositeClassPath::new(vec![
+        Box::new(DirectoryClassPath::new(mutated_library.path().clone())),
+        Box::new(DirectoryClassPath::new(published_scala39_library_dir())),
+        Box::new(JdkClassPath::new(java_home.join("jmods")).expect("genuine JDK jmods")),
+    ]);
+    let mut store = SemanticStore::new();
+    let mut loader = ClassLoader::new(class_path, &mut store);
+    let error = loader
+        .load_class(&BinaryName::from_internal("scala/Some"))
+        .expect_err("term-namespace SELECT must not become the Java interface parent");
+    assert!(
+        matches!(error, ClassLoadError::InvalidTastyFile(ref name, _) if name.as_internal() == "scala/Some"),
+        "the malformed neighboring parent shape should remain a typed TASTy failure: {error:?}"
+    );
 }
 
 struct HideSerializableOnce {

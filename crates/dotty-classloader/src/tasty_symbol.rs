@@ -3996,6 +3996,7 @@ fn resolve_parent_name_with_alias(
             &alias,
             &parent_reference_shape(file, parent),
             unresolved_alias_package_prefix(file, parent).as_deref(),
+            has_one_terminal_type_selection(file, parent, 0),
         );
         if selected_package_alias || rooted_scala_serializable {
             let package_object =
@@ -4013,11 +4014,13 @@ fn is_rooted_scala_serializable_parent(
     alias: &str,
     shape: &str,
     package_prefix: Option<&str>,
+    terminal_type_selection: bool,
 ) -> bool {
     owner.as_internal() == "scala"
         && alias == "Serializable"
         && shape == "selected-qualified"
         && package_prefix == Some("_root_/scala")
+        && terminal_type_selection
 }
 
 fn unresolved_alias_qualifier_is_package(
@@ -6147,40 +6150,59 @@ mod tests {
             &scala,
             "Serializable",
             "selected-qualified",
-            Some("_root_/scala")
+            Some("_root_/scala"),
+            true
         ));
-        for (owner, alias, shape, prefix) in [
+        for (owner, alias, shape, prefix, terminal_type_selection) in [
             (
                 "scala",
                 "Cloneable",
                 "selected-qualified",
                 Some("_root_/scala"),
+                true,
             ),
             (
                 "scala/Owner",
                 "Serializable",
                 "selected-qualified",
                 Some("_root_/scala"),
+                true,
             ),
             (
                 "scala",
                 "Serializable",
                 "package-qualified",
                 Some("_root_/scala"),
+                true,
             ),
             (
                 "scala",
                 "Serializable",
                 "selected-qualified",
                 Some("_root_/other"),
+                true,
             ),
-            ("scala", "Serializable", "selected-qualified", Some("scala")),
+            (
+                "scala",
+                "Serializable",
+                "selected-qualified",
+                Some("scala"),
+                true,
+            ),
+            (
+                "scala",
+                "Serializable",
+                "selected-qualified",
+                Some("_root_/scala"),
+                false,
+            ),
         ] {
             assert!(!is_rooted_scala_serializable_parent(
                 &BinaryName::from_internal(owner),
                 alias,
                 shape,
-                prefix
+                prefix,
+                terminal_type_selection
             ));
         }
     }
