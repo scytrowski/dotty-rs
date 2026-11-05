@@ -328,3 +328,35 @@ manifest validator (24 targets), frontend boundary guard, formatting, Clippy,
 and rustdoc warnings gate. The strict manifest is unchanged. Hosted strict
 shard aggregation remains a CI workflow result and is not represented as a
 local run.
+
+### Rust producer artifact identity
+
+The focused paired-batch producer regression emitted these six Rust artifacts
+from the frozen `TwoLocals.scala` source (SHA-256
+`e2411637c892feb474d6d70526d471b524cd7de49a3db2565923cd69736f73c3`) at
+source/test revision `bfeaf9a72119131a6b472cd99493a8f168fbae1d`. This is the
+exact committed source/test revision used for the two-thread strict Scala 3.9
+producer run that captured these values.
+
+| Rust-produced path | SHA-256 |
+| --- | --- |
+| `example/Counter.class` | `518831fb3bc939f249037f5a14f0e8c02c182681a38ee8f26314d74414411641` |
+| `example/Counter.tasty` | `504092e378b58d111e81169711cc86a4b4967ff47d3673646e96760ec1fc18de` |
+| `example/Pair.class` | `4e895557ebb06761402668cda14f93479cdbbc45199b3af4a67cbbe65a1c215b` |
+| `example/Pair.tasty` | `f7d29974104da060bc1a598d0b3043df6f43f136e72cb095f672548cdc5b4f13` |
+| `example/PairFactory.class` | `b9954a37aafc6a84a391c82b001865fa5b688b56cab4245f801d0e7dba351ffa` |
+| `example/PairFactory.tasty` | `a1812f47bad089c47ec125a887ddc7403f78124b4de396d87e262ccfd755e495` |
+
+The three decoded classfile `TASTY` links equal the UUIDs in their corresponding
+Rust-produced sidecars:
+
+| Classfile | Sidecar UUID |
+| --- | --- |
+| `example/Counter.class` | `009ce4f47b6e18ac0000000000008193` |
+| `example/Pair.class` | `007a1d11cde040f00000000000008198` |
+| `example/PairFactory.class` | `002d5a1b50b7d0c8000000000000819a` |
+
+The artifacts were emitted by Rust 1.98.1 and checked with Scala 3.9.0 at
+`777528f19a58e794c9954a42f433373472ec57f8` and Temurin 21.0.13+9. These are
+producer observations; they are not the Scala oracle hashes recorded earlier
+in this document.
