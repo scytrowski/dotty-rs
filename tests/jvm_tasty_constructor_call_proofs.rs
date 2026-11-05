@@ -1755,24 +1755,46 @@ fn two_original_immutable_local_initializers_prove_atomically_in_one_block() {
             },
         );
     }
-    let paired_plan_error = with_paired_jvm_tasty_batch_plan(
+    with_paired_jvm_tasty_batch_plan(
         TWO_IMMUTABLE_LOCALS_SOURCE,
         "TwoLocals.scala",
         SourceId::from_index(2126),
-        |_| (),
+        |batch| {
+            let proof = batch
+                .constructor_call_proofs
+                .iter()
+                .find(|proof| {
+                    proof.argument_proof().kind()
+                        == dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind::LocalValPair
+                })
+                .expect("the original source retains its LocalValPair proof");
+            let owner = batch
+                .jvm_unit
+                .store
+                .symbols
+                .get(proof.method())
+                .owner
+                .unwrap();
+            let factory = batch
+                .classes
+                .iter()
+                .find(|class| class.class == owner)
+                .expect("the source batch retains PairFactory");
+            factory
+                .tasty_plan
+                .validate_method_bodies()
+                .expect("the authenticated two-local method body validates");
+            assert!(
+                !factory
+                    .tasty_plan
+                    .pickle()
+                    .expect("the two-local body now emits its TASTy sidecar")
+                    .bytes()
+                    .is_empty()
+            );
+        },
     )
-    .expect_err("the initializer receipt must not enable paired planning");
-    assert!(
-        matches!(
-            paired_plan_error,
-            PairedPlanError::BatchClass {
-                phase: "JVM/TASTy cross-contract validation",
-                ref reason,
-                ..
-            } if format!("{reason:?}").contains("Unsupported { feature: BodyExpression")
-        ),
-        "paired planning retains its existing rejection gate: {paired_plan_error:?}"
-    );
+    .expect("the authenticated two-local source/typed body reaches TASTy output");
 }
 
 #[test]
