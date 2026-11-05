@@ -450,8 +450,7 @@ inherited regressions.
 The strict two-local runtime test, the full `jvm_tasty_mixed_origin_runtime`
 target, mandatory `DOTTY_CLASSFILE_REQUIRE_JDK=1` gate, and complete
 `cargo test --workspace --all-targets --locked` run were performed on code/test
-commit `883bb28674` (full SHA `883bb28674f9d1de` recorded in the PR commit
-history). The workspace run completed with 538 passed and 4 ignored; the ignored
+commit `883bb2867405f2acd92ba17c153ba1bf591cc4b9`. The workspace run completed with 538 passed and 4 ignored; the ignored
 tests require separate optional JDK/classpath fixtures and are outside this
 JVM-only issue gate. `cargo fmt --all -- --check`, the frontend boundary guard,
 workspace Clippy with warnings denied, workspace rustdoc with warnings denied,
