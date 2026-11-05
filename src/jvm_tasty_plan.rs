@@ -256,6 +256,19 @@ impl SourceTypedBindings for BatchSourceTypedBindings<'_> {
             })
     }
 
+    fn local_counter_initializers(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Vec<LocalCounterInitializerBinding> {
+        self.local_counter_initializers
+            .iter()
+            .filter_map(|(proof_source, proof_method, binding)| {
+                (*proof_source == source && *proof_method == method).then_some(*binding)
+            })
+            .collect()
+    }
+
     fn formal_local_constructor_call_pair(
         &self,
         source: SourceId,
@@ -1518,17 +1531,25 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
             .collect(),
         local_values: constructor_call_proofs
             .iter()
-            .filter_map(|proof| {
-                let local = proof.argument_proof().local_val().map(|local| {
-                    (local.source_declaration(), local.symbol(), local.typed_declaration(), local.scope())
-                }).or_else(|| {
-                    proof.argument_proof().ordered_pair().and_then(|pair| {
-                        pair.arguments().into_iter().find_map(|argument| argument.local_val()).map(|local| {
-                            (local.source_declaration(), local.symbol(), local.typed_declaration(), local.scope())
+            .flat_map(|proof| {
+                let locals = if let Some(local) = proof.argument_proof().local_val() {
+                    vec![(local.source_declaration(), local.symbol(), local.typed_declaration(), local.scope())]
+                } else {
+                    proof
+                        .argument_proof()
+                        .ordered_pair()
+                        .map(|pair| {
+                            pair.local_initializers()
+                                .map(|locals| locals.into_iter().map(|local| {
+                                    (local.source_declaration(), local.symbol(), local.typed_declaration(), local.scope())
+                                }).collect())
+                                .unwrap_or_else(|| pair.arguments().into_iter().filter_map(|argument| argument.local_val()).map(|local| {
+                                    (local.source_declaration(), local.symbol(), local.typed_declaration(), local.scope())
+                                }).collect())
                         })
-                    })
-                })?;
-                Some({
+                        .unwrap_or_default()
+                };
+                locals.into_iter().map(|local| {
                     (
                         proof.source_id(),
                         proof.method(),
@@ -1544,46 +1565,91 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
             .collect(),
         local_counter_initializers: constructor_call_proofs
             .iter()
-            .filter_map(|proof| {
-                let pair = proof.argument_proof().ordered_pair()?;
-                let local = pair.arguments().into_iter().find_map(|argument| argument.local_val())?;
-                let call = NestedConstructorCallBinding {
-                    source_apply: local.source_initializer(),
-                    typed_apply: local.typed_initializer(),
-                    source_select: local.source_initializer_select(),
-                    source_new: local.source_initializer_new(),
-                    source_argument: local.source_seed_argument(),
-                    typed_select: local.typed_initializer_select(),
-                    typed_new: local.typed_initializer_new(),
-                    typed_argument: local.typed_seed_argument(),
-                    class: typer.store().symbols.get(local.constructor()).owner?,
-                    constructor: local.constructor(),
-                    formal: local.constructor_formal(),
-                    formal_type: local.constructor_formal_type(),
-                    result_type: local.initializer_result_type(),
+            .flat_map(|proof| {
+                let Some(pair) = proof.argument_proof().ordered_pair() else {
+                    return Vec::new();
                 };
-                Some((proof.source_id(), proof.method(), LocalCounterInitializerBinding {
-                    source_block: local.source_block(),
-                    typed_block: local.typed_block(),
-                    source_declaration: local.source_declaration(),
-                    typed_declaration: local.typed_declaration(),
-                    source_initializer: local.source_initializer(),
-                    typed_initializer: local.typed_initializer(),
-                    source_type_tree: local.source_type_tree(),
-                    typed_type_tree: local.typed_type_tree(),
-                    local: local.symbol(),
-                    scope: local.scope(),
-                    local_type: local.local_type(),
-                    argument_formal: local.seed_formal(),
-                    call,
-                }))
+                let Some(block_local) = pair.arguments().into_iter().find_map(|argument| argument.local_val()) else {
+                    return Vec::new();
+                };
+                if let Some(receipts) = pair.local_initializers() {
+                    receipts.into_iter().filter_map(|local| {
+                        let call = NestedConstructorCallBinding {
+                            source_apply: local.source_initializer(),
+                            typed_apply: local.typed_initializer(),
+                            source_select: local.source_select(),
+                            source_new: local.source_new(),
+                            source_argument: local.source_argument(),
+                            typed_select: local.typed_select(),
+                            typed_new: local.typed_new(),
+                            typed_argument: local.typed_argument(),
+                            class: typer.store().symbols.get(local.constructor()).owner?,
+                            constructor: local.constructor(),
+                            formal: local.constructor_formal(),
+                            formal_type: local.constructor_formal_type(),
+                            result_type: local.initializer_result_type(),
+                        };
+                        Some((proof.source_id(), proof.method(), LocalCounterInitializerBinding {
+                            source_block: block_local.source_block(),
+                            typed_block: block_local.typed_block(),
+                            source_declaration: local.source_declaration(),
+                            typed_declaration: local.typed_declaration(),
+                            source_initializer: local.source_initializer(),
+                            typed_initializer: local.typed_initializer(),
+                            source_type_tree: local.source_type_tree(),
+                            typed_type_tree: local.typed_type_tree(),
+                            local: local.symbol(),
+                            scope: local.scope(),
+                            local_type: local.local_type(),
+                            argument_formal: local.seed_formal(),
+                            call,
+                        }))
+                    }).collect()
+                } else {
+                    pair.arguments().into_iter().filter_map(|argument| {
+                        let local = argument.local_val()?;
+                        let call = NestedConstructorCallBinding {
+                            source_apply: local.source_initializer(),
+                            typed_apply: local.typed_initializer(),
+                            source_select: local.source_initializer_select(),
+                            source_new: local.source_initializer_new(),
+                            source_argument: local.source_seed_argument(),
+                            typed_select: local.typed_initializer_select(),
+                            typed_new: local.typed_initializer_new(),
+                            typed_argument: local.typed_seed_argument(),
+                            class: typer.store().symbols.get(local.constructor()).owner?,
+                            constructor: local.constructor(),
+                            formal: local.constructor_formal(),
+                            formal_type: local.constructor_formal_type(),
+                            result_type: local.initializer_result_type(),
+                        };
+                        Some((proof.source_id(), proof.method(), LocalCounterInitializerBinding {
+                            source_block: local.source_block(),
+                            typed_block: local.typed_block(),
+                            source_declaration: local.source_declaration(),
+                            typed_declaration: local.typed_declaration(),
+                            source_initializer: local.source_initializer(),
+                            typed_initializer: local.typed_initializer(),
+                            source_type_tree: local.source_type_tree(),
+                            typed_type_tree: local.typed_type_tree(),
+                            local: local.symbol(),
+                            scope: local.scope(),
+                            local_type: local.local_type(),
+                            argument_formal: local.seed_formal(),
+                            call,
+                        }))
+                    }).collect()
+                }
             })
             .collect(),
         formal_local_constructor_call_pairs: constructor_call_proofs
             .iter()
             .filter_map(|proof| {
-                if proof.argument_proof().kind()
-                    != crate::jvm_tasty_cross_class::ConstructorArgumentProofKind::FormalLocalPair
+                if !matches!(
+                    proof.argument_proof().kind(),
+                    crate::jvm_tasty_cross_class::ConstructorArgumentProofKind::FormalLocalPair
+                        | crate::jvm_tasty_cross_class::ConstructorArgumentProofKind::LocalValPair
+                )
                 {
                     return None;
                 }
