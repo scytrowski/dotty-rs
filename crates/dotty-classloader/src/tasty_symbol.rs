@@ -4339,7 +4339,7 @@ pub(crate) fn resolve_type_alias_target(
         let StructuredNode::TypeDef(DefinitionBody::TypeDef {
             name,
             type_or_template,
-            ..
+            tail,
         }) = node.decode_structured()?
         else {
             continue;
@@ -4354,12 +4354,29 @@ pub(crate) fn resolve_type_alias_target(
             RawTree::LengthNode(template) if template.tag == TEMPLATE_TAG => continue,
             rhs => rhs,
         };
-        if let Some((owner, name)) = unresolved_alias_reference(file, &rhs)
+        if rooted_serializable_alias.is_some() {
+            // The rooted Scala alias is supported only in its pinned ordinary
+            // type-alias shape. Authenticate the RHS namespace and package
+            // qualifier before interpreting its rendered owner and name.
+            if !tail.is_empty() || !has_one_terminal_type_selection(file, &rhs, 0) {
+                return Ok(None);
+            }
+        }
+        let rhs_reference = unresolved_alias_reference(file, &rhs);
+        if rooted_serializable_alias.is_some()
+            && !matches!(rhs_reference.as_ref(), Some((owner, name)) if owner.as_internal() == "java/io" && name == "Serializable")
+        {
+            return Ok(None);
+        }
+        if let Some((owner, name)) = rhs_reference.as_ref()
             && matches!(owner.simple_name(), "package" | "package$")
         {
-            return Ok(Some(TypeAliasTarget::Alias { owner, name }));
+            return Ok(Some(TypeAliasTarget::Alias {
+                owner: owner.clone(),
+                name: name.clone(),
+            }));
         }
-        if let Some((owner, name)) = unresolved_alias_reference(file, &rhs) {
+        if let Some((owner, name)) = rhs_reference {
             let package_path = owner.package_path();
             let owner_path = if !current_package.is_empty()
                 && package_path.starts_with(&format!("{current_package}/"))

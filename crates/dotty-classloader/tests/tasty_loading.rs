@@ -1453,6 +1453,46 @@ fn rejects_term_selection_instead_of_following_serializable_type_alias() {
     );
 }
 
+#[test]
+fn rejects_term_selection_in_authentic_serializable_alias_rhs() {
+    const PACKAGE_SERIALIZABLE_RHS_OFFSET: usize = 1906;
+    let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+    let original = fs::read(published_scala39_library_dir().join("scala/package.tasty"))
+        .expect("pinned scala/package.tasty fixture");
+    assert_eq!(
+        original[PACKAGE_SERIALIZABLE_RHS_OFFSET],
+        dotty_tasty::tasty::SELECTTPT_TAG,
+        "the pinned Serializable alias RHS is a terminal type selection"
+    );
+
+    let mut term_selection = original;
+    term_selection[PACKAGE_SERIALIZABLE_RHS_OFFSET] = dotty_tasty::tasty::SELECT_TAG;
+    let mutated_library = TemporaryDirectory::new("package-term-serializable-alias-rhs");
+    let package_path = mutated_library.path().join("scala/package.tasty");
+    fs::create_dir_all(package_path.parent().expect("scala package directory"))
+        .expect("mutated fixture directory should be created");
+    fs::write(package_path, term_selection).expect("mutated authentic fixture should be written");
+
+    let class_path = CompositeClassPath::new(vec![
+        Box::new(DirectoryClassPath::new(mutated_library.path().clone())),
+        Box::new(DirectoryClassPath::new(published_scala39_library_dir())),
+        Box::new(JdkClassPath::new(java_home.join("jmods")).expect("genuine JDK jmods")),
+    ]);
+    let mut store = SemanticStore::new();
+    let mut loader = ClassLoader::new(class_path, &mut store);
+    let error = loader
+        .load_class(&BinaryName::from_internal("scala/Some"))
+        .expect_err("term-namespace alias RHS must not resolve a Java interface parent");
+    assert!(
+        matches!(
+            error,
+            ClassLoadError::DependencyFailure { ref source, .. }
+                if matches!(source.as_ref(), ClassLoadError::InvalidTastyFile(name, _) if name.as_internal() == "scala/Option")
+        ),
+        "the malformed package alias should remain a typed TASTy failure: {error:?}"
+    );
+}
+
 struct HideSerializableOnce {
     inner: CompositeClassPath,
     hide: Arc<AtomicBool>,
