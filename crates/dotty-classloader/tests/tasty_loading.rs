@@ -18,8 +18,9 @@ use dotty_core::{
     TypeId, Visibility,
 };
 use dotty_tasty::tasty::{
-    DefinitionBody, EncodedSection, LambdaTptNode, PackageNode, ParameterNode, RawNode, RawNodes,
-    Reader, StandardSection, StructuredNode, StructuredTree, TastyFile, TastyFileBuilder, Writer,
+    DefinitionBody, EncodedSection, LambdaTptNode, NameTable, PackageNode, ParameterNode, RawName,
+    RawNode, RawNodes, Reader, StandardSection, StructuredNode, StructuredTree, TastyFile,
+    TastyFileBuilder, Writer,
 };
 use dotty_tasty_unpickler::tasty_unpickler::{
     TastySession, TastySessionError, TastyUnpickler, UnpickleError,
@@ -1916,6 +1917,524 @@ fn enters_a_tasty_class_into_its_package_scope() {
         store.scopes.get(package_scope).lookup_all(&animal_name),
         &[animal],
         "a TASTy-loaded class should be discoverable through its package scope"
+    );
+}
+
+#[test]
+fn loads_pinned_tuple2_with_authenticated_applied_constructor_parent() {
+    let mut store = SemanticStore::new();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let scala_library = root.join("../dotty-tasty/tests/fixtures/scala3-library");
+    let jdk = JdkClassPath::new(
+        PathBuf::from(std::env::var_os("JAVA_HOME").expect("JDK 21 JAVA_HOME is required"))
+            .join("jmods"),
+    )
+    .expect("JDK 21 jmods are readable");
+    let class_path = CompositeClassPath::new(vec![
+        Box::new(DirectoryClassPath::new(scala_library.clone())),
+        Box::new(jdk),
+    ]);
+    let tuple2 = BinaryName::from_internal("scala/Tuple2");
+    let mut loader = ClassLoader::new(class_path, &mut store);
+    let class = loader
+        .load_class(&tuple2)
+        .expect("pinned Tuple2 and all four classpath parents should complete");
+    assert_eq!(
+        loader.load_class(&tuple2).unwrap(),
+        class,
+        "a repeated same-session load must preserve Tuple2 identity"
+    );
+    let tuple2_origin = loader.origin(class).cloned();
+    let times_colon = loader
+        .load_class(&BinaryName::from_internal("scala/$times$colon"))
+        .unwrap();
+    let times_colon_origin = loader.origin(times_colon).cloned();
+    let product2 = loader
+        .load_class(&BinaryName::from_internal("scala/Product2"))
+        .unwrap();
+    let product2_origin = loader.origin(product2).cloned();
+    let definitions = loader.definitions();
+    let session = loader.into_session();
+    let mut second_loader = ClassLoader::with_definitions(
+        CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(scala_library.clone())),
+            Box::new(
+                JdkClassPath::new(
+                    PathBuf::from(
+                        std::env::var_os("JAVA_HOME").expect("JDK 21 JAVA_HOME is required"),
+                    )
+                    .join("jmods"),
+                )
+                .expect("JDK 21 jmods are readable"),
+            ),
+        ]),
+        &mut store,
+        definitions,
+        session,
+    );
+    assert_eq!(
+        second_loader.load_class(&tuple2).unwrap(),
+        class,
+        "a loader handoff must reuse the same session identity"
+    );
+    drop(second_loader);
+
+    let info = class_info(&store, class);
+    assert_eq!(info.parents.len(), 4);
+    let parent_symbols = info
+        .parents
+        .iter()
+        .map(|parent| match store.types.get(*parent) {
+            Type::Applied { tycon, .. } => store
+                .types
+                .get(*tycon)
+                .reference_symbol()
+                .expect("applied parent tycon should retain its class identity"),
+            _ => parent_symbol(&store, *parent),
+        })
+        .collect::<Vec<_>>();
+    let parent_names = parent_symbols
+        .iter()
+        .map(|parent| {
+            store
+                .names
+                .resolve(store.symbols.get(*parent).name.text())
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        parent_names,
+        ["$times$colon", "Product2", "Product", "Serializable"]
+    );
+    assert_eq!(
+        tuple2_origin,
+        Some(ClassOrigin::Directory(scala_library.clone()))
+    );
+    assert_eq!(
+        times_colon_origin,
+        Some(ClassOrigin::Directory(scala_library.clone())),
+        "the encoded identity must resolve to the authentic Scala library resource"
+    );
+    assert_eq!(
+        product2_origin,
+        Some(ClassOrigin::Directory(scala_library.clone())),
+        "the independent Product2 parent must keep its own classpath identity"
+    );
+
+    let Type::Applied { tycon, args } = store.types.get(info.parents[1]) else {
+        panic!("Tuple2 parent 1 should retain its applied Product2 view");
+    };
+    assert_eq!(
+        store.types.get(*tycon).reference_symbol(),
+        Some(parent_symbols[1])
+    );
+    assert_eq!(args.len(), 2);
+    let argument_symbols = args
+        .iter()
+        .map(|argument| store.types.get(*argument).reference_symbol())
+        .collect::<Vec<_>>();
+    assert!(argument_symbols.iter().all(Option::is_some));
+    let argument_names = argument_symbols
+        .iter()
+        .map(|symbol| {
+            store
+                .names
+                .resolve(store.symbols.get(symbol.unwrap()).name.text())
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(argument_names, ["T1", "T2"]);
+
+    let mut fresh_store = SemanticStore::new();
+    let fresh = ClassLoader::new(
+        CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(scala_library)),
+            Box::new(
+                JdkClassPath::new(
+                    PathBuf::from(
+                        std::env::var_os("JAVA_HOME").expect("JDK 21 JAVA_HOME is required"),
+                    )
+                    .join("jmods"),
+                )
+                .expect("JDK 21 jmods are readable"),
+            ),
+        ]),
+        &mut fresh_store,
+    )
+    .load_class(&tuple2)
+    .expect("a fresh semantic session should load the same pinned Tuple2");
+    let fresh_info = class_info(&fresh_store, fresh);
+    let fresh_parent_names = fresh_info
+        .parents
+        .iter()
+        .map(|parent| match fresh_store.types.get(*parent) {
+            Type::Applied { tycon, .. } => fresh_store
+                .types
+                .get(*tycon)
+                .reference_symbol()
+                .expect("fresh applied parent tycon has a canonical identity"),
+            _ => parent_symbol(&fresh_store, *parent),
+        })
+        .map(|parent| {
+            fresh_store
+                .names
+                .resolve(fresh_store.symbols.get(parent).name.text())
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(fresh_parent_names, parent_names);
+    let Type::Applied { args, .. } = fresh_store.types.get(fresh_info.parents[1]) else {
+        panic!("fresh Tuple2 parent 1 should retain its applied Product2 view");
+    };
+    let fresh_argument_names = args
+        .iter()
+        .map(|argument| {
+            let symbol = fresh_store
+                .types
+                .get(*argument)
+                .reference_symbol()
+                .expect("fresh Product2 argument should remain a type parameter reference");
+            fresh_store
+                .names
+                .resolve(fresh_store.symbols.get(symbol).name.text())
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(fresh_argument_names, argument_names);
+}
+
+struct MaskedTimesColonClassPath {
+    inner: CompositeClassPath,
+}
+
+impl ClassPathEntry for MaskedTimesColonClassPath {
+    fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+        if name.as_internal() == "scala/$times$colon" {
+            return Ok(None);
+        }
+        self.inner.find_class(name)
+    }
+
+    fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        self.inner.contains_package(package)
+    }
+
+    fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        self.inner.contains_package_prefix(package)
+    }
+}
+
+struct MutatedTuple2ClassPath {
+    inner: DirectoryClassPath,
+    mutated_tuple2: Vec<u8>,
+    mutated_times_colon: Option<Vec<u8>>,
+}
+
+impl ClassPathEntry for MutatedTuple2ClassPath {
+    fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+        if name.as_internal() == "scala/Tuple2" {
+            let Some(resource) = self.inner.find_class(name)? else {
+                return Ok(None);
+            };
+            return Ok(Some(ClassResource::new(
+                self.mutated_tuple2.clone(),
+                ClassFormat::Tasty,
+                resource.origin().clone(),
+            )));
+        }
+        if name.as_internal() == "scala/$times$colon"
+            && let Some(mutated_times_colon) = &self.mutated_times_colon
+        {
+            let Some(resource) = self.inner.find_class(name)? else {
+                return Ok(None);
+            };
+            return Ok(Some(ClassResource::new(
+                mutated_times_colon.clone(),
+                ClassFormat::Tasty,
+                resource.origin().clone(),
+            )));
+        }
+        self.inner.find_class(name)
+    }
+
+    fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        self.inner.contains_package(package)
+    }
+
+    fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        self.inner.contains_package_prefix(package)
+    }
+}
+
+#[test]
+fn term_reference_at_tuple2_constructor_target_fails_closed_through_classloader() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let scala_library = root.join("../dotty-tasty/tests/fixtures/scala3-library");
+    assert_mutated_tuple2_rejected(
+        &scala_library,
+        162,
+        dotty_tasty::tasty::TYPEREF_TAG,
+        dotty_tasty::tasty::TERMREF_TAG,
+    );
+}
+
+#[test]
+fn string_constant_at_tuple2_package_prefix_fails_closed_through_classloader() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let scala_library = root.join("../dotty-tasty/tests/fixtures/scala3-library");
+    assert_mutated_tuple2_rejected(
+        &scala_library,
+        27,
+        dotty_tasty::tasty::TERMREFPKG_TAG,
+        dotty_tasty::tasty::STRINGCONST_TAG,
+    );
+}
+
+#[test]
+fn signed_result_name_cannot_authenticate_tuple2_constructor_through_classloader() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let scala_library = root.join("../dotty-tasty/tests/fixtures/scala3-library");
+    let tuple2_path = scala_library.join("scala/Tuple2.tasty");
+    let original = fs::read(&tuple2_path).expect("pinned Tuple2 fixture");
+    let file = TastyFile::parse(&original).expect("pinned Tuple2 TASTy");
+    let address_index = file.ast_address_index().expect("Tuple2 AST address index");
+    assert_eq!(
+        address_index
+            .get_node(162)
+            .expect("constructor type reference")
+            .tag,
+        dotty_tasty::tasty::TYPEREF_TAG
+    );
+
+    let mut names = file.names().entries().to_vec();
+    let star_refs = names
+        .iter()
+        .enumerate()
+        .filter_map(|(index, name)| {
+            matches!(name, RawName::Utf8(value) if value == "*:").then_some(index)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(star_refs.len(), 1, "fixture has one direct *: name entry");
+    let star_ref = star_refs[0] as u32;
+    let product2_ref = names
+        .iter()
+        .position(|name| matches!(name, RawName::Utf8(value) if value == "Product2"))
+        .expect("Tuple2 parent uses Product2") as u32;
+    let result_signature_ref = names.len() as u32;
+    names.push(RawName::Utf8("*:".to_owned()));
+    names[star_ref as usize] = RawName::Signed {
+        original: product2_ref,
+        result_signature: result_signature_ref,
+        parameter_signatures: Vec::new(),
+    };
+    let names = NameTable::from_entries(names).expect("mutated name table is valid");
+    let mut builder = TastyFileBuilder::new(file.header().clone(), names);
+    for section in file.sections().iter() {
+        builder.push_section(EncodedSection::raw(section.name, section.payload.to_vec()));
+    }
+    let mutated = builder.encode().expect("mutated Tuple2 fixture encodes");
+    let mutated_file = TastyFile::parse(&mutated).expect("mutated Tuple2 TASTy parses");
+    assert_eq!(
+        mutated_file
+            .section(StandardSection::Asts)
+            .expect("Tuple2 AST section")
+            .payload,
+        file.section(StandardSection::Asts)
+            .expect("original Tuple2 AST section")
+            .payload,
+        "the reproducer changes only name-table interpretation"
+    );
+
+    assert_tuple2_bytes_rejected(&scala_library, mutated);
+}
+
+#[test]
+fn signed_package_name_cannot_authenticate_tuple2_target_through_classloader() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let scala_library = root.join("../dotty-tasty/tests/fixtures/scala3-library");
+    let target_path = scala_library.join("scala/$times$colon.tasty");
+    let original = fs::read(&target_path).expect("pinned *: target fixture");
+    let file = TastyFile::parse(&original).expect("pinned *: target TASTy");
+    let mut names = file.names().entries().to_vec();
+    let scala_refs = names
+        .iter()
+        .enumerate()
+        .filter_map(|(index, name)| {
+            matches!(name, RawName::Utf8(value) if value == "scala").then_some(index)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        scala_refs.len(),
+        1,
+        "fixture has one direct scala name entry"
+    );
+    let scala_ref = scala_refs[0] as u32;
+    let foreign_ref = names.len() as u32;
+    let result_signature_ref = foreign_ref + 1;
+    names.push(RawName::Utf8("foreign".to_owned()));
+    names.push(RawName::Utf8("scala".to_owned()));
+    names[scala_ref as usize] = RawName::Signed {
+        original: foreign_ref,
+        result_signature: result_signature_ref,
+        parameter_signatures: Vec::new(),
+    };
+    let names = NameTable::from_entries(names).expect("mutated target name table is valid");
+    let mut builder = TastyFileBuilder::new(file.header().clone(), names);
+    for section in file.sections().iter() {
+        builder.push_section(EncodedSection::raw(section.name, section.payload.to_vec()));
+    }
+    let mutated = builder.encode().expect("mutated target fixture encodes");
+    let mutated_file = TastyFile::parse(&mutated).expect("mutated target TASTy parses");
+    assert_eq!(
+        mutated_file
+            .section(StandardSection::Asts)
+            .expect("target AST section")
+            .payload,
+        file.section(StandardSection::Asts)
+            .expect("original target AST section")
+            .payload,
+        "the reproducer changes only target name-table interpretation"
+    );
+
+    assert_tuple2_bytes_and_target_rejected(&scala_library, None, Some(mutated), "MissingTypeDef");
+}
+
+fn assert_mutated_tuple2_rejected(
+    scala_library: &Path,
+    address: u32,
+    expected_tag: u8,
+    replacement_tag: u8,
+) {
+    let tuple2_path = scala_library.join("scala/Tuple2.tasty");
+    let mut mutated_tuple2 = fs::read(&tuple2_path).expect("pinned Tuple2 fixture");
+    let target_tag_offset = {
+        let file = TastyFile::parse(&mutated_tuple2).expect("pinned Tuple2 TASTy");
+        let index = file.ast_address_index().unwrap();
+        let target = index.get_node(address).unwrap_or_else(|| {
+            panic!("the tuple constructor reference lives at AST address {address}")
+        });
+        assert_eq!(target.tag, expected_tag);
+        file.section(StandardSection::Asts)
+            .expect("Tuple2 has an AST section")
+            .offset
+            + target.offset
+    };
+    assert_eq!(mutated_tuple2[target_tag_offset], expected_tag);
+    mutated_tuple2[target_tag_offset] = replacement_tag;
+    let mutated_file = TastyFile::parse(&mutated_tuple2)
+        .expect("the one-byte reference-tag mutation remains structurally parseable");
+    assert_eq!(
+        mutated_file
+            .ast_address_index()
+            .unwrap()
+            .get_node(address)
+            .unwrap()
+            .tag,
+        replacement_tag
+    );
+
+    assert_tuple2_bytes_rejected(scala_library, mutated_tuple2);
+}
+
+fn assert_tuple2_bytes_rejected(scala_library: &Path, mutated_tuple2: Vec<u8>) {
+    assert_tuple2_bytes_and_target_rejected(
+        scala_library,
+        Some(mutated_tuple2),
+        None,
+        "UnresolvedSupertype",
+    );
+}
+
+fn assert_tuple2_bytes_and_target_rejected(
+    scala_library: &Path,
+    mutated_tuple2: Option<Vec<u8>>,
+    mutated_times_colon: Option<Vec<u8>>,
+    expected_error: &str,
+) {
+    let jdk = JdkClassPath::new(
+        PathBuf::from(std::env::var_os("JAVA_HOME").expect("JDK 21 JAVA_HOME")).join("jmods"),
+    )
+    .expect("JDK 21 jmods are readable");
+    let class_path = CompositeClassPath::new(vec![
+        Box::new(MutatedTuple2ClassPath {
+            inner: DirectoryClassPath::new(scala_library),
+            mutated_tuple2: mutated_tuple2.unwrap_or_else(|| {
+                fs::read(scala_library.join("scala/Tuple2.tasty")).expect("pinned Tuple2 fixture")
+            }),
+            mutated_times_colon,
+        }),
+        Box::new(jdk),
+    ]);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let checkpoint = store.checkpoint();
+    let mut loader =
+        ClassLoader::with_definitions(class_path, &mut store, definitions, LoadingSession::new());
+    let error = loader
+        .load_class(&BinaryName::from_internal("scala/Tuple2"))
+        .expect_err(
+            "a one-byte-mutated Tuple2 reference must not authenticate the nominal *: parent",
+        );
+    assert!(format!("{error:?}").contains(expected_error), "{error:?}");
+    drop(loader);
+    assert_eq!(
+        store.checkpoint(),
+        checkpoint,
+        "rejecting the malformed parent must roll back the entire Tuple2 load"
+    );
+}
+
+#[test]
+fn missing_tuple2_constructor_target_rolls_back_and_same_session_retry_succeeds() {
+    let mut store = SemanticStore::new();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let scala_library = root.join("../dotty-tasty/tests/fixtures/scala3-library");
+    let jdk = || {
+        Box::new(
+            JdkClassPath::new(
+                PathBuf::from(std::env::var_os("JAVA_HOME").expect("JDK 21 JAVA_HOME"))
+                    .join("jmods"),
+            )
+            .expect("JDK 21 jmods are readable"),
+        ) as Box<dyn ClassPathEntry>
+    };
+    let scala =
+        || Box::new(DirectoryClassPath::new(scala_library.clone())) as Box<dyn ClassPathEntry>;
+    let masked = CompositeClassPath::new(vec![Box::new(MaskedTimesColonClassPath {
+        inner: CompositeClassPath::new(vec![scala(), jdk()]),
+    })]);
+    let tuple2 = BinaryName::from_internal("scala/Tuple2");
+    let definitions = Definitions::bootstrap(&mut store);
+    let checkpoint = store.checkpoint();
+    let mut first_loader =
+        ClassLoader::with_definitions(masked, &mut store, definitions, LoadingSession::new());
+    let error = first_loader
+        .load_class(&tuple2)
+        .expect_err("the authenticated encoded target must be required on the classpath");
+    assert!(
+        format!("{error:?}").contains("scala/$times$colon"),
+        "missing target error should identify the encoded nominal dependency: {error:?}"
+    );
+    let session = first_loader.into_session();
+    assert_eq!(
+        store.checkpoint(),
+        checkpoint,
+        "a late missing-parent failure must roll back every allocated symbol/type/scope"
+    );
+
+    let mut retry_loader = ClassLoader::with_definitions(
+        CompositeClassPath::new(vec![scala(), jdk()]),
+        &mut store,
+        definitions,
+        session,
+    );
+    let class = retry_loader
+        .load_class(&tuple2)
+        .expect("the same session should retry once the authentic target is present");
+    assert_eq!(
+        retry_loader.load_class(&tuple2).unwrap(),
+        class,
+        "the successful retry should commit one stable Tuple2 identity"
     );
 }
 

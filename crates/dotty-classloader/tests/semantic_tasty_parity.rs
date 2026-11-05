@@ -859,14 +859,49 @@ fn assert_live_report_matches_frozen_with_selected_option_member_delta(
         .collect::<Vec<_>>();
     assert_eq!(
         changed.len(),
-        10,
-        "the selected Option member row and the newly loadable Some class fields are the only changes"
+        19,
+        "the selected Option member, newly loadable Some class, and newly loadable Tuple2 rows are the only changes"
     );
 
     let mut some_fields = HashSet::new();
     let mut option_member_delta = None;
     for (current, frozen) in changed {
         match (current[0].as_str(), current[1].as_str()) {
+            ("tuple2", field) => {
+                assert_eq!(current[4], "", "Tuple2 {field} loads from its fixture");
+                assert_eq!(current[5], frozen[5], "Tuple2 {field} fixture provenance");
+                let (outcome, value) = match field {
+                    "identity" => ("MATCH", "scala.Tuple2|Class|Tuple2"),
+                    "visibility" => ("MATCH", "public"),
+                    "flags" => ("MATCH", "final"),
+                    "hierarchy" => (
+                        "MATCH",
+                        "scala.$times$colon&scala.Product2[scala.Tuple2.T1,scala.Tuple2.T2]&scala.Product&java.io.Serializable",
+                    ),
+                    "type_parameters" => (
+                        "MATCH",
+                        "[T1:None:bounds(Nothing,Any),T2:None:bounds(Nothing,Any)]",
+                    ),
+                    "parameter_clauses" => (
+                        "MATCH",
+                        "<init>:Constructor:public:[T1:None:bounds(Nothing,Any),T2:None:bounds(Nothing,Any)]=>(ParamRef[0],ParamRef[1])Plain:Unit",
+                    ),
+                    "companion" => ("MATCH", "none"),
+                    "annotations" => ("MATCH", ""),
+                    "member_signatures" => {
+                        assert_eq!(current[2], "LOADER_UNSUPPORTED");
+                        assert!(current[3].starts_with(
+                            "<init>:Constructor:public:[T1:None:bounds(Nothing,Any),T2:None:bounds(Nothing,Any)]=>(ParamRef[0],ParamRef[1])Plain:Unit;T1:TypeParameter:public:bounds(Nothing,Any);T2:TypeParameter:public:bounds(Nothing,Any);_1:Field:public:scala.Tuple2.T1;_2:Field:public:scala.Tuple2.T2;"
+                        ));
+                        assert_eq!(current[10], "not-comparable");
+                        continue;
+                    }
+                    other => panic!("unexpected changed Tuple2 parity field {other}"),
+                };
+                assert_eq!(current[2], outcome, "Tuple2 {field} outcome");
+                assert_eq!(current[3], value, "Tuple2 {field} value");
+                assert_eq!(current[10], "not-comparable", "Tuple2 {field} comparison");
+            }
             ("some", field) => {
                 some_fields.insert(field);
                 assert_eq!(frozen[2], "UNRESOLVED_EXTERNAL");
