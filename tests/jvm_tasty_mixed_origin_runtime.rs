@@ -1587,11 +1587,11 @@ fn two_immutable_local_pair_identity_and_decoded_flow_on_strict_jdk21() {
                 .unwrap()
                 .operand
                 .unwrap();
-            let pair_init_insert_pc = primary_instructions
+            let pair_new_insert_pc = primary_instructions
                 .iter()
                 .find(|i| {
-                    i.opcode == 0xb7
-                        && batch_method_ref(&class, i.operand.unwrap()).0 == "example/Pair"
+                    i.opcode == 0xbb
+                        && batch_class_name(&class, i.operand.unwrap()) == "example/Pair"
                 })
                 .unwrap()
                 .pc;
@@ -1617,13 +1617,47 @@ fn two_immutable_local_pair_identity_and_decoded_flow_on_strict_jdk21() {
                     .unwrap(),
             );
             extra_counter.splice(
-                primary_code_start + pair_init_insert_pc..primary_code_start + pair_init_insert_pc,
+                primary_code_start + pair_new_insert_pc..primary_code_start + pair_new_insert_pc,
                 extra,
             );
             extra_counter[primary_code_start - 4..primary_code_start]
                 .copy_from_slice(&(old_code_len + 9).to_be_bytes());
             extra_counter[primary_code_start - 12..primary_code_start - 8]
                 .copy_from_slice(&(old_attribute_len + 9).to_be_bytes());
+            let extra_runtime = scratch.path().join("runtime-extra-counter-evaluation");
+            for artifact in batch.classes() {
+                let destination = extra_runtime.join(artifact.classfile_path());
+                std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+                let bytes = if artifact.classfile_path() == "example/PairFactory.class" {
+                    &extra_counter
+                } else {
+                    artifact.classfile_bytes()
+                };
+                std::fs::write(destination, bytes).unwrap();
+            }
+            let extra_java = Command::new("java")
+                .args(["-Xverify:all", "-ea", "-classpath"])
+                .arg(
+                    std::env::join_paths([harness_classes.as_path(), extra_runtime.as_path()])
+                        .unwrap(),
+                )
+                .arg("example.PairFactoryTwoLocalIdentityHarness")
+                .arg("primary")
+                .output()
+                .expect("verify and execute independently constructed extra Counter clone");
+            assert!(
+                extra_java.status.success(),
+                "balanced extra Counter class must independently verify and execute: {}{}",
+                String::from_utf8_lossy(&extra_java.stdout),
+                String::from_utf8_lossy(&extra_java.stderr)
+            );
+            assert_eq!(
+                extra_java.stdout, java.stdout,
+                "extra evaluation leaves the original runtime result unchanged"
+            );
+            eprintln!(
+                "two-local-extra-counter-clone verifier=passed runtime=passed; added sequence at empty stack before Pair NEW, max_stack=4"
+            );
             let extra_artifacts = JvmTastyBatchArtifacts {
                 classfiles: batch
                     .classes()
@@ -1652,7 +1686,16 @@ fn two_immutable_local_pair_identity_and_decoded_flow_on_strict_jdk21() {
                 let validated = validate_jvm_tasty_batch(plan.jvm_unit, &tasty).unwrap();
                 let error = validate_jvm_tasty_batch_artifacts(&validated, extra_artifacts)
                     .expect_err("paired Rust contract rejects extra Counter allocation and constructor");
-                eprintln!("two-local-negative extra-counter-allocation-and-constructor first-stage=Rust paired contract: {error:?}");
+                let JvmTastyContractError::BatchArtifact { phase, reason, .. } = &error else {
+                    panic!("extra evaluation must fail in the authenticated bytecode proof: {error:?}");
+                };
+                assert_eq!(*phase, "cross-class invocation");
+                assert!(
+                    reason.contains("expected aload_3 in bounded call bytecode")
+                        && reason.contains("found opcode 0x1b"),
+                    "rejection must identify the extra Counter constructor seed load where the Pair argument load was expected: {error:?}"
+                );
+                eprintln!("two-local-negative extra-counter-allocation-and-constructor first-stage=Rust paired contract phase={phase} reason={reason:?}");
             }).expect("authenticate source session for extra Counter control");
 
             let mut same_local = factory.to_vec();
