@@ -33,6 +33,17 @@ const IMMUTABLE_LOCAL_PAIR_REVERSED_BATCH: &str =
 const IMMUTABLE_LOCAL_PAIR_IDENTITY_HARNESS: &[u8] = include_bytes!(
     "fixtures/jvm_tasty_immutable_reference_local_pair/PairFactoryIdentityHarness.java"
 );
+const TWO_LOCAL_PRIMARY_BATCH: &str =
+    include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactoryTwoLocals.scala");
+const TWO_LOCAL_REVERSED_BATCH: &str = include_str!(
+    "fixtures/jvm_tasty_immutable_reference_local_pair/PairFactoryTwoLocalsReversed.scala"
+);
+const TWO_LOCAL_ALIAS_BATCH: &str = include_str!(
+    "fixtures/jvm_tasty_immutable_reference_local_pair/PairFactoryTwoLocalsAlias.scala"
+);
+const TWO_LOCAL_IDENTITY_HARNESS: &[u8] = include_bytes!(
+    "fixtures/jvm_tasty_immutable_reference_local_pair/PairFactoryTwoLocalIdentityHarness.java"
+);
 
 fn require_exact_jdk_21_or_skip() -> bool {
     let unavailable = ["java", "javac", "javap"]
@@ -284,7 +295,13 @@ fn mixed_factory_code<'a>(
         let start = pc;
         let opcode = code.code[pc];
         pc += 1;
+        let mut local_operand = None;
         let operand = match opcode {
+            0x19 | 0x3a => {
+                local_operand = Some(code.code[pc]);
+                pc += 1;
+                None
+            }
             0xbb | 0xb7 => {
                 let index =
                     ConstantPoolIndex(u16::from_be_bytes([code.code[pc], code.code[pc + 1]]));
@@ -314,6 +331,16 @@ fn mixed_factory_code<'a>(
             }
             (0x4c, None) => {
                 sequence.instruction(Instruction::AStore(LocalIndex::new(1)));
+            }
+            (0x3a, None) => {
+                sequence.instruction(Instruction::AStore(LocalIndex::new(u16::from(
+                    local_operand.expect("explicit astore index"),
+                ))));
+            }
+            (0x19, None) => {
+                sequence.instruction(Instruction::ALoad(LocalIndex::new(u16::from(
+                    local_operand.expect("explicit aload index"),
+                ))));
             }
             (0x2c, None) => {
                 sequence.instruction(Instruction::ALoad(LocalIndex::new(2)));
@@ -1095,6 +1122,527 @@ fn mixed_origin_counter_identity_and_allocation_order_on_strict_jdk21() {
 
     assert_mixed_original_files_unchanged(&snapshots, "all compiler/runtime/corrupt-copy stages");
     assert_eq!(reverse_method.classfile_path(), "example/PairFactory.class");
+}
+
+#[test]
+fn two_immutable_local_pair_identity_and_decoded_flow_on_strict_jdk21() {
+    if !require_jdk_21_or_skip() {
+        return;
+    }
+
+    let scratch = TestDirectory::new("two-immutable-local-pair-runtime");
+    let harness_source = scratch
+        .path()
+        .join("PairFactoryTwoLocalIdentityHarness.java");
+    std::fs::write(&harness_source, TWO_LOCAL_IDENTITY_HARNESS).unwrap();
+
+    let variants = [
+        ("primary", TWO_LOCAL_PRIMARY_BATCH, "primary"),
+        ("reversed", TWO_LOCAL_REVERSED_BATCH, "reversed"),
+        ("alias", TWO_LOCAL_ALIAS_BATCH, "alias"),
+    ];
+    for (index, (label, source, harness_mode)) in variants.into_iter().enumerate() {
+        let batch = emit_paired_jvm_tasty_batch(
+            source,
+            "PairFactory.scala",
+            SourceId::from_index(21270 + index as u32),
+        )
+        .unwrap_or_else(|error| {
+            panic!("{label} source emits its own six-file Rust batch: {error:?}")
+        });
+        assert_eq!(batch.classes().len(), 3);
+        let original = scratch.path().join(format!("original-{label}"));
+        let runtime = scratch.path().join(format!("runtime-{label}"));
+        std::fs::create_dir_all(&original).unwrap();
+        std::fs::create_dir_all(&runtime).unwrap();
+        let mut hashes_before = Vec::new();
+        for artifact in batch.classes() {
+            let mut reader = Reader::new(artifact.classfile_bytes());
+            let decoded = ClassFile::decode(&mut reader).unwrap();
+            assert!(reader.is_at_end());
+            assert_eq!((decoded.version.major, decoded.version.minor), (65, 0));
+            assert_eq!(
+                decoded.tasty_link_id().unwrap(),
+                Some(artifact.tasty_link_id())
+            );
+            let tasty = TastyFile::parse_and_validate_scala_3_9(artifact.tasty_bytes()).unwrap();
+            assert_eq!(
+                (tasty.header().major_version, tasty.header().minor_version),
+                (28, 9)
+            );
+            for (relative, bytes, runtime_class) in [
+                (artifact.classfile_path(), artifact.classfile_bytes(), true),
+                (artifact.tasty_path(), artifact.tasty_bytes(), false),
+            ] {
+                let path = original.join(relative);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, bytes).unwrap();
+                let hash = sha256sum_bytes(bytes);
+                eprintln!("two-local-original {label} {relative} sha256={hash}");
+                hashes_before.push((path, relative.to_owned(), hash));
+                if runtime_class {
+                    let destination = runtime.join(relative);
+                    std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+                    std::fs::write(destination, bytes).unwrap();
+                }
+            }
+        }
+        assert_eq!(hashes_before.len(), 6);
+        let harness_classes = scratch.path().join(format!("harness-{label}"));
+        std::fs::create_dir(&harness_classes).unwrap();
+        let harness_compile = Command::new("javac")
+            .args(["--release", "21", "-classpath"])
+            .arg(&runtime)
+            .arg("-d")
+            .arg(&harness_classes)
+            .arg(&harness_source)
+            .output()
+            .expect("compile independent Java 21 identity harness against original classes");
+        assert!(
+            harness_compile.status.success(),
+            "javac: {}{}",
+            String::from_utf8_lossy(&harness_compile.stdout),
+            String::from_utf8_lossy(&harness_compile.stderr)
+        );
+
+        let factory = mixed_factory_bytes(&batch);
+        let (class, instructions, sequence, descriptor, code_start, _) =
+            mixed_factory_code(factory, "create");
+        assert_eq!(descriptor, "(II)Lexample/Pair;");
+        let method = class
+            .methods
+            .iter()
+            .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "create")
+            .unwrap();
+        let [Attribute::Code(code)] = method.attributes.as_slice() else {
+            panic!("create has one Code attribute")
+        };
+        assert_eq!(code.max_locals, 5);
+        let allocations = instructions
+            .iter()
+            .filter(|i| i.opcode == 0xbb)
+            .map(|i| {
+                (
+                    i.pc,
+                    batch_class_name(&class, i.operand.unwrap()).to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            allocations
+                .iter()
+                .map(|(_, n)| n.as_str())
+                .collect::<Vec<_>>(),
+            ["example/Counter", "example/Counter", "example/Pair"]
+        );
+        let calls = instructions
+            .iter()
+            .filter(|i| i.opcode == 0xb7)
+            .map(|i| (i.pc, batch_method_ref(&class, i.operand.unwrap())))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|(_, (owner, (name, desc)))| (*owner, *name, *desc))
+                .collect::<Vec<_>>(),
+            [
+                ("example/Counter", "<init>", "(I)V"),
+                ("example/Counter", "<init>", "(I)V"),
+                (
+                    "example/Pair",
+                    "<init>",
+                    "(Lexample/Counter;Lexample/Counter;)V"
+                ),
+            ]
+        );
+        let local_ops = instructions
+            .iter()
+            .filter(|i| matches!(i.opcode, 0x4e | 0x3a | 0x2d | 0x19))
+            .map(|i| {
+                let slot = match i.opcode {
+                    0x4e => 3,
+                    0x3a | 0x19 => factory[code_start + i.pc + 1] as usize,
+                    0x2d => 3,
+                    _ => unreachable!(),
+                };
+                (i.pc, i.opcode, slot)
+            })
+            .collect::<Vec<_>>();
+        let stores = local_ops
+            .iter()
+            .filter(|(_, opcode, _)| matches!(opcode, 0x4e | 0x3a))
+            .map(|(_, _, slot)| *slot)
+            .collect::<Vec<_>>();
+        let loads = local_ops
+            .iter()
+            .filter(|(_, opcode, _)| matches!(opcode, 0x2d | 0x19))
+            .map(|(_, _, slot)| *slot)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            stores,
+            [3, 4],
+            "each initialized Counter has a distinct reference local store"
+        );
+        assert_eq!(
+            loads,
+            match label {
+                "reversed" => vec![4, 3],
+                "alias" => vec![3, 3],
+                _ => vec![3, 4],
+            },
+            "Pair arguments preserve source local identity and order"
+        );
+        let graph = ControlFlowGraph::build(&sequence).expect("two-local method CFG decodes");
+        let analysis = CfgCodeAnalyzer::analyze_with_current_class(
+            &graph,
+            "create",
+            &descriptor,
+            false,
+            &class.constant_pool,
+            class.this_class,
+        )
+        .expect("both reference locals are initialized before use");
+        assert_eq!((analysis.max_stack, analysis.max_locals), (4, 5));
+        eprintln!(
+            "two-local-flow {label}{descriptor} allocations={allocations:?} constructors={calls:?} local_ops={local_ops:?} stack={} locals={}",
+            analysis.max_stack, analysis.max_locals
+        );
+
+        let javap = Command::new("javap")
+            .args(["-v", "-p", "-c", "-classpath"])
+            .arg(&runtime)
+            .arg("example.PairFactory")
+            .output()
+            .expect("disassemble original Rust PairFactory");
+        assert!(
+            javap.status.success(),
+            "javap: {}",
+            String::from_utf8_lossy(&javap.stderr)
+        );
+        let disassembly = String::from_utf8_lossy(&javap.stdout);
+        assert!(disassembly.contains("descriptor: (II)Lexample/Pair;"));
+        assert!(disassembly.contains("stack=4, locals=5"));
+        for (pc, opcode, slot) in &local_ops {
+            if *slot == 4 && matches!(opcode, 0x3a | 0x19) {
+                let mnemonic = if *opcode == 0x3a { "astore" } else { "aload" };
+                assert!(
+                    disassembly.lines().any(|line| {
+                        let fields = line.split_whitespace().collect::<Vec<_>>();
+                        fields.len() >= 3
+                            && fields[0] == format!("{pc}:")
+                            && fields[1] == mnemonic
+                            && fields[2] == "4"
+                    }),
+                    "javap lacks decoded {mnemonic} slot 4 at PC {pc}: {disassembly}"
+                );
+            }
+        }
+        eprintln!("two-local-javap {label}: actual PairFactory.create disassembly inspected");
+
+        let java = Command::new("java")
+            .args(["-Xverify:all", "-ea", "-classpath"])
+            .arg(std::env::join_paths([harness_classes.as_path(), runtime.as_path()]).unwrap())
+            .arg("example.PairFactoryTwoLocalIdentityHarness")
+            .arg(harness_mode)
+            .output()
+            .expect("run unchanged original Rust classes under strict verifier");
+        assert!(
+            java.status.success(),
+            "strict java {label}: {}{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        let expected = format!(
+            "{harness_mode}=identity:true;mutations=isolated;repeat=fresh;seeds=7/3,3/7,-9/42"
+        );
+        assert_eq!(String::from_utf8_lossy(&java.stdout).trim(), expected);
+        if label == "primary" {
+            let run_negative = |case: &str,
+                                pair_factory: Option<&[u8]>,
+                                omit: Option<&str>,
+                                expected: &str| {
+                let root = scratch.path().join(format!("negative-{case}"));
+                for artifact in batch.classes() {
+                    if omit == Some(artifact.classfile_path()) {
+                        continue;
+                    }
+                    let destination = root.join(artifact.classfile_path());
+                    std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+                    let bytes = if artifact.classfile_path() == "example/PairFactory.class" {
+                        pair_factory.unwrap_or(artifact.classfile_bytes())
+                    } else {
+                        artifact.classfile_bytes()
+                    };
+                    std::fs::write(destination, bytes).unwrap();
+                }
+                let output = Command::new("java")
+                    .args(["-Xverify:all", "-ea", "-classpath"])
+                    .arg(std::env::join_paths([harness_classes.as_path(), root.as_path()]).unwrap())
+                    .arg("example.PairFactoryTwoLocalIdentityHarness")
+                    .arg("primary")
+                    .output()
+                    .expect("run isolated two-local bytecode corruption");
+                let text = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(
+                    !output.status.success(),
+                    "negative case {case} unexpectedly passed"
+                );
+                assert!(
+                    text.contains(expected),
+                    "{case} expected first failure {expected:?}: {text}"
+                );
+                assert!(
+                    !text.contains("VerifyError") || expected.contains("VerifyError"),
+                    "misclassified verifier result for {case}: {text}"
+                );
+                eprintln!("two-local-negative {case} first-stage={expected}");
+            };
+            let (_, primary_instructions, _, _, primary_code_start, _) =
+                mixed_factory_code(factory, "create");
+            let load3 = primary_instructions
+                .iter()
+                .find(|i| i.opcode == 0x2d)
+                .unwrap()
+                .pc;
+            let load4 = primary_instructions
+                .iter()
+                .find(|i| i.opcode == 0x19)
+                .unwrap()
+                .pc;
+            let store4 = primary_instructions
+                .iter()
+                .find(|i| i.opcode == 0x3a)
+                .unwrap()
+                .pc;
+            let mut swapped = factory.to_vec();
+            swapped[primary_code_start + load3..primary_code_start + load4 + 2]
+                .copy_from_slice(&[0x19, 4, 0x2d]);
+            run_negative("swapped-pair-loads", Some(&swapped), None, "AssertionError");
+            let swapped_artifacts = JvmTastyBatchArtifacts {
+                classfiles: batch
+                    .classes()
+                    .iter()
+                    .map(|artifact| JvmTastyClassFileArtifact {
+                        classfile_path: artifact.classfile_path().to_owned(),
+                        classfile_bytes: if artifact.classfile_path() == "example/PairFactory.class"
+                        {
+                            swapped.clone()
+                        } else {
+                            artifact.classfile_bytes().to_vec()
+                        },
+                    })
+                    .collect(),
+                sidecars: batch
+                    .classes()
+                    .iter()
+                    .map(|artifact| JvmTastySidecarArtifact {
+                        tasty_path: artifact.tasty_path().to_owned(),
+                        tasty_bytes: artifact.tasty_bytes().to_vec(),
+                    })
+                    .collect(),
+            };
+            with_paired_jvm_tasty_batch_plan(
+                TWO_LOCAL_PRIMARY_BATCH,
+                "PairFactory.scala",
+                SourceId::from_index(21279),
+                |plan| {
+                    let tasty = plan.classes.iter().map(|class| class.tasty_plan).collect::<Vec<_>>();
+                    let validated = validate_jvm_tasty_batch(plan.jvm_unit, &tasty).unwrap();
+                    let error = validate_jvm_tasty_batch_artifacts(&validated, swapped_artifacts)
+                        .expect_err("the genuine paired Rust contract rejects swapped two-local Pair loads");
+                    assert!(matches!(error, JvmTastyContractError::BatchArtifact { phase: "cross-class invocation", .. }), "unexpected first Rust contract error: {error:?}");
+                    eprintln!("two-local-negative swapped-pair-loads first-stage=Rust paired contract: {error:?}");
+                },
+            ).expect("authenticate the same original two-local source session");
+
+            let mut same_local = factory.to_vec();
+            same_local[primary_code_start + load3..primary_code_start + load4 + 2]
+                .copy_from_slice(&[0x2d, 0x2d, 0x00]);
+            run_negative(
+                "same-local-loaded-twice",
+                Some(&same_local),
+                None,
+                "AssertionError",
+            );
+
+            let mut wrong_slot_store = factory.to_vec();
+            wrong_slot_store[primary_code_start + store4 + 1] = 3;
+            run_negative(
+                "second-local-stored-to-slot-three",
+                Some(&wrong_slot_store),
+                None,
+                "VerifyError",
+            );
+            let mut missing_second_store = factory.to_vec();
+            missing_second_store[primary_code_start + store4..primary_code_start + store4 + 2]
+                .copy_from_slice(&[0x00, 0x00]);
+            run_negative(
+                "missing-second-local-store",
+                Some(&missing_second_store),
+                None,
+                "VerifyError",
+            );
+            let second_new = primary_instructions
+                .iter()
+                .filter(|i| i.opcode == 0xbb)
+                .nth(1)
+                .unwrap()
+                .pc;
+            let mut missing_second_new = factory.to_vec();
+            missing_second_new
+                [primary_code_start + second_new..primary_code_start + second_new + 3]
+                .copy_from_slice(&[0x00, 0x00, 0x00]);
+            run_negative(
+                "missing-second-counter-allocation",
+                Some(&missing_second_new),
+                None,
+                "VerifyError",
+            );
+            let second_counter_init = primary_instructions
+                .iter()
+                .filter(|i| {
+                    i.opcode == 0xb7
+                        && batch_method_ref(&class, i.operand.unwrap()).0 == "example/Counter"
+                })
+                .nth(1)
+                .unwrap()
+                .pc;
+            let mut missing_second_init = factory.to_vec();
+            missing_second_init[primary_code_start + second_counter_init
+                ..primary_code_start + second_counter_init + 3]
+                .copy_from_slice(&[0x00, 0x00, 0x00]);
+            run_negative(
+                "missing-second-counter-constructor",
+                Some(&missing_second_init),
+                None,
+                "VerifyError",
+            );
+
+            let mut wrong_pair_owner = factory.to_vec();
+            let pair_init_pc = primary_instructions
+                .iter()
+                .find(|i| {
+                    i.opcode == 0xb7
+                        && batch_method_ref(&class, i.operand.unwrap()).0 == "example/Pair"
+                })
+                .unwrap()
+                .pc;
+            let counter_init_ref = primary_instructions
+                .iter()
+                .find(|i| {
+                    i.opcode == 0xb7
+                        && batch_method_ref(&class, i.operand.unwrap()).0 == "example/Counter"
+                })
+                .unwrap()
+                .operand
+                .unwrap();
+            wrong_pair_owner
+                [primary_code_start + pair_init_pc + 1..primary_code_start + pair_init_pc + 3]
+                .copy_from_slice(&counter_init_ref.0.to_be_bytes());
+            run_negative(
+                "wrong-pair-constructor-reference",
+                Some(&wrong_pair_owner),
+                None,
+                "VerifyError",
+            );
+
+            let mut low_locals = factory.to_vec();
+            low_locals[primary_code_start - 6..primary_code_start - 4]
+                .copy_from_slice(&4u16.to_be_bytes());
+            run_negative("max-locals-too-low", Some(&low_locals), None, "VerifyError");
+            let mut low_stack = factory.to_vec();
+            low_stack[primary_code_start - 8..primary_code_start - 6]
+                .copy_from_slice(&3u16.to_be_bytes());
+            run_negative("max-stack-too-low", Some(&low_stack), None, "VerifyError");
+            for missing in [
+                "example/Counter.class",
+                "example/Pair.class",
+                "example/PairFactory.class",
+            ] {
+                run_negative(
+                    &format!("missing-{}", missing.rsplit('/').next().unwrap()),
+                    None,
+                    Some(missing),
+                    "NoClassDefFoundError",
+                );
+            }
+            let pair_artifact = batch
+                .classes()
+                .iter()
+                .find(|artifact| artifact.classfile_path() == "example/Pair.class")
+                .unwrap();
+            let pair_class =
+                ClassFile::decode(&mut Reader::new(pair_artifact.classfile_bytes())).unwrap();
+            let cp_count = u16::from_be_bytes([
+                pair_artifact.classfile_bytes()[8],
+                pair_artifact.classfile_bytes()[9],
+            ]);
+            let method_name = (1..=cp_count)
+                .map(ConstantPoolIndex)
+                .find(|index| pair_class.constant_pool.utf8(*index).ok() == Some("leftValue"))
+                .expect("Pair has leftValue UTF8 constant");
+            let mut no_such_method = pair_artifact.classfile_bytes().to_vec();
+            let name_offset = constant_pool_entry_offset(&no_such_method, method_name);
+            assert_eq!(no_such_method[name_offset], 1);
+            let name_len = usize::from(u16::from_be_bytes([
+                no_such_method[name_offset + 1],
+                no_such_method[name_offset + 2],
+            ]));
+            assert_eq!(
+                name_len,
+                "missingXX".len(),
+                "replacement keeps the classfile layout stable"
+            );
+            no_such_method[name_offset + 3..name_offset + 3 + name_len]
+                .copy_from_slice(b"missingXX");
+            let root = scratch.path().join("negative-no-such-method");
+            for artifact in batch.classes() {
+                let destination = root.join(artifact.classfile_path());
+                std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+                let bytes = if artifact.classfile_path() == "example/Pair.class" {
+                    &no_such_method
+                } else {
+                    artifact.classfile_bytes()
+                };
+                std::fs::write(destination, bytes).unwrap();
+            }
+            let output = Command::new("java")
+                .args(["-Xverify:all", "-ea", "-classpath"])
+                .arg(std::env::join_paths([harness_classes.as_path(), root.as_path()]).unwrap())
+                .arg("example.PairFactoryTwoLocalIdentityHarness")
+                .arg("primary")
+                .output()
+                .expect("run isolated missing-method classfile control");
+            let linkage = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                !output.status.success(),
+                "missing method unexpectedly linked"
+            );
+            assert!(
+                linkage.contains("NoSuchMethodError"),
+                "expected method-resolution failure: {linkage}"
+            );
+            eprintln!(
+                "two-local-negative missing-leftValue-method first-stage=JVM linkage NoSuchMethodError"
+            );
+        }
+        for (path, relative, before) in &hashes_before {
+            assert_eq!(
+                sha256sum(path),
+                *before,
+                "original {label} {relative} hash changed after javac/runtime"
+            );
+        }
+        eprintln!("two-local-runtime {expected}; six original artifact hashes unchanged");
+    }
 }
 
 #[test]
