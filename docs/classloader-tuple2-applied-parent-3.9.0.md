@@ -39,3 +39,11 @@ classpath-enabled revision. It next returns
 `ExtractorResultMemberUnsupported { ..., issue: NotValueType }`. Consequently,
 the foreign extractor owner/binder assertions are not reached yet. This is a
 checkpoint for #2134, not a claim that its foreign-source behavior is complete.
+
+After canonical `scala.Boolean` loading was added for #2154, the unchanged
+foreign-extractor source was run again through the same Rust source-frontend
+harness and still returns
+`ExtractorResultMemberUnsupported { ..., issue: NotValueType }`. The loader's
+separate regression confirms that external `Option.isEmpty` now resolves its
+result to `Definitions.boolean`; this does not advance the Typer's owner or
+binder assertions, which remain unreached for #2134.
