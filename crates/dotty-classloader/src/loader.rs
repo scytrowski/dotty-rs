@@ -1069,6 +1069,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         if let Err(error) = self.bind_open_primitive("Int", self.definitions.int) {
             return Err((error, None));
         }
+        if let Err(error) = self.bind_open_primitive("Boolean", self.definitions.boolean) {
+            return Err((error, None));
+        }
         let packages = self.session.packages.take_packages();
         let mut unpickler =
             TastyUnpickler::with_packages(file, self.store, self.definitions, packages);
@@ -1911,6 +1914,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         }
         self.bind_open_builtin_unit()?;
         self.bind_open_primitive("Int", self.definitions.int)?;
+        self.bind_open_primitive("Boolean", self.definitions.boolean)?;
         self.bind_open_builtin_symbol("Any", self.definitions.any_class)?;
         self.bind_open_builtin_symbol("Nothing", self.definitions.nothing_class)?;
         self.bind_open_builtin_symbol("Matchable", self.definitions.matchable_class)?;
@@ -3344,11 +3348,13 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             ));
         }
 
-        // Bind only the canonical Unit needed by the constructor result tree
-        // and Int needed by its one supported plain formal. The session
+        // Bind only the canonical Unit needed by the constructor result tree,
+        // Int needed by its one supported plain formal, and Boolean for
+        // external Scala type references. The session
         // checkpoint owns both symbol updates and package-scope entries, so a
         // later failure rolls them back together.
         self.bind_open_builtin_unit()?;
+        self.bind_open_primitive("Boolean", self.definitions.boolean)?;
         if selection.constructor_parameter_address.is_some() {
             self.bind_open_primitive("Int", self.definitions.int)?;
         }
@@ -5014,6 +5020,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 .types
                 .get(self.definitions.int)
                 .reference_symbol(),
+            "scala/Boolean" => self
+                .store
+                .types
+                .get(self.definitions.boolean)
+                .reference_symbol(),
             "scala/Any" => Some(self.definitions.any_class),
             "scala/Matchable" => Some(self.definitions.matchable_class),
             "scala/AnyRef" => Some(self.definitions.object_class),
@@ -6415,6 +6426,21 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         match declared_type {
             Some(tasty_symbol::DecodedTastyType::Named(name)) => {
                 match self.ensure_dependency_identity(owner, name) {
+                    Ok(symbol)
+                        if self
+                            .store
+                            .types
+                            .get(self.definitions.boolean)
+                            .reference_symbol()
+                            == Some(symbol) =>
+                    {
+                        // TASTy names resolve through the same authenticated
+                        // class identity as classfile descriptors. Preserve
+                        // the canonical primitive TypeId when that identity
+                        // is scala.Boolean; same-spelled foreign classes
+                        // continue through the ordinary TypeRef path below.
+                        self.definitions.boolean
+                    }
                     Ok(symbol) => self.type_ref(symbol),
                     Err(error) => {
                         let text = format!(
@@ -12738,6 +12764,15 @@ mod tests {
                 unit_type_ref_target(loader.store, loader.definitions.int).unwrap(),
                 "Int",
             ),
+            (
+                loader
+                    .store
+                    .types
+                    .get(loader.definitions.boolean)
+                    .reference_symbol()
+                    .unwrap(),
+                "Boolean",
+            ),
             (loader.definitions.any_class, "Any"),
             (loader.definitions.nothing_class, "Nothing"),
             (loader.definitions.matchable_class, "Matchable"),
@@ -12823,6 +12858,24 @@ mod tests {
             loader.store.symbols.get(loaded).info,
             SymbolInfo::Complete(_)
         ));
+        let boolean = loader
+            .store
+            .types
+            .get(loader.definitions.boolean)
+            .reference_symbol()
+            .unwrap();
+        assert_eq!(loader.store.symbols.get(boolean).owner, Some(scala));
+        assert!(
+            loader
+                .store
+                .scopes
+                .get(scala_scope)
+                .lookup_all(&Name::new(
+                    loader.store.names.intern("Boolean"),
+                    Namespace::Type
+                ))
+                .contains(&boolean)
+        );
     }
 
     #[test]
@@ -13633,7 +13686,8 @@ mod tests {
     }
 
     #[test]
-    fn scala_compiler_builtin_class_names_reuse_definitions_and_ignore_int_classpath_entry() {
+    fn scala_compiler_builtin_class_names_reuse_definitions_and_ignore_primitive_classpath_entries()
+    {
         let mut classes = HashMap::new();
         classes.insert(
             BinaryName::from_internal("scala/Int"),
@@ -13642,6 +13696,18 @@ mod tests {
         classes.insert(
             BinaryName::from_internal("scala/Matchable"),
             synthetic_class("scala/Matchable", None),
+        );
+        classes.insert(
+            BinaryName::from_internal("scala/Boolean"),
+            synthetic_class("scala/Boolean", None),
+        );
+        classes.insert(
+            BinaryName::from_internal("example/Boolean"),
+            synthetic_class("example/Boolean", None),
+        );
+        classes.insert(
+            BinaryName::from_internal("scala/collection/Boolean"),
+            synthetic_class("scala/collection/Boolean", None),
         );
         let mut store = SemanticStore::new();
         let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
@@ -13655,6 +13721,25 @@ mod tests {
         let operators = definitions
             .int_primitive_operator_symbols(loader.store)
             .unwrap();
+        let boolean_class = loader
+            .store
+            .types
+            .get(definitions.boolean)
+            .reference_symbol()
+            .unwrap();
+        assert_eq!(
+            loader
+                .lower_field_type(
+                    &BinaryName::from_internal("sample/DescriptorOwner"),
+                    &FieldType::Boolean,
+                )
+                .unwrap(),
+            definitions.boolean,
+            "JVM Boolean descriptors use the same canonical type"
+        );
+        let boolean_operators = definitions
+            .boolean_primitive_operator_symbols(loader.store)
+            .unwrap();
 
         let int = loader
             .load_class(&BinaryName::from_internal("scala/Int"))
@@ -13666,6 +13751,64 @@ mod tests {
                 .unwrap(),
             operators
         );
+        let boolean = loader
+            .load_class(&BinaryName::from_internal("scala/Boolean"))
+            .unwrap();
+        assert_eq!(boolean, boolean_class);
+        assert_eq!(
+            loader
+                .load_class(&BinaryName::from_internal("scala/Boolean"))
+                .unwrap(),
+            boolean,
+            "repeated builtin loads preserve symbol identity"
+        );
+        assert_eq!(
+            definitions.boolean_primitive_operator_symbols(loader.store),
+            Some(boolean_operators),
+            "canonical loading preserves Boolean operator identities"
+        );
+        assert_eq!(loader.origin(boolean), None);
+        let foreign_boolean = loader
+            .load_class(&BinaryName::from_internal("example/Boolean"))
+            .unwrap();
+        let nested_boolean = loader
+            .load_class(&BinaryName::from_internal("scala/collection/Boolean"))
+            .unwrap();
+        assert_ne!(foreign_boolean, boolean_class);
+        assert_ne!(nested_boolean, boolean_class);
+        assert_ne!(foreign_boolean, nested_boolean);
+        assert_eq!(
+            loader.lower_tasty_member_type(
+                &BinaryName::from_internal("sample/Owner"),
+                Some(&tasty_symbol::DecodedTastyType::Named(
+                    BinaryName::from_internal("scala/Boolean"),
+                )),
+            ),
+            definitions.boolean,
+            "the authenticated Scala Boolean TASTy reference reuses its canonical TypeId"
+        );
+        let foreign_tasty_boolean = loader.lower_tasty_member_type(
+            &BinaryName::from_internal("sample/Owner"),
+            Some(&tasty_symbol::DecodedTastyType::Named(
+                BinaryName::from_internal("example/Boolean"),
+            )),
+        );
+        let nested_tasty_boolean = loader.lower_tasty_member_type(
+            &BinaryName::from_internal("sample/Owner"),
+            Some(&tasty_symbol::DecodedTastyType::Named(
+                BinaryName::from_internal("scala/collection/Boolean"),
+            )),
+        );
+        assert_eq!(
+            parent_symbol(loader.store, foreign_tasty_boolean),
+            foreign_boolean
+        );
+        assert_eq!(
+            parent_symbol(loader.store, nested_tasty_boolean),
+            nested_boolean
+        );
+        assert_ne!(foreign_tasty_boolean, definitions.boolean);
+        assert_ne!(nested_tasty_boolean, definitions.boolean);
         assert_eq!(
             loader
                 .load_class(&BinaryName::from_internal("scala/AnyRef"))

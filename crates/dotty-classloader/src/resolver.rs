@@ -1478,6 +1478,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
 
         match store.names.resolve(member.text()) {
             "Int" => store.types.get(self.definitions.int).reference_symbol(),
+            "Boolean" => store.types.get(self.definitions.boolean).reference_symbol(),
             "Any" => Some(self.definitions.any_class),
             "Matchable" => Some(self.definitions.matchable_class),
             "AnyRef" => Some(self.definitions.object_class),
@@ -1495,7 +1496,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         package_path_of_symbol(store, package).is_some_and(|path| path.as_slice() == ["scala"])
             && matches!(
                 store.names.resolve(member.text()),
-                "Int" | "Any" | "Matchable" | "AnyRef" | "Nothing"
+                "Int" | "Boolean" | "Any" | "Matchable" | "AnyRef" | "Nothing"
             )
     }
 
@@ -7954,12 +7955,37 @@ mod tests {
             .scopes
             .get_mut(scala_scope)
             .enter(any_ref_name, noncanonical_any_ref);
+        let boolean_name = Name::new(store.names.intern("Boolean"), Namespace::Type);
+        let noncanonical_boolean = store.symbols.alloc(Symbol {
+            name: boolean_name,
+            owner: Some(scala),
+            kind: SymbolKind::Class,
+            flags: dotty_core::SymbolFlags::EMPTY,
+            visibility: dotty_core::Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: dotty_core::SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: dotty_core::SymbolLinks::default(),
+        });
+        store
+            .scopes
+            .get_mut(scala_scope)
+            .enter(boolean_name, noncanonical_boolean);
 
         for (name, expected) in [
             ("Any", definitions.any_class),
             ("Matchable", definitions.matchable_class),
             ("AnyRef", definitions.object_class),
             ("Nothing", definitions.nothing_class),
+            (
+                "Boolean",
+                store
+                    .types
+                    .get(definitions.boolean)
+                    .reference_symbol()
+                    .unwrap(),
+            ),
         ] {
             let name = Name::new(store.names.intern(name), Namespace::Type);
             let resolved = resolver
@@ -7998,6 +8024,28 @@ mod tests {
             "compiler-only aliases never reach classpath I/O"
         );
 
+        let scala_boolean = Name::new(store.names.intern("Boolean"), Namespace::Type);
+        let boolean_symbol = store
+            .types
+            .get(definitions.boolean)
+            .reference_symbol()
+            .unwrap();
+        assert_eq!(
+            resolver
+                .resolve_member(
+                    &mut store,
+                    &MemberRequest {
+                        prefix: scala_prefix,
+                        name: scala_boolean,
+                        selector: MemberSelector::Unique,
+                        space: MemberSpace::Prefix,
+                    },
+                )
+                .unwrap(),
+            Some(boolean_symbol)
+        );
+        assert_eq!(probes.load(Ordering::Relaxed), 0);
+
         let other = resolver
             .session
             .packages
@@ -8026,6 +8074,28 @@ mod tests {
             "alias ownership is exactly scala.AnyRef"
         );
 
+        let scala_foreign = resolver
+            .session
+            .packages
+            .resolve_package(&mut store, "scala.collection");
+        let scala_foreign_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, scala_foreign));
+        assert!(
+            resolver
+                .resolve_member(
+                    &mut store,
+                    &MemberRequest {
+                        prefix: scala_foreign_prefix,
+                        name: scala_boolean,
+                        selector: MemberSelector::Unique,
+                        space: MemberSpace::Prefix,
+                    },
+                )
+                .unwrap()
+                .is_none()
+        );
+
         let any_ref_term = Name::new(store.names.intern("AnyRef"), Namespace::Term);
         assert!(
             resolver
@@ -8043,8 +8113,8 @@ mod tests {
         );
         assert_eq!(
             probes.load(Ordering::Relaxed),
-            1,
-            "aliases occupy only the type namespace"
+            2,
+            "foreign and nested names probe normally; aliases occupy only the type namespace"
         );
     }
 

@@ -859,12 +859,13 @@ fn assert_live_report_matches_frozen_with_selected_option_member_delta(
         .collect::<Vec<_>>();
     assert_eq!(
         changed.len(),
-        19,
-        "the selected Option member, newly loadable Some class, and newly loadable Tuple2 rows are the only changes"
+        20,
+        "the selected Option member, canonical Boolean identity, newly loadable Some class, and newly loadable Tuple2 rows are the only changes"
     );
 
     let mut some_fields = HashSet::new();
     let mut option_member_delta = None;
+    let mut boolean_identity_delta = false;
     for (current, frozen) in changed {
         match (current[0].as_str(), current[1].as_str()) {
             ("tuple2", field) => {
@@ -901,6 +902,15 @@ fn assert_live_report_matches_frozen_with_selected_option_member_delta(
                 assert_eq!(current[2], outcome, "Tuple2 {field} outcome");
                 assert_eq!(current[3], value, "Tuple2 {field} value");
                 assert_eq!(current[10], "not-comparable", "Tuple2 {field} comparison");
+            }
+            ("with-filter", "member_signatures") => {
+                boolean_identity_delta = true;
+                assert_eq!(current[2], frozen[2]);
+                assert_eq!(
+                    current[3],
+                    frozen[3].replace("scala.Boolean", "Boolean"),
+                    "canonical Boolean references normalize to the shared builtin identity"
+                );
             }
             ("some", field) => {
                 some_fields.insert(field);
@@ -982,6 +992,10 @@ fn assert_live_report_matches_frozen_with_selected_option_member_delta(
         ]),
         "the alias change should expose exactly the nine Some fields"
     );
+    assert!(
+        boolean_identity_delta,
+        "the Boolean alias delta is observed"
+    );
 
     let (current, frozen) = option_member_delta.expect("the existing Option member delta");
     assert_eq!(
@@ -1005,7 +1019,8 @@ fn assert_live_report_matches_frozen_with_selected_option_member_delta(
     assert!(current[3].contains(
         "getOrElse:Method:public:[B:None:bounds(scala.Option.A,Any)]=>(by-name(ParamRef[0]))Plain:ParamRef[0]"
     ));
-    let current_members = current[3].split(';').collect::<Vec<_>>();
+    let normalized_current_members = current[3].replace("Boolean", "scala.Boolean");
+    let current_members = normalized_current_members.split(';').collect::<Vec<_>>();
     let frozen_members = frozen[3].split(';').collect::<Vec<_>>();
     assert_eq!(current_members.len(), frozen_members.len());
     let changed_members = current_members

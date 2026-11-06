@@ -15,6 +15,10 @@ use dotty_namer::name_compilation_unit;
 
 const SOURCE: &str = include_str!("fixtures/source-binary-recursive-adt-3.9.0/Expr.scala");
 const NESTED_SOURCE: &str = include_str!("fixtures/source-nested-recursive-adt-3.9.0/Expr.scala");
+// This receipt includes arena IDs: canonical scala.Boolean TASTy lowering now
+// reuses Definitions.boolean instead of allocating an equivalent TypeRef, so
+// later diagnostic TypeIds are two slots earlier while rejection behavior is
+// unchanged.
 const STRUCTURAL_CONTROL_RECEIPTS: &str =
     include_str!("fixtures/source-binary-recursive-adt-3.9.0/rust-structural-controls.tsv");
 

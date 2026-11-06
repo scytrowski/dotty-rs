@@ -388,6 +388,15 @@ term namespace, and a `Unique` request with multiple declarations returns
 inherited lookup, receiver adaptation, and overload ranking stay with the
 caller. Unsupported prefix forms return `None`.
 
+The exact root `scala` type aliases for compiler builtins (`Int`, `Boolean`,
+`Any`, `Matchable`, `AnyRef`, and `Nothing`) resolve to their session-owned
+`Definitions` symbols before classpath lookup. External Scala TASTy references
+to `scala.Boolean`, including `Option.isEmpty`'s result, therefore reuse
+`Definitions.boolean`; a same-spelled type under another or nested package is
+not an alias. Semantic TASTy projection transactions that bind open builtins
+include Boolean in their existing owner/package journal, so failure restores
+the builtin's prior ownership and scope state.
+
 A unique type-name request whose prefix is a package `TypeRef` derives the
 binary class name from the canonical package owner chain and asks the loader
 to materialize that class. Success returns the class's canonical symbol only
@@ -649,8 +658,9 @@ evidence retain their contracts.
 
 `ClassLoader::load_class(name)` follows that shape:
 
-1. Resolve `scala.Any`, `scala.AnyRef`, and `scala.Nothing` to their
-   canonical `Definitions` identities before classpath lookup. Otherwise,
+1. Resolve compiler builtin class names such as `scala.Boolean`, `scala.Any`,
+   `scala.AnyRef`, and `scala.Nothing` to their canonical `Definitions`
+   identities before classpath lookup. Otherwise,
    check the repository: `Loaded` -> return the cached symbol; `Failed`
    -> return the cached error. On `Loading`, consult the explicit current
    superclass/interface ancestry: a name already on that ancestry is a
