@@ -228,6 +228,76 @@ fn nested_sum_bounded_invalid_roots_fail_without_partial_mappings() {
 }
 
 #[test]
+fn nested_sum_rejects_a_sibling_case_binder_escape_then_types_original_sum() {
+    let sum_start = NESTED_SOURCE
+        .find("  def sum(")
+        .expect("original sum declaration");
+    let sum_method = &NESTED_SOURCE[sum_start..];
+    let escaped_method = sum_method
+        .replace("def sum(", "def badSum(")
+        .replace("sum(left) + sum(right)", "sum(left) + value");
+    assert_ne!(escaped_method, sum_method);
+    let source_text = format!(
+        "{}{escaped_method}\n{sum_method}",
+        &NESTED_SOURCE[..sum_start]
+    );
+
+    let source = SourceId::from_index(21328);
+    let mut session = BinarySession::new_with_source(source, &source_text);
+    session.with_typer(|ast, _index, typer, _definitions| {
+        let invalid_root = find_method_tree(ast, typer.store(), "badSum");
+        let invalid_range = ast.get(invalid_root).position.unwrap().span().range();
+        let before_store = typer.store().checkpoint();
+        let before_contents = store_content_projection(typer.store());
+        let before_typed = typer.typed_ast().checkpoint();
+        let error = typer
+            .type_method_definition(invalid_root)
+            .expect_err("a binder from another match case is out of scope");
+        let dotty_typer::TyperError::TermNameNotFound { name, position, .. } = error else {
+            panic!("an escaped sum binder reports an unresolved name: {error:?}");
+        };
+        assert_eq!(typer.store().names.resolve(name.text()), "value");
+        assert!(
+            position.is_some(),
+            "the unresolved sibling binder has a source span"
+        );
+        assert_eq!(typer.store().checkpoint(), before_store);
+        assert_store_content_projection(
+            &before_contents,
+            &store_content_projection(typer.store()),
+            0,
+        );
+        assert_eq!(typer.typed_ast().checkpoint(), before_typed);
+        assert!(
+            typer
+                .source_typed_index()
+                .get(source, invalid_root)
+                .is_none()
+        );
+        for (tree, _node) in ast.iter().filter(|(_, node)| {
+            node.position.is_some_and(|position| {
+                let range = position.span().range();
+                range.start() >= invalid_range.start() && range.end() <= invalid_range.end()
+            })
+        }) {
+            assert!(
+                typer.source_typed_index().get(source, tree).is_none(),
+                "escaped sum binder leaves no partial mapping for {tree:?}"
+            );
+        }
+
+        let valid_root = find_method_tree(ast, typer.store(), "sum");
+        let typed = typer
+            .type_method_definition(valid_root)
+            .expect("the unchanged original sum types after same-session rollback");
+        assert_eq!(
+            typer.source_typed_index().get(source, valid_root),
+            Some(typed)
+        );
+    });
+}
+
+#[test]
 fn nested_sum_wrong_num_extractor_owner_rolls_back_and_retries() {
     let source = SourceId::from_index(21327);
     let mut session = BinarySession::new_with_source(source, NESTED_SOURCE);
@@ -4009,9 +4079,26 @@ fn assert_nested_typed_shapes(
         .source_typed_index()
         .get(source, sum_source.rhs.unwrap())
         .unwrap();
+    assert_eq!(
+        typer
+            .source_typed_index()
+            .get(source, sum_source.rhs.unwrap()),
+        Some(sum_typed_match_tree),
+        "the source DefDef RHS maps to the complete typed Match"
+    );
     let TreeKind::Match(sum_typed_match) = &typer.typed_ast().get(sum_typed_match_tree).kind else {
         panic!("sum's complete typed RHS remains a Match")
     };
+    let TreeKind::DefDef(sum_typed_method) = &typer.typed_ast().get(sum_typed_root).kind else {
+        unreachable!()
+    };
+    let sum_typed_rhs = sum_typed_method.rhs;
+    let sum_typed_result_type_tree = sum_typed_method.tpt;
+    assert_eq!(
+        sum_typed_rhs,
+        Some(sum_typed_match_tree),
+        "the complete typed DefDef points to the source-mapped Match"
+    );
     assert_eq!(sum_typed_match.cases.len(), 3);
     let sum_typed_cases = sum_typed_match.cases.clone();
     let mut recursive_calls = Vec::new();
@@ -4029,6 +4116,23 @@ fn assert_nested_typed_shapes(
         else {
             unreachable!()
         };
+        assert_eq!(
+            typer.source_typed_index().get(source, source_case),
+            Some(sum_typed_cases[case_index]),
+            "the source CaseDef maps to its ordered typed case"
+        );
+        assert_eq!(
+            typed_case_node.pattern,
+            typer
+                .source_typed_index()
+                .get(source, source_case_node.pattern)
+                .expect("source case pattern is mapped")
+        );
+        let typed_case_body = typer
+            .source_typed_index()
+            .get(source, source_case_node.body)
+            .expect("source case body is mapped");
+        assert_eq!(typed_case_node.body, typed_case_body);
         assert_pattern_projection(
             source,
             ast,
@@ -4058,11 +4162,18 @@ fn assert_nested_typed_shapes(
         let TreeKind::Block(source_body) = &ast.get(source_case_node.body).kind else {
             panic!("sum case body is a source block")
         };
+        let TreeKind::Block(typed_body) = &typer.typed_ast().get(typed_case_body).kind else {
+            panic!("typed sum case keeps the source block edge")
+        };
         let source_return = source_body.expr;
         let typed_source_return = typer
             .source_typed_index()
             .get(source, source_return)
             .expect("each original sum branch result is mapped");
+        assert_eq!(
+            typed_body.expr, typed_source_return,
+            "typed Block expression points to the mapped source branch result"
+        );
         if case_index == 0 {
             let value_binder = case_binders["value"];
             assert_term_ref(
@@ -4225,6 +4336,11 @@ fn assert_nested_typed_shapes(
         "the original method has two Int additions"
     );
     for addition in &additions {
+        let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::InfixOp(source_addition)) =
+            &ast.get(*addition).kind
+        else {
+            unreachable!()
+        };
         let typed_addition = typer
             .source_typed_index()
             .get(source, *addition)
@@ -4236,12 +4352,25 @@ fn assert_nested_typed_shapes(
         let TreeKind::Select(plus) = &typer.typed_ast().get(application.function).kind else {
             panic!("Int + is resolved through its selected method")
         };
+        let typed_left = typer
+            .source_typed_index()
+            .get(source, source_addition.left)
+            .expect("original addition left operand has a typed mapping");
+        let typed_right = typer
+            .source_typed_index()
+            .get(source, source_addition.right)
+            .expect("original addition right operand has a typed mapping");
+        assert_eq!(
+            plus.qualifier, typed_left,
+            "typed + receiver is exactly the mapped source left operand"
+        );
+        assert_eq!(
+            application.args[0], typed_right,
+            "typed + argument is exactly the mapped source right operand"
+        );
         assert_eq!(typer.store().names.resolve(plus.name.text()), "+");
         assert_value_type_ref(typer.store(), typer.typed_ast().get(plus.qualifier).ty, int);
-        if let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::InfixOp(source_addition)) =
-            &ast.get(*addition).kind
-            && let TreeKind::Ident(source_left) = &ast.get(source_addition.left).kind
-        {
+        if let TreeKind::Ident(source_left) = &ast.get(source_addition.left).kind {
             let source_case_index = sum_match
                 .cases
                 .iter()
@@ -4272,14 +4401,11 @@ fn assert_nested_typed_shapes(
         );
         assert_type_ref(typer.store(), typer.typed_ast().get(typed_addition).ty, int);
     }
-    let TreeKind::DefDef(sum_typed_method) = &typer.typed_ast().get(sum_typed_root).kind else {
-        unreachable!()
-    };
     let typed_sum_result = typer
         .source_typed_index()
         .get(source, sum_source.tpt)
         .unwrap();
-    assert_eq!(sum_typed_method.tpt, typed_sum_result);
+    assert_eq!(sum_typed_result_type_tree, typed_sum_result);
     assert_type_ref(
         typer.store(),
         typer.typed_ast().get(typed_sum_result).ty,

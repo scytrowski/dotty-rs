@@ -21,6 +21,13 @@ order, all resolve to the same canonical method, and all return `Int`. Both
 `Int + Int` trees, each branch, the complete match, and the method have an
 `Int` result. Same-session retyping reuses the same typed root.
 
+The typed graph preserves the enclosing edges as well: the `DefDef` RHS points
+to its mapped `Match`, each ordered typed `CaseDef` points to the mapped
+pattern and block, and each typed block expression points to the mapped source
+result. For both additions, the typed selected `+` receiver and argument are
+exactly the mapped source left and right operands. This ties the recursive
+calls in the receipt to the operands that actually feed the method result.
+
 The normalized receipt is
 [`rust-sum-complete.tsv`](../crates/dotty-typer/tests/fixtures/source-nested-recursive-adt-3.9.0/rust-sum-complete.tsv).
 The focused regression compares it across fresh sessions and pins original
@@ -28,23 +35,28 @@ spans without depending on allocated arena IDs. A separate positive control
 declares `sum` before `peelLeft` and confirms the original sum root still
 types, including its three canonical recursive calls.
 
-Bounded negative controls use the original root and require failure without
-partial typed trees or source mappings:
+Bounded invalid-`sum` controls require failure without partial typed trees or
+source mappings. The scope control uses a malformed sibling copy of the same
+three-case body, leaving the immutable acceptance root available for its
+same-session retry:
 
 | Control | Rust typer diagnostic |
 | --- | --- |
 | Invalid recursive argument | `ApplicationArgumentTypeMismatch` |
 | Recursive call arity mismatch | `ApplicationArityMismatch` |
+| Sibling case binder escapes into the third `sum` case | `TermNameNotFound` |
 | Wrong nested `Num.unapply` owner | `SymbolSourceKindMismatch` |
 | Incompatible method result | `OverloadApplicationNoApplicable` |
 
 The successful root proof also checks pairwise distinct binder symbols,
 including the two separately spelled `right` binders, so an alias regression
-fails directly. The corrupted nested-owner control restores the canonical
-owner and successfully retries in the same session. No production Typer,
-Namer, or core change was needed; the prior baseline already completed this
-root, while this increment makes the coupled identity and failure evidence
-explicit.
+fails directly. The escaped-binder control types a malformed sibling method
+through its first recursive call, checks full rollback, then successfully
+types the unchanged original `sum` in the same session. The corrupted
+nested-owner control restores the canonical owner and also retries in the same
+session. No production Typer, Namer, or core change was needed; the prior
+baseline already completed this root, while this increment makes the coupled
+identity and failure evidence explicit.
 
 Reproduce the focused evidence with:
 
