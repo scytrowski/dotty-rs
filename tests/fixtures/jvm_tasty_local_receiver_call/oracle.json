@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "purpose": "Official Scala 3.9.0/JDK 21 oracle artifacts for the unchanged issue #2164 target; these are Scala output, not Rust output.",
+  "baseline_commit": "3fba164caaa5efac5994cee6d7c1e865dd1d767a",
+  "source": {
+    "path": "LocalReceiverCall.scala",
+    "sha256": "d00efdafda78682532599fbd9017a2037d1579241fa388c744f8f58d13b42eb8"
+  },
+  "scala": {
+    "version": "3.9.0",
+    "source_revision": "777528f19a58e794c9954a42f433373472ec57f8",
+    "source_checkout_verified": true,
+    "compiler_entry_point": "dotty.tools.dotc.Main",
+    "compiler_artifact": "org.scala-lang:scala3-compiler_3:3.9.0",
+    "compiler_jar_sha256": "3e2c09a5ca6cef17a55f2f66e123815f9c4ea061fce20d0e9d2371989405a61a",
+    "runtime_jars": {
+      "scala3-library_3-3.9.0.jar": "9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba",
+      "scala-library-3.9.0.jar": "b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd"
+    },
+    "compile_flags": [
+      "-Werror",
+      "-release",
+      "21"
+    ],
+    "compiler_built_from_revision": "not locally built; the official published 3.9.0 compiler artifact was used after the checkout-pinned sbt bootstrap could not download sbt 1.12.1 under restricted network access"
+  },
+  "jdk": {
+    "vendor": "Eclipse Temurin",
+    "version": "21.0.8+9",
+    "release": 21,
+    "classfile_major": 65,
+    "java_sha256": "90d0a6d25da103678013f193db078b90ed8aeb27b66ebe78e0149616c9c1b811",
+    "javac_sha256": "b8c1509bfd245eaf891fcf453c02871ce7e794263e8f3af7655082ffc68281b2",
+    "javap_sha256": "a6f2fb0e2bb72b6233f245deab5083f05542972363420a0a2d1206e86026c008"
+  },
+  "artifacts": [
+    {
+      "path": "scala39/primary/example/Counter.class",
+      "sha256": "472a4b07c024d1622a5f972f548eff3b9430c62f6dfa8eac52c4603898b162e9",
+      "size": 653,
+      "classfile_major": 65,
+      "tasty_link_hex": "00b01935fb30d8e800c83de48bd7ab1b"
+    },
+    {
+      "path": "scala39/primary/example/Counter.tasty",
+      "sha256": "bc36ffe8e93ce446727422d770037161e9ca98adb4a9976e6150c3c1fceee3ad",
+      "size": 573,
+      "tasty_version": "28.9.0",
+      "uuid": "00b01935-fb30-d8e8-00c8-3de48bd7ab1b"
+    },
+    {
+      "path": "scala39/primary/example/Pair.class",
+      "sha256": "7362697a75894f1cac4b96a9d1b2e1d722e04b8e61c24285371e7b8a5b60befa",
+      "size": 777,
+      "classfile_major": 65,
+      "tasty_link_hex": "00e0dbf44c41d5d3008a7e06d2d6c15b"
+    },
+    {
+      "path": "scala39/primary/example/Pair.tasty",
+      "sha256": "68a2b79d22ff5b9680927bd4b3d158062b65bc4a0cb114116184caaaaecdaf62",
+      "size": 673,
+      "tasty_version": "28.9.0",
+      "uuid": "00e0dbf4-4c41-d5d3-008a-7e06d2d6c15b"
+    },
+    {
+      "path": "scala39/primary/example/PairFactory.class",
+      "sha256": "eab5ba739f3b40155fc21e7cdc02b84d26995ae1bb652df72c352b23fb5a3c3a",
+      "size": 790,
+      "classfile_major": 65,
+      "tasty_link_hex": "008f4a0898cc89d6009eebb878a57c25"
+    },
+    {
+      "path": "scala39/primary/example/PairFactory.tasty",
+      "sha256": "2d2669e2e57e17c33e6256a6c42f1d6d2192b54dcc1d1259a5e241f7cfcdbe02",
+      "size": 695,
+      "tasty_version": "28.9.0",
+      "uuid": "008f4a08-98cc-89d6-009e-ebb878a57c25"
+    }
+  ],
+  "pair_factory_create": {
+    "descriptor": "(II)Lexample/Pair;",
+    "max_stack": 4,
+    "max_locals": 5,
+    "tasty_block_address": 57,
+    "tasty_block_stats": [
+      "VALDEF@75",
+      "VALDEF@98",
+      "APPLY@119"
+    ],
+    "tasty_result": "APPLY@59",
+    "selected_call": "SELECTin set[Signed Signature(List(scala.Int),scala.Unit) @set]",
+    "invocations": [
+      "Counter.<init>(I)V",
+      "Counter.<init>(I)V",
+      "Counter.set(I)V",
+      "Pair.<init>(Counter,Counter)V"
+    ],
+    "java_runtime_probe": "3/3 for seeds 7/3 under java -Xverify:all"
+  },
+  "scala_controls": {
+    "no-call": "accepted",
+    "wrong-arity": "rejected [E171]",
+    "wrong-type-Boolean": "rejected [E007]",
+    "receiver-second": "accepted",
+    "reversed-local-order": "accepted",
+    "second-call": "accepted"
+  }
+}

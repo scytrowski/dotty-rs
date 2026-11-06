@@ -1,0 +1,171 @@
+--------------------------------------------------------------------------------
+<oracle>/primary/example/PairFactory.tasty
+--------------------------------------------------------------------------------
+Header:
+  version: 28.9.0
+  tooling: Scala 3.9.0
+     UUID: 008f4a08-98cc-89d6-009e-ebb878a57c25
+
+Names (352 bytes, starting from 35):
+     0: ASTs
+     1: example
+     2: PairFactory
+     3: <init>
+     4: java
+     5: lang
+     6: java[Qualified . lang]
+     7: Object
+     8: java[Qualified . lang][Qualified . Object]
+     9: <init>[Signed Signature(List(),java.lang.Object) @<init>]
+    10: Unit
+    11: scala
+    12: create
+    13: firstSeed
+    14: Int
+    15: secondSeed
+    16: Pair
+    17: example[Qualified . Pair]
+    18: Counter
+    19: example[Qualified . Counter]
+    20: <init>[Signed Signature(List(example.Counter, example.Counter),example.Pair) @<init>]
+    21: first
+    22: scala[Qualified . Int]
+    23: <init>[Signed Signature(List(scala.Int),example.Counter) @<init>]
+    24: second
+    25: set
+    26: scala[Qualified . Unit]
+    27: set[Signed Signature(List(scala.Int),scala.Unit) @set]
+    28: SourceFile
+    29: annotation
+    30: scala[Qualified . annotation]
+    31: internal
+    32: scala[Qualified . annotation][Qualified . internal]
+    33: scala[Qualified . annotation][Qualified . internal][Qualified . SourceFile]
+    34: String
+    35: java[Qualified . lang][Qualified . String]
+    36: <init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]
+    37: tests/fixtures/jvm_tasty_local_receiver_call/LocalReceiverCall.scala
+    38: Positions
+    39: Comments
+    40: Attributes
+
+Trees (150 bytes, starting from 390):
+     0: PACKAGE(147)
+     3:   TERMREFpkg 1 [example]
+     5:   TYPEDEF(142) 2 [PairFactory]
+     9:     TEMPLATE(119)
+    11:       APPLY(10)
+    13:         SELECTin(8) 9 [<init>[Signed Signature(List(),java.lang.Object) @<init>]]
+    16:           NEW
+    17:             TYPEREF 7 [Object]
+    19:               TERMREFpkg 6 [java[Qualified . lang]]
+    21:           SHAREDtype 17
+    23:       DEFDEF(7) 3 [<init>]
+    26:         EMPTYCLAUSE
+    27:         TYPEREF 10 [Unit]
+    29:           TERMREFpkg 11 [scala]
+    31:         STABLE
+    32:       DEFDEF(96) 12 [create]
+    35:         PARAM(7) 13 [firstSeed]
+    38:           IDENTtpt 14 [Int]
+    40:             TYPEREF 14 [Int]
+    42:               TERMREFpkg 11 [scala]
+    44:         PARAM(5) 15 [secondSeed]
+    47:           IDENTtpt 14 [Int]
+    49:             SHAREDtype 40
+    51:         IDENTtpt 16 [Pair]
+    53:           TYPEREF 16 [Pair]
+    55:             TERMREFpkg 1 [example]
+    57:         BLOCK(71)
+    59:           APPLY(14)
+    61:             SELECTin(8) 20 [<init>[Signed Signature(List(example.Counter, example.Counter),example.Pair) @<init>]]
+    64:               NEW
+    65:                 IDENTtpt 16 [Pair]
+    67:                   SHAREDtype 53
+    69:               SHAREDtype 53
+    71:             TERMREFdirect 75
+    73:             TERMREFdirect 98
+    75:           VALDEF(21) 21 [first]
+    78:             IDENTtpt 18 [Counter]
+    80:               TYPEREF 18 [Counter]
+    82:                 SHAREDtype 55
+    84:             APPLY(12)
+    86:               SELECTin(8) 23 [<init>[Signed Signature(List(scala.Int),example.Counter) @<init>]]
+    89:                 NEW
+    90:                   IDENTtpt 18 [Counter]
+    92:                     SHAREDtype 80
+    94:                 SHAREDtype 80
+    96:               TERMREFdirect 35
+    98:           VALDEF(19) 24 [second]
+   101:             IDENTtpt 18 [Counter]
+   103:               SHAREDtype 80
+   105:             APPLY(12)
+   107:               SELECTin(8) 23 [<init>[Signed Signature(List(scala.Int),example.Counter) @<init>]]
+   110:                 NEW
+   111:                   IDENTtpt 18 [Counter]
+   113:                     SHAREDtype 80
+   115:                 SHAREDtype 80
+   117:               TERMREFdirect 44
+   119:           APPLY(9)
+   121:             SELECTin(5) 27 [set[Signed Signature(List(scala.Int),scala.Unit) @set]]
+   124:               SHAREDtype 71
+   126:               SHAREDtype 80
+   128:             SHAREDtype 117
+   130:     ANNOTATION(18)
+   132:       TYPEREF 28 [SourceFile]
+   134:         TERMREFpkg 32 [scala[Qualified . annotation][Qualified . internal]]
+   136:       APPLY(12)
+   138:         SELECTin(8) 36 [<init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]]
+   141:           NEW
+   142:             SHAREDtype 132
+   145:           SHAREDtype 132
+   148:         STRINGconst 37 [tests/fixtures/jvm_tasty_local_receiver_call/LocalReceiverCall.scala]
+   150:
+
+Positions (146 bytes, starting from 543):
+  lines: 20
+  line sizes:
+     15, 0, 26, 34, 26, 45, 0, 44, 35, 37, 35, 37, 0, 18, 53, 47, 49, 25, 27, 0
+  positions:
+     0: 0 .. 571
+     5: 347 .. 571
+     9: 368 .. 571
+    17: 353 .. 353
+    23: 368 .. 368
+    27: 368 .. 368
+    32: 368 .. 571
+    35: 379 .. 393
+    38: 390 .. 393
+    44: 395 .. 410
+    47: 407 .. 410
+    51: 413 .. 417
+    59: 548 .. 571
+    65: 552 .. 556
+    71: 557 .. 562
+    73: 564 .. 570
+    75: 424 .. 467
+    78: 435 .. 442
+    84: 445 .. 467
+    90: 449 .. 456
+    96: 457 .. 466
+    98: 472 .. 517
+   101: 484 .. 491
+   105: 494 .. 517
+   111: 498 .. 505
+   117: 506 .. 516
+   119: 522 .. 543
+   121: 522 .. 531
+   124: 522 .. 527
+   128: 532 .. 542
+   136: 347 .. 571
+   142: 347 .. 347
+   148: 347 .. 347
+
+  source paths:
+     0: 37 [tests/fixtures/jvm_tasty_local_receiver_call/LocalReceiverCall.scala]
+
+Attributes (2 bytes, starting from 693):
+  SOURCEFILEattr 37 [tests/fixtures/jvm_tasty_local_receiver_call/LocalReceiverCall.scala]
+
+
+--------------------------------------------------------------------------------
