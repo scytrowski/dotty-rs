@@ -62,8 +62,19 @@ fn nested_recursive_adt_original_roots_are_attempted_in_two_fresh_sessions() {
         source_a, source_b,
         "fresh sessions use disjoint source identities"
     );
-    let first = nested_roots(source_a, "session-a");
-    let second = nested_roots(source_b, "session-b");
+    // Keep both independently bootstrapped sessions alive together so their
+    // source, store, arena, ownership and resolver witnesses cannot alias.
+    let mut first_session = BinarySession::new_with_source(source_a, NESTED_SOURCE);
+    let mut second_session = BinarySession::new_with_source(source_b, NESTED_SOURCE);
+    let first = nested_roots_in_session(&mut first_session, "session-a");
+    let second = nested_roots_in_session(&mut second_session, "session-b");
+    let first_witness = first.session.as_ref().expect("session A witness");
+    let second_witness = second.session.as_ref().expect("session B witness");
+    assert_ne!(first_witness.nonce, second_witness.nonce);
+    assert_ne!(first_witness.source, second_witness.source);
+    assert_ne!(first_witness.store, second_witness.store);
+    assert_ne!(first_witness.arena, second_witness.arena);
+    assert_ne!(first_witness.resolver_nonce, second_witness.resolver_nonce);
     assert_eq!(first.normalized, second.normalized);
     assert_eq!(
         first.semantic_receipt, second.semantic_receipt,
@@ -105,6 +116,39 @@ fn nested_recursive_adt_original_roots_are_attempted_in_two_fresh_sessions() {
             .expect("nested two-root receipt header")
             .1
     );
+    let positive_rows = first
+        .positive_rows
+        .iter()
+        .chain(second.positive_rows.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        positive_rows.len(),
+        4,
+        "exactly two original roots per session"
+    );
+    let normalized_proofs = positive_rows
+        .iter()
+        .map(|row| row.splitn(12, '\t').nth(11).expect("normalized proof"))
+        .collect::<Vec<_>>();
+    assert_eq!(normalized_proofs[0], normalized_proofs[2]);
+    assert_eq!(normalized_proofs[1], normalized_proofs[3]);
+    let tested_sha = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("git is available for the execution-bound receipt")
+        .stdout;
+    let tested_sha = String::from_utf8(tested_sha).expect("git SHA is UTF-8");
+    let tested_sha = tested_sha.trim();
+    assert!(
+        tested_sha.len() == 40 && tested_sha.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "the receipt binds to the exact tested checkout"
+    );
+    println!("ISSUE2137_TESTED_SHA\t{tested_sha}");
+    println!("ISSUE2137_EXECUTED_TESTS\t1");
+    for row in positive_rows {
+        println!("ISSUE2137_POSITIVE\t{row}");
+    }
     for row in receipt {
         println!("ISSUE2132_NESTED_ROOT\t{row}");
     }
@@ -3341,6 +3385,16 @@ struct RootReceipt {
     roots: Vec<String>,
     normalized: Vec<String>,
     semantic_receipt: String,
+    session: Option<NestedSessionWitness>,
+    positive_rows: Vec<String>,
+}
+
+struct NestedSessionWitness {
+    nonce: String,
+    source: SourceId,
+    store: usize,
+    arena: usize,
+    resolver_nonce: String,
 }
 
 fn setup(
@@ -3439,6 +3493,43 @@ impl BinarySession {
         )
         .with_resolver(Box::new(resolver));
         f(&self.ast, &self.index, &mut typer, definitions)
+    }
+
+    fn with_typer_and_nonce<R>(
+        &mut self,
+        f: impl FnOnce(
+            &dotty_core::ast::AstArena<dotty_core::ast::Untyped>,
+            &SourceSemanticIndex,
+            &mut dotty_typer::SourceTyper<'_>,
+            Definitions,
+            String,
+        ) -> R,
+    ) -> R {
+        static NEXT_RESOLVER_NONCE: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
+        let resolver_nonce = format!(
+            "{}-{}",
+            self.source.index(),
+            NEXT_RESOLVER_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let definitions = self.definitions;
+        let resolver = resolver(definitions);
+        let mut typer = dotty_typer::SourceTyper::new(
+            &self.ast,
+            self.source,
+            &self.index,
+            &mut self.store,
+            definitions,
+            &self.packages,
+        )
+        .with_resolver(Box::new(resolver));
+        f(
+            &self.ast,
+            &self.index,
+            &mut typer,
+            definitions,
+            resolver_nonce,
+        )
     }
 }
 
@@ -3636,12 +3727,21 @@ fn analyze_roots(source: SourceId, session: &str) -> RootReceipt {
         roots: rows,
         normalized,
         semantic_receipt: String::new(),
+        session: None,
+        positive_rows: Vec::new(),
     }
 }
 
-fn nested_roots(source: SourceId, session: &str) -> RootReceipt {
-    let mut rust_session = BinarySession::new_with_source(source, NESTED_SOURCE);
-    rust_session.with_typer(|ast, index, typer, definitions| {
+fn nested_roots_in_session(rust_session: &mut BinarySession, session: &str) -> RootReceipt {
+    let source = rust_session.source;
+    let session_nonce = format!(
+        "{}-{:x}",
+        std::process::id(),
+        (&*rust_session.ownership_witness as *const u8) as usize
+    );
+    let store_identity = (&rust_session.store as *const SemanticStore) as usize;
+    let arena_identity = (&rust_session.ast as *const _) as usize;
+    rust_session.with_typer_and_nonce(|ast, index, typer, definitions, resolver_nonce| {
         let mut roots = Vec::new();
         for (tree, node) in ast.iter() {
             let TreeKind::DefDef(definition) = &node.kind else {
@@ -3746,12 +3846,92 @@ fn nested_roots(source: SourceId, session: &str) -> RootReceipt {
         }
         let semantic_receipt =
             assert_nested_typed_shapes(source, ast, index, typer, definitions, &typed_roots);
+        let mapping_counts = ["peelLeft", "sum"]
+            .into_iter()
+            .map(|name| {
+                let (root, _) = typed_roots[name];
+                let count = complete_root_mapping_count(source, ast, typer, root);
+                (name, count)
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(mapping_counts["sum"], 38);
+        let mut positive_rows = Vec::new();
+        for name in ["peelLeft", "sum"] {
+            let (root, _) = typed_roots[name];
+            let range = ast.get(root).position.unwrap().span().range();
+            let proof_line = semantic_receipt
+                .lines()
+                .find(|line| line.starts_with(&format!("{name}\t")))
+                .expect("normalized semantic proof for each original root");
+            let proof_line = proof_line.replace('\t', ";");
+            let (pattern_shape, identity_proof) = if name == "peelLeft" {
+                (
+                    "pattern=Add(Add(left,_),_)",
+                    "identity=outer+inner.Add_use_canonical_unapply;left_unique_case_binder",
+                )
+            } else {
+                (
+                    "patterns=[Num(value),Add(Num(value),right),Add(left,right)]",
+                    "identity=Evaluator.sum_same_canonical_method_at_3_distinct_Applies;5_distinct_case_binders",
+                )
+            };
+            let proof = format!(
+                "{proof_line};signature=(Expr):{};{pattern_shape};canonical=Expr,Num$.unapply->Num,Add$.unapply->Add,Add.Product2(_1:Expr,_2:Expr);{identity_proof};source_mapping=complete({}):all_spans_preserved;source_owned=true",
+                if name == "sum" { "Int" } else { "Expr" },
+                mapping_counts[name]
+            );
+            positive_rows.push(format!(
+                "{session}\t{session_nonce}\t{}\t{:x}\t{:x}\t{resolver_nonce}\t{name}\tExpr.scala#tree{}\t{}:{}\tEvaluator$\tf700d4e27f11365a08291ae15babc65e673eb91a0bdeee45ea5dc2cf7e8c8607\t{proof}",
+                source.index(), store_identity, arena_identity, root.index(), range.start(), range.end()
+            ));
+        }
         RootReceipt {
             roots: rows,
             normalized,
             semantic_receipt,
+            session: Some(NestedSessionWitness {
+                nonce: session_nonce,
+                source,
+                store: store_identity,
+                arena: arena_identity,
+                resolver_nonce,
+            }),
+            positive_rows,
         }
     })
+}
+
+fn complete_root_mapping_count(
+    source: SourceId,
+    ast: &dotty_core::ast::AstArena<dotty_core::ast::Untyped>,
+    typer: &dotty_typer::SourceTyper<'_>,
+    root: dotty_core::TreeId<dotty_core::ast::Untyped>,
+) -> usize {
+    let root_range = ast.get(root).position.unwrap().span().range();
+    ast.iter()
+        .filter(|(_, node)| {
+            node.position.is_some_and(|position| {
+                let range = position.span().range();
+                range.start() >= root_range.start()
+                    && range.end() <= root_range.end()
+                    && range.start() < range.end()
+            })
+        })
+        .map(|(tree, node)| {
+            let typed = typer
+                .source_typed_index()
+                .get(source, tree)
+                .unwrap_or_else(|| {
+                    panic!("missing source-to-typed mapping within {root:?} for {tree:?}")
+                });
+            assert_eq!(
+                typer.typed_ast().get(typed).position,
+                node.position,
+                "source spans are preserved in complete root mappings"
+            );
+            tree
+        })
+        .count()
 }
 
 fn assert_nested_typed_shapes(
