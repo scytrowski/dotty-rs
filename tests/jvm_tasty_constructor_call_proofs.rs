@@ -2191,6 +2191,46 @@ fn original_counter_set_call_is_proved_without_widening_pair_contract() {
                     ),
                     Err(dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(_))
                 ), "frozen source order rejects swapped final typed argument edges");
+
+                let replacement_new_kind = typed_ast
+                    .iter()
+                    .find_map(|(_, tree)| match &tree.kind {
+                        TreeKind::New(new) => Some(TreeKind::New(*new)),
+                        _ => None,
+                    })
+                    .expect("fixture has a typed constructor New");
+                let TreeKind::Apply(typed_final) = &typed_ast
+                    .get(proof.initializer_pair().typed_final_expression())
+                    .kind
+                else {
+                    panic!("typed final Pair expression remains Apply");
+                };
+                let corrupted_references = [
+                    proof.typed_receiver(),
+                    proof.typed_argument(),
+                    typed_final.args[0],
+                    typed_final.args[1],
+                ];
+                for corrupted_reference in corrupted_references {
+                    let mut corrupted_arena = clone_arena(typed_ast);
+                    corrupted_arena.get_mut(corrupted_reference).kind =
+                        replacement_new_kind.clone();
+                    let corrupted_unit = JvmCompilationUnit {
+                        store,
+                        typed_ast: &corrupted_arena,
+                        classes: jvm_unit.classes.clone(),
+                    };
+                    assert!(matches!(
+                        validate_immutable_local_counter_set_call_proof(
+                            ImmutableLocalInitializerPairProofInput {
+                                typed_ast: &corrupted_arena,
+                                jvm_unit: &corrupted_unit,
+                                ..input()
+                            }
+                        ),
+                        Err(dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(_))
+                    ), "a mapped typed New cannot stand in for a direct reference");
+                }
             },
         );
     }

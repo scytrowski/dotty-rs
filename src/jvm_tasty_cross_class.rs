@@ -5926,6 +5926,22 @@ pub fn validate_immutable_local_counter_set_call_proof<'session>(
         let expected_typed_arg = source_typed_index
             .get(source_id, source_arg)
             .ok_or_else(|| typed_error("final Pair argument has no original typed mapping"))?;
+        let TreeKind::Ident(typed_ident) = &typed_ast
+            .try_get(expected_typed_arg)
+            .ok_or_else(|| typed_error("typed final Pair argument is stale"))?
+            .kind
+        else {
+            return Err(typed_error(
+                "typed final Pair argument must remain the original local Ident",
+            ));
+        };
+        if store.names.resolve(typed_ident.name.text())
+            != store.names.resolve(source_ident.name.text())
+        {
+            return Err(typed_error(
+                "typed final Pair Ident must preserve its original local name",
+            ));
+        }
         if typed_final_apply.args[index] != expected_typed_arg
             || !matches!(store.types.try_get(typed_ast
                 .try_get(expected_typed_arg)
@@ -5976,6 +5992,22 @@ pub fn validate_immutable_local_counter_set_call_proof<'session>(
     if typed_selection.qualifier != typed_receiver {
         return Err(typed_error(
             "typed Counter.set must preserve its receiver edge",
+        ));
+    }
+    let TreeKind::Ident(typed_receiver_ident) = &typed_ast
+        .try_get(typed_receiver)
+        .ok_or_else(|| typed_error("typed Counter.set receiver is stale"))?
+        .kind
+    else {
+        return Err(typed_error(
+            "typed Counter.set receiver must remain the original local Ident",
+        ));
+    };
+    if store.names.resolve(typed_receiver_ident.name.text())
+        != store.names.resolve(source_receiver_ident.name.text())
+    {
+        return Err(typed_error(
+            "typed Counter.set receiver Ident must preserve its original local name",
         ));
     }
     let receiver = match store.types.try_get(
@@ -6156,6 +6188,22 @@ pub fn validate_immutable_local_counter_set_call_proof<'session>(
     };
     if argument != call_formal {
         return Err(typed_error("Counter.set argument must target secondSeed"));
+    }
+    let TreeKind::Ident(typed_argument_ident) = &typed_ast
+        .try_get(typed_argument)
+        .ok_or_else(|| typed_error("typed Counter.set argument is stale"))?
+        .kind
+    else {
+        return Err(typed_error(
+            "typed Counter.set argument must remain the original secondSeed Ident",
+        ));
+    };
+    if store.names.resolve(typed_argument_ident.name.text())
+        != store.names.resolve(source_argument_ident.name.text())
+    {
+        return Err(typed_error(
+            "typed Counter.set argument Ident must preserve its original formal name",
+        ));
     }
     let argument_type = match store.symbols.get(argument).info {
         SymbolInfo::Complete(ty) => ty,
