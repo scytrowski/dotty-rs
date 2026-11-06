@@ -20,6 +20,7 @@ const BINARY_CONTROL_RECEIPTS: &str = include_str!(
 );
 const NESTED_EXPR_SOURCE: &str =
     include_str!("../../../tests/fixtures/source-nested-recursive-adt-3.9.0/Expr.scala");
+const NESTED_ROLLBACK_CONTROL_SUFFIX: &str = "\nobject RollbackControls:\n  def prior(value: Int): Int = value\n  def peelLeftFails(expr: Expr): Boolean =\n    expr match\n      case Add(Add(left, _), _) => true\n      case _ => expr\n  def sumFails(expr: Expr): Boolean =\n    expr match\n      case Num(_) => true\n      case Add(Num(value), right) => value + Evaluator.sum(right)\n      case Add(left, right) => Evaluator.sum(left) + Evaluator.sum(right)\n";
 const NESTED_LATE_FAILURE_RECEIPTS: &str =
     include_str!("../../../tests/fixtures/source-nested-recursive-adt-3.9.0/rust-late-failure.tsv");
 const NESTED_SCALA_PEEL_CONTROL: &str = include_str!(
@@ -1479,9 +1480,7 @@ fn nested_late_failures_restore_and_retry_before_original_roots_recover() {
                 .contains("case Add(left, right) => Evaluator.sum(left) + Evaluator.sum(right)"),
         "Scala classifications cover the nested source shapes exercised by Rust"
     );
-    let source_text = format!(
-        "{NESTED_EXPR_SOURCE}\nobject RollbackControls:\n  def prior(value: Int): Int = value\n  def peelLeftFails(expr: Expr): Boolean =\n    expr match\n      case Add(Add(left, _), _) => true\n      case _ => expr\n  def sumFails(expr: Expr): Boolean =\n    expr match\n      case Num(_) => true\n      case Add(Num(value), right) => value + Evaluator.sum(right)\n      case Add(left, right) => Evaluator.sum(left) + Evaluator.sum(right)\n"
-    );
+    let source_text = format!("{NESTED_EXPR_SOURCE}{NESTED_ROLLBACK_CONTROL_SUFFIX}");
     let source = SourceId::from_index(21_361);
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
@@ -1490,6 +1489,27 @@ fn nested_late_failures_restore_and_retry_before_original_roots_recover() {
     let prior = tree_named(&parsed, &store, "prior");
     let peel_failure = tree_named(&parsed, &store, "peelLeftFails");
     let sum_failure = tree_named(&parsed, &store, "sumFails");
+    let peel_failure_symbol = index
+        .symbol_at(source, peel_failure)
+        .expect("rollback source root has a symbol");
+    let rollback_owner = store
+        .symbols
+        .get(peel_failure_symbol)
+        .owner
+        .expect("rollback root has an enclosing module");
+    let rollback_owner_name = store
+        .names
+        .resolve(store.symbols.get(rollback_owner).name.text())
+        .to_owned();
+    assert_eq!(rollback_owner_name, "RollbackControls$");
+    let sum_failure_symbol = index
+        .symbol_at(source, sum_failure)
+        .expect("sum rollback source root has a symbol");
+    assert_eq!(
+        store.symbols.get(sum_failure_symbol).owner,
+        Some(rollback_owner),
+        "both rollback roots belong to the emitted RollbackControls$ source owner"
+    );
     let peel_adds = nested_extractors(&parsed, &store, peel_failure, "Add");
     let sum_adds = nested_extractors(&parsed, &store, sum_failure, "Add");
     let sum_num_extractors = nested_extractors(&parsed, &store, sum_failure, "Num");
@@ -1842,6 +1862,19 @@ fn nested_late_failures_restore_and_retry_before_original_roots_recover() {
         "nested rollback evidence binds to the exact tested checkout"
     );
     println!("ISSUE2137_ROLLBACK_TESTED_SHA\t{tested_sha}");
+    let source_suffix_hex = NESTED_ROLLBACK_CONTROL_SUFFIX
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    println!(
+        "ISSUE2136_ROLLBACK_SOURCE\t{}\t{}\t{}\t{}\t{}",
+        source.index(),
+        fresh_source.index(),
+        source_text.len(),
+        rollback_owner_name,
+        source_suffix_hex,
+    );
     println!("ISSUE2136_NESTED_ROLLBACK\t{receipt}");
 }
 

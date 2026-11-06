@@ -63,6 +63,7 @@ python3 tools/typer-classpath-corpus-audit/verify_focused_gate.py \
   --nested-output target/typer-nested-adt-audit/positive.tsv \
   --nested-classified-output target/typer-nested-adt-audit/classified.tsv \
   --nested-report target/typer-nested-adt-audit/report.md \
+  --nested-baseline-sha 0fc457776374f69d6b16187c007721a85b2557a0 \
   --nested-tested-sha "$REVISION" --nested-pr-head-sha "$REVISION"
 ```
 

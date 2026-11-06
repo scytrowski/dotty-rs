@@ -65,6 +65,12 @@ jobs:
         run: |
           set -euo pipefail
           for prerequisite in \
+            7165bfc6f02c66706a86b5ea814ca49a757187b7 \
+            eb4ff37f704e8d1a112a46a294403d92a5a07767 \
+            73748e6dec188fb60c030d61d7b33a2b0706b2e7 \
+            e50e2cf465d833049b4c202919548198bc41fd8c \
+            0fc457776374f69d6b16187c007721a85b2557a0 \
+            918b4e3d757585799fbbe88d0f56b7fc44bbb43c \
             d62365e3cf2e6b322cceabdbd9e697670eb9e1b5 \
             deedd4c8581b31392c38f48060774466f50110c0 \
             31ed0e3232069410e76dfa9ccfe2291bebeb97f9 \
@@ -83,7 +89,11 @@ jobs:
               exit 1
             }
           done
-          printf 'Verified #2034-#2039 and #2061/#2066/#2071/#2072/#2076/#2078/#2079 prerequisite merge ancestry at HEAD %s\n' "$(git rev-parse HEAD)"
+          printf 'Verified #2132-#2137 and prior recursive Expr prerequisite merge ancestry at HEAD %s\n' "$(git rev-parse HEAD)"
+          git merge-base --is-ancestor "$DOTTY_EXPECTED_BASE_SHA" HEAD || {
+            echo "integrated baseline $DOTTY_EXPECTED_BASE_SHA is not an ancestor of tested HEAD=$(git rev-parse HEAD)" >&2
+            exit 1
+          }
 
       - name: Run audit tooling unit tests
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/typer-classpath-corpus-audit -p 'test_*.py'
@@ -155,6 +165,9 @@ jobs:
             printf 'issue2080_baseline_sha\t%s\n' "$DOTTY_EXPECTED_BASE_SHA"
             printf 'issue2080_tested_sha\t%s\n' "$(git rev-parse HEAD)"
             printf 'issue2080_pr_head_sha\t%s\n' "${{ github.event.pull_request.head.sha || github.sha }}"
+            printf 'issue2138_baseline_sha\t%s\n' "$DOTTY_EXPECTED_BASE_SHA"
+            printf 'issue2138_tested_sha\t%s\n' "$(git rev-parse HEAD)"
+            printf 'issue2138_pr_head_sha\t%s\n' "${{ github.event.pull_request.head.sha || github.sha }}"
             printf 'github_actions_run\t%s/%s/actions/runs/%s\n' \
               "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
             printf 'main_manifest_sha256\t%s\n' \
@@ -201,6 +214,14 @@ jobs:
               "$(sha256sum crates/dotty-typer/tests/fixtures/source-binary-recursive-adt-3.9.0/source-hashes.tsv | cut -d' ' -f1)"
             printf 'binary_recursive_adt_artifact_manifest_sha256\t%s\n' \
               "$(sha256sum crates/dotty-typer/tests/fixtures/source-binary-recursive-adt-3.9.0/scala-artifacts.sha256.tsv | cut -d' ' -f1)"
+            printf 'nested_recursive_adt_source_sha256\t%s\n' \
+              "$(sha256sum crates/dotty-typer/tests/fixtures/source-nested-recursive-adt-3.9.0/Expr.scala | cut -d' ' -f1)"
+            printf 'nested_recursive_adt_source_manifest_sha256\t%s\n' \
+              "$(sha256sum crates/dotty-typer/tests/fixtures/source-nested-recursive-adt-3.9.0/source-hashes.tsv | cut -d' ' -f1)"
+            printf 'nested_recursive_adt_artifact_manifest_sha256\t%s\n' \
+              "$(sha256sum crates/dotty-typer/tests/fixtures/source-nested-recursive-adt-3.9.0/scala-artifacts.sha256.tsv | cut -d' ' -f1)"
+            printf 'nested_recursive_adt_oracle_output_manifest_sha256\t%s\n' \
+              "$(sha256sum crates/dotty-typer/tests/fixtures/source-nested-recursive-adt-3.9.0/output-sha256.tsv | cut -d' ' -f1)"
             printf 'pull_request_url\t%s\n' "${{ github.event.pull_request.html_url || '' }}"
             printf 'inherited_source_sha256\t%s\n' \
               "$(sha256sum crates/dotty-typer/tests/fixtures/inherited-members-3.9.0/InheritedMembers.scala | cut -d' ' -f1)"
@@ -343,6 +364,19 @@ jobs:
             > "$DOTTY_AUDIT_REPORT_DIR/source-binary-recursive-adt-oracle.log" 2>&1
           cat "$DOTTY_AUDIT_REPORT_DIR/source-binary-recursive-adt-oracle.log"
 
+      - name: Run pinned nested recursive ADT Scala 3.9 oracle
+        shell: bash
+        env:
+          SCALA39_ROOT: ${{ github.workspace }}/scala39-source
+          COURSIER_MAVEN_ROOT: ${{ github.workspace }}/target/coursier/v1/https/repo1.maven.org/maven2
+          DOTTY_NESTED_RECURSIVE_ADT_TMP_ROOT: ${{ github.workspace }}/target/source-nested-recursive-adt-oracle
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+        run: |
+          set -euo pipefail
+          crates/dotty-typer/tests/fixtures/source-nested-recursive-adt-3.9.0/run \
+            > "$DOTTY_AUDIT_REPORT_DIR/source-nested-recursive-adt-oracle.log" 2>&1
+          cat "$DOTTY_AUDIT_REPORT_DIR/source-nested-recursive-adt-oracle.log"
+
       - name: Run pinned recursive Expr ADT negative matrix
         shell: bash
         env:
@@ -436,6 +470,68 @@ jobs:
           printf 'ISSUE2080_TESTED_SHA\t%s\n' "$(git rev-parse HEAD)" \
             >> "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-negative-rust.log"
           cat "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-negative-rust.log"
+
+      - name: Run nested recursive ADT four-root positive evidence
+        shell: bash
+        env:
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+        run: |
+          set -euo pipefail
+          cargo +1.98.1 test -p dotty-typer --test source_binary_recursive_adt_baseline \
+            nested_recursive_adt_original_roots_are_attempted_in_two_fresh_sessions \
+            --locked -- --exact --nocapture \
+            > "$DOTTY_AUDIT_REPORT_DIR/nested-positive.log" 2>&1
+          cat "$DOTTY_AUDIT_REPORT_DIR/nested-positive.log"
+
+      - name: Run nested recursive ADT classified controls
+        shell: bash
+        env:
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+        run: |
+          set -euo pipefail
+          cargo +1.98.1 test -p dotty-typer --test source_binary_recursive_adt_baseline \
+            nested --locked -- --nocapture \
+            > "$DOTTY_AUDIT_REPORT_DIR/nested-controls.log" 2>&1
+          cat "$DOTTY_AUDIT_REPORT_DIR/nested-controls.log"
+
+      - name: Run nested recursive ADT late rollback and recovery
+        shell: bash
+        env:
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+        run: |
+          set -euo pipefail
+          cargo +1.98.1 test -p dotty-typer --lib --locked \
+            nested_late_failures_restore_and_retry_before_original_roots_recover \
+            -- --nocapture \
+            > "$DOTTY_AUDIT_REPORT_DIR/nested-rollback.log" 2>&1
+          cat "$DOTTY_AUDIT_REPORT_DIR/nested-rollback.log"
+
+      - name: Reconcile actual nested libtest logs and source provenance
+        shell: bash
+        env:
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+        run: |
+          set -euo pipefail
+          PYTHONPATH=tools/typer-classpath-corpus-audit \
+            PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
+              test_verify_focused_gate.VerifyFocusedGateTests.test_actual_nested_workflow_logs_reconcile_and_bind_rollback_provenance
+
+      - name: Verify nested recursive ADT execution receipts
+        shell: bash
+        env:
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+        run: |
+          set -euo pipefail
+          PYTHONDONTWRITEBYTECODE=1 python3 tools/typer-classpath-corpus-audit/verify_focused_gate.py \
+            --nested-positive-log "$DOTTY_AUDIT_REPORT_DIR/nested-positive.log" \
+            --nested-controls-log "$DOTTY_AUDIT_REPORT_DIR/nested-controls.log" \
+            --nested-rollback-log "$DOTTY_AUDIT_REPORT_DIR/nested-rollback.log" \
+            --nested-output "$DOTTY_AUDIT_REPORT_DIR/nested-recursive-adt-positive.tsv" \
+            --nested-classified-output "$DOTTY_AUDIT_REPORT_DIR/nested-recursive-adt-negative-rollback.tsv" \
+            --nested-report "$DOTTY_AUDIT_REPORT_DIR/nested-recursive-adt-e2e-report.md" \
+            --nested-baseline-sha "$DOTTY_EXPECTED_BASE_SHA" \
+            --nested-tested-sha "$(git rev-parse HEAD)" \
+            --nested-pr-head-sha "${{ github.event.pull_request.head.sha || github.sha }}"
 
       - name: Verify binary recursive ADT receipts and revision pins
         shell: bash
@@ -664,6 +760,8 @@ jobs:
               --tested-sha "$(git rev-parse HEAD)" \
               --expected-head-sha "${{ github.event.pull_request.head.sha || github.sha }}" \
               --output "$DOTTY_AUDIT_REPORT_DIR/binary-recursive-adt-protected-cohorts.tsv"
+          cp "$DOTTY_AUDIT_REPORT_DIR/binary-recursive-adt-protected-cohorts.tsv" \
+            "$DOTTY_AUDIT_REPORT_DIR/nested-recursive-adt-protected-cohorts.tsv"
 
       - name: Run existing deterministic focused audit baseline
         shell: bash
