@@ -1830,6 +1830,18 @@ fn nested_late_failures_restore_and_retry_before_original_roots_recover() {
         NESTED_LATE_FAILURE_RECEIPTS.trim_end(),
         "normalized late-failure evidence changed"
     );
+    let tested_sha = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("git is available for the execution-bound nested rollback receipt")
+        .stdout;
+    let tested_sha = String::from_utf8(tested_sha).expect("git SHA is UTF-8");
+    let tested_sha = tested_sha.trim();
+    assert!(
+        tested_sha.len() == 40 && tested_sha.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "nested rollback evidence binds to the exact tested checkout"
+    );
+    println!("ISSUE2137_ROLLBACK_TESTED_SHA\t{tested_sha}");
     println!("ISSUE2136_NESTED_ROLLBACK\t{receipt}");
 }
 
