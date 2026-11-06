@@ -69,15 +69,29 @@ fn nested_recursive_adt_original_roots_are_attempted_in_two_fresh_sessions() {
         first.semantic_receipt, second.semantic_receipt,
         "fresh sessions have normalized peelLeft semantic parity"
     );
+    let (peel_left_receipt, sum_receipt) = first
+        .semantic_receipt
+        .split_once("sum\t")
+        .expect("normalized semantic receipt includes the original sum root");
+    let sum_receipt = format!("sum\t{sum_receipt}");
     assert_eq!(
-        first.semantic_receipt,
+        peel_left_receipt,
         include_str!("fixtures/source-nested-recursive-adt-3.9.0/rust-peelleft-complete.tsv")
             .split_once('\n')
-            .expect("normalized semantic receipt header")
+            .expect("normalized peelLeft receipt header")
             .1,
         "the original peelLeft semantics are pinned without arena allocation IDs"
     );
-    println!("ISSUE2133_PEELLEFT\t{}", first.semantic_receipt.trim_end());
+    assert_eq!(
+        sum_receipt,
+        include_str!("fixtures/source-nested-recursive-adt-3.9.0/rust-sum-complete.tsv")
+            .split_once('\n')
+            .expect("normalized sum receipt header")
+            .1,
+        "the exact original sum source graph has a stable normalized receipt"
+    );
+    println!("ISSUE2133_PEELLEFT\t{}", peel_left_receipt.trim_end());
+    println!("ISSUE2135_SUM\t{}", sum_receipt.trim_end());
     let receipt = first
         .roots
         .iter()
@@ -94,6 +108,248 @@ fn nested_recursive_adt_original_roots_are_attempted_in_two_fresh_sessions() {
     for row in receipt {
         println!("ISSUE2132_NESTED_ROOT\t{row}");
     }
+}
+
+#[test]
+fn nested_recursive_sum_types_after_source_method_declaration_reordering() {
+    let peel_start = NESTED_SOURCE
+        .find("  def peelLeft(")
+        .expect("original peelLeft declaration");
+    let sum_start = NESTED_SOURCE
+        .find("  def sum(")
+        .expect("original sum declaration");
+    let sum_text = &NESTED_SOURCE[sum_start..];
+    let peel_text = &NESTED_SOURCE[peel_start..sum_start];
+    let reordered = format!("{}{sum_text}{peel_text}", &NESTED_SOURCE[..peel_start]);
+    assert!(reordered.find("  def sum(").unwrap() < reordered.find("  def peelLeft(").unwrap());
+    assert!(reordered.contains(sum_text.trim_end()));
+
+    let source = SourceId::from_index(21323);
+    let mut session = BinarySession::new_with_source(source, &reordered);
+    session.with_typer(|ast, _index, typer, definitions| {
+        let root = find_method_tree(ast, typer.store(), "sum");
+        let method = source_method_symbol(ast, _index, typer, source, "sum");
+        let typed_root = typer
+            .type_method_definition(root)
+            .expect("original sum root still types when the sibling method is declared later");
+        assert_eq!(
+            typer.source_typed_index().get(source, root),
+            Some(typed_root)
+        );
+        let TreeKind::DefDef(source_method) = &ast.get(root).kind else {
+            unreachable!()
+        };
+        let TreeKind::Match(source_match) = &ast.get(source_method.rhs.unwrap()).kind else {
+            unreachable!()
+        };
+        assert_eq!(source_match.cases.len(), 3);
+        let mut calls = Vec::new();
+        for (tree, node) in ast.iter() {
+            if !matches!(node.kind, TreeKind::Apply(_)) {
+                continue;
+            }
+            let range = node.position.unwrap().span().range();
+            let root_range = ast.get(root).position.unwrap().span().range();
+            if range.start() < root_range.start() || range.end() > root_range.end() {
+                continue;
+            }
+            let TreeKind::Apply(application) = &node.kind else {
+                unreachable!()
+            };
+            let TreeKind::Ident(function) = &ast.get(application.function).kind else {
+                continue;
+            };
+            if typer.store().names.resolve(function.name.text()) == "sum" {
+                let typed_call = typer.source_typed_index().get(source, tree).unwrap();
+                assert_type_ref(
+                    typer.store(),
+                    typer.typed_ast().get(typed_call).ty,
+                    definitions_int(typer.store(), definitions),
+                );
+                let typed_function = typer
+                    .source_typed_index()
+                    .get(source, application.function)
+                    .unwrap();
+                assert_term_ref(
+                    typer.store(),
+                    typer.typed_ast().get(typed_function).ty,
+                    method,
+                );
+                calls.push(tree);
+            }
+        }
+        assert_eq!(calls.len(), 3);
+    });
+}
+
+#[test]
+fn nested_sum_bounded_invalid_roots_fail_without_partial_mappings() {
+    let invalid_argument = NESTED_SOURCE.replacen("value + sum(right)", "value + sum(0)", 1);
+    assert_sum_root_rejected(
+        SourceId::from_index(21324),
+        &invalid_argument,
+        |error| {
+            matches!(
+                error,
+                dotty_typer::TyperError::ApplicationArgumentTypeMismatch { .. }
+            )
+        },
+        "invalid recursive argument",
+    );
+
+    let wrong_arity = NESTED_SOURCE.replace("sum(left) + sum(right)", "sum(left, right)");
+    assert_sum_root_rejected(
+        SourceId::from_index(21325),
+        &wrong_arity,
+        |error| {
+            matches!(
+                error,
+                dotty_typer::TyperError::ApplicationArityMismatch { .. }
+            )
+        },
+        "recursive call arity mismatch",
+    );
+
+    let wrong_result = NESTED_SOURCE.replace(
+        "def sum(expr: Expr): Int =",
+        "def sum(expr: Expr): Boolean =",
+    );
+    assert_sum_root_rejected(
+        SourceId::from_index(21326),
+        &wrong_result,
+        |error| {
+            matches!(
+                error,
+                dotty_typer::TyperError::OverloadApplicationNoApplicable { .. }
+            )
+        },
+        "incompatible original method result",
+    );
+}
+
+#[test]
+fn nested_sum_wrong_num_extractor_owner_rolls_back_and_retries() {
+    let source = SourceId::from_index(21327);
+    let mut session = BinarySession::new_with_source(source, NESTED_SOURCE);
+    let mut classes = std::collections::BTreeMap::new();
+    for (tree, node) in session.ast.iter() {
+        let TreeKind::TypeDef(definition) = &node.kind else {
+            continue;
+        };
+        let name = session
+            .store
+            .names
+            .resolve(definition.name.as_name().text());
+        if matches!(name, "Num" | "Add") {
+            classes.insert(
+                name.to_owned(),
+                session.index.symbol_at(source, tree).unwrap(),
+            );
+        }
+    }
+    let add_owner = session
+        .store
+        .symbols
+        .get(classes["Add"])
+        .owner
+        .expect("source Add companion owner");
+    let num_unapply = session
+        .index
+        .generated_case_class_method(classes["Num"], GeneratedCaseClassMethodRole::Unapply)
+        .unwrap();
+    let original_owner = session.store.symbols.get(num_unapply).owner;
+    session.store.symbols.get_mut(num_unapply).owner = Some(add_owner);
+    session.with_typer(|ast, _index, typer, _definitions| {
+        let root = find_method_tree(ast, typer.store(), "sum");
+        let root_range = ast.get(root).position.unwrap().span().range();
+        let before_store = typer.store().checkpoint();
+        let before_contents = store_content_projection(typer.store());
+        let before_typed = typer.typed_ast().checkpoint();
+        let error = typer
+            .type_method_definition(root)
+            .expect_err("the nested Num extractor rejects an Add-owned unapply");
+        assert!(
+            matches!(
+                error,
+                dotty_typer::TyperError::SymbolSourceKindMismatch { .. }
+            ),
+            "wrong nested owner has an explicit identity diagnostic: {error:?}"
+        );
+        assert_eq!(typer.store().checkpoint(), before_store);
+        assert_store_content_projection(
+            &before_contents,
+            &store_content_projection(typer.store()),
+            0,
+        );
+        assert_eq!(typer.typed_ast().checkpoint(), before_typed);
+        assert!(typer.source_typed_index().get(source, root).is_none());
+        for (tree, _node) in ast.iter().filter(|(_, node)| {
+            node.position.is_some_and(|position| {
+                let range = position.span().range();
+                range.start() >= root_range.start() && range.end() <= root_range.end()
+            })
+        }) {
+            assert!(
+                typer.source_typed_index().get(source, tree).is_none(),
+                "wrong nested owner leaves no partial sum mapping for {tree:?}"
+            );
+        }
+    });
+    session.store.symbols.get_mut(num_unapply).owner = original_owner;
+    session.with_typer(|ast, _index, typer, _definitions| {
+        let root = find_method_tree(ast, typer.store(), "sum");
+        typer
+            .type_method_definition(root)
+            .expect("restoring the canonical nested owner permits same-session retry");
+    });
+}
+
+fn assert_sum_root_rejected(
+    source: SourceId,
+    source_text: &str,
+    is_expected: impl Fn(&dotty_typer::TyperError) -> bool,
+    control: &str,
+) {
+    let mut session = BinarySession::new_with_source(source, source_text);
+    session.with_typer(|ast, _index, typer, _definitions| {
+        let root = find_method_tree(ast, typer.store(), "sum");
+        let root_range = ast.get(root).position.unwrap().span().range();
+        let before_store = typer.store().checkpoint();
+        let before_contents = store_content_projection(typer.store());
+        let before_typed = typer.typed_ast().checkpoint();
+        let error = match typer.type_method_definition(root) {
+            Ok(_) => panic!("{control} unexpectedly typed"),
+            Err(error) => error,
+        };
+        assert!(is_expected(&error), "{control} diagnostic: {error:?}");
+        assert_eq!(
+            typer.store().checkpoint(),
+            before_store,
+            "{control} store rollback"
+        );
+        assert_store_content_projection(
+            &before_contents,
+            &store_content_projection(typer.store()),
+            0,
+        );
+        assert_eq!(
+            typer.typed_ast().checkpoint(),
+            before_typed,
+            "{control} typed rollback"
+        );
+        assert!(typer.source_typed_index().get(source, root).is_none());
+        for (tree, _node) in ast.iter().filter(|(_, node)| {
+            node.position.is_some_and(|position| {
+                let range = position.span().range();
+                range.start() >= root_range.start() && range.end() <= root_range.end()
+            })
+        }) {
+            assert!(
+                typer.source_typed_index().get(source, tree).is_none(),
+                "{control} leaked a partial source mapping for {tree:?}"
+            );
+        }
+    });
 }
 
 #[test]
@@ -3759,6 +4015,11 @@ fn assert_nested_typed_shapes(
     assert_eq!(sum_typed_match.cases.len(), 3);
     let sum_typed_cases = sum_typed_match.cases.clone();
     let mut recursive_calls = Vec::new();
+    let mut recursive_call_trees = Vec::new();
+    let mut recursive_function_trees = Vec::new();
+    let mut recursive_argument_trees = Vec::new();
+    let mut binder_sites = Vec::new();
+    let mut additions = Vec::new();
     for (case_index, source_case) in sum_match.cases.iter().copied().enumerate() {
         let TreeKind::CaseDef(source_case_node) = &ast.get(source_case).kind else {
             unreachable!()
@@ -3786,10 +4047,9 @@ fn assert_nested_typed_shapes(
                 }
                 TreeKind::Ident(ident) => {
                     if let Some(binder) = typer.pattern_binding_symbol_at(source, pattern_tree) {
-                        case_binders.insert(
-                            typer.store().names.resolve(ident.name.text()).to_owned(),
-                            binder,
-                        );
+                        let name = typer.store().names.resolve(ident.name.text()).to_owned();
+                        binder_sites.push((case_index, name.clone(), binder, pattern_tree));
+                        case_binders.insert(name, binder);
                     }
                 }
                 _ => {}
@@ -3799,6 +4059,33 @@ fn assert_nested_typed_shapes(
             panic!("sum case body is a source block")
         };
         let source_return = source_body.expr;
+        let typed_source_return = typer
+            .source_typed_index()
+            .get(source, source_return)
+            .expect("each original sum branch result is mapped");
+        if case_index == 0 {
+            let value_binder = case_binders["value"];
+            assert_term_ref(
+                typer.store(),
+                typer.typed_ast().get(typed_source_return).ty,
+                value_binder,
+            );
+            let SymbolInfo::Complete(value_type) = *typer.store().symbols.info(value_binder) else {
+                panic!("Num.value binder has a completed type")
+            };
+            assert_type_ref(typer.store(), value_type, int);
+        } else {
+            assert_type_ref(
+                typer.store(),
+                typer.typed_ast().get(typed_source_return).ty,
+                int,
+            );
+        }
+        assert_value_type_ref(
+            typer.store(),
+            typer.typed_ast().get(sum_typed_cases[case_index]).ty,
+            int,
+        );
         let mut pending = vec![source_return];
         while let Some(tree) = pending.pop() {
             match &ast.get(tree).kind {
@@ -3820,6 +4107,7 @@ fn assert_nested_typed_shapes(
                         .source_typed_index()
                         .get(source, application.function)
                         .unwrap();
+                    recursive_function_trees.push(application.function);
                     assert_eq!(typed_application.function, typed_function);
                     assert_term_ref(
                         typer.store(),
@@ -3827,6 +4115,8 @@ fn assert_nested_typed_shapes(
                         sum_symbol,
                     );
                     let source_argument = application.args[0];
+                    recursive_call_trees.push(tree);
+                    recursive_argument_trees.push(source_argument);
                     let typed_argument = typer
                         .source_typed_index()
                         .get(source, source_argument)
@@ -3864,6 +4154,8 @@ fn assert_nested_typed_shapes(
                     ));
                 }
                 TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::InfixOp(infix)) => {
+                    assert_eq!(typer.store().names.resolve(infix.op.text()), "+");
+                    additions.push(tree);
                     pending.extend([infix.left, infix.right]);
                 }
                 _ => {}
@@ -3880,6 +4172,106 @@ fn assert_nested_typed_shapes(
         "sum retains three distinct source-owned calls with right/left/right binders"
     );
     assert_eq!(recursive_calls.len(), 3);
+    recursive_call_trees
+        .sort_by_key(|tree| ast.get(*tree).position.unwrap().span().range().start());
+    assert_eq!(recursive_call_trees.len(), 3);
+    assert_ne!(recursive_call_trees[0], recursive_call_trees[1]);
+    assert_ne!(recursive_call_trees[1], recursive_call_trees[2]);
+    assert_ne!(recursive_call_trees[0], recursive_call_trees[2]);
+    assert_ne!(recursive_function_trees[0], recursive_function_trees[1]);
+    assert_ne!(recursive_function_trees[1], recursive_function_trees[2]);
+    assert_ne!(recursive_function_trees[0], recursive_function_trees[2]);
+    assert_ne!(recursive_argument_trees[0], recursive_argument_trees[1]);
+    assert_ne!(recursive_argument_trees[1], recursive_argument_trees[2]);
+    assert_ne!(recursive_argument_trees[0], recursive_argument_trees[2]);
+    binder_sites
+        .sort_by_key(|(_, _, _, tree)| ast.get(*tree).position.unwrap().span().range().start());
+    assert_eq!(
+        binder_sites
+            .iter()
+            .map(|(case, name, _, _)| (*case, name.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (0, "value"),
+            (1, "value"),
+            (1, "right"),
+            (2, "left"),
+            (2, "right")
+        ],
+        "the five source binders remain attached to their original case positions"
+    );
+    for left in 0..binder_sites.len() {
+        for right in left + 1..binder_sites.len() {
+            assert_ne!(
+                binder_sites[left].2, binder_sites[right].2,
+                "case-local binders never alias"
+            );
+        }
+    }
+    for (case, name, symbol, _) in &binder_sites {
+        let SymbolInfo::Complete(info) = *typer.store().symbols.info(*symbol) else {
+            panic!("sum case binder {case}.{name} has a completed semantic type")
+        };
+        assert_type_ref(
+            typer.store(),
+            info,
+            if name == "value" { int } else { expr },
+        );
+    }
+    additions.sort_by_key(|tree| ast.get(*tree).position.unwrap().span().range().start());
+    assert_eq!(
+        additions.len(),
+        2,
+        "the original method has two Int additions"
+    );
+    for addition in &additions {
+        let typed_addition = typer
+            .source_typed_index()
+            .get(source, *addition)
+            .expect("each original addition has a source-to-typed mapping");
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed_addition).kind else {
+            panic!("typed Int addition is an ordinary selected-method application")
+        };
+        assert_eq!(application.args.len(), 1);
+        let TreeKind::Select(plus) = &typer.typed_ast().get(application.function).kind else {
+            panic!("Int + is resolved through its selected method")
+        };
+        assert_eq!(typer.store().names.resolve(plus.name.text()), "+");
+        assert_value_type_ref(typer.store(), typer.typed_ast().get(plus.qualifier).ty, int);
+        if let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::InfixOp(source_addition)) =
+            &ast.get(*addition).kind
+            && let TreeKind::Ident(source_left) = &ast.get(source_addition.left).kind
+        {
+            let source_case_index = sum_match
+                .cases
+                .iter()
+                .position(|case| {
+                    let range = ast.get(*case).position.unwrap().span().range();
+                    let add_range = ast.get(*addition).position.unwrap().span().range();
+                    range.start() <= add_range.start() && add_range.end() <= range.end()
+                })
+                .expect("addition belongs to one original match case");
+            let binder = binder_sites
+                .iter()
+                .find(|(case, name, _, _)| {
+                    *case == source_case_index
+                        && name == typer.store().names.resolve(source_left.name.text())
+                })
+                .map(|(_, _, symbol, _)| *symbol)
+                .expect("addition's left identifier is its case-local binder");
+            assert_term_ref(
+                typer.store(),
+                typer.typed_ast().get(plus.qualifier).ty,
+                binder,
+            );
+        }
+        assert_value_type_ref(
+            typer.store(),
+            typer.typed_ast().get(application.args[0]).ty,
+            int,
+        );
+        assert_type_ref(typer.store(), typer.typed_ast().get(typed_addition).ty, int);
+    }
     let TreeKind::DefDef(sum_typed_method) = &typer.typed_ast().get(sum_typed_root).kind else {
         unreachable!()
     };
@@ -3902,6 +4294,41 @@ fn assert_nested_typed_shapes(
     assert_eq!(sum_signature.params.len(), 1);
     assert_type_ref(typer.store(), sum_signature.params[0].ty, expr);
     assert_type_ref(typer.store(), sum_signature.result, int);
+    assert_type_ref(
+        typer.store(),
+        typer.typed_ast().get(sum_typed_match_tree).ty,
+        int,
+    );
+
+    let sum_range = ast.get(sum_root.0).position.unwrap().span().range();
+    let mut mapped_sum_trees = 0usize;
+    for (tree, node) in ast.iter().filter(|(_, node)| {
+        node.position.is_some_and(|position| {
+            let range = position.span().range();
+            range.start() >= sum_range.start()
+                && range.end() <= sum_range.end()
+                && range.start() < range.end()
+        })
+    }) {
+        let typed = typer
+            .source_typed_index()
+            .get(source, tree)
+            .unwrap_or_else(|| panic!("missing source-to-typed mapping within sum for {tree:?}"));
+        assert_eq!(
+            typer.typed_ast().get(typed).position,
+            node.position,
+            "sum source spans are preserved in the typed tree"
+        );
+        mapped_sum_trees += 1;
+    }
+    assert!(mapped_sum_trees > 0);
+    let retyped_sum = typer
+        .type_method_definition(sum_root.0)
+        .expect("same-session sum retyping succeeds");
+    assert_eq!(
+        retyped_sum, sum_typed_root,
+        "retyping reuses the published sum root"
+    );
 
     let typed_binder = typer
         .source_typed_index()
@@ -3928,7 +4355,7 @@ fn assert_nested_typed_shapes(
             .1,
         "the immutable source tree IDs and spans remain pinned"
     );
-    let semantic_receipt = format!(
+    let peel_left_receipt = format!(
         "peelLeft\troot=DefDef@{}..{}\tresult=Expr\tmatch=Match@{}..{}:Expr\tcases=2\tcase0=CaseDef@{}\tcase1=CaseDef@{}\textractors=outer:Add@{}:canonical_Add_companion_unapply(Add);fields=[_1:Expr,_2:Expr]\tinner:Add@{}:same_canonical_unapply;fields=[_1:Expr,_2:Expr]\tbinder=left@{}:case_local_to_peelLeft:Expr\treturn=Ident(left)@{}:same_binder\twildcards=outer._2@{}+inner._2@{}:unbound\tfallback=wildcard@{}:unbound;Ident(expr)@{}:peelLeft_parameter:Expr\tmappings=complete_source_to_typed\tretype=same_typed_root\n",
         source_root_span.start(),
         source_root_span.end(),
@@ -3944,6 +4371,68 @@ fn assert_nested_typed_shapes(
         span(source_case_span(peel_inner.args[1])),
         fallback_pattern_span,
         fallback_return_span,
+    );
+    let sum_root_span = span(sum_range);
+    let sum_match_span = span(
+        ast.get(sum_source.rhs.unwrap())
+            .position
+            .unwrap()
+            .span()
+            .range(),
+    );
+    let sum_case_spans = sum_match
+        .cases
+        .iter()
+        .map(|case| span(ast.get(*case).position.unwrap().span().range()))
+        .collect::<Vec<_>>();
+    let binder_receipt = binder_sites
+        .iter()
+        .map(|(_, name, _, tree)| {
+            format!(
+                "{name}:{}@{}",
+                if name == "value" { "Int" } else { "Expr" },
+                span(ast.get(*tree).position.unwrap().span().range())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let call_receipt = recursive_call_trees
+        .iter()
+        .map(|tree| {
+            let TreeKind::Apply(application) = &ast.get(*tree).kind else {
+                unreachable!()
+            };
+            let TreeKind::Ident(argument) = &ast.get(application.args[0]).kind else {
+                unreachable!()
+            };
+            format!(
+                "sum({}):Int@{}[arg@{}]",
+                typer.store().names.resolve(argument.name.text()),
+                span(ast.get(*tree).position.unwrap().span().range()),
+                span(
+                    ast.get(application.args[0])
+                        .position
+                        .unwrap()
+                        .span()
+                        .range()
+                )
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let addition_receipt = additions
+        .iter()
+        .map(|tree| {
+            format!(
+                "Int+Int:Int@{}",
+                span(ast.get(*tree).position.unwrap().span().range())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let sum_receipt = format!(
+        "sum\troot=DefDef@{sum_root_span}:Int\tmatch=Match@{sum_match_span}:Int\tcases=[{}]\tbinders=[{binder_receipt}]\tcalls=[{call_receipt}]\tadditions=[{addition_receipt}]\tmappings=complete({mapped_sum_trees})\tretype=same_typed_root\n",
+        sum_case_spans.join(",")
     );
     eprintln!(
         "ISSUE2133_PEELLEFT_IDS source={} root={}=>{} match={}=>{} outer={}=>{} inner={}=>{} unapply={} binder={}=>{} symbol={} return={}=>{} fallback={}=>{} parameter={} retype={}",
@@ -3967,7 +4456,7 @@ fn assert_nested_typed_shapes(
         peel_parameter.index(),
         retyped_root.index(),
     );
-    semantic_receipt
+    format!("{peel_left_receipt}{sum_receipt}")
 }
 
 fn nested_source_tree_receipt(
