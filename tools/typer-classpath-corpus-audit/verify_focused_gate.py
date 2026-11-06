@@ -251,7 +251,7 @@ def validate_nested_positive_log(
     return rows
 
 
-def validate_nested_negative_sidecars(root: Path, rollback_log: str, tested_sha: str) -> None:
+def validate_nested_negative_sidecars(root: Path, rollback_log: str, tested_sha: str) -> list[dict[str, str]]:
     fixture = root / NESTED_FIXTURE
     try:
         negative_bytes = (fixture / "negative-cases.tsv").read_bytes()
@@ -279,6 +279,17 @@ def validate_nested_negative_sidecars(root: Path, rollback_log: str, tested_sha:
         raise GateError("#2136 actual late-failure receipt is absent or differs from its normalized sidecar")
     _validate_revision_marker(rollback_log, "ISSUE2137_ROLLBACK_TESTED_SHA", tested_sha, "#2136 rollback")
     _validate_test_summary(rollback_log, {NESTED_ROLLBACK_TEST}, "#2136 rollback")
+    expected_rows = [line.split("\t") for line in expected_rollback[1:]]
+    rows = []
+    for fields in expected_rows:
+        rows.append({
+            "kind": "rollback", "case": fields[0], "fixture": "Expr.scala",
+            "source_sha256": NESTED_SOURCE_SHA256, "root": fields[0],
+            "source_path_tree": "", "source_span": fields[4], "owner": "Evaluator$",
+            "classification": "rejected", "outcome": ";".join(fields[5:]),
+            "source_id": fields[1], "fresh_source_id": fields[2], "source_bytes": fields[3],
+        })
+    return rows
 
 
 def validate_nested_control_log(root: Path, control_log: str, tested_sha: str) -> list[dict[str, str]]:
@@ -414,6 +425,7 @@ def main() -> int:
     parser.add_argument("--nested-output", type=Path)
     parser.add_argument("--nested-classified-output", type=Path)
     parser.add_argument("--nested-report", type=Path)
+    parser.add_argument("--nested-baseline-sha")
     parser.add_argument("--nested-tested-sha")
     parser.add_argument("--nested-pr-head-sha")
     args = parser.parse_args()
@@ -422,7 +434,8 @@ def main() -> int:
             raise GateError("focused report verification requires both --report and --baseline")
         nested_mode = any((args.nested_positive_log, args.nested_controls_log,
                            args.nested_rollback_log, args.nested_output, args.nested_classified_output,
-                           args.nested_report, args.nested_tested_sha, args.nested_pr_head_sha))
+                           args.nested_report, args.nested_baseline_sha, args.nested_tested_sha,
+                           args.nested_pr_head_sha))
         if args.report is not None and args.baseline is not None:
             verify_baseline(args.report, args.baseline)
         elif not nested_mode:
@@ -433,7 +446,7 @@ def main() -> int:
             write_timing_tsv(args.timing_output, args.timing_log, args.timing_rss)
         nested_args = (args.nested_positive_log, args.nested_controls_log,
                        args.nested_rollback_log, args.nested_output, args.nested_classified_output,
-                       args.nested_report, args.nested_tested_sha)
+                       args.nested_report, args.nested_baseline_sha, args.nested_tested_sha)
         if any(value is not None for value in nested_args) or args.nested_pr_head_sha is not None:
             if any(value is None for value in nested_args):
                 raise GateError("nested ADT receipts require positive, controls and rollback logs, tested SHA, both TSV outputs and report")
@@ -446,9 +459,20 @@ def main() -> int:
             root = Path(__file__).resolve().parents[2]
             rows = validate_nested_positive_log(root, positive_log, args.nested_tested_sha,
                                                 args.nested_pr_head_sha, require_clean=True)
+            if not re.fullmatch(r"[0-9a-f]{40}", args.nested_baseline_sha):
+                raise GateError("nested ADT integrated baseline SHA is malformed")
+            try:
+                baseline_ancestry = subprocess.run(
+                    ["git", "-C", str(root), "merge-base", "--is-ancestor", args.nested_baseline_sha,
+                     args.nested_tested_sha], capture_output=True,
+                )
+            except OSError as error:
+                raise GateError(f"cannot verify integrated baseline ancestry: {error}") from error
+            if baseline_ancestry.returncode != 0:
+                raise GateError("nested ADT tested revision does not descend from the recorded integrated baseline")
             classified_rows = validate_nested_control_log(root, controls_log, args.nested_tested_sha)
-            validate_nested_negative_sidecars(root, rollback_log, args.nested_tested_sha)
-            baseline_sha = NESTED_BASELINE_SHA
+            rollback_rows = validate_nested_negative_sidecars(root, rollback_log, args.nested_tested_sha)
+            baseline_sha = args.nested_baseline_sha
             tested_sha = args.nested_tested_sha
             pr_head_sha = args.nested_pr_head_sha or tested_sha
             fields = ("session", "session_nonce", "source_id", "store_witness", "arena_witness",
@@ -465,25 +489,28 @@ def main() -> int:
                                      "pr_head_sha": pr_head_sha})
             args.nested_classified_output.parent.mkdir(parents=True, exist_ok=True)
             with args.nested_classified_output.open("w", encoding="utf-8", newline="") as stream:
-                writer = csv.DictWriter(stream, fieldnames=("case", "fixture", "source_sha256", "root",
+                writer = csv.DictWriter(stream, fieldnames=("kind", "case", "fixture", "source_sha256", "root",
                     "source_path_tree", "source_span", "owner", "classification", "outcome",
-                    "tested_sha", "pr_head_sha"), delimiter="\t")
+                    "source_id", "fresh_source_id", "source_bytes",
+                    "baseline_sha", "tested_sha", "pr_head_sha"), delimiter="\t")
                 writer.writeheader()
-                for row in classified_rows:
-                    writer.writerow({**row, "tested_sha": tested_sha, "pr_head_sha": pr_head_sha})
+                for row in [*classified_rows, *rollback_rows]:
+                    row.setdefault("kind", "classified")
+                    writer.writerow({**row, "baseline_sha": baseline_sha, "tested_sha": tested_sha,
+                                     "pr_head_sha": pr_head_sha})
             report = [
                 "# Nested recursive ADT local receipts (Scala 3.9.0)", "",
                 f"- Baseline: `{baseline_sha}`", f"- Tested revision: `{tested_sha}`",
                 f"- PR head: `{pr_head_sha}`", f"- Immutable source SHA-256: `{NESTED_SOURCE_SHA256}`",
                 "- Positive denominator: 4 original source roots across 2 live frontend sessions",
-                "- Negative classified cases: 10, each executed against its pinned source and method root",
-                "- Late rollback receipts: 2 executed controls", "",
+                "- Negative sidecar: ten executed Scala-classified cases plus two executed late rollback controls",
+                "- Protected roots: exact 18/18 source-root contract; unchanged 16/25 main + 15/25 analysis cohorts, two passes", "",
                 "| Session | Root | Source tree | Span | Normalized SHA-256 |",
                 "| --- | --- | --- | --- | --- |",
             ]
             for row in rows:
                 report.append(f"| {row['session']} | {row['root']} | {row['source_path_tree']} | {row['source_span']} | `{hashlib.sha256(row['proof'].encode()).hexdigest()}` |")
-            report.extend(["", "**PASS** — local evidence was emitted only after revision-bound positive, control, and rollback summaries reconciled with observed executions; four canonical roots, ten pinned source-root classifications, and actual rollback receipts verified.", ""])
+            report.extend(["", "**Execution PASS; final disposition SPRINT GOAL UNMET** — revision-bound positive, control, and rollback summaries reconciled with observed executions. Final acceptance remains unmet until hosted focused CI and independent review of this same PR head succeed.", ""])
             args.nested_report.parent.mkdir(parents=True, exist_ok=True)
             args.nested_report.write_text("\n".join(report), encoding="utf-8")
     except GateError as error:

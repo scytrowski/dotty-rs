@@ -125,9 +125,21 @@ class VerifyFocusedGateTests(unittest.TestCase):
         with self.assertRaises(GateError):
             validate_nested_control_log(self.repository_root, control_log.replace("nested_sum_bounded_invalid_roots_fail_without_partial_mappings", "skipped"), head)
         rollback_log = self.nested_rollback_log(head)
-        validate_nested_negative_sidecars(self.repository_root, rollback_log, head)
+        rollback_rows = validate_nested_negative_sidecars(self.repository_root, rollback_log, head)
+        self.assertEqual([row["case"] for row in rollback_rows], ["peelLeftFails", "sumFails"])
+        self.assertTrue(all(row["kind"] == "rollback" for row in rollback_rows))
+        self.assertEqual(
+            [(row["source_id"], row["fresh_source_id"], row["source_bytes"]) for row in rollback_rows],
+            [("21361", "21362", "870"), ("21361", "21362", "870")],
+        )
         with self.assertRaises(GateError):
             validate_nested_negative_sidecars(self.repository_root, rollback_log.replace("full_rollback_retry_same_session_and_fresh_parity", "partial"), head)
+        with self.assertRaisesRegex(GateError, "actual late-failure receipt"):
+            validate_nested_negative_sidecars(
+                self.repository_root,
+                rollback_log.replace("ISSUE2136_NESTED_ROLLBACK\tcontrol", "ISSUE2136_NESTED_ROLLBACK\tmissing"),
+                head,
+            )
 
     def test_control_and_rollback_receipts_bind_to_tested_sha(self) -> None:
         head, _ = self.nested_positive_log()
