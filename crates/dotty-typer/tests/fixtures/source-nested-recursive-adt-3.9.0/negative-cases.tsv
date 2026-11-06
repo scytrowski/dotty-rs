@@ -6,3 +6,6 @@ ForeignSameSpelledExtractor	accepted	qualified Foreign.Add has an unrelated sour
 InvalidRecursiveArgument	rejected	Int literal is passed to sum which requires Expr
 WrongMethodResult	rejected	Int-valued cases do not satisfy the changed Expr result annotation
 RenamedReorderedFields	accepted	field rename and declaration reorder preserve positional extractor acceptance
+LatePeelLeftResult	rejected	nested peelLeft binders are accepted before a later Expr-to-Boolean result mismatch
+LateSumResult	rejected	nested Add(Num(value), right) and recursive sum calls precede the Boolean result mismatch
+WrongOuterPatternArity	rejected	outer Add receives three patterns where its generated unapply accepts two

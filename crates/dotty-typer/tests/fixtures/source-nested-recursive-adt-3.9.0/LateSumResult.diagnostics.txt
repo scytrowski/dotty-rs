@@ -1,0 +1,15 @@
+-- [E007] Type Mismatch Error: LateSumResult.scala:26:37 -----------------------
+26 |      case Add(Num(value), right) => value + Evaluator.sum(right)
+   |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |                                     Found:    Int
+   |                                     Required: Boolean
+   |
+   | longer explanation available when compiling with `-explain`
+-- [E007] Type Mismatch Error: LateSumResult.scala:27:31 -----------------------
+27 |      case Add(left, right) => Evaluator.sum(left) + Evaluator.sum(right)
+   |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |                               Found:    Int
+   |                               Required: Boolean
+   |
+   | longer explanation available when compiling with `-explain`
+2 errors found

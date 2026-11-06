@@ -821,6 +821,22 @@ fn source_method_symbol(
 
 #[test]
 fn nested_peelleft_controls_keep_bounded_rejections_and_positional_identity() {
+    let wrong_outer_arity = NESTED_SOURCE.replace(
+        "case Add(Add(left, _), _) => left",
+        "case Add(Add(left, _), _, _) => left",
+    );
+    assert_ne!(
+        wrong_outer_arity, NESTED_SOURCE,
+        "wrong outer arity control mutation applies"
+    );
+    let wrong_outer_arity_error =
+        type_nested_peel_root(&wrong_outer_arity, SourceId::from_index(21336))
+            .expect_err("three outer extractor arguments are rejected");
+    assert!(
+        wrong_outer_arity_error.starts_with("ExtractorProductSelectorCountMismatch"),
+        "wrong outer arity control reports its typed rejection: {wrong_outer_arity_error}"
+    );
+
     let wrong_arity = NESTED_SOURCE.replace(
         "case Add(Add(left, _), _) => left",
         "case Add(Add(left, _, _), _) => left",

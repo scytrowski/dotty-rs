@@ -1,0 +1,8 @@
+-- [E007] Type Mismatch Error: LatePeelLeftResult.scala:26:16 ------------------
+26 |      case _ => expr
+   |                ^^^^
+   |                Found:    (expr : adt.Expr)
+   |                Required: Boolean
+   |
+   | longer explanation available when compiling with `-explain`
+1 error found

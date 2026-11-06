@@ -18,6 +18,18 @@ const BINARY_CONTROL_ROOTS: &str = include_str!(
 const BINARY_CONTROL_RECEIPTS: &str = include_str!(
     "../../../tests/fixtures/source-binary-recursive-adt-3.9.0/rust-control-matrix.tsv"
 );
+const NESTED_EXPR_SOURCE: &str =
+    include_str!("../../../tests/fixtures/source-nested-recursive-adt-3.9.0/Expr.scala");
+const NESTED_LATE_FAILURE_RECEIPTS: &str =
+    include_str!("../../../tests/fixtures/source-nested-recursive-adt-3.9.0/rust-late-failure.tsv");
+const NESTED_SCALA_PEEL_CONTROL: &str = include_str!(
+    "../../../tests/fixtures/source-nested-recursive-adt-3.9.0/LatePeelLeftResult.scala"
+);
+const NESTED_SCALA_SUM_CONTROL: &str =
+    include_str!("../../../tests/fixtures/source-nested-recursive-adt-3.9.0/LateSumResult.scala");
+const NESTED_SCALA_OUTER_ARITY_CONTROL: &str = include_str!(
+    "../../../tests/fixtures/source-nested-recursive-adt-3.9.0/WrongOuterPatternArity.scala"
+);
 
 struct NegativeCase {
     name: String,
@@ -1442,6 +1454,519 @@ fn binary_complete_state_projection(
         ),
     ]);
     state
+}
+
+#[test]
+fn nested_late_failures_restore_and_retry_before_original_roots_recover() {
+    assert!(
+        NESTED_SCALA_PEEL_CONTROL.starts_with(NESTED_EXPR_SOURCE),
+        "Scala peel control preserves the immutable source prefix"
+    );
+    assert!(
+        NESTED_SCALA_SUM_CONTROL.starts_with(NESTED_EXPR_SOURCE),
+        "Scala sum control preserves the immutable source prefix"
+    );
+    assert!(
+        NESTED_SCALA_OUTER_ARITY_CONTROL.starts_with(NESTED_EXPR_SOURCE)
+            && NESTED_SCALA_OUTER_ARITY_CONTROL.contains("case Add(Add(left, _), _, _) => left"),
+        "Scala outer-arity control preserves the immutable source and malformed pattern"
+    );
+    assert!(
+        NESTED_SCALA_PEEL_CONTROL.contains("case Add(Add(left, _), _) => true")
+            && NESTED_SCALA_SUM_CONTROL
+                .contains("case Add(Num(value), right) => value + Evaluator.sum(right)")
+            && NESTED_SCALA_SUM_CONTROL
+                .contains("case Add(left, right) => Evaluator.sum(left) + Evaluator.sum(right)"),
+        "Scala classifications cover the nested source shapes exercised by Rust"
+    );
+    let source_text = format!(
+        "{NESTED_EXPR_SOURCE}\nobject RollbackControls:\n  def prior(value: Int): Int = value\n  def peelLeftFails(expr: Expr): Boolean =\n    expr match\n      case Add(Add(left, _), _) => true\n      case _ => expr\n  def sumFails(expr: Expr): Boolean =\n    expr match\n      case Num(_) => true\n      case Add(Num(value), right) => value + Evaluator.sum(right)\n      case Add(left, right) => Evaluator.sum(left) + Evaluator.sum(right)\n"
+    );
+    let source = SourceId::from_index(21_361);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let (parsed, index) = parse_and_name_unit(&source_text, source, &mut store, &mut packages);
+    let prior = tree_named(&parsed, &store, "prior");
+    let peel_failure = tree_named(&parsed, &store, "peelLeftFails");
+    let sum_failure = tree_named(&parsed, &store, "sumFails");
+    let peel_adds = nested_extractors(&parsed, &store, peel_failure, "Add");
+    let sum_adds = nested_extractors(&parsed, &store, sum_failure, "Add");
+    let sum_num_extractors = nested_extractors(&parsed, &store, sum_failure, "Num");
+    assert_eq!(
+        peel_adds.len(),
+        2,
+        "peelLeft control has both nested Add sites"
+    );
+    assert_eq!(sum_adds.len(), 2, "sum control has both nested Add sites");
+    assert_eq!(sum_num_extractors.len(), 2, "sum control has two Num sites");
+    let TreeKind::Apply(peel_outer) = &parsed.ast.get(peel_adds[0]).kind else {
+        unreachable!()
+    };
+    let TreeKind::Apply(peel_inner) = &parsed.ast.get(peel_adds[1]).kind else {
+        unreachable!()
+    };
+    assert_eq!(peel_outer.args[0], peel_adds[1]);
+    let peel_left = peel_inner.args[0];
+    let TreeKind::Apply(sum_first_add) = &parsed.ast.get(sum_adds[0]).kind else {
+        unreachable!()
+    };
+    let TreeKind::Apply(sum_second_add) = &parsed.ast.get(sum_adds[1]).kind else {
+        unreachable!()
+    };
+    let sum_right_binders = [sum_first_add.args[1], sum_second_add.args[1]];
+    let sum_left_binder = sum_second_add.args[0];
+    let TreeKind::Apply(sum_num) = &parsed.ast.get(*sum_num_extractors.last().unwrap()).kind else {
+        unreachable!()
+    };
+    let sum_value_binder = sum_num.args[0];
+    let sum_calls = nested_named_calls(&parsed, &store, sum_failure, "sum");
+    assert_eq!(
+        sum_calls.len(),
+        3,
+        "all three original recursive sum Apply sites are retained"
+    );
+
+    let original_peel = tree_named(&parsed, &store, "peelLeft");
+    let original_sum = tree_named_before(&parsed, &store, "sum", NESTED_EXPR_SOURCE.len() as u32);
+    let original_sum_symbol = index.symbol_at(source, original_sum).unwrap();
+    let expr = class_symbol(&parsed, &store, &index, source, "Expr");
+    let mut typer = typer_for(&parsed, &mut store, &packages, definitions, &index, source);
+    let prior_typed = typer
+        .type_method_definition(prior)
+        .expect("the unrelated valid root is established before failures");
+    let before = binary_complete_state_projection(&typer, &parsed);
+
+    let peel_observed = Rc::new(RefCell::new(false));
+    let peel_observed_by_callback = Rc::clone(&peel_observed);
+    let peel_adds_by_callback = peel_adds.clone();
+    typer.transaction_failure_observer = Some(Rc::new(move |typer| {
+        let mapped = peel_adds_by_callback
+            .iter()
+            .map(|tree| typer.source_typed_index().get(source, *tree))
+            .collect::<Vec<_>>();
+        if mapped.iter().any(Option::is_none) {
+            return;
+        }
+        let outer = mapped[0].unwrap();
+        let inner = mapped[1].unwrap();
+        for typed in [outer, inner] {
+            assert!(matches!(
+                typer.typed_ast().get(typed).kind,
+                TreeKind::UnApply(_)
+            ));
+        }
+        let binder = typer
+            .pattern_binding_symbol_at(source, peel_left)
+            .expect("the inner left binder exists before rollback");
+        let SymbolInfo::Complete(binding_type) = *typer.store().symbols.info(binder) else {
+            panic!("the inner left binder has a complete type before rollback")
+        };
+        assert_eq!(type_symbol(typer.store(), binding_type), expr);
+        assert!(
+            typer
+                .source_typed_index()
+                .get(source, peel_failure)
+                .is_none()
+        );
+        *peel_observed_by_callback.borrow_mut() = true;
+    }));
+    let peel_error = typer
+        .type_method_definition(peel_failure)
+        .expect_err("Expr-valued nested peelLeft body mismatches Boolean result");
+    assert!(matches!(
+        peel_error,
+        TyperError::ExpectedExpressionTypeMismatch { .. }
+    ));
+    assert!(
+        *peel_observed.borrow(),
+        "nested Add sites and left binder were observed before unwind"
+    );
+    let peel_debug = format!("{peel_error:?}");
+    assert_eq!(binary_complete_state_projection(&typer, &parsed), before);
+    assert_eq!(
+        typer.source_typed_index().get(source, prior),
+        Some(prior_typed)
+    );
+    assert!(typer.pattern_binding_symbol_at(source, peel_left).is_none());
+    for tree in peel_adds.into_iter().chain([peel_left]) {
+        assert!(typer.source_typed_index().get(source, tree).is_none());
+    }
+    let peel_retry = typer
+        .type_method_definition(peel_failure)
+        .expect_err("the same nested peelLeft failure retries");
+    assert_eq!(format!("{peel_retry:?}"), peel_debug);
+    assert_eq!(binary_complete_state_projection(&typer, &parsed), before);
+
+    let sum_observed = Rc::new(RefCell::new(false));
+    let sum_observed_by_callback = Rc::clone(&sum_observed);
+    let sum_calls_by_callback = sum_calls.clone();
+    let sum_adds_by_callback = sum_adds.clone();
+    let sum_num_extractors_by_callback = sum_num_extractors.clone();
+    typer.transaction_failure_observer = Some(Rc::new(move |typer| {
+        for extractor in sum_adds_by_callback
+            .iter()
+            .chain(sum_num_extractors_by_callback.iter())
+        {
+            let typed = typer
+                .source_typed_index()
+                .get(source, *extractor)
+                .expect("nested Add and Num extractor trees exist before rollback");
+            assert!(matches!(
+                typer.typed_ast().get(typed).kind,
+                TreeKind::UnApply(_)
+            ));
+        }
+        let typed_calls = sum_calls_by_callback
+            .iter()
+            .map(|tree| typer.source_typed_index().get(source, *tree))
+            .collect::<Vec<_>>();
+        if typed_calls.iter().any(Option::is_none) {
+            return;
+        }
+        let [first, second, third] = [
+            typed_calls[0].unwrap(),
+            typed_calls[1].unwrap(),
+            typed_calls[2].unwrap(),
+        ];
+        let mut rights = Vec::new();
+        for (position, (tree, typed)) in sum_calls_by_callback
+            .iter()
+            .copied()
+            .zip([first, second, third])
+            .enumerate()
+        {
+            let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+                panic!("recursive call remains an Apply before rollback")
+            };
+            let callee = match typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(application.function).ty)
+            {
+                Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                } => *symbol,
+                other => panic!("recursive call targets a canonical method: {other:?}"),
+            };
+            assert_eq!(callee, original_sum_symbol);
+            let expected_binder = match position {
+                0 => sum_right_binders[0],
+                1 => sum_left_binder,
+                _ => sum_right_binders[1],
+            };
+            let argument = application.args[0];
+            let argument_symbol = match typer.store().types.get(typer.typed_ast().get(argument).ty)
+            {
+                Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                } => *symbol,
+                other => panic!("recursive argument is a binder reference: {other:?}"),
+            };
+            let expected_symbol = typer
+                .pattern_binding_symbol_at(source, expected_binder)
+                .expect("recursive call's case binder exists before rollback");
+            assert_eq!(argument_symbol, expected_symbol);
+            assert_eq!(typer.source_typed_index().get(source, tree), Some(typed));
+            if position != 1 {
+                rights.push(expected_symbol);
+            }
+        }
+        assert_ne!(
+            rights[0], rights[1],
+            "sibling right binders stay distinct before rollback"
+        );
+        let value = typer
+            .pattern_binding_symbol_at(source, sum_value_binder)
+            .expect("nested Num value binder exists before rollback");
+        let SymbolInfo::Complete(value_type) = *typer.store().symbols.info(value) else {
+            panic!("nested Num value binder has a completed type")
+        };
+        assert_eq!(
+            type_symbol(typer.store(), value_type),
+            type_symbol(typer.store(), definitions.int)
+        );
+        *sum_observed_by_callback.borrow_mut() = true;
+    }));
+    let sum_error = typer
+        .type_method_definition(sum_failure)
+        .expect_err("Int-valued recursive sum body mismatches Boolean result");
+    assert!(
+        matches!(sum_error, TyperError::ExpectedExpressionTypeMismatch { .. }),
+        "{sum_error:?}"
+    );
+    assert!(
+        *sum_observed.borrow(),
+        "all three recursive Apply sites were observed before unwind"
+    );
+    let sum_debug = format!("{sum_error:?}");
+    assert_eq!(binary_complete_state_projection(&typer, &parsed), before);
+    assert_eq!(
+        typer.source_typed_index().get(source, prior),
+        Some(prior_typed)
+    );
+    for tree in sum_adds
+        .into_iter()
+        .chain(sum_calls)
+        .chain(sum_num_extractors)
+        .chain(sum_right_binders)
+        .chain([sum_left_binder, sum_value_binder])
+    {
+        assert!(typer.source_typed_index().get(source, tree).is_none());
+        assert!(typer.pattern_binding_symbol_at(source, tree).is_none());
+    }
+    let sum_retry = typer
+        .type_method_definition(sum_failure)
+        .expect_err("the same nested sum failure retries");
+    assert_eq!(format!("{sum_retry:?}"), sum_debug);
+    assert_eq!(binary_complete_state_projection(&typer, &parsed), before);
+
+    let typed_peel = typer
+        .type_method_definition(original_peel)
+        .expect("the untouched original peelLeft recovers in the same live typer");
+    let typed_sum = typer
+        .type_method_definition(original_sum)
+        .expect("the untouched original sum recovers in the same live typer");
+    assert_eq!(
+        typer.source_typed_index().get(source, original_peel),
+        Some(typed_peel)
+    );
+    assert_eq!(
+        typer.source_typed_index().get(source, original_sum),
+        Some(typed_sum)
+    );
+    let recovered = format!(
+        "{}\n{}",
+        normalized_nested_root(&parsed, &typer, source, original_peel),
+        normalized_nested_root(&parsed, &typer, source, original_sum)
+    );
+
+    let fresh_source = SourceId::from_index(21_362);
+    let mut fresh_store = SemanticStore::new();
+    let fresh_definitions = Definitions::bootstrap(&mut fresh_store);
+    let mut fresh_packages = Packages::new();
+    let (fresh_parsed, fresh_index) = parse_and_name_unit(
+        &source_text,
+        fresh_source,
+        &mut fresh_store,
+        &mut fresh_packages,
+    );
+    let fresh_prior = tree_named(&fresh_parsed, &fresh_store, "prior");
+    let fresh_peel_failure = tree_named(&fresh_parsed, &fresh_store, "peelLeftFails");
+    let fresh_sum_failure = tree_named(&fresh_parsed, &fresh_store, "sumFails");
+    let fresh_original_peel = tree_named(&fresh_parsed, &fresh_store, "peelLeft");
+    let fresh_original_sum = tree_named_before(
+        &fresh_parsed,
+        &fresh_store,
+        "sum",
+        NESTED_EXPR_SOURCE.len() as u32,
+    );
+    let mut fresh_typer = typer_for(
+        &fresh_parsed,
+        &mut fresh_store,
+        &fresh_packages,
+        fresh_definitions,
+        &fresh_index,
+        fresh_source,
+    );
+    fresh_typer
+        .type_method_definition(fresh_prior)
+        .expect("fresh session types prior root");
+    for (root, expected) in [
+        (fresh_peel_failure, normalized_error(&peel_error, &parsed)),
+        (fresh_sum_failure, normalized_error(&sum_error, &parsed)),
+    ] {
+        let first = fresh_typer
+            .type_method_definition(root)
+            .expect_err("fresh session rejects late control");
+        assert_eq!(normalized_error(&first, &fresh_parsed), expected);
+        let retry = fresh_typer
+            .type_method_definition(root)
+            .expect_err("fresh late control retry fails");
+        assert_eq!(format!("{retry:?}"), format!("{first:?}"));
+    }
+    fresh_typer
+        .type_method_definition(fresh_original_peel)
+        .expect("fresh peelLeft recovery");
+    fresh_typer
+        .type_method_definition(fresh_original_sum)
+        .expect("fresh sum recovery");
+    let fresh_recovered = format!(
+        "{}\n{}",
+        normalized_nested_root(
+            &fresh_parsed,
+            &fresh_typer,
+            fresh_source,
+            fresh_original_peel
+        ),
+        normalized_nested_root(
+            &fresh_parsed,
+            &fresh_typer,
+            fresh_source,
+            fresh_original_sum
+        )
+    );
+    assert_eq!(
+        recovered, fresh_recovered,
+        "same-session recovery matches fresh parse/resolution"
+    );
+    let receipt = format!(
+        "control\tsource_id\tfresh_source_id\tsource_bytes\troot_span\tdiagnostic\trecovery\npeelLeftFails\t{}\t{}\t{}\t{}\t{}\tfull_rollback_retry_same_session_and_fresh_parity\nsumFails\t{}\t{}\t{}\t{}\t{}\tfull_rollback_retry_same_session_and_fresh_parity",
+        source.index(),
+        fresh_source.index(),
+        source_text.len(),
+        tree_span(&parsed, peel_failure.index()),
+        normalized_error(&peel_error, &parsed),
+        source.index(),
+        fresh_source.index(),
+        source_text.len(),
+        tree_span(&parsed, sum_failure.index()),
+        normalized_error(&sum_error, &parsed),
+    );
+    assert_eq!(
+        receipt,
+        NESTED_LATE_FAILURE_RECEIPTS.trim_end(),
+        "normalized late-failure evidence changed"
+    );
+    println!("ISSUE2136_NESTED_ROLLBACK\t{receipt}");
+}
+
+fn nested_extractors(
+    parsed: &dotty_parser::ParseResult,
+    store: &SemanticStore,
+    root: TreeId<Untyped>,
+    name: &str,
+) -> Vec<TreeId<Untyped>> {
+    let root_span = parsed.ast.get(root).position.unwrap().span().range();
+    let mut trees = parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, node)| {
+            let span = node.position?.span().range();
+            if span.start() < root_span.start() || span.end() > root_span.end() {
+                return None;
+            }
+            let TreeKind::Apply(application) = &node.kind else {
+                return None;
+            };
+            let function_name = match &parsed.ast.get(application.function).kind {
+                TreeKind::Ident(function) => store.names.resolve(function.name.text()),
+                TreeKind::Select(function) => store.names.resolve(function.name.text()),
+                _ => return None,
+            };
+            (function_name == name).then_some(tree)
+        })
+        .collect::<Vec<_>>();
+    trees.sort_by_key(|tree| {
+        parsed
+            .ast
+            .get(*tree)
+            .position
+            .unwrap()
+            .span()
+            .range()
+            .start()
+    });
+    trees
+}
+
+fn tree_named_before(
+    parsed: &dotty_parser::ParseResult,
+    store: &SemanticStore,
+    name: &str,
+    source_offset: u32,
+) -> TreeId<Untyped> {
+    parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, node)| match &node.kind {
+            TreeKind::DefDef(definition)
+                if store.names.resolve(definition.name.as_name().text()) == name
+                    && node.position.unwrap().span().range().end() <= source_offset =>
+            {
+                Some(tree)
+            }
+            _ => None,
+        })
+        .last()
+        .unwrap_or_else(|| panic!("missing method {name} before source offset {source_offset}"))
+}
+
+fn nested_named_calls(
+    parsed: &dotty_parser::ParseResult,
+    store: &SemanticStore,
+    root: TreeId<Untyped>,
+    name: &str,
+) -> Vec<TreeId<Untyped>> {
+    let root_span = parsed.ast.get(root).position.unwrap().span().range();
+    let mut trees = parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, node)| {
+            let span = node.position?.span().range();
+            if span.start() < root_span.start() || span.end() > root_span.end() {
+                return None;
+            }
+            let TreeKind::Apply(application) = &node.kind else {
+                return None;
+            };
+            let function_name = match &parsed.ast.get(application.function).kind {
+                TreeKind::Ident(function) => store.names.resolve(function.name.text()),
+                TreeKind::Select(function) => store.names.resolve(function.name.text()),
+                _ => return None,
+            };
+            (function_name == name).then_some(tree)
+        })
+        .collect::<Vec<_>>();
+    trees.sort_by_key(|tree| {
+        parsed
+            .ast
+            .get(*tree)
+            .position
+            .unwrap()
+            .span()
+            .range()
+            .start()
+    });
+    trees
+}
+
+fn normalized_nested_root(
+    parsed: &dotty_parser::ParseResult,
+    typer: &SourceTyper<'_>,
+    source: SourceId,
+    root: TreeId<Untyped>,
+) -> String {
+    let root_span = parsed.ast.get(root).position.unwrap().span().range();
+    let mut rows = parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, node)| {
+            let span = node.position?.span().range();
+            if span.start() < root_span.start() || span.end() > root_span.end() {
+                return None;
+            }
+            let typed = typer.source_typed_index().get(source, tree)?;
+            let typed = typer.typed_ast().get(typed);
+            Some(format!(
+                "{}..{}:{}:{}",
+                span.start(),
+                span.end(),
+                typed_kind_shape(typed),
+                normalized_type_shape(typer.store(), typed.ty)
+            ))
+        })
+        .collect::<Vec<_>>();
+    rows.sort();
+    format!(
+        "{}@{}..{}\n{}",
+        tree_span(parsed, root.index()),
+        root_span.start(),
+        root_span.end(),
+        rows.join("\n")
+    )
 }
 
 #[test]
