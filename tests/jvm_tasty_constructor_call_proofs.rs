@@ -1,8 +1,8 @@
 use dotty::jvm_tasty_cross_class::{
     CrossClassConstructorCallProofInput, ImmutableLocalInitializationProofInput,
     ImmutableLocalInitializerPairProofInput, ValidatedCrossClassConstructorCallProof,
-    validate_cross_class_constructor_call_proofs, validate_immutable_local_initialization_proof,
-    validate_immutable_local_initializer_pair_proof,
+    validate_cross_class_constructor_call_proofs, validate_immutable_local_counter_set_call_proof,
+    validate_immutable_local_initialization_proof, validate_immutable_local_initializer_pair_proof,
     validate_ordered_constructor_argument_bindings,
 };
 use dotty::jvm_tasty_plan::{PairedPlanError, with_paired_jvm_tasty_batch_plan};
@@ -33,6 +33,8 @@ const IMMUTABLE_LOCAL_PAIR_REVERSED_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactoryReversed.scala");
 const TWO_IMMUTABLE_LOCALS_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
+const COUNTER_SET_CALL_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_local_receiver_call/LocalReceiverCall.scala");
 const TWO_IMMUTABLE_LOCALS_REVERSED_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocalsReversed.scala");
 
@@ -236,17 +238,28 @@ fn with_two_local_proof_session_internal<R>(
             }
             let context = typer.expression_context_for(method).unwrap();
             let typed_body = typer.type_expression(rhs, context).unwrap();
+            let local_declarations = block
+                .stats
+                .iter()
+                .copied()
+                .filter(|declaration| {
+                    matches!(parsed.ast.get(*declaration).kind, TreeKind::ValDef(_))
+                })
+                .collect::<Vec<_>>();
             let local_bindings = [
                 typer
-                    .typed_local_binding_at(source_id, block.stats[0])
+                    .typed_local_binding_at(source_id, local_declarations[0])
                     .unwrap(),
                 typer
-                    .typed_local_binding_at(source_id, block.stats[1])
+                    .typed_local_binding_at(source_id, local_declarations[1])
                     .unwrap(),
             ];
             let all_local_bindings = block
                 .stats
                 .iter()
+                .filter(|declaration| {
+                    matches!(parsed.ast.get(**declaration).kind, TreeKind::ValDef(_))
+                })
                 .map(|declaration| {
                     typer
                         .typed_local_binding_at(source_id, *declaration)
@@ -2025,6 +2038,206 @@ fn two_local_pair_rejects_nested_argument_even_when_other_local_is_authenticated
             );
         },
     );
+}
+
+#[test]
+fn original_counter_set_call_is_proved_without_widening_pair_contract() {
+    let renamed = COUNTER_SET_CALL_SOURCE
+        .replace("PairFactory", "Assembler")
+        .replace("create", "assemble")
+        .replace("firstSeed", "leftSeed")
+        .replace("secondSeed", "rightSeed")
+        .replace("first", "left")
+        .replace("second", "right");
+    let reversed = COUNTER_SET_CALL_SOURCE.replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
+        "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
+    );
+    let second_receiver =
+        COUNTER_SET_CALL_SOURCE.replace("first.set(secondSeed)", "second.set(secondSeed)");
+
+    for (source, source_id, receiver_index) in [
+        (COUNTER_SET_CALL_SOURCE, 21650, 0),
+        (renamed.as_str(), 21651, 0),
+        (reversed.as_str(), 21652, 1),
+        (second_receiver.as_str(), 21653, 1),
+    ] {
+        with_two_local_proof_session(
+            source,
+            source_id,
+            |store,
+             definitions,
+             source_ast,
+             typed_ast,
+             source_index,
+             source_typed_index,
+             source_id,
+             method_tree,
+             bindings,
+             _other_local_binding,
+             _typer,
+             jvm_unit| {
+                let input = || ImmutableLocalInitializerPairProofInput {
+                    source_id,
+                    method_tree,
+                    store,
+                    definitions,
+                    source_ast,
+                    typed_ast,
+                    source_index,
+                    source_typed_index,
+                    local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                    jvm_unit,
+                };
+                assert!(matches!(
+                    validate_immutable_local_initializer_pair_proof(input()),
+                    Err(dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceShape(_))
+                ), "the existing two-statement proof stays strict");
+                let proof = validate_immutable_local_counter_set_call_proof(input())
+                    .unwrap_or_else(|error| panic!("source {source_id:?}: {error:?}"));
+                let TreeKind::DefDef(method) = &source_ast.get(method_tree).kind else {
+                    panic!("factory method remains original");
+                };
+                let TreeKind::Block(block) = &source_ast.get(method.rhs.unwrap()).kind else {
+                    panic!("factory body remains original Block");
+                };
+                assert_eq!(proof.source_call(), block.stats[2]);
+                assert_eq!(
+                    proof.typed_call(),
+                    source_typed_index.get(source_id, block.stats[2]).unwrap()
+                );
+                assert_eq!(proof.receiver(), bindings[receiver_index].symbol());
+                assert_eq!(
+                    proof.formal(),
+                    source_index
+                        .symbol_at(source_id, method.value_param_clauses[0][1])
+                        .unwrap()
+                );
+                assert_eq!(proof.argument_type(), definitions.int);
+                assert_eq!(proof.result_type(), definitions.unit);
+                assert_eq!(
+                    store.symbols.get(proof.method()).owner,
+                    Some(proof.initializer_pair().counter())
+                );
+
+                let TreeKind::Apply(final_apply) = &source_ast
+                    .get(proof.initializer_pair().source_final_expression())
+                    .kind
+                else {
+                    panic!("final Pair expression remains an Apply");
+                };
+                let final_typed_select = source_typed_index
+                    .get(source_id, final_apply.function)
+                    .unwrap();
+                let mut foreign_owner = clone_arena(typed_ast);
+                foreign_owner.get_mut(proof.typed_select()).ty =
+                    typed_ast.get(final_typed_select).ty;
+                let foreign_owner_unit = JvmCompilationUnit {
+                    store,
+                    typed_ast: &foreign_owner,
+                    classes: jvm_unit.classes.clone(),
+                };
+                let wrong_owner = validate_immutable_local_counter_set_call_proof(
+                    ImmutableLocalInitializerPairProofInput {
+                        typed_ast: &foreign_owner,
+                        jvm_unit: &foreign_owner_unit,
+                        ..input()
+                    },
+                );
+                assert_eq!(
+                    wrong_owner.err().unwrap(),
+                    dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SemanticIdentity(
+                        "selected Counter.set must be the original accessible Counter member"
+                    )
+                );
+
+                let TreeKind::Apply(apply) = &source_ast.get(proof.source_call()).kind else {
+                    panic!("call receipt preserves the source Apply");
+                };
+                let mut stale_index = source_typed_index.clone();
+                assert!(stale_index.remove(source_id, apply.function).is_some());
+                let stale = validate_immutable_local_counter_set_call_proof(
+                    ImmutableLocalInitializerPairProofInput {
+                        source_typed_index: &stale_index,
+                        ..input()
+                    },
+                );
+                assert_eq!(
+                    stale.err().unwrap(),
+                    dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+                        "Counter.set Select has no typed mapping"
+                    )
+                );
+            },
+        );
+    }
+
+    let wrong_formal =
+        COUNTER_SET_CALL_SOURCE.replace("first.set(secondSeed)", "first.set(firstSeed)");
+    let call_before_second_local = COUNTER_SET_CALL_SOURCE.replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)\n    first.set(secondSeed)\n",
+        "    val first: Counter = new Counter(firstSeed)\n    first.set(secondSeed)\n    val second: Counter = new Counter(secondSeed)\n",
+    );
+    let duplicate_call = COUNTER_SET_CALL_SOURCE.replace(
+        "    first.set(secondSeed)\n",
+        "    first.set(secondSeed)\n    second.set(firstSeed)\n",
+    );
+    for (source, source_id, expected) in [
+        (
+            wrong_formal.as_str(),
+            21654,
+            dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceShape(
+                "Counter.set argument must be secondSeed",
+            ),
+        ),
+        (
+            call_before_second_local.as_str(),
+            21655,
+            dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceShape(
+                "third factory Block statistic must be the original Counter.set Apply",
+            ),
+        ),
+        (
+            duplicate_call.as_str(),
+            21656,
+            dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceShape(
+                "factory Block must contain exactly two local ValDefs and one Counter.set call",
+            ),
+        ),
+    ] {
+        with_two_local_proof_session(
+            source,
+            source_id,
+            |store,
+             definitions,
+             source_ast,
+             typed_ast,
+             source_index,
+             source_typed_index,
+             source_id,
+             method_tree,
+             bindings,
+             _other_local_binding,
+             _typer,
+             jvm_unit| {
+                let result = validate_immutable_local_counter_set_call_proof(
+                    ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast,
+                        source_index,
+                        source_typed_index,
+                        local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                        jvm_unit,
+                    },
+                );
+                assert_eq!(result.err().unwrap(), expected);
+            },
+        );
+    }
 }
 
 #[test]
