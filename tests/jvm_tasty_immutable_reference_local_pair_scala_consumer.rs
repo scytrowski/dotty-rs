@@ -835,13 +835,35 @@ fn rust_two_local_graph(
             })
             .any(|parent| parent.offset as u32 == method_address)
         })
-        .map(|node| node.offset as u32)
-        .collect::<Vec<_>>();
+        .map(|node| {
+            let parameter = index
+                .get(node.offset as u32)
+                .unwrap()
+                .decode_parameter()
+                .unwrap();
+            (
+                tasty.names().render(parameter.name()).unwrap().to_owned(),
+                node.offset as u32,
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
     assert_eq!(
         parameter_addresses.len(),
         2,
         "the two source PARAM addresses exist"
     );
+    let (canonical_locals, canonical_formals): ([&str; 2], [&str; 2]) =
+        if expected_names.contains(&"leftLocal") {
+            (["leftLocal", "rightLocal"], ["leftSeed", "rightSeed"])
+        } else {
+            (["first", "second"], ["firstSeed", "secondSeed"])
+        };
+    let declaration_order = expected_names.map(|name| {
+        canonical_locals
+            .iter()
+            .position(|canonical| *canonical == name)
+            .expect("source local name maps to its canonical local")
+    });
     let block = index
         .iter_nodes_with_tag(BLOCK_TAG)
         .find(|node| {
@@ -883,7 +905,7 @@ fn rust_two_local_graph(
         "source declaration order is preserved"
     );
     let asts = tasty.section(StandardSection::Asts).unwrap();
-    for (local, parameter) in locals.iter().zip(parameter_addresses) {
+    for (local_index, local) in locals.iter().enumerate() {
         let initializer_refs = index
             .iter_nodes_with_tag(TERMREFDIRECT_TAG)
             .filter(|node| {
@@ -908,7 +930,7 @@ fn rust_two_local_graph(
             .collect::<Vec<_>>();
         assert_eq!(
             initializer_refs,
-            [parameter],
+            [parameter_addresses[canonical_formals[declaration_order[local_index]]]],
             "each local uses its matching seed formal"
         );
     }
@@ -946,10 +968,16 @@ fn rust_two_local_graph(
         .map(|node| node.offset as u32)
         .collect::<Vec<_>>();
     if let Some(expected_arg_ordinals) = expected_arg_ordinals {
+        let expected_local_indices = expected_arg_ordinals.map(|ordinal| {
+            declaration_order
+                .iter()
+                .position(|local_ordinal| *local_ordinal == ordinal)
+                .expect("Pair argument refers to an original local")
+        });
         assert_eq!(
             references,
-            expected_arg_ordinals
-                .map(|ordinal| local_addresses[ordinal])
+            expected_local_indices
+                .map(|local_index| local_addresses[local_index])
                 .to_vec(),
             "final Pair arguments point directly to expected local VALDEF addresses"
         );
@@ -2341,6 +2369,28 @@ fn rust_two_local_tasty_graph_uses_two_original_local_addresses() {
     eprintln!(
         "RUST_TWO_LOCAL_GRAPH block={block} local_addresses={locals:?} pair_arguments={pair_arguments:?}"
     );
+
+    let reversed = TWO_LOCAL_SOURCE.replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
+        "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
+    );
+    let reversed_batch =
+        emit_paired_jvm_tasty_batch(&reversed, "PairFactory.scala", SourceId::from_index(21271))
+            .expect("reversed source declarations preserve each seed binding");
+    let reversed_factory = reversed_batch
+        .classes()
+        .iter()
+        .find(|artifact| artifact.tasty_path() == "example/PairFactory.tasty")
+        .unwrap();
+    let (_, reversed_locals, reversed_arguments) = rust_two_local_graph(
+        reversed_factory.tasty_bytes(),
+        ["second", "first"],
+        Some([0, 1]),
+    );
+    assert_eq!(
+        reversed_arguments,
+        reversed_locals.iter().rev().copied().collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -2405,6 +2455,11 @@ fn official_scala_consumes_original_rust_two_immutable_local_artifacts() {
     let aliased_source =
         TWO_LOCAL_SOURCE.replace("new Pair(first, second)", "new Pair(first, first)");
     assert_ne!(aliased_source, TWO_LOCAL_SOURCE);
+    let reversed_local_declarations = TWO_LOCAL_SOURCE.replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
+        "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
+    );
+    assert_ne!(reversed_local_declarations, TWO_LOCAL_SOURCE);
     let (renamed_source, renamed_client) = {
         let rename = |text: &str| {
             text.replace("example", "renamed.example")
@@ -2427,6 +2482,7 @@ fn official_scala_consumes_original_rust_two_immutable_local_artifacts() {
             TWO_LOCAL_CLIENT,
             "client.Consumer",
             [0, 1],
+            ["first", "second"],
         ),
         (
             "reversed",
@@ -2434,6 +2490,15 @@ fn official_scala_consumes_original_rust_two_immutable_local_artifacts() {
             TWO_LOCAL_RUST_REVERSED_CLIENT,
             "client.Consumer",
             [1, 0],
+            ["first", "second"],
+        ),
+        (
+            "reversed-local-declarations",
+            reversed_local_declarations.as_str(),
+            TWO_LOCAL_CLIENT,
+            "client.Consumer",
+            [0, 1],
+            ["second", "first"],
         ),
         (
             "repeated-first",
@@ -2441,6 +2506,7 @@ fn official_scala_consumes_original_rust_two_immutable_local_artifacts() {
             TWO_LOCAL_ALIAS_CLIENT,
             "client.Consumer",
             [0, 0],
+            ["first", "second"],
         ),
         (
             "renamed",
@@ -2448,6 +2514,7 @@ fn official_scala_consumes_original_rust_two_immutable_local_artifacts() {
             renamed_client.as_str(),
             "client.Consumer",
             [0, 1],
+            ["leftLocal", "rightLocal"],
         ),
         (
             "reordered-declarations",
@@ -2455,9 +2522,12 @@ fn official_scala_consumes_original_rust_two_immutable_local_artifacts() {
             TWO_LOCAL_CLIENT,
             "client.Consumer",
             [0, 1],
+            ["first", "second"],
         ),
     ];
-    for (index, (label, source, client, entry, arguments)) in cases.into_iter().enumerate() {
+    for (index, (label, source, client, entry, arguments, local_names)) in
+        cases.into_iter().enumerate()
+    {
         let source_id = 21280 + index as u32 * 10;
         let batch = emit_paired_jvm_tasty_batch(
             source,
@@ -2476,12 +2546,12 @@ fn official_scala_consumes_original_rust_two_immutable_local_artifacts() {
                 .iter()
                 .find(|artifact| artifact.tasty_path() == "example/PairFactory.tasty")
                 .unwrap();
-            rust_two_local_graph(factory.tasty_bytes(), ["first", "second"], Some([0, 0]));
+            rust_two_local_graph(factory.tasty_bytes(), local_names, Some([0, 0]));
         }
         compile_and_run(&scala, &root, &batch, source, client, entry, source_id);
-        if index < 3 {
+        if index < 4 {
             let producer = root.join(format!("original-{source_id}"));
-            inspect_rust_two_local_batch(&scala, &root, &producer, ["first", "second"], arguments);
+            inspect_rust_two_local_batch(&scala, &root, &producer, local_names, arguments);
         }
         eprintln!("SCALA_TWO_LOCAL_RUST_CONSUMER variant={label} source_id={source_id}");
         if index == 0 {

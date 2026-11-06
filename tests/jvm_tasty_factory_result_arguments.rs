@@ -630,6 +630,8 @@ fn assert_two_local_pair_tasty(
     method_name: &str,
     expected_local_names: [&str; 2],
     order: [usize; 2],
+    seed_order: [usize; 2],
+    formal_names: [&str; 2],
 ) {
     let file = tasty(bytes);
     let index = file.ast_address_index().unwrap();
@@ -650,14 +652,22 @@ fn assert_two_local_pair_tasty(
         .offset as u32;
     let method_parameters = index
         .iter_nodes_with_tag(PARAM_TAG)
-        .filter(|node| {
-            std::iter::successors(index.parent_of(node.offset as u32), |parent| {
-                index.parent_of(parent.offset as u32)
-            })
-            .any(|parent| parent.offset as u32 == method_address)
+        .filter_map(|node| {
+            let address = node.offset as u32;
+            let mut parent = index.parent_of(address);
+            while let Some(item) = parent {
+                if item.offset as u32 == method_address {
+                    let parameter = index.get(address)?.decode_parameter().ok()?;
+                    return Some((
+                        file.names().render(parameter.name()).ok()?.to_owned(),
+                        address,
+                    ));
+                }
+                parent = index.parent_of(item.offset as u32);
+            }
+            None
         })
-        .map(|node| node.offset as u32)
-        .collect::<Vec<_>>();
+        .collect::<std::collections::HashMap<_, _>>();
     assert_eq!(method_parameters.len(), 2);
     let block = index.get(block_address).unwrap().decode_block().unwrap();
     assert_eq!(block.stats.len(), 2);
@@ -711,7 +721,16 @@ fn assert_two_local_pair_tasty(
             panic!("each seed is one direct TERMREF")
         };
         assert_eq!(seed_ref.kind, AstRefKind::TermRefDirect);
-        assert_eq!(seed_ref.address, method_parameters[local_index]);
+        let expected_formal = formal_names[seed_order[local_index]];
+        assert_eq!(
+            seed_ref.address,
+            *method_parameters
+                .get(expected_formal)
+                .unwrap_or_else(|| panic!(
+                    "TASTy method parameter names are {:?}",
+                    method_parameters.keys().collect::<Vec<_>>()
+                )),
+        );
         local_names.push(file.names().render(name).unwrap().to_owned());
     }
     assert_eq!(local_names, expected_local_names);
@@ -3166,16 +3185,23 @@ fn formal_local_pair_pickles_both_original_argument_orders() {
 fn two_immutable_counter_locals_pickle_in_source_order_for_local_pair_arguments() {
     let original =
         include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
-    for (source, expected_order, source_id) in [
-        (original.to_owned(), [0usize, 1usize], 21250u32),
+    let reversed_local_declarations = original.replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
+        "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
+    );
+    for (source, expected_order, seed_order, source_id) in [
+        (original.to_owned(), [0usize, 1usize], [0, 1], 21250u32),
         (
             original.replace("new Pair(first, second)", "new Pair(second, first)"),
             [1, 0],
+            [0, 1],
             21252,
         ),
+        (reversed_local_declarations, [1, 0], [1, 0], 21253),
         (
             original.replace("new Pair(first, second)", "new Pair(first, first)"),
             [0, 0],
+            [0, 1],
             21254,
         ),
     ] {
@@ -3242,7 +3268,7 @@ fn two_immutable_counter_locals_pickle_in_source_order_for_local_pair_arguments(
                     };
                     assert_eq!(symbol, locals[expected_order[index]].symbol);
                 }
-                if expected_order == [0, 1] {
+                if expected_order == [0, 1] && seed_order == [0, 1] {
                     let mut typed_only = clone_typed_ast(plan.typed_ast);
                     let TreeKind::Ident(typed_second) =
                         &mut typed_only.get_mut(arguments[1].typed_argument).kind
@@ -3335,7 +3361,18 @@ fn two_immutable_counter_locals_pickle_in_source_order_for_local_pair_arguments(
             bytes, repeated,
             "each source variant serializes deterministically"
         );
-        assert_two_local_pair_tasty(&bytes, "create", ["first", "second"], expected_order);
+        assert_two_local_pair_tasty(
+            &bytes,
+            "create",
+            if seed_order == [1, 0] {
+                ["second", "first"]
+            } else {
+                ["first", "second"]
+            },
+            expected_order,
+            seed_order,
+            ["firstSeed", "secondSeed"],
+        );
         if expected_order == [0, 1]
             && std::env::var_os("DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE").as_deref()
                 == Some(std::ffi::OsStr::new("1"))
@@ -3349,6 +3386,10 @@ fn two_immutable_counter_locals_pickle_in_source_order_for_local_pair_arguments(
 fn two_local_pair_emits_deterministic_six_artifact_batches_for_all_argument_orders() {
     let original =
         include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
+    let reversed_local_declarations = original.replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
+        "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
+    );
     let renamed = original
         .replace("package example", "package renamed")
         .replace("Counter", "Gauge")
@@ -3394,6 +3435,15 @@ fn two_local_pair_emits_deterministic_six_artifact_batches_for_all_argument_orde
             ["first", "second"],
             "PairFactory",
             Some("new example.Pair(second, first)"),
+        ),
+        (
+            "reversed-local-declarations",
+            reversed_local_declarations,
+            [1usize, 0usize],
+            "create",
+            ["second", "first"],
+            "PairFactory",
+            Some("new example.Pair(first, second)"),
         ),
         (
             "repeat-first",
@@ -3510,10 +3560,8 @@ fn two_local_pair_emits_deterministic_six_artifact_batches_for_all_argument_orde
             TastyFile::parse_and_validate_scala_3_9(left.tasty_bytes()).unwrap_or_else(|error| {
                 panic!("{variant} sidecar {expected_index} validates: {error:?}")
             });
-            if variant == "original"
-                && let Some(root) = std::env::var_os("DOTTY_ISSUE_2126_ARTIFACT_SCRATCH")
-            {
-                let root = PathBuf::from(root).join("primary");
+            if let Some(root) = std::env::var_os("DOTTY_ISSUE_2129_ARTIFACT_SCRATCH") {
+                let root = PathBuf::from(root).join(variant);
                 for (relative, bytes) in [
                     (left.classfile_path(), left.classfile_bytes()),
                     (left.tasty_path(), left.tasty_bytes()),
@@ -3528,7 +3576,10 @@ fn two_local_pair_emits_deterministic_six_artifact_batches_for_all_argument_orde
                     .iter()
                     .map(|byte| format!("{byte:02x}"))
                     .collect::<String>();
-                println!("issue-2126 {} TASTY_UUID={uuid}", left.classfile_path());
+                println!(
+                    "issue-2129 {variant} {} TASTY_UUID={uuid}",
+                    left.classfile_path()
+                );
             }
             if left.classfile_path() == format!("{package}/{factory_class_name}.class") {
                 assert_two_local_pair_tasty(
@@ -3536,6 +3587,16 @@ fn two_local_pair_emits_deterministic_six_artifact_batches_for_all_argument_orde
                     method_name,
                     local_names,
                     expected_loads,
+                    if variant == "reversed-local-declarations" {
+                        [1, 0]
+                    } else {
+                        [0, 1]
+                    },
+                    if method_name == "assemble" {
+                        ["primarySeed", "backupSeed"]
+                    } else {
+                        ["firstSeed", "secondSeed"]
+                    },
                 );
                 if let (Some(expected_pair_call), Ok(strict)) = (
                     scala_pair_call,
