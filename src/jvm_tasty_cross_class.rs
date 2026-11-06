@@ -4844,6 +4844,17 @@ pub fn validate_immutable_local_initializer_pair_proof<'session>(
     ValidatedImmutableLocalInitializerPairProof<'session>,
     CrossClassConstructorCallProofError,
 > {
+    validate_immutable_local_initializer_pair_proof_inner(input, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_immutable_local_initializer_pair_proof_inner<'session>(
+    input: ImmutableLocalInitializerPairProofInput<'session>,
+    allow_counter_set_call: bool,
+) -> Result<
+    ValidatedImmutableLocalInitializerPairProof<'session>,
+    CrossClassConstructorCallProofError,
+> {
     let source_error = |s| CrossClassConstructorCallProofError::SourceShape(s);
     let identity_error = |s| CrossClassConstructorCallProofError::SourceIdentity(s);
     let semantic_error = |s| CrossClassConstructorCallProofError::SemanticIdentity(s);
@@ -4998,14 +5009,26 @@ pub fn validate_immutable_local_initializer_pair_proof<'session>(
     else {
         return Err(source_error("factory body must be the original Block"));
     };
-    if block.stats.len() != 2 {
-        return Err(source_error(
-            "factory Block must contain exactly two local ValDefs",
-        ));
+    if block.stats.len() != if allow_counter_set_call { 3 } else { 2 } {
+        return Err(source_error(if allow_counter_set_call {
+            "factory Block must contain exactly two local ValDefs and one Counter.set call"
+        } else {
+            "factory Block must contain exactly two local ValDefs"
+        }));
     }
     if block.stats[0] == block.stats[1] {
         return Err(identity_error(
             "two local declarations must have distinct original source roots",
+        ));
+    }
+    if allow_counter_set_call
+        && !matches!(
+            source_ast.try_get(block.stats[2]).map(|node| &node.kind),
+            Some(TreeKind::Apply(_))
+        )
+    {
+        return Err(source_error(
+            "third factory Block statistic must be the original Counter.set Apply",
         ));
     }
     let typed_block = source_typed_index
@@ -5034,7 +5057,9 @@ pub fn validate_immutable_local_initializer_pair_proof<'session>(
     else {
         return Err(typed_error("original source Block must remain typed Block"));
     };
-    if typed_block_tree.stats != typed_declarations
+    if typed_block_tree.stats.get(..2) != Some(typed_declarations.as_slice())
+        || (allow_counter_set_call && typed_block_tree.stats.len() != 3)
+        || (!allow_counter_set_call && typed_block_tree.stats.len() != 2)
         || typed_block_tree.expr != typed_final_expression
     {
         return Err(typed_error(
