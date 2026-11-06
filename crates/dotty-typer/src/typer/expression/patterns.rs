@@ -87,22 +87,24 @@ impl SourceTyper<'_> {
         unapply: SymbolId,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
-        let members =
-            match self.lookup_overload_members_journaled(result_type, member_name, info_journal) {
-                Ok(members) => members,
-                Err(crate::typer::lookup::MemberLookupError::ClassInfoUnavailable { .. })
-                | Err(crate::typer::lookup::MemberLookupError::UnsupportedReceiverType {
-                    ..
-                }) => {
-                    return Err(TyperError::UnsupportedExtractorResultProtocol {
-                        source: self.source,
-                        tree_index: pattern_index,
-                        unapply,
-                        result: result_type,
-                    });
-                }
-                Err(error) => return Err(TyperError::MemberLookup(Box::new(error))),
-            };
+        // Extractor result protocols select value members using ordinary
+        // receiver precedence. Overload application must discover hidden
+        // inherited buckets before it can test applicability; a protocol
+        // member such as Tuple2._1 instead follows the direct member bucket,
+        // which hides the matching inherited Product2._1 declaration.
+        let members = match self.lookup_members_journaled(result_type, member_name, info_journal) {
+            Ok(members) => members,
+            Err(crate::typer::lookup::MemberLookupError::ClassInfoUnavailable { .. })
+            | Err(crate::typer::lookup::MemberLookupError::UnsupportedReceiverType { .. }) => {
+                return Err(TyperError::UnsupportedExtractorResultProtocol {
+                    source: self.source,
+                    tree_index: pattern_index,
+                    unapply,
+                    result: result_type,
+                });
+            }
+            Err(error) => return Err(TyperError::MemberLookup(Box::new(error))),
+        };
         if members.is_empty() {
             return Err(TyperError::ExtractorResultMemberNotFound {
                 source: self.source,
@@ -111,7 +113,7 @@ impl SourceTyper<'_> {
                 member: member_name,
             });
         }
-        let mut candidates = members
+        let candidates = members
             .into_iter()
             .map(|member| {
                 let callable = self.member_type_on_journaled(&member, info_journal)?;
@@ -123,7 +125,6 @@ impl SourceTyper<'_> {
                 })
             })
             .collect::<Result<Vec<_>, TyperError>>()?;
-        self.remove_overridden_overload_candidates(&mut candidates, pattern_index)?;
         let candidate = match candidates.as_slice() {
             [] => {
                 return Err(TyperError::ExtractorResultMemberNotFound {
@@ -178,6 +179,18 @@ impl SourceTyper<'_> {
                     member_type: callable,
                     issue: ExtractorResultMemberIssue::NotValueType,
                 });
+            }
+            Some(Type::ByName { result })
+                if self.store.symbols.get(candidate.symbol).kind == SymbolKind::Method
+                    && matches!(
+                        self.store.symbols.get(candidate.symbol).origin,
+                        SymbolOrigin::Tasty(_)
+                    ) =>
+            {
+                // Semantic TASTy represents a no-term-clause method as
+                // ExprType. At a value-member boundary consume its result
+                // type while retaining the canonical stored signature.
+                *result
             }
             Some(_) => callable,
             None => {
@@ -2569,6 +2582,141 @@ mod tests {
         )
         .unwrap();
         (parsed, store, packages, definitions, index, source)
+    }
+
+    #[test]
+    fn extractor_result_protocol_uses_ordinary_selection_overload_discovery() {
+        let source_text = "class Parent { def _1: Int = 0 }; class Tuple extends Parent { override def _1: Int = 1 }; class Direct extends Parent { override def _1: Int = 2; def _1(value: Int): Int = value }; class Left { def _1: Int = 0 }; class Right { def _1: Int = 1 }; class Incomparable extends Left with Right";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+        let class_symbol = |name: &str, store: &SemanticStore| {
+            parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::TypeDef(definition)
+                        if store.names.resolve(definition.name.as_name().text()) == name =>
+                    {
+                        index.symbol_at(source, tree)
+                    }
+                    _ => None,
+                })
+                .expect("fixture class")
+        };
+        let parent = class_symbol("Parent", &store);
+        let tuple = class_symbol("Tuple", &store);
+        let parent_selector = store
+            .scopes
+            .get(index.scope_of(parent).unwrap())
+            .lookup(&Name::new(store.names.intern("_1"), Namespace::Term))
+            .unwrap();
+        let tuple_selector = store
+            .scopes
+            .get(index.scope_of(tuple).unwrap())
+            .lookup(&Name::new(store.names.intern("_1"), Namespace::Term))
+            .unwrap();
+        let receiver = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, tuple));
+        let selector_name = Name::new(store.names.intern("_1"), Namespace::Term);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let mut ordinary_journal = Vec::new();
+        let ordinary = typer
+            .lookup_members_journaled(receiver, selector_name, &mut ordinary_journal)
+            .unwrap();
+        assert_eq!(ordinary.len(), 1);
+        assert_eq!(ordinary[0].symbol, tuple_selector);
+        assert_eq!(ordinary[0].declaring_class, tuple);
+        let ordinary_type = typer
+            .member_type_on_journaled(&ordinary[0], &mut ordinary_journal)
+            .unwrap();
+        assert_eq!(ordinary_type, definitions.int);
+
+        let mut overload_journal = Vec::new();
+        let overloads = typer
+            .lookup_overload_members_journaled(receiver, selector_name, &mut overload_journal)
+            .unwrap();
+        assert_eq!(
+            overloads
+                .iter()
+                .map(|candidate| candidate.symbol)
+                .collect::<Vec<_>>(),
+            [tuple_selector, parent_selector]
+        );
+
+        let direct = class_symbol("Direct", typer.store());
+        let direct_receiver = typer
+            .store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, direct));
+        let mut direct_journal = Vec::new();
+        let direct_bucket = typer
+            .lookup_members_journaled(direct_receiver, selector_name, &mut direct_journal)
+            .unwrap();
+        assert_eq!(
+            direct_bucket.len(),
+            2,
+            "direct overloads remain in one ambiguous selection bucket"
+        );
+        assert!(
+            direct_bucket
+                .iter()
+                .all(|candidate| candidate.declaring_class == direct)
+        );
+        let mut direct_protocol_journal = Vec::new();
+        let direct_error = typer
+            .extractor_result_member_type(
+                direct_receiver,
+                selector_name,
+                0,
+                direct_bucket[0].symbol,
+                &mut direct_protocol_journal,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            direct_error,
+            TyperError::ExtractorResultMemberOverloaded { .. }
+        ));
+
+        let incomparable = class_symbol("Incomparable", typer.store());
+        let incomparable_receiver = typer
+            .store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, incomparable));
+        let mut incomparable_journal = Vec::new();
+        let inherited = typer
+            .lookup_members_journaled(
+                incomparable_receiver,
+                selector_name,
+                &mut incomparable_journal,
+            )
+            .unwrap();
+        assert_eq!(
+            inherited.len(),
+            2,
+            "incomparable inherited buckets remain ambiguous"
+        );
+        let mut inherited_protocol_journal = Vec::new();
+        let inherited_error = typer
+            .extractor_result_member_type(
+                incomparable_receiver,
+                selector_name,
+                0,
+                inherited[0].symbol,
+                &mut inherited_protocol_journal,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            inherited_error,
+            TyperError::ExtractorResultMemberOverloaded { .. }
+        ));
     }
 
     struct ProductResolver {
