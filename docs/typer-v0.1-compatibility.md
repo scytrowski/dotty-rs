@@ -228,10 +228,18 @@ its plain unary method shape, and check
 accept zero nested patterns and lower to `UnApply` with empty pattern and
 implicit lists. For the supported Option-like result protocol, the result must
 expose parameterless `isEmpty` with Boolean type and parameterless value `get`;
-the `get` type is passed unchanged as the nested pattern prototype. The typed
-`UnApply` retains the selector/input prototype as its own type and the exact
-selected `unapply` symbol. Nested patterns reuse the existing case-local
-binder machinery and may naturally contain another supported unary extractor.
+the adapted `get` value type is passed unchanged as the nested pattern
+prototype. The typed `UnApply` retains the selector/input prototype as its own
+type and the exact selected `unapply` symbol. Nested patterns reuse the
+existing case-local binder machinery and may naturally contain another
+supported unary extractor.
+For TASTy-owned no-term-clause methods, semantic loading represents the
+external member as `ByName(result)`; the extractor value boundary consumes that
+result type while preserving the canonical symbol signature. Explicit empty
+term clauses and other callable shapes remain unsupported. Result-protocol
+members use ordinary member-selection precedence, so a direct `Tuple2._1`
+bucket hides inherited `Product2._1`; direct overload buckets and incomparable
+inherited declarations remain ambiguous.
 The pinned Scala 3.9.0 oracles and normalized shapes are recorded in
 [`unary-option-extractors`](../crates/dotty-typer/tests/fixtures/unary-option-extractors),
 [`boolean-extractors`](../crates/dotty-typer/tests/fixtures/boolean-extractors),

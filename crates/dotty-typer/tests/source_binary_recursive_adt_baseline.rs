@@ -6,7 +6,7 @@ use dotty_classloader::classloader::{
 };
 use dotty_core::ast::TreeKind;
 use dotty_core::{
-    Definitions, GeneratedCaseClassMethodRole, MethodKind, Packages, SemanticStore,
+    Definitions, GeneratedCaseClassMethodRole, MethodKind, Namespace, Packages, SemanticStore,
     SourceDefinition, SourceId, SourceSemanticIndex, SourceText, SymbolFlags, SymbolInfo,
     SymbolKind, SymbolOrigin, TermName, TermRefTarget, Type, TypeName, TypeRefTarget,
 };
@@ -15,6 +15,8 @@ use dotty_namer::name_compilation_unit;
 
 const SOURCE: &str = include_str!("fixtures/source-binary-recursive-adt-3.9.0/Expr.scala");
 const NESTED_SOURCE: &str = include_str!("fixtures/source-nested-recursive-adt-3.9.0/Expr.scala");
+const FOREIGN_SOURCE: &str =
+    include_str!("fixtures/source-nested-recursive-adt-3.9.0/ForeignSameSpelledExtractor.scala");
 // This receipt includes arena IDs: canonical scala.Boolean TASTy lowering now
 // reuses Definitions.boolean instead of allocating an equivalent TypeRef, so
 // later diagnostic TypeIds are two slots earlier while rejection behavior is
@@ -92,6 +94,403 @@ fn nested_recursive_adt_original_roots_are_attempted_in_two_fresh_sessions() {
     for row in receipt {
         println!("ISSUE2132_NESTED_ROOT\t{row}");
     }
+}
+
+#[test]
+fn foreign_add_nested_num_pattern_preserves_owner_and_binder_provenance_in_fresh_sessions() {
+    let first = foreign_nested_pattern_receipt(SourceId::from_index(21341));
+    let second = foreign_nested_pattern_receipt(SourceId::from_index(21342));
+    assert_eq!(
+        first, second,
+        "fresh source/resolver sessions normalize equally"
+    );
+}
+
+#[test]
+fn foreign_option_tuple_selector_uses_the_direct_tuple_bucket_and_adapted_component_type() {
+    let source = SourceId::from_index(21343);
+    let mut session = BinarySession::new_with_source(source, &foreign_nested_pattern_source());
+    session.with_typer(|ast, index, typer, _definitions| {
+        let foreign_unapply = source_method_symbol(ast, index, typer, source, "unapply");
+        let info = typer.complete_symbol(foreign_unapply).unwrap();
+        let result = match typer.store().types.get(info) {
+            Type::Method(method) => method.result,
+            other => panic!("unexpected Foreign.Add.unapply signature {other:?}"),
+        };
+        let get_name =
+            dotty_core::Name::new(typer.store().names.get("get").unwrap(), Namespace::Term);
+        let get = typer.lookup_members(result, get_name).unwrap().remove(0);
+        let get_type = typer.member_type_on(&get).unwrap();
+        let tuple = match typer.store().types.get(get_type) {
+            Type::ByName { result } => *result,
+            other => panic!("Option.get keeps its TASTy ExprType wrapper: {other:?}"),
+        };
+        let Type::Applied { tycon, args } = typer.store().types.get(tuple).clone() else {
+            panic!(
+                "Option.get adapts to applied Tuple2: {:?}",
+                typer.store().types.get(tuple)
+            );
+        };
+        assert_eq!(args.len(), 2);
+        let tuple_symbol = match typer.store().types.get(tycon) {
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            } => *symbol,
+            other => panic!("unexpected tuple tycon {other:?}"),
+        };
+        assert_eq!(
+            typer
+                .store()
+                .names
+                .resolve(typer.store().symbols.get(tuple_symbol).name.text()),
+            "Tuple2"
+        );
+        let one_name =
+            dotty_core::Name::new(typer.store().names.get("_1").unwrap(), Namespace::Term);
+        let selected = typer.lookup_members(tuple, one_name).unwrap();
+        assert_eq!(
+            selected.len(),
+            1,
+            "ordinary lookup selects Tuple2._1 and hides Product2._1"
+        );
+        let selected = &selected[0];
+        assert_eq!(selected.declaring_class, tuple_symbol);
+        let tuple_info = typer.complete_symbol(tuple_symbol).unwrap();
+        let Type::ClassInfo(tuple_info) = typer.store().types.get(tuple_info) else {
+            panic!("Tuple2 has completed class info")
+        };
+        let tuple_selector = typer
+            .store()
+            .scopes
+            .get(tuple_info.declarations)
+            .lookup(&one_name)
+            .unwrap();
+        assert_eq!(
+            selected.symbol, tuple_selector,
+            "ordinary lookup returns the canonical Tuple2._1 symbol"
+        );
+        assert!(matches!(
+            typer.store().symbols.get(selected.symbol).origin,
+            SymbolOrigin::Tasty(_)
+        ));
+        assert_eq!(
+            typer
+                .store()
+                .names
+                .resolve(typer.store().symbols.get(selected.symbol).name.text()),
+            "_1"
+        );
+        let adapted = typer.member_type_on(selected).unwrap();
+        assert_eq!(
+            adapted, args[0],
+            "Tuple2._1 adapts to the first receiver argument"
+        );
+    });
+}
+
+#[test]
+fn foreign_nested_wrong_arity_rolls_back_before_same_session_valid_retry() {
+    let source = SourceId::from_index(21344);
+    let source_text = foreign_nested_pattern_source().replace(
+        "  def probe(expr: Expr): Int =",
+        "  def wrongArity(expr: Expr): Int =\n    expr match\n      case Foreign.Add(Num(value, extra), right) => value\n      case _ => 0\n  def probe(expr: Expr): Int =",
+    );
+    let mut session = BinarySession::new_with_source(source, &source_text);
+    session.with_typer(|ast, _index, typer, _definitions| {
+        let wrong_arity = find_method_tree(ast, typer.store(), "wrongArity");
+        let probe = find_method_tree(ast, typer.store(), "probe");
+        let before_store = typer.store().checkpoint();
+        let before_contents = store_content_projection(typer.store());
+        let before_typed = typer.typed_ast().checkpoint();
+        let error = typer
+            .type_method_definition(wrong_arity)
+            .expect_err("Num's one-field product rejects two nested patterns");
+        assert!(
+            matches!(
+                error,
+                dotty_typer::TyperError::ExtractorProductSelectorCountMismatch { .. }
+            ),
+            "{error:?}"
+        );
+        assert_eq!(typer.store().checkpoint(), before_store);
+        assert_store_content_projection(
+            &before_contents,
+            &store_content_projection(typer.store()),
+            0,
+        );
+        assert_eq!(typer.typed_ast().checkpoint(), before_typed);
+        assert!(
+            typer
+                .source_typed_index()
+                .get(source, wrong_arity)
+                .is_none()
+        );
+        typer
+            .type_method_definition(probe)
+            .expect("same-session valid foreign nested pattern retries");
+    });
+}
+
+#[test]
+fn foreign_nested_wrong_type_and_escaped_binder_rollback_then_retry() {
+    let valid_retry = "  def retry(expr: Expr): Int =\n    expr match\n      case Foreign.Add(Num(value), right) => value + consume(right)\n      case _ => 0\n";
+    let wrong_type = foreign_nested_pattern_source()
+        .replace("  def probe(", "  def wrongType(")
+        .replace("Foreign.Add(Num(value), right)", "Foreign.Add(1, right)");
+    assert_foreign_failure_then_retry(
+        SourceId::from_index(21345),
+        format!("{wrong_type}{valid_retry}"),
+        "wrongType",
+        |error| matches!(error, dotty_typer::TyperError::PatternTypeMismatch { .. }),
+    );
+
+    let escaped = foreign_nested_pattern_source()
+        .replace("  def probe(", "  def escaped(")
+        .replace("case _ => 0", "case _ => value");
+    assert_foreign_failure_then_retry(
+        SourceId::from_index(21346),
+        format!("{escaped}{valid_retry}"),
+        "escaped",
+        |error| matches!(error, dotty_typer::TyperError::TermNameNotFound { .. }),
+    );
+}
+
+#[test]
+fn foreign_unapply_wrong_owner_rolls_back_before_same_session_retry() {
+    let source = SourceId::from_index(21347);
+    let source_text = foreign_nested_pattern_source();
+    let mut session = BinarySession::new_with_source(source, &source_text);
+    let foreign_unapply = session
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            (session
+                .store
+                .names
+                .resolve(definition.name.as_name().text())
+                == "unapply")
+                .then(|| session.index.symbol_at(source, tree).unwrap())
+        })
+        .unwrap();
+    let num = session
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::TypeDef(definition) = &node.kind else {
+                return None;
+            };
+            (session
+                .store
+                .names
+                .resolve(definition.name.as_name().text())
+                == "Num")
+                .then(|| session.index.symbol_at(source, tree).unwrap())
+        })
+        .unwrap();
+    let num_unapply = session
+        .index
+        .generated_case_class_method(num, GeneratedCaseClassMethodRole::Unapply)
+        .unwrap();
+    let invalid_owner = session.store.symbols.get(foreign_unapply).owner.unwrap();
+    let original_owner = session.store.symbols.get(num_unapply).owner;
+    session.store.symbols.get_mut(num_unapply).owner = Some(invalid_owner);
+    session.with_typer(|ast, _index, typer, _definitions| {
+        let probe = find_method_tree(ast, typer.store(), "probe");
+        let before_store = typer.store().checkpoint();
+        let before_contents = store_content_projection(typer.store());
+        let before_typed = typer.typed_ast().checkpoint();
+        let error = typer
+            .type_method_definition(probe)
+            .expect_err("Num.unapply owned by the foreign extractor companion is rejected");
+        assert!(
+            matches!(
+                error,
+                dotty_typer::TyperError::SymbolSourceKindMismatch { .. }
+            ),
+            "{error:?}"
+        );
+        assert_eq!(typer.store().checkpoint(), before_store);
+        assert_store_content_projection(
+            &before_contents,
+            &store_content_projection(typer.store()),
+            0,
+        );
+        assert_eq!(typer.typed_ast().checkpoint(), before_typed);
+        assert!(typer.source_typed_index().get(source, probe).is_none());
+    });
+    session.store.symbols.get_mut(num_unapply).owner = original_owner;
+    session.with_typer(|ast, _index, typer, _definitions| {
+        let probe = find_method_tree(ast, typer.store(), "probe");
+        typer
+            .type_method_definition(probe)
+            .expect("authentic owner permits same-session retry");
+    });
+}
+
+fn assert_foreign_failure_then_retry(
+    source: SourceId,
+    source_text: String,
+    invalid_name: &str,
+    is_expected: impl Fn(&dotty_typer::TyperError) -> bool,
+) {
+    let mut session = BinarySession::new_with_source(source, &source_text);
+    session.with_typer(|ast, _index, typer, _definitions| {
+        let (classes, _) = nested_class_symbols(ast, _index, typer, source);
+        typer.complete_symbol(classes["Expr"]).unwrap();
+        let invalid = find_method_tree(ast, typer.store(), invalid_name);
+        let retry = find_method_tree(ast, typer.store(), "retry");
+        let before_store = typer.store().checkpoint();
+        let before_contents = store_content_projection(typer.store());
+        let before_typed = typer.typed_ast().checkpoint();
+        let error = typer
+            .type_method_definition(invalid)
+            .expect_err("negative nested extractor control is rejected");
+        assert!(is_expected(&error), "unexpected rejection: {error:?}");
+        assert_eq!(typer.store().checkpoint(), before_store);
+        assert_store_content_projection(
+            &before_contents,
+            &store_content_projection(typer.store()),
+            0,
+        );
+        assert_eq!(typer.typed_ast().checkpoint(), before_typed);
+        assert!(typer.source_typed_index().get(source, invalid).is_none());
+        typer
+            .type_method_definition(retry)
+            .expect("valid nested pattern retries in the same session");
+    });
+}
+
+fn foreign_nested_pattern_source() -> String {
+    let (declarations, _) = FOREIGN_SOURCE
+        .split_once("object Evaluator:")
+        .expect("pinned fixture has the original Evaluator source root");
+    format!(
+        "{declarations}object Evaluator:\n  def consume(expr: Expr): Int = 0\n  def probe(expr: Expr): Int =\n    expr match\n      case Foreign.Add(Num(value), right) => value + consume(right)\n      case _ => 0\n"
+    )
+}
+
+fn foreign_nested_pattern_receipt(source: SourceId) -> String {
+    let source_text = foreign_nested_pattern_source();
+    let mut session = BinarySession::new_with_source(source, &source_text);
+    session.with_typer(|ast, index, typer, definitions| {
+        let probe = find_method_tree(ast, typer.store(), "probe");
+        typer.type_method_definition(probe).expect("bounded foreign nested-pattern probe types");
+        let (classes, expr) = nested_class_symbols(ast, index, typer, source);
+        let int = definitions_int(typer.store(), definitions);
+        for class in [classes["Add"], classes["Num"]] {
+            for (tree, node) in ast.iter() {
+                if !matches!(node.kind, TreeKind::ValDef(_))
+                    || index.symbol_at(source, tree).is_none_or(|field| typer.store().symbols.get(field).owner != Some(class))
+                {
+                    continue;
+                }
+                let selector = index.derived_symbol_at(class, source, tree).unwrap();
+                typer.complete_symbol(selector).unwrap();
+            }
+        }
+        assert_source_product_fields(typer, ast, index, source, classes["Add"], &["left", "right"], expr);
+        assert_source_product_fields(typer, ast, index, source, classes["Num"], &["value"], int);
+
+        let TreeKind::DefDef(probe_def) = &ast.get(probe).kind else { unreachable!() };
+        let TreeKind::Match(source_match) = &ast.get(probe_def.rhs.unwrap()).kind else { panic!("probe body is a match") };
+        let TreeKind::CaseDef(source_case) = &ast.get(source_match.cases[0]).kind else { panic!("first branch is a case") };
+        let TreeKind::Apply(source_outer) = &ast.get(source_case.pattern).kind else { panic!("outer pattern is Foreign.Add") };
+        let source_inner_tree = source_outer.args[0];
+        let TreeKind::Apply(source_inner) = &ast.get(source_inner_tree).kind else { panic!("first Add component is Num") };
+        assert_eq!(source_outer.args.len(), 2);
+        assert_eq!(source_inner.args.len(), 1);
+
+        let foreign_unapply = source_method_symbol(ast, index, typer, source, "unapply");
+        let num_unapply = index.generated_case_class_method(classes["Num"], GeneratedCaseClassMethodRole::Unapply).unwrap();
+        let add_unapply = index.generated_case_class_method(classes["Add"], GeneratedCaseClassMethodRole::Unapply).unwrap();
+        assert_ne!(foreign_unapply, add_unapply);
+        assert_ne!(foreign_unapply, num_unapply);
+        assert_ne!(typer.store().symbols.get(foreign_unapply).owner, typer.store().symbols.get(add_unapply).owner);
+        assert_eq!(typer.store().symbols.get(foreign_unapply).origin, SymbolOrigin::Source(source));
+        let foreign_signature = typer.complete_symbol(foreign_unapply).unwrap();
+        let Type::Method(foreign_signature) = typer.store().types.get(foreign_signature) else {
+            panic!("Foreign.Add.unapply has a method signature")
+        };
+        assert_eq!(foreign_signature.params.len(), 1);
+        assert_type_ref(typer.store(), foreign_signature.params[0].ty, classes["Expr"]);
+        let Type::Applied { tycon: option_tycon, args: option_args } = typer.store().types.get(foreign_signature.result) else {
+            panic!("Foreign.Add.unapply returns Option[(Expr, Expr)]")
+        };
+        assert_eq!(option_args.len(), 1);
+        let option_symbol = match typer.store().types.get(*option_tycon) {
+            Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } => *symbol,
+            other => panic!("Option tycon is an authentic TASTy class reference: {other:?}"),
+        };
+        assert_eq!(typer.store().names.resolve(typer.store().symbols.get(option_symbol).name.text()), "Option");
+        let Type::Applied { tycon: tuple_tycon, args: tuple_args } = typer.store().types.get(option_args[0]) else {
+            panic!("Option result carries Tuple2[Expr, Expr]")
+        };
+        assert_eq!(tuple_args.len(), 2);
+        let tuple_symbol = match typer.store().types.get(*tuple_tycon) {
+            Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } => *symbol,
+            other => panic!("Tuple2 tycon is an authentic TASTy class reference: {other:?}"),
+        };
+        assert_eq!(typer.store().names.resolve(typer.store().symbols.get(tuple_symbol).name.text()), "Tuple2");
+        assert_type_ref(typer.store(), tuple_args[0], classes["Expr"]);
+        assert_type_ref(typer.store(), tuple_args[1], classes["Expr"]);
+
+        let outer_typed = typer.source_typed_index().get(source, source_case.pattern).unwrap();
+        let inner_typed = typer.source_typed_index().get(source, source_inner_tree).unwrap();
+        assert_ne!(outer_typed, inner_typed);
+        for (source_tree, typed_tree) in [(source_case.pattern, outer_typed), (source_inner_tree, inner_typed)] {
+            assert_eq!(ast.get(source_tree).position.unwrap().span().range(), typer.typed_ast().get(typed_tree).position.unwrap().span().range());
+        }
+        let TreeKind::UnApply(outer) = &typer.typed_ast().get(outer_typed).kind else { panic!("outer pattern lowers to UnApply") };
+        let TreeKind::UnApply(inner) = &typer.typed_ast().get(inner_typed).kind else { panic!("inner pattern lowers to UnApply") };
+        assert_term_ref(typer.store(), typer.typed_ast().get(outer.function).ty, foreign_unapply);
+        assert_term_ref(typer.store(), typer.typed_ast().get(inner.function).ty, num_unapply);
+        assert_eq!(outer.patterns.len(), 2);
+        assert_eq!(inner.patterns.len(), 1);
+
+        let value_binder = typer.pattern_binding_symbol_at(source, source_inner.args[0]).unwrap();
+        let right_binder = typer.pattern_binding_symbol_at(source, source_outer.args[1]).unwrap();
+        assert_ne!(value_binder, right_binder);
+        let SymbolInfo::Complete(value_info) = typer.store().symbols.get(value_binder).info else { panic!("value binder completes") };
+        let SymbolInfo::Complete(right_info) = typer.store().symbols.get(right_binder).info else { panic!("right binder completes") };
+        assert_type_ref(typer.store(), value_info, int);
+        assert_type_ref(typer.store(), right_info, classes["Expr"]);
+        for (wanted, expected) in [("value", value_binder), ("right", right_binder)] {
+            let source_ident = ast.iter().find_map(|(tree, node)| {
+                let TreeKind::Ident(ident) = &node.kind else { return None };
+                (typer.store().names.resolve(ident.name.text()) == wanted
+                    && ast.get(tree).position.unwrap().span().range().start() >= ast.get(source_case.body).position.unwrap().span().range().start()).then_some(tree)
+            }).expect("body binder reference");
+            let typed_ident = typer.source_typed_index().get(source, source_ident).unwrap();
+            assert_term_ref(typer.store(), typer.typed_ast().get(typed_ident).ty, expected);
+        }
+        format!("pattern={:?};foreign_unapply={};nested_unapply={};value=Int;right=Expr;source_mappings=complete", ast.get(source_case.pattern).position.unwrap().span().range(), foreign_unapply.index(), num_unapply.index())
+    })
+}
+
+fn source_method_symbol(
+    ast: &dotty_core::ast::AstArena<dotty_core::ast::Untyped>,
+    index: &SourceSemanticIndex,
+    typer: &dotty_typer::SourceTyper<'_>,
+    source: SourceId,
+    wanted: &str,
+) -> dotty_core::SymbolId {
+    ast.iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            (typer
+                .store()
+                .names
+                .resolve(definition.name.as_name().text())
+                == wanted)
+                .then(|| index.symbol_at(source, tree).unwrap())
+        })
+        .expect("source method symbol")
 }
 
 #[test]
