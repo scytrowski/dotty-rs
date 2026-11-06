@@ -1095,13 +1095,14 @@ fn external_option_is_empty_uses_the_canonical_boolean_definition() {
         .get(definitions.boolean)
         .reference_symbol()
         .expect("canonical Boolean is class-backed");
-    assert!(matches!(
-        store.types.get(*result),
-        Type::TypeRef {
-            target: dotty_core::TypeRefTarget::Symbol(symbol),
-            ..
-        } if *symbol == boolean_class
-    ));
+    assert_eq!(
+        *result, definitions.boolean,
+        "external Option.isEmpty must reuse the canonical Boolean TypeId"
+    );
+    assert_eq!(
+        store.types.get(*result).reference_symbol(),
+        Some(boolean_class)
+    );
     assert_eq!(store.symbols.get(boolean_class).owner, None);
     assert_eq!(
         store.symbols.get(boolean_class).origin,

@@ -6426,6 +6426,21 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         match declared_type {
             Some(tasty_symbol::DecodedTastyType::Named(name)) => {
                 match self.ensure_dependency_identity(owner, name) {
+                    Ok(symbol)
+                        if self
+                            .store
+                            .types
+                            .get(self.definitions.boolean)
+                            .reference_symbol()
+                            == Some(symbol) =>
+                    {
+                        // TASTy names resolve through the same authenticated
+                        // class identity as classfile descriptors. Preserve
+                        // the canonical primitive TypeId when that identity
+                        // is scala.Boolean; same-spelled foreign classes
+                        // continue through the ordinary TypeRef path below.
+                        self.definitions.boolean
+                    }
                     Ok(symbol) => self.type_ref(symbol),
                     Err(error) => {
                         let text = format!(
@@ -13762,6 +13777,38 @@ mod tests {
         assert_ne!(foreign_boolean, boolean_class);
         assert_ne!(nested_boolean, boolean_class);
         assert_ne!(foreign_boolean, nested_boolean);
+        assert_eq!(
+            loader.lower_tasty_member_type(
+                &BinaryName::from_internal("sample/Owner"),
+                Some(&tasty_symbol::DecodedTastyType::Named(
+                    BinaryName::from_internal("scala/Boolean"),
+                )),
+            ),
+            definitions.boolean,
+            "the authenticated Scala Boolean TASTy reference reuses its canonical TypeId"
+        );
+        let foreign_tasty_boolean = loader.lower_tasty_member_type(
+            &BinaryName::from_internal("sample/Owner"),
+            Some(&tasty_symbol::DecodedTastyType::Named(
+                BinaryName::from_internal("example/Boolean"),
+            )),
+        );
+        let nested_tasty_boolean = loader.lower_tasty_member_type(
+            &BinaryName::from_internal("sample/Owner"),
+            Some(&tasty_symbol::DecodedTastyType::Named(
+                BinaryName::from_internal("scala/collection/Boolean"),
+            )),
+        );
+        assert_eq!(
+            parent_symbol(loader.store, foreign_tasty_boolean),
+            foreign_boolean
+        );
+        assert_eq!(
+            parent_symbol(loader.store, nested_tasty_boolean),
+            nested_boolean
+        );
+        assert_ne!(foreign_tasty_boolean, definitions.boolean);
+        assert_ne!(nested_tasty_boolean, definitions.boolean);
         assert_eq!(
             loader
                 .load_class(&BinaryName::from_internal("scala/AnyRef"))
