@@ -25,6 +25,9 @@ TIMING_FIELDS = (
 TIMING_PATTERN = re.compile(r"^FOCUSED_TIMING (.+)$", re.MULTILINE)
 NESTED_FIXTURE = Path("crates/dotty-typer/tests/fixtures/source-nested-recursive-adt-3.9.0")
 NESTED_SOURCE_SHA256 = "f700d4e27f11365a08291ae15babc65e673eb91a0bdeee45ea5dc2cf7e8c8607"
+NESTED_ROLLBACK_SOURCE_SHA256 = "23fd51007477c572b49c2ef0165482173f0b7265fbf23d89cbf069dd444d0c8f"
+NESTED_ROLLBACK_SOURCE_BYTES = 870
+NESTED_ROLLBACK_OWNER = "RollbackControls$"
 NESTED_BASELINE_SHA = "0fc457776374f69d6b16187c007721a85b2557a0"
 NESTED_TEST = "nested_recursive_adt_original_roots_are_attempted_in_two_fresh_sessions"
 NESTED_RECEIPT_HASHES = {
@@ -132,7 +135,12 @@ def _git_is_clean(root: Path) -> bool:
 
 
 def _validate_test_summary(log: str, expected_tests: set[str], label: str) -> None:
-    events = re.findall(r"^test ([A-Za-z0-9_:]+) \.\.\. (ok|ignored|FAILED)$", log, re.MULTILINE)
+    # With --nocapture and RUST_TEST_THREADS=1, libtest emits `test NAME ... `,
+    # then the test's own output, then the terminal status on a separate line.
+    # Count test starts and reconcile their total with libtest's authoritative
+    # summary; a successful summary with zero ignored/failed tests proves each
+    # observed start passed without misreading arbitrary stdout as a status.
+    events = re.findall(r"^test ([A-Za-z0-9_:]+) \.\.\..*$", log, re.MULTILINE)
     summaries = re.findall(
         r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;",
         log, re.MULTILINE,
@@ -140,22 +148,20 @@ def _validate_test_summary(log: str, expected_tests: set[str], label: str) -> No
     if len(summaries) != 1:
         raise GateError(f"{label} log must contain exactly one complete test summary")
     status, passed, failed, ignored = summaries[0]
-    counts = {"ok": 0, "ignored": 0, "FAILED": 0}
     names: dict[str, list[str]] = {}
-    for name, outcome in events:
-        counts[outcome] += 1
-        names.setdefault(name.split("::")[-1], []).append(outcome)
-    if status != "ok" or int(failed) != counts["FAILED"] or int(passed) != counts["ok"] or int(ignored) != counts["ignored"]:
-        raise GateError(f"{label} test summary does not reconcile with observed test outcomes")
-    if int(passed) == 0 or int(ignored) != 0 or counts["FAILED"] != 0:
+    for name in events:
+        names.setdefault(name.split("::")[-1], []).append(name)
+    if status != "ok" or int(failed) != 0 or int(ignored) != 0 or int(passed) != len(events):
+        raise GateError(f"{label} test summary does not reconcile with observed test starts")
+    if int(passed) == 0:
         raise GateError(f"{label} log must prove nonzero passing tests with no ignored or failed tests")
     for name in expected_tests:
-        if names.get(name) != ["ok"]:
+        if len(names.get(name, [])) != 1:
             raise GateError(f"{label} mandatory test did not execute exactly once and pass: {name}")
 
 
 def _validate_revision_marker(log: str, marker: str, tested_sha: str, label: str) -> None:
-    matches = re.findall(rf"^{re.escape(marker)}\t([0-9a-f]{{40}})$", log, re.MULTILINE)
+    matches = re.findall(rf"(?:^|\s){re.escape(marker)}\t([0-9a-f]{{40}})(?=\s|$)", log, re.MULTILINE)
     if matches != [tested_sha]:
         raise GateError(f"{label} log is missing, stale or mismatched for the exact tested revision")
 
@@ -277,17 +283,45 @@ def validate_nested_negative_sidecars(root: Path, rollback_log: str, tested_sha:
     marker = "ISSUE2136_NESTED_ROLLBACK\t" + "\n".join(expected_rollback)
     if rollback_log.count(marker) != 1:
         raise GateError("#2136 actual late-failure receipt is absent or differs from its normalized sidecar")
+    source_records = re.findall(r"(?:^|\s)ISSUE2136_ROLLBACK_SOURCE\t(.+)$", rollback_log, re.MULTILINE)
+    if len(source_records) != 1:
+        raise GateError("#2136 actual rollback source provenance must be emitted exactly once")
+    source_fields = source_records[0].split("\t")
+    if len(source_fields) != 5:
+        raise GateError("#2136 rollback source provenance has a malformed schema")
+    source_id, fresh_source_id, source_bytes, owner, suffix_hex = source_fields
+    try:
+        suffix = bytes.fromhex(suffix_hex)
+        positive_source = (fixture / "Expr.scala").read_bytes()
+    except (ValueError, OSError) as error:
+        raise GateError(f"cannot decode #2136 rollback source provenance: {error}") from error
+    rollback_source = positive_source + suffix
+    if (
+        source_id != "21361" or fresh_source_id != "21362"
+        or source_id == fresh_source_id
+        or source_bytes != str(NESTED_ROLLBACK_SOURCE_BYTES)
+        or len(rollback_source) != NESTED_ROLLBACK_SOURCE_BYTES
+        or hashlib.sha256(rollback_source).hexdigest() != NESTED_ROLLBACK_SOURCE_SHA256
+        or owner != NESTED_ROLLBACK_OWNER
+    ):
+        raise GateError("#2136 rollback source id, bytes, hash or owner differs from the executed control source")
     _validate_revision_marker(rollback_log, "ISSUE2137_ROLLBACK_TESTED_SHA", tested_sha, "#2136 rollback")
     _validate_test_summary(rollback_log, {NESTED_ROLLBACK_TEST}, "#2136 rollback")
     expected_rows = [line.split("\t") for line in expected_rollback[1:]]
     rows = []
     for fields in expected_rows:
+        span = re.fullmatch(r"tree[0-9]+@([0-9]+)\.\.([0-9]+)", fields[4])
+        if (fields[1], fields[2], fields[3]) != (source_id, fresh_source_id, source_bytes):
+            raise GateError("#2136 rollback row identity differs from its emitted control-source receipt")
+        if span is None or int(span.group(2)) > len(rollback_source):
+            raise GateError("#2136 rollback root span escapes its emitted control source")
         rows.append({
-            "kind": "rollback", "case": fields[0], "fixture": "Expr.scala",
-            "source_sha256": NESTED_SOURCE_SHA256, "root": fields[0],
-            "source_path_tree": "", "source_span": fields[4], "owner": "Evaluator$",
+            "kind": "rollback", "case": fields[0], "fixture": "Expr.scala+RollbackControls",
+            "source_sha256": NESTED_ROLLBACK_SOURCE_SHA256, "root": fields[0],
+            "source_path_tree": "", "source_span": fields[4], "owner": owner,
             "classification": "rejected", "outcome": ";".join(fields[5:]),
-            "source_id": fields[1], "fresh_source_id": fields[2], "source_bytes": fields[3],
+            "source_id": source_id, "fresh_source_id": fresh_source_id,
+            "source_bytes": source_bytes,
         })
     return rows
 

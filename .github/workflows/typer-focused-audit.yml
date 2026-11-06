@@ -481,8 +481,6 @@ jobs:
             nested_recursive_adt_original_roots_are_attempted_in_two_fresh_sessions \
             --locked -- --exact --nocapture \
             > "$DOTTY_AUDIT_REPORT_DIR/nested-positive.log" 2>&1
-          printf 'ISSUE2137_TESTED_SHA\t%s\n' "$(git rev-parse HEAD)" \
-            >> "$DOTTY_AUDIT_REPORT_DIR/nested-positive.log"
           cat "$DOTTY_AUDIT_REPORT_DIR/nested-positive.log"
 
       - name: Run nested recursive ADT classified controls
@@ -494,8 +492,6 @@ jobs:
           cargo +1.98.1 test -p dotty-typer --test source_binary_recursive_adt_baseline \
             nested --locked -- --nocapture \
             > "$DOTTY_AUDIT_REPORT_DIR/nested-controls.log" 2>&1
-          printf 'ISSUE2137_CONTROLS_TESTED_SHA\t%s\n' "$(git rev-parse HEAD)" \
-            >> "$DOTTY_AUDIT_REPORT_DIR/nested-controls.log"
           cat "$DOTTY_AUDIT_REPORT_DIR/nested-controls.log"
 
       - name: Run nested recursive ADT late rollback and recovery
@@ -508,9 +504,17 @@ jobs:
             nested_late_failures_restore_and_retry_before_original_roots_recover \
             -- --nocapture \
             > "$DOTTY_AUDIT_REPORT_DIR/nested-rollback.log" 2>&1
-          printf 'ISSUE2137_ROLLBACK_TESTED_SHA\t%s\n' "$(git rev-parse HEAD)" \
-            >> "$DOTTY_AUDIT_REPORT_DIR/nested-rollback.log"
           cat "$DOTTY_AUDIT_REPORT_DIR/nested-rollback.log"
+
+      - name: Reconcile actual nested libtest logs and source provenance
+        shell: bash
+        env:
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+        run: |
+          set -euo pipefail
+          PYTHONPATH=tools/typer-classpath-corpus-audit \
+            PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
+              test_verify_focused_gate.VerifyFocusedGateTests.test_actual_nested_workflow_logs_reconcile_and_bind_rollback_provenance
 
       - name: Verify nested recursive ADT execution receipts
         shell: bash

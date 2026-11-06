@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,6 +18,21 @@ from verify_focused_gate import (
     validate_nested_positive_log,
     verify_baseline,
     write_timing_tsv,
+)
+
+
+NESTED_ROLLBACK_CONTROL_SUFFIX = (
+    "\nobject RollbackControls:\n"
+    "  def prior(value: Int): Int = value\n"
+    "  def peelLeftFails(expr: Expr): Boolean =\n"
+    "    expr match\n"
+    "      case Add(Add(left, _), _) => true\n"
+    "      case _ => expr\n"
+    "  def sumFails(expr: Expr): Boolean =\n"
+    "    expr match\n"
+    "      case Num(_) => true\n"
+    "      case Add(Num(value), right) => value + Evaluator.sum(right)\n"
+    "      case Add(left, right) => Evaluator.sum(left) + Evaluator.sum(right)\n"
 )
 
 
@@ -68,9 +84,11 @@ class VerifyFocusedGateTests(unittest.TestCase):
     def nested_rollback_log(self, head: str) -> str:
         rollback = self.repository_root / NESTED_FIXTURE / "rust-late-failure.tsv"
         marker = "ISSUE2136_NESTED_ROLLBACK\t" + "\n".join(rollback.read_text(encoding="utf-8").splitlines())
+        source = ("ISSUE2136_ROLLBACK_SOURCE\t21361\t21362\t870\tRollbackControls$\t"
+                  + NESTED_ROLLBACK_CONTROL_SUFFIX.encode().hex())
         return (f"test {NESTED_ROLLBACK_TEST} ... ok\n"
                 f"test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; finished in 0.12s\n"
-                f"ISSUE2137_ROLLBACK_TESTED_SHA\t{head}\n{marker}\n")
+                f"ISSUE2137_ROLLBACK_TESTED_SHA\t{head}\n{source}\n{marker}\n")
 
     def test_accepts_exact_four_nested_positive_receipts(self) -> None:
         head, log = self.nested_positive_log()
@@ -132,6 +150,9 @@ class VerifyFocusedGateTests(unittest.TestCase):
             [(row["source_id"], row["fresh_source_id"], row["source_bytes"]) for row in rollback_rows],
             [("21361", "21362", "870"), ("21361", "21362", "870")],
         )
+        self.assertTrue(all(row["owner"] == "RollbackControls$" for row in rollback_rows))
+        self.assertTrue(all(row["source_sha256"] == "23fd51007477c572b49c2ef0165482173f0b7265fbf23d89cbf069dd444d0c8f" for row in rollback_rows))
+        self.assertTrue(all(row["fixture"] == "Expr.scala+RollbackControls" for row in rollback_rows))
         with self.assertRaises(GateError):
             validate_nested_negative_sidecars(self.repository_root, rollback_log.replace("full_rollback_retry_same_session_and_fresh_parity", "partial"), head)
         with self.assertRaisesRegex(GateError, "actual late-failure receipt"):
@@ -140,6 +161,13 @@ class VerifyFocusedGateTests(unittest.TestCase):
                 rollback_log.replace("ISSUE2136_NESTED_ROLLBACK\tcontrol", "ISSUE2136_NESTED_ROLLBACK\tmissing"),
                 head,
             )
+        for bad_source in (
+            rollback_log.replace("\t21361\t21362\t870\tRollbackControls$", "\t21361\t21362\t870\tEvaluator$", 1),
+            rollback_log.replace("\t21361\t21362\t870\tRollbackControls$", "\t21361\t21362\t469\tRollbackControls$", 1),
+            rollback_log.replace(NESTED_ROLLBACK_CONTROL_SUFFIX.encode().hex(), "00"),
+        ):
+            with self.assertRaises(GateError):
+                validate_nested_negative_sidecars(self.repository_root, bad_source, head)
 
     def test_control_and_rollback_receipts_bind_to_tested_sha(self) -> None:
         head, _ = self.nested_positive_log()
@@ -203,7 +231,7 @@ class VerifyFocusedGateTests(unittest.TestCase):
             fixture = root / NESTED_FIXTURE
             fixture.mkdir(parents=True)
             source_fixture = self.repository_root / NESTED_FIXTURE
-            for name in ("negative-cases.tsv", "rust-late-failure.tsv"):
+            for name in ("negative-cases.tsv", "rust-late-failure.tsv", "Expr.scala"):
                 shutil.copy2(source_fixture / name, fixture / name)
             head, _ = self.nested_positive_log()
             valid_log = self.nested_rollback_log(head)
@@ -293,6 +321,38 @@ class VerifyFocusedGateTests(unittest.TestCase):
 
             with self.assertRaisesRegex(GateError, "RSS is missing"):
                 write_timing_tsv(root / "timings.tsv", [log], [rss])
+
+    def test_actual_nested_workflow_logs_reconcile_and_bind_rollback_provenance(self) -> None:
+        report_dir = os.environ.get("DOTTY_AUDIT_REPORT_DIR")
+        if not report_dir:
+            self.skipTest("actual workflow log regression runs after the nested Rust steps in CI")
+        root = self.repository_root
+        paths = {
+            "positive": Path(report_dir) / "nested-positive.log",
+            "controls": Path(report_dir) / "nested-controls.log",
+            "rollback": Path(report_dir) / "nested-rollback.log",
+        }
+        if any(not path.is_file() for path in paths.values()):
+            self.skipTest("actual nested workflow logs have not been produced")
+        import subprocess
+
+        head = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        positive_rows = validate_nested_positive_log(
+            root, paths["positive"].read_text(encoding="utf-8"), head, head, require_clean=True,
+        )
+        controls = paths["controls"].read_text(encoding="utf-8")
+        control_rows = validate_nested_control_log(root, controls, head)
+        rollback_rows = validate_nested_negative_sidecars(
+            root, paths["rollback"].read_text(encoding="utf-8"), head,
+        )
+        self.assertEqual(len(positive_rows), 4)
+        self.assertEqual(len(control_rows), 10)
+        self.assertEqual(len(rollback_rows), 2)
+        self.assertTrue(all(row["source_sha256"] == "23fd51007477c572b49c2ef0165482173f0b7265fbf23d89cbf069dd444d0c8f" for row in rollback_rows))
+        self.assertTrue(all(row["owner"] == "RollbackControls$" for row in rollback_rows))
 
 
 if __name__ == "__main__":

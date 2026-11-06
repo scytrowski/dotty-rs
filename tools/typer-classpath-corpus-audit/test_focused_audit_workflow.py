@@ -132,6 +132,8 @@ class FocusedAuditWorkflowTests(unittest.TestCase):
             "Run pinned nested recursive ADT Scala 3.9 oracle",
             "nested_recursive_adt_original_roots_are_attempted_in_two_fresh_sessions",
             "nested_late_failures_restore_and_retry_before_original_roots_recover",
+            "Reconcile actual nested libtest logs and source provenance",
+            "test_actual_nested_workflow_logs_reconcile_and_bind_rollback_provenance",
             "Verify nested recursive ADT execution receipts",
             "nested-recursive-adt-positive.tsv",
             "nested-recursive-adt-negative-rollback.tsv",
@@ -141,6 +143,9 @@ class FocusedAuditWorkflowTests(unittest.TestCase):
                 self.assertIn(required, workflow)
         self.assertIn("nested-recursive-adt-e2e-report.md", report_writer)
         self.assertIn("independent review of this exact PR head is pending", report_writer)
+        self.assertNotIn("printf 'ISSUE2137_TESTED_SHA", workflow)
+        self.assertNotIn("printf 'ISSUE2137_CONTROLS_TESTED_SHA", workflow)
+        self.assertNotIn("printf 'ISSUE2137_ROLLBACK_TESTED_SHA", workflow)
         self.assertIn("actions/upload-artifact@v4", workflow)
 
     def test_nested_report_binds_pins_sidecar_hashes_and_unmet_review_disposition(self) -> None:
