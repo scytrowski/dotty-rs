@@ -32,6 +32,7 @@ NESTED_RECEIPT_HASHES = {
     "rust-sum-complete.tsv": "f75fc10eac428ff81324cefecf46607b31f6bf78470d06bdfe4b03029e868e3c",
     "negative-cases.tsv": "966f67c7eaff94084eb58b759f69f72db0c2481d36b6e16f8fc080ab5e5206fd",
     "rust-late-failure.tsv": "b23431067a439b5a1a997e90023e2301e3eaeb0656968209cf8a7a16222bc916",
+    "source-hashes.tsv": "7ac1df0416cc785b14441a4c2f05a5dbaf67cb37cf16f5c7ae1d503ac363c718",
 }
 NESTED_ROWS = {
     ("session-a", "peelLeft"): ("Expr.scala#tree40", "158:266", 20, "Expr"),
@@ -52,6 +53,25 @@ NESTED_NEGATIVE_CLASSIFICATIONS = {
     "LateSumResult": "rejected",
     "WrongOuterPatternArity": "rejected",
 }
+NESTED_CLASSIFIED_CASES = {
+    "WrongNestedArity": ("WrongNestedArity.scala", "21380", "sum", "WrongNestedArity.scala#tree79", "270:475", "Evaluator$", "rejected", "rejected;error=ExtractorProductSelectorCountMismatch;failure=WrongNestedArity.scala#tree55@358:375;typed_root=absent"),
+    "WrongNestedLiteralType": ("WrongNestedLiteralType.scala", "21381", "sum", "WrongNestedLiteralType.scala#tree74", "270:451", "Evaluator$", "rejected", "rejected;error=PatternTypeMismatch;failure=WrongNestedLiteralType.scala#tree52@358:359;typed_root=absent"),
+    "EscapedCaseBinder": ("EscapedCaseBinder.scala", "21382", "sum", "EscapedCaseBinder.scala#tree78", "270:463", "Evaluator$", "rejected", "rejected;error=TermNameNotFound;failure=EscapedCaseBinder.scala#tree48@333:337;typed_root=absent"),
+    "ForeignSameSpelledExtractor": ("ForeignSameSpelledExtractor.scala", "21383", "peelLeft", "ForeignSameSpelledExtractor.scala#tree66", "265:381", "Evaluator$", "accepted", "accepted;typed_root=complete_DefDef;return=Expr;mappings=complete(21):all_spans_preserved"),
+    "InvalidRecursiveArgument": ("InvalidRecursiveArgument.scala", "21384", "sum", "InvalidRecursiveArgument.scala#tree78", "270:464", "Evaluator$", "rejected", "rejected;error=ApplicationArgumentTypeMismatch;failure=InvalidRecursiveArgument.scala#tree60@396:402;typed_root=absent"),
+    "WrongMethodResult": ("WrongMethodResult.scala", "21385", "sum", "WrongMethodResult.scala#tree78", "270:469", "Evaluator$", "rejected", "rejected;error=OverloadApplicationNoApplicable;failure=WrongMethodResult.scala#tree61@389:407;typed_root=absent"),
+    "RenamedReorderedFields": ("RenamedReorderedFields.scala", "21386", "peelLeft", "RenamedReorderedFields.scala#tree40", "158:266", "Evaluator$", "accepted", "accepted;typed_root=complete_DefDef;return=Expr;mappings=complete(20):all_spans_preserved"),
+    "LatePeelLeftResult": ("LatePeelLeftResult.scala", "21387", "peelLeftFails", "LatePeelLeftResult.scala#tree102", "496:612", "LatePeelControl$", "rejected", "rejected;error=ExpectedExpressionTypeMismatch;failure=LatePeelLeftResult.scala#tree101@541:612;typed_root=absent"),
+    "LateSumResult": ("LateSumResult.scala", "21388", "sumFails", "LateSumResult.scala#tree123", "495:711", "LateSumControl$", "rejected", "rejected;error=ExpectedExpressionTypeMismatch;failure=LateSumResult.scala#tree122@535:711;typed_root=absent"),
+    "WrongOuterPatternArity": ("WrongOuterPatternArity.scala", "21389", "peelLeftFails", "WrongOuterPatternArity.scala#tree103", "503:619", "WrongOuterArityControl$", "rejected", "rejected;error=ExtractorProductSelectorCountMismatch;failure=WrongOuterPatternArity.scala#tree94@567:590;typed_root=absent"),
+}
+NESTED_CONTROL_TESTS = {
+    "nested_peelleft_controls_keep_bounded_rejections_and_positional_identity",
+    "nested_sum_bounded_invalid_roots_fail_without_partial_mappings",
+    "nested_sum_rejects_a_sibling_case_binder_escape_then_types_original_sum",
+    "nested_adt_classifications_execute_all_pinned_case_roots",
+}
+NESTED_ROLLBACK_TEST = "nested_late_failures_restore_and_retry_before_original_roots_recover"
 
 
 class GateError(ValueError):
@@ -111,6 +131,35 @@ def _git_is_clean(root: Path) -> bool:
     return not result.stdout
 
 
+def _validate_test_summary(log: str, expected_tests: set[str], label: str) -> None:
+    events = re.findall(r"^test ([A-Za-z0-9_:]+) \.\.\. (ok|ignored|FAILED)$", log, re.MULTILINE)
+    summaries = re.findall(
+        r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;",
+        log, re.MULTILINE,
+    )
+    if len(summaries) != 1:
+        raise GateError(f"{label} log must contain exactly one complete test summary")
+    status, passed, failed, ignored = summaries[0]
+    counts = {"ok": 0, "ignored": 0, "FAILED": 0}
+    names: dict[str, list[str]] = {}
+    for name, outcome in events:
+        counts[outcome] += 1
+        names.setdefault(name.split("::")[-1], []).append(outcome)
+    if status != "ok" or int(failed) != counts["FAILED"] or int(passed) != counts["ok"] or int(ignored) != counts["ignored"]:
+        raise GateError(f"{label} test summary does not reconcile with observed test outcomes")
+    if int(passed) == 0 or int(ignored) != 0 or counts["FAILED"] != 0:
+        raise GateError(f"{label} log must prove nonzero passing tests with no ignored or failed tests")
+    for name in expected_tests:
+        if names.get(name) != ["ok"]:
+            raise GateError(f"{label} mandatory test did not execute exactly once and pass: {name}")
+
+
+def _validate_revision_marker(log: str, marker: str, tested_sha: str, label: str) -> None:
+    matches = re.findall(rf"^{re.escape(marker)}\t([0-9a-f]{{40}})$", log, re.MULTILINE)
+    if matches != [tested_sha]:
+        raise GateError(f"{label} log is missing, stale or mismatched for the exact tested revision")
+
+
 def validate_nested_positive_log(
     root: Path, log_text: str, tested_sha: str, pr_head_sha: str | None = None,
     require_clean: bool = False,
@@ -142,13 +191,8 @@ def validate_nested_positive_log(
     if source_digest != NESTED_SOURCE_SHA256:
         raise GateError("nested ADT source does not match the immutable #2132 pin")
 
-    if not re.search(rf"^test {re.escape(NESTED_TEST)} \.\.\. ok$", log_text, re.MULTILINE):
-        raise GateError("nested ADT positive test was not observed as executed and passing")
-    result_rows = re.findall(r"^test result: ok\. 1 passed; 0 failed; 0 ignored;", log_text, re.MULTILINE)
-    if len(result_rows) != 1:
-        raise GateError("nested ADT positive log must prove exactly one executed test")
-    if log_text.count(f"ISSUE2137_TESTED_SHA\t{tested_sha}") != 1:
-        raise GateError("nested ADT positive log is missing the exact tested revision marker")
+    _validate_test_summary(log_text, {NESTED_TEST}, "nested ADT positive")
+    _validate_revision_marker(log_text, "ISSUE2137_TESTED_SHA", tested_sha, "nested ADT positive")
     if log_text.count("ISSUE2137_EXECUTED_TESTS\t1") != 1:
         raise GateError("nested ADT positive log is missing its nonzero execution receipt")
 
@@ -207,7 +251,7 @@ def validate_nested_positive_log(
     return rows
 
 
-def validate_nested_negative_sidecars(root: Path, rollback_log: str) -> None:
+def validate_nested_negative_sidecars(root: Path, rollback_log: str, tested_sha: str) -> None:
     fixture = root / NESTED_FIXTURE
     try:
         negative_bytes = (fixture / "negative-cases.tsv").read_bytes()
@@ -233,27 +277,47 @@ def validate_nested_negative_sidecars(root: Path, rollback_log: str) -> None:
     marker = "ISSUE2136_NESTED_ROLLBACK\t" + "\n".join(expected_rollback)
     if rollback_log.count(marker) != 1:
         raise GateError("#2136 actual late-failure receipt is absent or differs from its normalized sidecar")
-    test_name = "nested_late_failures_restore_and_retry_before_original_roots_recover"
-    if len(re.findall(rf"^test (?:[A-Za-z0-9_:]+::)?{re.escape(test_name)} \.\.\. ok$", rollback_log, re.MULTILINE)) != 1:
-        raise GateError("#2136 nested rollback test was not observed as executed and passing")
-    if len(re.findall(r"^test result: ok\. 1 passed; 0 failed;", rollback_log, re.MULTILINE)) != 1:
-        raise GateError("#2136 rollback log must prove exactly one executed test")
+    _validate_revision_marker(rollback_log, "ISSUE2137_ROLLBACK_TESTED_SHA", tested_sha, "#2136 rollback")
+    _validate_test_summary(rollback_log, {NESTED_ROLLBACK_TEST}, "#2136 rollback")
 
 
-def validate_nested_control_log(control_log: str) -> None:
-    expected = {
-        "nested_peelleft_controls_keep_bounded_rejections_and_positional_identity",
-        "nested_sum_bounded_invalid_roots_fail_without_partial_mappings",
-        "nested_sum_rejects_a_sibling_case_binder_escape_then_types_original_sum",
-    }
-    observed = set(re.findall(r"^test ([A-Za-z0-9_]+) \.\.\. ok$", control_log, re.MULTILINE))
-    if expected - observed:
-        raise GateError(f"nested ADT classified controls did not execute: {sorted(expected - observed)}")
-    for name in expected:
-        if len(re.findall(rf"^test {re.escape(name)} \.\.\. ok$", control_log, re.MULTILINE)) != 1:
-            raise GateError(f"nested ADT classified control duplicated execution: {name}")
-    if len(re.findall(r"^test result: ok\. \d+ passed; 0 failed;", control_log, re.MULTILINE)) != 1:
-        raise GateError("nested ADT classified control tests did not pass")
+def validate_nested_control_log(root: Path, control_log: str, tested_sha: str) -> list[dict[str, str]]:
+    _validate_revision_marker(control_log, "ISSUE2137_CONTROLS_TESTED_SHA", tested_sha, "nested ADT controls")
+    _validate_test_summary(control_log, NESTED_CONTROL_TESTS, "nested ADT controls")
+    fixture = root / NESTED_FIXTURE
+    hashes = {}
+    for line in (fixture / "source-hashes.tsv").read_text(encoding="utf-8").splitlines()[1:]:
+        digest, filename = line.split("\t")
+        hashes[filename] = digest
+    if hashlib.sha256((fixture / "source-hashes.tsv").read_bytes()).hexdigest() != NESTED_RECEIPT_HASHES["source-hashes.tsv"]:
+        raise GateError("nested ADT source hash inventory pin changed")
+    rows = []
+    records = re.findall(r"^ISSUE2137_CLASSIFIED_CASE\t(.+)$", control_log, re.MULTILINE)
+    if len(records) != len(NESTED_CLASSIFIED_CASES) or control_log.count("ISSUE2137_CLASSIFIED_CASE_COUNT\t10") != 1:
+        raise GateError("nested ADT controls must emit exactly ten executed classified case receipts")
+    for record in records:
+        fields = record.split("\t")
+        if len(fields) != 9:
+            raise GateError("nested ADT classified case receipt has malformed columns")
+        case, fixture_name, source_id, method, path_tree, span, owner, classification, outcome = fields
+        expected = NESTED_CLASSIFIED_CASES.get(case)
+        if expected is None or any(row["case"] == case for row in rows):
+            raise GateError("nested ADT classified case receipt is unexpected or duplicated")
+        expected_tuple = (*expected[:6], NESTED_NEGATIVE_CLASSIFICATIONS[case], expected[7])
+        if tuple(fields[1:]) != expected_tuple:
+            raise GateError(f"nested ADT case execution differs from pinned source/root/outcome: {case}")
+        try:
+            source_digest = hashlib.sha256((fixture / fixture_name).read_bytes()).hexdigest()
+        except OSError as error:
+            raise GateError(f"cannot read classified source fixture {fixture_name}: {error}") from error
+        if hashes.get(fixture_name) != source_digest:
+            raise GateError(f"nested ADT case source differs from its pinned SHA-256: {fixture_name}")
+        rows.append({"case": case, "fixture": fixture_name, "source_sha256": source_digest,
+                     "root": method, "source_path_tree": path_tree, "source_span": span,
+                     "owner": owner, "classification": classification, "outcome": outcome})
+    if {row["case"] for row in rows} != set(NESTED_CLASSIFIED_CASES):
+        raise GateError("nested ADT controls omitted one or more pinned classifications")
+    return rows
 
 
 def extract_selected_report(report: str) -> str:
@@ -348,6 +412,7 @@ def main() -> int:
     parser.add_argument("--nested-controls-log", type=Path)
     parser.add_argument("--nested-rollback-log", type=Path)
     parser.add_argument("--nested-output", type=Path)
+    parser.add_argument("--nested-classified-output", type=Path)
     parser.add_argument("--nested-report", type=Path)
     parser.add_argument("--nested-tested-sha")
     parser.add_argument("--nested-pr-head-sha")
@@ -356,7 +421,7 @@ def main() -> int:
         if (args.report is None) != (args.baseline is None):
             raise GateError("focused report verification requires both --report and --baseline")
         nested_mode = any((args.nested_positive_log, args.nested_controls_log,
-                           args.nested_rollback_log, args.nested_output,
+                           args.nested_rollback_log, args.nested_output, args.nested_classified_output,
                            args.nested_report, args.nested_tested_sha, args.nested_pr_head_sha))
         if args.report is not None and args.baseline is not None:
             verify_baseline(args.report, args.baseline)
@@ -367,11 +432,11 @@ def main() -> int:
                 raise GateError("timing sidecars require --timing-output")
             write_timing_tsv(args.timing_output, args.timing_log, args.timing_rss)
         nested_args = (args.nested_positive_log, args.nested_controls_log,
-                       args.nested_rollback_log, args.nested_output,
+                       args.nested_rollback_log, args.nested_output, args.nested_classified_output,
                        args.nested_report, args.nested_tested_sha)
         if any(value is not None for value in nested_args) or args.nested_pr_head_sha is not None:
             if any(value is None for value in nested_args):
-                raise GateError("nested ADT receipts require positive, controls and rollback logs, tested SHA, TSV output and report")
+                raise GateError("nested ADT receipts require positive, controls and rollback logs, tested SHA, both TSV outputs and report")
             try:
                 positive_log = args.nested_positive_log.read_text(encoding="utf-8")
                 controls_log = args.nested_controls_log.read_text(encoding="utf-8")
@@ -381,8 +446,8 @@ def main() -> int:
             root = Path(__file__).resolve().parents[2]
             rows = validate_nested_positive_log(root, positive_log, args.nested_tested_sha,
                                                 args.nested_pr_head_sha, require_clean=True)
-            validate_nested_control_log(controls_log)
-            validate_nested_negative_sidecars(root, rollback_log)
+            classified_rows = validate_nested_control_log(root, controls_log, args.nested_tested_sha)
+            validate_nested_negative_sidecars(root, rollback_log, args.nested_tested_sha)
             baseline_sha = NESTED_BASELINE_SHA
             tested_sha = args.nested_tested_sha
             pr_head_sha = args.nested_pr_head_sha or tested_sha
@@ -398,18 +463,27 @@ def main() -> int:
                     writer.writerow({**row, "normalized_semantic_sha256": hashlib.sha256(row["proof"].encode()).hexdigest(),
                                      "baseline_sha": baseline_sha, "tested_sha": tested_sha,
                                      "pr_head_sha": pr_head_sha})
+            args.nested_classified_output.parent.mkdir(parents=True, exist_ok=True)
+            with args.nested_classified_output.open("w", encoding="utf-8", newline="") as stream:
+                writer = csv.DictWriter(stream, fieldnames=("case", "fixture", "source_sha256", "root",
+                    "source_path_tree", "source_span", "owner", "classification", "outcome",
+                    "tested_sha", "pr_head_sha"), delimiter="\t")
+                writer.writeheader()
+                for row in classified_rows:
+                    writer.writerow({**row, "tested_sha": tested_sha, "pr_head_sha": pr_head_sha})
             report = [
                 "# Nested recursive ADT local receipts (Scala 3.9.0)", "",
                 f"- Baseline: `{baseline_sha}`", f"- Tested revision: `{tested_sha}`",
                 f"- PR head: `{pr_head_sha}`", f"- Immutable source SHA-256: `{NESTED_SOURCE_SHA256}`",
                 "- Positive denominator: 4 original source roots across 2 live frontend sessions",
-                "- Negative classified cases: 10; late rollback receipts: 2 executed controls", "",
+                "- Negative classified cases: 10, each executed against its pinned source and method root",
+                "- Late rollback receipts: 2 executed controls", "",
                 "| Session | Root | Source tree | Span | Normalized SHA-256 |",
                 "| --- | --- | --- | --- | --- |",
             ]
             for row in rows:
                 report.append(f"| {row['session']} | {row['root']} | {row['source_path_tree']} | {row['source_span']} | `{hashlib.sha256(row['proof'].encode()).hexdigest()}` |")
-            report.extend(["", "**PASS** — local evidence was emitted only after the executed positive test, four canonical receipts, fresh-session witnesses, pinned classifications, and actual rollback receipt all verified.", ""])
+            report.extend(["", "**PASS** — local evidence was emitted only after revision-bound positive, control, and rollback summaries reconciled with observed executions; four canonical roots, ten pinned source-root classifications, and actual rollback receipts verified.", ""])
             args.nested_report.parent.mkdir(parents=True, exist_ok=True)
             args.nested_report.write_text("\n".join(report), encoding="utf-8")
     except GateError as error:
@@ -420,7 +494,7 @@ def main() -> int:
     if args.timing_output:
         print(f"wrote informational per-run timings to {args.timing_output}")
     if args.nested_output:
-        print(f"verified four nested ADT receipts and wrote {args.nested_output}")
+        print(f"verified four nested ADT receipts and wrote {args.nested_output} and {args.nested_classified_output}")
     return 0
 
 

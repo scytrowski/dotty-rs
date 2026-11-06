@@ -4,6 +4,9 @@ from pathlib import Path
 
 from verify_focused_gate import (
     NESTED_ROWS,
+    NESTED_CLASSIFIED_CASES,
+    NESTED_CONTROL_TESTS,
+    NESTED_ROLLBACK_TEST,
     NESTED_SOURCE_SHA256,
     NESTED_TEST,
     NESTED_FIXTURE,
@@ -50,6 +53,24 @@ class VerifyFocusedGateTests(unittest.TestCase):
                               root, path_tree, span, "Evaluator$", NESTED_SOURCE_SHA256, proof))
             )
         return head, "\n".join(lines) + "\n"
+
+    def nested_control_log(self, head: str) -> str:
+        lines = [f"test {name} ... ok" for name in sorted(NESTED_CONTROL_TESTS)]
+        lines.extend((f"test result: ok. {len(NESTED_CONTROL_TESTS)} passed; 0 failed; 0 ignored; 0 measured; finished in 0.12s",
+                      f"ISSUE2137_CONTROLS_TESTED_SHA\t{head}"))
+        for case, expected in NESTED_CLASSIFIED_CASES.items():
+            filename, source_id, method, path_tree, span, owner, classification, outcome = expected
+            lines.append("ISSUE2137_CLASSIFIED_CASE\t" + "\t".join((case, filename, source_id, method,
+                path_tree, span, owner, classification, outcome)))
+        lines.append("ISSUE2137_CLASSIFIED_CASE_COUNT\t10")
+        return "\n".join(lines) + "\n"
+
+    def nested_rollback_log(self, head: str) -> str:
+        rollback = self.repository_root / NESTED_FIXTURE / "rust-late-failure.tsv"
+        marker = "ISSUE2136_NESTED_ROLLBACK\t" + "\n".join(rollback.read_text(encoding="utf-8").splitlines())
+        return (f"test {NESTED_ROLLBACK_TEST} ... ok\n"
+                f"test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; finished in 0.12s\n"
+                f"ISSUE2137_ROLLBACK_TESTED_SHA\t{head}\n{marker}\n")
 
     def test_accepts_exact_four_nested_positive_receipts(self) -> None:
         head, log = self.nested_positive_log()
@@ -98,27 +119,69 @@ class VerifyFocusedGateTests(unittest.TestCase):
                 validate_nested_positive_log(self.repository_root, log, head, head, require_clean=True)
 
     def test_requires_executed_negative_controls_and_actual_rollback_receipt(self) -> None:
-        control_log = "\n".join(
-            [
-                "test nested_peelleft_controls_keep_bounded_rejections_and_positional_identity ... ok",
-                "test nested_sum_bounded_invalid_roots_fail_without_partial_mappings ... ok",
-                "test nested_sum_rejects_a_sibling_case_binder_escape_then_types_original_sum ... ok",
-                "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.12s",
-            ]
-        )
-        validate_nested_control_log(control_log)
+        head, _ = self.nested_positive_log()
+        control_log = self.nested_control_log(head)
+        validate_nested_control_log(self.repository_root, control_log, head)
         with self.assertRaises(GateError):
-            validate_nested_control_log(control_log.replace("nested_sum_bounded_invalid_roots_fail_without_partial_mappings", "skipped"))
-        rollback = self.repository_root / NESTED_FIXTURE / "rust-late-failure.tsv"
-        marker = "ISSUE2136_NESTED_ROLLBACK\t" + "\n".join(rollback.read_text(encoding="utf-8").splitlines())
-        rollback_log = (
-            "test nested_late_failures_restore_and_retry_before_original_roots_recover ... ok\n"
-            + marker
-            + "\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; finished in 0.12s\n"
-        )
-        validate_nested_negative_sidecars(self.repository_root, rollback_log)
+            validate_nested_control_log(self.repository_root, control_log.replace("nested_sum_bounded_invalid_roots_fail_without_partial_mappings", "skipped"), head)
+        rollback_log = self.nested_rollback_log(head)
+        validate_nested_negative_sidecars(self.repository_root, rollback_log, head)
         with self.assertRaises(GateError):
-            validate_nested_negative_sidecars(self.repository_root, rollback_log.replace("full_rollback_retry_same_session_and_fresh_parity", "partial"))
+            validate_nested_negative_sidecars(self.repository_root, rollback_log.replace("full_rollback_retry_same_session_and_fresh_parity", "partial"), head)
+
+    def test_control_and_rollback_receipts_bind_to_tested_sha(self) -> None:
+        head, _ = self.nested_positive_log()
+        controls = self.nested_control_log(head)
+        rollback = self.nested_rollback_log(head)
+        for marker, log, validator in (
+            ("ISSUE2137_CONTROLS_TESTED_SHA", controls, lambda value: validate_nested_control_log(self.repository_root, value, head)),
+            ("ISSUE2137_ROLLBACK_TESTED_SHA", rollback, lambda value: validate_nested_negative_sidecars(self.repository_root, value, head)),
+        ):
+            for mutated in (log.replace(f"{marker}\t{head}", ""),
+                            log.replace(head, "0" * 40),
+                            log + f"{marker}\t{'f' * 40}\n"):
+                with self.subTest(marker=marker), self.assertRaisesRegex(GateError, "exact tested revision"):
+                    validator(mutated)
+
+    def test_classifications_require_exact_executed_pinned_case_roots(self) -> None:
+        head, _ = self.nested_positive_log()
+        valid = self.nested_control_log(head)
+        validate_nested_control_log(self.repository_root, valid, head)
+        mutations = (
+            valid.replace("ISSUE2137_CLASSIFIED_CASE\tWrongNestedArity", "ISSUE2137_CLASSIFIED_CASE\tMissingCase", 1),
+            valid.replace("WrongNestedArity.scala#tree55@358:375", "WrongNestedArity.scala#tree54@358:375"),
+            valid.replace("270:475", "270:474", 1),
+            valid.replace("error=PatternTypeMismatch", "error=OtherError"),
+            valid.replace("ISSUE2137_CLASSIFIED_CASE_COUNT\t10", "ISSUE2137_CLASSIFIED_CASE_COUNT\t9"),
+            "\n".join(line for line in valid.splitlines() if "ISSUE2137_CLASSIFIED_CASE\tWrongNestedArity" not in line) + "\n",
+        )
+        for mutated in mutations:
+            with self.subTest(mutated=mutated[-80:]), self.assertRaises(GateError):
+                validate_nested_control_log(self.repository_root, mutated, head)
+
+    def test_test_summaries_reconcile_observed_pass_ignored_and_mandatory_events(self) -> None:
+        head, log = self.nested_positive_log()
+        bad_positive = (
+            log.replace("1 passed; 0 failed; 0 ignored", "0 passed; 0 failed; 1 ignored"),
+            log.replace("1 passed; 0 failed; 0 ignored", "1 passed; 0 failed; 1 ignored"),
+            log.replace("1 passed; 0 failed; 0 ignored", "2 passed; 0 failed; 0 ignored"),
+            log.replace("test result: ok.", "test result: FAILED.", 1),
+        )
+        for mutated in bad_positive:
+            with self.assertRaises(GateError):
+                validate_nested_positive_log(self.repository_root, mutated, head, head)
+        controls = self.nested_control_log(head)
+        for mutated in (
+            controls.replace("4 passed; 0 failed; 0 ignored", "0 passed; 0 failed; 4 ignored"),
+            controls.replace("4 passed; 0 failed; 0 ignored", "4 passed; 0 failed; 1 ignored"),
+            controls.replace("4 passed; 0 failed; 0 ignored", "3 passed; 0 failed; 0 ignored"),
+            controls.replace("test nested_sum_bounded_invalid_roots_fail_without_partial_mappings ... ok\n", ""),
+        ):
+            with self.assertRaises(GateError):
+                validate_nested_control_log(self.repository_root, mutated, head)
+        rollback = self.nested_rollback_log(head)
+        with self.assertRaises(GateError):
+            validate_nested_negative_sidecars(self.repository_root, rollback.replace("1 passed; 0 failed; 0 ignored", "0 passed; 0 failed; 1 ignored"), head)
 
     def test_rejects_malformed_classification_sidecar(self) -> None:
         import shutil
@@ -130,16 +193,12 @@ class VerifyFocusedGateTests(unittest.TestCase):
             source_fixture = self.repository_root / NESTED_FIXTURE
             for name in ("negative-cases.tsv", "rust-late-failure.tsv"):
                 shutil.copy2(source_fixture / name, fixture / name)
-            valid_log = (
-                "test nested_late_failures_restore_and_retry_before_original_roots_recover ... ok\n"
-                + "ISSUE2136_NESTED_ROLLBACK\t"
-                + "\n".join((fixture / "rust-late-failure.tsv").read_text(encoding="utf-8").splitlines())
-                + "\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; finished in 0.12s\n"
-            )
-            validate_nested_negative_sidecars(root, valid_log)
+            head, _ = self.nested_positive_log()
+            valid_log = self.nested_rollback_log(head)
+            validate_nested_negative_sidecars(root, valid_log, head)
             (fixture / "negative-cases.tsv").write_text("case\tclassification\treason\nWrongNestedArity\trejected\tpartial\n", encoding="utf-8")
             with self.assertRaises(GateError):
-                validate_nested_negative_sidecars(root, valid_log)
+                validate_nested_negative_sidecars(root, valid_log, head)
 
     def test_rejects_altered_normalized_semantic_fixture(self) -> None:
         import shutil

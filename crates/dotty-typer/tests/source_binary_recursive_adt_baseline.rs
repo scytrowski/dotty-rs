@@ -17,6 +17,8 @@ const SOURCE: &str = include_str!("fixtures/source-binary-recursive-adt-3.9.0/Ex
 const NESTED_SOURCE: &str = include_str!("fixtures/source-nested-recursive-adt-3.9.0/Expr.scala");
 const FOREIGN_SOURCE: &str =
     include_str!("fixtures/source-nested-recursive-adt-3.9.0/ForeignSameSpelledExtractor.scala");
+const NESTED_CASE_CLASSIFICATIONS: &str =
+    include_str!("fixtures/source-nested-recursive-adt-3.9.0/negative-cases.tsv");
 // This receipt includes arena IDs: canonical scala.Boolean TASTy lowering now
 // reuses Definitions.boolean instead of allocating an equivalent TypeRef, so
 // later diagnostic TypeIds are two slots earlier while rejection behavior is
@@ -152,6 +154,160 @@ fn nested_recursive_adt_original_roots_are_attempted_in_two_fresh_sessions() {
     for row in receipt {
         println!("ISSUE2132_NESTED_ROOT\t{row}");
     }
+}
+
+#[test]
+fn nested_adt_classifications_execute_all_pinned_case_roots() {
+    let cases = [
+        (
+            "WrongNestedArity",
+            "WrongNestedArity.scala",
+            include_str!("fixtures/source-nested-recursive-adt-3.9.0/WrongNestedArity.scala"),
+            "sum",
+        ),
+        (
+            "WrongNestedLiteralType",
+            "WrongNestedLiteralType.scala",
+            include_str!("fixtures/source-nested-recursive-adt-3.9.0/WrongNestedLiteralType.scala"),
+            "sum",
+        ),
+        (
+            "EscapedCaseBinder",
+            "EscapedCaseBinder.scala",
+            include_str!("fixtures/source-nested-recursive-adt-3.9.0/EscapedCaseBinder.scala"),
+            "sum",
+        ),
+        (
+            "ForeignSameSpelledExtractor",
+            "ForeignSameSpelledExtractor.scala",
+            FOREIGN_SOURCE,
+            "peelLeft",
+        ),
+        (
+            "InvalidRecursiveArgument",
+            "InvalidRecursiveArgument.scala",
+            include_str!(
+                "fixtures/source-nested-recursive-adt-3.9.0/InvalidRecursiveArgument.scala"
+            ),
+            "sum",
+        ),
+        (
+            "WrongMethodResult",
+            "WrongMethodResult.scala",
+            include_str!("fixtures/source-nested-recursive-adt-3.9.0/WrongMethodResult.scala"),
+            "sum",
+        ),
+        (
+            "RenamedReorderedFields",
+            "RenamedReorderedFields.scala",
+            include_str!("fixtures/source-nested-recursive-adt-3.9.0/RenamedReorderedFields.scala"),
+            "peelLeft",
+        ),
+        (
+            "LatePeelLeftResult",
+            "LatePeelLeftResult.scala",
+            include_str!("fixtures/source-nested-recursive-adt-3.9.0/LatePeelLeftResult.scala"),
+            "peelLeftFails",
+        ),
+        (
+            "LateSumResult",
+            "LateSumResult.scala",
+            include_str!("fixtures/source-nested-recursive-adt-3.9.0/LateSumResult.scala"),
+            "sumFails",
+        ),
+        (
+            "WrongOuterPatternArity",
+            "WrongOuterPatternArity.scala",
+            include_str!("fixtures/source-nested-recursive-adt-3.9.0/WrongOuterPatternArity.scala"),
+            "peelLeftFails",
+        ),
+    ];
+    let tested_sha = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("git is available for the execution-bound controls receipt")
+        .stdout;
+    let tested_sha = String::from_utf8(tested_sha).expect("git SHA is UTF-8");
+    let tested_sha = tested_sha.trim();
+    assert!(
+        tested_sha.len() == 40 && tested_sha.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "classified outcomes bind to the exact tested checkout"
+    );
+    println!("ISSUE2137_CONTROLS_TESTED_SHA\t{tested_sha}");
+
+    for (case_index, (case, fixture, source_text, root_name)) in cases.into_iter().enumerate() {
+        let scala_classification = NESTED_CASE_CLASSIFICATIONS
+            .lines()
+            .skip(1)
+            .find_map(|line| {
+                let mut fields = line.split('\t');
+                (fields.next() == Some(case)).then(|| fields.next().unwrap().to_owned())
+            })
+            .unwrap_or_else(|| {
+                panic!("{case} is absent from the pinned Scala classification inventory")
+            });
+        let source = SourceId::from_index(21380 + case_index as u32);
+        let mut session = BinarySession::new_with_source(source, source_text);
+        let receipt = session.with_typer(|ast, index, typer, _definitions| {
+            let root = find_method_tree(ast, typer.store(), root_name);
+            let root_node = ast.get(root);
+            let root_span = root_node.position.unwrap().span().range();
+            let method = index
+                .symbol_at(source, root)
+                .expect("classified root has source semantic identity");
+            let owner = typer.store().symbols.get(method).owner.expect("source method owner");
+            let owner_name = typer
+                .store()
+                .names
+                .resolve(typer.store().symbols.get(owner).name.text())
+                .to_owned();
+            assert!(matches!(
+                typer.store().symbols.get(method).origin,
+                SymbolOrigin::Source(id) if id == source
+            ));
+            let outcome = match typer.type_method_definition(root) {
+                Ok(typed) => {
+                    assert_eq!(typer.source_typed_index().get(source, root), Some(typed));
+                    assert!(matches!(typer.typed_ast().get(typed).kind, TreeKind::DefDef(_)));
+                    let result = source_method_result_name(typer.store(), method);
+                    let mappings = complete_root_mapping_count(source, ast, typer, root);
+                    format!(
+                        "accepted;typed_root=complete_DefDef;return={result};mappings=complete({mappings}):all_spans_preserved"
+                    )
+                }
+                Err(error) => {
+                    assert!(typer.source_typed_index().get(source, root).is_none());
+                    let debug = format!("{error:?}");
+                    let error_kind = debug.split(" {").next().unwrap_or(&debug);
+                    let failure = parse_tree_index(&debug)
+                        .and_then(|tree_index| {
+                            ast.iter().find(|(tree, _)| tree.index() == tree_index)
+                        })
+                        .map(|(tree, node)| {
+                            let span = node.position.unwrap().span().range();
+                            format!("{fixture}#tree{}@{}:{}", tree.index(), span.start(), span.end())
+                        })
+                        .unwrap_or_else(|| "UNREPORTED".to_owned());
+                    format!("rejected;error={error_kind};failure={failure};typed_root=absent")
+                }
+            };
+            let actual_classification = if outcome.starts_with("accepted;") {
+                "accepted"
+            } else {
+                "rejected"
+            };
+            assert_eq!(
+                actual_classification, scala_classification,
+                "{case} Rust source-root outcome agrees with its pinned classification"
+            );
+            format!(
+                "{case}\t{fixture}\t{}\t{root_name}\t{fixture}#tree{}\t{}:{}\t{owner_name}\t{scala_classification}\t{outcome}",
+                source.index(), root.index(), root_span.start(), root_span.end()
+            )
+        });
+        println!("ISSUE2137_CLASSIFIED_CASE\t{receipt}");
+    }
+    println!("ISSUE2137_CLASSIFIED_CASE_COUNT\t{}", cases.len());
 }
 
 #[test]
@@ -3932,6 +4088,26 @@ fn complete_root_mapping_count(
             tree
         })
         .count()
+}
+
+fn source_method_result_name(store: &SemanticStore, method: dotty_core::SymbolId) -> String {
+    let SymbolInfo::Complete(signature) = *store.symbols.info(method) else {
+        panic!("accepted source method has a complete signature")
+    };
+    let Type::Method(signature) = store.types.get(signature) else {
+        panic!("accepted source method has a method signature")
+    };
+    let Type::TypeRef {
+        target: TypeRefTarget::Symbol(result),
+        ..
+    } = store.types.get(signature.result)
+    else {
+        panic!("classified method result is a canonical named type")
+    };
+    store
+        .names
+        .resolve(store.symbols.get(*result).name.text())
+        .to_owned()
 }
 
 fn assert_nested_typed_shapes(
