@@ -1816,6 +1816,9 @@ fn validate_two_local_constructor_pair(
     {
         return Err("two-local seed formals do not preserve the original method ABI".into());
     }
+    if initializers[0].argument_formal == initializers[1].argument_formal {
+        return Err("two-local initializers must use distinct authorized seed formals".into());
+    }
     let caller_plan = proof
         .jvm_unit
         .classes
@@ -1880,7 +1883,7 @@ fn validate_two_local_constructor_pair(
             || !tasty.store.symbols.get(initializer.local).flags.is_empty()
             || !matches!(tasty.store.symbols.get(initializer.local).info, SymbolInfo::Complete(ty) if ty == initializer.local_type)
             || tasty.typed_ast.get(typed_declaration).ty != initializer.local_type
-            || initializer.argument_formal != pair.method_formals[index]
+            || !pair.method_formals.contains(&initializer.argument_formal)
             || initializer.call.formal_type != tasty.definitions.int
             || !matches!(tasty.store.types.try_get(initializer.local_type), Some(Type::TypeRef { target: TypeRefTarget::Symbol(class), .. }) if *class == initializer.call.class)
         {
@@ -1940,7 +1943,7 @@ fn validate_two_local_constructor_pair(
                 tasty.typed_ast.try_get(call.typed_new).map(|t| &t.kind),
                 Some(TreeKind::New(_))
             )
-            || !matches!(tasty.store.types.try_get(tasty.typed_ast.get(call.typed_argument).ty), Some(Type::TermRef { prefix, target: TermRefTarget::Symbol(symbol) }) if *prefix == tasty.definitions.no_prefix && *symbol == pair.method_formals[index])
+            || !matches!(tasty.store.types.try_get(tasty.typed_ast.get(call.typed_argument).ty), Some(Type::TermRef { prefix, target: TermRefTarget::Symbol(symbol) }) if *prefix == tasty.definitions.no_prefix && *symbol == initializer.argument_formal)
             || !matches!(tasty.store.types.try_get(tasty.typed_ast.get(call.typed_new).ty), Some(Type::TypeRef { target: TypeRefTarget::Symbol(class), .. }) if *class == call.class)
             || tasty.typed_ast.get(call.typed_apply).ty != call.result_type
             || tasty.typed_bindings.typed_at(source_id, call.source_select)
@@ -1982,7 +1985,16 @@ fn validate_two_local_constructor_pair(
         local_initializers.push(LocalCounterInitializerRef {
             owner_internal_name: nested_metadata.identity().internal_name().to_owned(),
             descriptor: nested_constructor.descriptor().as_str().to_owned(),
-            argument_local_slot: method.parameters()[index].slot(),
+            argument_local_slot: method
+                .parameters()
+                .iter()
+                .find(|parameter| parameter.symbol() == initializer.argument_formal)
+                .ok_or_else(|| {
+                    format!(
+                        "two-local initializer {index} formal is absent from the authenticated JVM method"
+                    )
+                })?
+                .slot(),
             result_local_slot: local_slot.slot(),
         });
     }

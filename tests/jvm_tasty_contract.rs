@@ -87,6 +87,94 @@ fn two_immutable_reference_locals_reach_paired_tasty_output() {
 }
 
 #[test]
+fn two_local_contract_binds_reversed_declarations_to_their_seed_formals() {
+    let reversed_declarations = TWO_IMMUTABLE_REFERENCE_LOCALS_BATCH.replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
+        "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
+    );
+
+    for (source, source_id) in [
+        (TWO_IMMUTABLE_REFERENCE_LOCALS_BATCH, 21261),
+        (reversed_declarations.as_str(), 21262),
+    ] {
+        with_paired_jvm_tasty_batch_plan(
+            source,
+            "TwoLocals.scala",
+            SourceId::from_index(source_id),
+            |source_batch| {
+                let plans = source_batch
+                    .classes
+                    .iter()
+                    .map(|class| class.tasty_plan)
+                    .collect::<Vec<_>>();
+                let validated = validate_jvm_tasty_batch(source_batch.jvm_unit, &plans).expect(
+                    "source local order does not change the method's authenticated formal order",
+                );
+                let valid = encode_batch_for_contract_test(&source_batch);
+                validate_jvm_tasty_batch_artifacts(&validated, valid.clone())
+                    .expect("both original initializer paths match their own seed formals");
+
+                if source_id == 21262 {
+                    let mut swapped_seed_loads = valid;
+                    let factory = swapped_seed_loads
+                        .classfiles
+                        .iter_mut()
+                        .find(|artifact| artifact.classfile_path == "example/PairFactory.class")
+                        .unwrap();
+                    let (code_offset, seed_load_offsets) = {
+                        let mut reader = Reader::new(&factory.classfile_bytes);
+                        let class = ClassFile::decode(&mut reader).unwrap();
+                        let create = class
+                            .methods
+                            .iter()
+                            .find(|method| {
+                                class.constant_pool.utf8(method.name_index).unwrap() == "create"
+                            })
+                            .unwrap();
+                        let [Attribute::Code(code)] = create.attributes.as_slice() else {
+                            panic!("PairFactory.create has one Code attribute");
+                        };
+                        let offsets = (0..code.code.len().saturating_sub(4))
+                            .filter(|offset| {
+                                code.code[*offset] == 0xbb
+                                    && code.code[*offset + 3] == 0x59
+                                    && matches!(code.code[*offset + 4], 0x1b | 0x1c)
+                            })
+                            .map(|offset| offset + 4)
+                            .collect::<Vec<_>>();
+                        let absolute =
+                            code.code.as_ptr() as usize - factory.classfile_bytes.as_ptr() as usize;
+                        (absolute, offsets)
+                    };
+                    assert_eq!(
+                        seed_load_offsets.len(),
+                        2,
+                        "both Counter initializer seed loads are located"
+                    );
+                    for offset in seed_load_offsets {
+                        let opcode = &mut factory.classfile_bytes[code_offset + offset];
+                        *opcode = match *opcode {
+                            0x1b => 0x1c,
+                            0x1c => 0x1b,
+                            other => panic!("unexpected initializer seed load opcode: {other:#x}"),
+                        };
+                    }
+                    assert!(matches!(
+                        validate_jvm_tasty_batch_artifacts(&validated, swapped_seed_loads),
+                        Err(JvmTastyContractError::BatchArtifact {
+                            class_index: 2,
+                            phase: "cross-class invocation",
+                            ..
+                        })
+                    ));
+                }
+            },
+        )
+        .unwrap();
+    }
+}
+
+#[test]
 fn two_immutable_reference_locals_variations_record_first_observed_rejection() {
     let exact = TWO_IMMUTABLE_REFERENCE_LOCALS_BATCH;
     let renamed = exact
