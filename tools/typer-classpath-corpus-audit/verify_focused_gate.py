@@ -124,14 +124,17 @@ def _git_head(root: Path) -> str:
 def _git_is_clean(root: Path) -> bool:
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), "status", "--porcelain=v1", "--untracked-files=all"],
-            check=True,
+            # The focused workflow checks out the pinned Scala source tree below
+            # the repository root. It is intentionally untracked; only tracked
+            # source changes can invalidate evidence for the tested commit.
+            ["git", "-C", str(root), "diff", "--quiet", "HEAD", "--"],
+            check=False,
             capture_output=True,
             text=True,
         )
     except (OSError, subprocess.CalledProcessError) as error:
         raise GateError(f"cannot verify tested repository cleanliness: {error}") from error
-    return not result.stdout
+    return result.returncode == 0
 
 
 def _validate_test_summary(log: str, expected_tests: set[str], label: str) -> None:

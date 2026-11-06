@@ -12,6 +12,7 @@ from verify_focused_gate import (
     NESTED_TEST,
     NESTED_FIXTURE,
     GateError,
+    _git_is_clean,
     expected_nested_proof,
     validate_nested_control_log,
     validate_nested_negative_sidecars,
@@ -135,6 +136,29 @@ class VerifyFocusedGateTests(unittest.TestCase):
         with patch("verify_focused_gate._git_is_clean", return_value=False):
             with self.assertRaisesRegex(GateError, "clean tested revision"):
                 validate_nested_positive_log(self.repository_root, log, head, head, require_clean=True)
+
+    def test_clean_revision_allows_untracked_pinned_checkout_but_rejects_tracked_edits(self) -> None:
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", str(root)], check=True, capture_output=True)
+            tracked = root / "tracked.txt"
+            tracked.write_text("committed\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "tracked.txt"], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture"],
+                check=True,
+                capture_output=True,
+            )
+
+            (root / "scala39-source").mkdir()
+            (root / "scala39-source" / "README").write_text("pinned checkout\n", encoding="utf-8")
+            self.assertTrue(_git_is_clean(root))
+
+            tracked.write_text("modified\n", encoding="utf-8")
+            self.assertFalse(_git_is_clean(root))
 
     def test_requires_executed_negative_controls_and_actual_rollback_receipt(self) -> None:
         head, _ = self.nested_positive_log()
