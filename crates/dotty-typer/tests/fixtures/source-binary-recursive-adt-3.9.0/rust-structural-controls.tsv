@@ -1,9 +1,9 @@
 case	failure_root	diagnostic	rollback_retry
-SwappedSourceProvenance	selectLeft@158..271	ExtractorResultMemberNotFound { source: SourceId(20770), tree_index: 34, result: TypeId(139), member: Name { text: NameId(107), namespace: Term } }	rollback=complete,negative_retry=stable
-SwappedScopeSelectors	selectLeft@158..271	ExtractorResultMemberNotFound { source: SourceId(20771), tree_index: 34, result: TypeId(139), member: Name { text: NameId(107), namespace: Term } }	rollback=complete,negative_retry=stable
-AliasedScopeSelectors	selectLeft@158..271	ExtractorResultMemberNotFound { source: SourceId(20772), tree_index: 34, result: TypeId(139), member: Name { text: NameId(107), namespace: Term } }	rollback=complete,negative_retry=stable
+SwappedSourceProvenance	selectLeft@158..271	ExtractorResultMemberNotFound { source: SourceId(20770), tree_index: 34, result: TypeId(137), member: Name { text: NameId(107), namespace: Term } }	rollback=complete,negative_retry=stable
+SwappedScopeSelectors	selectLeft@158..271	ExtractorResultMemberNotFound { source: SourceId(20771), tree_index: 34, result: TypeId(137), member: Name { text: NameId(107), namespace: Term } }	rollback=complete,negative_retry=stable
+AliasedScopeSelectors	selectLeft@158..271	ExtractorResultMemberNotFound { source: SourceId(20772), tree_index: 34, result: TypeId(137), member: Name { text: NameId(107), namespace: Term } }	rollback=complete,negative_retry=stable
 ForeignUnapplyOwner	selectLeft@158..271	SymbolSourceKindMismatch { source: SourceId(20773), tree_index: 20, symbol: SymbolId(63), kind: Method }	rollback=complete,negative_retry=stable
 ForeignCompanionLink	selectLeft@158..271	ExtractorQualifierNotValueLike { source: SourceId(20774), tree_index: 34, qualifier_type: None }	rollback=complete,negative_retry=stable
-WrongParent	selectLeft@158..271	MalformedClassInfo { symbol: SymbolId(42), info: TypeId(112) }	rollback=complete,negative_retry=stable
-BrokenProductIdentity	selectLeft@158..271	MalformedClassInfo { symbol: SymbolId(42), info: TypeId(112) }	rollback=complete,negative_retry=stable
-ForeignSelectorOwner	selectLeft@158..271	ExtractorResultMemberNotFound { source: SourceId(20777), tree_index: 34, result: TypeId(139), member: Name { text: NameId(107), namespace: Term } }	rollback=complete,negative_retry=stable
+WrongParent	selectLeft@158..271	MalformedClassInfo { symbol: SymbolId(42), info: TypeId(110) }	rollback=complete,negative_retry=stable
+BrokenProductIdentity	selectLeft@158..271	MalformedClassInfo { symbol: SymbolId(42), info: TypeId(110) }	rollback=complete,negative_retry=stable
+ForeignSelectorOwner	selectLeft@158..271	ExtractorResultMemberNotFound { source: SourceId(20777), tree_index: 34, result: TypeId(137), member: Name { text: NameId(107), namespace: Term } }	rollback=complete,negative_retry=stable

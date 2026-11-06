@@ -1710,6 +1710,10 @@ fn run_sealed_event_case_local_negative_matrix() {
             ));
         });
     }
+    // The diagnostic snapshot contains arena IDs. Canonical scala.Boolean
+    // TASTy lowering now reuses Definitions.boolean rather than allocating
+    // an equivalent TypeRef, shifting later TypeIds without changing these
+    // negative cases or their rejection classes.
     assert_eq!(
         format!(
             "case\tmethod root\tMatch\tfirst error tree\tTyper diagnostic\tScala\tTyper detail\n{}\n",
