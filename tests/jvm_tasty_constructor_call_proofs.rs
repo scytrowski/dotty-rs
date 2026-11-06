@@ -2168,9 +2168,79 @@ fn original_counter_set_call_is_proved_without_widening_pair_contract() {
                         "Counter.set Select has no typed mapping"
                     )
                 );
+
+                let mut swapped_final_arguments = clone_arena(typed_ast);
+                let typed_final = swapped_final_arguments
+                    .get_mut(proof.initializer_pair().typed_final_expression());
+                let TreeKind::Apply(final_apply) = &mut typed_final.kind else {
+                    panic!("typed final Pair expression remains Apply");
+                };
+                final_apply.args.swap(0, 1);
+                let swapped_unit = JvmCompilationUnit {
+                    store,
+                    typed_ast: &swapped_final_arguments,
+                    classes: jvm_unit.classes.clone(),
+                };
+                assert!(matches!(
+                    validate_immutable_local_counter_set_call_proof(
+                        ImmutableLocalInitializerPairProofInput {
+                            typed_ast: &swapped_final_arguments,
+                            jvm_unit: &swapped_unit,
+                            ..input()
+                        }
+                    ),
+                    Err(dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(_))
+                ), "frozen source order rejects swapped final typed argument edges");
             },
         );
     }
+
+    let wrong_method_source = COUNTER_SET_CALL_SOURCE
+        .replace(
+            "  def set(value: Int): Unit = current = value",
+            "  def set(value: Int): Unit = current = value\n  def ignore(value: Int): Unit = ()",
+        )
+        .replace("first.set(secondSeed)", "first.ignore(secondSeed)");
+    with_two_local_proof_session(
+        &wrong_method_source,
+        21657,
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         _,
+         _,
+         jvm_unit| {
+            let result = validate_immutable_local_counter_set_call_proof(
+                ImmutableLocalInitializerPairProofInput {
+                    source_id,
+                    method_tree,
+                    store,
+                    definitions,
+                    source_ast,
+                    typed_ast,
+                    source_index,
+                    source_typed_index,
+                    local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                    jvm_unit,
+                },
+            );
+            assert!(
+                matches!(
+            result,
+            Err(dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceShape(
+                "selected member must be the accessible original one-argument set method"
+            ))
+        ),
+                "a same-owner, same-signature method is not Counter.set"
+            );
+        },
+    );
 
     let wrong_formal =
         COUNTER_SET_CALL_SOURCE.replace("first.set(secondSeed)", "first.set(firstSeed)");

@@ -5868,6 +5868,89 @@ pub fn validate_immutable_local_counter_set_call_proof<'session>(
             "typed Block must preserve exactly one original Counter.set stat after both locals",
         ));
     }
+    // The initializer-pair receipt intentionally does not authenticate the
+    // final Pair argument origins. This call receipt includes that envelope,
+    // so bind both source and typed arguments to the two locals in order.
+    let TreeKind::Apply(source_final_apply) = &source_ast
+        .try_get(pair.source_final_expression)
+        .ok_or_else(|| source_error("final Pair expression is stale"))?
+        .kind
+    else {
+        return Err(source_error("final Pair expression must remain Apply"));
+    };
+    let TreeKind::Apply(typed_final_apply) = &typed_ast
+        .try_get(pair.typed_final_expression)
+        .ok_or_else(|| typed_error("typed final Pair expression is stale"))?
+        .kind
+    else {
+        return Err(typed_error("final Pair expression must remain typed Apply"));
+    };
+    if source_final_apply.args.len() != 2
+        || typed_final_apply.kind != ApplyKind::Regular
+        || typed_final_apply.args.len() != 2
+    {
+        return Err(source_error(
+            "final Pair call must retain two ordered arguments",
+        ));
+    }
+    let mut seen_final_locals = [false; 2];
+    for (index, source_arg) in source_final_apply.args.iter().copied().enumerate() {
+        let TreeKind::Ident(source_ident) = &source_ast
+            .try_get(source_arg)
+            .ok_or_else(|| source_error("final Pair argument is stale"))?
+            .kind
+        else {
+            return Err(source_error(
+                "final Pair arguments must be the original local Idents",
+            ));
+        };
+        let local_index = pair
+            .initializers
+            .iter()
+            .position(|initializer| {
+                source_ast
+                    .try_get(initializer.declaration.declaration)
+                    .is_some_and(|node| {
+                        matches!(&node.kind, TreeKind::ValDef(local_def) if source_ident.name == *local_def.name.as_name())
+                    })
+            })
+            .ok_or_else(|| {
+                source_error("final Pair arguments must name the two initialized locals")
+            })?;
+        if std::mem::replace(&mut seen_final_locals[local_index], true) {
+            return Err(source_error(
+                "final Pair call must use each initialized local once",
+            ));
+        }
+        let initializer = &pair.initializers[local_index];
+        let expected_typed_arg = source_typed_index
+            .get(source_id, source_arg)
+            .ok_or_else(|| typed_error("final Pair argument has no original typed mapping"))?;
+        if typed_final_apply.args[index] != expected_typed_arg
+            || !matches!(store.types.try_get(typed_ast
+                .try_get(expected_typed_arg)
+                .ok_or_else(|| typed_error("typed final Pair argument is stale"))?.ty),
+                Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. })
+                    if *symbol == initializer.declaration.symbol)
+        {
+            return Err(typed_error(
+                "typed final Pair arguments must retain the ordered local TermRefs",
+            ));
+        }
+        require_matching_source_typed_positions(
+            source_ast,
+            typed_ast,
+            source_id,
+            source_arg,
+            expected_typed_arg,
+            "final Pair local argument",
+        )?;
+    }
+    if seen_final_locals != [true, true] {
+        return Err(source_error(
+            "final Pair call must use both initialized locals",
+        ));
+    }
     let TreeKind::Apply(typed_apply) = &typed_ast
         .try_get(typed_call)
         .ok_or_else(|| typed_error("typed Counter.set Apply is stale"))?
@@ -6002,8 +6085,8 @@ pub fn validate_immutable_local_counter_set_call_proof<'session>(
             "selected Counter member must be a source method",
         ));
     };
-    if store.names.resolve(source_selection.name.text())
-        != store.names.resolve(set_def.name.as_name().text())
+    if store.names.resolve(source_selection.name.text()) != "set"
+        || store.names.resolve(set_def.name.as_name().text()) != "set"
         || !set_def.type_params.is_empty()
         || set_def.value_param_clauses.len() != 1
         || set_def.value_param_clauses[0].len() != 1
