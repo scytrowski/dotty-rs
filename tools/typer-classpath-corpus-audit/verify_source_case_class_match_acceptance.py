@@ -148,6 +148,7 @@ RECURSIVE_ADT_NEGATIVE_TESTS = {
     "typer::tests::method_parameter_capture::recursive_adt_rollback::binary_recursive_second_argument_failure_and_late_failure_restore_then_retry_eval",
     "typer::tests::method_parameter_capture::recursive_adt_rollback::binary_late_failure_restores_complete_state_retries_then_types_both_original_roots",
     "typer::tests::method_parameter_capture::recursive_adt_rollback::binary_classified_source_controls_have_stable_retry_and_session_receipts",
+    "typer::tests::method_parameter_capture::recursive_adt_rollback::nested_late_failures_restore_and_retry_before_original_roots_recover",
 }
 BINARY_ADT_POSITIVE_TESTS = {
     "binary_recursive_adt_original_roots_share_two_real_sessions",
