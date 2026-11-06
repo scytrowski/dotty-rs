@@ -5781,7 +5781,7 @@ pub fn validate_immutable_local_counter_set_call_proof<'session>(
         .kind
     else {
         return Err(source_error(
-            "Counter.set receiver must be the first local Ident",
+            "Counter.set receiver must be one of the initialized local Idents",
         ));
     };
     let source_argument = source_apply.args[0];
