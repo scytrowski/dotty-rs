@@ -574,3 +574,95 @@ oracle success for this increment. Those required gates must pass in hosted CI;
 the exact integrated artifact hashes, UUID receipts, failure matrix and CI run
 links will be added after the required run completes. Local focused producer
 tests are run on Rust 1.98.1 with the registered task scratch directory.
+
+## Final integrated AC1–AC10 release ledger
+
+This ledger distinguishes evidence measured by this final PR from receipts
+inherited from prerequisites. The frozen integrated base is
+`ee90e7f9c013c85623ee1fe4ea7dbd4b8ac27d2a`; it contains the seven prerequisite
+merges listed above. The implementation and local producer/negative tests were
+run at PR head `75ddb1c4e655377f5200218b0e448005890a4d8a`. The CI runs at that
+head are [Rust/JVM CI run 42176124273](https://github.com/scytrowski/dotty-rs/actions/runs/42176124273)
+and [strict Scala 3.9 run 42176124274](https://github.com/scytrowski/dotty-rs/actions/runs/42176124274).
+Both jobs in Rust/JVM CI run 42176124273 are green, including 1,014 workspace
+tests (one ignored) and the mandatory JDK 21 job. The four shards in strict
+Scala 3.9 run 42176124274 are still running. These hosted checks are current
+integrated receipts, not inherited prerequisite results. This document-only
+correction will itself trigger fresh PR checks, which must also finish green.
+
+| AC | Integrated observation and evidence | Result at this ledger revision |
+| --- | --- | --- |
+| **1. Baseline and provenance** | Base `ee90e7f9c013c85623ee1fe4ea7dbd4b8ac27d2a`; prerequisite reviewed heads and merge SHAs are in the preceding table. Original `TwoLocals.scala`: `e2411637c892feb474d6d70526d471b524cd7de49a3db2565923cd69736f73c3`; reversed-declaration source: `3f95b763e6fd5b05c5e21951e4428e3c7b00dd508078caf547fa50341fc4a0e1`; Scala `Consumer.scala`: `d0ecf8a1183b95508da88f75a06175c2b01dacc575c9b44498d00b030572d00c`; Java identity harness: `38310c03464a835034b628c500324f7c3676c5bea4eef43965660b40cc6f8f69`. Rust is 1.98.1 (`48a229cea`), Scala is 3.9.0 at `777528f19a58e794c9954a42f433373472ec57f8`, TASTy 28.9.0, Temurin 21.0.13+9 with `--release 21` / class-file 65. The pinned checkout launcher is `dist/target/universal/stage/bin/scalac` (observed SHA-256 `2981fa689c25ac031e1d923387c07ca65506ed7d8d88454e5d4dcd8e11726120`); the staged compiler JAR is recorded as an observation only, not a reproducible pin. Published runtime JAR hashes: Scala 3 library `9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba`, Scala library `b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd`; full oracle provenance is in `oracle.json`. | Both Rust/JVM run 42176124273 and strict Scala run 42176124274 passed at the recorded test head. |
+| **2. One source/typed session** | `two_immutable_counter_locals_pickle_in_source_order_for_local_pair_arguments` exercises the whole source unit in one session and asserts both original initializer/formal relationships and final Pair local identities. It passes on the recorded PR tree. The assertion is identity-based and does not treat spelling or arena slot numbers as proof. | Focused test passed locally and was included in green Rust CI run 42176124273. |
+| **3. Authentic TASTy graph** | The producer test checks two immutable `Counter` `VALDEF`s, separate constructor applications and seed `PARAM` references, and final direct `TERMREF`s to the corresponding local declarations. The Rust graph regression reports `BLOCK=54`, declaration addresses `[72, 97]`, and Pair references `[72, 97]` for the original and `[97, 72]` when declarations are reversed but Pair use remains `Pair(first, second)`. The official Scala 3.9 oracle observes method 32, block 57, final apply 59, local VALDEF addresses `[75,98]`, direct Pair targets `[75,98]`; `-decompile`, `-print-tasty`, and `-from-tasty` ran on Rust sidecars. | Focused producer and Scala 3.9 shard passed in run 42176124274. |
+| **4. Six-file batches** | Focused deterministic producer coverage emits exactly `Counter.class/.tasty`, `Pair.class/.tasty`, and `PairFactory.class/.tasty` in two fresh sessions. Original-source SHA-256 values are listed below. The complete declaration-reversal batch retains Counter and Pair artifacts and changes PairFactory; its six hashes and UUID are recorded above. The source-order and final-argument controls are tested separately. | Focused six-artifact test passed locally. |
+| **5. JVM bytecode/proof** | The strict runtime test decodes `create(II)Lexample/Pair;`, checks `max_stack=4`, `max_locals=5`, two Counter allocations/constructors and distinct stores. Original Pair use loads slots `[3,4]`; declaration reversal with unchanged `Pair(first, second)` loads `[4,3]`; final-argument reversal also loads `[4,3]`; repeat-first loads `[3,3]`. The new runtime matrix asserts these per variant. | The required hosted Classfile JVM encoder gate passed on this tested head with `DOTTY_CLASSFILE_REQUIRE_JDK=1` and includes `jvm_tasty_mixed_origin_runtime`; see [job 127754877388](https://github.com/scytrowski/dotty-rs/actions/runs/42176124273/job/127754877388). |
+| **6. Strict Java 21 runtime** | Temurin 21.0.13+9 ran the Java harness with `-Xverify:all -ea`. The original, reversed-final-argument and reversed-declaration variants each reported `identity:true;mutations=isolated;repeat=fresh;seeds=7/3,3/7,-9/42;equalSeeds=distinct-isolated`; the alias control reported the same seed/mutation/fresh-call result with `equalSeeds=n/a`. The reversed-declaration disassembly retained two allocations and stores to slots 3/4, then loaded `[4,3]` for source Pair(first, second). All six runtime artifacts remained hash-identical before and after checks. | Passed in JVM job 127754877388 at tested head `75ddb1c4e655377f5200218b0e448005890a4d8a`; run output records the runtime strings and actual flow. |
+| **7. Strict Scala 3.9 consumer** | The independent client is `tests/fixtures/jvm_tasty_two_immutable_reference_locals/Consumer.scala`; it compiles against the Rust six-file batch and the two approved runtime JARs. It reports primary `7/3`, reversed arguments `3/7`, and alias `left-equals-right`; independent mutation and fresh allocations pass. Declaration reversal is separately compiled and run with the unchanged `Pair(first, second)` client, and the six original outputs stay unchanged after each run. TASTy-only lookup succeeds for Counter constructor/get/set, Pair fields/constructor, and factory method; matching classfile-only controls fail at Scala `[E008]`/`[E173]` lookup. | All four required shards and aggregate check passed in run 42176124274. |
+| **8. Negative and publisher first-failure matrix** | The JVM matrix rejected swapped Pair loads at the paired contract (`cross-class invocation`, expected `aload_3`, found `0x19`); a JVM-valid swapped clone failed the identity assertion (`left value: expected 7 got 3`); same-local-twice failed distinct-local identity; invalid local slots/stores, missing allocations/constructors, use-before-store, uninitialized escape, wrong constructor references/descriptors and low stack/local limits failed at JVM verification. Missing classes produced `NoClassDefFoundError`; missing `leftValue` produced `NoSuchMethodError`. Scala-reader controls observed missing/misplaced sidecars, corruption and UUID mismatch at compiler loading; dangling local TERMREFs failed `-decompile` with `TreeWithoutOwner`. Wrong local types/initializer constructor were accepted by Scala's reader but rejected against the Rust source-bound TASTy plan at `TASTy plan identity`; wrong signed constructor-name mutation was likewise recorded as accepted by Scala, not claimed as a Scala rejection. The paired publisher matrix injects failures across six staged writes and promotion and checks partial-output/sentinel containment. | JVM negative matrix and publisher test passed in run 42176124273; Scala-reader negative matrix passed in run 42176124274, both at tested head `75ddb1c4e655377f5200218b0e448005890a4d8a`. |
+| **9. Strict CI and repository gates** | Current strict manifest validates 24 targets / four shards and includes the consumer target once. The required shard flags include `DOTTY_REQUIRE_SCALA_TASTY_TWO_IMMUTABLE_REFERENCE_LOCALS_CONSUMER=1` and `DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1`; the JVM workflow sets `DOTTY_CLASSFILE_REQUIRE_JDK=1`. Local fmt, frontend-boundary, manifest, Clippy (`-D warnings`), rustdoc (`-D warnings`) and diff checks pass; the full workspace suite was not run locally; Java/Scala tools are absent locally. | Rust/JVM CI and all strict Scala 3.9 shards passed on PR head `75ddb1c4e655377f5200218b0e448005890a4d8a`; both workflows must run again and pass at the final documentation-correction head. |
+| **10. Final ledger and boundary** | This section records each AC, tested source/client pins, artifacts, UUIDs, runtime and first-failure evidence with explicit provenance. Supported scope is the two original immutable `Counter` locals, their authenticated initializers, ordered two-reference Pair construction, six-file Rust output and the pinned Java/Scala verification gate. Third/mutable locals, helper/conditional/nested initializers, broader constructor shapes, cross-unit ABI, public compiler API/CLI and unrelated compiler features remain deferred. A newly exposed production defect goes to its owning prerequisite. | Evidence document updated; required final-head CI receipts remain outstanding. |
+
+Original-source artifacts emitted by the focused Rust producer on the recorded
+PR tree (SHA-256). The artifact test additionally decodes class-file major 65,
+TASTy 28.9 and each classfile-to-sidecar UUID link.
+
+| Original path | SHA-256 |
+| --- | --- |
+| `example/Counter.class` | `518831fb3bc939f249037f5a14f0e8c02c182681a38ee8f26314d74414411641` |
+| `example/Counter.tasty` | `504092e378b58d111e81169711cc86a4b4967ff47d3673646e96760ec1fc18de` |
+| `example/Pair.class` | `4e895557ebb06761402668cda14f93479cdbbc45199b3af4a67cbbe65a1c215b` |
+| `example/Pair.tasty` | `f7d29974104da060bc1a598d0b3043df6f43f136e72cb095f672548cdc5b4f13` |
+| `example/PairFactory.class` | `b9954a37aafc6a84a391c82b001865fa5b688b56cab4245f801d0e7dba351ffa` |
+| `example/PairFactory.tasty` | `a1812f47bad089c47ec125a887ddc7403f78124b4de396d87e262ccfd755e495` |
+
+| Classfile | Sidecar UUID |
+| --- | --- |
+| `example/Counter.class` | `009ce4f47b6e18ac0000000000008193` |
+| `example/Pair.class` | `007a1d11cde040f00000000000008198` |
+| `example/PairFactory.class` | `002d5a1b50b7d0c8000000000000819a` |
+
+For declaration reversal, the unchanged Counter and Pair hashes/UUIDs are
+above. `PairFactory.class` is
+`6eb506efce8f0ef03a28f51114822c89bc7e377bf9745a82155b304ca5a41d8f`, its
+sidecar is `23d218100c13d0291f00a5b91ae614353ec3acfc9f3554d520286ccb13c9d1e6`,
+and its UUID is `0086a9094699abc1000000000000819a`. The final-argument-reversed
+variant has PairFactory hashes
+`dddd308354ea7d7948ff85a8a54e491e475db9c59b8bc1974bdb4eec01c70309` /
+`aee575b295a7f5e86c5afb0ab29da575f62230eab4cd415f17cb90987edb1bed` and UUID
+`00045a1b509ed0c8000000000000819a`. The existing repeat-first variant has
+UUID `00045a1b50b7d0c8000000000000819a`. These variant receipts are from
+`two_local_pair_emits_deterministic_six_artifact_batches_for_all_argument_orders`
+at PR head `75ddb1c4e655377f5200218b0e448005890a4d8a`; the test compares fresh
+session outputs byte for byte.
+
+### Strict Scala-consumer runtime classpaths
+
+The strict Scala workflow also emitted the classpaths actually consumed by its
+independently compiled client. These use the runtime test's source IDs, so their
+PairFactory hashes/UUIDs are distinct from the paired-batch producer receipts
+above. The first set is the original source (`source_id=21280`); the second is
+the complete local-declaration reversal with final `Pair(first, second)` held
+fixed (`source_id=21300`). The workflow recorded all six files unchanged after
+Scala compile/runtime for each case.
+
+| Artifact | Original source, source ID 21280 SHA-256 | Reversed declarations, source ID 21300 SHA-256 |
+| --- | --- | --- |
+| `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | same |
+| `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | same |
+| `example/Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` | same |
+| `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | same |
+| `example/PairFactory.class` | `16f734ec97d054a2ff1ec40400b6583b9d60476babcf0ba8617fd98dc0feebea` | `c4730db60612fa1968533389c9afe1a94720ffd344366bc1805e677aaa4767c7` |
+| `example/PairFactory.tasty` | `9415f52a7476d72554ba8943b9b657d588385fc339b3ff639a3c7d51e3d685e4` | `199dab4895187fed40e1384050fcf111c80bfac9bf50241c4058967dc5bb9387` |
+
+| Classfile | Original source UUID | Reversed-declaration UUID |
+| --- | --- | --- |
+| `example/Counter.class` | `008071c3c00968ac0000000000008193` | same |
+| `example/Pair.class` | `000b7d8d7441c7f00000000000008198` | same |
+| `example/PairFactory.class` | `000a7216f3d105c8000000000000819a` | `00316d11887affc1000000000000819a` |
+
+These strict-consumer receipts are from [Scala shard 2/4, job
+127754877279](https://github.com/scytrowski/dotty-rs/actions/runs/42176124274/job/127754877279)
+at tested PR head `75ddb1c4e655377f5200218b0e448005890a4d8a`. The companion
+strict shards and aggregate required check also passed in [run
+42176124274](https://github.com/scytrowski/dotty-rs/actions/runs/42176124274).
