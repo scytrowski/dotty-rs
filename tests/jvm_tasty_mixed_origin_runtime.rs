@@ -1233,9 +1233,19 @@ fn two_immutable_local_pair_identity_and_decoded_flow_on_strict_jdk21() {
         .join("PairFactoryTwoLocalIdentityHarness.java");
     std::fs::write(&harness_source, TWO_LOCAL_IDENTITY_HARNESS).unwrap();
 
+    let reversed_local_declarations = TWO_LOCAL_PRIMARY_BATCH.replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
+        "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
+    );
+    assert_ne!(reversed_local_declarations, TWO_LOCAL_PRIMARY_BATCH);
     let variants = [
         ("primary", TWO_LOCAL_PRIMARY_BATCH, "primary"),
         ("reversed", TWO_LOCAL_REVERSED_BATCH, "reversed"),
+        (
+            "reversed-local-declarations",
+            reversed_local_declarations.as_str(),
+            "primary",
+        ),
         ("alias", TWO_LOCAL_ALIAS_BATCH, "alias"),
     ];
     for (index, (label, source, harness_mode)) in variants.into_iter().enumerate() {
@@ -1383,7 +1393,7 @@ fn two_immutable_local_pair_identity_and_decoded_flow_on_strict_jdk21() {
         assert_eq!(
             loads,
             match label {
-                "reversed" => vec![4, 3],
+                "reversed" | "reversed-local-declarations" => vec![4, 3],
                 "alias" => vec![3, 3],
                 _ => vec![3, 4],
             },
