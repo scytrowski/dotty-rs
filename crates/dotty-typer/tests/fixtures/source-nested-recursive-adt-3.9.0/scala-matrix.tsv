@@ -6,3 +6,6 @@ ForeignSameSpelledExtractor	accepted
 InvalidRecursiveArgument	rejected
 WrongMethodResult	rejected
 RenamedReorderedFields	accepted
+LatePeelLeftResult	rejected
+LateSumResult	rejected
+WrongOuterPatternArity	rejected

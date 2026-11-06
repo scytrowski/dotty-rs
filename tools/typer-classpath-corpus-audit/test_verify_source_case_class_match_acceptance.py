@@ -171,7 +171,7 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
         self.assertEqual({row["case"] for row in rows if row["case"].startswith("foreign_")},
                          {"foreign_succ_owner", "foreign_eval_wrong_argument", "foreign_eval_control", "foreign_expr_succ_owner"})
 
-    def test_recursive_expr_negative_gate_requires_all_cases_and_all_five_audit_tests(self) -> None:
+    def test_recursive_expr_negative_gate_requires_all_cases_and_all_six_audit_tests(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             log = self.write_log(Path(directory) / "negative.log", self.recursive_negative_log())
             gate.validate_recursive_adt_negative_log(log)
@@ -186,7 +186,7 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
     def recursive_negative_log(self) -> str:
         root = Path(__file__).resolve().parents[2]
         fixture = root / gate.RECURSIVE_ADT_SOURCE / "rust-negative-matrix.tsv"
-        lines = ["running 5 tests"]
+        lines = ["running 6 tests"]
         for row in gate.read_tsv(fixture)[1]:
             lines.append(f"ISSUE2039_NEGATIVE\t{row['case']}\t{row['root']}\t{row['scala_result']}\t{row['rust_result']}")
         for case, evidence in (
@@ -200,7 +200,8 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
             "test typer::tests::method_parameter_capture::recursive_adt_rollback::binary_recursive_second_argument_failure_and_late_failure_restore_then_retry_eval ... ok",
             "test typer::tests::method_parameter_capture::recursive_adt_rollback::binary_late_failure_restores_complete_state_retries_then_types_both_original_roots ... ok",
             "test typer::tests::method_parameter_capture::recursive_adt_rollback::binary_classified_source_controls_have_stable_retry_and_session_receipts ... ok",
-            "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 1010 filtered out",
+            "test typer::tests::method_parameter_capture::recursive_adt_rollback::nested_late_failures_restore_and_retry_before_original_roots_recover ... ok",
+            "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1011 filtered out",
         ])
         return "\n".join(lines) + "\n"
 
@@ -426,7 +427,7 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
         )
         control_lines.extend(required)
         control_lines.extend(f"test {name} ... ok" for name in sorted(gate.RECURSIVE_ADT_NEGATIVE_TESTS))
-        control_lines.append("test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out")
+        control_lines.append("test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out")
         control = self.write_log(directory / "negative.log", "\n".join(control_lines) + "\n")
 
         structural_file = fixture / "rust-structural-controls.tsv"
