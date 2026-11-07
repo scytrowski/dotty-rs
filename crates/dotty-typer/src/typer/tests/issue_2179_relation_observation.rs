@@ -190,7 +190,7 @@ fn captures_acceptance_iv_relation_operands_before_transaction_rollback() {
         let capture = observed.clone();
         let parsed_ast = &parsed.ast;
         let observed_resource_origins = resource_origins.clone();
-        typer.transaction_failure_observer = Some(Rc::new(move |typer, error| {
+        typer.transaction_failure_error_observer = Some(Rc::new(move |typer, error| {
             let mut lines = vec![
                 format!("root={relative}#tree={wanted_tree}"),
                 format!("error={error:?}"),

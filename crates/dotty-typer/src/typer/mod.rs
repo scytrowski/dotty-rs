@@ -98,7 +98,9 @@ fn application_kind_accepts(application_kind: ApplyKind, method_kind: MethodKind
 }
 
 #[cfg(test)]
-type TransactionFailureObserver<'a> = std::rc::Rc<dyn Fn(&SourceTyper<'a>, &TyperError) + 'a>;
+type TransactionFailureObserver<'a> = std::rc::Rc<dyn Fn(&SourceTyper<'a>) + 'a>;
+#[cfg(test)]
+type TransactionFailureErrorObserver<'a> = std::rc::Rc<dyn Fn(&SourceTyper<'a>, &TyperError) + 'a>;
 
 /// Completes source declaration signatures against a shared semantic session.
 pub struct SourceTyper<'a> {
@@ -140,6 +142,8 @@ pub struct SourceTyper<'a> {
     synthetic_class_member_entries: Vec<(ScopeId, SymbolId)>,
     #[cfg(test)]
     transaction_failure_observer: Option<TransactionFailureObserver<'a>>,
+    #[cfg(test)]
+    transaction_failure_error_observer: Option<TransactionFailureErrorObserver<'a>>,
     #[cfg(test)]
     inject_failure_after_outermost_success: bool,
 }
@@ -304,6 +308,8 @@ impl<'a> SourceTyper<'a> {
             synthetic_class_member_entries: Vec::new(),
             #[cfg(test)]
             transaction_failure_observer: None,
+            #[cfg(test)]
+            transaction_failure_error_observer: None,
             #[cfg(test)]
             inject_failure_after_outermost_success: false,
         }
@@ -38302,7 +38308,7 @@ mod tests {
         let observed_bindings = Rc::new(RefCell::new(None));
         let observation = Rc::clone(&observed_bindings);
         let parsed_ref = &parsed;
-        typer.transaction_failure_observer = Some(Rc::new(move |typer, _error| {
+        typer.transaction_failure_observer = Some(Rc::new(move |typer| {
             let bindings = parsed_ref
                 .ast
                 .iter()
@@ -38720,7 +38726,7 @@ mod tests {
         let observed = Rc::new(RefCell::new(false));
         let observation = Rc::clone(&observed);
         let parsed_ref = &parsed;
-        typer.transaction_failure_observer = Some(Rc::new(move |typer, _error| {
+        typer.transaction_failure_observer = Some(Rc::new(move |typer| {
             let typed_match = typer
                 .source_typed_index()
                 .get(source, rhs)
@@ -38994,7 +39000,7 @@ mod tests {
         let observation = Rc::clone(&observed);
         let parsed_ref = &parsed;
         let observed_cases = cases.clone();
-        typer.transaction_failure_observer = Some(Rc::new(move |typer, _error| {
+        typer.transaction_failure_observer = Some(Rc::new(move |typer| {
             if typer.source_typed_index().get(source, rhs).is_none() {
                 return;
             }

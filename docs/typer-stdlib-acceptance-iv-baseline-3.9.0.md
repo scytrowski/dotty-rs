@@ -41,7 +41,7 @@ All printed arena IDs belong to the focused replay session and are diagnostic on
 
 ## Reproduction
 
-From protected main `89f81940fc538a7b24323b82b9415cdb6a7c5404`, with the pinned Scala source checkout, JDK 21, and the eight verified artifact jars configured as below. `TMPDIR`, `TMP`, `TEMP`, and `DOTTY_AUDIT_TMP_ROOT` must point to a writable persistent scratch directory.
+Use the protected-main revision `89f81940fc538a7b24323b82b9415cdb6a7c5404` for the unchanged 25+25 ordinary audits. The focused replay test was added later and is absent at protected main; run it from code revision `66f881f9ccd2dc2c7bd9c24cd00519df03971965` or a descendant containing the same test. Do not run the replay command at protected main, where Cargo could return success after matching zero tests. Use the pinned Scala source checkout, JDK 21, and the eight verified artifact jars listed above. `TMPDIR`, `TMP`, `TEMP`, and `DOTTY_AUDIT_TMP_ROOT` must point to a writable persistent scratch directory.
 
 ```sh
 export SCALA39_ROOT=/path/to/scala3-at-777528f
@@ -50,14 +50,10 @@ export SCALA39_JDK_RELEASE=21
 export COURSIER_MAVEN_ROOT=/path/to/pinned-maven-cache
 export TMPDIR=/path/to/managed-scratch
 export TMP="$TMPDIR" TEMP="$TMPDIR" DOTTY_AUDIT_TMP_ROOT="$TMPDIR/audit"
+
+# These ordinary full-DefDef audits run at protected main 89f81940fc53.
+git checkout --detach 89f81940fc538a7b24323b82b9415cdb6a7c5404
 mkdir -p target/acceptance-iv
-
-# Set SCALA39_CLASSPATH to the colon-separated absolute paths of the eight
-# verified Scala 3.9.0 jars listed above before running the focused replay.
-cargo test -p dotty-typer --lib \
-  captures_acceptance_iv_relation_operands_before_transaction_rollback \
-  -- --ignored --nocapture
-
 tools/typer-classpath-corpus-audit/run --method-kind ordinary \
   --method-manifest docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv \
   --require-typed-cohort docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-main.tsv \
@@ -67,9 +63,17 @@ tools/typer-classpath-corpus-audit/run --method-kind ordinary \
   --method-manifest docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv \
   --require-typed-cohort docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-analysis.tsv \
   --verify-determinism target/acceptance-iv/analysis.tsv
+
+# This focused test exists at 66f881f9ccd2 and later, not at protected main.
+git checkout --detach 66f881f9ccd2dc2c7bd9c24cd00519df03971965
+# Set SCALA39_CLASSPATH to the colon-separated absolute paths of the eight
+# verified Scala 3.9.0 jars listed above before running this replay.
+cargo test -p dotty-typer --lib \
+  captures_acceptance_iv_relation_operands_before_transaction_rollback \
+  -- --ignored --nocapture
 ```
 
-The two commands above are the unchanged 25+25 ordinary full-method audits. The committed TSV isolates the two target rows from the first full report. No cohort selection, production compiler code, workflow, or hosted Scala corpus was changed or run.
+The two ordinary audit commands are unchanged 25+25 full-method runs at protected main. The replay command uses the original complete target `DefDef`s with focused test-only observation at the code revision that adds that test. The committed TSV isolates the two target rows from the first ordinary report. No cohort selection, production compiler code, workflow, or hosted Scala corpus was changed or run.
 
 ## Validation
 
@@ -77,6 +81,7 @@ The two commands above are the unchanged 25+25 ordinary full-method audits. The 
 - Analysis ordinary report: SHA-256 `aa9c1751d8cd72ec77a0af0801d4f1db9452747b433288ec9c44ad25c40c14eb` on both passes.
 - Isolated target report: SHA-256 `c3e614bce4823e4a0fc0c0cb4ae9a06cb0c47d53166629f6a35c4ce0d595d0bd` on both passes.
 - `cargo fmt --all -- --check`, `python3 tools/check-frontend-boundaries.py`, `git diff --check`, and all 193 `tools/typer-classpath-corpus-audit` Python tests passed (one existing skipped test).
+- After the review fix, the frozen lexical-input verifier and the focused semantic gate's exact positive and negative test-log matrices passed; the frozen rollback source hash remains `817b20f0e3d92be4028c6e967842b5bfc38a5734ed0eabdc031f59f8b369ad4b`.
 - The focused pre-rollback relation replay passed for both original complete `DefDef`s. `cargo test -p dotty-typer --all-targets --locked` passed (1,016 unit tests passed, 2 ignored; all integration test binaries passed); the environment-gated replay is run explicitly with `--ignored`.
 - `cargo clippy -p dotty-typer --all-targets --locked -- -D warnings` and the frontend boundary guard passed after the review fix.
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`, `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked`, and `JAVA_HOME=<Temurin 21.0.13+9> cargo test --workspace --all-targets --locked` passed.
