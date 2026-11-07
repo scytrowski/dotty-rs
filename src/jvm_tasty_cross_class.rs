@@ -88,11 +88,28 @@ pub struct ValidatedCrossClassConstructorCallProof<'session> {
     typed_new: TreeId<Typed>,
     typed_argument: TreeId<Typed>,
     argument_proof: ConstructorArgumentProof,
+    local_receiver_unit_call: Option<LocalReceiverUnitCallReceipt>,
     formal_type: TypeId,
     constructor_formal_type: TypeId,
     result_type: TypeId,
     method_descriptor: String,
     constructor_descriptor: String,
+}
+
+/// Canonical source/typed roots for the one admitted local-receiver Unit call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocalReceiverUnitCallReceipt {
+    pub source_apply: TreeId<Untyped>,
+    pub typed_apply: TreeId<Typed>,
+    pub source_select: TreeId<Untyped>,
+    pub typed_select: TreeId<Typed>,
+    pub source_receiver: TreeId<Untyped>,
+    pub typed_receiver: TreeId<Typed>,
+    pub source_argument: TreeId<Untyped>,
+    pub typed_argument: TreeId<Typed>,
+    pub receiver: SymbolId,
+    pub method: SymbolId,
+    pub argument_formal: SymbolId,
 }
 
 /// Supported shape of a validated cross-class constructor argument.
@@ -299,6 +316,7 @@ fn immutable_local_argument_from_initializer(
 /// Opaque all-or-error proof of exactly two original immutable Counter
 /// initializers in a single Block. This is a borrowed identity receipt only;
 /// it does not validate Pair argument origins or authorize emission.
+#[derive(Clone, Copy)]
 pub struct ValidatedImmutableLocalInitializerPairProof<'session> {
     _store: &'session SemanticStore,
     _definitions: &'session Definitions,
@@ -337,8 +355,8 @@ pub struct ValidatedImmutableLocalCounterSetCallProof<'session> {
     result_type: TypeId,
 }
 
-impl ValidatedImmutableLocalCounterSetCallProof<'_> {
-    pub const fn initializer_pair(&self) -> &ValidatedImmutableLocalInitializerPairProof<'_> {
+impl<'session> ValidatedImmutableLocalCounterSetCallProof<'session> {
+    pub const fn initializer_pair(&self) -> &ValidatedImmutableLocalInitializerPairProof<'session> {
         &self.initializer_pair
     }
     pub const fn source_call(&self) -> TreeId<Untyped> {
@@ -1645,6 +1663,11 @@ impl ValidatedCrossClassConstructorCallProof<'_> {
     pub const fn ordered_argument_pair(&self) -> Option<OrderedConstructorArgumentPairProofView> {
         self.argument_proof.ordered_pair()
     }
+    /// Canonical local-receiver Unit statement, when the exact three-statement
+    /// local-pair envelope was independently authenticated.
+    pub const fn local_receiver_unit_call(&self) -> Option<LocalReceiverUnitCallReceipt> {
+        self.local_receiver_unit_call
+    }
     /// Canonical semantic type of the method formal and constructor argument.
     pub const fn formal_type(&self) -> TypeId {
         self.formal_type
@@ -2130,7 +2153,14 @@ fn validate_two_argument_constructor_call_candidate<'session>(
     let (source_apply_tree, source_block) =
         match source_ast.try_get(source_rhs).map(|node| &node.kind) {
             Some(TreeKind::Apply(_)) => (source_rhs, None),
-            Some(TreeKind::Block(block)) if matches!(block.stats.len(), 1 | 2) => {
+            Some(TreeKind::Block(block))
+                if (1..=2).contains(&block.stats.len())
+                    || (block.stats.len() == 3
+                        && matches!(
+                            source_ast.try_get(block.stats[2]).map(|node| &node.kind),
+                            Some(TreeKind::Apply(_))
+                        )) =>
+            {
                 (block.expr, Some(block))
             }
             _ => {
@@ -2175,37 +2205,67 @@ fn validate_two_argument_constructor_call_candidate<'session>(
     } else {
         None
     };
+    let mut local_receiver_unit_call = None;
     let immutable_local_pair =
-        if let Some(block) = source_block.filter(|block| block.stats.len() == 2) {
+        if let Some(block) = source_block.filter(|block| matches!(block.stats.len(), 2 | 3)) {
             if block.stats.iter().any(|declaration| {
                 !matches!(
                     source_ast.try_get(*declaration).map(|node| &node.kind),
                     Some(TreeKind::ValDef(_))
                 )
-            }) {
+            }) && (block.stats.len() != 3
+                || block.stats[..2].iter().any(|declaration| {
+                    !matches!(
+                        source_ast.try_get(*declaration).map(|node| &node.kind),
+                        Some(TreeKind::ValDef(_))
+                    )
+                })
+                || !matches!(
+                    source_ast.try_get(block.stats[2]).map(|node| &node.kind),
+                    Some(TreeKind::Apply(_))
+                ))
+            {
                 return Err(source_error(
-                    "two-local Pair call block must contain exactly two val declarations",
+                    "local Pair call block must contain two vals followed by one Counter.set call",
                 ));
             }
             let typer = typer_for_locals
                 .ok_or_else(|| typed_error("two-local Pair call requires its original Typer"))?;
-            Some(validate_immutable_local_initializer_pair_proof(
-                ImmutableLocalInitializerPairProofInput {
-                    source_id,
-                    method_tree,
-                    store,
-                    definitions,
-                    source_ast,
-                    typed_ast,
-                    source_index,
-                    source_typed_index,
-                    local_bindings: [
-                        typer.typed_local_binding_at(source_id, block.stats[0]),
-                        typer.typed_local_binding_at(source_id, block.stats[1]),
-                    ],
-                    jvm_unit,
-                },
-            )?)
+            let input = ImmutableLocalInitializerPairProofInput {
+                source_id,
+                method_tree,
+                store,
+                definitions,
+                source_ast,
+                typed_ast,
+                source_index,
+                source_typed_index,
+                local_bindings: [
+                    typer.typed_local_binding_at(source_id, block.stats[0]),
+                    typer.typed_local_binding_at(source_id, block.stats[1]),
+                ],
+                jvm_unit,
+            };
+            if block.stats.len() == 3 {
+                let call = validate_immutable_local_counter_set_call_proof(input)?;
+                let pair = *call.initializer_pair();
+                local_receiver_unit_call = Some(LocalReceiverUnitCallReceipt {
+                    source_apply: call.source_call(),
+                    typed_apply: call.typed_call(),
+                    source_select: call.source_select(),
+                    typed_select: call.typed_select(),
+                    source_receiver: call.source_receiver(),
+                    typed_receiver: call.typed_receiver(),
+                    source_argument: call.source_argument(),
+                    typed_argument: call.typed_argument(),
+                    receiver: call.receiver(),
+                    method: call.method(),
+                    argument_formal: call.formal(),
+                });
+                Some(pair)
+            } else {
+                Some(validate_immutable_local_initializer_pair_proof(input)?)
+            }
         } else {
             None
         };
@@ -3689,6 +3749,7 @@ fn validate_two_argument_constructor_call_candidate<'session>(
                 },
             ),
         },
+        local_receiver_unit_call,
         formal_type: method_formal_types[0],
         constructor_formal_type,
         result_type,
@@ -8629,6 +8690,7 @@ fn validate_constructor_call_candidate<'session>(
         typed_new,
         typed_argument,
         argument_proof,
+        local_receiver_unit_call: None,
         formal_type,
         constructor_formal_type,
         result_type,

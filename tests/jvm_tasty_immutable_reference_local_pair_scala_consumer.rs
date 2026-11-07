@@ -36,6 +36,8 @@ const CLIENTS: [&str; 2] = [
 ];
 const TWO_LOCAL_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
+const LOCAL_RECEIVER_CALL_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_local_receiver_call/LocalReceiverCall.scala");
 const TWO_LOCAL_REVERSED_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocalsReversed.scala");
 const TWO_LOCAL_ALIAS_SOURCE: &str =
@@ -2585,6 +2587,56 @@ fn official_scala_consumes_original_rust_two_immutable_local_artifacts() {
             );
         }
     }
+}
+
+#[test]
+fn official_scala_reads_and_executes_rust_local_receiver_unit_call_artifacts() {
+    if !required() {
+        return;
+    }
+    let scala = Scala::required();
+    let root = task_dir();
+    fs::create_dir_all(&root).unwrap();
+    let client = r#"package client
+
+import example.{Counter, Pair, PairFactory}
+
+object CounterSetConsumer:
+  private def field(pair: Pair, name: String): Counter =
+    val field = classOf[Pair].getDeclaredField(name)
+    field.setAccessible(true)
+    field.get(pair).asInstanceOf[Counter]
+
+  def main(args: Array[String]): Unit =
+    val factory = new PairFactory()
+    val pair = factory.create(7, 3)
+    assert(pair.leftValue() == 3 && pair.rightValue() == 3)
+    val left = field(pair, "left")
+    val right = field(pair, "right")
+    assert(left ne right)
+    left.set(41)
+    assert(pair.leftValue() == 41 && pair.rightValue() == 3)
+    right.set(-8)
+    assert(pair.leftValue() == 41 && pair.rightValue() == -8)
+    println("scala39-immutable-reference-local-pair Counter.set")
+"#;
+    let source_id = 21670;
+    let batch = emit_paired_jvm_tasty_batch(
+        LOCAL_RECEIVER_CALL_SOURCE,
+        "PairFactory.scala",
+        SourceId::from_index(source_id),
+    )
+    .expect("Rust emits the authenticated Counter.set batch");
+    compile_and_run(
+        &scala,
+        &root,
+        &batch,
+        LOCAL_RECEIVER_CALL_SOURCE,
+        client,
+        "client.CounterSetConsumer",
+        source_id,
+    );
+    eprintln!("SCALA39_LOCAL_RECEIVER_UNIT_CALL_CONSUMER source_id={source_id}");
 }
 
 #[test]

@@ -3893,15 +3893,13 @@ fn standalone_local_receiver_call_candidate(
         assert!(validated.validate_method_bodies().is_err());
     }
 
-    let paired = with_paired_jvm_tasty_batch_plan(
+    with_paired_jvm_tasty_batch_plan(
         source_text,
         "LocalReceiverCall.scala",
         SourceId::from_index(21662),
         |_| (),
     )
-    .expect_err("paired publication remains gated for the three-stat body");
-    assert!(matches!(paired, PairedPlanError::BatchUnit { phase, .. }
-        if phase == "cross-class constructor-call identity proof"));
+    .expect("paired planning carries the authenticated three-stat call body");
     candidate.bytes().to_vec()
 }
 
