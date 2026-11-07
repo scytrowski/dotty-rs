@@ -86,6 +86,7 @@ pub struct EncodingContext<'a> {
     wire: AstBuilder,
     declarations: HashMap<SymbolId, AstLabel>,
     planned_calls: HashMap<SymbolId, crate::PlannedCallBinding>,
+    local_receiver_unit_calls: HashMap<SymbolId, crate::LocalReceiverUnitCallBinding>,
     local_values_by_typed_declaration: HashMap<TreeId<Typed>, SymbolId>,
     local_value_symbols: HashSet<SymbolId>,
     external: HashMap<SymbolId, (NameRef, NameRef)>,
@@ -116,6 +117,31 @@ impl<'a> EncodingContext<'a> {
 
     pub(crate) fn planned_call(&self, caller: SymbolId) -> Option<crate::PlannedCallBinding> {
         self.planned_calls.get(&caller).copied()
+    }
+
+    pub(crate) fn local_receiver_unit_call(
+        &self,
+        caller: SymbolId,
+    ) -> Option<crate::LocalReceiverUnitCallBinding> {
+        self.local_receiver_unit_calls.get(&caller).copied()
+    }
+
+    pub(crate) fn register_local_receiver_unit_call(
+        &mut self,
+        caller: SymbolId,
+        binding: crate::LocalReceiverUnitCallBinding,
+    ) -> Result<(), PickleError> {
+        self.run(|context| {
+            if context.symbol(caller)?.kind != SymbolKind::Method
+                || context
+                    .local_receiver_unit_calls
+                    .insert(caller, binding)
+                    .is_some()
+            {
+                return Err(reference(caller, ReferenceError::Metadata));
+            }
+            Ok(())
+        })
     }
 
     pub(crate) fn register_planned_call(
@@ -164,6 +190,7 @@ impl<'a> EncodingContext<'a> {
             wire: AstBuilder::new(limits.wire),
             declarations: HashMap::new(),
             planned_calls: HashMap::new(),
+            local_receiver_unit_calls: HashMap::new(),
             local_values_by_typed_declaration: HashMap::new(),
             local_value_symbols: HashSet::new(),
             external: HashMap::new(),
@@ -1320,6 +1347,7 @@ impl<'a> EncodingContext<'a> {
         method: SymbolId,
         receiver: AstLabel,
         owner_type: TypeId,
+        unit_argument_call: bool,
     ) -> Result<AstLabel, PickleError> {
         self.run(|c| {
             if !c.same_source_external.contains(&class) {
@@ -1350,17 +1378,44 @@ impl<'a> EncodingContext<'a> {
                     role: crate::TypeRole::Parameter,
                 });
             };
-            if signature.kind != dotty_core::MethodKind::Plain
-                || !signature.params.is_empty()
-                || signature.result != c.definitions.int
-            {
+            let signature_matches = signature.kind == dotty_core::MethodKind::Plain
+                && if unit_argument_call {
+                    signature.params.len() == 1
+                        && signature.params[0].ty == c.definitions.int
+                        && signature.result == c.definitions.unit
+                } else {
+                    signature.params.is_empty() && signature.result == c.definitions.int
+                };
+            if !signature_matches {
                 return Err(reference(method, ReferenceError::Metadata));
             }
+            // Preserve the historical intern order for ordinary `get(): Int`
+            // selections: these entries contribute to the serialized name
+            // table and therefore to frozen TASTy bytes and linked UUIDs.
             let method_name = c.utf8(c.text(method_record.name.text())?)?;
             let scala = c.utf8("scala")?;
             let int = c.utf8("Int")?;
-            let int_type = c.intern(NameKey::Qualified(scala, int))?;
-            let signed = c.intern(NameKey::SignedMany(method_name, int_type, Vec::new()))?;
+            let int_signature = c.intern(NameKey::Qualified(scala, int))?;
+            let (result_signature, parameters) = if unit_argument_call {
+                let unit = c.utf8("Unit")?;
+                let unit_signature = c.intern(NameKey::Qualified(scala, unit))?;
+                (
+                    unit_signature,
+                    vec![
+                        i32::try_from(int_signature).map_err(|_| PickleError::LimitExceeded {
+                            kind: LimitKind::Names,
+                            limit: i32::MAX as usize,
+                        })?,
+                    ],
+                )
+            } else {
+                (int_signature, Vec::new())
+            };
+            let signed = c.intern(NameKey::SignedMany(
+                method_name,
+                result_signature,
+                parameters,
+            ))?;
             let owner_type = c.lower_same_source_class_type(class, owner_type)?;
             c.wire
                 .push(AstNode::Length {

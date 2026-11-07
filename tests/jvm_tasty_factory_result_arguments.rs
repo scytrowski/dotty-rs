@@ -1,13 +1,15 @@
 use dotty::jvm_tasty_artifacts::emit_paired_jvm_tasty_batch;
 use dotty::jvm_tasty_cross_class::{
-    CrossClassConstructorCallProofInput, validate_cross_class_constructor_call_proofs,
+    CrossClassConstructorCallProofInput, ImmutableLocalInitializerPairProofInput,
+    validate_cross_class_constructor_call_proofs,
     validate_cross_class_constructor_call_proofs_with_typer,
+    validate_immutable_local_counter_set_call_proof,
 };
 use dotty::jvm_tasty_plan::{PairedPlanError, with_paired_jvm_tasty_batch_plan};
 use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::reader::Reader as ClassReader;
-use dotty_core::ast::{TreeKind, TypedAst};
+use dotty_core::ast::{AstArena, TreeKind, TypedAst, Untyped};
 use dotty_core::{
     Definitions, Packages, SemanticStore, SourceId, SourceText, SourceTypedIndex, SymbolId,
     SymbolInfo, TermRefTarget, Type, TypeRefTarget,
@@ -30,9 +32,11 @@ use dotty_tasty::tasty::{
 use dotty_tasty::term::{AstRefKind, RawTree};
 use dotty_tasty_pickler::{
     ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan,
+    FormalLocalConstructorCallArgumentBinding, FormalLocalConstructorCallArgumentOrigin,
     FormalLocalConstructorCallPairBinding, LimitKind, LocalCounterInitializerBinding,
-    LocalValueBinding, PickleError, PickleLimits, PlannedCallBinding, PrimaryConstructorInputPlan,
-    ProjectionLimits, SourceMetadata, SourceTypedBindings, UnsupportedFeature,
+    LocalReceiverUnitCallBinding, LocalValueBinding, NestedConstructorCallBinding, PickleError,
+    PickleLimits, PlannedCallBinding, PrimaryConstructorInputPlan, ProjectionLimits,
+    SourceMetadata, SourceTypedBindings, UnsupportedFeature,
 };
 use dotty_typer::SourceTyper;
 use std::fs;
@@ -60,6 +64,75 @@ struct FormalLocalFaultBindings<'a> {
     pair: Option<FormalLocalConstructorCallPairBinding>,
     initializer: Option<LocalCounterInitializerBinding>,
     locals: Vec<LocalValueBinding>,
+}
+
+#[derive(Clone)]
+struct StandaloneCallBindings<'a> {
+    base: &'a SourceTypedIndex,
+    source: SourceId,
+    method: SymbolId,
+    classes: Vec<SymbolId>,
+    methods: Vec<SymbolId>,
+    pair: FormalLocalConstructorCallPairBinding,
+    initializers: Vec<LocalCounterInitializerBinding>,
+    locals: Vec<LocalValueBinding>,
+    call: Option<LocalReceiverUnitCallBinding>,
+}
+
+impl SourceTypedBindings for StandaloneCallBindings<'_> {
+    fn typed_at(
+        &self,
+        source: SourceId,
+        tree: dotty_core::TreeId<Untyped>,
+    ) -> Option<dotty_core::TreeId<dotty_core::ast::Typed>> {
+        self.base.get(source, tree)
+    }
+
+    fn planned_class_symbols(&self) -> &[SymbolId] {
+        &self.classes
+    }
+
+    fn planned_method_symbols(&self) -> &[SymbolId] {
+        &self.methods
+    }
+
+    fn formal_local_constructor_call_pair(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<FormalLocalConstructorCallPairBinding> {
+        (source == self.source && method == self.method).then_some(self.pair)
+    }
+
+    fn local_counter_initializers(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Vec<LocalCounterInitializerBinding> {
+        if source == self.source && method == self.method {
+            self.initializers.clone()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn local_value_bindings(&self, source: SourceId, method: SymbolId) -> Vec<LocalValueBinding> {
+        if source == self.source && method == self.method {
+            self.locals.clone()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn local_receiver_unit_call(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<LocalReceiverUnitCallBinding> {
+        (source == self.source && method == self.method)
+            .then_some(self.call)
+            .flatten()
+    }
 }
 
 impl SourceTypedBindings for FormalLocalFaultBindings<'_> {
@@ -184,6 +257,14 @@ struct LocalFlowBindings<'a> {
 
 fn clone_typed_ast(ast: &TypedAst) -> TypedAst {
     let mut cloned = TypedAst::new();
+    for (tree_id, tree) in ast.iter() {
+        assert_eq!(cloned.alloc(tree.clone()), tree_id);
+    }
+    cloned
+}
+
+fn clone_untyped_ast(ast: &AstArena<Untyped>) -> AstArena<Untyped> {
+    let mut cloned = AstArena::new();
     for (tree_id, tree) in ast.iter() {
         assert_eq!(cloned.alloc(tree.clone()), tree_id);
     }
@@ -973,6 +1054,118 @@ fn run_pinned_two_local_pair_reader(bytes: &[u8], expected_pair_call: &str) {
     assert!(
         from_tasty.status.success(),
         "Scala -from-tasty rejected Rust's two-local TASTy: {}",
+        String::from_utf8_lossy(&from_tasty.stderr)
+    );
+    assert!(reconstructed.join("example/PairFactory.class").is_file());
+    fs::remove_dir_all(root).unwrap();
+}
+
+fn run_pinned_local_receiver_unit_call_reader(bytes: &[u8]) {
+    let scala_root = PathBuf::from(
+        std::env::var_os("SCALA39_ROOT").expect("pinned Scala 3.9 checkout is required"),
+    );
+    let revision = Command::new("git")
+        .arg("-C")
+        .arg(&scala_root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    assert!(revision.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&revision.stdout).trim(),
+        "777528f19a58e794c9954a42f433373472ec57f8"
+    );
+    let compiler = std::env::var_os("SCALA39_SCALAC")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| scala_root.join("dist/target/universal/stage/bin/scalac"));
+    assert!(
+        compiler.is_file(),
+        "pinned Scala compiler executable is missing: {}",
+        compiler.display()
+    );
+    let scratch = PathBuf::from(
+        std::env::var_os("DOTTY_TASTY_PICKLER_ORACLE_TMP")
+            .expect("task-local Scala scratch is required"),
+    );
+    let invocation = NEXT_TWO_LOCAL_SCALA_READER_ID.fetch_add(1, Ordering::Relaxed);
+    let root = scratch.join(format!(
+        "issue-2166-scala-reader-{}-{invocation}",
+        std::process::id()
+    ));
+    let candidate = root.join("candidate");
+    let reconstructed = root.join("from-tasty");
+    fs::create_dir_all(candidate.join("example")).unwrap();
+    fs::create_dir_all(&reconstructed).unwrap();
+    let fixture =
+        PathBuf::from("tests/fixtures/jvm_tasty_local_receiver_call/scala39/primary/example");
+    for name in ["Counter.class", "Counter.tasty", "Pair.class", "Pair.tasty"] {
+        fs::copy(fixture.join(name), candidate.join("example").join(name)).unwrap();
+    }
+    let factory = candidate.join("example/PairFactory.tasty");
+    fs::write(&factory, bytes).unwrap();
+    let decompile = Command::new(&compiler)
+        .args(["-color:never", "-decompile"])
+        .arg(&factory)
+        .output()
+        .unwrap();
+    assert!(
+        decompile.status.success(),
+        "Scala -decompile rejected the Rust candidate: {}",
+        String::from_utf8_lossy(&decompile.stderr)
+    );
+    let decompiled = String::from_utf8_lossy(&decompile.stdout);
+    for required in [
+        "val first: example.Counter",
+        "val second: example.Counter",
+        "new example.Counter(firstSeed)",
+        "new example.Counter(secondSeed)",
+        "first.set(secondSeed)",
+        "new example.Pair(first, second)",
+    ] {
+        assert!(
+            decompiled.contains(required),
+            "missing {required:?}: {decompiled}"
+        );
+    }
+    let stat_order = [
+        "val first: example.Counter",
+        "val second: example.Counter",
+        "first.set(secondSeed)",
+        "new example.Pair(first, second)",
+    ]
+    .map(|text| decompiled.find(text).unwrap());
+    assert!(
+        stat_order.windows(2).all(|pair| pair[0] < pair[1]),
+        "{decompiled}"
+    );
+    let printed = Command::new(&compiler)
+        .args(["-color:never", "-print-tasty"])
+        .arg(&factory)
+        .output()
+        .unwrap();
+    assert!(
+        printed.status.success(),
+        "Scala -print-tasty rejected the Rust candidate: {}",
+        String::from_utf8_lossy(&printed.stderr)
+    );
+    assert!(String::from_utf8_lossy(&printed.stdout).contains("version: 28.9.0"));
+    let from_tasty = Command::new(&compiler)
+        .args([
+            "-color:never",
+            "-release",
+            "21",
+            "-from-tasty",
+            "-classpath",
+        ])
+        .arg(&candidate)
+        .arg("-d")
+        .arg(&reconstructed)
+        .arg(&factory)
+        .output()
+        .unwrap();
+    assert!(
+        from_tasty.status.success(),
+        "Scala -from-tasty rejected the Rust candidate: {}",
         String::from_utf8_lossy(&from_tasty.stderr)
     );
     assert!(reconstructed.join("example/PairFactory.class").is_file());
@@ -2960,8 +3153,10 @@ fn reference_local_constructor_flow_preserves_one_session_identity_through_body_
         first, second,
         "independent sessions preserve the same proof relationships"
     );
-    if std::env::var_os("DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE").as_deref()
+    if std::env::var_os("DOTTY_REQUIRE_SCALA_TASTY_LOCAL_RECEIVER_UNIT_CALL").as_deref()
         == Some(std::ffi::OsStr::new("1"))
+        || std::env::var_os("DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
     {
         run_reference_local_factory_scala_reader(&first.tasty_files);
     }
@@ -3001,6 +3196,713 @@ fn reference_local_constructor_flow_preserves_one_session_identity_through_body_
     assert!(reordered_observation.original_source_and_typed_roots_match);
     assert!(reordered_observation.helper_receipt_matches_original_initializer);
     assert!(reordered_observation.local_scope_is_owned_by_create);
+}
+
+#[test]
+fn standalone_local_receiver_call_uses_the_original_frontend_receipt() {
+    let source = include_str!("fixtures/jvm_tasty_local_receiver_call/LocalReceiverCall.scala");
+    let original =
+        standalone_local_receiver_call_candidate(source, SourceId::from_index(21661), true);
+    let reversed_source = source.replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
+        "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
+    );
+    let reversed_first = standalone_local_receiver_call_candidate(
+        &reversed_source,
+        SourceId::from_index(21663),
+        false,
+    );
+    let reversed_second = standalone_local_receiver_call_candidate(
+        &reversed_source,
+        SourceId::from_index(21664),
+        false,
+    );
+    assert_eq!(
+        reversed_first, reversed_second,
+        "reversed declarations preserve deterministic standalone bytes"
+    );
+    assert_ne!(original, reversed_first);
+}
+
+fn standalone_local_receiver_call_candidate(
+    source_text: &str,
+    source_id: SourceId,
+    scala_checks: bool,
+) -> Vec<u8> {
+    use dotty::jvm_tasty_cross_class::ValidatedImmutableLocalCounterSetCallProof;
+    use dotty_core::TreeId;
+    use dotty_core::ast::Untyped;
+
+    let scanner = ContextualScanner::new(source_text).unwrap();
+    assert!(scanner.diagnostics().is_empty());
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source_id,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty());
+    let mut packages = Packages::new();
+    let source_index = match name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source_id,
+        "LocalReceiverCall.scala",
+        SourceParseStatus::Clean,
+        &mut store,
+        &mut packages,
+    )
+    .unwrap()
+    {
+        NamingOutcome::Named { index, diagnostics } if diagnostics.is_empty() => index,
+        other => panic!("real source names cleanly: {other:?}"),
+    };
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("source package")
+    };
+    let classes = package
+        .stats
+        .iter()
+        .map(|tree| source_index.symbol_at(source_id, *tree).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(classes.len(), 3);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source_id,
+        &source_index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    let mut factory_tree = None;
+    let mut factory_constructor_tree = None;
+    let mut create_tree = None;
+    let mut jvm_classes = Vec::new();
+    let mut all_methods = Vec::new();
+    for (&class_tree, &class) in package.stats.iter().zip(&classes) {
+        typer.complete_symbol(class).unwrap();
+        let TreeKind::TypeDef(class_def) = &parsed.ast.get(class_tree).kind else {
+            panic!("ordinary source class")
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(class_def.rhs).kind else {
+            panic!("ordinary source template")
+        };
+        let constructor_tree = template.constructor;
+        let constructor = source_index.symbol_at(source_id, constructor_tree).unwrap();
+        typer.complete_symbol(constructor).unwrap();
+        let TreeKind::DefDef(constructor_def) = &parsed.ast.get(constructor_tree).kind else {
+            panic!("primary constructor")
+        };
+        let constructor_parameters = constructor_def
+            .value_param_clauses
+            .iter()
+            .map(|clause| {
+                clause
+                    .iter()
+                    .map(|parameter| {
+                        source_index
+                            .derived_symbol_at(constructor, source_id, *parameter)
+                            .unwrap()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let constructor_plan = JvmPrimaryConstructorPlan::from_source(
+            class,
+            constructor,
+            constructor_parameters.iter().flatten().copied().collect(),
+            &parsed.ast,
+            &source_index,
+        )
+        .unwrap();
+        jvm_classes.push(JvmClassPlan {
+            class,
+            fields: Vec::new(),
+            methods: Vec::new(),
+            initialization: JvmClassInitializationPlan::PrimaryConstructor(constructor_plan),
+        });
+        if typer
+            .store()
+            .names
+            .resolve(typer.store().symbols.get(class).name.text())
+            == "PairFactory"
+        {
+            factory_tree = Some(class_tree);
+            factory_constructor_tree = Some(constructor_tree);
+        }
+        for &member in &template.body {
+            let TreeKind::DefDef(_) = &parsed.ast.get(member).kind else {
+                continue;
+            };
+            let method = source_index.symbol_at(source_id, member).unwrap();
+            all_methods.push(method);
+            if typer.store().symbols.get(method).kind == dotty_core::SymbolKind::Method {
+                typer.type_method_definition(member).unwrap();
+            }
+            if typer
+                .store()
+                .names
+                .resolve(typer.store().symbols.get(method).name.text())
+                == "create"
+            {
+                create_tree = Some(member);
+            }
+        }
+    }
+    let factory_tree = factory_tree.unwrap();
+    let factory_constructor_tree = factory_constructor_tree.unwrap();
+    let create_tree = create_tree.unwrap();
+    let factory = source_index.symbol_at(source_id, factory_tree).unwrap();
+    let create = source_index.symbol_at(source_id, create_tree).unwrap();
+    let TreeKind::DefDef(create_def) = &parsed.ast.get(create_tree).kind else {
+        panic!("factory method")
+    };
+    let source_rhs = create_def.rhs.unwrap();
+    let TreeKind::Block(source_block) = &parsed.ast.get(source_rhs).kind else {
+        panic!("original factory body block")
+    };
+    assert_eq!(source_block.stats.len(), 3);
+    let locals = [source_block.stats[0], source_block.stats[1]]
+        .map(|tree| typer.typed_local_binding_at(source_id, tree).unwrap());
+    let jvm_unit = JvmCompilationUnit {
+        store: typer.store(),
+        typed_ast: typer.typed_ast(),
+        classes: jvm_classes,
+    };
+    let call_proof: ValidatedImmutableLocalCounterSetCallProof<'_> =
+        validate_immutable_local_counter_set_call_proof(ImmutableLocalInitializerPairProofInput {
+            source_id,
+            method_tree: create_tree,
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &parsed.ast,
+            typed_ast: typer.typed_ast(),
+            source_index: &source_index,
+            source_typed_index: typer.source_typed_index(),
+            local_bindings: [Some(locals[0]), Some(locals[1])],
+            jvm_unit: &jvm_unit,
+        })
+        .expect("the merged #2165 proof authenticates this original source session");
+    let pair_proof = call_proof.initializer_pair();
+    let initializer_receipts = pair_proof.initializers();
+    let local_values = initializer_receipts.map(|receipt| LocalValueBinding {
+        source_tree: receipt.source_declaration(),
+        symbol: receipt.symbol(),
+        typed_declaration: receipt.typed_declaration(),
+        scope: receipt.scope(),
+    });
+    let local_initializers = initializer_receipts.map(|receipt| {
+        let class = match typer.store().types.get(receipt.initializer_result_type()) {
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(class),
+                ..
+            } => *class,
+            other => panic!("canonical Counter initializer type: {other:?}"),
+        };
+        LocalCounterInitializerBinding {
+            source_block: pair_proof.source_block(),
+            typed_block: pair_proof.typed_block(),
+            source_declaration: receipt.source_declaration(),
+            typed_declaration: receipt.typed_declaration(),
+            source_initializer: receipt.source_initializer(),
+            typed_initializer: receipt.typed_initializer(),
+            source_type_tree: receipt.source_type_tree(),
+            typed_type_tree: receipt.typed_type_tree(),
+            local: receipt.symbol(),
+            scope: receipt.scope(),
+            local_type: receipt.local_type(),
+            argument_formal: receipt.seed_formal(),
+            call: NestedConstructorCallBinding {
+                source_apply: receipt.source_initializer(),
+                typed_apply: receipt.typed_initializer(),
+                source_select: receipt.source_select(),
+                source_new: receipt.source_new(),
+                source_argument: receipt.source_argument(),
+                typed_select: receipt.typed_select(),
+                typed_new: receipt.typed_new(),
+                typed_argument: receipt.typed_argument(),
+                class,
+                constructor: receipt.constructor(),
+                formal: receipt.constructor_formal(),
+                formal_type: receipt.constructor_formal_type(),
+                result_type: receipt.initializer_result_type(),
+            },
+        }
+    });
+    let source_formals: [TreeId<Untyped>; 2] = create_def.value_param_clauses[0]
+        .as_slice()
+        .try_into()
+        .expect("two source method formals");
+    let method_formals =
+        source_formals.map(|tree| source_index.symbol_at(source_id, tree).unwrap());
+    let source_result = pair_proof.source_final_expression();
+    let typed_result = pair_proof.typed_final_expression();
+    let (TreeKind::Apply(source_pair), TreeKind::Apply(typed_pair)) = (
+        &parsed.ast.get(source_result).kind,
+        &typer.typed_ast().get(typed_result).kind,
+    ) else {
+        panic!("final Pair constructor application")
+    };
+    let pair_arguments: [FormalLocalConstructorCallArgumentBinding; 2] = source_pair
+        .args
+        .iter()
+        .zip(&typed_pair.args)
+        .map(|(&source_argument, &typed_argument)| {
+            let typed_argument_tree = typer.typed_ast().get(typed_argument);
+            let Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } = typer.store().types.get(typed_argument_tree.ty)
+            else {
+                panic!("final Pair argument is a canonical reference")
+            };
+            assert!(local_values.iter().any(|local| local.symbol == *symbol));
+            FormalLocalConstructorCallArgumentBinding {
+                source_argument,
+                typed_argument,
+                origin: FormalLocalConstructorCallArgumentOrigin::LocalValue {
+                    symbol: *symbol,
+                    result_type: typed_argument_tree.ty,
+                },
+            }
+        })
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
+    let formal_local_pair = FormalLocalConstructorCallPairBinding {
+        source_method_formals: source_formals,
+        method_formals,
+        arguments: pair_arguments,
+    };
+    let call_binding = LocalReceiverUnitCallBinding {
+        source_apply: call_proof.source_call(),
+        typed_apply: call_proof.typed_call(),
+        source_select: call_proof.source_select(),
+        typed_select: call_proof.typed_select(),
+        source_receiver: call_proof.source_receiver(),
+        typed_receiver: call_proof.typed_receiver(),
+        source_argument: call_proof.source_argument(),
+        typed_argument: call_proof.typed_argument(),
+        receiver: call_proof.receiver(),
+        method: call_proof.method(),
+        argument_formal: call_proof.formal(),
+    };
+    let bindings = StandaloneCallBindings {
+        base: typer.source_typed_index(),
+        source: source_id,
+        method: create,
+        classes: classes.clone(),
+        methods: all_methods,
+        pair: formal_local_pair,
+        initializers: local_initializers.to_vec(),
+        locals: local_values.to_vec(),
+        call: Some(call_binding),
+    };
+    let TreeKind::TypeDef(factory_def) = &parsed.ast.get(factory_tree).kind else {
+        panic!("factory class")
+    };
+    let TreeKind::Template(factory_template) = &parsed.ast.get(factory_def.rhs).kind else {
+        panic!("factory template")
+    };
+    let TreeKind::DefDef(factory_constructor) = &parsed.ast.get(factory_constructor_tree).kind
+    else {
+        panic!("factory constructor")
+    };
+    let constructor = source_index
+        .symbol_at(source_id, factory_constructor_tree)
+        .unwrap();
+    let constructor_clauses = factory_constructor
+        .value_param_clauses
+        .iter()
+        .map(|clause| {
+            clause
+                .iter()
+                .map(|tree| {
+                    source_index
+                        .derived_symbol_at(constructor, source_id, *tree)
+                        .unwrap()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let members = [ClassMemberPicklePlan::Method {
+        symbol: create,
+        source_tree: create_tree,
+    }];
+    let plan = ClassStatePicklePlan {
+        store: typer.store(),
+        definitions: &definitions,
+        source_ast: &parsed.ast,
+        typed_ast: typer.typed_ast(),
+        source_index: &source_index,
+        typed_bindings: &bindings,
+        source: SourceMetadata {
+            id: source_id,
+            name: "LocalReceiverCall.scala".to_owned(),
+        },
+        class: factory,
+        class_tree: factory_tree,
+        constructor: PrimaryConstructorInputPlan {
+            symbol: constructor,
+            source_tree: factory_template.constructor,
+            parameter_clauses: constructor_clauses.clone(),
+        },
+        members: &members,
+    };
+    let validated = plan.validate().unwrap();
+    validated.validate_method_bodies().unwrap();
+    let candidate = validated.pickle().unwrap();
+    assert_eq!(candidate.bytes(), validated.pickle().unwrap().bytes());
+    drop(validated);
+    drop(plan);
+    TastyFile::parse_and_validate_scala_3_9(candidate.bytes()).unwrap();
+    if scala_checks
+        && (std::env::var_os("DOTTY_REQUIRE_SCALA_TASTY_LOCAL_RECEIVER_UNIT_CALL").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+            || std::env::var_os("DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE").as_deref()
+                == Some(std::ffi::OsStr::new("1")))
+    {
+        run_pinned_local_receiver_unit_call_reader(candidate.bytes());
+    }
+    let factory_file = TastyFile::parse_and_validate_scala_3_9(candidate.bytes()).unwrap();
+    let address_index = factory_file.ast_address_index().unwrap();
+    let method_node = address_index
+        .iter_nodes_with_tag(DEFDEF_TAG)
+        .find(|node| {
+            address_index
+                .get(node.offset as u32)
+                .and_then(|node| node.decode_defdef_body().ok())
+                .is_some_and(|body| factory_file.names().render(body.name).unwrap() == "create")
+        })
+        .unwrap();
+    let method_body = address_index
+        .get(method_node.offset as u32)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    let RawTree::LengthNode(block_node) = method_body.rhs.unwrap() else {
+        panic!("Rust candidate factory body is a BLOCK")
+    };
+    let block = block_node.decode_block().unwrap();
+    assert_eq!(block.stats.len(), 3);
+    let raw_tag = |tree: &RawTree<'_>| match tree {
+        RawTree::Leaf(term) => term.tag,
+        RawTree::Ast { tag, .. } | RawTree::NatAst { tag, .. } => *tag,
+        RawTree::LengthNode(node) => node.tag,
+    };
+    assert_eq!(
+        block.stats.iter().map(raw_tag).collect::<Vec<_>>(),
+        [VALDEF_TAG, VALDEF_TAG, APPLY_TAG]
+    );
+    assert_eq!(raw_tag(&block.expression), APPLY_TAG);
+    let block_address = address_index
+        .iter_nodes_with_tag(BLOCK_TAG)
+        .find(|node| {
+            address_index
+                .parent_of(node.offset as u32)
+                .is_some_and(|parent| parent.offset as u32 == method_node.offset as u32)
+        })
+        .expect("method owns its result block")
+        .offset as u32;
+    let local_addresses = address_index
+        .iter_nodes_with_tag(VALDEF_TAG)
+        .filter(|node| {
+            address_index
+                .parent_of(node.offset as u32)
+                .is_some_and(|parent| parent.offset as u32 == block_address)
+        })
+        .map(|node| node.offset as u32)
+        .collect::<Vec<_>>();
+    assert_eq!(local_addresses.len(), 2);
+    let receiver_index = local_values
+        .iter()
+        .position(|local| local.symbol == call_binding.receiver)
+        .expect("receiver is one of the authenticated local declarations");
+    let RawTree::LengthNode(call_node) = &block.stats[2] else {
+        panic!("third stat is the selected Unit call")
+    };
+    let call = call_node.decode_apply().unwrap();
+    let RawTree::LengthNode(select_node) = call.function else {
+        panic!("call applies a selected method")
+    };
+    assert_eq!(select_node.tag, SELECTIN_TAG);
+    let selected = select_node.decode_select_in().unwrap();
+    assert!(matches!(
+        factory_file
+            .names()
+            .render_signed_name(selected.name)
+            .unwrap()
+            .unwrap(),
+        RenderedSignedName::Signed {
+            original,
+            signature: RenderedNameSignature { parameters, result },
+        } if original == "set"
+            && parameters == [RenderedParamSig::TermParameter("scala.Int".to_owned())]
+            && result == "scala.Unit"
+    ));
+    let receiver_references = selected.qualifier.ast_refs();
+    let [receiver_reference] = receiver_references.as_slice() else {
+        panic!("receiver selection uses one direct reference")
+    };
+    assert_eq!(receiver_reference.kind, AstRefKind::TermRefDirect);
+    assert_eq!(receiver_reference.address, local_addresses[receiver_index]);
+    let [argument] = call.arguments.as_slice() else {
+        panic!("set receives the second source formal once")
+    };
+    let argument_references = argument.ast_refs();
+    let [argument_reference] = argument_references.as_slice() else {
+        panic!("set argument is one direct formal reference")
+    };
+    assert_eq!(argument_reference.kind, AstRefKind::TermRefDirect);
+    let second_seed = address_index
+        .iter_nodes_with_tag(PARAM_TAG)
+        .find(|node| {
+            address_index
+                .parent_of(node.offset as u32)
+                .is_some_and(|parent| parent.offset as u32 == method_node.offset as u32)
+                && address_index
+                    .get(node.offset as u32)
+                    .and_then(|parameter| parameter.decode_parameter().ok())
+                    .and_then(|parameter| factory_file.names().render(parameter.name()).ok())
+                    .is_some_and(|name| name == "secondSeed")
+        })
+        .expect("secondSeed is declared by create")
+        .offset as u32;
+    assert_eq!(argument_reference.address, second_seed);
+    let RawTree::LengthNode(pair_result) = &block.expression else {
+        panic!("Pair constructor result is the final expression")
+    };
+    let pair_result = pair_result.decode_apply().unwrap();
+    for (argument, binding) in pair_result
+        .arguments
+        .iter()
+        .zip(formal_local_pair.arguments)
+    {
+        let references = argument.ast_refs();
+        let [reference] = references.as_slice() else {
+            panic!("Pair arguments are direct local references")
+        };
+        let dotty_tasty_pickler::FormalLocalConstructorCallArgumentOrigin::LocalValue {
+            symbol,
+            ..
+        } = binding.origin
+        else {
+            panic!("standalone final Pair retains two local origins")
+        };
+        let local_index = local_values
+            .iter()
+            .position(|local| local.symbol == symbol)
+            .expect("final Pair local origin is one of the initialized declarations");
+        assert_eq!(reference.address, local_addresses[local_index]);
+    }
+
+    let mut corruptions = Vec::new();
+    let mut missing_receipt = bindings.clone();
+    missing_receipt.call = None;
+    corruptions.push(missing_receipt);
+    let mut stale_receiver = bindings.clone();
+    let wrong_receiver = local_values
+        .iter()
+        .find(|local| local.symbol != call_binding.receiver)
+        .expect("the second local differs from the authenticated receiver")
+        .symbol;
+    stale_receiver.call = Some(LocalReceiverUnitCallBinding {
+        receiver: wrong_receiver,
+        ..call_binding
+    });
+    corruptions.push(stale_receiver);
+    for stale_edge in [
+        LocalReceiverUnitCallBinding {
+            source_apply: call_binding.source_select,
+            ..call_binding
+        },
+        LocalReceiverUnitCallBinding {
+            typed_apply: call_binding.typed_select,
+            ..call_binding
+        },
+        LocalReceiverUnitCallBinding {
+            source_select: call_binding.source_apply,
+            ..call_binding
+        },
+        LocalReceiverUnitCallBinding {
+            typed_select: call_binding.typed_apply,
+            ..call_binding
+        },
+        LocalReceiverUnitCallBinding {
+            source_argument: call_binding.source_receiver,
+            ..call_binding
+        },
+        LocalReceiverUnitCallBinding {
+            typed_argument: call_binding.typed_receiver,
+            ..call_binding
+        },
+        LocalReceiverUnitCallBinding {
+            source_receiver: call_binding.source_argument,
+            ..call_binding
+        },
+        LocalReceiverUnitCallBinding {
+            typed_receiver: call_binding.typed_argument,
+            ..call_binding
+        },
+        LocalReceiverUnitCallBinding {
+            receiver: wrong_receiver,
+            ..call_binding
+        },
+        LocalReceiverUnitCallBinding {
+            argument_formal: method_formals[0],
+            ..call_binding
+        },
+    ] {
+        let mut stale = bindings.clone();
+        stale.call = Some(stale_edge);
+        corruptions.push(stale);
+    }
+    let mut wrong_method = bindings.clone();
+    wrong_method.call = Some(LocalReceiverUnitCallBinding {
+        method: method_formals[0],
+        ..call_binding
+    });
+    corruptions.push(wrong_method);
+    let mut detached_typed_root = bindings.clone();
+    detached_typed_root.call = Some(LocalReceiverUnitCallBinding {
+        typed_receiver: call_binding.typed_apply,
+        ..call_binding
+    });
+    corruptions.push(detached_typed_root);
+    for (index, corrupted) in corruptions.iter().enumerate() {
+        let corrupted_plan = ClassStatePicklePlan {
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &parsed.ast,
+            typed_ast: typer.typed_ast(),
+            source_index: &source_index,
+            typed_bindings: corrupted,
+            source: SourceMetadata {
+                id: source_id,
+                name: "LocalReceiverCall.scala".to_owned(),
+            },
+            class: factory,
+            class_tree: factory_tree,
+            constructor: PrimaryConstructorInputPlan {
+                symbol: constructor,
+                source_tree: factory_template.constructor,
+                parameter_clauses: constructor_clauses.clone(),
+            },
+            members: &members,
+        };
+        if let Ok(validated) = corrupted_plan.validate() {
+            assert!(
+                validated.validate_method_bodies().is_err(),
+                "corrupted call receipt {index} unexpectedly validated"
+            );
+        }
+    }
+    let mut aliased_source_ast = clone_untyped_ast(&parsed.ast);
+    let mut aliased_typed_ast = clone_typed_ast(typer.typed_ast());
+    let (TreeKind::Apply(source_pair), TreeKind::Apply(typed_pair)) = (
+        &parsed.ast.get(source_result).kind,
+        &typer.typed_ast().get(typed_result).kind,
+    ) else {
+        panic!("final Pair roots remain original applications")
+    };
+    let first_source_argument_name = match &parsed.ast.get(source_pair.args[0]).kind {
+        TreeKind::Ident(ident) => ident.name,
+        _ => panic!("first Pair argument remains an Ident"),
+    };
+    let second_source_argument = aliased_source_ast.get_mut(source_pair.args[1]);
+    let TreeKind::Ident(second_source_ident) = &mut second_source_argument.kind else {
+        panic!("second Pair argument remains an Ident")
+    };
+    second_source_ident.name = first_source_argument_name;
+    let first_typed_argument_type = typer.typed_ast().get(typed_pair.args[0]).ty;
+    let second_typed_argument = aliased_typed_ast.get_mut(typed_pair.args[1]);
+    second_typed_argument.ty = first_typed_argument_type;
+    let TreeKind::Ident(second_typed_ident) = &mut second_typed_argument.kind else {
+        panic!("second typed Pair argument remains an Ident")
+    };
+    second_typed_ident.name = first_source_argument_name;
+    let FormalLocalConstructorCallArgumentBinding {
+        source_argument: aliased_source_argument,
+        typed_argument: aliased_typed_argument,
+        ..
+    } = formal_local_pair.arguments[1];
+    let first_local_symbol = local_values[receiver_index].symbol;
+    let mut aliased_bindings = bindings.clone();
+    aliased_bindings.pair = FormalLocalConstructorCallPairBinding {
+        arguments: [
+            formal_local_pair.arguments[0],
+            FormalLocalConstructorCallArgumentBinding {
+                source_argument: aliased_source_argument,
+                typed_argument: aliased_typed_argument,
+                origin: FormalLocalConstructorCallArgumentOrigin::LocalValue {
+                    symbol: first_local_symbol,
+                    result_type: first_typed_argument_type,
+                },
+            },
+        ],
+        ..formal_local_pair
+    };
+    let aliased_pair_plan = ClassStatePicklePlan {
+        store: typer.store(),
+        definitions: &definitions,
+        source_ast: &aliased_source_ast,
+        typed_ast: &aliased_typed_ast,
+        source_index: &source_index,
+        typed_bindings: &aliased_bindings,
+        source: SourceMetadata {
+            id: source_id,
+            name: "LocalReceiverCall.scala".to_owned(),
+        },
+        class: factory,
+        class_tree: factory_tree,
+        constructor: PrimaryConstructorInputPlan {
+            symbol: constructor,
+            source_tree: factory_template.constructor,
+            parameter_clauses: constructor_clauses.clone(),
+        },
+        members: &members,
+    };
+    if let Ok(validated) = aliased_pair_plan.validate() {
+        assert!(validated.validate_method_bodies().is_err());
+    }
+    let mut wrong_unit_ast = clone_typed_ast(typer.typed_ast());
+    wrong_unit_ast.get_mut(call_binding.typed_apply).ty = definitions.int;
+    let wrong_unit_plan = ClassStatePicklePlan {
+        store: typer.store(),
+        definitions: &definitions,
+        source_ast: &parsed.ast,
+        typed_ast: &wrong_unit_ast,
+        source_index: &source_index,
+        typed_bindings: &bindings,
+        source: SourceMetadata {
+            id: source_id,
+            name: "LocalReceiverCall.scala".to_owned(),
+        },
+        class: factory,
+        class_tree: factory_tree,
+        constructor: PrimaryConstructorInputPlan {
+            symbol: constructor,
+            source_tree: factory_template.constructor,
+            parameter_clauses: constructor_clauses.clone(),
+        },
+        members: &members,
+    };
+    if let Ok(validated) = wrong_unit_plan.validate() {
+        assert!(validated.validate_method_bodies().is_err());
+    }
+
+    let paired = with_paired_jvm_tasty_batch_plan(
+        source_text,
+        "LocalReceiverCall.scala",
+        SourceId::from_index(21662),
+        |_| (),
+    )
+    .expect_err("paired publication remains gated for the three-stat body");
+    assert!(matches!(paired, PairedPlanError::BatchUnit { phase, .. }
+        if phase == "cross-class constructor-call identity proof"));
+    candidate.bytes().to_vec()
 }
 
 #[test]

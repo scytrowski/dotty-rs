@@ -108,7 +108,39 @@ impl Validator<'_, '_> {
                     ty: typed.ty,
                 });
             }
-            let exact_shape = (1..=2).contains(&source_block.stats.len())
+            let call_binding = self
+                .plan
+                .typed_bindings
+                .local_receiver_unit_call(self.plan.source.id, method.symbol);
+            let three_stat_shape = source_block.stats.len() == 3
+                && call_binding.is_some()
+                && source_block.stats[..2]
+                    .iter()
+                    .zip(&typed_block.stats[..2])
+                    .all(|(&source_stat, &typed_stat)| {
+                        matches!(
+                            self.source_tree(source_stat).map(|tree| &tree.kind),
+                            Ok(TreeKind::ValDef(_))
+                        ) && matches!(
+                            self.plan
+                                .typed_ast
+                                .try_get(typed_stat)
+                                .map(|tree| &tree.kind),
+                            Some(TreeKind::ValDef(_))
+                        )
+                    })
+                && matches!(
+                    self.source_tree(source_block.stats[2])?.kind,
+                    TreeKind::Apply(_)
+                )
+                && matches!(
+                    self.plan
+                        .typed_ast
+                        .try_get(typed_block.stats[2])
+                        .map(|tree| &tree.kind),
+                    Some(TreeKind::Apply(_))
+                );
+            let local_stat_shape = (1..=2).contains(&source_block.stats.len())
                 && source_block.stats.iter().zip(&typed_block.stats).all(
                     |(&source_stat, &typed_stat)| {
                         matches!(
@@ -122,7 +154,8 @@ impl Validator<'_, '_> {
                             Some(TreeKind::ValDef(_))
                         )
                     },
-                )
+                );
+            let exact_shape = (local_stat_shape || three_stat_shape)
                 && matches!(
                     self.source_tree(source_block.expr)?.kind,
                     TreeKind::Apply(_)
@@ -171,7 +204,23 @@ impl Validator<'_, '_> {
                 .plan
                 .typed_bindings
                 .local_counter_initializers(self.plan.source.id, method.symbol);
-            let two_local_shape = source_block.stats.len() == 2
+            let distinct_local_pair_matches_initializers = pair.is_some_and(|pair| {
+                let local_symbols = pair.arguments.map(|argument| match argument.origin {
+                    crate::FormalLocalConstructorCallArgumentOrigin::LocalValue {
+                        symbol, ..
+                    } => Some(symbol),
+                    crate::FormalLocalConstructorCallArgumentOrigin::Formal { .. } => None,
+                });
+                matches!(local_symbols, [Some(first), Some(second)]
+                    if first != second
+                        && initializers.len() == 2
+                        && initializers.iter().any(|initializer| initializer.local == first)
+                        && initializers.iter().any(|initializer| initializer.local == second))
+            });
+            let two_local_shape = (source_block.stats.len() == 2 || three_stat_shape)
+                && ((source_block.stats.len() == 2 && call_binding.is_none())
+                    || (source_block.stats.len() == 3 && call_binding.is_some()))
+                && (source_block.stats.len() == 2 || distinct_local_pair_matches_initializers)
                 && local_argument_indices.len() == 2
                 && initializers.len() == 2
                 && initializers[0].local != initializers[1].local
@@ -179,6 +228,7 @@ impl Validator<'_, '_> {
                 && source_block
                     .stats
                     .iter()
+                    .take(2)
                     .zip(&typed_block.stats)
                     .zip(&initializers)
                     .all(|((&source_stat, &typed_stat), initializer)| {
@@ -256,7 +306,16 @@ impl Validator<'_, '_> {
             }
         }
 
-        for (&source_stat, &typed_stat) in source_block.stats.iter().zip(&typed_block.stats) {
+        let unit_call = self
+            .plan
+            .typed_bindings
+            .local_receiver_unit_call(self.plan.source.id, method.symbol);
+        for (index, (&source_stat, &typed_stat)) in source_block
+            .stats
+            .iter()
+            .zip(&typed_block.stats)
+            .enumerate()
+        {
             if visited.contains(&typed_stat) {
                 return Err(PickleError::RepeatedExpression { tree: typed_stat });
             }
@@ -274,6 +333,19 @@ impl Validator<'_, '_> {
                     typed_stat,
                     method,
                     reference_result.then_some(stat.ty),
+                    depth,
+                    visited,
+                )?;
+                continue;
+            }
+            if index == 2
+                && let Some(binding) = unit_call
+            {
+                self.validate_local_receiver_unit_call(
+                    binding,
+                    source_stat,
+                    typed_stat,
+                    method,
                     depth,
                     visited,
                 )?;
@@ -332,6 +404,146 @@ impl Validator<'_, '_> {
             depth,
             (Some(visited), reference_result),
         )
+    }
+
+    fn validate_local_receiver_unit_call(
+        &mut self,
+        binding: crate::LocalReceiverUnitCallBinding,
+        source_stat: TreeId<Untyped>,
+        typed_stat: TreeId<Typed>,
+        method: &MethodPicklePlan,
+        depth: usize,
+        visited: &mut HashSet<TreeId<Typed>>,
+    ) -> Result<(), PickleError> {
+        let p = self.plan;
+        let source_apply = self.source_tree(binding.source_apply)?;
+        let typed_apply =
+            p.typed_ast
+                .try_get(binding.typed_apply)
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: binding.typed_apply,
+                })?;
+        let (TreeKind::Apply(source_call), TreeKind::Apply(typed_call)) =
+            (&source_apply.kind, &typed_apply.kind)
+        else {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        };
+        let source_select = self.source_tree(binding.source_select)?;
+        let typed_select =
+            p.typed_ast
+                .try_get(binding.typed_select)
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: binding.typed_select,
+                })?;
+        let (TreeKind::Select(source_selection), TreeKind::Select(typed_selection)) =
+            (&source_select.kind, &typed_select.kind)
+        else {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        };
+        let source_receiver = self.source_tree(binding.source_receiver)?;
+        let typed_receiver =
+            p.typed_ast
+                .try_get(binding.typed_receiver)
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: binding.typed_receiver,
+                })?;
+        let source_argument = self.source_tree(binding.source_argument)?;
+        let typed_argument =
+            p.typed_ast
+                .try_get(binding.typed_argument)
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: binding.typed_argument,
+                })?;
+        let initializers = p
+            .typed_bindings
+            .local_counter_initializers(p.source.id, method.symbol);
+        let receiver_initializer = initializers
+            .iter()
+            .find(|initializer| initializer.local == binding.receiver);
+        let pair = p
+            .typed_bindings
+            .formal_local_constructor_call_pair(p.source.id, method.symbol);
+        let (TreeKind::Ident(source_receiver_ident), TreeKind::Ident(typed_receiver_ident)) =
+            (&source_receiver.kind, &typed_receiver.kind)
+        else {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        };
+        let (TreeKind::Ident(source_argument_ident), TreeKind::Ident(typed_argument_ident)) =
+            (&source_argument.kind, &typed_argument.kind)
+        else {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        };
+        let second_formal = pair.map(|pair| pair.method_formals[1]);
+        let canonical_method = matches!(
+            p.source_index.definition_of(binding.method),
+            Some(dotty_core::SourceDefinition::Canonical { source, tree })
+                if source == p.source.id
+                    && matches!(p.source_ast.try_get(tree).map(|node| &node.kind), Some(TreeKind::DefDef(_)))
+        );
+        if binding.source_apply != source_stat
+            || binding.typed_apply != typed_stat
+            || source_call.kind != ApplyKind::Regular
+            || typed_call.kind != ApplyKind::Regular
+            || source_call.function != binding.source_select
+            || typed_call.function != binding.typed_select
+            || source_call.args.as_slice() != [binding.source_argument]
+            || typed_call.args.as_slice() != [binding.typed_argument]
+            || source_selection.qualifier != binding.source_receiver
+            || typed_selection.qualifier != binding.typed_receiver
+            || initializers.len() != 2
+            || receiver_initializer.is_none()
+            || !self.visible_locals.contains(&binding.receiver)
+            || !canonical_method
+            || second_formal != Some(binding.argument_formal)
+            || source_receiver_ident.name != self.symbol(binding.receiver)?.name
+            || typed_receiver_ident.name != source_receiver_ident.name
+            || source_argument_ident.name != self.symbol(binding.argument_formal)?.name
+            || typed_argument_ident.name != source_argument_ident.name
+            || !matches!(self.ty(typed_receiver.ty)?, Type::TermRef { prefix, target: TermRefTarget::Symbol(symbol) } if *prefix == p.definitions.no_prefix && *symbol == binding.receiver)
+            || !matches!(self.ty(typed_select.ty)?, Type::TermRef { prefix, target: TermRefTarget::Symbol(symbol) } if *prefix == typed_receiver.ty && *symbol == binding.method)
+            || !matches!(self.ty(typed_argument.ty)?, Type::TermRef { prefix, target: TermRefTarget::Symbol(symbol) } if *prefix == p.definitions.no_prefix && *symbol == binding.argument_formal)
+            || typed_apply.ty != p.definitions.unit
+            || !matches!(self.ty(typed_argument.ty)?, Type::TermRef { .. })
+            || self.symbol(binding.argument_formal)?.kind != SymbolKind::Parameter
+            || self.symbol(binding.argument_formal)?.owner != Some(method.symbol)
+            || self.symbol(binding.method)?.owner
+                != receiver_initializer.map(|initializer| initializer.call.class)
+            || self.symbol(binding.method)?.kind != SymbolKind::Method
+            || source_selection.name != self.symbol(binding.method)?.name
+            || typed_selection.name != source_selection.name
+            || !matches!(self.ty(self.complete(binding.method)?)?, Type::Method(signature)
+                if signature.params.len() == 1
+                    && signature.params[0].ty == p.definitions.int
+                    && signature.result == p.definitions.unit)
+        {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        }
+        for (source_tree, typed_tree) in [
+            (binding.source_apply, binding.typed_apply),
+            (binding.source_select, binding.typed_select),
+            (binding.source_receiver, binding.typed_receiver),
+            (binding.source_argument, binding.typed_argument),
+        ] {
+            self.source_typed_binding(source_tree, typed_tree)?;
+            let source = self.source_tree(source_tree)?;
+            let typed = p
+                .typed_ast
+                .try_get(typed_tree)
+                .ok_or(PickleError::InvalidTypedTree { tree: typed_tree })?;
+            self.paired_source_typed_span(source.position, typed.position, typed_tree)?;
+        }
+        self.charge(1)?;
+        if !visited.insert(binding.typed_apply)
+            || !visited.insert(binding.typed_select)
+            || !visited.insert(binding.typed_receiver)
+            || !visited.insert(binding.typed_argument)
+        {
+            return Err(PickleError::RepeatedExpression {
+                tree: binding.typed_apply,
+            });
+        }
+        let _ = depth;
+        Ok(())
     }
 
     pub(super) fn validate_unit_expression(

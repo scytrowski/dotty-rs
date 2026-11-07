@@ -142,6 +142,18 @@ pub trait SourceTypedBindings {
     ) -> Option<FormalLocalConstructorCallPairBinding> {
         None
     }
+
+    /// Exact source/typed identity for the single authenticated local-receiver
+    /// Unit statement admitted between the two local declarations and final
+    /// constructor result. This receipt is derived from the same frontend
+    /// session as `typed_at`; it does not authorize arbitrary statement calls.
+    fn local_receiver_unit_call(
+        &self,
+        _source: SourceId,
+        _method: SymbolId,
+    ) -> Option<LocalReceiverUnitCallBinding> {
+        None
+    }
 }
 
 /// Source and typed tree identities retained by the cross-class constructor
@@ -225,6 +237,23 @@ pub struct FormalLocalConstructorCallPairBinding {
     pub source_method_formals: [TreeId<Untyped>; 2],
     pub method_formals: [SymbolId; 2],
     pub arguments: [FormalLocalConstructorCallArgumentBinding; 2],
+}
+
+/// Canonical call roots retained by the source proof for
+/// `first.set(secondSeed): Unit` in the bounded two-local Pair factory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocalReceiverUnitCallBinding {
+    pub source_apply: TreeId<Untyped>,
+    pub typed_apply: TreeId<Typed>,
+    pub source_select: TreeId<Untyped>,
+    pub typed_select: TreeId<Typed>,
+    pub source_receiver: TreeId<Untyped>,
+    pub typed_receiver: TreeId<Typed>,
+    pub source_argument: TreeId<Untyped>,
+    pub typed_argument: TreeId<Typed>,
+    pub receiver: SymbolId,
+    pub method: SymbolId,
+    pub argument_formal: SymbolId,
 }
 
 /// Original source/typed identities for the direct `new Counter(seed)` local
