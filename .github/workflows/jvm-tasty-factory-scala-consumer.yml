@@ -26,6 +26,7 @@ on:
       - 'docs/strict-tasty-target-sharding.md'
       - 'docs/jvm-tasty-mixed-origin-constructor-arguments.md'
       - 'docs/jvm-tasty-immutable-reference-local-pair.md'
+      - 'docs/jvm-tasty-local-receiver-call.md'
       - 'tests/fixtures/jvm_tasty_immutable_reference_local_pair/**'
       - 'tests/jvm_tasty_immutable_reference_local_pair_scala_consumer.rs'
       - 'tests/fixtures/jvm_tasty_two_immutable_reference_locals/**'

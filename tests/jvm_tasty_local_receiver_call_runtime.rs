@@ -337,6 +337,31 @@ fn local_counter_set_runs_on_unchanged_rust_batch_under_strict_jdk21() {
         )
         .expect("frozen single-session Rust source produces six linked artifacts");
         let originals = artifacts(&batch);
+        let repeated = emit_paired_jvm_tasty_batch(
+            source,
+            "LocalReceiverCall.scala",
+            SourceId::from_index(source_id),
+        )
+        .expect("a fresh source session emits the same six linked artifacts");
+        assert_eq!(
+            originals,
+            artifacts(&repeated),
+            "the {label} source variant is deterministic across fresh sessions"
+        );
+        for artifact in batch.classes() {
+            let class_hash = sha256_bytes(artifact.classfile_bytes());
+            let tasty_hash = sha256_bytes(artifact.tasty_bytes());
+            let uuid = artifact
+                .tasty_link_id()
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            eprintln!(
+                "local-receiver-artifact variant={label} class={} sha256_class={class_hash} sha256_tasty={tasty_hash} tasty_uuid={uuid}",
+                artifact.classfile_path()
+            );
+        }
         let original_hashes = originals
             .iter()
             .map(|(relative, bytes)| (relative.clone(), sha256_bytes(bytes)))
