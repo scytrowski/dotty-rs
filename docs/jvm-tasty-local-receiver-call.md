@@ -121,7 +121,7 @@ The Java primary and reversed output batches are emitted and hashed by `local_co
 | Reversed `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | `008071c3c00968ac0000000000008193` |
 | Reversed `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | `008071c3c00968ac0000000000008193` |
 | Reversed `example/Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` | `000b7d8d7441c7f00000000000008198` |
-| Reversed `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | `000b7d8d7441c7f0000000000008198` |
+| Reversed `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | `000b7d8d7441c7f00000000000008198` |
 | Reversed `example/PairFactory.class` | `59bf043cf27d266a5b23de4f99be1d031d219a02a649b62d9bddb56560415034` | `00c77c7aa6e6c0cb000000000000819d` |
 | Reversed `example/PairFactory.tasty` | `7086eb507918f67003edd23a18c362ac47d695eeaa8e2d468efe853e5243ebc4` | `00c77c7aa6e6c0cb000000000000819d` |
 
@@ -140,6 +140,18 @@ These are the observed first rejection stages from the integrated Java and Scala
 | Rust source: `first.set()` / `first.set(true)` | Method body typing: `ApplicationArityMismatch` / `ApplicationArgumentTypeMismatch` |
 | Rust source: extra setter, wrong formal or moved call | Cross-class identity proof: `SourceShape` for unsupported statement/argument; or JVM/TASTy contract validation: `TastyPlan(BodyType)` for the moved call |
 | Rust source: non-Unit setter expression | Cross-class identity proof: `Counter.set statement must be one regular one-argument Apply` |
+
+### Acceptance checkpoint matrix
+
+| Checkpoint | Integrated test/evidence | Observed result |
+| --- | --- | --- |
+| #2170.2: canonical source/typed proof | `jvm_tasty_local_receiver_call::local_receiver_call_audit_keeps_the_real_frontend_identities_and_first_failure` | Real frontend session `SourceId(21640)` preserves two local symbols and ordered stats; typed receiver resolves to `first`, selected member to `Counter.set`, argument to `secondSeed`, final Pair arguments to their original formals; call span `[522, 543)`. Passed locally. |
+| #2170.3: authentic Rust TASTy and JVM statement order | `jvm_tasty_local_receiver_call::local_receiver_unit_call_emits_one_linked_six_artifact_batch` | Exactly six linked files; Rust TASTy `BLOCK` stats are `VALDEF, VALDEF, APPLY`, followed by final constructor `APPLY`. `PairFactory.create(II)Lexample/Pair;` initializes/stores both Counters, invokes `Counter.set(I)V` once on `first` with `secondSeed`, then constructs `Pair(first, second)`; `max_stack=4`, `max_locals=5`, class major 65 and TASTy 28.9. Passed locally. |
+| #2170.4–5: linked outputs, determinism and inherited no-call bytes | `jvm_tasty_local_receiver_call_runtime::local_counter_set_runs_on_unchanged_rust_batch_under_strict_jdk21`; the two six-file consumer tables above | Each Java source variant is emitted twice in fresh sessions with byte-identical six-file output; Scala primary/reversed outputs and UUIDs are separately recorded. The original no-call `Counter` and `Pair` class/TASTy bytes remain identical to their inherited batch. Passed locally. |
+| #2170.6: independent external consumers | Java `JavaConsumer` harness and Scala `Consumer.scala`, mapped to their producer filename/session and output hashes above | Java 21 `-Xverify:all -ea` and pinned Scala 3.9 compile/runtime, readers and lookups passed locally for primary and reversed declarations. Current-head hosted consumer gate remains pending. |
+| #2170.7: negative controls and accepted-artifact publisher | Negative first-failure table above; `jvm_tasty_artifacts::immutable_local_pair_batch_publisher_rejects_partial_and_unsafe_outputs` | Existing source/typed/TASTy/JVM/Scala/Java negatives retain their observed first stages. Publisher checks inject failure after each of six staged artifact writes, before promotion and after promotion; each failure leaves no staging/final tree. The pre-existing destination sentinel remains byte-identical and is the only file left. Passed in the locked workspace suite. |
+| #2170.8: current strict inventory and fail-closed execution | `tools/ci/validate_strict_tasty_targets.py`; PR runs linked in the exact-head evidence comment | Inventory validates 25 unique targets over four shards. Final-head hosted shard/aggregate outcomes are pending; historical prerequisite checks are not substituted. |
+| #2170.9: reproducible provenance and final-head receipt | Prerequisite review/head/merge table above; [exact-head evidence comment](https://github.com/scytrowski/dotty-rs/pull/2185#issuecomment-6713923017) | Inputs, both consumer clients, producer filenames/sessions, artifact hashes/UUIDs, and measured negative failures are recorded here. The linked comment binds workflow/job outcomes to the final PR SHA and tree; hosted checks remain pending until completion. |
 
 ### Tool and final-head status
 
