@@ -1378,11 +1378,6 @@ impl<'a> EncodingContext<'a> {
                     role: crate::TypeRole::Parameter,
                 });
             };
-            let scala = c.utf8("scala")?;
-            let int = c.utf8("Int")?;
-            let unit = c.utf8("Unit")?;
-            let int_signature = c.intern(NameKey::Qualified(scala, int))?;
-            let unit_signature = c.intern(NameKey::Qualified(scala, unit))?;
             let signature_matches = signature.kind == dotty_core::MethodKind::Plain
                 && if unit_argument_call {
                     signature.params.len() == 1
@@ -1394,7 +1389,16 @@ impl<'a> EncodingContext<'a> {
             if !signature_matches {
                 return Err(reference(method, ReferenceError::Metadata));
             }
+            // Preserve the historical intern order for ordinary `get(): Int`
+            // selections: these entries contribute to the serialized name
+            // table and therefore to frozen TASTy bytes and linked UUIDs.
+            let method_name = c.utf8(c.text(method_record.name.text())?)?;
+            let scala = c.utf8("scala")?;
+            let int = c.utf8("Int")?;
+            let int_signature = c.intern(NameKey::Qualified(scala, int))?;
             let (result_signature, parameters) = if unit_argument_call {
+                let unit = c.utf8("Unit")?;
+                let unit_signature = c.intern(NameKey::Qualified(scala, unit))?;
                 (
                     unit_signature,
                     vec![
@@ -1407,7 +1411,6 @@ impl<'a> EncodingContext<'a> {
             } else {
                 (int_signature, Vec::new())
             };
-            let method_name = c.utf8(c.text(method_record.name.text())?)?;
             let signed = c.intern(NameKey::SignedMany(
                 method_name,
                 result_signature,
