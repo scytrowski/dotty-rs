@@ -276,14 +276,21 @@ STRICT_REQUIRED_ENVS: DOTTY_REQUIRE_FIRST
                 with self.assertRaisesRegex(ManifestError, "workflow must select each fixed shard once in order"):
                     validate_manifest(manifest, self.root)
 
-    def test_real_inventory_supports_four_fixed_shards_and_preserves_24_targets(self):
+    def test_real_inventory_supports_four_fixed_shards_and_preserves_25_targets(
+        self,
+    ):
         repository = Path(__file__).parents[2]
         manifest_path = repository / "tools/ci/strict_tasty_targets.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        self.assertEqual(manifest["baseline"]["inventory_count"], 24)
+        self.assertEqual(manifest["baseline"]["inventory_count"], 25)
+        target_names = [target["name"] for target in manifest["targets"]]
         self.assertIn(
             "jvm_tasty_immutable_reference_local_pair_scala_consumer",
-            [target["name"] for target in manifest["targets"]],
+            target_names,
+        )
+        self.assertIn(
+            "jvm_tasty_two_local_counter_set_scala_consumer",
+            target_names,
         )
         self.assertEqual(
             [shard["id"] for shard in manifest["sharding"]["shards"]],
