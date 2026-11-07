@@ -711,3 +711,44 @@ The strict log records the variant producer/client hashes, all original Rust
 artifact hashes and UUIDs, compiler/JDK versions, observed Scala outcomes, and
 elapsed test time. The focused strict Rust-produced two-local consumer test
 completed in 175.83 seconds in the recorded local run. This was the full six-test target run, including both the existing one-local consumer and the new two-local strict matrix.
+
+## Independent `Counter.set` consumer
+
+The separate `jvm_tasty_two_local_counter_set_scala_consumer` target compiles
+`tests/fixtures/jvm_tasty_two_local_counter_set/Consumer.scala` with the pinned
+Scala 3.9.0 compiler against only the original Rust-produced `Counter`, `Pair`,
+and `PairFactory` class/TASTy pairs plus the hash-checked official Scala
+runtime. It executes both the original source declaration order and the
+fully reversed `first`/`second` declaration order. The client observes
+`create(7, 3) == 3/3` and `create(-9, 42) == 42/42`, reads both `Counter`
+objects by reflection, confirms they are distinct, and mutates each object to
+verify the pair exposes the expected independent values. The assertions record
+runtime-observed identity; they do not infer identity from equal values.
+
+For the original six Rust artifacts, official `-print-tasty`, `-decompile`, and
+inspection-only `-from-tasty` verify the two local bindings, the direct
+`Counter.set(Int): Unit` call on `first` with `secondSeed`, and the final
+`Pair(first, second)` constructor call. The target also runs the existing masked
+classfile/TASTy lookup controls, including `set`, isolated sidecar negatives,
+malformed local-reference checks, and source-authenticated negative checks.
+Each Scala compile and execution is followed by a byte-for-byte check of the
+six producer artifacts.
+
+For stat negatives, Scala's reader accepts an artifact produced from a source
+without the required `set` call, while Rust's source-authenticated plan check
+rejects those artifacts against the required source. A non-Unit `get()` call in
+that stat position is rejected by the Rust producer before artifact emission,
+with the observed `Counter.set statement must be one regular one-argument
+Apply` source-shape diagnostic; no Scala outcome is claimed for that
+unproduced variant.
+
+The new target's observed local runtime was 86.14 seconds. It is in strict
+shard 1 and is required by the distinct
+`DOTTY_REQUIRE_SCALA_TASTY_TWO_LOCAL_COUNTER_SET_CONSUMER=1` flag in every
+shard and the aggregate fail-closed inventory. Run it locally with:
+
+```sh
+DOTTY_REQUIRE_SCALA_TASTY_TWO_LOCAL_COUNTER_SET_CONSUMER=1 \
+  cargo test -p dotty --test jvm_tasty_two_local_counter_set_scala_consumer \
+  --locked -- --nocapture
+```

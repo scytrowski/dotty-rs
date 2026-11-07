@@ -8,7 +8,7 @@
     "timing_method": "PR #2115 successful pinned serial run; Cargo/libtest final per-binary result lines"
   },
   "baseline": {
-    "inventory_count": 24,
+    "inventory_count": 25,
     "accounted_test_seconds": 1421.9,
     "cargo_build_seconds": 76,
     "strict_step_seconds": 1498,
@@ -88,6 +88,10 @@
       "measured_seconds": 172.37
     },
     {
+      "name": "jvm_tasty_two_local_counter_set_scala_consumer",
+      "measured_seconds": 86.14
+    },
+    {
       "name": "jvm_tasty_direct_formal_constructor_pair",
       "measured_seconds": 0.0
     },
@@ -120,14 +124,15 @@
     "shards": [
       {
         "id": "shard-1",
-        "estimated_test_seconds": 354.21,
+        "estimated_test_seconds": 440.35,
         "targets": [
           "jvm_tasty_mixed_origin_constructor_scala_consumer",
           "jvm_tasty_constructor_injection_scala_consumer",
           "jvm_tasty_multiclass_scala_consumer",
           "tasty_source_pickling",
           "jvm_tasty_dual_reference_scala_consumer",
-          "jvm_tasty_direct_formal_constructor_pair"
+          "jvm_tasty_direct_formal_constructor_pair",
+          "jvm_tasty_two_local_counter_set_scala_consumer"
         ]
       },
       {
