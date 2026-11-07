@@ -19,6 +19,7 @@ use dotty_tasty::ast::{APPLY_TAG, BLOCK_TAG, DEFDEF_TAG, VALDEF_TAG};
 use dotty_tasty::file::TastyFile;
 use dotty_tasty::term::RawTree;
 use dotty_typer::SourceTyper;
+use std::process::Command;
 
 const TARGET: &str = include_str!("fixtures/jvm_tasty_local_receiver_call/LocalReceiverCall.scala");
 const TWO_LOCAL_SOURCE: &str =
@@ -50,6 +51,30 @@ fn raw_tag(tree: &RawTree<'_>) -> u8 {
         RawTree::Leaf(term) => term.tag,
         RawTree::Ast { tag, .. } | RawTree::NatAst { tag, .. } => *tag,
         RawTree::LengthNode(node) => node.tag,
+    }
+}
+
+fn require_jdk_21_or_skip() -> bool {
+    let available = ["java", "javac"].into_iter().all(|tool| {
+        match Command::new(tool).arg("-version").output() {
+            Ok(output) if output.status.success() => {
+                let version = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                version.contains("21.")
+            }
+            _ => false,
+        }
+    });
+    if available {
+        true
+    } else if std::env::var("DOTTY_CLASSFILE_REQUIRE_JDK").as_deref() == Ok("1") {
+        panic!("the Counter.set receiver runtime test requires JDK 21 on PATH");
+    } else {
+        eprintln!("skipping Counter.set receiver runtime test without JDK 21");
+        false
     }
 }
 
@@ -469,14 +494,237 @@ fn local_receiver_call_controls_record_each_real_paired_path_result() {
         ),
         Err(dotty::jvm_tasty_artifacts::PairedBatchArtifactError::Contract(_))
     ));
-    assert!(matches!(
-        emit_paired_jvm_tasty_batch(
-            source_order.as_str(),
-            "LocalReceiverCall.scala",
-            SourceId::from_index(21646)
-        ),
-        Err(dotty::jvm_tasty_artifacts::PairedBatchArtifactError::Contract(_))
-    ));
+    assert!(paired_result(source_order.as_str(), 21646).is_ok());
+}
+
+#[test]
+fn local_receiver_slot_tracks_the_authenticated_symbol_after_declaration_reversal() {
+    let reversed = TARGET.replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
+        "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
+    );
+    let source_id = SourceId::from_index(21652);
+    let batch = emit_paired_jvm_tasty_batch(&reversed, "LocalReceiverCall.scala", source_id)
+        .expect("reversed local declarations preserve the authenticated Counter.set call");
+    let repeated = emit_paired_jvm_tasty_batch(&reversed, "LocalReceiverCall.scala", source_id)
+        .expect("an independent session emits the reversed batch deterministically");
+    assert_eq!(batch.classes(), repeated.classes());
+    assert_eq!(batch.classes().len(), 3);
+
+    let classfiles = batch
+        .classes()
+        .iter()
+        .map(|artifact| JvmTastyClassFileArtifact {
+            classfile_path: artifact.classfile_path().to_owned(),
+            classfile_bytes: artifact.classfile_bytes().to_vec(),
+        })
+        .collect::<Vec<_>>();
+    let sidecars = batch
+        .classes()
+        .iter()
+        .map(|artifact| JvmTastySidecarArtifact {
+            tasty_path: artifact.tasty_path().to_owned(),
+            tasty_bytes: artifact.tasty_bytes().to_vec(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(classfiles.len() + sidecars.len(), 6);
+    for (classfile, sidecar) in classfiles.iter().zip(&sidecars) {
+        let class = decode_class(&classfile.classfile_bytes);
+        let tasty = TastyFile::parse_and_validate_scala_3_9(&sidecar.tasty_bytes).unwrap();
+        assert_eq!(
+            class.tasty_link_id().unwrap().unwrap().as_bytes(),
+            &tasty.header().uuid,
+            "each reversed classfile remains linked to its TASTy sidecar"
+        );
+    }
+
+    with_paired_jvm_tasty_batch_plan(
+        &reversed,
+        "LocalReceiverCall.scala",
+        source_id,
+        |plan| {
+            let [proof] = plan.constructor_call_proofs else {
+                panic!("the reversed source keeps one canonical constructor proof");
+            };
+            let call = proof
+                .local_receiver_unit_call()
+                .expect("the proof authenticates the original local receiver");
+            assert_eq!(
+                plan.jvm_unit
+                    .store
+                    .names
+                    .resolve(plan.jvm_unit.store.symbols.get(call.receiver).name.text()),
+                "first",
+                "the reversed declaration source still authenticates first as receiver"
+            );
+
+            let tasty_plans = plan
+                .classes
+                .iter()
+                .map(|class| class.tasty_plan)
+                .collect::<Vec<_>>();
+            let validated = validate_jvm_tasty_batch(plan.jvm_unit, &tasty_plans).unwrap();
+            let artifacts = JvmTastyBatchArtifacts {
+                classfiles: classfiles.clone(),
+                sidecars: sidecars.clone(),
+            };
+            validate_jvm_tasty_batch_artifacts(&validated, artifacts.clone())
+                .expect("the six linked reversed artifacts satisfy the canonical contract");
+
+            let factory = classfiles
+                .iter()
+                .find(|artifact| artifact.classfile_path == "example/PairFactory.class")
+                .unwrap();
+            let class = decode_class(&factory.classfile_bytes);
+            let create = class
+                .methods
+                .iter()
+                .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "create")
+                .unwrap();
+            let [Attribute::Code(code)] = create.attributes.as_slice() else {
+                panic!("PairFactory.create has one Code attribute");
+            };
+            let invocation_pc = code
+                .code
+                .windows(3)
+                .position(|window| window[0] == 0xb6)
+                .expect("the call uses invokevirtual Counter.set");
+            assert_eq!(
+                &code.code[invocation_pc - 3..invocation_pc],
+                &[0x19, 0x04, 0x1c],
+                "the authenticated first local occupies slot 4 after declaration reversal"
+            );
+
+            // Slot 3 is the other initialized Counter and produces JVM-valid bytecode,
+            // but it no longer implements the source receiver identity in the receipt.
+            let mut wrong_receiver = artifacts;
+            let factory = wrong_receiver
+                .classfiles
+                .iter_mut()
+                .find(|artifact| artifact.classfile_path == "example/PairFactory.class")
+                .unwrap();
+            let mut reader = ClassReader::new(&factory.classfile_bytes);
+            let decoded = ClassFile::decode(&mut reader).unwrap();
+            let create = decoded
+                .methods
+                .iter()
+                .find(|method| decoded.constant_pool.utf8(method.name_index).unwrap() == "create")
+                .unwrap();
+            let [Attribute::Code(code)] = create.attributes.as_slice() else {
+                panic!("PairFactory.create has one Code attribute");
+            };
+            let invocation_pc = code
+                .code
+                .windows(3)
+                .position(|window| window[0] == 0xb6)
+                .unwrap();
+            let code_start = code.code.as_ptr() as usize - factory.classfile_bytes.as_ptr() as usize;
+            factory.classfile_bytes[code_start + invocation_pc - 3..code_start + invocation_pc]
+                .copy_from_slice(&[0x2d, 0x00, 0x1c]);
+            let wrong_factory_bytes = factory.classfile_bytes.clone();
+            let error = validate_jvm_tasty_batch_artifacts(&validated, wrong_receiver)
+                .expect_err("the other local cannot replace the authenticated receiver slot");
+            assert!(
+                matches!(
+                    error,
+                    JvmTastyContractError::BatchArtifact {
+                        class_index: 2,
+                        phase: "cross-class invocation",
+                        ..
+                    }
+                ),
+                "a valid load of the wrong local must fail semantic slot authentication, not verification: {error:?}"
+            );
+
+            if require_jdk_21_or_skip() {
+                let root = std::env::temp_dir().join(format!(
+                    "dotty-counter-set-reversed-{}",
+                    std::process::id()
+                ));
+                let _ = std::fs::remove_dir_all(&root);
+                let original_classes = root.join("original");
+                let wrong_classes = root.join("wrong-receiver");
+                let harness_classes = root.join("harness");
+                for directory in [&original_classes, &wrong_classes, &harness_classes] {
+                    std::fs::create_dir_all(directory).unwrap();
+                }
+                for artifact in &classfiles {
+                    let original_path = original_classes.join(&artifact.classfile_path);
+                    let wrong_path = wrong_classes.join(&artifact.classfile_path);
+                    std::fs::create_dir_all(original_path.parent().unwrap()).unwrap();
+                    std::fs::create_dir_all(wrong_path.parent().unwrap()).unwrap();
+                    std::fs::write(&original_path, &artifact.classfile_bytes).unwrap();
+                    std::fs::write(
+                        &wrong_path,
+                        if artifact.classfile_path == "example/PairFactory.class" {
+                            &wrong_factory_bytes
+                        } else {
+                            &artifact.classfile_bytes
+                        },
+                    )
+                    .unwrap();
+                }
+                let harness = root.join("CounterSetReceiverHarness.java");
+                std::fs::write(
+                    &harness,
+                    r#"import example.Pair;
+import example.PairFactory;
+public final class CounterSetReceiverHarness {
+  public static void main(String[] args) {
+    Pair pair = new PairFactory().create(7, 3);
+    if (pair.leftValue() != 3 || pair.rightValue() != 3)
+      throw new AssertionError("first receiver mutation did not reach Pair.first");
+    System.out.println("counter-set=3/3");
+  }
+}"#,
+                )
+                .unwrap();
+                let javac = Command::new("javac")
+                    .args(["--release", "21", "-classpath"])
+                    .arg(&original_classes)
+                    .arg("-d")
+                    .arg(&harness_classes)
+                    .arg(&harness)
+                    .output()
+                    .expect("start JDK 21 javac for the reversed receiver harness");
+                assert!(
+                    javac.status.success(),
+                    "javac rejected the reversed receiver harness: {}",
+                    String::from_utf8_lossy(&javac.stderr)
+                );
+                let run = |classes: &std::path::Path| {
+                    let classpath = std::env::join_paths([&harness_classes, classes]).unwrap();
+                    Command::new("java")
+                        .args(["-Xverify:all", "-ea", "-classpath"])
+                        .arg(classpath)
+                        .arg("CounterSetReceiverHarness")
+                        .output()
+                        .expect("start JDK 21 with strict bytecode verification")
+                };
+                let valid = run(&original_classes);
+                assert!(
+                    valid.status.success(),
+                    "JDK rejected the reversed six-artifact class files:\n{}\n{}",
+                    String::from_utf8_lossy(&valid.stdout),
+                    String::from_utf8_lossy(&valid.stderr)
+                );
+                assert_eq!(String::from_utf8_lossy(&valid.stdout).trim(), "counter-set=3/3");
+                let wrong_target = run(&wrong_classes);
+                let wrong_output = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&wrong_target.stdout),
+                    String::from_utf8_lossy(&wrong_target.stderr)
+                );
+                assert!(
+                    !wrong_target.status.success()
+                        && wrong_output.contains("AssertionError: first receiver mutation"),
+                    "the wrong local remains verifier-valid and fails the semantic receiver assertion, not verification:\n{wrong_output}"
+                );
+                std::fs::remove_dir_all(&root).unwrap();
+            }
+        },
+    )
+    .expect("reversed declaration slot mapping remains inside the paired contract");
 }
 
 #[test]
