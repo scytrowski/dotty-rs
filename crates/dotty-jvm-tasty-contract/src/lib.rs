@@ -2025,6 +2025,10 @@ fn validate_two_local_constructor_pair(
     let local_symbols = [initializers[0].local, initializers[1].local];
     let counter_class =
         local_class.ok_or_else(|| "two-local Counter class is absent".to_owned())?;
+    let expected_receiver = match pair.arguments[0].origin {
+        FormalLocalConstructorCallArgumentOrigin::LocalValue { symbol, .. } => symbol,
+        _ => return Err("first Pair argument is not an authenticated local value".into()),
+    };
     let local_receiver_call = if let Some(binding) = local_receiver_call {
         let source_call_tree = *source_block
             .stats
@@ -2073,7 +2077,7 @@ fn validate_two_local_constructor_pair(
                 != Some(binding.typed_argument)
             || !matches!(tasty.source_ast.try_get(binding.source_select).map(|tree| &tree.kind), Some(TreeKind::Select(select)) if select.qualifier == binding.source_receiver)
             || !matches!(tasty.typed_ast.try_get(binding.typed_select).map(|tree| &tree.kind), Some(TreeKind::Select(select)) if select.qualifier == binding.typed_receiver)
-            || !matches!(tasty.store.types.try_get(tasty.typed_ast.get(binding.typed_receiver).ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == binding.receiver && *symbol == local_symbols[0])
+            || !matches!(tasty.store.types.try_get(tasty.typed_ast.get(binding.typed_receiver).ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == binding.receiver && *symbol == expected_receiver && local_symbols.contains(symbol))
             || !matches!(tasty.store.types.try_get(tasty.typed_ast.get(binding.typed_argument).ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == binding.argument_formal && *symbol == pair.method_formals[1])
             || !matches!(tasty.store.types.try_get(tasty.typed_ast.get(binding.typed_select).ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == binding.method)
             || tasty.typed_ast.get(binding.typed_apply).ty != tasty.definitions.unit
@@ -2098,7 +2102,15 @@ fn validate_two_local_constructor_pair(
         {
             return Err("Counter.set JVM target must be the selected instance set(I)V".into());
         }
-        let receiver_local_slot = local_slots[0];
+        let receiver_index = local_symbols
+            .iter()
+            .position(|symbol| *symbol == binding.receiver)
+            .ok_or_else(|| {
+                "Counter.set receiver is not one of the authenticated locals".to_owned()
+            })?;
+        let receiver_local_slot = *local_slots
+            .get(receiver_index)
+            .ok_or_else(|| "Counter.set receiver has no authenticated JVM local slot".to_owned())?;
         let argument_local_slot = method
             .parameters()
             .iter()
