@@ -481,6 +481,118 @@ fn lower_expression_inner(
                 fields,
             });
         }
+        if let TreeKind::Select(selection) = &function.kind
+            && application.args.len() == 1
+            && let Some(binding) = context.local_receiver_unit_call(method)
+            && binding.typed_apply == root
+        {
+            let Some(Type::TermRef {
+                target: TermRefTarget::Symbol(target),
+                ..
+            }) = store.types.try_get(function.ty)
+            else {
+                return Err(PickleError::BodyType {
+                    tree: application.function,
+                    ty: function.ty,
+                });
+            };
+            let argument =
+                ast.try_get(application.args[0])
+                    .ok_or(PickleError::InvalidTypedTree {
+                        tree: application.args[0],
+                    })?;
+            let receiver =
+                ast.try_get(selection.qualifier)
+                    .ok_or(PickleError::InvalidTypedTree {
+                        tree: selection.qualifier,
+                    })?;
+            let Some(Type::TermRef {
+                prefix,
+                target: TermRefTarget::Symbol(receiver_symbol),
+            }) = store.types.try_get(receiver.ty)
+            else {
+                return Err(PickleError::BodyType {
+                    tree: selection.qualifier,
+                    ty: receiver.ty,
+                });
+            };
+            let Some(Type::TermRef {
+                prefix: argument_prefix,
+                target: TermRefTarget::Symbol(argument_symbol),
+            }) = store.types.try_get(argument.ty)
+            else {
+                return Err(PickleError::BodyType {
+                    tree: application.args[0],
+                    ty: argument.ty,
+                });
+            };
+            let target_owner = store
+                .symbols
+                .contains(*target)
+                .then(|| store.symbols.get(*target).owner)
+                .flatten()
+                .ok_or(PickleError::InvalidSymbol { symbol: *target })?;
+            let SymbolInfo::Complete(receiver_type) = store.symbols.get(*receiver_symbol).info
+            else {
+                return Err(PickleError::IncompleteSymbol {
+                    symbol: *receiver_symbol,
+                    info: store.symbols.get(*receiver_symbol).info,
+                });
+            };
+            if binding.typed_apply != root
+                || binding.typed_select != application.function
+                || binding.typed_receiver != selection.qualifier
+                || binding.typed_argument != application.args[0]
+                || binding.method != *target
+                || binding.receiver != *receiver_symbol
+                || binding.argument_formal != *argument_symbol
+                || !parameters.contains(argument_symbol)
+                || *prefix != context.definitions().no_prefix
+                || *argument_prefix != context.definitions().no_prefix
+                || !matches!(receiver.kind, TreeKind::Ident(_))
+                || tree.ty != context.definitions().unit
+                || store.symbols.get(*target).kind != dotty_core::SymbolKind::Method
+                || !matches!(store.symbols.get(*target).info, dotty_core::SymbolInfo::Complete(signature)
+                    if matches!(store.types.try_get(signature), Some(Type::Method(method_signature))
+                        if method_signature.params.len() == 1
+                            && method_signature.params[0].ty == context.definitions().int
+                            && method_signature.result == context.definitions().unit))
+            {
+                return Err(PickleError::Reference {
+                    symbol: *target,
+                    reason: crate::ReferenceError::Owner,
+                });
+            }
+            let receiver_label = lower_expression_inner(
+                store,
+                ast,
+                selection.qualifier,
+                method,
+                parameters,
+                ExpressionState { depth, budget },
+                context,
+            )?;
+            let selected = context.same_source_method_select_in(
+                target_owner,
+                *target,
+                receiver_label,
+                receiver_type,
+                true,
+            )?;
+            let argument_label = lower_expression_inner(
+                store,
+                ast,
+                application.args[0],
+                method,
+                parameters,
+                ExpressionState { depth, budget },
+                context,
+            )?;
+            return context.wire_node(AstNode::Length {
+                tag: APPLY_TAG,
+                fields: vec![AstField::Tree(selected), AstField::Tree(argument_label)],
+            });
+        }
         if application.args.is_empty() {
             let TreeKind::Select(selection) = &function.kind else {
                 return Err(PickleError::Unsupported {
@@ -566,8 +678,13 @@ fn lower_expression_inner(
                 ExpressionState { depth, budget },
                 context,
             )?;
-            let selected =
-                context.same_source_method_select_in(target_owner, target, receiver, owner_type)?;
+            let selected = context.same_source_method_select_in(
+                target_owner,
+                target,
+                receiver,
+                owner_type,
+                false,
+            )?;
             return context.wire_node(AstNode::Length {
                 tag: APPLY_TAG,
                 fields: vec![AstField::Tree(selected)],
