@@ -66,7 +66,11 @@ jobs:
         run: cargo doc --workspace --no-deps --locked
 
       - name: Run tests
-        run: cargo test --workspace --all-targets --locked
+        env:
+          TMPDIR: ${{ github.workspace }}/target/rust-tests-tmp
+        run: |
+          mkdir -p "$TMPDIR"
+          cargo test --workspace --all-targets --locked
 
       - name: Check diff
         run: git diff --check
@@ -107,11 +111,14 @@ jobs:
       - name: Verify generated class files with the JVM
         env:
           DOTTY_CLASSFILE_REQUIRE_JDK: '1'
+          TMPDIR: ${{ github.workspace }}/target/classfile-jvm-tmp
         run: |
+          mkdir -p "$TMPDIR"
           cargo +stable test \
             -p dotty-classfile --test classfile_jvm_encoder \
             -p dotty-jvm --lib \
             -p dotty --test jvm_source_compilation \
+            --test jvm_tasty_local_receiver_call_runtime \
             --test jvm_tasty_artifacts \
             --test jvm_tasty_mixed_origin_runtime \
             --test jvm_tasty_dual_reference_identity \
