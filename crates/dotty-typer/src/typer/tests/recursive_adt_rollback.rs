@@ -658,7 +658,7 @@ fn recursive_eval_late_result_failure_observes_binder_call_and_rolls_back_for_re
     let observed_cases = cases.clone();
     let parsed_ref = &parsed;
     let index_ref = &index;
-    typer.transaction_failure_observer = Some(Rc::new(move |typer| {
+    typer.transaction_failure_observer = Some(Rc::new(move |typer, _error| {
         let Some(typed_call) = typer.source_typed_index().get(source, recursive_call) else {
             return;
         };
@@ -946,7 +946,7 @@ fn binary_recursive_second_argument_failure_and_late_failure_restore_then_retry_
     let before_mappings = typer.source_typed_index().len();
     let invalid_observed = Rc::new(RefCell::new(false));
     let invalid_observed_by_callback = Rc::clone(&invalid_observed);
-    typer.transaction_failure_observer = Some(Rc::new(move |typer| {
+    typer.transaction_failure_observer = Some(Rc::new(move |typer, _error| {
         let Some(first_call) = typer.source_typed_index().get(source, invalid_calls[0]) else {
             return;
         };
@@ -1060,7 +1060,7 @@ fn binary_recursive_second_argument_failure_and_late_failure_restore_then_retry_
     let before_mappings = typer.source_typed_index().len();
     let late_observation = Rc::new(RefCell::new(None));
     let late_observation_by_callback = Rc::clone(&late_observation);
-    typer.transaction_failure_observer = Some(Rc::new(move |typer| {
+    typer.transaction_failure_observer = Some(Rc::new(move |typer, _error| {
         let mapped_calls = late_calls.map(|call| typer.source_typed_index().get(source, call));
         let [Some(first_call), Some(second_call)] = mapped_calls else {
             return;
@@ -1186,7 +1186,7 @@ fn binary_late_failure_restores_complete_state_retries_then_types_both_original_
     let before = binary_complete_state_projection(&typer, &parsed);
     let nodes_seen = Rc::new(RefCell::new(false));
     let nodes_seen_by_observer = Rc::clone(&nodes_seen);
-    typer.transaction_failure_observer = Some(Rc::new(move |typer| {
+    typer.transaction_failure_observer = Some(Rc::new(move |typer, _error| {
         let typed_calls = nodes
             .calls
             .map(|call| typer.source_typed_index().get(source, call));
@@ -1560,7 +1560,7 @@ fn nested_late_failures_restore_and_retry_before_original_roots_recover() {
     let peel_observed = Rc::new(RefCell::new(false));
     let peel_observed_by_callback = Rc::clone(&peel_observed);
     let peel_adds_by_callback = peel_adds.clone();
-    typer.transaction_failure_observer = Some(Rc::new(move |typer| {
+    typer.transaction_failure_observer = Some(Rc::new(move |typer, _error| {
         let mapped = peel_adds_by_callback
             .iter()
             .map(|tree| typer.source_typed_index().get(source, *tree))
@@ -1623,7 +1623,7 @@ fn nested_late_failures_restore_and_retry_before_original_roots_recover() {
     let sum_calls_by_callback = sum_calls.clone();
     let sum_adds_by_callback = sum_adds.clone();
     let sum_num_extractors_by_callback = sum_num_extractors.clone();
-    typer.transaction_failure_observer = Some(Rc::new(move |typer| {
+    typer.transaction_failure_observer = Some(Rc::new(move |typer, _error| {
         for extractor in sum_adds_by_callback
             .iter()
             .chain(sum_num_extractors_by_callback.iter())

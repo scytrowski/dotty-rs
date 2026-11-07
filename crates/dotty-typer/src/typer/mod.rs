@@ -98,7 +98,7 @@ fn application_kind_accepts(application_kind: ApplyKind, method_kind: MethodKind
 }
 
 #[cfg(test)]
-type TransactionFailureObserver<'a> = std::rc::Rc<dyn Fn(&SourceTyper<'a>) + 'a>;
+type TransactionFailureObserver<'a> = std::rc::Rc<dyn Fn(&SourceTyper<'a>, &TyperError) + 'a>;
 
 /// Completes source declaration signatures against a shared semantic session.
 pub struct SourceTyper<'a> {
@@ -1028,6 +1028,8 @@ mod tests {
     // exposing a production mutable accessor.
     #[path = "issue_2076_product2_recovery.rs"]
     mod issue_2076_product2_recovery;
+    #[path = "issue_2179_relation_observation.rs"]
+    mod issue_2179_relation_observation;
     use dotty_classloader::classloader::{
         ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError, ClassResource,
     };
@@ -38300,7 +38302,7 @@ mod tests {
         let observed_bindings = Rc::new(RefCell::new(None));
         let observation = Rc::clone(&observed_bindings);
         let parsed_ref = &parsed;
-        typer.transaction_failure_observer = Some(Rc::new(move |typer| {
+        typer.transaction_failure_observer = Some(Rc::new(move |typer, _error| {
             let bindings = parsed_ref
                 .ast
                 .iter()
@@ -38718,7 +38720,7 @@ mod tests {
         let observed = Rc::new(RefCell::new(false));
         let observation = Rc::clone(&observed);
         let parsed_ref = &parsed;
-        typer.transaction_failure_observer = Some(Rc::new(move |typer| {
+        typer.transaction_failure_observer = Some(Rc::new(move |typer, _error| {
             let typed_match = typer
                 .source_typed_index()
                 .get(source, rhs)
@@ -38992,7 +38994,7 @@ mod tests {
         let observation = Rc::clone(&observed);
         let parsed_ref = &parsed;
         let observed_cases = cases.clone();
-        typer.transaction_failure_observer = Some(Rc::new(move |typer| {
+        typer.transaction_failure_observer = Some(Rc::new(move |typer, _error| {
             if typer.source_typed_index().get(source, rhs).is_none() {
                 return;
             }

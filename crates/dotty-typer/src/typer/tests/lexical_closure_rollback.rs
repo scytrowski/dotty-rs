@@ -135,7 +135,7 @@ fn observe_captures_before_method_rollback(source_text: &str, method_name: &str)
     };
     let observation = Rc::new(RefCell::new(None));
     let observed = Rc::clone(&observation);
-    typer.transaction_failure_observer = Some(Rc::new(move |typer| {
+    typer.transaction_failure_observer = Some(Rc::new(move |typer, _error| {
         let Some(lambda_method) = typer.function_literal_method_at(source, rhs) else {
             return;
         };
