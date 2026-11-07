@@ -204,9 +204,23 @@ impl Validator<'_, '_> {
                 .plan
                 .typed_bindings
                 .local_counter_initializers(self.plan.source.id, method.symbol);
+            let distinct_local_pair_matches_initializers = pair.is_some_and(|pair| {
+                let local_symbols = pair.arguments.map(|argument| match argument.origin {
+                    crate::FormalLocalConstructorCallArgumentOrigin::LocalValue {
+                        symbol, ..
+                    } => Some(symbol),
+                    crate::FormalLocalConstructorCallArgumentOrigin::Formal { .. } => None,
+                });
+                matches!(local_symbols, [Some(first), Some(second)]
+                    if first != second
+                        && initializers.len() == 2
+                        && initializers.iter().any(|initializer| initializer.local == first)
+                        && initializers.iter().any(|initializer| initializer.local == second))
+            });
             let two_local_shape = (source_block.stats.len() == 2 || three_stat_shape)
                 && ((source_block.stats.len() == 2 && call_binding.is_none())
                     || (source_block.stats.len() == 3 && call_binding.is_some()))
+                && (source_block.stats.len() == 2 || distinct_local_pair_matches_initializers)
                 && local_argument_indices.len() == 2
                 && initializers.len() == 2
                 && initializers[0].local != initializers[1].local
@@ -443,6 +457,9 @@ impl Validator<'_, '_> {
         let initializers = p
             .typed_bindings
             .local_counter_initializers(p.source.id, method.symbol);
+        let receiver_initializer = initializers
+            .iter()
+            .find(|initializer| initializer.local == binding.receiver);
         let pair = p
             .typed_bindings
             .formal_local_constructor_call_pair(p.source.id, method.symbol);
@@ -474,7 +491,7 @@ impl Validator<'_, '_> {
             || source_selection.qualifier != binding.source_receiver
             || typed_selection.qualifier != binding.typed_receiver
             || initializers.len() != 2
-            || initializers[0].local != binding.receiver
+            || receiver_initializer.is_none()
             || !self.visible_locals.contains(&binding.receiver)
             || !canonical_method
             || second_formal != Some(binding.argument_formal)
@@ -489,7 +506,8 @@ impl Validator<'_, '_> {
             || !matches!(self.ty(typed_argument.ty)?, Type::TermRef { .. })
             || self.symbol(binding.argument_formal)?.kind != SymbolKind::Parameter
             || self.symbol(binding.argument_formal)?.owner != Some(method.symbol)
-            || self.symbol(binding.method)?.owner != Some(initializers[0].call.class)
+            || self.symbol(binding.method)?.owner
+                != receiver_initializer.map(|initializer| initializer.call.class)
             || self.symbol(binding.method)?.kind != SymbolKind::Method
             || source_selection.name != self.symbol(binding.method)?.name
             || typed_selection.name != source_selection.name

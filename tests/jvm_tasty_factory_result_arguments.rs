@@ -9,7 +9,7 @@ use dotty::jvm_tasty_plan::{PairedPlanError, with_paired_jvm_tasty_batch_plan};
 use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::reader::Reader as ClassReader;
-use dotty_core::ast::{TreeKind, TypedAst, Untyped};
+use dotty_core::ast::{AstArena, TreeKind, TypedAst, Untyped};
 use dotty_core::{
     Definitions, Packages, SemanticStore, SourceId, SourceText, SourceTypedIndex, SymbolId,
     SymbolInfo, TermRefTarget, Type, TypeRefTarget,
@@ -257,6 +257,14 @@ struct LocalFlowBindings<'a> {
 
 fn clone_typed_ast(ast: &TypedAst) -> TypedAst {
     let mut cloned = TypedAst::new();
+    for (tree_id, tree) in ast.iter() {
+        assert_eq!(cloned.alloc(tree.clone()), tree_id);
+    }
+    cloned
+}
+
+fn clone_untyped_ast(ast: &AstArena<Untyped>) -> AstArena<Untyped> {
+    let mut cloned = AstArena::new();
     for (tree_id, tree) in ast.iter() {
         assert_eq!(cloned.alloc(tree.clone()), tree_id);
     }
@@ -1070,6 +1078,11 @@ fn run_pinned_local_receiver_unit_call_reader(bytes: &[u8]) {
     let compiler = std::env::var_os("SCALA39_SCALAC")
         .map(PathBuf::from)
         .unwrap_or_else(|| scala_root.join("dist/target/universal/stage/bin/scalac"));
+    assert!(
+        compiler.is_file(),
+        "pinned Scala compiler executable is missing: {}",
+        compiler.display()
+    );
     let scratch = PathBuf::from(
         std::env::var_os("DOTTY_TASTY_PICKLER_ORACLE_TMP")
             .expect("task-local Scala scratch is required"),
@@ -3187,13 +3200,39 @@ fn reference_local_constructor_flow_preserves_one_session_identity_through_body_
 
 #[test]
 fn standalone_local_receiver_call_uses_the_original_frontend_receipt() {
+    let source = include_str!("fixtures/jvm_tasty_local_receiver_call/LocalReceiverCall.scala");
+    let original =
+        standalone_local_receiver_call_candidate(source, SourceId::from_index(21661), true);
+    let reversed_source = source.replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
+        "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
+    );
+    let reversed_first = standalone_local_receiver_call_candidate(
+        &reversed_source,
+        SourceId::from_index(21663),
+        false,
+    );
+    let reversed_second = standalone_local_receiver_call_candidate(
+        &reversed_source,
+        SourceId::from_index(21664),
+        false,
+    );
+    assert_eq!(
+        reversed_first, reversed_second,
+        "reversed declarations preserve deterministic standalone bytes"
+    );
+    assert_ne!(original, reversed_first);
+}
+
+fn standalone_local_receiver_call_candidate(
+    source_text: &str,
+    source_id: SourceId,
+    scala_checks: bool,
+) -> Vec<u8> {
     use dotty::jvm_tasty_cross_class::ValidatedImmutableLocalCounterSetCallProof;
     use dotty_core::TreeId;
     use dotty_core::ast::Untyped;
 
-    let source_text =
-        include_str!("fixtures/jvm_tasty_local_receiver_call/LocalReceiverCall.scala");
-    let source_id = SourceId::from_index(21661);
     let scanner = ContextualScanner::new(source_text).unwrap();
     assert!(scanner.diagnostics().is_empty());
     let mut store = SemanticStore::new();
@@ -3519,8 +3558,11 @@ fn standalone_local_receiver_call_uses_the_original_frontend_receipt() {
     drop(validated);
     drop(plan);
     TastyFile::parse_and_validate_scala_3_9(candidate.bytes()).unwrap();
-    if std::env::var_os("DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE").as_deref()
-        == Some(std::ffi::OsStr::new("1"))
+    if scala_checks
+        && (std::env::var_os("DOTTY_REQUIRE_SCALA_TASTY_LOCAL_RECEIVER_UNIT_CALL").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+            || std::env::var_os("DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE").as_deref()
+                == Some(std::ffi::OsStr::new("1")))
     {
         run_pinned_local_receiver_unit_call_reader(candidate.bytes());
     }
@@ -3574,6 +3616,10 @@ fn standalone_local_receiver_call_uses_the_original_frontend_receipt() {
         .map(|node| node.offset as u32)
         .collect::<Vec<_>>();
     assert_eq!(local_addresses.len(), 2);
+    let receiver_index = local_values
+        .iter()
+        .position(|local| local.symbol == call_binding.receiver)
+        .expect("receiver is one of the authenticated local declarations");
     let RawTree::LengthNode(call_node) = &block.stats[2] else {
         panic!("third stat is the selected Unit call")
     };
@@ -3601,7 +3647,7 @@ fn standalone_local_receiver_call_uses_the_original_frontend_receipt() {
         panic!("receiver selection uses one direct reference")
     };
     assert_eq!(receiver_reference.kind, AstRefKind::TermRefDirect);
-    assert_eq!(receiver_reference.address, local_addresses[0]);
+    assert_eq!(receiver_reference.address, local_addresses[receiver_index]);
     let [argument] = call.arguments.as_slice() else {
         panic!("set receives the second source formal once")
     };
@@ -3629,12 +3675,27 @@ fn standalone_local_receiver_call_uses_the_original_frontend_receipt() {
         panic!("Pair constructor result is the final expression")
     };
     let pair_result = pair_result.decode_apply().unwrap();
-    for (argument, local) in pair_result.arguments.iter().zip(&local_addresses) {
+    for (argument, binding) in pair_result
+        .arguments
+        .iter()
+        .zip(formal_local_pair.arguments)
+    {
         let references = argument.ast_refs();
         let [reference] = references.as_slice() else {
             panic!("Pair arguments are direct local references")
         };
-        assert_eq!(reference.address, *local);
+        let dotty_tasty_pickler::FormalLocalConstructorCallArgumentOrigin::LocalValue {
+            symbol,
+            ..
+        } = binding.origin
+        else {
+            panic!("standalone final Pair retains two local origins")
+        };
+        let local_index = local_values
+            .iter()
+            .position(|local| local.symbol == symbol)
+            .expect("final Pair local origin is one of the initialized declarations");
+        assert_eq!(reference.address, local_addresses[local_index]);
     }
 
     let mut corruptions = Vec::new();
@@ -3642,8 +3703,13 @@ fn standalone_local_receiver_call_uses_the_original_frontend_receipt() {
     missing_receipt.call = None;
     corruptions.push(missing_receipt);
     let mut stale_receiver = bindings.clone();
+    let wrong_receiver = local_values
+        .iter()
+        .find(|local| local.symbol != call_binding.receiver)
+        .expect("the second local differs from the authenticated receiver")
+        .symbol;
     stale_receiver.call = Some(LocalReceiverUnitCallBinding {
-        source_receiver: call_binding.source_apply,
+        receiver: wrong_receiver,
         ..call_binding
     });
     corruptions.push(stale_receiver);
@@ -3681,7 +3747,7 @@ fn standalone_local_receiver_call_uses_the_original_frontend_receipt() {
             ..call_binding
         },
         LocalReceiverUnitCallBinding {
-            receiver: local_values[1].symbol,
+            receiver: wrong_receiver,
             ..call_binding
         },
         LocalReceiverUnitCallBinding {
@@ -3705,7 +3771,7 @@ fn standalone_local_receiver_call_uses_the_original_frontend_receipt() {
         ..call_binding
     });
     corruptions.push(detached_typed_root);
-    for corrupted in &corruptions {
+    for (index, corrupted) in corruptions.iter().enumerate() {
         let corrupted_plan = ClassStatePicklePlan {
             store: typer.store(),
             definitions: &definitions,
@@ -3727,8 +3793,79 @@ fn standalone_local_receiver_call_uses_the_original_frontend_receipt() {
             members: &members,
         };
         if let Ok(validated) = corrupted_plan.validate() {
-            assert!(validated.validate_method_bodies().is_err());
+            assert!(
+                validated.validate_method_bodies().is_err(),
+                "corrupted call receipt {index} unexpectedly validated"
+            );
         }
+    }
+    let mut aliased_source_ast = clone_untyped_ast(&parsed.ast);
+    let mut aliased_typed_ast = clone_typed_ast(typer.typed_ast());
+    let (TreeKind::Apply(source_pair), TreeKind::Apply(typed_pair)) = (
+        &parsed.ast.get(source_result).kind,
+        &typer.typed_ast().get(typed_result).kind,
+    ) else {
+        panic!("final Pair roots remain original applications")
+    };
+    let first_source_argument_name = match &parsed.ast.get(source_pair.args[0]).kind {
+        TreeKind::Ident(ident) => ident.name,
+        _ => panic!("first Pair argument remains an Ident"),
+    };
+    let second_source_argument = aliased_source_ast.get_mut(source_pair.args[1]);
+    let TreeKind::Ident(second_source_ident) = &mut second_source_argument.kind else {
+        panic!("second Pair argument remains an Ident")
+    };
+    second_source_ident.name = first_source_argument_name;
+    let first_typed_argument_type = typer.typed_ast().get(typed_pair.args[0]).ty;
+    let second_typed_argument = aliased_typed_ast.get_mut(typed_pair.args[1]);
+    second_typed_argument.ty = first_typed_argument_type;
+    let TreeKind::Ident(second_typed_ident) = &mut second_typed_argument.kind else {
+        panic!("second typed Pair argument remains an Ident")
+    };
+    second_typed_ident.name = first_source_argument_name;
+    let FormalLocalConstructorCallArgumentBinding {
+        source_argument: aliased_source_argument,
+        typed_argument: aliased_typed_argument,
+        ..
+    } = formal_local_pair.arguments[1];
+    let first_local_symbol = local_values[receiver_index].symbol;
+    let mut aliased_bindings = bindings.clone();
+    aliased_bindings.pair = FormalLocalConstructorCallPairBinding {
+        arguments: [
+            formal_local_pair.arguments[0],
+            FormalLocalConstructorCallArgumentBinding {
+                source_argument: aliased_source_argument,
+                typed_argument: aliased_typed_argument,
+                origin: FormalLocalConstructorCallArgumentOrigin::LocalValue {
+                    symbol: first_local_symbol,
+                    result_type: first_typed_argument_type,
+                },
+            },
+        ],
+        ..formal_local_pair
+    };
+    let aliased_pair_plan = ClassStatePicklePlan {
+        store: typer.store(),
+        definitions: &definitions,
+        source_ast: &aliased_source_ast,
+        typed_ast: &aliased_typed_ast,
+        source_index: &source_index,
+        typed_bindings: &aliased_bindings,
+        source: SourceMetadata {
+            id: source_id,
+            name: "LocalReceiverCall.scala".to_owned(),
+        },
+        class: factory,
+        class_tree: factory_tree,
+        constructor: PrimaryConstructorInputPlan {
+            symbol: constructor,
+            source_tree: factory_template.constructor,
+            parameter_clauses: constructor_clauses.clone(),
+        },
+        members: &members,
+    };
+    if let Ok(validated) = aliased_pair_plan.validate() {
+        assert!(validated.validate_method_bodies().is_err());
     }
     let mut wrong_unit_ast = clone_typed_ast(typer.typed_ast());
     wrong_unit_ast.get_mut(call_binding.typed_apply).ty = definitions.int;
@@ -3765,6 +3902,7 @@ fn standalone_local_receiver_call_uses_the_original_frontend_receipt() {
     .expect_err("paired publication remains gated for the three-stat body");
     assert!(matches!(paired, PairedPlanError::BatchUnit { phase, .. }
         if phase == "cross-class constructor-call identity proof"));
+    candidate.bytes().to_vec()
 }
 
 #[test]
