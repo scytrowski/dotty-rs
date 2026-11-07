@@ -71,59 +71,80 @@ The matrix keeps wrong-call diagnostics at their measured frontend stages and co
 
 ## Integrated release-gate evidence for issue #2170
 
-This appendix closes the final tests/docs gate against integration base
-`89f81940fc538a7b24323b82b9415cdb6a7c5404`, which contains reviewed merges of
-#2164 through #2169. Those prerequisite review and merge receipts remain
-historical provenance; the checks in this table are the candidate's own
-integrated-head evidence. The tested Scala input is the unchanged
-`LocalReceiverCall.scala` above (SHA-256
-`d00efdafda78682532599fbd9017a2037d1579241fa388c744f8f58d13b42eb8`), and the
-Java fixture client is `RuntimeProbe.java` (SHA-256
-`d02400bbd69140197a8948c3074cd61d38a077e9b2283102a6f00573c8ecfc2d`). The
-strict consumer job pins Scala 3.9.0 source revision
-`777528f19a58e794c9954a42f433373472ec57f8`, its compiler artifact SHA-256
-`3e2c09a5ca6cef17a55f2f66e123815f9c4ea061fce20d0e9d2371989405a61a`, Rust
-1.98.1 and Temurin JDK 21.0.13+9.0.LTS.
+### Frozen base and prerequisite receipts
 
-| Acceptance contract | Integrated regression/evidence | Result |
+The integrated base is `89f81940fc538a7b24323b82b9415cdb6a7c5404`. Each prerequisite below has a published `READY_FOR_MERGE` review on the same head that was merged. These are stable prerequisite receipts; they do not certify this final gate's CI.
+
+| Issue | PR | Reviewed head | READY_FOR_MERGE review | Merge commit (UTC) |
+| --- | --- | --- | --- | --- |
+| #2164 | [#2171](https://github.com/scytrowski/dotty-rs/pull/2171) | [`7eb7eda2b6b6eafda2b0989be907527f7035b38d`](https://github.com/scytrowski/dotty-rs/commit/7eb7eda2b6b6eafda2b0989be907527f7035b38d) | [review](https://github.com/scytrowski/dotty-rs/pull/2171#pullrequestreview-5807089636) | [`1e4d48bcaac479384fd2e830a9f928daee27d402`](https://github.com/scytrowski/dotty-rs/commit/1e4d48bcaac479384fd2e830a9f928daee27d402), 2026-11-06 21:31:26 |
+| #2165 | [#2172](https://github.com/scytrowski/dotty-rs/pull/2172) | [`28e693809bd9ef82ae70cb1dc5c93da349ecd4bd`](https://github.com/scytrowski/dotty-rs/commit/28e693809bd9ef82ae70cb1dc5c93da349ecd4bd) | [review](https://github.com/scytrowski/dotty-rs/pull/2172#pullrequestreview-5807843186) | [`c1954485ac382b1d0c710d1f2e974f1c639e4ca5`](https://github.com/scytrowski/dotty-rs/commit/c1954485ac382b1d0c710d1f2e974f1c639e4ca5), 2026-11-07 00:07:50 |
+| #2166 | [#2173](https://github.com/scytrowski/dotty-rs/pull/2173) | [`11d902771bd918817c3096b622d9957cb94a516d`](https://github.com/scytrowski/dotty-rs/commit/11d902771bd918817c3096b622d9957cb94a516d) | [review](https://github.com/scytrowski/dotty-rs/pull/2173#pullrequestreview-5809387128) | [`3a92a8a6e292f14ed5deebf59bf4da624ce0bcd8`](https://github.com/scytrowski/dotty-rs/commit/3a92a8a6e292f14ed5deebf59bf4da624ce0bcd8), 2026-11-07 02:08:57 |
+| #2167 | [#2174](https://github.com/scytrowski/dotty-rs/pull/2174) | [`71c8c7e2a6d64d022dd49825a45f41865d1fcdfe`](https://github.com/scytrowski/dotty-rs/commit/71c8c7e2a6d64d022dd49825a45f41865d1fcdfe) | [review](https://github.com/scytrowski/dotty-rs/pull/2174#pullrequestreview-5809729576) | [`0478e877de638f8b9a27bb392f234593babcc991`](https://github.com/scytrowski/dotty-rs/commit/0478e877de638f8b9a27bb392f234593babcc991), 2026-11-07 10:34:34 |
+| #2168 | [#2177](https://github.com/scytrowski/dotty-rs/pull/2177) | [`73d29488ed122b6979eade0c5d5c9fbd714f1b0f`](https://github.com/scytrowski/dotty-rs/commit/73d29488ed122b6979eade0c5d5c9fbd714f1b0f) | [review](https://github.com/scytrowski/dotty-rs/pull/2177#pullrequestreview-5812269655) | [`8c73292d054ad5df9960539718e441ecec8a7ae6`](https://github.com/scytrowski/dotty-rs/commit/8c73292d054ad5df9960539718e441ecec8a7ae6), 2026-11-07 12:57:01 |
+| #2169 | [#2178](https://github.com/scytrowski/dotty-rs/pull/2178) | [`a267714ecd8c51159dcdd7c66e5f9f1ea3c74289`](https://github.com/scytrowski/dotty-rs/commit/a267714ecd8c51159dcdd7c66e5f9f1ea3c74289) | [review](https://github.com/scytrowski/dotty-rs/pull/2178#pullrequestreview-5815019092) | [`89f81940fc538a7b24323b82b9415cdb6a7c5404`](https://github.com/scytrowski/dotty-rs/commit/89f81940fc538a7b24323b82b9415cdb6a7c5404), 2026-11-07 21:33:02 |
+
+### Consumer-to-producer mapping
+
+Both consumers compile the unchanged source bytes from `tests/fixtures/jvm_tasty_local_receiver_call/LocalReceiverCall.scala` (SHA-256 `d00efdafda78682532599fbd9017a2037d1579241fa388c744f8f58d13b42eb8`). They call the producer with different source filenames and session IDs, so their emitted six-file batches and UUIDs are different. `RuntimeProbe.java` (`d02400bbd69140197a8948c3074cd61d38a077e9b2283102a6f00573c8ecfc2d`) is a historical Scala-oracle fixture only; it is not the Java client executed by the current Rust runtime test.
+
+| Consumer run | Producer filename / session | Actual client source |
 | --- | --- | --- |
-| One real source/typed session preserves two immutable local initializers, `first.set(secondSeed)` and final `Pair(first, second)` order | `local_receiver_call_audit_keeps_the_real_frontend_identities_and_first_failure`; canonical receiver symbol is `first`, selected method is `Counter.set`, and call source span is `[522, 543)` | Passed on the candidate worktree |
-| Authentic TASTy and JVM output retain the call and both original locals | `local_receiver_unit_call_emits_one_linked_six_artifact_batch`; TASTy `BLOCK` has `VALDEF, VALDEF, APPLY` stats and final `APPLY`; JVM `create(II)Lexample/Pair;` has one `Counter.set(I)V` invocation between local initialization and Pair construction, classfile major 65 and TASTy 28.9 links | Passed on the candidate worktree |
-| Fresh sessions reproduce all six artifacts for original and reversed declarations | `local_counter_set_runs_on_unchanged_rust_batch_under_strict_jdk21`; each source variant is emitted twice in independent sessions and all class/TASTy bytes compare equal | Passed on the candidate worktree |
-| The actual Rust output passes Java verification/runtime, identity, mutation-isolation and reversed-order controls | Same runtime test, with `DOTTY_CLASSFILE_REQUIRE_JDK=1`, Temurin 21.0.13; both primary and reversed variants report verifier/runtime success | Passed locally |
-| Existing no-call artifact bytes and bounded negative first failures remain intact | The six-artifact test compares `Counter` and `Pair` bytes with the inherited no-call batch; paired-path controls retain frontend, identity-proof and cross-contract rejection stages; runtime test retains verifier/linkage/publisher tamper controls | Passed in focused local tests |
-| Official Scala reader/consumer and all current strict shards execute fail-closed | `jvm_tasty_two_local_counter_set_scala_consumer`, strict inventory and aggregate job | Scala consumer passed locally; hosted four-shard workflow is required on the PR head. The current manifest validates 25 unique targets across four shards |
+| Java verifier/runtime | `LocalReceiverCall.scala`, primary `SourceId(21681)` and reversed `SourceId(21682)` | Embedded `HARNESS` in `tests/jvm_tasty_local_receiver_call_runtime.rs`, compiled as `JavaConsumer.java`; SHA-256 `ac193ace840cff262983583ebbcae0f87f90151abf1021390b7c3ec7273e4cef` |
+| Scala source consumer | `PairFactory.scala`, primary `SourceId(21690)` and reversed `SourceId(21691)` | `tests/fixtures/jvm_tasty_two_local_counter_set/Consumer.scala`; SHA-256 `5d9d77abad4111fd49e135b9bdd044e14a177d35440852de89440d8c6d50e61e` |
 
-The focused local run used the exact Java gate with `DOTTY_CLASSFILE_REQUIRE_JDK=1`
-and the source-built Scala consumer with `DOTTY_REQUIRE_SCALA_TASTY_TWO_LOCAL_COUNTER_SET_CONSUMER=1`
-and `DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1`. The compiler source checkout was
-verified at `777528f19a58e794c9954a42f433373472ec57f8`; its staged compiler
-reported `3.9.0-bin-SNAPSHOT-git-777528f`, SHA-256
-`8972d966eae9b43346b89e4f3cf608ce9ff90a20764dca8f8d5c13d98587c2e6`. The
-runtime consumer used Temurin 21.0.13 (`java` SHA-256
-`9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155`), the
-Scala producer source SHA above and generated client SHA-256
-`5d9d77abad4111fd49e135b9bdd044e14a177d35440852de89440d8c6d50e61e`. The
-strict inventory validator passed for all 25 registered targets and four
-shards. The final PR description links workflow run and job IDs for the final
-tested head; no historical prerequisite check is substituted for those
-results.
+The Java primary and reversed output batches are emitted and hashed by `local_counter_set_runs_on_unchanged_rust_batch_under_strict_jdk21`. The Scala primary and reversed batches are emitted and consumed by `official_scala_consumes_two_local_counter_set_rust_artifacts`. In each table, the class entry's UUID is the UUID in its matching sidecar header; the tests validate this link directly.
 
-For the runtime regression's original source session (`SourceId(21681)`),
-SHA-256 hashes and linked TASTy UUIDs are emitted by the test itself. The
-observed primary batch was:
-
-| Artifact | SHA-256 | Linked TASTy UUID |
+| Java consumer, `LocalReceiverCall.scala` | SHA-256 | Linked TASTy UUID |
 | --- | --- | --- |
-| `example/Counter.class` | `00d8c580a7de082187963ef68da3ed2c0fc434c8ffd7eb74fc3b4fc284d15f4b` | `00c921ab9a680cac0000000000008193` |
-| `example/Counter.tasty` | `a810aae114aa178ae6d46ea0186cad24b2accbeb1f60a261ff86bc0ca6bddebc` | `00c921ab9a680cac0000000000008193` |
-| `example/Pair.class` | `7c013db083dec06742cb25c9d5e8d624a056f6f7d76d9b19ab1691b99db9cb37` | `00422de52e20a3f00000000000008198` |
-| `example/Pair.tasty` | `0f4ba6c53d4b71b058db4a606753ad2afdbc854a05f2a57d356e51f3066a8652` | `00422de52e20a3f00000000000008198` |
-| `example/PairFactory.class` | `b9cb66f944343b13bd166d2ac85025d2cd203608830658e6fe3a410100570286` | `008977b0069599cb000000000000819d` |
-| `example/PairFactory.tasty` | `18c9f230a0c519810e13e50dcae8adff351c20348a30aef903078df231e8559a` | `008977b0069599cb000000000000819d` |
+| Primary `example/Counter.class` | `00d8c580a7de082187963ef68da3ed2c0fc434c8ffd7eb74fc3b4fc284d15f4b` | `00c921ab9a680cac0000000000008193` |
+| Primary `example/Counter.tasty` | `a810aae114aa178ae6d46ea0186cad24b2accbeb1f60a261ff86bc0ca6bddebc` | `00c921ab9a680cac0000000000008193` |
+| Primary `example/Pair.class` | `7c013db083dec06742cb25c9d5e8d624a056f6f7d76d9b19ab1691b99db9cb37` | `00422de52e20a3f00000000000008198` |
+| Primary `example/Pair.tasty` | `0f4ba6c53d4b71b058db4a606753ad2afdbc854a05f2a57d356e51f3066a8652` | `00422de52e20a3f00000000000008198` |
+| Primary `example/PairFactory.class` | `b9cb66f944343b13bd166d2ac85025d2cd203608830658e6fe3a410100570286` | `008977b0069599cb000000000000819d` |
+| Primary `example/PairFactory.tasty` | `18c9f230a0c519810e13e50dcae8adff351c20348a30aef903078df231e8559a` | `008977b0069599cb000000000000819d` |
+| Reversed `example/Counter.class` | `00d8c580a7de082187963ef68da3ed2c0fc434c8ffd7eb74fc3b4fc284d15f4b` | `00c921ab9a680cac0000000000008193` |
+| Reversed `example/Counter.tasty` | `a810aae114aa178ae6d46ea0186cad24b2accbeb1f60a261ff86bc0ca6bddebc` | `00c921ab9a680cac0000000000008193` |
+| Reversed `example/Pair.class` | `7c013db083dec06742cb25c9d5e8d624a056f6f7d76d9b19ab1691b99db9cb37` | `00422de52e20a3f00000000000008198` |
+| Reversed `example/Pair.tasty` | `0f4ba6c53d4b71b058db4a606753ad2afdbc854a05f2a57d356e51f3066a8652` | `00422de52e20a3f00000000000008198` |
+| Reversed `example/PairFactory.class` | `8e1a18a0a329c6a44165ec3a1e5b93c090423f5d631482df35f49dc1dcc09406` | `008e2c12fc87a4cb000000000000819d` |
+| Reversed `example/PairFactory.tasty` | `3b57917fe8a1966fc4af671aa620693c8c8fdc18b202a5be1e2ee2a0ca6c99e3` | `008e2c12fc87a4cb000000000000819d` |
 
-These hashes are measurements from the final gate test, not checked-in golden
-outputs. The reversed declaration variant keeps the `Counter` and `Pair`
-artifacts identical and produces its own deterministic `PairFactory` class and
-TASTy hashes, printed by the same test. Unsupported forms remain those listed
-in the bounded controls above; this release gate adds no producer behavior.
+| Scala consumer, `PairFactory.scala` | SHA-256 | Linked TASTy UUID |
+| --- | --- | --- |
+| Primary `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | `008071c3c00968ac0000000000008193` |
+| Primary `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | `008071c3c00968ac0000000000008193` |
+| Primary `example/Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` | `000b7d8d7441c7f00000000000008198` |
+| Primary `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | `000b7d8d7441c7f00000000000008198` |
+| Primary `example/PairFactory.class` | `db036a44f33a34661e2849215ededc022c4f8fb01bb89c7bc02009a4d7125f0d` | `00c027d85cf4fdcb000000000000819d` |
+| Primary `example/PairFactory.tasty` | `3193a268004e9b6481789c34b4fcd70d03c94324c511dafdd5a62d7abbc3a2ca` | `00c027d85cf4fdcb000000000000819d` |
+| Reversed `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | `008071c3c00968ac0000000000008193` |
+| Reversed `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | `008071c3c00968ac0000000000008193` |
+| Reversed `example/Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` | `000b7d8d7441c7f00000000000008198` |
+| Reversed `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | `000b7d8d7441c7f0000000000008198` |
+| Reversed `example/PairFactory.class` | `59bf043cf27d266a5b23de4f99be1d031d219a02a649b62d9bddb56560415034` | `00c77c7aa6e6c0cb000000000000819d` |
+| Reversed `example/PairFactory.tasty` | `7086eb507918f67003edd23a18c362ac47d695eeaa8e2d468efe853e5243ebc4` | `00c77c7aa6e6c0cb000000000000819d` |
+
+### Measured negative-control first failures
+
+These are the observed first rejection stages from the integrated Java and Scala harnesses, not inferred producer guarantees. The byte-level tamper tests separately assert that Rust artifact bytes are unchanged after external consumers run.
+
+| Control | First observed failure |
+| --- | --- |
+| Java batch: wrong receiver, wrong seed, skipped setter or duplicate setter | Runtime semantic assertion: `create(7,3) expected 3/3` |
+| Java batch: wrong opcode/owner/descriptor, undersized stack/locals or call before receiver initialization | JVM verification under `-Xverify:all`: `VerifyError` |
+| Java batch: missing setter method / missing `Counter.class` | Method resolution `NoSuchMethodError` / class resolution `NoClassDefFoundError` |
+| Scala consumer: missing or misplaced `.tasty` sidecar | Scala binary loader: class file expected its `.tasty` sidecar; sidecar missing at the required path |
+| Scala consumer: corrupt sidecar / mismatched classfile UUID | Scala TASTy parser reports broken file (`ArrayIndexOutOfBoundsException`) / rejects out-of-sync TASTy UUID |
+| Scala consumer: invalid BLOCK target `TERMREF` | `readTasty`: `TreeWithoutOwner` |
+| Rust source: `first.set()` / `first.set(true)` | Method body typing: `ApplicationArityMismatch` / `ApplicationArgumentTypeMismatch` |
+| Rust source: extra setter, wrong formal or moved call | Cross-class identity proof: `SourceShape` for unsupported statement/argument; or JVM/TASTy contract validation: `TastyPlan(BodyType)` for the moved call |
+| Rust source: non-Unit setter expression | Cross-class identity proof: `Counter.set statement must be one regular one-argument Apply` |
+
+### Tool and final-head status
+
+The Scala 3.9 source checkout was built from revision `777528f19a58e794c9954a42f433373472ec57f8`. The staged compiler reported `3.9.0-bin-SNAPSHOT-git-777528f` with SHA-256 `8972d966eae9b43346b89e4f3cf608ce9ff90a20764dca8f8d5c13d98587c2e6`; the official compiler artifact used by the pinned strict workflow is SHA-256 `3e2c09a5ca6cef17a55f2f66e123815f9c4ea061fce20d0e9d2371989405a61a`. Rust is 1.98.1. The Scala runtime JAR hashes are `9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba` (`scala3-library_3`) and `b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd` (`scala-library`). Temurin JDK 21.0.13 `java` SHA-256 is `9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155`.
+
+The local workspace run on review head `27d52766c856b5214c9291ebd117c56f124e2b9c` passed the locked workspace tests, Clippy, rustdoc, formatting, frontend boundary guard, strict inventory (25 unique targets/four shards), mandatory Java 21 gate and pinned Scala consumer (9/9 tests). Those local checks precede this documentation correction and are not final-head CI receipts. The current final-head check outcomes and direct workflow/job URLs are recorded in the [exact-head PR evidence comment](https://github.com/scytrowski/dotty-rs/pull/2185#issuecomment-6713923017); mandatory hosted checks stay pending until their actual completion. No earlier prerequisite or historical CI pass is counted as final release success.
+
+Unsupported language forms remain those in the bounded controls above. This PR adds acceptance evidence only and changes no production semantic, JVM, TASTy or publisher behavior.
