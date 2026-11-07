@@ -68,3 +68,62 @@ Each control was compiled with Scala 3.9.0 and separately sent through the real 
 | Add `second.set(firstSeed)` as a second call | Accepted | Cross-class constructor-call identity proof: same `SourceShape` rejection |
 
 The matrix keeps wrong-call diagnostics at their measured frontend stages and confirms that ordinary Scala acceptance of the other controls does not imply paired Rust support. The complete fixture, artifact snapshots and paired identity assertions are focused audit coverage; no general statement framework or production acceptance change was added.
+
+## Integrated release-gate evidence for issue #2170
+
+This appendix closes the final tests/docs gate against integration base
+`89f81940fc538a7b24323b82b9415cdb6a7c5404`, which contains reviewed merges of
+#2164 through #2169. Those prerequisite review and merge receipts remain
+historical provenance; the checks in this table are the candidate's own
+integrated-head evidence. The tested Scala input is the unchanged
+`LocalReceiverCall.scala` above (SHA-256
+`d00efdafda78682532599fbd9017a2037d1579241fa388c744f8f58d13b42eb8`), and the
+Java fixture client is `RuntimeProbe.java` (SHA-256
+`d02400bbd69140197a8948c3074cd61d38a077e9b2283102a6f00573c8ecfc2d`). The
+strict consumer job pins Scala 3.9.0 source revision
+`777528f19a58e794c9954a42f433373472ec57f8`, its compiler artifact SHA-256
+`3e2c09a5ca6cef17a55f2f66e123815f9c4ea061fce20d0e9d2371989405a61a`, Rust
+1.98.1 and Temurin JDK 21.0.13+9.0.LTS.
+
+| Acceptance contract | Integrated regression/evidence | Result |
+| --- | --- | --- |
+| One real source/typed session preserves two immutable local initializers, `first.set(secondSeed)` and final `Pair(first, second)` order | `local_receiver_call_audit_keeps_the_real_frontend_identities_and_first_failure`; canonical receiver symbol is `first`, selected method is `Counter.set`, and call source span is `[522, 543)` | Passed on the candidate worktree |
+| Authentic TASTy and JVM output retain the call and both original locals | `local_receiver_unit_call_emits_one_linked_six_artifact_batch`; TASTy `BLOCK` has `VALDEF, VALDEF, APPLY` stats and final `APPLY`; JVM `create(II)Lexample/Pair;` has one `Counter.set(I)V` invocation between local initialization and Pair construction, classfile major 65 and TASTy 28.9 links | Passed on the candidate worktree |
+| Fresh sessions reproduce all six artifacts for original and reversed declarations | `local_counter_set_runs_on_unchanged_rust_batch_under_strict_jdk21`; each source variant is emitted twice in independent sessions and all class/TASTy bytes compare equal | Passed on the candidate worktree |
+| The actual Rust output passes Java verification/runtime, identity, mutation-isolation and reversed-order controls | Same runtime test, with `DOTTY_CLASSFILE_REQUIRE_JDK=1`, Temurin 21.0.13; both primary and reversed variants report verifier/runtime success | Passed locally |
+| Existing no-call artifact bytes and bounded negative first failures remain intact | The six-artifact test compares `Counter` and `Pair` bytes with the inherited no-call batch; paired-path controls retain frontend, identity-proof and cross-contract rejection stages; runtime test retains verifier/linkage/publisher tamper controls | Passed in focused local tests |
+| Official Scala reader/consumer and all current strict shards execute fail-closed | `jvm_tasty_two_local_counter_set_scala_consumer`, strict inventory and aggregate job | Scala consumer passed locally; hosted four-shard workflow is required on the PR head. The current manifest validates 25 unique targets across four shards |
+
+The focused local run used the exact Java gate with `DOTTY_CLASSFILE_REQUIRE_JDK=1`
+and the source-built Scala consumer with `DOTTY_REQUIRE_SCALA_TASTY_TWO_LOCAL_COUNTER_SET_CONSUMER=1`
+and `DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1`. The compiler source checkout was
+verified at `777528f19a58e794c9954a42f433373472ec57f8`; its staged compiler
+reported `3.9.0-bin-SNAPSHOT-git-777528f`, SHA-256
+`8972d966eae9b43346b89e4f3cf608ce9ff90a20764dca8f8d5c13d98587c2e6`. The
+runtime consumer used Temurin 21.0.13 (`java` SHA-256
+`9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155`), the
+Scala producer source SHA above and generated client SHA-256
+`5d9d77abad4111fd49e135b9bdd044e14a177d35440852de89440d8c6d50e61e`. The
+strict inventory validator passed for all 25 registered targets and four
+shards. The final PR description links workflow run and job IDs for the final
+tested head; no historical prerequisite check is substituted for those
+results.
+
+For the runtime regression's original source session (`SourceId(21681)`),
+SHA-256 hashes and linked TASTy UUIDs are emitted by the test itself. The
+observed primary batch was:
+
+| Artifact | SHA-256 | Linked TASTy UUID |
+| --- | --- | --- |
+| `example/Counter.class` | `00d8c580a7de082187963ef68da3ed2c0fc434c8ffd7eb74fc3b4fc284d15f4b` | `00c921ab9a680cac0000000000008193` |
+| `example/Counter.tasty` | `a810aae114aa178ae6d46ea0186cad24b2accbeb1f60a261ff86bc0ca6bddebc` | `00c921ab9a680cac0000000000008193` |
+| `example/Pair.class` | `7c013db083dec06742cb25c9d5e8d624a056f6f7d76d9b19ab1691b99db9cb37` | `00422de52e20a3f00000000000008198` |
+| `example/Pair.tasty` | `0f4ba6c53d4b71b058db4a606753ad2afdbc854a05f2a57d356e51f3066a8652` | `00422de52e20a3f00000000000008198` |
+| `example/PairFactory.class` | `b9cb66f944343b13bd166d2ac85025d2cd203608830658e6fe3a410100570286` | `008977b0069599cb000000000000819d` |
+| `example/PairFactory.tasty` | `18c9f230a0c519810e13e50dcae8adff351c20348a30aef903078df231e8559a` | `008977b0069599cb000000000000819d` |
+
+These hashes are measurements from the final gate test, not checked-in golden
+outputs. The reversed declaration variant keeps the `Counter` and `Pair`
+artifacts identical and produces its own deterministic `PairFactory` class and
+TASTy hashes, printed by the same test. Unsupported forms remain those listed
+in the bounded controls above; this release gate adds no producer behavior.
