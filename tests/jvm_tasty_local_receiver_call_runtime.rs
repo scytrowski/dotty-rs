@@ -4,6 +4,7 @@ use dotty_classfile::classfile::{ClassFile, Reader};
 use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
 use dotty_core::SourceId;
 use dotty_tasty::tasty::TastyFile;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SOURCE: &str = include_str!("fixtures/jvm_tasty_local_receiver_call/LocalReceiverCall.scala");
@@ -249,6 +250,45 @@ fn require_jdk_21() -> bool {
     false
 }
 
+struct TestDirectory(PathBuf);
+
+impl TestDirectory {
+    fn new(label: &str) -> Self {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "dotty-local-receiver-{}-{label}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&path).unwrap_or_else(|error| {
+            panic!("create isolated test directory {}: {error}", path.display())
+        });
+        Self(path)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TestDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn java_tool(name: &str, tmpdir: &Path) -> Command {
+    let mut command = Command::new(name);
+    let mut options = std::env::var("JAVA_TOOL_OPTIONS").unwrap_or_default();
+    if !options.is_empty() {
+        options.push(' ');
+    }
+    options.push_str(&format!("-Djava.io.tmpdir={}", tmpdir.display()));
+    command.env("JAVA_TOOL_OPTIONS", options);
+    command
+}
+
 fn sha256(path: &std::path::Path) -> String {
     let output = Command::new("sha256sum")
         .arg(path)
@@ -268,10 +308,8 @@ fn local_counter_set_runs_on_unchanged_rust_batch_under_strict_jdk21() {
     if !require_jdk_21() {
         return;
     }
-    let tmp = std::env::var_os("TMPDIR").expect("managed TMPDIR is required");
-    let root =
-        std::path::PathBuf::from(tmp).join(format!("local-receiver-call-{}", std::process::id()));
-    std::fs::create_dir_all(&root).unwrap();
+    let scratch = TestDirectory::new("runtime");
+    let root = scratch.path();
     let harness_src = root.join("harness-src");
     let harness_classes = root.join("harness-classes");
     std::fs::create_dir_all(&harness_src).unwrap();
@@ -415,7 +453,7 @@ fn local_counter_set_runs_on_unchanged_rust_batch_under_strict_jdk21() {
             [first_slot, second_slot],
             "Pair argument order follows semantic first/second locals"
         );
-        let javap = Command::new("javap")
+        let javap = java_tool("javap", root)
             .args(["-c", "-v", "-p", "-classpath"])
             .arg(&runtime)
             .arg("example.PairFactory")
@@ -437,7 +475,7 @@ fn local_counter_set_runs_on_unchanged_rust_batch_under_strict_jdk21() {
         ] {
             assert!(dump.contains(evidence), "javap omitted {evidence}:\n{dump}");
         }
-        let javac = Command::new("javac")
+        let javac = java_tool("javac", root)
             .args(["--release", "21", "-classpath"])
             .arg(&runtime)
             .arg("-d")
@@ -453,7 +491,7 @@ fn local_counter_set_runs_on_unchanged_rust_batch_under_strict_jdk21() {
         );
         let classpath =
             std::env::join_paths([harness_classes.as_path(), runtime.as_path()]).unwrap();
-        let java = Command::new("java")
+        let java = java_tool("java", root)
             .args(["-Xverify:all", "-ea", "-classpath"])
             .arg(classpath)
             .arg("example.JavaConsumer")
@@ -715,8 +753,6 @@ fn local_counter_set_runs_on_unchanged_rust_batch_under_strict_jdk21() {
 
 fn sha256_bytes(bytes: &[u8]) -> String {
     use std::io::Write;
-    let path = std::env::var_os("TMPDIR").expect("managed TMPDIR");
-    let file = std::path::PathBuf::from(path).join(format!("sha256-{}", std::process::id()));
     let mut output = Command::new("sha256sum")
         .arg("--tag")
         .arg("-")
@@ -726,7 +762,6 @@ fn sha256_bytes(bytes: &[u8]) -> String {
         .expect("sha256sum");
     output.stdin.take().unwrap().write_all(bytes).unwrap();
     let result = output.wait_with_output().unwrap();
-    let _ = file;
     assert!(result.status.success());
     String::from_utf8(result.stdout)
         .unwrap()
@@ -822,7 +857,7 @@ fn run_harness(
     runtime: &std::path::Path,
 ) -> std::process::Output {
     let classpath = std::env::join_paths([harness_classes, runtime]).unwrap();
-    Command::new("java")
+    java_tool("java", runtime)
         .args(["-Xverify:all", "-ea", "-classpath"])
         .arg(classpath)
         .arg("example.JavaConsumer")
