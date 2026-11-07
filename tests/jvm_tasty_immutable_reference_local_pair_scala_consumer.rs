@@ -25,6 +25,7 @@ use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const REQUIRE: &str = "DOTTY_REQUIRE_SCALA_TASTY_TWO_IMMUTABLE_REFERENCE_LOCALS_CONSUMER";
+const REQUIRE_COUNTER_SET: &str = "DOTTY_REQUIRE_SCALA_TASTY_TWO_LOCAL_COUNTER_SET_CONSUMER";
 const SCALA_REVISION: &str = "777528f19a58e794c9954a42f433373472ec57f8";
 const SOURCES: [&str; 2] = [
     include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactory.scala"),
@@ -38,6 +39,8 @@ const TWO_LOCAL_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
 const LOCAL_RECEIVER_CALL_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_local_receiver_call/LocalReceiverCall.scala");
+const COUNTER_SET_CLIENT: &str =
+    include_str!("fixtures/jvm_tasty_two_local_counter_set/Consumer.scala");
 const TWO_LOCAL_REVERSED_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocalsReversed.scala");
 const TWO_LOCAL_ALIAS_SOURCE: &str =
@@ -79,7 +82,20 @@ const TWO_LOCAL_FACTORY_SIGNATURE_CONTROLS: [(&str, &str); 3] = [
     ),
 ];
 
+fn is_counter_set_target() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .is_some_and(|name| name.starts_with("jvm_tasty_two_local_counter_set_scala_consumer-"))
+}
+
 fn required() -> bool {
+    if is_counter_set_target() {
+        return false;
+    }
     match std::env::var(REQUIRE).as_deref() {
         Ok("1") => true,
         Ok(value) => panic!("{REQUIRE} must equal 1 when set, got {value:?}"),
@@ -483,7 +499,12 @@ fn direct_termref_bytes(address: u32) -> Vec<u8> {
     bytes
 }
 
-fn change_termref_target(tasty_bytes: &[u8], address: u32, replacement: u32) -> Vec<u8> {
+fn change_termref_target(
+    tasty_bytes: &[u8],
+    address: u32,
+    replacement: u32,
+    reference_ordinal: usize,
+) -> Vec<u8> {
     let reference = direct_termref_bytes(address);
     let mut writer = Writer::default();
     writer.write_nat(replacement);
@@ -501,9 +522,13 @@ fn change_termref_target(tasty_bytes: &[u8], address: u32, replacement: u32) -> 
         .enumerate()
         .filter_map(|(offset, window)| (window == reference).then_some(offset))
         .collect::<Vec<_>>();
-    assert_eq!(matches.len(), 1, "one direct local reference");
+    assert!(
+        reference_ordinal < matches.len(),
+        "direct local reference #{reference_ordinal} exists among {} matching references",
+        matches.len()
+    );
     let mut changed = tasty_bytes.to_vec();
-    let offset = asts.offset + matches[0] + 1;
+    let offset = asts.offset + matches[reference_ordinal] + 1;
     changed[offset..offset + replacement.len()].copy_from_slice(&replacement);
     changed
 }
@@ -985,6 +1010,31 @@ fn rust_two_local_graph(
         );
     }
     (block_address, local_addresses, references)
+}
+
+fn method_parameter_addresses(tasty_bytes: &[u8], method_name: &str) -> Vec<u32> {
+    let tasty = TastyFile::parse_and_validate_scala_3_9(tasty_bytes).unwrap();
+    let index = tasty.ast_address_index().unwrap();
+    let method = index
+        .iter_nodes_with_tag(DEFDEF_TAG)
+        .find(|node| {
+            index
+                .get(node.offset as u32)
+                .and_then(|raw| raw.decode_defdef_body().ok())
+                .and_then(|body| tasty.names().render(body.name).ok())
+                .is_some_and(|name| name == method_name)
+        })
+        .unwrap();
+    index
+        .iter_nodes_with_tag(PARAM_TAG)
+        .filter(|node| {
+            std::iter::successors(Some(*node), |current| {
+                index.parent_of(current.offset as u32)
+            })
+            .any(|parent| parent.offset as u32 == method.offset as u32)
+        })
+        .map(|node| node.offset as u32)
+        .collect()
 }
 
 fn assert_two_local_body_types(tasty_bytes: &[u8], local_types: [&str; 2]) {
@@ -1653,7 +1703,7 @@ fn malformed_local_reference_probe(
     let target = local_address(factory.tasty_bytes(), "create");
     fs::write(
         classes.join(factory.tasty_path()),
-        change_termref_target(factory.tasty_bytes(), target, 127),
+        change_termref_target(factory.tasty_bytes(), target, 127, 0),
     )
     .unwrap();
     let client = case.join("Consumer.scala");
@@ -1695,6 +1745,7 @@ fn second_local_reference_negative_probes(
     root: &Path,
     batch: &PairedJvmTastyBatchArtifacts,
     client_source: &str,
+    producer_source: &str,
 ) {
     let factory = batch
         .classes()
@@ -1704,7 +1755,7 @@ fn second_local_reference_negative_probes(
     let locals = local_addresses(factory.tasty_bytes(), "create");
     assert_eq!(locals.len(), 2);
     assert_eq!(
-        source_contract_result(TWO_LOCAL_SOURCE, batch, None),
+        source_contract_result(producer_source, batch, None),
         Ok(()),
         "the authentic two-local graph satisfies its original source contract"
     );
@@ -1718,7 +1769,7 @@ fn second_local_reference_negative_probes(
         fs::create_dir_all(&classes).unwrap();
         fs::create_dir_all(&output_dir).unwrap();
         write_batch(&classes, batch);
-        let changed_tasty = change_termref_target(factory.tasty_bytes(), locals[1], replacement);
+        let changed_tasty = change_termref_target(factory.tasty_bytes(), locals[1], replacement, 0);
         let (block, changed_locals, changed_arguments) = rust_two_local_graph(
             &changed_tasty,
             ["first", "second"],
@@ -1731,7 +1782,7 @@ fn second_local_reference_negative_probes(
             assert_eq!(changed_locals, locals);
             assert_eq!(changed_arguments, [locals[0], locals[0]]);
             let contract_error = source_contract_result(
-                TWO_LOCAL_SOURCE,
+                producer_source,
                 batch,
                 Some((factory.tasty_path(), &changed_tasty)),
             )
@@ -1800,6 +1851,7 @@ fn malformed_local_body_probe(
     root: &Path,
     batch: &PairedJvmTastyBatchArtifacts,
     client_source: &str,
+    producer_source: &str,
 ) {
     let factory = batch
         .classes()
@@ -1817,7 +1869,7 @@ fn malformed_local_body_probe(
         ),
         (
             "invalid-block-target-termref",
-            change_termref_target(factory.tasty_bytes(), local, block),
+            change_termref_target(factory.tasty_bytes(), local, block, 0),
             "readTasty",
         ),
         (
@@ -1902,11 +1954,7 @@ fn malformed_local_body_probe(
             );
             let dump = plain(&String::from_utf8_lossy(&decompiled.stdout));
             let contract_error = source_contract_result(
-                if local_count > 1 {
-                    TWO_LOCAL_SOURCE
-                } else {
-                    SOURCES[0]
-                },
+                producer_source,
                 batch,
                 Some((factory.tasty_path(), &changed_tasty)),
             )
@@ -2050,8 +2098,12 @@ fn factory_signature_negative_probes(
             .lines()
             .find(|line| line.contains("[E"))
             .unwrap_or(&stderr);
+        let expected_first_failure = diagnostic.contains("[E007]")
+            || (label == "wrong-result-type"
+                && client_source.contains("first.leftValue()")
+                && diagnostic.contains("[E008]"));
         assert!(
-            diagnostic.contains("[E007]"),
+            expected_first_failure,
             "wrong first failure for {label}: {stderr}"
         );
         let distinguishes_mutation = match label {
@@ -2284,7 +2336,7 @@ fn official_scala_consumes_original_rust_immutable_local_pair_batch() {
         if i == 0 {
             sidecar_negative_probes(&scala, &root, &batch, CLIENTS[0]);
             malformed_local_reference_probe(&scala, &root, &batch, CLIENTS[0]);
-            malformed_local_body_probe(&scala, &root, &batch, CLIENTS[0]);
+            malformed_local_body_probe(&scala, &root, &batch, CLIENTS[0], SOURCES[0]);
             factory_signature_negative_probes(
                 &scala,
                 &root,
@@ -2567,8 +2619,14 @@ fn official_scala_consumes_original_rust_two_immutable_local_artifacts() {
             );
             sidecar_negative_probes(&scala, &root, &batch, TWO_LOCAL_CLIENT);
             malformed_local_reference_probe(&scala, &root, &batch, TWO_LOCAL_CLIENT);
-            second_local_reference_negative_probes(&scala, &root, &batch, TWO_LOCAL_CLIENT);
-            malformed_local_body_probe(&scala, &root, &batch, TWO_LOCAL_CLIENT);
+            second_local_reference_negative_probes(
+                &scala,
+                &root,
+                &batch,
+                TWO_LOCAL_CLIENT,
+                TWO_LOCAL_SOURCE,
+            );
+            malformed_local_body_probe(&scala, &root, &batch, TWO_LOCAL_CLIENT, TWO_LOCAL_SOURCE);
             factory_signature_negative_probes(
                 &scala,
                 &root,
@@ -2640,7 +2698,186 @@ object CounterSetConsumer:
 }
 
 #[test]
+fn official_scala_consumes_two_local_counter_set_rust_artifacts() {
+    if !is_counter_set_target() {
+        return;
+    }
+    match std::env::var(REQUIRE_COUNTER_SET).as_deref() {
+        Ok("1") => {}
+        Ok(value) => panic!("{REQUIRE_COUNTER_SET} must equal 1 when set, got {value:?}"),
+        Err(std::env::VarError::NotPresent) => return,
+        Err(error) => panic!("read {REQUIRE_COUNTER_SET}: {error}"),
+    }
+    let scala = Scala::required();
+    let root = task_dir();
+    fs::create_dir_all(&root).unwrap();
+    let reversed = LOCAL_RECEIVER_CALL_SOURCE.replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
+        "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
+    );
+    assert_ne!(reversed, LOCAL_RECEIVER_CALL_SOURCE);
+    for (index, source) in [LOCAL_RECEIVER_CALL_SOURCE, reversed.as_str()]
+        .into_iter()
+        .enumerate()
+    {
+        let source_id = 21690 + index as u32;
+        let batch = emit_paired_jvm_tasty_batch(
+            source,
+            "PairFactory.scala",
+            SourceId::from_index(source_id),
+        )
+        .expect("Rust emits two-local Counter.set TASTy");
+        assert_eq!(batch.classes().len(), 3);
+        compile_and_run(
+            &scala,
+            &root,
+            &batch,
+            source,
+            COUNTER_SET_CLIENT,
+            "client.Consumer",
+            source_id,
+        );
+        let producer = root.join(format!("original-{source_id}"));
+        inspect_rust_two_local_batch(
+            &scala,
+            &root,
+            &producer,
+            if index == 0 {
+                ["first", "second"]
+            } else {
+                ["second", "first"]
+            },
+            [0, 1],
+        );
+        if index == 0 {
+            let producer = root.join(format!("original-{source_id}"));
+            lookup_probes(
+                &scala,
+                &root,
+                &batch,
+                "create",
+                "(II)Lexample/Pair;",
+                "new PairFactory().{method}(7, 3)",
+            );
+            sidecar_negative_probes(&scala, &root, &batch, TWO_LOCAL_CLIENT);
+            malformed_local_reference_probe(&scala, &root, &batch, TWO_LOCAL_CLIENT);
+            second_local_reference_negative_probes(&scala, &root, &batch, TWO_LOCAL_CLIENT, source);
+            malformed_local_body_probe(&scala, &root, &batch, TWO_LOCAL_CLIENT, source);
+            factory_signature_negative_probes(
+                &scala,
+                &root,
+                &batch,
+                COUNTER_SET_CLIENT,
+                "client.Consumer",
+                &TWO_LOCAL_FACTORY_SIGNATURE_CONTROLS,
+            );
+            abi_descriptor_negative_probes(
+                &scala,
+                &root,
+                &batch,
+                "(II)Lexample/Pair;",
+                COUNTER_SET_CLIENT,
+                "client.Consumer",
+            );
+
+            let factory_tasty = producer.join("example/PairFactory.tasty");
+            let decompiled = plain(&String::from_utf8_lossy(
+                &output(scala.command().arg("-decompile").arg(&factory_tasty)).stdout,
+            ));
+            assert!(decompiled.contains("first.set(secondSeed)"), "{decompiled}");
+            assert!(
+                decompiled.contains("new example.Pair(first, second)"),
+                "{decompiled}"
+            );
+            let printed = plain(&String::from_utf8_lossy(
+                &output(scala.command().arg("-print-tasty").arg(&factory_tasty)).stdout,
+            ));
+            let factory_bytes = fs::read(&factory_tasty).unwrap();
+            let (_, local_addresses, _) =
+                rust_two_local_graph(&factory_bytes, ["first", "second"], Some([0, 1]));
+            let selected_set = "set[Signed Signature(List(scala.Int),scala.Unit) @set]";
+            let set_offset = printed
+                .rfind(selected_set)
+                .expect("selected intermediate Counter.set(Int): Unit application");
+            let attributes_offset = set_offset + printed[set_offset..].find("Attributes").unwrap();
+            let set_tree = &printed[set_offset..attributes_offset];
+            let receiver_offset = set_tree
+                .find(&format!("TERMREFdirect {}", local_addresses[0]))
+                .expect("selected Counter.set receiver points to first local");
+            let second_seed_offset = set_tree
+                .find(&format!(
+                    "TERMREFdirect {}",
+                    method_parameter_addresses(&factory_bytes, "create")[1]
+                ))
+                .expect("selected Counter.set argument points to secondSeed formal");
+            assert!(
+                receiver_offset < second_seed_offset,
+                "the selected set APPLY has receiver then argument references: {set_tree}"
+            );
+        }
+    }
+
+    let wrong_unit_call =
+        LOCAL_RECEIVER_CALL_SOURCE.replace("first.set(secondSeed)", "first.get()");
+    for (ordinal, (label, source, expected_call)) in [
+        ("missing-unit-stat", TWO_LOCAL_SOURCE, None),
+        (
+            "non-unit-stat",
+            wrong_unit_call.as_str(),
+            Some("first.get()"),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let source_id = 21700 + ordinal as u32;
+        let malformed = emit_paired_jvm_tasty_batch(
+            source,
+            "PairFactory.scala",
+            SourceId::from_index(source_id),
+        );
+        if label == "non-unit-stat" {
+            let producer_error =
+                malformed.expect_err("Rust source validation rejects a non-Unit Counter stat");
+            let diagnostic = format!("{producer_error:?}");
+            assert!(
+                diagnostic.contains("Counter.set statement must be one regular one-argument Apply"),
+                "unexpected producer rejection for non-Unit stat: {diagnostic}"
+            );
+            eprintln!(
+                "RUST_SOURCE_REJECTED {label} before emission at cross-class constructor-call identity proof: {diagnostic}"
+            );
+            continue;
+        }
+        let malformed = malformed.expect("Rust emits the missing Unit stat control");
+        let contract_error = source_contract_result(LOCAL_RECEIVER_CALL_SOURCE, &malformed, None)
+            .expect_err("the required Unit call source rejects each body control");
+        assert!(
+            contract_error.contains("TASTy plan identity")
+                && contract_error.contains("decoded sidecar bytes differ"),
+            "{label} must fail source-authenticated plan identity: {contract_error}"
+        );
+        let case = root.join(format!("source-contract-{label}-{source_id}"));
+        fs::create_dir_all(&case).unwrap();
+        write_batch(&case, &malformed);
+        let factory_tasty = case.join("example/PairFactory.tasty");
+        let decompiled = output(scala.command().arg("-decompile").arg(&factory_tasty));
+        let dump = plain(&String::from_utf8_lossy(&decompiled.stdout));
+        match expected_call {
+            Some(call) => assert!(dump.contains(call), "{dump}"),
+            None => assert!(!dump.contains("first.set("), "{dump}"),
+        }
+        eprintln!(
+            "SCALA_ACCEPTED_SOURCE_CONTRACT_REJECTED {label} -decompile=accepted; source-contract={contract_error}"
+        );
+    }
+}
+
+#[test]
 fn immutable_local_pair_required_mode_does_not_skip_when_configuration_is_missing() {
+    if is_counter_set_target() {
+        return;
+    }
     if std::env::var_os(REQUIRE).as_deref() != Some(std::ffi::OsStr::new("1")) {
         return;
     }
