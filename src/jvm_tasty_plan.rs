@@ -24,11 +24,11 @@ use dotty_tasty_pickler::{
     ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan,
     DirectFormalConstructorCallPairBinding, FormalLocalConstructorCallArgumentBinding,
     FormalLocalConstructorCallArgumentOrigin, FormalLocalConstructorCallPairBinding,
-    LocalCounterInitializerBinding, LocalValueBinding, NestedConstructorCallBinding,
-    NestedConstructorCallPairBinding, OrderedConstructorCallArgumentBinding,
-    OrderedConstructorCallArgumentOrigin, OrderedConstructorCallArgumentPairBinding, PickleError,
-    PlannedCallBinding, PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings,
-    ValidatedClassStatePlan,
+    LocalCounterInitializerBinding, LocalReceiverUnitCallBinding, LocalValueBinding,
+    NestedConstructorCallBinding, NestedConstructorCallPairBinding,
+    OrderedConstructorCallArgumentBinding, OrderedConstructorCallArgumentOrigin,
+    OrderedConstructorCallArgumentPairBinding, PickleError, PlannedCallBinding,
+    PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings, ValidatedClassStatePlan,
 };
 use dotty_typer::{SourceTyper, TyperError};
 
@@ -158,6 +158,7 @@ struct BatchSourceTypedBindings<'a> {
     planned_calls: Vec<(SourceId, SymbolId, PlannedCallBinding)>,
     local_values: Vec<(SourceId, SymbolId, LocalValueBinding)>,
     local_counter_initializers: Vec<(SourceId, SymbolId, LocalCounterInitializerBinding)>,
+    local_receiver_unit_calls: Vec<(SourceId, SymbolId, LocalReceiverUnitCallBinding)>,
     formal_local_constructor_call_pairs:
         Vec<(SourceId, SymbolId, FormalLocalConstructorCallPairBinding)>,
 }
@@ -279,6 +280,18 @@ impl SourceTypedBindings for BatchSourceTypedBindings<'_> {
                 (*proof_source == source && *proof_method == method).then_some(*binding)
             },
         )
+    }
+
+    fn local_receiver_unit_call(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<LocalReceiverUnitCallBinding> {
+        self.local_receiver_unit_calls
+            .iter()
+            .find_map(|(proof_source, proof_method, binding)| {
+                (*proof_source == source && *proof_method == method).then_some(*binding)
+            })
     }
 }
 
@@ -1114,18 +1127,30 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                         symbol: method,
                         source_tree: tree,
                     });
-                    // Project only the original immutable ValDefs in a bounded
-                    // constructor-result Block. The cross-class contract below
-                    // authenticates their initializer receipts and final uses.
+                    // Project only original immutable ValDefs in bounded
+                    // constructor-result Blocks. The cross-class contract
+                    // authenticates any third Counter.set stat and both local
+                    // initializer receipts before a producer plan is accepted.
                     let locals = match &parsed.ast.get(rhs).kind {
                         TreeKind::Block(block)
-                            if (1..=2).contains(&block.stats.len())
+                            if ((1..=2).contains(&block.stats.len())
                                 && block.stats.iter().all(|declaration| {
                                     matches!(
                                         parsed.ast.try_get(*declaration).map(|node| &node.kind),
                                         Some(TreeKind::ValDef(_))
                                     )
-                                }) =>
+                                })
+                                || (block.stats.len() == 3
+                                    && block.stats[..2].iter().all(|declaration| {
+                                        matches!(
+                                            parsed.ast.try_get(*declaration).map(|node| &node.kind),
+                                            Some(TreeKind::ValDef(_))
+                                        )
+                                    })
+                                    && matches!(
+                                        parsed.ast.try_get(block.stats[2]).map(|node| &node.kind),
+                                        Some(TreeKind::Apply(_))
+                                    ))) =>
                         {
                             let final_constructor_uses_local = matches!(
                                 parsed.ast.try_get(block.expr).map(|node| &node.kind),
@@ -1142,6 +1167,11 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                                 block
                                     .stats
                                     .iter()
+                                    .take(if block.stats.len() == 3 {
+                                        2
+                                    } else {
+                                        block.stats.len()
+                                    })
                                     .filter_map(|declaration| {
                                         typer
                                             .typed_local_binding_at(source_id, *declaration)
@@ -1644,6 +1674,29 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                         }))
                     }).collect()
                 }
+            })
+            .collect(),
+        local_receiver_unit_calls: constructor_call_proofs
+            .iter()
+            .filter_map(|proof| {
+                let call = proof.local_receiver_unit_call()?;
+                Some((
+                    proof.source_id(),
+                    proof.method(),
+                    LocalReceiverUnitCallBinding {
+                        source_apply: call.source_apply,
+                        typed_apply: call.typed_apply,
+                        source_select: call.source_select,
+                        typed_select: call.typed_select,
+                        source_receiver: call.source_receiver,
+                        typed_receiver: call.typed_receiver,
+                        source_argument: call.source_argument,
+                        typed_argument: call.typed_argument,
+                        receiver: call.receiver,
+                        method: call.method,
+                        argument_formal: call.argument_formal,
+                    },
+                ))
             })
             .collect(),
         formal_local_constructor_call_pairs: constructor_call_proofs
