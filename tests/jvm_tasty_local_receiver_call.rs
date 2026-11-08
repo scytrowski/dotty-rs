@@ -531,7 +531,7 @@ fn local_receiver_call_audit_keeps_the_real_frontend_identities_and_first_failur
 }
 
 #[test]
-fn ordered_two_call_audit_measures_the_first_paired_rejection_from_one_frontend_session() {
+fn ordered_two_call_audit_authenticates_source_before_unchanged_producer_rejection() {
     let source_id = SourceId::from_index(21870);
     let source_text = SourceText::new(TWO_CALL_TARGET).unwrap();
     let scanner = ContextualScanner::new(TWO_CALL_TARGET).unwrap();
@@ -758,16 +758,17 @@ fn ordered_two_call_audit_measures_the_first_paired_rejection_from_one_frontend_
     assert!(matches!(
         failed,
         Err(dotty::jvm_tasty_artifacts::PairedBatchArtifactError::Plan(
-            PairedPlanError::BatchUnit {
-                phase: "cross-class constructor-call identity proof",
-                reason
+            PairedPlanError::BatchClass {
+                phase: "JVM/TASTy cross-contract validation",
+                reason,
+                ..
             }
-        )) if reason.contains("factory body must be a direct Apply or a one- or two-local Block")
+        )) if reason.contains("BodyExpression")
     ));
 }
 
 #[test]
-fn ordered_two_call_controls_keep_valid_source_distinct_from_first_paired_rejection() {
+fn ordered_two_call_controls_authenticate_supported_source_before_producer_rejection() {
     let reversed_declarations = TWO_CALL_TARGET.replace(
         "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
         "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
@@ -793,6 +794,7 @@ fn ordered_two_call_controls_keep_valid_source_distinct_from_first_paired_reject
     assert_ne!(same_receiver, duplicate_call);
 
     for (name, source, source_id) in [
+        ("original", TWO_CALL_TARGET, 21879),
         (
             "reversed-declarations",
             reversed_declarations.as_str(),
@@ -806,13 +808,33 @@ fn ordered_two_call_controls_keep_valid_source_distinct_from_first_paired_reject
     ] {
         let result = paired_result(source, source_id);
         println!("ordered two-call control {name}: {result:?}");
-        assert!(matches!(
-            result,
-            Err(PairedPlanError::BatchUnit {
-                phase: "cross-class constructor-call identity proof",
-                ref reason
-            }) if reason.contains("factory body must be a direct Apply or a one- or two-local Block")
-        ));
+        if matches!(
+            name,
+            "original" | "reversed-declarations" | "swapped-call-order" | "same-receiver"
+        ) {
+            assert!(
+                matches!(
+                    result,
+                    Err(PairedPlanError::BatchClass {
+                        phase: "JVM/TASTy cross-contract validation",
+                        ref reason,
+                        ..
+                    }) if reason.contains("BodyExpression")
+                ),
+                "the ordered source proof passes before the unchanged producer rejects it: {result:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    result,
+                    Err(PairedPlanError::BatchUnit {
+                        phase: "cross-class constructor-call identity proof",
+                        ..
+                    })
+                ),
+                "malformed ordered call controls fail their source/typed proof: {result:?}"
+            );
+        }
     }
     for (name, source, source_id) in [
         ("wrong-arity", wrong_arity.as_str(), 21876),
@@ -863,6 +885,14 @@ fn local_receiver_call_controls_record_each_real_paired_path_result() {
         println!("control {name}: {result:?}");
         match name {
             "target" => assert!(result.is_ok(), "accepted bounded case: {result:?}"),
+            "second-call" => assert!(matches!(
+                result,
+                Err(PairedPlanError::BatchClass {
+                    phase: "JVM/TASTy cross-contract validation",
+                    ref reason,
+                    ..
+                }) if reason.contains("BodyExpression")
+            )),
             "wrong-arity" => assert!(
                 matches!(result, Err(PairedPlanError::BatchClass { phase: "method body typing", reason, .. }) if reason.contains("ApplicationArityMismatch"))
             ),
