@@ -2563,6 +2563,55 @@ mod tests {
         }
     }
 
+    struct InfoPairAuditClassPath {
+        fixture_root: PathBuf,
+        jdk: JdkClassPath,
+    }
+
+    impl ClassPathEntry for InfoPairAuditClassPath {
+        fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            let fixture = match name.as_internal() {
+                "me/cytrowski/tastyfixtures/semantic/InfoBase" => Some("InfoBase.tasty"),
+                "me/cytrowski/tastyfixtures/semantic/InfoWrapped" => Some("InfoWrapped.tasty"),
+                _ => None,
+            };
+            if let Some(fixture) = fixture {
+                let path = self.fixture_root.join(fixture);
+                let bytes = std::fs::read(&path).map_err(ClassPathError::from)?;
+                return Ok(Some(ClassResource::new(
+                    bytes,
+                    ClassFormat::Tasty,
+                    ClassOrigin::Directory(self.fixture_root.clone()),
+                )));
+            }
+            self.jdk.find_class(name)
+        }
+
+        fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            if package == ["me", "cytrowski", "tastyfixtures", "semantic"] {
+                return Ok(true);
+            }
+            self.jdk.contains_package(package)
+        }
+
+        fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            const FIXTURE_PACKAGE: &[&str] = &["me", "cytrowski", "tastyfixtures", "semantic"];
+            if FIXTURE_PACKAGE.starts_with(package) {
+                return Ok(true);
+            }
+            self.jdk.contains_package_prefix(package)
+        }
+    }
+
+    fn info_pair_audit_class_path() -> InfoPairAuditClassPath {
+        let fixture_root = fixture_path("../dotty-tasty-unpickler/tests/fixtures/semantic");
+        let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+        InfoPairAuditClassPath {
+            fixture_root,
+            jdk: JdkClassPath::new(java_home.join("jmods")).expect("JDK 21 jmods"),
+        }
+    }
+
     fn open_class_path(include_jdk: bool) -> CompositeClassPath {
         let mut entries: Vec<Box<dyn ClassPathEntry>> = vec![Box::new(DirectoryClassPath::new(
             fixture_path("tests/fixtures/tasty_visibility"),
@@ -3428,6 +3477,73 @@ mod tests {
         assert_eq!(resolver.session.resolved.get(&open_name), Some(&retried));
         assert_eq!(store.symbols.get(retried).owner, Some(package));
         assert!(resolver.class_path.is_some());
+    }
+
+    #[test]
+    fn info_pair_selected_resolver_records_first_typed_outcome_per_root() {
+        let package_path = ["me", "cytrowski", "tastyfixtures", "semantic"];
+        for (simple_name, binary_name) in [
+            (
+                "InfoWrapped",
+                BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped"),
+            ),
+            (
+                "InfoBase",
+                BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase"),
+            ),
+        ] {
+            let mut store = SemanticStore::new();
+            let definitions = Definitions::bootstrap(&mut store);
+            let mut resolver = ClasspathSymbolResolver::new(
+                info_pair_audit_class_path(),
+                definitions,
+                LoadingSession::new(),
+            );
+            let package = resolver
+                .resolve_package(&mut store, &package_path)
+                .unwrap()
+                .expect("fixture package");
+            let request = MemberRequest {
+                prefix: store
+                    .types
+                    .alloc(Type::type_ref(definitions.no_prefix, package)),
+                name: Name::new(store.names.intern(simple_name), Namespace::Type),
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            };
+            let store_before = store.checkpoint();
+            let session_before = resolver.session.checkpoint();
+            let error = resolver
+                .transact(&mut store, |resolver, store| {
+                    resolver.resolve_member_inner_with_semantic_request(
+                        store,
+                        &request,
+                        &binary_name,
+                    )
+                })
+                .expect_err("single-root semantic request should expose its first failure");
+            let MemberResolutionFailure::SemanticLoad(failure) = error else {
+                panic!("the first resolver failure remains a typed semantic load: {error:?}");
+            };
+            assert_eq!(failure.binary_name, binary_name);
+            let expected = match simple_name {
+                "InfoWrapped" => {
+                    "the class template must have no type parameters and one constructor declaration"
+                }
+                "InfoBase" => "the requested top-level declaration must have a class template",
+                _ => unreachable!(),
+            };
+            assert!(matches!(
+                failure.source,
+                SemanticTastyLoadError::UnsupportedShape(reason) if reason == expected
+            ));
+            assert_eq!(store.checkpoint(), store_before);
+            assert_eq!(resolver.session.checkpoint(), session_before);
+            assert!(resolver.class_path.is_some());
+            assert!(!resolver.session.identified.contains_key(&binary_name));
+            assert!(!resolver.session.resolved.contains_key(&binary_name));
+            assert!(resolver.session.origins.is_empty());
+        }
     }
 
     #[test]
