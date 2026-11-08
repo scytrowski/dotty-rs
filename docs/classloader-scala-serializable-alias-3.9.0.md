@@ -35,6 +35,12 @@ type, while preserving its thirteen declared member names. The existing
 `option/member_signatures` delta from #1948 remains the tenth changed row and
 is checked separately. The historical TSV is not regenerated or modified.
 
+Follow-up #2180 preserves the class type argument in `Some`'s applied parent.
+The current hierarchy observation is therefore
+`scala.Option[scala.Some.A]&scala.Product&java.io.Serializable`; the value
+above records the earlier alias-resolution increment before the parent
+projection correction.
+
 No TASTy bytes or other frozen fixture expectations change. Existing Array
 Java-parent and package-alias behavior remain covered by their regression
 tests.
