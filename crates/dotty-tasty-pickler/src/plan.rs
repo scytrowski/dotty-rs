@@ -154,6 +154,16 @@ pub trait SourceTypedBindings {
     ) -> Option<LocalReceiverUnitCallBinding> {
         None
     }
+
+    /// Exact source-ordered identities for the two authenticated local-receiver
+    /// Unit statements admitted by the bounded PairFactory body shape.
+    fn local_receiver_unit_call_pair(
+        &self,
+        _source: SourceId,
+        _method: SymbolId,
+    ) -> Option<[LocalReceiverUnitCallBinding; 2]> {
+        None
+    }
 }
 
 /// Source and typed tree identities retained by the cross-class constructor

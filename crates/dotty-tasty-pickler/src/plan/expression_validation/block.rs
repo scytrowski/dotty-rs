@@ -112,8 +112,26 @@ impl Validator<'_, '_> {
                 .plan
                 .typed_bindings
                 .local_receiver_unit_call(self.plan.source.id, method.symbol);
-            let three_stat_shape = source_block.stats.len() == 3
-                && call_binding.is_some()
+            let call_pair_binding = self
+                .plan
+                .typed_bindings
+                .local_receiver_unit_call_pair(self.plan.source.id, method.symbol);
+            let call_bindings = match (call_binding, call_pair_binding) {
+                (Some(call), None) => vec![call],
+                (None, Some(calls)) => calls.to_vec(),
+                (None, None) => Vec::new(),
+                (Some(_), Some(_)) => {
+                    return Err(
+                        self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                    );
+                }
+            };
+            let verified_call_stat_shape = (1..=2).contains(&call_bindings.len())
+                && source_block.stats.len() == 2 + call_bindings.len()
+                && call_bindings.iter().enumerate().all(|(index, binding)| {
+                    binding.source_apply == source_block.stats[index + 2]
+                        && binding.typed_apply == typed_block.stats[index + 2]
+                })
                 && source_block.stats[..2]
                     .iter()
                     .zip(&typed_block.stats[..2])
@@ -129,17 +147,21 @@ impl Validator<'_, '_> {
                             Some(TreeKind::ValDef(_))
                         )
                     })
-                && matches!(
-                    self.source_tree(source_block.stats[2])?.kind,
-                    TreeKind::Apply(_)
-                )
-                && matches!(
-                    self.plan
-                        .typed_ast
-                        .try_get(typed_block.stats[2])
-                        .map(|tree| &tree.kind),
-                    Some(TreeKind::Apply(_))
-                );
+                && source_block.stats[2..]
+                    .iter()
+                    .zip(&typed_block.stats[2..])
+                    .all(|(&source_stat, &typed_stat)| {
+                        matches!(
+                            self.source_tree(source_stat).map(|tree| &tree.kind),
+                            Ok(TreeKind::Apply(_))
+                        ) && matches!(
+                            self.plan
+                                .typed_ast
+                                .try_get(typed_stat)
+                                .map(|tree| &tree.kind),
+                            Some(TreeKind::Apply(_))
+                        )
+                    });
             let local_stat_shape = (1..=2).contains(&source_block.stats.len())
                 && source_block.stats.iter().zip(&typed_block.stats).all(
                     |(&source_stat, &typed_stat)| {
@@ -155,7 +177,7 @@ impl Validator<'_, '_> {
                         )
                     },
                 );
-            let exact_shape = (local_stat_shape || three_stat_shape)
+            let exact_shape = (local_stat_shape || verified_call_stat_shape)
                 && matches!(
                     self.source_tree(source_block.expr)?.kind,
                     TreeKind::Apply(_)
@@ -217,10 +239,9 @@ impl Validator<'_, '_> {
                         && initializers.iter().any(|initializer| initializer.local == first)
                         && initializers.iter().any(|initializer| initializer.local == second))
             });
-            let two_local_shape = (source_block.stats.len() == 2 || three_stat_shape)
-                && ((source_block.stats.len() == 2 && call_binding.is_none())
-                    || (source_block.stats.len() == 3 && call_binding.is_some()))
-                && (source_block.stats.len() == 2 || distinct_local_pair_matches_initializers)
+            let two_local_shape = (source_block.stats.len() == 2 || verified_call_stat_shape)
+                && source_block.stats.len() == 2 + call_bindings.len()
+                && (call_bindings.is_empty() || distinct_local_pair_matches_initializers)
                 && local_argument_indices.len() == 2
                 && initializers.len() == 2
                 && initializers[0].local != initializers[1].local
@@ -310,6 +331,10 @@ impl Validator<'_, '_> {
             .plan
             .typed_bindings
             .local_receiver_unit_call(self.plan.source.id, method.symbol);
+        let unit_call_pair = self
+            .plan
+            .typed_bindings
+            .local_receiver_unit_call_pair(self.plan.source.id, method.symbol);
         for (index, (&source_stat, &typed_stat)) in source_block
             .stats
             .iter()
@@ -338,8 +363,10 @@ impl Validator<'_, '_> {
                 )?;
                 continue;
             }
-            if index == 2
-                && let Some(binding) = unit_call
+            if index >= 2
+                && let Some(binding) = unit_call_pair
+                    .and_then(|calls| calls.get(index - 2).copied())
+                    .or_else(|| (index == 2).then_some(unit_call).flatten())
             {
                 self.validate_local_receiver_unit_call(
                     binding,
@@ -463,6 +490,9 @@ impl Validator<'_, '_> {
         let pair = p
             .typed_bindings
             .formal_local_constructor_call_pair(p.source.id, method.symbol);
+        let calls_pair = p
+            .typed_bindings
+            .local_receiver_unit_call_pair(p.source.id, method.symbol);
         let (TreeKind::Ident(source_receiver_ident), TreeKind::Ident(typed_receiver_ident)) =
             (&source_receiver.kind, &typed_receiver.kind)
         else {
@@ -473,7 +503,14 @@ impl Validator<'_, '_> {
         else {
             return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
         };
-        let second_formal = pair.map(|pair| pair.method_formals[1]);
+        let expected_argument_formal = calls_pair
+            .and_then(|calls| {
+                calls
+                    .into_iter()
+                    .find(|call| call.source_apply == binding.source_apply)
+                    .map(|call| call.argument_formal)
+            })
+            .or_else(|| pair.map(|pair| pair.method_formals[1]));
         let canonical_method = matches!(
             p.source_index.definition_of(binding.method),
             Some(dotty_core::SourceDefinition::Canonical { source, tree })
@@ -494,7 +531,7 @@ impl Validator<'_, '_> {
             || receiver_initializer.is_none()
             || !self.visible_locals.contains(&binding.receiver)
             || !canonical_method
-            || second_formal != Some(binding.argument_formal)
+            || expected_argument_formal != Some(binding.argument_formal)
             || source_receiver_ident.name != self.symbol(binding.receiver)?.name
             || typed_receiver_ident.name != source_receiver_ident.name
             || source_argument_ident.name != self.symbol(binding.argument_formal)?.name

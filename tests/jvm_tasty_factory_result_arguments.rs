@@ -4,6 +4,7 @@ use dotty::jvm_tasty_cross_class::{
     validate_cross_class_constructor_call_proofs,
     validate_cross_class_constructor_call_proofs_with_typer,
     validate_immutable_local_counter_set_call_proof,
+    validate_immutable_local_counter_set_calls_proof,
 };
 use dotty::jvm_tasty_plan::{PairedPlanError, with_paired_jvm_tasty_batch_plan};
 use dotty_classfile::attribute::Attribute;
@@ -52,6 +53,8 @@ const IMMUTABLE_LOCAL_PAIR_BATCH: &str =
     include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactory.scala");
 const IMMUTABLE_LOCAL_PAIR_REVERSED_BATCH: &str =
     include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactoryReversed.scala");
+const TWO_CALL_TARGET: &str =
+    include_str!("fixtures/jvm_tasty_ordered_local_unit_calls/OrderedLocalUnitCalls.scala");
 
 struct AuditBindings<'a> {
     index: &'a SourceTypedIndex,
@@ -77,6 +80,7 @@ struct StandaloneCallBindings<'a> {
     initializers: Vec<LocalCounterInitializerBinding>,
     locals: Vec<LocalValueBinding>,
     call: Option<LocalReceiverUnitCallBinding>,
+    calls: Option<[LocalReceiverUnitCallBinding; 2]>,
 }
 
 impl SourceTypedBindings for StandaloneCallBindings<'_> {
@@ -131,6 +135,16 @@ impl SourceTypedBindings for StandaloneCallBindings<'_> {
     ) -> Option<LocalReceiverUnitCallBinding> {
         (source == self.source && method == self.method)
             .then_some(self.call)
+            .flatten()
+    }
+
+    fn local_receiver_unit_call_pair(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<[LocalReceiverUnitCallBinding; 2]> {
+        (source == self.source && method == self.method)
+            .then_some(self.calls)
             .flatten()
     }
 }
@@ -1060,7 +1074,7 @@ fn run_pinned_two_local_pair_reader(bytes: &[u8], expected_pair_call: &str) {
     fs::remove_dir_all(root).unwrap();
 }
 
-fn run_pinned_local_receiver_unit_call_reader(bytes: &[u8]) {
+fn run_pinned_local_receiver_unit_call_reader(bytes: &[u8], call_count: usize) {
     let scala_root = PathBuf::from(
         std::env::var_os("SCALA39_ROOT").expect("pinned Scala 3.9 checkout is required"),
     );
@@ -1114,26 +1128,36 @@ fn run_pinned_local_receiver_unit_call_reader(bytes: &[u8]) {
         String::from_utf8_lossy(&decompile.stderr)
     );
     let decompiled = String::from_utf8_lossy(&decompile.stdout);
-    for required in [
+    let mut required = vec![
         "val first: example.Counter",
         "val second: example.Counter",
         "new example.Counter(firstSeed)",
         "new example.Counter(secondSeed)",
         "first.set(secondSeed)",
         "new example.Pair(first, second)",
-    ] {
+    ];
+    if call_count == 2 {
+        required.push("second.set(firstSeed)");
+    }
+    for required in required {
         assert!(
             decompiled.contains(required),
             "missing {required:?}: {decompiled}"
         );
     }
-    let stat_order = [
+    let mut stat_order = vec![
         "val first: example.Counter",
         "val second: example.Counter",
         "first.set(secondSeed)",
         "new example.Pair(first, second)",
-    ]
-    .map(|text| decompiled.find(text).unwrap());
+    ];
+    if call_count == 2 {
+        stat_order.insert(3, "second.set(firstSeed)");
+    }
+    let stat_order = stat_order
+        .into_iter()
+        .map(|text| decompiled.find(text).unwrap())
+        .collect::<Vec<_>>();
     assert!(
         stat_order.windows(2).all(|pair| pair[0] < pair[1]),
         "{decompiled}"
@@ -3224,12 +3248,30 @@ fn standalone_local_receiver_call_uses_the_original_frontend_receipt() {
     assert_ne!(original, reversed_first);
 }
 
+#[test]
+fn standalone_ordered_two_local_receiver_calls_use_the_original_proof_pair() {
+    let first = standalone_local_receiver_call_candidate(
+        TWO_CALL_TARGET,
+        SourceId::from_index(21901),
+        true,
+    );
+    let second = standalone_local_receiver_call_candidate(
+        TWO_CALL_TARGET,
+        SourceId::from_index(21902),
+        true,
+    );
+    assert_eq!(
+        first, second,
+        "fresh source sessions emit deterministic TASTy"
+    );
+    TastyFile::parse_and_validate_scala_3_9(&first).expect("structural reader accepts candidate");
+}
+
 fn standalone_local_receiver_call_candidate(
     source_text: &str,
     source_id: SourceId,
     scala_checks: bool,
 ) -> Vec<u8> {
-    use dotty::jvm_tasty_cross_class::ValidatedImmutableLocalCounterSetCallProof;
     use dotty_core::TreeId;
     use dotty_core::ast::Untyped;
 
@@ -3363,7 +3405,7 @@ fn standalone_local_receiver_call_candidate(
     let TreeKind::Block(source_block) = &parsed.ast.get(source_rhs).kind else {
         panic!("original factory body block")
     };
-    assert_eq!(source_block.stats.len(), 3);
+    assert!((3..=4).contains(&source_block.stats.len()));
     let locals = [source_block.stats[0], source_block.stats[1]]
         .map(|tree| typer.typed_local_binding_at(source_id, tree).unwrap());
     let jvm_unit = JvmCompilationUnit {
@@ -3371,22 +3413,61 @@ fn standalone_local_receiver_call_candidate(
         typed_ast: typer.typed_ast(),
         classes: jvm_classes,
     };
-    let call_proof: ValidatedImmutableLocalCounterSetCallProof<'_> =
-        validate_immutable_local_counter_set_call_proof(ImmutableLocalInitializerPairProofInput {
-            source_id,
-            method_tree: create_tree,
-            store: typer.store(),
-            definitions: &definitions,
-            source_ast: &parsed.ast,
-            typed_ast: typer.typed_ast(),
-            source_index: &source_index,
-            source_typed_index: typer.source_typed_index(),
-            local_bindings: [Some(locals[0]), Some(locals[1])],
-            jvm_unit: &jvm_unit,
-        })
-        .expect("the merged #2165 proof authenticates this original source session");
-    let pair_proof = call_proof.initializer_pair();
-    let initializer_receipts = pair_proof.initializers();
+    let input = ImmutableLocalInitializerPairProofInput {
+        source_id,
+        method_tree: create_tree,
+        store: typer.store(),
+        definitions: &definitions,
+        source_ast: &parsed.ast,
+        typed_ast: typer.typed_ast(),
+        source_index: &source_index,
+        source_typed_index: typer.source_typed_index(),
+        local_bindings: [Some(locals[0]), Some(locals[1])],
+        jvm_unit: &jvm_unit,
+    };
+    let call_to_binding =
+        |call: &dotty::jvm_tasty_cross_class::ValidatedImmutableLocalCounterSetCallProof<'_>| {
+            LocalReceiverUnitCallBinding {
+                source_apply: call.source_call(),
+                typed_apply: call.typed_call(),
+                source_select: call.source_select(),
+                typed_select: call.typed_select(),
+                source_receiver: call.source_receiver(),
+                typed_receiver: call.typed_receiver(),
+                source_argument: call.source_argument(),
+                typed_argument: call.typed_argument(),
+                receiver: call.receiver(),
+                method: call.method(),
+                argument_formal: call.formal(),
+            }
+        };
+    let (initializer_receipts, call_binding, call_pair_binding) = if source_block.stats.len() == 3 {
+        let call_proof: dotty::jvm_tasty_cross_class::ValidatedImmutableLocalCounterSetCallProof<
+            '_,
+        > = validate_immutable_local_counter_set_call_proof(input)
+            .expect("the merged proof authenticates this original single-call source session");
+        (
+            call_proof.initializer_pair().initializers(),
+            Some(call_to_binding(&call_proof)),
+            None,
+        )
+    } else {
+        let calls_proof = validate_immutable_local_counter_set_calls_proof(input)
+            .expect("the merged proof authenticates this original ordered two-call source session");
+        (
+            calls_proof.initializer_pair().initializers(),
+            None,
+            Some(
+                calls_proof
+                    .calls()
+                    .iter()
+                    .map(call_to_binding)
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap(),
+            ),
+        )
+    };
     let local_values = initializer_receipts.map(|receipt| LocalValueBinding {
         source_tree: receipt.source_declaration(),
         symbol: receipt.symbol(),
@@ -3402,8 +3483,11 @@ fn standalone_local_receiver_call_candidate(
             other => panic!("canonical Counter initializer type: {other:?}"),
         };
         LocalCounterInitializerBinding {
-            source_block: pair_proof.source_block(),
-            typed_block: pair_proof.typed_block(),
+            source_block: source_rhs,
+            typed_block: typer
+                .source_typed_index()
+                .get(source_id, source_rhs)
+                .unwrap(),
             source_declaration: receipt.source_declaration(),
             typed_declaration: receipt.typed_declaration(),
             source_initializer: receipt.source_initializer(),
@@ -3437,8 +3521,11 @@ fn standalone_local_receiver_call_candidate(
         .expect("two source method formals");
     let method_formals =
         source_formals.map(|tree| source_index.symbol_at(source_id, tree).unwrap());
-    let source_result = pair_proof.source_final_expression();
-    let typed_result = pair_proof.typed_final_expression();
+    let source_result = source_block.expr;
+    let typed_result = typer
+        .source_typed_index()
+        .get(source_id, source_result)
+        .unwrap();
     let (TreeKind::Apply(source_pair), TreeKind::Apply(typed_pair)) = (
         &parsed.ast.get(source_result).kind,
         &typer.typed_ast().get(typed_result).kind,
@@ -3476,19 +3563,6 @@ fn standalone_local_receiver_call_candidate(
         method_formals,
         arguments: pair_arguments,
     };
-    let call_binding = LocalReceiverUnitCallBinding {
-        source_apply: call_proof.source_call(),
-        typed_apply: call_proof.typed_call(),
-        source_select: call_proof.source_select(),
-        typed_select: call_proof.typed_select(),
-        source_receiver: call_proof.source_receiver(),
-        typed_receiver: call_proof.typed_receiver(),
-        source_argument: call_proof.source_argument(),
-        typed_argument: call_proof.typed_argument(),
-        receiver: call_proof.receiver(),
-        method: call_proof.method(),
-        argument_formal: call_proof.formal(),
-    };
     let bindings = StandaloneCallBindings {
         base: typer.source_typed_index(),
         source: source_id,
@@ -3498,7 +3572,8 @@ fn standalone_local_receiver_call_candidate(
         pair: formal_local_pair,
         initializers: local_initializers.to_vec(),
         locals: local_values.to_vec(),
-        call: Some(call_binding),
+        call: call_binding,
+        calls: call_pair_binding,
     };
     let TreeKind::TypeDef(factory_def) = &parsed.ast.get(factory_tree).kind else {
         panic!("factory class")
@@ -3551,6 +3626,36 @@ fn standalone_local_receiver_call_candidate(
         },
         members: &members,
     };
+    if let Some(mut calls) = call_pair_binding {
+        calls.swap(0, 1);
+        let mut forged_bindings = bindings.clone();
+        forged_bindings.calls = Some(calls);
+        let forged_plan = ClassStatePicklePlan {
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &parsed.ast,
+            typed_ast: typer.typed_ast(),
+            source_index: &source_index,
+            typed_bindings: &forged_bindings,
+            source: SourceMetadata {
+                id: source_id,
+                name: "LocalReceiverCall.scala".to_owned(),
+            },
+            class: factory,
+            class_tree: factory_tree,
+            constructor: PrimaryConstructorInputPlan {
+                symbol: constructor,
+                source_tree: factory_template.constructor,
+                parameter_clauses: constructor_clauses.clone(),
+            },
+            members: &members,
+        };
+        let forged = forged_plan.validate().unwrap();
+        assert!(
+            forged.validate_method_bodies().is_err(),
+            "reordered receipt roots cannot authorize the original statement order"
+        );
+    }
     let validated = plan.validate().unwrap();
     validated.validate_method_bodies().unwrap();
     let candidate = validated.pickle().unwrap();
@@ -3564,7 +3669,10 @@ fn standalone_local_receiver_call_candidate(
             || std::env::var_os("DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE").as_deref()
                 == Some(std::ffi::OsStr::new("1")))
     {
-        run_pinned_local_receiver_unit_call_reader(candidate.bytes());
+        run_pinned_local_receiver_unit_call_reader(
+            candidate.bytes(),
+            if call_pair_binding.is_some() { 2 } else { 1 },
+        );
     }
     let factory_file = TastyFile::parse_and_validate_scala_3_9(candidate.bytes()).unwrap();
     let address_index = factory_file.ast_address_index().unwrap();
@@ -3586,15 +3694,20 @@ fn standalone_local_receiver_call_candidate(
         panic!("Rust candidate factory body is a BLOCK")
     };
     let block = block_node.decode_block().unwrap();
-    assert_eq!(block.stats.len(), 3);
+    assert_eq!(block.stats.len(), source_block.stats.len());
     let raw_tag = |tree: &RawTree<'_>| match tree {
         RawTree::Leaf(term) => term.tag,
         RawTree::Ast { tag, .. } | RawTree::NatAst { tag, .. } => *tag,
         RawTree::LengthNode(node) => node.tag,
     };
+    let expected_tags = if call_pair_binding.is_some() {
+        vec![VALDEF_TAG, VALDEF_TAG, APPLY_TAG, APPLY_TAG]
+    } else {
+        vec![VALDEF_TAG, VALDEF_TAG, APPLY_TAG]
+    };
     assert_eq!(
         block.stats.iter().map(raw_tag).collect::<Vec<_>>(),
-        [VALDEF_TAG, VALDEF_TAG, APPLY_TAG]
+        expected_tags
     );
     assert_eq!(raw_tag(&block.expression), APPLY_TAG);
     let block_address = address_index
@@ -3616,6 +3729,101 @@ fn standalone_local_receiver_call_candidate(
         .map(|node| node.offset as u32)
         .collect::<Vec<_>>();
     assert_eq!(local_addresses.len(), 2);
+    if let Some(calls) = call_pair_binding {
+        assert_eq!(block.stats.len(), 4);
+        assert_eq!(
+            block.stats.iter().map(raw_tag).collect::<Vec<_>>(),
+            [VALDEF_TAG, VALDEF_TAG, APPLY_TAG, APPLY_TAG]
+        );
+        let local_index = |symbol| {
+            local_values
+                .iter()
+                .position(|local| local.symbol == symbol)
+                .expect("receiver belongs to the original local pair")
+        };
+        for (stat, binding) in block.stats[2..].iter().zip(calls) {
+            let RawTree::LengthNode(call_node) = stat else {
+                panic!("each authenticated call remains an APPLY")
+            };
+            let call = call_node.decode_apply().unwrap();
+            let RawTree::LengthNode(select_node) = call.function else {
+                panic!("each call applies a selected method")
+            };
+            assert_eq!(select_node.tag, SELECTIN_TAG);
+            let selected = select_node.decode_select_in().unwrap();
+            assert!(matches!(
+                factory_file
+                    .names()
+                    .render_signed_name(selected.name)
+                    .unwrap()
+                    .unwrap(),
+                RenderedSignedName::Signed {
+                    original,
+                    signature: RenderedNameSignature { parameters, result },
+                } if original == "set"
+                    && parameters == [RenderedParamSig::TermParameter("scala.Int".to_owned())]
+                    && result == "scala.Unit"
+            ));
+            let receiver_references = selected.qualifier.ast_refs();
+            let [receiver_reference] = receiver_references.as_slice() else {
+                panic!("receiver selection uses one direct reference")
+            };
+            assert_eq!(receiver_reference.kind, AstRefKind::TermRefDirect);
+            assert_eq!(
+                receiver_reference.address,
+                local_addresses[local_index(binding.receiver)]
+            );
+            let [argument] = call.arguments.as_slice() else {
+                panic!("set receives one original method formal")
+            };
+            let argument_references = argument.ast_refs();
+            let [argument_reference] = argument_references.as_slice() else {
+                panic!("set argument is one direct formal reference")
+            };
+            assert_eq!(argument_reference.kind, AstRefKind::TermRefDirect);
+            let formal_name = typer.store().names.resolve(
+                typer
+                    .store()
+                    .symbols
+                    .get(binding.argument_formal)
+                    .name
+                    .text(),
+            );
+            let formal_address = address_index
+                .iter_nodes_with_tag(PARAM_TAG)
+                .find(|node| {
+                    address_index
+                        .parent_of(node.offset as u32)
+                        .is_some_and(|parent| parent.offset as u32 == method_node.offset as u32)
+                        && address_index
+                            .get(node.offset as u32)
+                            .and_then(|parameter| parameter.decode_parameter().ok())
+                            .and_then(|parameter| {
+                                factory_file.names().render(parameter.name()).ok()
+                            })
+                            .is_some_and(|name| name == formal_name)
+                })
+                .expect("argument formal is declared by create")
+                .offset as u32;
+            assert_eq!(argument_reference.address, formal_address);
+        }
+        let RawTree::LengthNode(pair_result_node) = &block.expression else {
+            panic!("Pair constructor is the final block expression")
+        };
+        assert_eq!(pair_result_node.tag, APPLY_TAG);
+        let pair_result = pair_result_node.decode_apply().unwrap();
+        assert_eq!(pair_result.arguments.len(), 2);
+        for (argument, expected_address) in pair_result.arguments.iter().zip(&local_addresses) {
+            let references = argument.ast_refs();
+            let [reference] = references.as_slice() else {
+                panic!("Pair result arguments are direct local references")
+            };
+            assert_eq!(reference.kind, AstRefKind::TermRefDirect);
+            assert_eq!(reference.address, *expected_address);
+        }
+        return candidate.bytes().to_vec();
+    }
+    let call_binding = call_binding.expect("the existing one-call test path");
     let receiver_index = local_values
         .iter()
         .position(|local| local.symbol == call_binding.receiver)

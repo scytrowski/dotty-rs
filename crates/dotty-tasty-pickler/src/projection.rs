@@ -87,6 +87,7 @@ pub struct EncodingContext<'a> {
     declarations: HashMap<SymbolId, AstLabel>,
     planned_calls: HashMap<SymbolId, crate::PlannedCallBinding>,
     local_receiver_unit_calls: HashMap<SymbolId, crate::LocalReceiverUnitCallBinding>,
+    local_receiver_unit_call_pairs: HashMap<SymbolId, [crate::LocalReceiverUnitCallBinding; 2]>,
     local_values_by_typed_declaration: HashMap<TreeId<Typed>, SymbolId>,
     local_value_symbols: HashSet<SymbolId>,
     external: HashMap<SymbolId, (NameRef, NameRef)>,
@@ -126,6 +127,13 @@ impl<'a> EncodingContext<'a> {
         self.local_receiver_unit_calls.get(&caller).copied()
     }
 
+    pub(crate) fn local_receiver_unit_call_pair(
+        &self,
+        caller: SymbolId,
+    ) -> Option<[crate::LocalReceiverUnitCallBinding; 2]> {
+        self.local_receiver_unit_call_pairs.get(&caller).copied()
+    }
+
     pub(crate) fn register_local_receiver_unit_call(
         &mut self,
         caller: SymbolId,
@@ -136,6 +144,24 @@ impl<'a> EncodingContext<'a> {
                 || context
                     .local_receiver_unit_calls
                     .insert(caller, binding)
+                    .is_some()
+            {
+                return Err(reference(caller, ReferenceError::Metadata));
+            }
+            Ok(())
+        })
+    }
+
+    pub(crate) fn register_local_receiver_unit_call_pair(
+        &mut self,
+        caller: SymbolId,
+        bindings: [crate::LocalReceiverUnitCallBinding; 2],
+    ) -> Result<(), PickleError> {
+        self.run(|context| {
+            if context.symbol(caller)?.kind != SymbolKind::Method
+                || context
+                    .local_receiver_unit_call_pairs
+                    .insert(caller, bindings)
                     .is_some()
             {
                 return Err(reference(caller, ReferenceError::Metadata));
@@ -191,6 +217,7 @@ impl<'a> EncodingContext<'a> {
             declarations: HashMap::new(),
             planned_calls: HashMap::new(),
             local_receiver_unit_calls: HashMap::new(),
+            local_receiver_unit_call_pairs: HashMap::new(),
             local_values_by_typed_declaration: HashMap::new(),
             local_value_symbols: HashSet::new(),
             external: HashMap::new(),
