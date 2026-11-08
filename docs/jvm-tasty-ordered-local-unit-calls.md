@@ -26,6 +26,7 @@ the pinned compiler's `scalac`, and direct all temporary and output files to a
 managed scratch directory.
 
 ```sh
+set -eu
 export JAVA_HOME=/path/to/temurin-21
 export PATH="$JAVA_HOME/bin:$PATH"
 export TMPDIR=/path/to/managed-scratch
@@ -33,7 +34,7 @@ export TMP="$TMPDIR" TEMP="$TMPDIR"
 export JAVA_TOOL_OPTIONS="-XX:-UsePerfData -Djava.io.tmpdir=$TMPDIR"
 SCALAC=/path/to/scala-3.9.0/bin/scalac
 OUT="$TMPDIR/ordered-local-unit-calls"
-mkdir -p "$OUT/classes"
+mkdir -p "$OUT/classes" "$OUT/typed"
 
 "$SCALAC" -Werror -release 21 -d "$OUT/classes" \
   tests/fixtures/jvm_tasty_ordered_local_unit_calls/OrderedLocalUnitCalls.scala
@@ -97,7 +98,8 @@ error and publishes no accepted artifact batch.
 | Reversed local declarations | Accepted source shape | Constructor-call identity proof: factory body shape |
 | Swapped call order | Accepted | Constructor-call identity proof: factory body shape |
 | Both calls on the same local | Accepted | Constructor-call identity proof: factory body shape |
-| Duplicate call / modified argument | Accepted | Constructor-call identity proof: factory body shape |
+| Duplicate identical call (`first.set(secondSeed)` twice) | Accepted | Constructor-call identity proof: factory body shape |
+| Modified argument | Accepted | Constructor-call identity proof: factory body shape |
 | Third call | Deferred by issue scope | Constructor-call identity proof: factory body shape |
 | Wrong arity | Rejected by Rust typer | Method body typing: `ApplicationArityMismatch` |
 | Boolean argument | Rejected by Rust typer | Method body typing: `ApplicationArgumentTypeMismatch` |
