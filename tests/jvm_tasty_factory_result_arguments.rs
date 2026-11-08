@@ -3656,6 +3656,80 @@ fn standalone_local_receiver_call_candidate(
             "reordered receipt roots cannot authorize the original statement order"
         );
     }
+    if let Some(calls) = call_pair_binding {
+        let duplicate_formal = calls[0].argument_formal;
+        let duplicate_name = typer.store().symbols.get(duplicate_formal).name;
+        let mut malformed_source_ast = clone_untyped_ast(&parsed.ast);
+        let mut malformed_typed_ast = clone_typed_ast(typer.typed_ast());
+        let TreeKind::Ident(source_argument) =
+            &mut malformed_source_ast.get_mut(calls[1].source_argument).kind
+        else {
+            panic!("second call argument remains an original source Ident");
+        };
+        source_argument.name = duplicate_name;
+        let first_argument_type = typer.typed_ast().get(calls[0].typed_argument).ty;
+        let second_typed_argument = malformed_typed_ast.get_mut(calls[1].typed_argument);
+        second_typed_argument.ty = first_argument_type;
+        let TreeKind::Ident(typed_argument) = &mut second_typed_argument.kind else {
+            panic!("second call argument remains an original typed Ident");
+        };
+        typed_argument.name = duplicate_name;
+        assert!(
+            validate_immutable_local_counter_set_calls_proof(
+                ImmutableLocalInitializerPairProofInput {
+                    source_id,
+                    method_tree: create_tree,
+                    store: typer.store(),
+                    definitions: &definitions,
+                    source_ast: &malformed_source_ast,
+                    typed_ast: &malformed_typed_ast,
+                    source_index: &source_index,
+                    source_typed_index: typer.source_typed_index(),
+                    local_bindings: [Some(locals[0]), Some(locals[1])],
+                    jvm_unit: &jvm_unit,
+                }
+            )
+            .is_err()
+        );
+
+        let mut malformed_bindings = bindings.clone();
+        malformed_bindings.calls = Some([
+            calls[0],
+            LocalReceiverUnitCallBinding {
+                argument_formal: duplicate_formal,
+                ..calls[1]
+            },
+        ]);
+        let malformed_plan = ClassStatePicklePlan {
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &malformed_source_ast,
+            typed_ast: &malformed_typed_ast,
+            source_index: &source_index,
+            typed_bindings: &malformed_bindings,
+            source: SourceMetadata {
+                id: source_id,
+                name: "LocalReceiverCall.scala".to_owned(),
+            },
+            class: factory,
+            class_tree: factory_tree,
+            constructor: PrimaryConstructorInputPlan {
+                symbol: constructor,
+                source_tree: factory_template.constructor,
+                parameter_clauses: constructor_clauses.clone(),
+            },
+            members: &members,
+        };
+        let malformed = malformed_plan.validate().unwrap();
+        assert!(
+            malformed.validate_method_bodies().is_err(),
+            "duplicate canonical argument formals are rejected during body validation"
+        );
+        assert!(
+            malformed.pickle().is_err(),
+            "duplicate canonical argument formals cannot produce TASTy"
+        );
+    }
     let validated = plan.validate().unwrap();
     validated.validate_method_bodies().unwrap();
     let candidate = validated.pickle().unwrap();

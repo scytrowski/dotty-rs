@@ -126,8 +126,22 @@ impl Validator<'_, '_> {
                     );
                 }
             };
+            let method_formals = match method.parameter_clauses.as_slice() {
+                [formals] if formals.len() == 2 => Some([formals[0], formals[1]]),
+                _ => None,
+            };
+            let pair_formals_valid = match (call_pair_binding, method_formals) {
+                (Some(calls), Some([first, second])) => {
+                    first != second
+                        && calls[0].argument_formal == second
+                        && calls[1].argument_formal == first
+                }
+                (None, _) => true,
+                _ => false,
+            };
             let verified_call_stat_shape = (1..=2).contains(&call_bindings.len())
                 && source_block.stats.len() == 2 + call_bindings.len()
+                && pair_formals_valid
                 && call_bindings.iter().enumerate().all(|(index, binding)| {
                     binding.source_apply == source_block.stats[index + 2]
                         && binding.typed_apply == typed_block.stats[index + 2]
@@ -487,9 +501,6 @@ impl Validator<'_, '_> {
         let receiver_initializer = initializers
             .iter()
             .find(|initializer| initializer.local == binding.receiver);
-        let pair = p
-            .typed_bindings
-            .formal_local_constructor_call_pair(p.source.id, method.symbol);
         let calls_pair = p
             .typed_bindings
             .local_receiver_unit_call_pair(p.source.id, method.symbol);
@@ -503,14 +514,20 @@ impl Validator<'_, '_> {
         else {
             return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
         };
-        let expected_argument_formal = calls_pair
-            .and_then(|calls| {
-                calls
-                    .into_iter()
-                    .find(|call| call.source_apply == binding.source_apply)
-                    .map(|call| call.argument_formal)
-            })
-            .or_else(|| pair.map(|pair| pair.method_formals[1]));
+        let method_formals = match method.parameter_clauses.as_slice() {
+            [formals] if formals.len() == 2 => Some([formals[0], formals[1]]),
+            _ => None,
+        };
+        let expected_argument_formal = match (calls_pair, method_formals) {
+            (Some(calls), Some([_, second])) if binding.source_apply == calls[0].source_apply => {
+                Some(second)
+            }
+            (Some(calls), Some([first, _])) if binding.source_apply == calls[1].source_apply => {
+                Some(first)
+            }
+            (None, Some([_, second])) => Some(second),
+            _ => None,
+        };
         let canonical_method = matches!(
             p.source_index.definition_of(binding.method),
             Some(dotty_core::SourceDefinition::Canonical { source, tree })
