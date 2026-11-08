@@ -318,6 +318,29 @@ fn captures_acceptance_iv_relation_operands_before_transaction_rollback() {
                                     "Option branch constructors retain the canonical source parent"
                                 );
                             }
+                            if name == "Some" {
+                                let Some(parent_node) = parsed_ast.try_get(*parent_tree) else {
+                                    panic!(
+                                        "Some's original Option parent should remain in the AST"
+                                    );
+                                };
+                                let TreeKind::AppliedTypeTree(applied) = &parent_node.kind else {
+                                    panic!("Some's original parent should retain Option[T]");
+                                };
+                                assert_eq!(applied.args.len(), 1);
+                                let Some(argument_node) = parsed_ast.try_get(applied.args[0])
+                                else {
+                                    panic!("Some's parent argument should remain in the AST");
+                                };
+                                let TreeKind::Ident(argument) = &argument_node.kind else {
+                                    panic!("Some's parent argument should remain an identifier");
+                                };
+                                assert_eq!(
+                                    typer.store.names.resolve(argument.name.text()),
+                                    "A",
+                                    "the original Scala Some[A] parent must be Option[A]"
+                                );
+                            }
                             lines.push(format!("canonical_declared_parent=child:{symbol:?} parent_tree:{parent_tree:?} parent_name:{parent_name:?} direct_tree_symbol:{parent_symbol:?} source_canonical_parent:{canonical_parent:?} parent_shape:{parent_shape:?}"));
                         }
                     }

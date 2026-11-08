@@ -2686,6 +2686,41 @@ fn decode_tasty_parent_type(
     if depth >= MAX_PARENT_TYPE_DEPTH {
         return None;
     }
+    if let Ok(StructuredTree::Length(StructuredNode::Apply(application))) = tree.decode_structured()
+        && application.arguments.is_empty()
+    {
+        // Scala 3.9 emits Some's `Option[A]` parent as a zero-term Apply around
+        // a one-argument TypeApply. Keep this projection narrow: other wrapped
+        // parents (including Tuple2's unsupported `*:` parent) retain the
+        // existing nominal fallback.
+        let option_name = BinaryName::from_internal("scala/Option");
+        if resolved_name == &option_name && class_type_parameters.len() == 1 {
+            let projected = decode_tasty_parent_type(
+                file,
+                &application.function,
+                resolved_name,
+                package,
+                class_type_parameters,
+                resolve_bare,
+                depth + 1,
+            );
+            if let Some(projected) = projected
+                && matches!(
+                    &projected,
+                    DecodedTastyType::Applied { tycon, arguments }
+                        if arguments.len() == 1
+                            && matches!(
+                                arguments.as_slice(),
+                                [DecodedTastyType::ClassParamRef(_)]
+                            )
+                            && matches!(tycon.as_ref(), DecodedTastyType::Named(name) if name == &option_name)
+                )
+            {
+                return Some(projected);
+            }
+        }
+        return Some(DecodedTastyType::Named(resolved_name.clone()));
+    }
     if let RawTree::Ast { tag, child, .. } | RawTree::NatAst { tag, child, .. } = tree
         && matches!(*tag, IDENTTPT_TAG | TYPEREF_TAG)
     {

@@ -14743,6 +14743,185 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the pinned Scala 3.9.0 library artifacts and JDK"]
+    fn scala39_some_generic_parent_metadata_is_canonical_and_survives_loader_handoff() {
+        let some_name = BinaryName::from_internal("scala/Some");
+        let option_name = BinaryName::from_internal("scala/Option");
+        let java_home = std::env::var_os("JAVA_HOME").expect("JAVA_HOME");
+        let jdk_release: u16 = std::env::var("SCALA39_JDK_RELEASE")
+            .expect("SCALA39_JDK_RELEASE")
+            .parse()
+            .unwrap();
+        let jars = std::env::split_paths(
+            &std::env::var_os("SCALA39_CLASSPATH").expect("SCALA39_CLASSPATH"),
+        )
+        .collect::<Vec<_>>();
+        let (some_artifact, some_resource) = jars
+            .iter()
+            .find_map(|jar| {
+                let path = crate::jar_class_path::JarClassPath::new(jar.clone(), jdk_release)
+                    .expect("pinned Scala artifact should open");
+                path.find_class(&some_name)
+                    .expect("Some resource lookup should succeed")
+                    .map(|resource| (jar, resource))
+            })
+            .expect("pinned artifacts should contain Some.tasty");
+        let decoded_some = tasty_symbol::decode(some_resource.bytes(), &some_name)
+            .expect("pinned Some.tasty should decode");
+        assert!(decoded_some.parent_types.iter().any(|parent| {
+            matches!(
+                parent,
+                Some(tasty_symbol::DecodedTastyType::Applied { tycon, arguments })
+                    if matches!(tycon.as_ref(), tasty_symbol::DecodedTastyType::Named(name)
+                        if name == &option_name)
+                        && arguments.as_slice() == [tasty_symbol::DecodedTastyType::ClassParamRef(0)]
+            )
+        }));
+        let class_path = || {
+            let mut entries: Vec<Box<dyn ClassPathEntry>> = vec![Box::new(
+                crate::jdk_class_path::JdkClassPath::new(
+                    std::path::PathBuf::from(&java_home).join("jmods"),
+                )
+                .expect("pinned JDK modules should open"),
+            )];
+            entries.extend(jars.iter().map(|jar| {
+                Box::new(
+                    crate::jar_class_path::JarClassPath::new(jar.clone(), jdk_release)
+                        .expect("pinned Scala artifact should open"),
+                ) as Box<dyn ClassPathEntry>
+            }));
+            CompositeClassPath::new(entries)
+        };
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut loader = ClassLoader::with_definitions(
+            class_path(),
+            &mut store,
+            definitions,
+            LoadingSession::new(),
+        );
+
+        let some = loader
+            .load_class(&some_name)
+            .expect("pinned Some.tasty should load");
+        let option = loader
+            .load_class(&option_name)
+            .expect("pinned Option.tasty should load");
+        assert!(matches!(
+            loader.store.symbols.get(some).origin,
+            SymbolOrigin::Tasty(_)
+        ));
+        assert!(matches!(
+            loader.store.symbols.get(option).origin,
+            SymbolOrigin::Tasty(_)
+        ));
+        assert_eq!(
+            loader.origin(some),
+            Some(&ClassOrigin::Jar(some_artifact.clone())),
+            "Some must come from the pinned Scala library artifact"
+        );
+
+        let some_parameters = loader
+            .session
+            .class_type_parameters
+            .get(&some)
+            .expect("Some class parameters should be retained in the loading session")
+            .clone();
+        let option_parameters = loader
+            .session
+            .class_type_parameters
+            .get(&option)
+            .expect("Option class parameters should be retained in the loading session")
+            .clone();
+        assert_eq!(some_parameters.len(), 1);
+        assert_eq!(option_parameters.len(), 1);
+        for (class, parameter) in [(some, some_parameters[0]), (option, option_parameters[0])] {
+            let info = loader.store.symbols.get(parameter);
+            assert_eq!(info.kind, SymbolKind::TypeParameter);
+            assert_eq!(info.owner, Some(class));
+            assert!(matches!(info.origin, SymbolOrigin::Tasty(_)));
+            assert_eq!(
+                loader.store.names.resolve(info.name.text()),
+                "A",
+                "the decoded class parameter order must preserve Scala's declaration order"
+            );
+        }
+
+        let SymbolInfo::Complete(some_info) = loader.store.symbols.get(some).info else {
+            panic!("Some must be completed from its original TASTy");
+        };
+        let Type::ClassInfo(some_info) = loader.store.types.get(some_info) else {
+            panic!("Some completion should contain ClassInfo");
+        };
+        let parent = some_info
+            .parents
+            .iter()
+            .copied()
+            .find(|parent| {
+                let Type::Applied { tycon, .. } = loader.store.types.get(*parent) else {
+                    return false;
+                };
+                loader.store.types.get(*tycon).reference_symbol() == Some(option)
+            })
+            .expect("Some's declared parent should retain applied Option[A]");
+        let Type::Applied { args, .. } = loader.store.types.get(parent) else {
+            unreachable!("the selected Option parent must remain applied")
+        };
+        assert_eq!(args.len(), 1);
+        assert_eq!(
+            loader.store.types.get(args[0]).reference_symbol(),
+            Some(some_parameters[0]),
+            "Some's Option parent argument must be its exact canonical class parameter"
+        );
+
+        let class_parameter_ref = loader.type_ref(some_parameters[0]);
+        let out_of_range_parent = tasty_symbol::DecodedTastyType::Applied {
+            tycon: Box::new(tasty_symbol::DecodedTastyType::Named(option_name.clone())),
+            arguments: vec![tasty_symbol::DecodedTastyType::ClassParamRef(1)],
+        };
+        let malformed_parent = loader.lower_tasty_type(
+            &some_name,
+            Some(&out_of_range_parent),
+            &[],
+            &[class_parameter_ref],
+        );
+        let Type::Applied { args, .. } = loader.store.types.get(malformed_parent) else {
+            panic!("malformed parent arity should remain visible as an applied type");
+        };
+        let Type::Error(error) = loader.store.types.get(args[0]) else {
+            panic!("an out-of-range parent parameter must stay an explicit error");
+        };
+        assert_eq!(
+            loader.store.names.resolve(error.message),
+            "unresolved .tasty member type: class type parameter reference is out of range"
+        );
+
+        let first_some = some;
+        let first_option = option;
+        let first_some_parameters = some_parameters;
+        let first_option_parameters = option_parameters;
+        let session = loader.into_session();
+        let mut second_loader =
+            ClassLoader::with_definitions(class_path(), &mut store, definitions, session);
+        assert_eq!(second_loader.load_class(&some_name).unwrap(), first_some);
+        assert_eq!(
+            second_loader.load_class(&option_name).unwrap(),
+            first_option
+        );
+        assert_eq!(
+            second_loader.session.class_type_parameters.get(&first_some),
+            Some(&first_some_parameters)
+        );
+        assert_eq!(
+            second_loader
+                .session
+                .class_type_parameters
+                .get(&first_option),
+            Some(&first_option_parameters)
+        );
+    }
+
+    #[test]
     fn lowers_scala39_tasty_methods_with_absent_and_empty_term_clauses_distinctly() {
         let bytes = semantic_unpickler_fixture_bytes("Methods.tasty");
         let owner = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Methods");
