@@ -3888,7 +3888,7 @@ fn validate_cross_class_call_code(
                     .ok_or_else(|| "FormalLocalPair Pair class is outside the batch".to_owned())?;
                 let mixed_pair = if matches!(
                     tasty.source_ast.try_get(rhs).map(|tree| &tree.kind),
-                    Some(TreeKind::Block(block)) if matches!(block.stats.len(), 2 | 3)
+                    Some(TreeKind::Block(block)) if matches!(block.stats.len(), 2..=4)
                 ) {
                     validate_two_local_constructor_pair(
                         proof,

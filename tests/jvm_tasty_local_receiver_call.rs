@@ -757,18 +757,18 @@ fn ordered_two_call_audit_authenticates_source_before_unchanged_producer_rejecti
     println!("two-call first paired rejection: {failed:?}");
     assert!(matches!(
         failed,
-        Err(dotty::jvm_tasty_artifacts::PairedBatchArtifactError::Plan(
-            PairedPlanError::BatchClass {
-                phase: "JVM/TASTy cross-contract validation",
+        Err(dotty::jvm_tasty_artifacts::PairedBatchArtifactError::Contract(
+            JvmTastyContractError::BatchArtifact {
+                phase: "cross-class invocation",
                 reason,
                 ..
             }
-        )) if reason.contains("BodyExpression")
+        )) if reason.contains("two-local Block must contain its exact optional Counter.set stat")
     ));
 }
 
 #[test]
-fn ordered_two_call_controls_authenticate_supported_source_before_producer_rejection() {
+fn ordered_two_call_controls_authenticate_supported_source_before_artifact_rejection() {
     let reversed_declarations = TWO_CALL_TARGET.replace(
         "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
         "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
@@ -813,15 +813,8 @@ fn ordered_two_call_controls_authenticate_supported_source_before_producer_rejec
             "original" | "reversed-declarations" | "swapped-call-order" | "same-receiver"
         ) {
             assert!(
-                matches!(
-                    result,
-                    Err(PairedPlanError::BatchClass {
-                        phase: "JVM/TASTy cross-contract validation",
-                        ref reason,
-                        ..
-                    }) if reason.contains("BodyExpression")
-                ),
-                "the ordered source proof passes before the unchanged producer rejects it: {result:?}"
+                result.is_ok(),
+                "the ordered source proof admits this bounded variant before artifact validation: {result:?}"
             );
         } else {
             assert!(
