@@ -410,9 +410,6 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             ));
         }
 
-        if matches!(self.type_at(prefix)?, Type::NoPrefix) {
-            return Ok(true);
-        }
         let Some(owner) = declaration.owner else {
             return Ok(false);
         };
@@ -421,13 +418,7 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         {
             return Ok(false);
         }
-        Ok(matches!(
-            self.type_at(prefix)?,
-            Type::TypeRef {
-                prefix: package_prefix,
-                target: TypeRefTarget::Symbol(package),
-            } if *package == owner && self.is_canonical_package_prefix(owner, *package_prefix, 0)?
-        ))
+        self.is_canonical_top_level_class_prefix(class, prefix)
     }
 
     fn is_canonical_package_prefix(
@@ -444,19 +435,38 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         {
             return Ok(false);
         }
-        let declaration = self.typer.store.symbols.get(package);
+        // Source projection currently represents every package as a flat
+        // `TypeRef(NoPrefix, package)`. The package SymbolId carries its
+        // owner, so this is canonical for nested packages too; recursively
+        // qualified forms are also accepted below.
         if matches!(self.type_at(prefix)?, Type::NoPrefix) {
             return Ok(true);
         }
+        let declaration = self.typer.store.symbols.get(package);
         let Some(owner) = declaration.owner else {
-            return Ok(false);
+            return Ok(matches!(self.type_at(prefix)?, Type::NoPrefix));
         };
         if !self.typer.store.symbols.contains(owner)
             || self.typer.store.symbols.get(owner).kind != SymbolKind::Package
         {
             return Ok(false);
         }
+        let owner_declaration = self.typer.store.symbols.get(owner);
+        if owner_declaration.owner.is_none()
+            && owner_declaration.name.namespace() == Namespace::Term
+            && self
+                .typer
+                .store
+                .names
+                .resolve(owner_declaration.name.text())
+                .is_empty()
+        {
+            return Ok(matches!(self.type_at(prefix)?, Type::NoPrefix));
+        }
         match self.type_at(prefix)? {
+            Type::ThisType {
+                class: prefix_owner,
+            } if *prefix_owner == owner => Ok(true),
             Type::TypeRef {
                 prefix: parent_prefix,
                 target: TypeRefTarget::Symbol(parent_package),
@@ -482,6 +492,9 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             return Ok(true);
         }
         match self.type_at(prefix)? {
+            Type::ThisType {
+                class: prefix_package,
+            } if *prefix_package == package => Ok(true),
             Type::TypeRef {
                 prefix: package_prefix,
                 target: TypeRefTarget::Symbol(found_package),
@@ -866,7 +879,18 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
                 ..
             } => return Err(TypeRelationError::UnsupportedType { found, expected }),
             Type::ThisType { class } => {
-                self.ensure_class_symbol(class)?;
+                if self.typer.store.symbols.contains(class)
+                    && self.typer.store.symbols.get(class).kind == SymbolKind::Package
+                {
+                    if value_position {
+                        return Err(TypeRelationError::NonClassLikeSymbol {
+                            symbol: class,
+                            kind: SymbolKind::Package,
+                        });
+                    }
+                } else {
+                    self.ensure_class_symbol(class)?;
+                }
             }
             Type::Applied { tycon, args } => {
                 children.push((tycon, true));

@@ -2824,6 +2824,219 @@ mod tests {
     }
 
     #[test]
+    fn nested_package_projection_matches_canonical_prefixes_and_class_this() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("package p { package q { class C; val value: C = null } }");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "value");
+        let package_p = packages.symbol(&["p"]).unwrap();
+        let package_q = packages.symbol(&["p", "q"]).unwrap();
+        let other_package = packages.symbol(&[] as &[&str]).unwrap();
+        let no_prefix = definitions.no_prefix;
+        let p_reference = store.types.alloc(Type::type_ref(no_prefix, package_p));
+        let nested_package = store.types.alloc(Type::type_ref(p_reference, package_q));
+        let p_this = store.types.alloc(Type::ThisType { class: package_p });
+        let nested_through_package_this = store.types.alloc(Type::type_ref(p_this, package_q));
+        let q_this = store.types.alloc(Type::ThisType { class: package_q });
+        let other_reference = store.types.alloc(Type::type_ref(no_prefix, other_package));
+        let other_this = store.types.alloc(Type::ThisType {
+            class: other_package,
+        });
+        let unqualified = nominal_type_ref(&mut store, definitions, class);
+        let recursive = nominal_type_ref_with_prefix(&mut store, class, nested_package);
+        let through_package_this =
+            nominal_type_ref_with_prefix(&mut store, class, nested_through_package_this);
+        let direct_package_this = nominal_type_ref_with_prefix(&mut store, class, q_this);
+        let wrong_package = nominal_type_ref_with_prefix(&mut store, class, other_reference);
+        let wrong_package_this = nominal_type_ref_with_prefix(&mut store, class, other_this);
+        let this_class = store.types.alloc(Type::ThisType { class });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.complete_symbol(value).unwrap();
+        let Type::TypeRef { prefix, target } = typer.store().types.get(projected) else {
+            panic!("expected the source projector's nested class reference")
+        };
+        assert_eq!(*target, TypeRefTarget::Symbol(class));
+        assert_eq!(
+            typer.store().types.get(*prefix),
+            &Type::type_ref(no_prefix, package_q),
+            "package projection is flat and the exact package symbol carries its owner"
+        );
+
+        for equivalent in [
+            unqualified,
+            recursive,
+            through_package_this,
+            direct_package_this,
+        ] {
+            assert!(typer.is_subtype(projected, equivalent).unwrap());
+            assert!(typer.is_subtype(equivalent, projected).unwrap());
+            assert!(typer.is_subtype(this_class, equivalent).unwrap());
+        }
+        assert!(typer.is_subtype(this_class, projected).unwrap());
+        assert!(!typer.is_subtype(projected, wrong_package).unwrap());
+        assert!(!typer.is_subtype(projected, wrong_package_this).unwrap());
+    }
+
+    #[test]
+    fn package_this_type_is_equivalent_only_as_an_owner_sensitive_prefix() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Root; package p { package q { final class C } }; package r { final class C }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let package_p = packages.symbol(&["p"]).unwrap();
+        let package_q = packages.symbol(&["p", "q"]).unwrap();
+        let package_r = packages.symbol(&["r"]).unwrap();
+        let root_package = packages.symbol(&[] as &[&str]).unwrap();
+        let root_class = class_symbol(&parsed, &store, &index, source, "Root");
+        let other_class = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "C" =>
+                {
+                    index
+                        .symbol_at(source, tree)
+                        .filter(|symbol| store.symbols.get(*symbol).owner == Some(package_r))
+                }
+                _ => None,
+            })
+            .expect("same-spelled class in the unrelated package");
+
+        let no_prefix = definitions.no_prefix;
+        let p_reference = store.types.alloc(Type::type_ref(no_prefix, package_p));
+        let q_reference = store.types.alloc(Type::type_ref(p_reference, package_q));
+        let p_this = store.types.alloc(Type::ThisType { class: package_p });
+        let q_reference_through_this = store.types.alloc(Type::type_ref(p_this, package_q));
+        let q_this = store.types.alloc(Type::ThisType { class: package_q });
+        let root_this = store.types.alloc(Type::ThisType {
+            class: root_package,
+        });
+        let r_this = store.types.alloc(Type::ThisType { class: package_r });
+        let r_reference = store.types.alloc(Type::type_ref(no_prefix, package_r));
+        let canonical = nominal_type_ref_with_prefix(&mut store, class, q_reference);
+        let through_package_this =
+            nominal_type_ref_with_prefix(&mut store, class, q_reference_through_this);
+        let direct_package_this = nominal_type_ref_with_prefix(&mut store, class, q_this);
+        let unqualified = nominal_type_ref(&mut store, definitions, class);
+        let wrong_owner = nominal_type_ref_with_prefix(&mut store, class, r_reference);
+        let wrong_package_this = nominal_type_ref_with_prefix(&mut store, class, r_this);
+        let root_this_type = nominal_type_ref_with_prefix(&mut store, root_class, root_this);
+        let unqualified_root = nominal_type_ref(&mut store, definitions, root_class);
+        let unqualified_class = nominal_type_ref(&mut store, definitions, class);
+        let unqualified_other_class = nominal_type_ref(&mut store, definitions, other_class);
+        let package_value = store.types.alloc(Type::ThisType { class: package_p });
+        let package_argument_type = store.types.alloc(Type::Applied {
+            tycon: unqualified_class,
+            args: vec![package_value],
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(typer.is_subtype(canonical, through_package_this).unwrap());
+        assert!(typer.is_subtype(through_package_this, canonical).unwrap());
+        for (left, right) in [
+            (canonical, direct_package_this),
+            (direct_package_this, canonical),
+            (canonical, unqualified),
+            (unqualified, canonical),
+            (direct_package_this, unqualified),
+            (unqualified, direct_package_this),
+            (root_this_type, unqualified_root),
+            (unqualified_root, root_this_type),
+        ] {
+            assert!(typer.is_subtype(left, right).unwrap());
+        }
+        assert!(!typer.is_subtype(canonical, wrong_owner).unwrap());
+        assert!(!typer.is_subtype(canonical, wrong_package_this).unwrap());
+        typer.complete_symbol(class).unwrap();
+        typer.complete_symbol(other_class).unwrap();
+        assert!(
+            !typer
+                .is_subtype(unqualified_class, unqualified_other_class)
+                .unwrap()
+        );
+        assert!(
+            !typer
+                .is_subtype(unqualified_other_class, unqualified_class)
+                .unwrap()
+        );
+        assert!(matches!(
+            typer.is_subtype(package_value, package_value),
+            Err(TypeRelationError::NonClassLikeSymbol {
+                symbol,
+                kind: SymbolKind::Package,
+            }) if symbol == package_p
+        ));
+        assert!(matches!(
+            typer.is_subtype(package_argument_type, package_argument_type),
+            Err(TypeRelationError::NonClassLikeSymbol {
+                symbol,
+                kind: SymbolKind::Package,
+            }) if symbol == package_p
+        ));
+    }
+
+    #[test]
+    fn package_prefix_graphs_keep_malformed_cycle_and_depth_errors() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("package p { class C }");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let package = packages.symbol(&["p"]).unwrap();
+        let malformed_prefix = store.types.alloc(Type::And {
+            left: definitions.int,
+            right: definitions.boolean,
+        });
+        let malformed = nominal_type_ref_with_prefix(&mut store, class, malformed_prefix);
+        let reserved = store.types.reserve();
+        let cyclic_package = reserved.id();
+        store
+            .types
+            .fill(reserved, Type::type_ref(cyclic_package, package));
+        let cyclic = nominal_type_ref_with_prefix(&mut store, class, cyclic_package);
+        let mut deep_prefix = definitions.no_prefix;
+        for _ in 0..MAX_TYPE_RELATION_DEPTH {
+            deep_prefix = store.types.alloc(Type::type_ref(deep_prefix, package));
+        }
+        let too_deep = nominal_type_ref_with_prefix(&mut store, class, deep_prefix);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.is_subtype(malformed, malformed),
+            Err(TypeRelationError::UnsupportedType { .. })
+        ));
+        assert!(matches!(
+            typer.is_subtype(cyclic, cyclic),
+            Err(TypeRelationError::UnsupportedType { .. })
+        ));
+        assert!(matches!(
+            typer.is_subtype(too_deep, too_deep),
+            Err(TypeRelationError::TooDeep)
+        ));
+    }
+
+    #[test]
     fn this_type_conforms_to_its_own_class_reference() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name("class C");
         let class = class_symbol(&parsed, &store, &index, source, "C");
