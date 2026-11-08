@@ -640,6 +640,16 @@ fn ordered_two_call_audit_measures_the_first_paired_rejection_from_one_frontend_
         .iter()
         .map(|tree| typer.typed_local_binding_at(source_id, *tree).unwrap())
         .collect::<Vec<_>>();
+    for (tree, binding) in local_trees.iter().zip(&typed_local_bindings) {
+        assert_eq!(
+            typer.source_typed_index().get(source_id, *tree),
+            Some(binding.declaration())
+        );
+        assert!(matches!(
+            &typed_ast.get(binding.declaration()).kind,
+            TreeKind::ValDef(_)
+        ));
+    }
     assert_ne!(
         typed_local_bindings[0].symbol(),
         typed_local_bindings[1].symbol()
@@ -653,6 +663,44 @@ fn ordered_two_call_audit_measures_the_first_paired_rejection_from_one_frontend_
         .iter()
         .map(|binding| binding.symbol())
         .collect::<Vec<_>>();
+    let source_result = block.expr;
+    let typed_result = typer
+        .source_typed_index()
+        .get(source_id, source_result)
+        .expect("the original final Pair construction has a typed identity");
+    assert_eq!(typed_block.expr, typed_result);
+    let TreeKind::Apply(pair_call) = &typed_ast.get(typed_result).kind else {
+        panic!("the final result remains the two-local Pair construction");
+    };
+    let TreeKind::Select(_) = &typed_ast.get(pair_call.function).kind else {
+        panic!("the final result retains its canonical Pair constructor selection");
+    };
+    let constructor_ty = typer
+        .store()
+        .types
+        .get(typed_ast.get(pair_call.function).ty);
+    let Type::TermRef {
+        target: TermRefTarget::Symbol(pair_constructor_symbol),
+        ..
+    } = constructor_ty
+    else {
+        panic!("Pair constructor selection carries canonical identity: {constructor_ty:?}");
+    };
+    assert_eq!(
+        typer.store().symbols.get(*pair_constructor_symbol).owner,
+        Some(source_index.symbol_at(source_id, package.stats[1]).unwrap())
+    );
+    assert_eq!(pair_call.args.len(), 2);
+    for (argument, local_symbol) in pair_call.args.iter().zip(&typed_local_symbols) {
+        let argument_ty = typer.store().types.get(typed_ast.get(*argument).ty);
+        assert!(matches!(
+            argument_ty,
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } if symbol == local_symbol
+        ));
+    }
     for (ordinal, (receiver_ordinal, formal_ordinal)) in [(0, 1), (1, 0)].into_iter().enumerate() {
         let typed_stat = typer
             .source_typed_index()
