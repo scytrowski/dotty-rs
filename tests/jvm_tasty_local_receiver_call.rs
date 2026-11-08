@@ -22,6 +22,8 @@ use dotty_typer::SourceTyper;
 use std::process::Command;
 
 const TARGET: &str = include_str!("fixtures/jvm_tasty_local_receiver_call/LocalReceiverCall.scala");
+const TWO_CALL_TARGET: &str =
+    include_str!("fixtures/jvm_tasty_ordered_local_unit_calls/OrderedLocalUnitCalls.scala");
 const TWO_LOCAL_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
 const COUNTER_CLASS: &[u8] =
@@ -38,6 +40,10 @@ const FACTORY_CLASS: &[u8] = include_bytes!(
 const FACTORY_TASTY: &[u8] = include_bytes!(
     "fixtures/jvm_tasty_local_receiver_call/scala39/primary/example/PairFactory.tasty"
 );
+const TWO_CALL_FACTORY_CLASS: &[u8] =
+    include_bytes!("fixtures/jvm_tasty_ordered_local_unit_calls/scala39/example/PairFactory.class");
+const TWO_CALL_FACTORY_TASTY: &[u8] =
+    include_bytes!("fixtures/jvm_tasty_ordered_local_unit_calls/scala39/example/PairFactory.tasty");
 
 fn decode_class(bytes: &[u8]) -> ClassFile<'_> {
     let mut reader = ClassReader::new(bytes);
@@ -163,6 +169,105 @@ fn scala39_oracle_fixture_records_the_block_and_jvm_method() {
         [VALDEF_TAG, VALDEF_TAG, APPLY_TAG]
     );
     assert_eq!(raw_tag(&block.expression), APPLY_TAG);
+}
+
+#[test]
+fn scala39_two_call_oracle_records_ordered_block_and_bytecode() {
+    let class = decode_class(TWO_CALL_FACTORY_CLASS);
+    let tasty = TastyFile::parse_and_validate_scala_3_9(TWO_CALL_FACTORY_TASTY).unwrap();
+    assert_eq!(class.version.major, 65);
+    assert_eq!(
+        class.constant_pool.class_name(class.this_class).unwrap(),
+        "example/PairFactory"
+    );
+    assert_eq!(
+        class.tasty_link_id().unwrap().unwrap().as_bytes(),
+        &tasty.header().uuid
+    );
+    assert_eq!(
+        (
+            tasty.header().major_version,
+            tasty.header().minor_version,
+            tasty.header().experimental_version
+        ),
+        (28, 9, 0)
+    );
+    let method = class
+        .methods
+        .iter()
+        .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "create")
+        .unwrap();
+    assert_eq!(
+        class.constant_pool.utf8(method.descriptor_index).unwrap(),
+        "(II)Lexample/Pair;"
+    );
+    let code = method
+        .attributes
+        .iter()
+        .find_map(|attribute| match attribute {
+            Attribute::Code(code) => Some(code),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!((code.max_stack, code.max_locals), (4, 5));
+
+    let index = tasty.ast_address_index().unwrap();
+    let (_, body) = index
+        .iter_nodes_with_tag(DEFDEF_TAG)
+        .find_map(|node| {
+            let body = index
+                .get(node.offset as u32)
+                .unwrap()
+                .decode_defdef_body()
+                .unwrap();
+            (tasty.names().render(body.name).unwrap() == "create")
+                .then_some((node.offset as u32, body))
+        })
+        .unwrap();
+    let RawTree::LengthNode(block_node) = body.rhs.unwrap() else {
+        panic!("Scala encodes create as a BLOCK");
+    };
+    assert_eq!(block_node.tag, BLOCK_TAG);
+    let block = block_node.decode_block().unwrap();
+    assert!(
+        index
+            .iter_nodes_with_tag(BLOCK_TAG)
+            .any(|node| node.offset == 58)
+    );
+    assert_eq!(block.stats.len(), 4);
+    assert_eq!(
+        block.stats.iter().map(raw_tag).collect::<Vec<_>>(),
+        [VALDEF_TAG, VALDEF_TAG, APPLY_TAG, APPLY_TAG]
+    );
+    assert_eq!(raw_tag(&block.expression), APPLY_TAG);
+
+    let javap =
+        include_str!("fixtures/jvm_tasty_ordered_local_unit_calls/oracle/PairFactory.javap.txt");
+    let first_call = javap.find("Method example/Counter.set:(I)V").unwrap();
+    let second_call = javap[first_call + 1..]
+        .find("Method example/Counter.set:(I)V")
+        .unwrap()
+        + first_call
+        + 1;
+    let final_pair = javap.find("Method example/Pair.\"<init>\"").unwrap();
+    assert!(first_call < second_call && second_call < final_pair);
+    assert!(javap.contains("aload_3\n        20: iload_2"));
+    assert!(javap.contains("aload         4\n        26: iload_1"));
+
+    let tasty_print =
+        include_str!("fixtures/jvm_tasty_ordered_local_unit_calls/oracle/print-tasty.txt");
+    for observation in [
+        "58:         BLOCK(82)",
+        "120:           APPLY(9)",
+        "131:           APPLY(9)",
+        "72:             TERMREFdirect 76",
+        "74:             TERMREFdirect 99",
+    ] {
+        assert!(
+            tasty_print.contains(observation),
+            "missing TASTy observation {observation:?}"
+        );
+    }
 }
 
 fn paired_result(source: &str, source_id: u32) -> Result<(), PairedPlanError> {
@@ -423,6 +528,259 @@ fn local_receiver_call_audit_keeps_the_real_frontend_identities_and_first_failur
         paired_result(baseline, 21641).is_ok(),
         "the existing no-call shape remains accepted"
     );
+}
+
+#[test]
+fn ordered_two_call_audit_measures_the_first_paired_rejection_from_one_frontend_session() {
+    let source_id = SourceId::from_index(21870);
+    let source_text = SourceText::new(TWO_CALL_TARGET).unwrap();
+    let scanner = ContextualScanner::new(TWO_CALL_TARGET).unwrap();
+    assert!(scanner.diagnostics().is_empty());
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let parsed = parse_compilation_unit(source_text, source_id, scanner, &mut store.names);
+    assert!(parsed.diagnostics.is_empty());
+    let mut packages = Packages::new();
+    let source_index = match name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source_id,
+        "OrderedLocalUnitCalls.scala",
+        SourceParseStatus::Clean,
+        &mut store,
+        &mut packages,
+    )
+    .unwrap()
+    {
+        NamingOutcome::Named { index, diagnostics } if diagnostics.is_empty() => index,
+        outcome => panic!("target names cleanly: {outcome:?}"),
+    };
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("target package root");
+    };
+    let factory_tree = *package.stats.last().unwrap();
+    let factory = source_index.symbol_at(source_id, factory_tree).unwrap();
+    let TreeKind::TypeDef(factory_def) = &parsed.ast.get(factory_tree).kind else {
+        panic!("PairFactory is a class");
+    };
+    let TreeKind::Template(template) = &parsed.ast.get(factory_def.rhs).kind else {
+        panic!("PairFactory has a template");
+    };
+    let create_tree = *template
+        .body
+        .iter()
+        .find(|tree| matches!(&parsed.ast.get(**tree).kind, TreeKind::DefDef(def) if def.rhs.is_some()))
+        .unwrap();
+    let create = source_index.symbol_at(source_id, create_tree).unwrap();
+    let TreeKind::DefDef(create_def) = &parsed.ast.get(create_tree).kind else {
+        panic!("create is a method");
+    };
+    let formals = create_def.value_param_clauses[0]
+        .iter()
+        .map(|tree| source_index.symbol_at(source_id, *tree).unwrap())
+        .collect::<Vec<_>>();
+    let body_tree = create_def.rhs.unwrap();
+    let TreeKind::Block(block) = &parsed.ast.get(body_tree).kind else {
+        panic!("create body is a source block");
+    };
+    assert_eq!(block.stats.len(), 4);
+    assert!(
+        block.stats[..2]
+            .iter()
+            .all(|tree| matches!(&parsed.ast.get(*tree).kind, TreeKind::ValDef(_)))
+    );
+    assert!(
+        block.stats[2..]
+            .iter()
+            .all(|tree| matches!(&parsed.ast.get(*tree).kind, TreeKind::Apply(_)))
+    );
+    let local_trees = block.stats[..2].to_vec();
+
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source_id,
+        &source_index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for class_tree in package.stats.iter().copied() {
+        let class = source_index.symbol_at(source_id, class_tree).unwrap();
+        typer.complete_symbol(class).unwrap();
+        let TreeKind::TypeDef(def) = &parsed.ast.get(class_tree).kind else {
+            unreachable!();
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(def.rhs).kind else {
+            unreachable!();
+        };
+        typer
+            .complete_symbol(
+                source_index
+                    .symbol_at(source_id, template.constructor)
+                    .unwrap(),
+            )
+            .unwrap();
+        for member in template.body.iter().copied() {
+            if matches!(&parsed.ast.get(member).kind, TreeKind::DefDef(_)) {
+                typer.type_method_definition(member).unwrap();
+            }
+        }
+    }
+    assert_eq!(typer.store().symbols.get(create).owner, Some(factory));
+    let typed_ast = typer.typed_ast();
+    let typed_block_id = typer
+        .source_typed_index()
+        .get(source_id, body_tree)
+        .unwrap();
+    let TreeKind::Block(typed_block) = &typed_ast.get(typed_block_id).kind else {
+        panic!("create retains the typed block");
+    };
+    assert_eq!(typed_block.stats.len(), 4);
+    let typed_local_bindings = local_trees
+        .iter()
+        .map(|tree| typer.typed_local_binding_at(source_id, *tree).unwrap())
+        .collect::<Vec<_>>();
+    assert_ne!(
+        typed_local_bindings[0].symbol(),
+        typed_local_bindings[1].symbol()
+    );
+    assert!(
+        typed_local_bindings
+            .iter()
+            .all(|binding| { typer.store().symbols.get(binding.symbol()).owner == Some(create) })
+    );
+    let typed_local_symbols = typed_local_bindings
+        .iter()
+        .map(|binding| binding.symbol())
+        .collect::<Vec<_>>();
+    for (ordinal, (receiver_ordinal, formal_ordinal)) in [(0, 1), (1, 0)].into_iter().enumerate() {
+        let typed_stat = typer
+            .source_typed_index()
+            .get(source_id, block.stats[ordinal + 2])
+            .unwrap();
+        assert_eq!(typed_block.stats[ordinal + 2], typed_stat);
+        let TreeKind::Apply(call) = &typed_ast.get(typed_stat).kind else {
+            panic!("each ordered Unit call stays an Apply");
+        };
+        let TreeKind::Select(selection) = &typed_ast.get(call.function).kind else {
+            panic!("each Unit call retains a selected method");
+        };
+        let receiver_ty = typer
+            .store()
+            .types
+            .get(typed_ast.get(selection.qualifier).ty);
+        let Type::TermRef {
+            target: TermRefTarget::Symbol(receiver),
+            ..
+        } = receiver_ty
+        else {
+            panic!("receiver has canonical local identity: {receiver_ty:?}");
+        };
+        assert_eq!(*receiver, typed_local_symbols[receiver_ordinal]);
+        let method_ty = typer.store().types.get(typed_ast.get(call.function).ty);
+        let Type::TermRef {
+            target: TermRefTarget::Symbol(method),
+            ..
+        } = method_ty
+        else {
+            panic!("selection has canonical method identity: {method_ty:?}");
+        };
+        assert_eq!(
+            typer.store().symbols.get(*method).owner,
+            Some(source_index.symbol_at(source_id, package.stats[0]).unwrap())
+        );
+        let argument_ty = typer.store().types.get(typed_ast.get(call.args[0]).ty);
+        let Type::TermRef {
+            target: TermRefTarget::Symbol(argument),
+            ..
+        } = argument_ty
+        else {
+            panic!("argument retains canonical formal identity: {argument_ty:?}");
+        };
+        assert_eq!(*argument, formals[formal_ordinal]);
+        println!(
+            "ordered_call={ordinal}; source_tree={:?}; typed_tree={typed_stat:?}; receiver={receiver:?}; method={method:?}; argument={argument:?}",
+            block.stats[ordinal + 2]
+        );
+    }
+
+    let failed =
+        emit_paired_jvm_tasty_batch(TWO_CALL_TARGET, "OrderedLocalUnitCalls.scala", source_id);
+    println!("two-call first paired rejection: {failed:?}");
+    assert!(matches!(
+        failed,
+        Err(dotty::jvm_tasty_artifacts::PairedBatchArtifactError::Plan(
+            PairedPlanError::BatchUnit {
+                phase: "cross-class constructor-call identity proof",
+                reason
+            }
+        )) if reason.contains("factory body must be a direct Apply or a one- or two-local Block")
+    ));
+}
+
+#[test]
+fn ordered_two_call_controls_keep_valid_source_distinct_from_first_paired_rejection() {
+    let reversed_declarations = TWO_CALL_TARGET.replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
+        "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
+    );
+    let swapped_calls = TWO_CALL_TARGET.replace(
+        "    first.set(secondSeed)\n    second.set(firstSeed)",
+        "    second.set(firstSeed)\n    first.set(secondSeed)",
+    );
+    let same_receiver =
+        TWO_CALL_TARGET.replace("    second.set(firstSeed)", "    first.set(firstSeed)");
+    let duplicate_call = TWO_CALL_TARGET.replace(
+        "    first.set(secondSeed)\n    second.set(firstSeed)",
+        "    first.set(secondSeed)\n    first.set(firstSeed)",
+    );
+    let modified_argument =
+        TWO_CALL_TARGET.replace("    second.set(firstSeed)", "    second.set(secondSeed)");
+    let wrong_arity = TWO_CALL_TARGET.replace("first.set(secondSeed)", "first.set()");
+    let wrong_type = TWO_CALL_TARGET.replace("first.set(secondSeed)", "first.set(true)");
+    let third_call = TWO_CALL_TARGET.replace(
+        "    second.set(firstSeed)",
+        "    second.set(firstSeed)\n    first.set(firstSeed)",
+    );
+
+    for (name, source, source_id) in [
+        (
+            "reversed-declarations",
+            reversed_declarations.as_str(),
+            21871,
+        ),
+        ("swapped-call-order", swapped_calls.as_str(), 21872),
+        ("same-receiver", same_receiver.as_str(), 21873),
+        ("duplicate-call", duplicate_call.as_str(), 21874),
+        ("modified-argument", modified_argument.as_str(), 21875),
+        ("third-call-deferred", third_call.as_str(), 21878),
+    ] {
+        let result = paired_result(source, source_id);
+        println!("ordered two-call control {name}: {result:?}");
+        assert!(matches!(
+            result,
+            Err(PairedPlanError::BatchUnit {
+                phase: "cross-class constructor-call identity proof",
+                ref reason
+            }) if reason.contains("factory body must be a direct Apply or a one- or two-local Block")
+        ));
+    }
+    for (name, source, source_id) in [
+        ("wrong-arity", wrong_arity.as_str(), 21876),
+        ("wrong-type", wrong_type.as_str(), 21877),
+    ] {
+        let result = paired_result(source, source_id);
+        println!("ordered two-call invalid-type control {name}: {result:?}");
+        assert!(matches!(
+            result,
+            Err(PairedPlanError::BatchClass {
+                phase: "method body typing",
+                ref reason,
+                ..
+            }) if (name == "wrong-arity" && reason.contains("ApplicationArityMismatch"))
+                || (name == "wrong-type" && reason.contains("ApplicationArgumentTypeMismatch"))
+        ));
+    }
 }
 
 #[test]
