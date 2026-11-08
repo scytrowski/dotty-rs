@@ -99,6 +99,8 @@ fn application_kind_accepts(application_kind: ApplyKind, method_kind: MethodKind
 
 #[cfg(test)]
 type TransactionFailureObserver<'a> = std::rc::Rc<dyn Fn(&SourceTyper<'a>) + 'a>;
+#[cfg(test)]
+type TransactionFailureErrorObserver<'a> = std::rc::Rc<dyn Fn(&SourceTyper<'a>, &TyperError) + 'a>;
 
 /// Completes source declaration signatures against a shared semantic session.
 pub struct SourceTyper<'a> {
@@ -140,6 +142,8 @@ pub struct SourceTyper<'a> {
     synthetic_class_member_entries: Vec<(ScopeId, SymbolId)>,
     #[cfg(test)]
     transaction_failure_observer: Option<TransactionFailureObserver<'a>>,
+    #[cfg(test)]
+    transaction_failure_error_observer: Option<TransactionFailureErrorObserver<'a>>,
     #[cfg(test)]
     inject_failure_after_outermost_success: bool,
 }
@@ -304,6 +308,8 @@ impl<'a> SourceTyper<'a> {
             synthetic_class_member_entries: Vec::new(),
             #[cfg(test)]
             transaction_failure_observer: None,
+            #[cfg(test)]
+            transaction_failure_error_observer: None,
             #[cfg(test)]
             inject_failure_after_outermost_success: false,
         }
@@ -1028,6 +1034,8 @@ mod tests {
     // exposing a production mutable accessor.
     #[path = "issue_2076_product2_recovery.rs"]
     mod issue_2076_product2_recovery;
+    #[path = "issue_2179_relation_observation.rs"]
+    mod issue_2179_relation_observation;
     use dotty_classloader::classloader::{
         ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError, ClassResource,
     };

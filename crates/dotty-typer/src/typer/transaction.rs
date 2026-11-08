@@ -132,8 +132,15 @@ impl SourceTyper<'_> {
         };
         let committed = result.is_ok();
         #[cfg(test)]
-        if !committed && let Some(observer) = self.transaction_failure_observer.clone() {
-            observer(self);
+        if !committed {
+            if let Some(observer) = self.transaction_failure_observer.clone() {
+                observer(self);
+            }
+            if let Some(observer) = self.transaction_failure_error_observer.clone()
+                && let Err(error) = &result
+            {
+                observer(self, error);
+            }
         }
         let outcome = match result {
             Ok(typed) => Ok(typed),

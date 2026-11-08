@@ -694,6 +694,41 @@ pub(super) fn run() {
             }
 
             attempts += 1;
+            if identity == "library/src/scala/Option.scala#tree=214"
+                || identity == "library/src/scala/Tuple.scala#tree=23"
+            {
+                println!("TARGET_SOURCE_IDENTITY_BEGIN\t{identity}");
+                println!("source\t{source:?}");
+                println!(
+                    "method\t{method:?}\t{:?}",
+                    typer.store().symbols.get(method)
+                );
+                if let Some(owner) = owner {
+                    println!("owner\t{owner:?}\t{:?}", typer.store().symbols.get(owner));
+                    println!("owner_info\t{:?}", typer.store().symbols.info(owner));
+                    for (candidate_tree, _) in parsed.ast.iter() {
+                        if let Some(candidate_symbol) = index.symbol_at(source, candidate_tree) {
+                            let candidate = typer.store().symbols.get(candidate_symbol);
+                            if candidate.owner == Some(owner)
+                                && candidate.kind == SymbolKind::TypeParameter
+                            {
+                                println!(
+                                    "owner_type_parameter\t{candidate_symbol:?}\t{candidate:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+                for parameter in &definition.type_params {
+                    if let Some(parameter_symbol) = index.symbol_at(source, *parameter) {
+                        println!(
+                            "type_parameter\t{parameter_symbol:?}\t{:?}",
+                            typer.store().symbols.get(parameter_symbol)
+                        );
+                    }
+                }
+                println!("TARGET_SOURCE_IDENTITY_END\t{identity}");
+            }
             let outcome = typer.type_method_definition(tree);
             let mut typed_tree_identity = String::new();
             let status = match outcome {
