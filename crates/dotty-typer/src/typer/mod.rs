@@ -2824,6 +2824,68 @@ mod tests {
     }
 
     #[test]
+    fn nested_package_projection_matches_canonical_prefixes_and_class_this() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("package p { package q { class C; val value: C = null } }");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "value");
+        let package_p = packages.symbol(&["p"]).unwrap();
+        let package_q = packages.symbol(&["p", "q"]).unwrap();
+        let other_package = packages.symbol(&[] as &[&str]).unwrap();
+        let no_prefix = definitions.no_prefix;
+        let p_reference = store.types.alloc(Type::type_ref(no_prefix, package_p));
+        let nested_package = store.types.alloc(Type::type_ref(p_reference, package_q));
+        let p_this = store.types.alloc(Type::ThisType { class: package_p });
+        let nested_through_package_this = store.types.alloc(Type::type_ref(p_this, package_q));
+        let q_this = store.types.alloc(Type::ThisType { class: package_q });
+        let other_reference = store.types.alloc(Type::type_ref(no_prefix, other_package));
+        let other_this = store.types.alloc(Type::ThisType {
+            class: other_package,
+        });
+        let unqualified = nominal_type_ref(&mut store, definitions, class);
+        let recursive = nominal_type_ref_with_prefix(&mut store, class, nested_package);
+        let through_package_this =
+            nominal_type_ref_with_prefix(&mut store, class, nested_through_package_this);
+        let direct_package_this = nominal_type_ref_with_prefix(&mut store, class, q_this);
+        let wrong_package = nominal_type_ref_with_prefix(&mut store, class, other_reference);
+        let wrong_package_this = nominal_type_ref_with_prefix(&mut store, class, other_this);
+        let this_class = store.types.alloc(Type::ThisType { class });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.complete_symbol(value).unwrap();
+        let Type::TypeRef { prefix, target } = typer.store().types.get(projected) else {
+            panic!("expected the source projector's nested class reference")
+        };
+        assert_eq!(*target, TypeRefTarget::Symbol(class));
+        assert_eq!(
+            typer.store().types.get(*prefix),
+            &Type::type_ref(no_prefix, package_q),
+            "package projection is flat and the exact package symbol carries its owner"
+        );
+
+        for equivalent in [
+            unqualified,
+            recursive,
+            through_package_this,
+            direct_package_this,
+        ] {
+            assert!(typer.is_subtype(projected, equivalent).unwrap());
+            assert!(typer.is_subtype(equivalent, projected).unwrap());
+            assert!(typer.is_subtype(this_class, equivalent).unwrap());
+        }
+        assert!(typer.is_subtype(this_class, projected).unwrap());
+        assert!(!typer.is_subtype(projected, wrong_package).unwrap());
+        assert!(!typer.is_subtype(projected, wrong_package_this).unwrap());
+    }
+
+    #[test]
     fn package_this_type_is_equivalent_only_as_an_owner_sensitive_prefix() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class Root; package p { package q { final class C } }; package r { final class C }",

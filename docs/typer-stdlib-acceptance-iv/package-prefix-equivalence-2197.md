@@ -59,10 +59,14 @@ exact next relation boundary: `None$` class information is still missing.
 Generic parent adaptation and source class completion remain outside this
 increment.
 
-Focused controls compare `TypeRef(ThisType(p), C)`, the canonical package
-reference form, and `NoPrefix` in both subtype directions for a nested-package
-class and a root-package class. They also reject wrong package prefixes,
-package `ThisType` as a value, and distinct same-spelled final classes.
+Focused controls complete the source-owned nested class type with
+`complete_symbol` and assert the projector's actual
+`TypeRef(TypeRef(NoPrefix, q), C)` shape. They compare this flat package
+reference, recursively qualified `p.q`, `TypeRef(ThisType(p), q)`, direct
+`ThisType(q)`, and `NoPrefix` in both subtype directions. `ThisType(C)` also
+conforms through each supported prefix form. The package symbol's exact owner
+identity validates the flat form; wrong package prefixes, package `ThisType`
+as a value, and distinct same-spelled final classes remain rejected.
 Existing nested-class tests keep the different outer-instance rejection.
 Focused malformed-graph controls continue to return `UnsupportedType` for a
 non-prefix type and a cyclic prefix graph, and `TooDeep` for an over-limit

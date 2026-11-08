@@ -410,9 +410,6 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             ));
         }
 
-        if matches!(self.type_at(prefix)?, Type::NoPrefix) {
-            return Ok(true);
-        }
         let Some(owner) = declaration.owner else {
             return Ok(false);
         };
@@ -421,13 +418,7 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         {
             return Ok(false);
         }
-        Ok(matches!(
-            self.type_at(prefix)?,
-            Type::TypeRef {
-                prefix: package_prefix,
-                target: TypeRefTarget::Symbol(package),
-            } if *package == owner && self.is_canonical_package_prefix(owner, *package_prefix, 0)?
-        ))
+        self.is_canonical_top_level_class_prefix(class, prefix)
     }
 
     fn is_canonical_package_prefix(
@@ -443,6 +434,13 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             || self.typer.store.symbols.get(package).kind != SymbolKind::Package
         {
             return Ok(false);
+        }
+        // Source projection currently represents every package as a flat
+        // `TypeRef(NoPrefix, package)`. The package SymbolId carries its
+        // owner, so this is canonical for nested packages too; recursively
+        // qualified forms are also accepted below.
+        if matches!(self.type_at(prefix)?, Type::NoPrefix) {
+            return Ok(true);
         }
         let declaration = self.typer.store.symbols.get(package);
         let Some(owner) = declaration.owner else {
