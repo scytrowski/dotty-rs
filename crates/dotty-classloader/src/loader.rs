@@ -8608,6 +8608,15 @@ mod tests {
                 .expect("the frozen real pair completes through the loader adapter");
             let base = loader.semantic_tasty_loaded[&base_name];
             let wrapped = loader.semantic_tasty_loaded[&wrapped_name];
+            let expected_fixture_origin = ClassOrigin::Directory(PathBuf::from("<memory>"));
+            assert_eq!(
+                loader.session.origins.get(&base),
+                Some(&expected_fixture_origin)
+            );
+            assert_eq!(
+                loader.session.origins.get(&wrapped),
+                Some(&expected_fixture_origin)
+            );
             assert_eq!(
                 first_symbol,
                 if first == "InfoBase" { base } else { wrapped }
