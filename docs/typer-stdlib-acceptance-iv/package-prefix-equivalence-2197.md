@@ -59,6 +59,16 @@ exact next relation boundary: `None$` class information is still missing.
 Generic parent adaptation and source class completion remain outside this
 increment.
 
+Focused controls compare `TypeRef(ThisType(p), C)`, the canonical package
+reference form, and `NoPrefix` in both subtype directions for a nested-package
+class and a root-package class. They also reject wrong package prefixes,
+package `ThisType` as a value, and distinct same-spelled final classes.
+Existing nested-class tests keep the different outer-instance rejection.
+Focused malformed-graph controls continue to return `UnsupportedType` for a
+non-prefix type and a cyclic prefix graph, and `TooDeep` for an over-limit
+prefix chain. The relation suite also retains missing-class-info, illegal
+generic arity, cyclic-ancestry and source transaction rollback coverage.
+
 Both protected ordinary full-method acceptance cohorts (25 main and 25
 analysis roots) passed their required-identity and determinism gates. The main
 report retains `Option.scala#tree=214` as a valid blocked attempt with this
