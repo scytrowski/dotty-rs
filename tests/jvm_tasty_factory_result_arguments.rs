@@ -3463,6 +3463,7 @@ fn standalone_local_receiver_call_candidate(
                 source_argument: call.source_argument(),
                 typed_argument: call.typed_argument(),
                 receiver: call.receiver(),
+                receiver_scope: call.receiver_scope(),
                 method: call.method(),
                 argument_formal: call.formal(),
             }

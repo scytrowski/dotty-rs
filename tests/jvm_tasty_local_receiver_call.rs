@@ -531,7 +531,7 @@ fn local_receiver_call_audit_keeps_the_real_frontend_identities_and_first_failur
 }
 
 #[test]
-fn ordered_two_call_audit_authenticates_source_before_unchanged_producer_rejection() {
+fn ordered_two_call_audit_authenticates_source_and_emits_complete_pair_batch() {
     let source_id = SourceId::from_index(21870);
     let source_text = SourceText::new(TWO_CALL_TARGET).unwrap();
     let scanner = ContextualScanner::new(TWO_CALL_TARGET).unwrap();
@@ -752,19 +752,129 @@ fn ordered_two_call_audit_authenticates_source_before_unchanged_producer_rejecti
         );
     }
 
-    let failed =
+    let batch =
         emit_paired_jvm_tasty_batch(TWO_CALL_TARGET, "OrderedLocalUnitCalls.scala", source_id);
-    println!("two-call first paired rejection: {failed:?}");
-    assert!(matches!(
-        failed,
-        Err(dotty::jvm_tasty_artifacts::PairedBatchArtifactError::Contract(
-            JvmTastyContractError::BatchArtifact {
-                phase: "cross-class invocation",
-                reason,
-                ..
-            }
-        )) if reason.contains("two-local Block must contain its exact optional Counter.set stat")
-    ));
+    let batch = batch.expect("the ordered proof emits the complete paired artifact batch");
+    let repeated =
+        emit_paired_jvm_tasty_batch(TWO_CALL_TARGET, "OrderedLocalUnitCalls.scala", source_id)
+            .expect("a fresh source session emits the same six artifacts");
+    assert_eq!(batch.classes(), repeated.classes());
+    assert_eq!(batch.classes().len(), 3);
+    let expected = [
+        ("example/Counter.class", "example/Counter.tasty"),
+        ("example/Pair.class", "example/Pair.tasty"),
+        ("example/PairFactory.class", "example/PairFactory.tasty"),
+    ];
+    for (artifacts, (class_path, tasty_path)) in batch.classes().iter().zip(expected) {
+        assert_eq!(artifacts.classfile_path(), class_path);
+        assert_eq!(artifacts.tasty_path(), tasty_path);
+        let class = decode_class(artifacts.classfile_bytes());
+        let tasty = TastyFile::parse_and_validate_scala_3_9(artifacts.tasty_bytes()).unwrap();
+        assert_eq!(class.version.major, 65);
+        assert_eq!(
+            (tasty.header().major_version, tasty.header().minor_version),
+            (28, 9)
+        );
+        assert_eq!(
+            class.tasty_link_id().unwrap().unwrap().as_bytes(),
+            &tasty.header().uuid
+        );
+        if class_path.ends_with("PairFactory.class") {
+            let index = tasty.ast_address_index().unwrap();
+            let (_, method) = index
+                .iter_nodes_with_tag(DEFDEF_TAG)
+                .find_map(|node| {
+                    let body = index
+                        .get(node.offset as u32)
+                        .unwrap()
+                        .decode_defdef_body()
+                        .unwrap();
+                    (tasty.names().render(body.name).unwrap() == "create")
+                        .then_some((node.offset as u32, body))
+                })
+                .unwrap();
+            let RawTree::LengthNode(block) = method.rhs.unwrap() else {
+                panic!("Rust TASTy records create's source BLOCK");
+            };
+            let block = block.decode_block().unwrap();
+            assert_eq!(block.stats.len(), 4);
+            assert_eq!(
+                block.stats.iter().map(raw_tag).collect::<Vec<_>>(),
+                [VALDEF_TAG, VALDEF_TAG, APPLY_TAG, APPLY_TAG]
+            );
+            assert_eq!(raw_tag(&block.expression), APPLY_TAG);
+
+            let create = class
+                .methods
+                .iter()
+                .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "create")
+                .unwrap();
+            let [Attribute::Code(code)] = create.attributes.as_slice() else {
+                panic!("PairFactory.create has one Code attribute");
+            };
+            assert_eq!((code.max_stack, code.max_locals), (4, 5));
+            let invocations = code
+                .code
+                .windows(3)
+                .enumerate()
+                .filter(|(_, instruction)| instruction[0] == 0xb6)
+                .map(|(pc, instruction)| {
+                    let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Methodref {
+                        class_index,
+                        name_and_type_index,
+                    }) = class
+                        .constant_pool
+                        .get(ConstantPoolIndex(u16::from_be_bytes([
+                            instruction[1],
+                            instruction[2],
+                        ])))
+                    else {
+                        panic!("invokevirtual references CONSTANT_Methodref");
+                    };
+                    let owner = class.constant_pool.class_name(*class_index).unwrap();
+                    let (name, descriptor) = class
+                        .constant_pool
+                        .name_and_type(*name_and_type_index)
+                        .unwrap();
+                    (pc, owner.to_owned(), name.to_owned(), descriptor.to_owned())
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(invocations.len(), 2);
+            assert!(invocations.iter().all(|(_, owner, name, descriptor)| {
+                owner == "example/Counter" && name == "set" && descriptor == "(I)V"
+            }));
+            let pair_constructor = code
+                .code
+                .windows(3)
+                .enumerate()
+                .find_map(|(pc, instruction)| {
+                    if instruction[0] != 0xb7 {
+                        return None;
+                    }
+                    let index =
+                        ConstantPoolIndex(u16::from_be_bytes([instruction[1], instruction[2]]));
+                    let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Methodref {
+                        class_index,
+                        name_and_type_index,
+                    }) = class.constant_pool.get(index)
+                    else {
+                        return None;
+                    };
+                    let owner = class.constant_pool.class_name(*class_index).ok()?;
+                    let (name, descriptor) = class
+                        .constant_pool
+                        .name_and_type(*name_and_type_index)
+                        .ok()?;
+                    (owner == "example/Pair"
+                        && name == "<init>"
+                        && descriptor == "(Lexample/Counter;Lexample/Counter;)V")
+                        .then_some(pc)
+                })
+                .expect("the final call constructs Pair(Counter, Counter)");
+            assert!(invocations[0].0 < invocations[1].0);
+            assert!(invocations[1].0 < pair_constructor);
+        }
+    }
 }
 
 #[test]
@@ -816,6 +926,13 @@ fn ordered_two_call_controls_authenticate_supported_source_before_artifact_rejec
                 result.is_ok(),
                 "the ordered source proof admits this bounded variant before artifact validation: {result:?}"
             );
+            let batch = emit_paired_jvm_tasty_batch(
+                source,
+                "OrderedLocalUnitCalls.scala",
+                SourceId::from_index(source_id),
+            )
+            .unwrap_or_else(|error| panic!("supported source variant {name} emits: {error:?}"));
+            assert_eq!(batch.classes().len(), 3, "variant {name} emits all classes");
         } else {
             assert!(
                 matches!(
@@ -845,6 +962,262 @@ fn ordered_two_call_controls_authenticate_supported_source_before_artifact_rejec
                 || (name == "wrong-type" && reason.contains("ApplicationArgumentTypeMismatch"))
         ));
     }
+}
+
+#[test]
+fn ordered_two_call_artifact_contract_rejects_forged_slots_targets_and_links() {
+    let batch = emit_paired_jvm_tasty_batch(
+        TWO_CALL_TARGET,
+        "OrderedLocalUnitCalls.scala",
+        SourceId::from_index(21920),
+    )
+    .expect("the ordered source proof emits the six-artifact batch");
+    let encoded = JvmTastyBatchArtifacts {
+        classfiles: batch
+            .classes()
+            .iter()
+            .map(|artifact| JvmTastyClassFileArtifact {
+                classfile_path: artifact.classfile_path().to_owned(),
+                classfile_bytes: artifact.classfile_bytes().to_vec(),
+            })
+            .collect(),
+        sidecars: batch
+            .classes()
+            .iter()
+            .map(|artifact| JvmTastySidecarArtifact {
+                tasty_path: artifact.tasty_path().to_owned(),
+                tasty_bytes: artifact.tasty_bytes().to_vec(),
+            })
+            .collect(),
+    };
+    let factory_index = encoded
+        .classfiles
+        .iter()
+        .position(|artifact| artifact.classfile_path == "example/PairFactory.class")
+        .unwrap();
+    let class = decode_class(&encoded.classfiles[factory_index].classfile_bytes);
+    let create = class
+        .methods
+        .iter()
+        .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "create")
+        .unwrap();
+    let [Attribute::Code(code)] = create.attributes.as_slice() else {
+        panic!("PairFactory.create has one Code attribute");
+    };
+    let invocations = code
+        .code
+        .windows(3)
+        .enumerate()
+        .filter_map(|(pc, instruction)| {
+            if instruction[0] != 0xb6 {
+                return None;
+            }
+            let index = ConstantPoolIndex(u16::from_be_bytes([instruction[1], instruction[2]]));
+            let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Methodref {
+                class_index,
+                name_and_type_index,
+            }) = class.constant_pool.get(index)
+            else {
+                return None;
+            };
+            let owner = class.constant_pool.class_name(*class_index).ok()?;
+            let (name, descriptor) = class
+                .constant_pool
+                .name_and_type(*name_and_type_index)
+                .ok()?;
+            (owner == "example/Counter" && name == "set" && descriptor == "(I)V").then_some(pc)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(invocations.len(), 2);
+    let code_offset = code.code.as_ptr() as usize
+        - encoded.classfiles[factory_index].classfile_bytes.as_ptr() as usize;
+
+    fn preceding_load(code: &[u8], end: usize, reference: bool) -> (usize, usize, u8) {
+        let (compact_first, generic) = if reference {
+            (0x2a, 0x19)
+        } else {
+            (0x1a, 0x15)
+        };
+        let last = code[end - 1];
+        if (compact_first..=compact_first + 3).contains(&last) {
+            return (end - 1, 1, last - compact_first);
+        }
+        assert!(
+            end >= 2 && code[end - 2] == generic,
+            "generic local load before {end}: {:02x?}",
+            &code[end.saturating_sub(4)..end]
+        );
+        (end - 2, 2, code[end - 1])
+    }
+    fn replace_load(code: &mut [u8], start: usize, len: usize, slot: u8) {
+        if len == 1 {
+            assert!(slot <= 3, "compact local slot remains encodable");
+            let compact_first = if (0x2a..=0x2d).contains(&code[start]) {
+                0x2a
+            } else {
+                0x1a
+            };
+            code[start] = compact_first + slot;
+        } else {
+            code[start + 1] = slot;
+        }
+    }
+
+    with_paired_jvm_tasty_batch_plan(
+        TWO_CALL_TARGET,
+        "OrderedLocalUnitCalls.scala",
+        SourceId::from_index(21920),
+        |plan| {
+            let tasty_plans = plan
+                .classes
+                .iter()
+                .map(|class| class.tasty_plan)
+                .collect::<Vec<_>>();
+            let validated = validate_jvm_tasty_batch(plan.jvm_unit, &tasty_plans).unwrap();
+            validate_jvm_tasty_batch_artifacts(&validated, encoded.clone()).unwrap();
+
+            let check_invocation_rejection =
+                |mut corrupted: JvmTastyBatchArtifacts, label: &str| {
+                    let error = validate_jvm_tasty_batch_artifacts(&validated, corrupted.clone())
+                        .expect_err("corrupted pair invocation is rejected before acceptance");
+                    assert!(
+                        matches!(
+                            error,
+                            JvmTastyContractError::BatchArtifact {
+                                class_index: 2,
+                                phase: "cross-class invocation",
+                                ..
+                            }
+                        ),
+                        "{label} reaches the pair invocation contract: {error:?}"
+                    );
+                    corrupted.classfiles.clear();
+                };
+
+            let mut wrong_receiver = encoded.clone();
+            let second_pc = invocations[1];
+            let (second_argument_start, _, _) = preceding_load(code.code, second_pc, false);
+            let (first_argument_start, _, _) = preceding_load(code.code, invocations[0], false);
+            let (_, _, first_receiver_slot) = preceding_load(code.code, first_argument_start, true);
+            let (second_receiver_start, second_receiver_len, _) =
+                preceding_load(code.code, second_argument_start, true);
+            replace_load(
+                &mut wrong_receiver.classfiles[factory_index].classfile_bytes
+                    [code_offset..code_offset + code.code.len()],
+                second_receiver_start,
+                second_receiver_len,
+                first_receiver_slot,
+            );
+            check_invocation_rejection(wrong_receiver, "forged receiver slot");
+
+            let mut wrong_seed = encoded.clone();
+            let (first_seed_start, first_seed_len, first_seed_slot) =
+                preceding_load(code.code, invocations[0], false);
+            let (second_seed_start, second_seed_len, _) =
+                preceding_load(code.code, invocations[1], false);
+            replace_load(
+                &mut wrong_seed.classfiles[factory_index].classfile_bytes
+                    [code_offset..code_offset + code.code.len()],
+                first_seed_start,
+                first_seed_len,
+                1, // firstSeed's canonical parameter slot in (II)
+            );
+            assert_ne!(first_seed_slot, 1, "the first call reads secondSeed");
+            let _ = second_seed_start;
+            let _ = second_seed_len;
+            check_invocation_rejection(wrong_seed, "forged seed slot");
+
+            let mut wrong_opcode = encoded.clone();
+            wrong_opcode.classfiles[factory_index].classfile_bytes[code_offset + invocations[0]] =
+                0xb8;
+            check_invocation_rejection(wrong_opcode, "wrong invocation opcode");
+
+            let counter_init_ref = (1..256)
+                .map(ConstantPoolIndex)
+                .find(|index| {
+                    matches!(
+                        class.constant_pool.get(*index),
+                        Some(dotty_classfile::constant_pool::ConstantPoolEntry::Methodref {
+                            class_index,
+                            name_and_type_index,
+                        }) if class.constant_pool.class_name(*class_index) == Ok("example/Counter")
+                            && class.constant_pool.name_and_type(*name_and_type_index)
+                                == Ok(("<init>", "(I)V"))
+                    )
+                })
+                .unwrap();
+            let mut wrong_methodref = encoded.clone();
+            wrong_methodref.classfiles[factory_index].classfile_bytes
+                [code_offset + invocations[1] + 1..code_offset + invocations[1] + 3]
+                .copy_from_slice(&counter_init_ref.0.to_be_bytes());
+            check_invocation_rejection(wrong_methodref, "wrong Methodref");
+
+            let mut missing_call = encoded.clone();
+            missing_call.classfiles[factory_index].classfile_bytes[code_offset + invocations[1]] =
+                0x00;
+            check_invocation_rejection(missing_call, "missing second call");
+
+            let swapped_calls = TWO_CALL_TARGET.replace(
+                "    first.set(secondSeed)\n    second.set(firstSeed)",
+                "    second.set(firstSeed)\n    first.set(secondSeed)",
+            );
+            let swapped = emit_paired_jvm_tasty_batch(
+                &swapped_calls,
+                "OrderedLocalUnitCalls.scala",
+                SourceId::from_index(21921),
+            )
+            .unwrap();
+            let swapped_tasty = swapped
+                .classes()
+                .iter()
+                .find(|artifact| artifact.tasty_path() == "example/PairFactory.tasty")
+                .unwrap()
+                .tasty_bytes();
+            let mut wrong_tasty = encoded.clone();
+            let sidecar = wrong_tasty
+                .sidecars
+                .iter_mut()
+                .find(|artifact| artifact.tasty_path == "example/PairFactory.tasty")
+                .unwrap();
+            let swapped_file = TastyFile::parse_and_validate_scala_3_9(swapped_tasty).unwrap();
+            let expected_uuid = TastyFile::parse_and_validate_scala_3_9(&sidecar.tasty_bytes)
+                .unwrap()
+                .header()
+                .uuid;
+            let swapped_uuid = swapped_file.header().uuid;
+            let uuid_at = swapped_tasty
+                .windows(swapped_uuid.len())
+                .position(|window| window == swapped_uuid)
+                .unwrap();
+            sidecar.tasty_bytes = swapped_tasty.to_vec();
+            sidecar.tasty_bytes[uuid_at..uuid_at + expected_uuid.len()]
+                .copy_from_slice(&expected_uuid);
+            assert_eq!(
+                TastyFile::parse_and_validate_scala_3_9(&sidecar.tasty_bytes)
+                    .unwrap()
+                    .header()
+                    .uuid,
+                expected_uuid
+            );
+            assert!(validate_jvm_tasty_batch_artifacts(&validated, wrong_tasty.clone()).is_err());
+
+            let mut wrong_uuid = encoded.clone();
+            let factory_bytes = &mut wrong_uuid.classfiles[factory_index].classfile_bytes;
+            let tasty_uuid = TastyFile::parse_and_validate_scala_3_9(
+                &wrong_tasty.sidecars[factory_index].tasty_bytes,
+            )
+            .unwrap()
+            .header()
+            .uuid;
+            let link = factory_bytes
+                .windows(tasty_uuid.len())
+                .position(|window| window == tasty_uuid)
+                .unwrap();
+            factory_bytes[link] ^= 0x01;
+            assert!(validate_jvm_tasty_batch_artifacts(&validated, wrong_uuid).is_err());
+        },
+    )
+    .expect("the paired plan validates source/typed identities before mutations");
 }
 
 #[test]
@@ -878,14 +1251,7 @@ fn local_receiver_call_controls_record_each_real_paired_path_result() {
         println!("control {name}: {result:?}");
         match name {
             "target" => assert!(result.is_ok(), "accepted bounded case: {result:?}"),
-            "second-call" => assert!(matches!(
-                result,
-                Err(PairedPlanError::BatchClass {
-                    phase: "JVM/TASTy cross-contract validation",
-                    ref reason,
-                    ..
-                }) if reason.contains("BodyExpression")
-            )),
+            "second-call" => assert!(result.is_ok(), "accepted ordered pair: {result:?}"),
             "wrong-arity" => assert!(
                 matches!(result, Err(PairedPlanError::BatchClass { phase: "method body typing", reason, .. }) if reason.contains("ApplicationArityMismatch"))
             ),
@@ -924,6 +1290,14 @@ fn local_receiver_call_controls_record_each_real_paired_path_result() {
         ),
         Err(dotty::jvm_tasty_artifacts::PairedBatchArtifactError::Contract(_))
     ));
+    assert!(
+        emit_paired_jvm_tasty_batch(
+            second_call.as_str(),
+            "LocalReceiverCall.scala",
+            SourceId::from_index(21647)
+        )
+        .is_ok()
+    );
     assert!(paired_result(source_order.as_str(), 21646).is_ok());
 }
 

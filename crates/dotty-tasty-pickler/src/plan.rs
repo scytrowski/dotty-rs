@@ -262,6 +262,7 @@ pub struct LocalReceiverUnitCallBinding {
     pub source_argument: TreeId<Untyped>,
     pub typed_argument: TreeId<Typed>,
     pub receiver: SymbolId,
+    pub receiver_scope: dotty_core::ScopeId,
     pub method: SymbolId,
     pub argument_formal: SymbolId,
 }
