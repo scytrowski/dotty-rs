@@ -58,7 +58,8 @@ pub(crate) struct DecodedTastyClass {
     /// Generic view of each explicitly declared parent, in TASTy parent
     /// order. The first entry corresponds to `super_class`, the rest to
     /// `interfaces`; unsupported parent shapes remain `None` and retain the
-    /// existing nominal fallback.
+    /// existing nominal fallback. Invalid metadata for the selected
+    /// `scala.Option` applied parent aborts decoding instead of falling back.
     pub parent_types: Vec<Option<DecodedTastyType>>,
     pub fields: Vec<DecodedTastyField>,
     pub methods: Vec<DecodedTastyMethod>,
@@ -440,6 +441,9 @@ pub enum TastyDecodeError {
     /// More than one direct class definition claims a bounded encoded
     /// classpath identity in the same TASTy package.
     AmbiguousTypeDef,
+    /// Scala's selected `Option[A]` parent wrapper did not preserve its one
+    /// exact reference to the declaring class's sole type parameter.
+    InvalidOptionParentMetadata(&'static str),
     /// The pinned Predef module does not contain the one address-backed
     /// `String` type alias required by the bounded module projection.
     InvalidPredefStringAlias(&'static str),
@@ -481,6 +485,10 @@ impl fmt::Display for TastyDecodeError {
             Self::AmbiguousTypeDef => {
                 write!(formatter, "TASTy has ambiguous top-level class identities")
             }
+            Self::InvalidOptionParentMetadata(reason) => write!(
+                formatter,
+                "invalid scala.Option applied parent metadata: {reason}"
+            ),
             Self::InvalidPredefStringAlias(reason) => {
                 write!(
                     formatter,
@@ -520,6 +528,7 @@ impl std::error::Error for TastyDecodeError {
             | Self::UnresolvedSupertype(_)
             | Self::AmbiguousModuleIdentity
             | Self::AmbiguousTypeDef
+            | Self::InvalidOptionParentMetadata(_)
             | Self::InvalidPredefStringAlias(_)
             | Self::AmbiguousPredefStringAlias => None,
         }
@@ -540,6 +549,7 @@ impl TastyDecodeError {
             Self::UnresolvedSupertype(_) => "tasty.unresolved_supertype",
             Self::AmbiguousModuleIdentity => "tasty.ambiguous_module_identity",
             Self::AmbiguousTypeDef => "tasty.ambiguous_type_def",
+            Self::InvalidOptionParentMetadata(_) => "tasty.invalid_option_parent_metadata",
             Self::InvalidPredefStringAlias(_) => "tasty.invalid_predef_string_alias",
             Self::AmbiguousPredefStringAlias => "tasty.ambiguous_predef_string_alias",
         }
@@ -588,6 +598,7 @@ impl TastyDecodeError {
             | Self::UnresolvedSupertype(_)
             | Self::AmbiguousModuleIdentity
             | Self::AmbiguousTypeDef
+            | Self::InvalidOptionParentMetadata(_)
             | Self::InvalidPredefStringAlias(_)
             | Self::AmbiguousPredefStringAlias => ClassLoadCategory::Conditional,
         }
@@ -1739,7 +1750,7 @@ where
                 0,
             )
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(DecodedTastyClass {
         flags,
@@ -2681,10 +2692,36 @@ fn decode_tasty_parent_type(
     class_type_parameters: &HashMap<u32, u32>,
     resolve_bare: &mut impl FnMut(&str, &str) -> Option<BinaryName>,
     depth: usize,
-) -> Option<DecodedTastyType> {
+) -> Result<Option<DecodedTastyType>, TastyDecodeError> {
     const MAX_PARENT_TYPE_DEPTH: usize = 128;
     if depth >= MAX_PARENT_TYPE_DEPTH {
-        return None;
+        return Ok(None);
+    }
+    if let Ok(StructuredTree::Length(StructuredNode::Apply(application))) = tree.decode_structured()
+        && application.arguments.is_empty()
+    {
+        let option_name = BinaryName::from_internal("scala/Option");
+        if resolved_name == &option_name {
+            let StructuredTree::Length(StructuredNode::TypeApply(application)) = application
+                .function
+                .decode_structured()
+                .map_err(TastyDecodeError::Ast)?
+            else {
+                return Err(TastyDecodeError::InvalidOptionParentMetadata(
+                    "expected one type application",
+                ));
+            };
+            return decode_option_parent_type_application(
+                file,
+                &application,
+                package,
+                class_type_parameters,
+                resolve_bare,
+                depth + 1,
+            )
+            .map(Some);
+        }
+        return Ok(Some(DecodedTastyType::Named(resolved_name.clone())));
     }
     if let RawTree::Ast { tag, child, .. } | RawTree::NatAst { tag, child, .. } = tree
         && matches!(*tag, IDENTTPT_TAG | TYPEREF_TAG)
@@ -2713,16 +2750,20 @@ fn decode_tasty_parent_type(
         );
     }
 
-    let arguments = match tree.decode_structured().ok()? {
-        StructuredTree::Length(StructuredNode::AppliedType(applied)) => Some(applied.arguments),
-        StructuredTree::Length(StructuredNode::TypeApply(applied)) => Some(applied.type_arguments),
+    let arguments = match tree.decode_structured().ok() {
+        Some(StructuredTree::Length(StructuredNode::AppliedType(applied))) => {
+            Some(applied.arguments)
+        }
+        Some(StructuredTree::Length(StructuredNode::TypeApply(applied))) => {
+            Some(applied.type_arguments)
+        }
         _ => None,
     };
     let Some(arguments) = arguments else {
-        return Some(DecodedTastyType::Named(resolved_name.clone()));
+        return Ok(Some(DecodedTastyType::Named(resolved_name.clone())));
     };
     if arguments.is_empty() {
-        return Some(DecodedTastyType::Named(resolved_name.clone()));
+        return Ok(Some(DecodedTastyType::Named(resolved_name.clone())));
     }
     let arguments = arguments
         .iter()
@@ -2739,9 +2780,48 @@ fn decode_tasty_parent_type(
             .unwrap_or(DecodedTastyType::Unsupported)
         })
         .collect::<Vec<_>>();
-    Some(DecodedTastyType::Applied {
+    Ok(Some(DecodedTastyType::Applied {
         tycon: Box::new(DecodedTastyType::Named(resolved_name.clone())),
         arguments,
+    }))
+}
+
+fn decode_option_parent_type_application(
+    file: &TastyFile<'_>,
+    application: &TypeApplyNode<'_>,
+    package: &str,
+    class_type_parameters: &HashMap<u32, u32>,
+    resolve_bare: &mut impl FnMut(&str, &str) -> Option<BinaryName>,
+    depth: usize,
+) -> Result<DecodedTastyType, TastyDecodeError> {
+    let invalid = TastyDecodeError::InvalidOptionParentMetadata;
+    if class_type_parameters.len() != 1 || !class_type_parameters.values().any(|index| *index == 0)
+    {
+        return Err(invalid("expected exactly one mapped class type parameter"));
+    }
+    if application.type_arguments.len() != 1 {
+        return Err(invalid("expected exactly one applied class type argument"));
+    }
+    let argument = decode_tasty_member_type(
+        file,
+        &application.type_arguments[0],
+        package,
+        &HashMap::new(),
+        class_type_parameters,
+        resolve_bare,
+        depth,
+    )
+    .ok_or_else(|| invalid("the class argument has no mapped type-parameter identity"))?;
+    if !matches!(argument, DecodedTastyType::ClassParamRef(0)) {
+        return Err(invalid(
+            "the argument does not reference the declaring class's sole type parameter",
+        ));
+    }
+    Ok(DecodedTastyType::Applied {
+        tycon: Box::new(DecodedTastyType::Named(BinaryName::from_internal(
+            "scala/Option",
+        ))),
+        arguments: vec![argument],
     })
 }
 
@@ -7734,6 +7814,154 @@ mod tests {
             Some(DecodedTastyType::ClassParamRef(0)),
             "Some.value refers to the enclosing class parameter A, not a method parameter"
         );
+    }
+
+    #[test]
+    fn rejects_invalid_scala39_some_applied_parent_parameter_metadata() {
+        let bytes = fixture_bytes("scala3-library/scala/Some.tasty");
+        let file = TastyFile::parse(&bytes).expect("pinned Some TASTy should parse");
+        let index = file.ast_address_index().unwrap();
+        let definition = index
+            .iter()
+            .find_map(|node| {
+                if node.tag != TYPEDEF_TAG {
+                    return None;
+                }
+                let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+                    name,
+                    type_or_template,
+                    ..
+                }) = node.decode_structured().ok()?
+                else {
+                    return None;
+                };
+                (wire_name(&file, name).as_deref() == Some("Some")).then_some(type_or_template)
+            })
+            .expect("Some class definition should exist");
+        let RawTree::LengthNode(template_node) = definition else {
+            panic!("Some should have a template body");
+        };
+        let StructuredNode::Template(template) = template_node.decode_structured().unwrap() else {
+            panic!("Some should have a template");
+        };
+        let parent = template
+            .parents
+            .iter()
+            .find(|tree| {
+                matches!(
+                    tree.decode_structured(),
+                    Ok(StructuredTree::Length(StructuredNode::Apply(ApplyNode {
+                        arguments,
+                        ..
+                    }))) if arguments.is_empty()
+                )
+            })
+            .expect("Some should have the selected zero-term parent wrapper");
+        let StructuredTree::Length(StructuredNode::Apply(outer_apply)) =
+            parent.decode_structured().unwrap()
+        else {
+            unreachable!()
+        };
+        let StructuredTree::Length(StructuredNode::TypeApply(application)) =
+            outer_apply.function.decode_structured().unwrap()
+        else {
+            panic!("Some parent wrapper should contain a type application");
+        };
+
+        let type_parameter_nodes = template
+            .type_params
+            .iter()
+            .filter(|parameter| matches!(parameter, ParameterNode::TypeParam { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(type_parameter_nodes.len(), 1);
+        let parameter_payload = type_parameter_nodes[0].payload();
+        let parameter_address = index
+            .iter()
+            .find(|node| {
+                node.tag == dotty_tasty::tasty::TYPEPARAM_TAG
+                    && node.payload.len() == parameter_payload.len()
+                    && node.payload.as_ptr() == parameter_payload.as_ptr()
+            })
+            .and_then(|node| u32::try_from(node.offset).ok())
+            .expect("Some's class type parameter should have an indexed address");
+        let class_parameters = HashMap::from([(parameter_address, 0)]);
+        let mut resolve_bare = |package: &str, simple_name: &str| {
+            Some(BinaryName::from_internal(format!(
+                "{package}/{simple_name}"
+            )))
+        };
+        let resolved_option = BinaryName::from_internal("scala/Option");
+
+        let decoded = decode_tasty_parent_type(
+            &file,
+            parent,
+            &resolved_option,
+            "scala",
+            &class_parameters,
+            &mut resolve_bare,
+            0,
+        )
+        .expect("valid Some parent metadata should decode")
+        .expect("valid parent should be projected");
+        assert!(matches!(
+            decoded,
+            DecodedTastyType::Applied { tycon, arguments }
+                if matches!(tycon.as_ref(), DecodedTastyType::Named(name)
+                    if name.as_internal() == "scala/Option")
+                    && matches!(arguments.as_slice(), [DecodedTastyType::ClassParamRef(0)])
+        ));
+
+        let missing_map_error = decode_tasty_parent_type(
+            &file,
+            parent,
+            &resolved_option,
+            "scala",
+            &HashMap::new(),
+            &mut resolve_bare,
+            0,
+        )
+        .expect_err("a missing class-parameter map must fail closed");
+        assert!(matches!(
+            missing_map_error,
+            TastyDecodeError::InvalidOptionParentMetadata(_)
+        ));
+
+        let foreign_map = HashMap::from([(parameter_address.wrapping_add(1), 0)]);
+        let foreign_map_error = decode_tasty_parent_type(
+            &file,
+            parent,
+            &resolved_option,
+            "scala",
+            &foreign_map,
+            &mut resolve_bare,
+            0,
+        )
+        .expect_err("a foreign class-parameter address must fail closed");
+        assert!(matches!(
+            foreign_map_error,
+            TastyDecodeError::InvalidOptionParentMetadata(_)
+        ));
+
+        let wrong_arity = TypeApplyNode {
+            function: application.function,
+            type_arguments: vec![
+                application.type_arguments[0].clone(),
+                application.type_arguments[0].clone(),
+            ],
+        };
+        let wrong_arity_error = decode_option_parent_type_application(
+            &file,
+            &wrong_arity,
+            "scala",
+            &class_parameters,
+            &mut resolve_bare,
+            1,
+        )
+        .expect_err("a two-argument Option parent must fail closed");
+        assert!(matches!(
+            wrong_arity_error,
+            TastyDecodeError::InvalidOptionParentMetadata(_)
+        ));
     }
 
     #[test]
