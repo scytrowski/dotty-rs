@@ -564,6 +564,14 @@ fn validate_immutable_local_counter_set_call_at<'session>(
             "selected member must be the accessible original one-argument set method",
         ));
     }
+    if store.names.resolve(typed_selection.name.text())
+        != store.names.resolve(source_selection.name.text())
+        || store.names.resolve(typed_selection.name.text()) != "set"
+    {
+        return Err(typed_error(
+            "typed Counter.set Select name must match the original canonical set member",
+        ));
+    }
     let formal_tree = set_def.value_param_clauses[0][0];
     let TreeKind::ValDef(set_formal_def) = &source_ast
         .try_get(formal_tree)

@@ -2482,6 +2482,63 @@ fn ordered_counter_set_pair_receipt_keeps_source_typed_order_and_local_identity(
                     )
                 )
             ));
+
+            for call_offset in 0..2 {
+                let source_call = block.stats[2 + call_offset];
+                let TreeKind::Apply(source_apply) = &source_ast.get(source_call).kind else {
+                    panic!("ordered source call remains an Apply");
+                };
+                let source_select = source_apply.function;
+                let TreeKind::Select(source_selection) = &source_ast.get(source_select).kind else {
+                    panic!("ordered source call retains its Select");
+                };
+                let TreeKind::Ident(source_receiver) =
+                    &source_ast.get(source_selection.qualifier).kind
+                else {
+                    panic!("ordered source receiver remains an Ident");
+                };
+                let typed_select = source_typed_index.get(source_id, source_select).unwrap();
+                let mut mismatched_name_ast = clone_arena(typed_ast);
+                let TreeKind::Select(typed_selection) =
+                    &mut mismatched_name_ast.get_mut(typed_select).kind
+                else {
+                    panic!("mapped typed call function remains a Select");
+                };
+                typed_selection.name = source_receiver.name;
+                let mismatched_jvm_unit = JvmCompilationUnit {
+                    store: jvm_unit.store,
+                    typed_ast: &mismatched_name_ast,
+                    classes: jvm_unit.classes.clone(),
+                };
+
+                let result = validate_immutable_local_counter_set_calls_proof(
+                    ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast: &mismatched_name_ast,
+                        source_index,
+                        source_typed_index,
+                        local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                        jvm_unit: &mismatched_jvm_unit,
+                    },
+                );
+                let error = match result {
+                    Err(error) => error,
+                    Ok(_) => {
+                        panic!("typed Select name mismatch in call slot {call_offset} was accepted")
+                    }
+                };
+                assert_eq!(
+                    error,
+                    dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+                        "typed Counter.set Select name must match the original canonical set member"
+                    ),
+                    "call slot {call_offset} rejects the name mismatch before later proof checks"
+                );
+            }
         },
     );
 }
