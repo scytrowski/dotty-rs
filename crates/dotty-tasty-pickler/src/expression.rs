@@ -483,8 +483,18 @@ fn lower_expression_inner(
         }
         if let TreeKind::Select(selection) = &function.kind
             && application.args.len() == 1
-            && let Some(binding) = context.local_receiver_unit_call(method)
-            && binding.typed_apply == root
+            && let Some(binding) = context
+                .local_receiver_unit_call(method)
+                .filter(|binding| binding.typed_apply == root)
+                .or_else(|| {
+                    context
+                        .local_receiver_unit_call_pair(method)
+                        .and_then(|calls| {
+                            calls
+                                .into_iter()
+                                .find(|binding| binding.typed_apply == root)
+                        })
+                })
         {
             let Some(Type::TermRef {
                 target: TermRefTarget::Symbol(target),

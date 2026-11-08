@@ -530,6 +530,12 @@ impl ValidatedClassStatePlan<'_, '_> {
             {
                 context.register_local_receiver_unit_call(symbol, unit_call)?;
             }
+            if let Some(unit_calls) = p
+                .typed_bindings
+                .local_receiver_unit_call_pair(p.source.id, symbol)
+            {
+                context.register_local_receiver_unit_call_pair(symbol, unit_calls)?;
+            }
             let mut registered = Vec::new();
             if let Some(nested) = p
                 .typed_bindings
