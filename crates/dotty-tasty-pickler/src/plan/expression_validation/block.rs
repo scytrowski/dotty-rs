@@ -133,8 +133,9 @@ impl Validator<'_, '_> {
             let pair_formals_valid = match (call_pair_binding, method_formals) {
                 (Some(calls), Some([first, second])) => {
                     first != second
-                        && calls[0].argument_formal == second
-                        && calls[1].argument_formal == first
+                        && calls[0].argument_formal != calls[1].argument_formal
+                        && [first, second].contains(&calls[0].argument_formal)
+                        && [first, second].contains(&calls[1].argument_formal)
                 }
                 (None, _) => true,
                 _ => false,
@@ -519,11 +520,8 @@ impl Validator<'_, '_> {
             _ => None,
         };
         let expected_argument_formal = match (calls_pair, method_formals) {
-            (Some(calls), Some([_, second])) if binding.source_apply == calls[0].source_apply => {
-                Some(second)
-            }
-            (Some(calls), Some([first, _])) if binding.source_apply == calls[1].source_apply => {
-                Some(first)
+            (Some(_), Some(formals)) if formals.contains(&binding.argument_formal) => {
+                Some(binding.argument_formal)
             }
             (None, Some([_, second])) => Some(second),
             _ => None,

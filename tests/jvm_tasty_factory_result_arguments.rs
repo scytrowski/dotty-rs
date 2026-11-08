@@ -1074,7 +1074,11 @@ fn run_pinned_two_local_pair_reader(bytes: &[u8], expected_pair_call: &str) {
     fs::remove_dir_all(root).unwrap();
 }
 
-fn run_pinned_local_receiver_unit_call_reader(bytes: &[u8], call_count: usize) {
+fn run_pinned_local_receiver_unit_call_reader(
+    bytes: &[u8],
+    call_count: usize,
+    reversed_calls: bool,
+) {
     let scala_root = PathBuf::from(
         std::env::var_os("SCALA39_ROOT").expect("pinned Scala 3.9 checkout is required"),
     );
@@ -1145,15 +1149,18 @@ fn run_pinned_local_receiver_unit_call_reader(bytes: &[u8], call_count: usize) {
             "missing {required:?}: {decompiled}"
         );
     }
-    let mut stat_order = vec![
-        "val first: example.Counter",
-        "val second: example.Counter",
-        "first.set(secondSeed)",
-        "new example.Pair(first, second)",
-    ];
+    let mut stat_order = vec!["val first: example.Counter", "val second: example.Counter"];
     if call_count == 2 {
-        stat_order.insert(3, "second.set(firstSeed)");
+        let calls = if reversed_calls {
+            ["second.set(firstSeed)", "first.set(secondSeed)"]
+        } else {
+            ["first.set(secondSeed)", "second.set(firstSeed)"]
+        };
+        stat_order.extend(calls);
+    } else {
+        stat_order.push("first.set(secondSeed)");
     }
+    stat_order.push("new example.Pair(first, second)");
     let stat_order = stat_order
         .into_iter()
         .map(|text| decompiled.find(text).unwrap())
@@ -3267,6 +3274,25 @@ fn standalone_ordered_two_local_receiver_calls_use_the_original_proof_pair() {
     TastyFile::parse_and_validate_scala_3_9(&first).expect("structural reader accepts candidate");
 }
 
+#[test]
+fn standalone_reversed_two_local_receiver_calls_preserve_source_order() {
+    let reversed_source = TWO_CALL_TARGET.replace(
+        "    first.set(secondSeed)\n    second.set(firstSeed)",
+        "    second.set(firstSeed)\n    first.set(secondSeed)",
+    );
+    assert_ne!(
+        reversed_source, TWO_CALL_TARGET,
+        "fixture call sequence matched"
+    );
+    let candidate = standalone_local_receiver_call_candidate(
+        &reversed_source,
+        SourceId::from_index(21903),
+        true,
+    );
+    TastyFile::parse_and_validate_scala_3_9(&candidate)
+        .expect("structural reader accepts the independently reversed source order");
+}
+
 fn standalone_local_receiver_call_candidate(
     source_text: &str,
     source_id: SourceId,
@@ -3655,6 +3681,10 @@ fn standalone_local_receiver_call_candidate(
             forged.validate_method_bodies().is_err(),
             "reordered receipt roots cannot authorize the original statement order"
         );
+        assert!(
+            forged.pickle().is_err(),
+            "reordered receipt roots cannot produce TASTy for the original statement order"
+        );
     }
     if let Some(calls) = call_pair_binding {
         let duplicate_formal = calls[0].argument_formal;
@@ -3746,6 +3776,7 @@ fn standalone_local_receiver_call_candidate(
         run_pinned_local_receiver_unit_call_reader(
             candidate.bytes(),
             if call_pair_binding.is_some() { 2 } else { 1 },
+            source_text.contains("second.set(firstSeed)\n    first.set(secondSeed)"),
         );
     }
     let factory_file = TastyFile::parse_and_validate_scala_3_9(candidate.bytes()).unwrap();
