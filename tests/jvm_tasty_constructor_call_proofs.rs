@@ -2,6 +2,7 @@ use dotty::jvm_tasty_cross_class::{
     CrossClassConstructorCallProofInput, ImmutableLocalInitializationProofInput,
     ImmutableLocalInitializerPairProofInput, ValidatedCrossClassConstructorCallProof,
     validate_cross_class_constructor_call_proofs, validate_immutable_local_counter_set_call_proof,
+    validate_immutable_local_counter_set_calls_proof,
     validate_immutable_local_initialization_proof, validate_immutable_local_initializer_pair_proof,
     validate_ordered_constructor_argument_bindings,
 };
@@ -35,6 +36,8 @@ const TWO_IMMUTABLE_LOCALS_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
 const COUNTER_SET_CALL_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_local_receiver_call/LocalReceiverCall.scala");
+const ORDERED_COUNTER_SET_CALLS_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_ordered_local_unit_calls/OrderedLocalUnitCalls.scala");
 const TWO_IMMUTABLE_LOCALS_REVERSED_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocalsReversed.scala");
 
@@ -2348,6 +2351,139 @@ fn original_counter_set_call_is_proved_without_widening_pair_contract() {
             },
         );
     }
+}
+
+#[test]
+fn ordered_counter_set_pair_receipt_keeps_source_typed_order_and_local_identity() {
+    let swapped_calls = ORDERED_COUNTER_SET_CALLS_SOURCE.replace(
+        "    first.set(secondSeed)\n    second.set(firstSeed)",
+        "    second.set(firstSeed)\n    first.set(secondSeed)",
+    );
+    let reversed_declarations = ORDERED_COUNTER_SET_CALLS_SOURCE.replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
+        "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
+    );
+    for (source, source_id) in [
+        (ORDERED_COUNTER_SET_CALLS_SOURCE, 21891),
+        (swapped_calls.as_str(), 21892),
+        (reversed_declarations.as_str(), 21893),
+    ] {
+        with_two_local_proof_session(
+            source,
+            source_id,
+            |store,
+             definitions,
+             source_ast,
+             typed_ast,
+             source_index,
+             source_typed_index,
+             source_id,
+             method_tree,
+             bindings,
+             _,
+             _,
+             jvm_unit| {
+                let input = ImmutableLocalInitializerPairProofInput {
+                    source_id,
+                    method_tree,
+                    store,
+                    definitions,
+                    source_ast,
+                    typed_ast,
+                    source_index,
+                    source_typed_index,
+                    local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                    jvm_unit,
+                };
+                let proof = validate_immutable_local_counter_set_calls_proof(input).expect(
+                    "both original calls retain canonical ordered source and typed identity",
+                );
+                let calls = proof.calls();
+                let TreeKind::DefDef(method) = &source_ast.get(method_tree).kind else {
+                    panic!("factory method root is DefDef");
+                };
+                let TreeKind::Block(block) = &source_ast.get(method.rhs.unwrap()).kind else {
+                    panic!("factory body is Block");
+                };
+                assert_eq!(block.stats.len(), 4);
+                let typed_block = source_typed_index
+                    .get(source_id, method.rhs.unwrap())
+                    .and_then(|tree| match &typed_ast.get(tree).kind {
+                        TreeKind::Block(block) => Some(block),
+                        _ => None,
+                    })
+                    .unwrap();
+                for (index, call) in calls.iter().enumerate() {
+                    assert_eq!(call.source_call(), block.stats[index + 2]);
+                    assert_eq!(call.typed_call(), typed_block.stats[index + 2]);
+                    assert_eq!(call.method(), calls[0].method());
+                    assert_eq!(call.argument_type(), definitions.int);
+                    assert_eq!(call.result_type(), definitions.unit);
+                    let local = bindings
+                        .iter()
+                        .find(|binding| binding.symbol() == call.receiver())
+                        .expect("receiver resolves to one initialized local symbol");
+                    assert_eq!(call.receiver_scope(), local.scope());
+                }
+                assert_ne!(calls[0].source_call(), calls[1].source_call());
+                assert_ne!(calls[0].typed_call(), calls[1].typed_call());
+                assert_ne!(calls[0].formal(), calls[1].formal());
+            },
+        );
+    }
+
+    with_two_local_proof_session(
+        ORDERED_COUNTER_SET_CALLS_SOURCE,
+        21894,
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         _,
+         _,
+         jvm_unit| {
+            let TreeKind::DefDef(method) = &source_ast.get(method_tree).kind else {
+                panic!("factory method root is DefDef");
+            };
+            let TreeKind::Block(block) = &source_ast.get(method.rhs.unwrap()).kind else {
+                panic!("factory body is Block");
+            };
+            let first = source_typed_index.get(source_id, block.stats[2]).unwrap();
+            let second = source_typed_index.get(source_id, block.stats[3]).unwrap();
+            let mut swapped = source_typed_index.clone();
+            swapped.remove(source_id, block.stats[2]);
+            swapped.remove(source_id, block.stats[3]);
+            swapped.insert(source_id, block.stats[2], second).unwrap();
+            swapped.insert(source_id, block.stats[3], first).unwrap();
+            let result = validate_immutable_local_counter_set_calls_proof(
+                ImmutableLocalInitializerPairProofInput {
+                    source_id,
+                    method_tree,
+                    store,
+                    definitions,
+                    source_ast,
+                    typed_ast,
+                    source_index,
+                    source_typed_index: &swapped,
+                    local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                    jvm_unit,
+                },
+            );
+            assert!(matches!(
+                result,
+                Err(
+                    dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+                        _
+                    )
+                )
+            ));
+        },
+    );
 }
 
 #[test]
