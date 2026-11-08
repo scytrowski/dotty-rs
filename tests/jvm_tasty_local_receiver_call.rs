@@ -21,6 +21,10 @@ use dotty_tasty::term::RawTree;
 use dotty_typer::SourceTyper;
 use std::process::Command;
 
+#[allow(dead_code)]
+#[path = "support/jvm_tasty_batch_publisher.rs"]
+mod batch_publisher;
+
 const TARGET: &str = include_str!("fixtures/jvm_tasty_local_receiver_call/LocalReceiverCall.scala");
 const TWO_CALL_TARGET: &str =
     include_str!("fixtures/jvm_tasty_ordered_local_unit_calls/OrderedLocalUnitCalls.scala");
@@ -1218,6 +1222,78 @@ fn ordered_two_call_artifact_contract_rejects_forged_slots_targets_and_links() {
         },
     )
     .expect("the paired plan validates source/typed identities before mutations");
+}
+
+#[test]
+fn ordered_two_call_batch_publication_is_atomic_across_six_writes() {
+    let batch = emit_paired_jvm_tasty_batch(
+        TWO_CALL_TARGET,
+        "OrderedLocalUnitCalls.scala",
+        SourceId::from_index(21913),
+    )
+    .expect("the authenticated ordered-call source emits six artifacts");
+    let stage = std::env::temp_dir().join(format!(
+        "dotty-rs-ordered-two-call-publisher-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&stage).unwrap();
+    let destination = stage.join("published");
+    let published = batch_publisher::publish_paired_batch(&destination, &batch, None)
+        .expect("the complete six-write batch publishes");
+    assert_eq!(published.len(), 6);
+    let expected = [
+        "example/Counter.class",
+        "example/Counter.tasty",
+        "example/Pair.class",
+        "example/Pair.tasty",
+        "example/PairFactory.class",
+        "example/PairFactory.tasty",
+    ];
+    let mut actual = published
+        .iter()
+        .map(|path| {
+            path.strip_prefix(&destination)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect::<Vec<_>>();
+    actual.sort();
+    assert_eq!(actual, expected);
+
+    for (index, fault) in (1..=6)
+        .map(batch_publisher::BatchPublishFault::AfterStagedFiles)
+        .chain([
+            batch_publisher::BatchPublishFault::BeforePromotion,
+            batch_publisher::BatchPublishFault::AfterPromotion,
+        ])
+        .enumerate()
+    {
+        let failed_destination = stage.join(format!("failed-{index}"));
+        assert!(
+            batch_publisher::publish_paired_batch(&failed_destination, &batch, Some(fault))
+                .is_err()
+        );
+        assert!(
+            !failed_destination.exists(),
+            "failure {index} leaves no published destination"
+        );
+    }
+
+    let sentinel_destination = stage.join("sentinel");
+    std::fs::create_dir(&sentinel_destination).unwrap();
+    let sentinel = sentinel_destination.join("sentinel.txt");
+    std::fs::write(&sentinel, b"preserve existing destination").unwrap();
+    assert!(batch_publisher::publish_paired_batch(&sentinel_destination, &batch, None).is_err());
+    assert_eq!(
+        std::fs::read(&sentinel).unwrap(),
+        b"preserve existing destination"
+    );
+    std::fs::remove_dir_all(stage).unwrap();
 }
 
 #[test]
