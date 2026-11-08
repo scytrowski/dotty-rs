@@ -255,6 +255,104 @@ fn captures_acceptance_iv_relation_operands_before_transaction_rollback() {
                             } if observed_symbol_path(typer.store, *symbol).ends_with(".scala.Some"))
                     ));
                 }
+                TyperError::ExpectedExpressionConformanceUnsupported {
+                    source,
+                    tree_index,
+                    actual,
+                    error: relation,
+                    ..
+                } => {
+                    assert_eq!(*source, typer.source);
+                    assert_eq!(*tree_index, 213);
+                    assert!(matches!(
+                        relation.as_ref(),
+                        TypeRelationError::ClassInfoUnavailable {
+                            symbol,
+                            state: crate::SymbolInfoState::Missing,
+                        } if observed_symbol_path(typer.store, *symbol).ends_with(".scala.None$")
+                    ));
+                    let Type::Or { left, right } = typer.store.types.get(*actual) else {
+                        panic!(
+                            "post-prefix-relation actual operand should retain the branch join: {:?}",
+                            typer.store.types.get(*actual)
+                        );
+                    };
+                    let is_none_branch = |ty: TypeId| {
+                        matches!(
+                            typer.store.types.get(ty),
+                            Type::TypeRef {
+                                target: TypeRefTarget::Symbol(symbol),
+                                ..
+                            } if observed_symbol_path(typer.store, *symbol).ends_with(".scala.None$")
+                        )
+                    };
+                    let is_some_branch = |ty: TypeId| {
+                        matches!(
+                            typer.store.types.get(ty),
+                            Type::Applied { tycon, .. }
+                                if matches!(typer.store.types.get(*tycon), Type::TypeRef {
+                                    target: TypeRefTarget::Symbol(symbol),
+                                    ..
+                                } if observed_symbol_path(typer.store, *symbol).ends_with(".scala.Some"))
+                        )
+                    };
+                    assert!(
+                        (is_none_branch(*left) && is_some_branch(*right))
+                            || (is_none_branch(*right) && is_some_branch(*left)),
+                        "the joined operand should retain canonical None$ and Some[B] branches"
+                    );
+                    let (none_branch, some_branch) = if is_none_branch(*left) {
+                        (*left, *right)
+                    } else {
+                        (*right, *left)
+                    };
+                    let Type::TypeRef {
+                        prefix: none_prefix,
+                        target: TypeRefTarget::Symbol(none_class),
+                    } = typer.store.types.get(none_branch)
+                    else {
+                        unreachable!("the observed None$ branch was checked above")
+                    };
+                    let Type::TypeRef {
+                        prefix: none_package_prefix,
+                        target: TypeRefTarget::Symbol(none_package),
+                    } = typer.store.types.get(*none_prefix)
+                    else {
+                        panic!("None$ should retain its package TypeRef prefix")
+                    };
+                    assert!(matches!(
+                        typer.store.types.get(*none_package_prefix),
+                        Type::NoPrefix
+                    ));
+                    let Type::Applied {
+                        tycon: some_tycon, ..
+                    } = typer.store.types.get(some_branch)
+                    else {
+                        unreachable!("the observed Some[B] branch was checked above")
+                    };
+                    let Type::TypeRef {
+                        prefix: some_prefix,
+                        target: TypeRefTarget::Symbol(some_class),
+                    } = typer.store.types.get(*some_tycon)
+                    else {
+                        panic!("Some[B] should retain its class TypeRef prefix")
+                    };
+                    let Type::ThisType {
+                        class: some_package,
+                    } = typer.store.types.get(*some_prefix)
+                    else {
+                        panic!("Some should retain its package ThisType prefix")
+                    };
+                    assert_eq!(none_package, some_package);
+                    assert_eq!(
+                        typer.store.symbols.get(*none_class).owner,
+                        Some(*none_package)
+                    );
+                    assert_eq!(
+                        typer.store.symbols.get(*some_class).owner,
+                        Some(*some_package)
+                    );
+                }
                 TyperError::ApplicationArgumentConformanceUnsupported {
                     actual, expected, ..
                 } => {
@@ -352,6 +450,9 @@ fn captures_acceptance_iv_relation_operands_before_transaction_rollback() {
             }
             let operands = match error {
                 TyperError::IfBranchJoinUnsupported { left, right, .. } => vec![*left, *right],
+                TyperError::ExpectedExpressionConformanceUnsupported {
+                    actual, expected, ..
+                } => vec![*actual, *expected],
                 TyperError::ApplicationArgumentConformanceUnsupported {
                     actual, expected, ..
                 } => vec![*actual, *expected],

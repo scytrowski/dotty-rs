@@ -2824,6 +2824,50 @@ mod tests {
     }
 
     #[test]
+    fn package_this_type_is_equivalent_only_as_an_owner_sensitive_prefix() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("package p { package q { class C } }; package r { class D }");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let package_p = packages.symbol(&["p"]).unwrap();
+        let package_q = packages.symbol(&["p", "q"]).unwrap();
+        let package_r = packages.symbol(&["r"]).unwrap();
+
+        let no_prefix = definitions.no_prefix;
+        let p_reference = store.types.alloc(Type::type_ref(no_prefix, package_p));
+        let q_reference = store.types.alloc(Type::type_ref(p_reference, package_q));
+        let p_this = store.types.alloc(Type::ThisType { class: package_p });
+        let q_reference_through_this = store.types.alloc(Type::type_ref(p_this, package_q));
+        let r_this = store.types.alloc(Type::ThisType { class: package_r });
+        let r_reference = store.types.alloc(Type::type_ref(no_prefix, package_r));
+        let canonical = nominal_type_ref_with_prefix(&mut store, class, q_reference);
+        let through_package_this =
+            nominal_type_ref_with_prefix(&mut store, class, q_reference_through_this);
+        let wrong_owner = nominal_type_ref_with_prefix(&mut store, class, r_reference);
+        let wrong_package_this = nominal_type_ref_with_prefix(&mut store, class, r_this);
+        let package_value = store.types.alloc(Type::ThisType { class: package_p });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(typer.is_subtype(canonical, through_package_this).unwrap());
+        assert!(typer.is_subtype(through_package_this, canonical).unwrap());
+        assert!(!typer.is_subtype(canonical, wrong_owner).unwrap());
+        assert!(!typer.is_subtype(canonical, wrong_package_this).unwrap());
+        assert!(matches!(
+            typer.is_subtype(package_value, package_value),
+            Err(TypeRelationError::NonClassLikeSymbol {
+                symbol,
+                kind: SymbolKind::Package,
+            }) if symbol == package_p
+        ));
+    }
+
+    #[test]
     fn this_type_conforms_to_its_own_class_reference() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name("class C");
         let class = class_symbol(&parsed, &store, &index, source, "C");
