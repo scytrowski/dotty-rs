@@ -1,0 +1,28 @@
+Picked up JAVA_TOOL_OPTIONS: -XX:-UsePerfData -Djava.io.tmpdir=/home/vdrake6/.cache/agent-worktrees/issue-2187-tmp-77d685b4
+[[syntax trees at end of                     typer]] // tests/fixtures/jvm_tasty_ordered_local_unit_calls/OrderedLocalUnitCalls.scala
+[33mpackage [0mexample {
+  [33mclass[0m [32mCounter[0m([36mstart[0m: [32mInt[0m)[33m extends[0m [32mObject[0m() {
+    [33mprivate[this][0m [33mval[0m [36mstart[0m: [32mInt[0m
+    [33mprivate[this][0m [33mvar[0m [36mcurrent[0m: [32mInt[0m = Counter.this.start
+    [33mdef[0m [36mget[0m(): [32mInt[0m = [33mthis[0m.current
+    [33mdef[0m [36mset[0m([36mvalue[0m: [32mInt[0m): [32mUnit[0m = [33mthis[0m.current = value
+  }
+  [33mclass[0m [32mPair[0m([36mfirst[0m: [32mexample.Counter[0m, [36msecond[0m: [32mexample.Counter[0m)[33m extends[0m [32mObject[0m() {
+    [33mprivate[this][0m [33mval[0m [36mfirst[0m: [32mexample.Counter[0m
+    [33mprivate[this][0m [33mval[0m [36msecond[0m: [32mexample.Counter[0m
+    [33mprivate[this][0m [33mval[0m [36mleft[0m: [32mexample.Counter[0m = Pair.this.first
+    [33mprivate[this][0m [33mval[0m [36mright[0m: [32mexample.Counter[0m = Pair.this.second
+    [33mdef[0m [36mleftValue[0m(): [32mInt[0m = [33mthis[0m.left.get()
+    [33mdef[0m [36mrightValue[0m(): [32mInt[0m = [33mthis[0m.right.get()
+  }
+  [33mclass[0m [32mPairFactory[0m()[33m extends[0m [32mObject[0m() {
+    [33mdef[0m [36mcreate[0m([36mfirstSeed[0m: [32mInt[0m, [36msecondSeed[0m: [32mInt[0m): [32mexample.Pair[0m =
+      {
+        [33mval[0m [36mfirst[0m: [32mexample.Counter[0m = [33mnew [0m[32mexample.Counter[0m(firstSeed)
+        [33mval[0m [36msecond[0m: [32mexample.Counter[0m = [33mnew [0m[32mexample.Counter[0m(secondSeed)
+        first.set(secondSeed)
+        second.set(firstSeed)
+        [33mnew [0m[32mexample.Pair[0m(first, second)
+      }
+  }
+}

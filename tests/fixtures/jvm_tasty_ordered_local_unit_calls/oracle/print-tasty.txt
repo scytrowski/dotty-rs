@@ -1,0 +1,181 @@
+--------------------------------------------------------------------------------
+/home/vdrake6/.cache/agent-worktrees/issue-2187-tmp-77d685b4/oracle/classes/example/PairFactory.tasty
+--------------------------------------------------------------------------------
+Header:
+  version: 28.9.0
+  tooling: Scala 3.9.0-bin-SNAPSHOT-git-777528f
+     UUID: 00ea4a5f-b911-2ad6-009e-c4110746aa25
+
+Names (361 bytes, starting from 60):
+     0: ASTs
+     1: example
+     2: PairFactory
+     3: <init>
+     4: java
+     5: lang
+     6: java[Qualified . lang]
+     7: Object
+     8: java[Qualified . lang][Qualified . Object]
+     9: <init>[Signed Signature(List(),java.lang.Object) @<init>]
+    10: Unit
+    11: scala
+    12: create
+    13: firstSeed
+    14: Int
+    15: secondSeed
+    16: Pair
+    17: example[Qualified . Pair]
+    18: Counter
+    19: example[Qualified . Counter]
+    20: <init>[Signed Signature(List(example.Counter, example.Counter),example.Pair) @<init>]
+    21: first
+    22: scala[Qualified . Int]
+    23: <init>[Signed Signature(List(scala.Int),example.Counter) @<init>]
+    24: second
+    25: set
+    26: scala[Qualified . Unit]
+    27: set[Signed Signature(List(scala.Int),scala.Unit) @set]
+    28: SourceFile
+    29: annotation
+    30: scala[Qualified . annotation]
+    31: internal
+    32: scala[Qualified . annotation][Qualified . internal]
+    33: scala[Qualified . annotation][Qualified . internal][Qualified . SourceFile]
+    34: String
+    35: java[Qualified . lang][Qualified . String]
+    36: <init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]
+    37: tests/fixtures/jvm_tasty_ordered_local_unit_calls/OrderedLocalUnitCalls.scala
+    38: Positions
+    39: Comments
+    40: Attributes
+
+Trees (162 bytes, starting from 424):
+     0: PACKAGE(159)
+     3:   TERMREFpkg 1 [example]
+     5:   TYPEDEF(154) 2 [PairFactory]
+     9:     TEMPLATE(130)
+    12:       APPLY(10)
+    14:         SELECTin(8) 9 [<init>[Signed Signature(List(),java.lang.Object) @<init>]]
+    17:           NEW
+    18:             TYPEREF 7 [Object]
+    20:               TERMREFpkg 6 [java[Qualified . lang]]
+    22:           SHAREDtype 18
+    24:       DEFDEF(7) 3 [<init>]
+    27:         EMPTYCLAUSE
+    28:         TYPEREF 10 [Unit]
+    30:           TERMREFpkg 11 [scala]
+    32:         STABLE
+    33:       DEFDEF(107) 12 [create]
+    36:         PARAM(7) 13 [firstSeed]
+    39:           IDENTtpt 14 [Int]
+    41:             TYPEREF 14 [Int]
+    43:               TERMREFpkg 11 [scala]
+    45:         PARAM(5) 15 [secondSeed]
+    48:           IDENTtpt 14 [Int]
+    50:             SHAREDtype 41
+    52:         IDENTtpt 16 [Pair]
+    54:           TYPEREF 16 [Pair]
+    56:             TERMREFpkg 1 [example]
+    58:         BLOCK(82)
+    60:           APPLY(14)
+    62:             SELECTin(8) 20 [<init>[Signed Signature(List(example.Counter, example.Counter),example.Pair) @<init>]]
+    65:               NEW
+    66:                 IDENTtpt 16 [Pair]
+    68:                   SHAREDtype 54
+    70:               SHAREDtype 54
+    72:             TERMREFdirect 76
+    74:             TERMREFdirect 99
+    76:           VALDEF(21) 21 [first]
+    79:             IDENTtpt 18 [Counter]
+    81:               TYPEREF 18 [Counter]
+    83:                 SHAREDtype 56
+    85:             APPLY(12)
+    87:               SELECTin(8) 23 [<init>[Signed Signature(List(scala.Int),example.Counter) @<init>]]
+    90:                 NEW
+    91:                   IDENTtpt 18 [Counter]
+    93:                     SHAREDtype 81
+    95:                 SHAREDtype 81
+    97:               TERMREFdirect 36
+    99:           VALDEF(19) 24 [second]
+   102:             IDENTtpt 18 [Counter]
+   104:               SHAREDtype 81
+   106:             APPLY(12)
+   108:               SELECTin(8) 23 [<init>[Signed Signature(List(scala.Int),example.Counter) @<init>]]
+   111:                 NEW
+   112:                   IDENTtpt 18 [Counter]
+   114:                     SHAREDtype 81
+   116:                 SHAREDtype 81
+   118:               TERMREFdirect 45
+   120:           APPLY(9)
+   122:             SELECTin(5) 27 [set[Signed Signature(List(scala.Int),scala.Unit) @set]]
+   125:               SHAREDtype 72
+   127:               SHAREDtype 81
+   129:             SHAREDtype 118
+   131:           APPLY(9)
+   133:             SELECTin(5) 27 [set[Signed Signature(List(scala.Int),scala.Unit) @set]]
+   136:               SHAREDtype 74
+   138:               SHAREDtype 81
+   140:             SHAREDtype 97
+   142:     ANNOTATION(18)
+   144:       TYPEREF 28 [SourceFile]
+   146:         TERMREFpkg 32 [scala[Qualified . annotation][Qualified . internal]]
+   148:       APPLY(12)
+   150:         SELECTin(8) 36 [<init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]]
+   153:           NEW
+   154:             SHAREDtype 144
+   157:           SHAREDtype 144
+   160:         STRINGconst 37 [tests/fixtures/jvm_tasty_ordered_local_unit_calls/OrderedLocalUnitCalls.scala]
+   162:
+
+Positions (161 bytes, starting from 589):
+  lines: 21
+  line sizes:
+     15, 0, 26, 34, 26, 45, 0, 44, 35, 37, 35, 37, 0, 18, 53, 47, 49, 25, 25, 27
+     0
+  positions:
+     0: 0 .. 597
+     5: 347 .. 597
+     9: 368 .. 597
+    18: 353 .. 353
+    24: 368 .. 368
+    28: 368 .. 368
+    33: 368 .. 597
+    36: 379 .. 393
+    39: 390 .. 393
+    45: 395 .. 410
+    48: 407 .. 410
+    52: 413 .. 417
+    60: 574 .. 597
+    66: 578 .. 582
+    72: 583 .. 588
+    74: 590 .. 596
+    76: 424 .. 467
+    79: 435 .. 442
+    85: 445 .. 467
+    91: 449 .. 456
+    97: 457 .. 466
+    99: 472 .. 517
+   102: 484 .. 491
+   106: 494 .. 517
+   112: 498 .. 505
+   118: 506 .. 516
+   120: 522 .. 543
+   122: 522 .. 531
+   125: 522 .. 527
+   129: 532 .. 542
+   131: 548 .. 569
+   133: 548 .. 558
+   136: 548 .. 554
+   140: 559 .. 568
+   148: 347 .. 597
+   154: 347 .. 347
+   160: 347 .. 347
+
+  source paths:
+     0: 37 [tests/fixtures/jvm_tasty_ordered_local_unit_calls/OrderedLocalUnitCalls.scala]
+
+Attributes (2 bytes, starting from 754):
+  SOURCEFILEattr 37 [tests/fixtures/jvm_tasty_ordered_local_unit_calls/OrderedLocalUnitCalls.scala]
+
+
+--------------------------------------------------------------------------------

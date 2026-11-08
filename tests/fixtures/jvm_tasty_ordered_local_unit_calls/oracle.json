@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "purpose": "Official Scala 3.9.0/JDK 21 oracle artifacts for issue #2187's exact two-ordered-Unit-call source; these are Scala output, not Rust output.",
+  "repository_baseline": {
+    "main_sha": "dbec2acb7fe9ce8dd43078b55e52f9dba56f05cc",
+    "integrated_one_call_sha": "bc190f52e78a313fe747ad7e1e9a800741361908",
+    "main_verified_by": "GitHub recent commit listing; local Git fetch was unavailable because DNS/network access was restricted",
+    "ancestry_verified_locally": true
+  },
+  "source": {
+    "path": "tests/fixtures/jvm_tasty_ordered_local_unit_calls/OrderedLocalUnitCalls.scala",
+    "sha256": "2e60a40b35587559589b431c9cc191f5d752ea3b4219aa2fc71b99edd2da3b8b"
+  },
+  "scala": {
+    "version": "3.9.0-bin-SNAPSHOT-git-777528f",
+    "source_revision": "777528f19a58e794c9954a42f433373472ec57f8",
+    "source_checkout_verified": true,
+    "compiler_entry_point": "dotty.tools.MainGenericCompiler",
+    "compiler_jar": "scala3-compiler_3-3.9.0-bin-SNAPSHOT.jar",
+    "compiler_jar_sha256": "5b100526fd2231b4ca7f76c5b9f98af4df60c62b2c268ccf1ac786ad950c6b4d",
+    "published_runtime_jars": {
+      "scala3-library_3-3.9.0.jar": "9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba",
+      "scala-library-3.9.0.jar": "b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd"
+    },
+    "compile_flags": ["-Werror", "-release", "21"],
+    "typed_tree_snapshot": "oracle/typer.txt",
+    "tasty_print_command": "scalac -color:never -print-tasty PairFactory.tasty"
+  },
+  "jdk": {
+    "vendor": "Eclipse Temurin",
+    "version": "21.0.8+9",
+    "release": 21,
+    "classfile_major": 65,
+    "java_sha256": "90d0a6d25da103678013f193db078b90ed8aeb27b66ebe78e0149616c9c1b811",
+    "javac_sha256": "b8c1509bfd245eaf891fcf453c02871ce7e794263e8f3af7655082ffc68281b2",
+    "javap_sha256": "a6f2fb0e2bb72b6233f245deab5083f05542972363420a0a2d1206e86026c008"
+  },
+  "artifacts": [
+    {"path": "scala39/example/Counter.class", "sha256": "99650a7c92b7c5fc79b37fc4a6e3d2589ae812bfd66527fd9c7ec3ecd587c11a", "classfile_major": 65},
+    {"path": "scala39/example/Counter.tasty", "sha256": "a5454f10759255d3ce7318ca634bb671799b97d2387e81825ba2a65cba6ae223", "tasty_version": "28.9.0"},
+    {"path": "scala39/example/Pair.class", "sha256": "c6c447dc7cbf0584ced36b56cd42980ed8492624a267a6cec6bdbae368a3e6f8", "classfile_major": 65},
+    {"path": "scala39/example/Pair.tasty", "sha256": "e5ab208d0770f270fafdbef89c43284d8acc7b0b6c0e9f2ec0f1a29295c5825a", "tasty_version": "28.9.0"},
+    {"path": "scala39/example/PairFactory.class", "sha256": "a2a84e4909bb655ace302bf7023657c37eecb9b594b0545c64652db40ff32861", "classfile_major": 65},
+    {"path": "scala39/example/PairFactory.tasty", "sha256": "703ce716310b83e34ecb293706e091f1da0b618ab6e35dc64f1c74b501b1b895", "tasty_version": "28.9.0"}
+  ],
+  "pair_factory_create": {
+    "descriptor": "(II)Lexample/Pair;",
+    "max_stack": 4,
+    "max_locals": 5,
+    "tasty_block_address": 58,
+    "tasty_block_stats": ["VALDEF@76", "VALDEF@99", "APPLY@120", "APPLY@131"],
+    "tasty_result": "APPLY@60",
+    "selected_call": "set[Signed Signature(List(scala.Int),scala.Unit) @set]",
+    "source_local_references": ["first@76", "second@99"],
+    "invocations": [
+      "Counter.<init>(I)V",
+      "Counter.<init>(I)V",
+      "Counter.set(I)V",
+      "Counter.set(I)V",
+      "Pair.<init>(Counter,Counter)V"
+    ],
+    "java_runtime_probe": [
+      "3/7 distinct=true for seeds 7/3 under java -Xverify:all",
+      "42/-9 distinct=true for seeds -9/42 under java -Xverify:all"
+    ]
+  },
+  "oracle_snapshots": {
+    "javap": {"path": "oracle/PairFactory.javap.txt", "sha256": "a8977aaadd0978b0d828a5273fd6fa676dac10dc195e7e31cbe5b5403f042017"},
+    "print_tasty": {"path": "oracle/print-tasty.txt", "sha256": "d34a6b154d92c6c6100fed4bb409ef265c27124b6417ef8fb3e6171cb6fd8700"},
+    "typed_tree": {"path": "oracle/typer.txt", "sha256": "a09f2271d288dad3533e20ee7f63f484fee92a3066cf78ffdddd055b1d0a7c84"}
+  },
+  "java_runtime_fixture": {
+    "path": "RuntimeProbe.java",
+    "sha256": "207e7a5bca59ace13abe384655b9ea825ac3e9f4023e298156c9de7095ebe0ad"
+  }
+}
