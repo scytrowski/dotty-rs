@@ -780,7 +780,7 @@ fn ordered_two_call_controls_keep_valid_source_distinct_from_first_paired_reject
         TWO_CALL_TARGET.replace("    second.set(firstSeed)", "    first.set(firstSeed)");
     let duplicate_call = TWO_CALL_TARGET.replace(
         "    first.set(secondSeed)\n    second.set(firstSeed)",
-        "    first.set(secondSeed)\n    first.set(firstSeed)",
+        "    first.set(secondSeed)\n    first.set(secondSeed)",
     );
     let modified_argument =
         TWO_CALL_TARGET.replace("    second.set(firstSeed)", "    second.set(secondSeed)");
@@ -790,6 +790,7 @@ fn ordered_two_call_controls_keep_valid_source_distinct_from_first_paired_reject
         "    second.set(firstSeed)",
         "    second.set(firstSeed)\n    first.set(firstSeed)",
     );
+    assert_ne!(same_receiver, duplicate_call);
 
     for (name, source, source_id) in [
         (
