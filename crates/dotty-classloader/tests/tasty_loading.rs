@@ -1592,9 +1592,13 @@ fn loads_scala39_some_with_rooted_serializable_alias_from_real_jdk() {
             .parents
             .iter()
             .map(|parent| {
+                let parent_tycon = match store.types.get(*parent) {
+                    Type::Applied { tycon, .. } => *tycon,
+                    _ => *parent,
+                };
                 let symbol = store
                     .types
-                    .get(*parent)
+                    .get(parent_tycon)
                     .reference_symbol()
                     .expect("class parent");
                 store

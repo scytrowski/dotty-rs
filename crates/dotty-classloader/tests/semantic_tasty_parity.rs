@@ -925,8 +925,8 @@ fn assert_live_report_matches_frozen_with_selected_option_member_delta(
                     "flags" => ("MATCH", "final", "different"),
                     "hierarchy" => (
                         "MATCH",
-                        "scala.Option&scala.Product&java.io.Serializable",
-                        "different",
+                        "scala.Option[scala.Some.A]&scala.Product&java.io.Serializable",
+                        "equal",
                     ),
                     "type_parameters" => {
                         ("MATCH", "[A:None:bounds(Nothing,Any)]", "not-comparable")
