@@ -128,10 +128,47 @@ publication.
   explicit checkpoint/invalidation rule before being introduced.
 - **Origins and borrowed resolver:** selected fixture origins are captured
   from `ClassResource` and stored by canonical symbol ID only after a
-  successful operation. The pair's nested resolver borrows the selected
-  classpath for indexed TASTy dependencies while the outer resolver has
-  temporarily transferred ownership; it must not re-enter the outer mutable
+  successful operation. During pair loading, a temporary resolver over the
+  borrowed classpath is used only to resolve canonical `java.lang.Object`;
+  its session is recovered with `into_session` before pair unpickling begins.
+  The pair then moves shared `Packages` into `TastySession::with_packages`
+  without attaching a resolver. It enters and completes the two units using
+  their retained `TastySemanticIndex` values and shared package state. This
+  boundary cannot discover additional classpath dependencies through that
   resolver. A failed pair must not leave origins for either root.
+
+## Successful handoff followed by enclosing rollback
+
+There is a separate journal gap after a successful pair call. In
+`load_info_pair_semantics`, both unpicklers enter their root declarations into
+the shared `Packages` value. The pair success path later calls
+`self.session.packages.swap_packages(&mut packages)`, which moves the
+`Packages` registry back but does not adopt the two class-to-package-scope
+links into `PackageRegistry::class_entries`. The session journal therefore
+does not know that those links were added. By comparison,
+`load_semantic_class_transaction` explicitly calls
+`track_existing_class(store, class)` after semantic unpickling; that records an
+already-entered single root for an enclosing rollback.
+
+For the future resolver bridge, the fixture package is resolved before the
+selected request and so predates its outer resolver checkpoint. The pair
+loader's own rollback handles failures during pair loading, but on pair
+success there is no pair failure rollback to remove its declarations. If the
+enclosing resolver then rolls back the successful request, its session
+checkpoint has no class-entry journal records for the two roots. It rolls back
+their positive identities and origins, then the store checkpoint truncates the
+root symbols, while the preexisting package and its scope links survive. Those
+links can point at the rolled-back symbol IDs. `swap_packages` alone cannot
+make the outer rollback safe.
+
+The current selected resolver has no pair bridge, so this successful-request /
+outer-rollback sequence is not executable through the selected resolver yet;
+this is a traced integration gap, not a claim that the existing pair loader's
+own failure transaction is broken. The bridge contract must, before returning
+success, call `track_existing_class` for both pair roots and fail closed if
+either canonical package link cannot be adopted. Both records must be inside
+the enclosing session checkpoint so rollback removes both links before store
+arena rollback.
 
 ## Minimal future contract: V/B1 -> V/B2 -> V/B3
 
@@ -171,6 +208,11 @@ loader-local caches alone cannot serve that purpose after `into_parts`.
   parameters, symbol updates, `Object`/builtin aliases, and store allocations.
   Restore the original classpath and `LoadingSession` in all cases. Preserve
   any state that predates the transaction.
+- After pair success, adopt both already-entered root links into the outer
+  `PackageRegistry` journal with `track_existing_class` before the selected
+  request returns. The pair loader's success-path `swap_packages` transfers
+  `Packages` but does not transfer these journal records. Do not claim the
+  outer rollback is safe until both roots are journaled.
 - A successful selected request returns its requested class or trait ID while
   retaining both pair identities and their origins as the defined atomic
   effect. Repeat selected requests must reuse the same IDs, even though the
@@ -182,9 +224,17 @@ Retain this pair graph and both selected root probes. Add regressions for both
 request orders; both identities published and reused; class versus trait
 identity checks; preexisting collision for either root; missing, non-TASTy,
 malformed, and late second-unit failures; package-entry/origin/cache rollback;
-and retry after failure with valid bytes. Assert store/session checkpoints and
-preservation of preexisting package/Object state. Keep ordinary `load_class`
-and unselected resolver requests on the legacy path.
+and retry after failure with valid bytes. Also exercise a successful selected
+pair handoff followed by rollback of the enclosing resolver/store transaction:
+pre-resolve the fixture package, keep an unrelated preexisting declaration,
+checkpoint, complete the selected pair request, then roll back. Assert that
+both pair class-entry journal records remove their package-scope links before
+store rollback, both pair identities/origins/cache effects disappear, the
+preexisting package and unrelated declaration remain valid, the classpath is
+recovered, and a subsequent valid pair request succeeds. This regression
+specifically proves success-path journal adoption, which the existing pair
+loader's own late-failure tests cannot cover. Keep ordinary `load_class` and
+unselected resolver requests on the legacy path.
 
 | Gate | Evidence expected in the future implementation |
 | --- | --- |
@@ -192,6 +242,7 @@ and unselected resolver requests on the legacy path.
 | Selected trait request | `InfoBase` trait identity and both pair roots complete |
 | Cross-unit semantics | `InfoWrapped -> InfoBase[F[Int]]`, direct `m: F[Int]`, shared parent ID |
 | Atomic publication | Both package entries, identities and origins appear together |
+| Enclosing rollback after success | Preexisting package survives; both journaled pair links and identities roll back before store truncation; prior declarations remain valid |
 | Collision | Either root's conflicting prior identity rejects before pair mutation |
 | Error and rollback | Typed first unit failure, no legacy retry, exact preexisting state restored |
 | Retry and determinism | Valid retry succeeds; normalized graph agrees across both orders and fresh stores |
