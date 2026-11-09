@@ -2852,6 +2852,61 @@ mod tests {
     }
 
     #[test]
+    fn subtype_memoization_bounds_shared_nominal_dags_in_both_variance_directions() {
+        const DEPTH: usize = 32;
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Base; class Sub extends Base; class Pair[+A, +B]; trait Contra[-A, -B]",
+        );
+        let base = class_symbol(&parsed, &store, &index, source, "Base");
+        let sub = class_symbol(&parsed, &store, &index, source, "Sub");
+        let pair = class_symbol(&parsed, &store, &index, source, "Pair");
+        let contra = class_symbol(&parsed, &store, &index, source, "Contra");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        for class in [base, sub, pair, contra] {
+            typer.complete_symbol(class).unwrap();
+        }
+
+        let base_type = nominal_type_ref(typer.store, definitions, base);
+        let sub_type = nominal_type_ref(typer.store, definitions, sub);
+        let mut found = sub_type;
+        let mut expected = base_type;
+        for _ in 0..DEPTH {
+            found = applied_class_type(typer.store, definitions, pair, &[found, found]);
+            expected = applied_class_type(typer.store, definitions, pair, &[expected, expected]);
+        }
+        let covariant_found = applied_class_type(typer.store, definitions, pair, &[found, found]);
+        let covariant_expected =
+            applied_class_type(typer.store, definitions, pair, &[expected, expected]);
+        let contravariant_found =
+            applied_class_type(typer.store, definitions, contra, &[expected, expected]);
+        let contravariant_expected =
+            applied_class_type(typer.store, definitions, contra, &[found, found]);
+
+        // Keep both orders in one relation instance. A symmetric cache would
+        // incorrectly reuse the first successful pair for its failed reverse.
+        let (results, cached_pairs) = typer
+            .subtype_sequence_with_cache_size(&[
+                (covariant_found, covariant_expected),
+                (covariant_expected, covariant_found),
+                (contravariant_found, contravariant_expected),
+                (contravariant_expected, contravariant_found),
+            ])
+            .unwrap();
+        assert_eq!(results, [true, false, true, false]);
+        assert!(
+            cached_pairs <= DEPTH * 2 + 16,
+            "shared nominal DAG required {cached_pairs} completed directional pairs at depth {DEPTH}"
+        );
+    }
+
+    #[test]
     fn missing_class_info_is_reported_without_implicit_completion() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class A; class B");
@@ -3592,7 +3647,16 @@ mod tests {
     }
 
     #[test]
-    fn union_relation_rejects_cycles_and_excessive_nesting() {
+    fn union_relation_rejects_cycles_and_excessive_depth_but_memoizes_shared_nodes() {
+        fn full_union(store: &mut SemanticStore, leaves: &[TypeId], depth: usize) -> TypeId {
+            if depth == 0 {
+                return leaves[depth % leaves.len()];
+            }
+            let left = full_union(store, leaves, depth - 1);
+            let right = full_union(store, leaves, depth - 1);
+            store.types.alloc(Type::Or { left, right })
+        }
+
         let (arena, mut store, packages, definitions) = setup();
         let reserved = store.types.reserve();
         let recursive_union = reserved.id();
@@ -3620,6 +3684,7 @@ mod tests {
                 right: wide,
             });
         }
+        let full = full_union(&mut store, &[definitions.int, definitions.boolean], 13);
         let index = SourceSemanticIndex::new();
         let source = SourceId::from_index(0);
         let mut typer =
@@ -3633,8 +3698,9 @@ mod tests {
             typer.is_subtype(nested, definitions.any_type),
             Err(TypeRelationError::TooDeep)
         ));
+        assert!(typer.is_subtype(wide, definitions.any_type).unwrap());
         assert!(matches!(
-            typer.is_subtype(wide, definitions.any_type),
+            typer.is_subtype(full, definitions.any_type),
             Err(TypeRelationError::TooManyUnionRelations)
         ));
     }

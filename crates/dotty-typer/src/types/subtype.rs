@@ -120,10 +120,24 @@ impl SourceTyper<'_> {
     pub fn conforms(&mut self, found: TypeId, expected: TypeId) -> Result<bool, TypeRelationError> {
         self.is_subtype(found, expected)
     }
+
+    #[cfg(test)]
+    pub(crate) fn subtype_sequence_with_cache_size(
+        &mut self,
+        pairs: &[(TypeId, TypeId)],
+    ) -> Result<(Vec<bool>, usize), TypeRelationError> {
+        let mut relation = TypeRelation::new(self);
+        let mut results = Vec::with_capacity(pairs.len());
+        for (found, expected) in pairs {
+            results.push(relation.is_subtype(*found, *expected)?);
+        }
+        Ok((results, relation.subtype_pairs.len()))
+    }
 }
 
 struct TypeRelation<'typer, 'store> {
     typer: &'typer mut SourceTyper<'store>,
+    subtype_pairs: HashMap<(TypeId, TypeId), bool>,
     equivalent_pairs: HashMap<(TypeId, TypeId), bool>,
     active_equivalent_pairs: HashSet<(TypeId, TypeId)>,
     union_comparisons: usize,
@@ -134,6 +148,7 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
     fn new(typer: &'typer mut SourceTyper<'store>) -> Self {
         Self {
             typer,
+            subtype_pairs: HashMap::new(),
             equivalent_pairs: HashMap::new(),
             active_equivalent_pairs: HashSet::new(),
             union_comparisons: 0,
@@ -145,9 +160,16 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         if self.subtype_depth >= MAX_TYPE_RELATION_DEPTH {
             return Err(TypeRelationError::TooDeep);
         }
+        let pair = (found, expected);
+        if let Some(is_subtype) = self.subtype_pairs.get(&pair) {
+            return Ok(*is_subtype);
+        }
         self.subtype_depth += 1;
         let result = self.is_subtype_inner(found, expected);
         self.subtype_depth -= 1;
+        if let Ok(is_subtype) = result {
+            self.subtype_pairs.insert(pair, is_subtype);
+        }
         result
     }
 
