@@ -206,6 +206,8 @@ struct SemanticInfoTypeParameterIdentity {
     symbol: SymbolId,
     symbol_snapshot: Symbol,
     info_snapshot: Type,
+    lower_bound_snapshot: Type,
+    upper_bound_snapshot: Type,
 }
 
 struct SemanticInfoRootIdentity<'a> {
@@ -962,9 +964,14 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             let SymbolInfo::Complete(info) = class_type_parameter.info else {
                 return false;
             };
+            let Some(Type::Bounds { low, high }) = store.types.try_get(info) else {
+                return false;
+            };
             if identity.symbol != class_type_parameter_id
                 || identity.symbol_snapshot != *class_type_parameter
                 || store.types.try_get(info) != Some(&identity.info_snapshot)
+                || store.types.try_get(*low) != Some(&identity.lower_bound_snapshot)
+                || store.types.try_get(*high) != Some(&identity.upper_bound_snapshot)
             {
                 return false;
             }
@@ -1103,10 +1110,10 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         let Type::Bounds { low, high } = &info_snapshot else {
             return None;
         };
-        if store.types.try_get(*low).and_then(Type::reference_symbol)
-            != Some(self.definitions.nothing_class)
-            || store.types.try_get(*high).and_then(Type::reference_symbol)
-                != Some(self.definitions.any_class)
+        let lower_bound_snapshot = store.types.try_get(*low)?.clone();
+        let upper_bound_snapshot = store.types.try_get(*high)?.clone();
+        if lower_bound_snapshot.reference_symbol() != Some(self.definitions.nothing_class)
+            || upper_bound_snapshot.reference_symbol() != Some(self.definitions.any_class)
         {
             return None;
         }
@@ -1114,6 +1121,8 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             symbol: parameter_id,
             symbol_snapshot: parameter.clone(),
             info_snapshot,
+            lower_bound_snapshot,
+            upper_bound_snapshot,
         })
     }
 
@@ -5369,6 +5378,15 @@ mod tests {
             panic!("indexed A parameter has complete bounds");
         };
         let original_parameter_info = store.types.get(parameter_info).clone();
+        let Type::Bounds { low, high } = &original_parameter_info else {
+            panic!("indexed A parameter has bounds");
+        };
+        let lower_bound = *low;
+        let upper_bound = *high;
+        let original_lower_bound = store.types.get(lower_bound).clone();
+        let original_upper_bound = store.types.get(upper_bound).clone();
+        let wrapped_request =
+            semantic_member_request(&mut store, package, definitions.no_prefix, "InfoWrapped");
         let mut replacement_parameter_symbol = indexed_parameter_symbol.clone();
         replacement_parameter_symbol.info = SymbolInfo::Missing;
         replacement_parameter_symbol.origin = SymbolOrigin::Synthetic;
@@ -5421,6 +5439,40 @@ mod tests {
             resolver.resolve_member_with_semantic_info_pair(&mut store, &request),
             Ok(Some(base))
         );
+
+        *store.types.get_mut(lower_bound) =
+            Type::type_ref(definitions.no_prefix, definitions.any_class);
+        for (selected_request, expected) in [(&request, base), (&wrapped_request, wrapped)] {
+            assert!(matches!(
+                resolver.resolve_member_with_semantic_info_pair(&mut store, selected_request),
+                Err(ResolutionError::Malformed { .. })
+            ));
+            *store.types.get_mut(lower_bound) = original_lower_bound.clone();
+            assert_eq!(
+                resolver.resolve_member_with_semantic_info_pair(&mut store, selected_request),
+                Ok(Some(expected))
+            );
+            *store.types.get_mut(lower_bound) =
+                Type::type_ref(definitions.no_prefix, definitions.any_class);
+        }
+        *store.types.get_mut(lower_bound) = original_lower_bound;
+
+        *store.types.get_mut(upper_bound) =
+            Type::type_ref(definitions.no_prefix, definitions.nothing_class);
+        for (selected_request, expected) in [(&request, base), (&wrapped_request, wrapped)] {
+            assert!(matches!(
+                resolver.resolve_member_with_semantic_info_pair(&mut store, selected_request),
+                Err(ResolutionError::Malformed { .. })
+            ));
+            *store.types.get_mut(upper_bound) = original_upper_bound.clone();
+            assert_eq!(
+                resolver.resolve_member_with_semantic_info_pair(&mut store, selected_request),
+                Ok(Some(expected))
+            );
+            *store.types.get_mut(upper_bound) =
+                Type::type_ref(definitions.no_prefix, definitions.nothing_class);
+        }
+        *store.types.get_mut(upper_bound) = original_upper_bound;
 
         let constructor = store
             .scopes
