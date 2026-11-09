@@ -1196,3 +1196,291 @@ fn captures_acceptance_iv_relation_operands_before_transaction_rollback() {
         );
     }
 }
+
+#[test]
+#[ignore = "requires pinned Scala 3.9.0 sources, classpath jars, and JDK environment"]
+fn original_tuple_to_array_types_after_explicit_canonical_owner_preparation() {
+    let scala_root = PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT"));
+    let revision = Command::new("git")
+        .args(["-C", scala_root.to_str().unwrap(), "rev-parse", "HEAD"])
+        .output()
+        .expect("git reads the pinned Scala source revision");
+    assert!(revision.status.success());
+    assert_eq!(
+        String::from_utf8(revision.stdout).unwrap().trim(),
+        "777528f19a58e794c9954a42f433373472ec57f8"
+    );
+    let scala_file = scala_root.join("library/src/scala/Tuple.scala");
+    let text = fs::read_to_string(&scala_file).unwrap();
+    let source = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(&text).unwrap(),
+        source,
+        ContextualScanner::new(&text).unwrap(),
+        &mut store.names,
+    );
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "library/src/scala/Tuple.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let (method_tree, _) = parsed
+        .ast
+        .iter()
+        .find(|(tree, node)| tree.index() == 23 && matches!(node.kind, TreeKind::DefDef(_)))
+        .expect("original Tuple.scala#tree=23 remains a DefDef");
+    let tuple_tree = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::TypeDef(definition)
+                if store.names.resolve(definition.name.as_name().text()) == "Tuple" =>
+            {
+                Some(tree)
+            }
+            _ => None,
+        })
+        .expect("canonical source Tuple trait");
+    let tuple = index
+        .symbol_at(source, tuple_tree)
+        .expect("Tuple has a source-index symbol");
+    let method = index
+        .symbol_at(source, method_tree)
+        .expect("toArray has a canonical source symbol");
+    let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+    let release = std::env::var("SCALA39_JDK_RELEASE")
+        .expect("SCALA39_JDK_RELEASE")
+        .parse()
+        .unwrap();
+    let jars =
+        std::env::split_paths(&std::env::var_os("SCALA39_CLASSPATH").expect("SCALA39_CLASSPATH"))
+            .collect::<Vec<_>>();
+    let mut entries: Vec<Box<dyn ClassPathEntry>> = vec![Box::new(
+        JdkClassPath::new(java_home.join("jmods")).unwrap(),
+    )];
+    for jar in jars {
+        entries.push(Box::new(JarClassPath::new(jar, release).unwrap()));
+    }
+    let resolver = ClasspathSymbolResolver::new(
+        CompositeClassPath::new(entries),
+        definitions,
+        LoadingSession::with_packages(packages.snapshot()),
+    );
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(resolver));
+
+    let before_observation = Rc::new(RefCell::new(None::<String>));
+    let observed_before = before_observation.clone();
+    typer.transaction_failure_error_observer = Some(Rc::new(move |typer, error| {
+        let TyperError::ApplicationArgumentConformanceUnsupported {
+            tree_index,
+            argument_index,
+            actual,
+            expected,
+            ..
+        } = error
+        else {
+            *observed_before.borrow_mut() = Some(format!("unexpected={error:?}"));
+            return;
+        };
+        let actual_is_tuple = matches!(
+            typer.store().types.get(*actual),
+            Type::ThisType { class } if *class == tuple
+        );
+        let expected_is_error = matches!(typer.store().types.get(*expected), Type::Error(_));
+        *observed_before.borrow_mut() = Some(format!(
+            "tree={tree_index} argument={argument_index} actual_tuple_this={actual_is_tuple} expected_error={expected_is_error}"
+        ));
+    }));
+    let before = typer
+        .type_method_definition(method_tree)
+        .expect_err("the labelled unprepared source-owner attempt remains blocked");
+    assert!(
+        matches!(
+            before,
+            TyperError::ApplicationArgumentConformanceUnsupported {
+                tree_index: 22,
+                argument_index: 0,
+                ..
+            }
+        ),
+        "unprepared before-state must retain the observed identity-resolution blocker: {before:?}"
+    );
+    assert_eq!(
+        before_observation.borrow().as_deref(),
+        Some("tree=22 argument=0 actual_tuple_this=true expected_error=true"),
+        "the before-state operands are captured before the failed method transaction rolls back"
+    );
+    typer.transaction_failure_error_observer = None;
+
+    let prepared_type = typer
+        .complete_symbol(tuple)
+        .expect("explicit source owner completion");
+    let Type::ClassInfo(class_info) = typer.store().types.get(prepared_type) else {
+        panic!("Tuple completion publishes ClassInfo");
+    };
+    assert_eq!(class_info.class, tuple);
+    let declaration_scope = index.scope_of(tuple).expect("source declaration scope");
+    assert_eq!(class_info.declarations, declaration_scope);
+    assert!(matches!(
+        index.definition_of(tuple),
+        Some(SourceDefinition::Canonical { source: owner_source, tree })
+            if owner_source == source && tree == tuple_tree
+    ));
+
+    let typed_method = typer
+        .type_method_definition(method_tree)
+        .expect("the unchanged original method types after explicit owner preparation");
+    assert_eq!(
+        typer.source_typed_index().get(source, method_tree),
+        Some(typed_method)
+    );
+    let TreeKind::DefDef(_) = &parsed.ast.get(method_tree).kind else {
+        unreachable!();
+    };
+    let TreeKind::DefDef(typed_definition) = &typer.typed_ast().get(typed_method).kind else {
+        panic!("the accepted root remains the original owned DefDef");
+    };
+    let typed_result = typer.typed_ast().get(typed_definition.tpt).ty;
+    let Type::Applied { tycon, args } = typer.store().types.get(typed_result) else {
+        panic!("Tuple.toArray result remains Array[Object]");
+    };
+    let Type::TypeRef {
+        target: TypeRefTarget::Symbol(array),
+        ..
+    } = typer.store().types.get(*tycon)
+    else {
+        panic!("Array result uses the canonical Array symbol");
+    };
+    assert_eq!(observed_symbol_path(typer.store(), *array), ".scala.Array");
+    assert_eq!(args.len(), 1);
+    let Type::TypeRef {
+        target: TypeRefTarget::Symbol(object),
+        ..
+    } = typer.store().types.get(args[0])
+    else {
+        panic!("Array element uses the canonical Object symbol");
+    };
+    assert_eq!(
+        observed_symbol_path(typer.store(), *object),
+        ".java.lang.Object"
+    );
+    let source_to_array = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::Select(select)
+                if typer.store().names.resolve(select.name.text()) == "toArray" =>
+            {
+                Some(tree)
+            }
+            _ => None,
+        })
+        .expect("original source selection of runtime toArray");
+    let typed_to_array = typer
+        .source_typed_index()
+        .get(source, source_to_array)
+        .expect("original toArray selection is mapped");
+    let Type::TermRef {
+        target: TermRefTarget::Symbol(selected),
+        ..
+    } = typer
+        .store()
+        .types
+        .get(typer.typed_ast().get(typed_to_array).ty)
+    else {
+        panic!("selected runtime toArray has a canonical symbol reference");
+    };
+    assert_eq!(
+        observed_symbol_path(typer.store(), *selected),
+        ".scala.runtime.Tuples$.toArray"
+    );
+    let SymbolInfo::Complete(mut signature) = *typer.store().symbols.info(*selected) else {
+        panic!("selected runtime toArray has a complete loaded signature");
+    };
+    while let Type::Poly(poly) = typer.store().types.get(signature) {
+        signature = poly.result;
+    }
+    let Type::Method(method_signature) = typer.store().types.get(signature) else {
+        panic!("selected runtime toArray has a method clause");
+    };
+    assert_eq!(method_signature.params.len(), 1);
+    assert!(
+        matches!(
+            typer.store().types.get(method_signature.params[0].ty),
+            Type::TypeRef { target: TypeRefTarget::Symbol(formal), .. } if *formal == tuple
+        ),
+        "the loaded formal is a TypeRef of the same canonical Tuple owner as the source this"
+    );
+    let source_this = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| matches!(node.kind, TreeKind::This(_)).then_some(tree))
+        .expect("original this argument is retained");
+    let typed_this = typer
+        .source_typed_index()
+        .get(source, source_this)
+        .expect("original this argument is mapped");
+    assert!(matches!(
+        typer.store().types.get(typer.typed_ast().get(typed_this).ty),
+        Type::ThisType { class } if *class == tuple
+    ));
+    let source_call = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::Apply(application) if application.args.contains(&source_this) => Some(tree),
+            _ => None,
+        })
+        .expect("the original toArray application retains this as its argument");
+    let typed_call = typer
+        .source_typed_index()
+        .get(source, source_call)
+        .expect("original application is mapped into the typed method");
+    let TreeKind::Apply(typed_application) = &typer.typed_ast().get(typed_call).kind else {
+        panic!("the original method application remains an Apply");
+    };
+    assert_eq!(typed_application.args, vec![typed_this]);
+    let mut mappings = parsed
+        .ast
+        .iter()
+        .filter_map(|(source_tree, _)| {
+            typer
+                .source_typed_index()
+                .get(source, source_tree)
+                .map(|typed_tree| format!("{}:{}", source_tree.index(), typed_tree.index()))
+        })
+        .collect::<Vec<_>>();
+    mappings.sort();
+    let normalized = format!(
+        "source=Tuple.scala#tree=23 method={} owner={} mappings={}",
+        observed_symbol_path(typer.store(), method),
+        observed_symbol_path(typer.store(), tuple),
+        mappings.join(",")
+    );
+    assert_eq!(
+        observed_symbol_path(typer.store(), method),
+        ".scala.Tuple.toArray"
+    );
+    println!(
+        "TUPLE_TO_ARRAY_ACCEPTED {normalized} selected={} argument=scala.Tuple.this result=scala.Array[java.lang.Object]",
+        observed_symbol_path(typer.store(), *selected)
+    );
+    println!(
+        "TUPLE_TO_ARRAY_BEFORE outcome=ApplicationArgumentConformanceUnsupported actual=ThisType(scala.Tuple) expected=ErrorType"
+    );
+}
