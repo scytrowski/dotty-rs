@@ -11,7 +11,7 @@ const SOURCE: &str = include_str!("fixtures/jvm_tasty_local_receiver_call/LocalR
 const TWO_CALL_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_ordered_local_unit_calls/OrderedLocalUnitCalls.scala");
 const TWO_CALL_HARNESS: &str =
-    include_str!("fixtures/jvm_tasty_ordered_local_unit_calls/RuntimeProbe.java");
+    include_str!("fixtures/jvm_tasty_ordered_local_unit_calls/RuntimeProbe2192.java");
 const HARNESS: &str = r#"package example;
 
 import java.lang.reflect.Field;
@@ -65,6 +65,12 @@ struct Insn {
     cp: Option<u16>,
 }
 
+struct PrimaryRuntimeBatch {
+    originals: Vec<(String, Vec<u8>)>,
+    runtime: PathBuf,
+    first_local_slot: u8,
+}
+
 fn method_code<'a>(class: &'a ClassFile<'a>, name: &str) -> (&'a [u8], u16, u16) {
     let method = class
         .methods
@@ -91,7 +97,7 @@ fn decode(code: &[u8]) -> Vec<Insn> {
         let mut local = None;
         let mut cp = None;
         match opcode {
-            0x19 | 0x3a => {
+            0x15 | 0x19 | 0x3a => {
                 local = Some(code[pc]);
                 pc += 1;
             }
@@ -99,7 +105,7 @@ fn decode(code: &[u8]) -> Vec<Insn> {
                 cp = Some(u16::from_be_bytes([code[pc], code[pc + 1]]));
                 pc += 2;
             }
-            0x59 | 0x1b | 0x1c | 0x2b | 0x2c | 0x2d | 0x4e | 0x4c | 0xb0 => {}
+            0x00 | 0x59 | 0x1b..=0x1e | 0x2a..=0x2d | 0x4b..=0x4e | 0xb0 => {}
             other => panic!("unexpected bytecode {other:#04x} at {start}"),
         }
         result.push(Insn {
@@ -119,6 +125,22 @@ fn aload_slot(insn: &Insn) -> Option<u8> {
         0x2b => Some(1),
         0x2c => Some(2),
         0x2d => Some(3),
+        _ => None,
+    }
+}
+
+fn iload_slot(insn: &Insn) -> Option<u8> {
+    match insn.opcode {
+        0x15 => insn.local,
+        0x1b..=0x1e => Some(insn.opcode - 0x1a),
+        _ => None,
+    }
+}
+
+fn astore_slot(insn: &Insn) -> Option<u8> {
+    match insn.opcode {
+        0x3a => insn.local,
+        0x4b..=0x4e => Some(insn.opcode - 0x4b),
         _ => None,
     }
 }
@@ -794,15 +816,52 @@ fn ordered_two_local_unit_calls_execute_under_strict_jdk21() {
     let harness = harness_src.join("RuntimeProbe.java");
     std::fs::write(&harness, TWO_CALL_HARNESS).unwrap();
 
-    let reversed = TWO_CALL_SOURCE.replace(
+    let reversed_declarations = TWO_CALL_SOURCE.replace(
         "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
         "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
     );
-    assert_ne!(reversed, TWO_CALL_SOURCE);
-    for (label, source, source_id) in [
-        ("primary", TWO_CALL_SOURCE, 21911),
-        ("reversed", reversed.as_str(), 21912),
-    ] {
+    let reversed_calls = TWO_CALL_SOURCE.replace(
+        "    first.set(secondSeed)\n    second.set(firstSeed)",
+        "    second.set(firstSeed)\n    first.set(secondSeed)",
+    );
+    let same_receiver = TWO_CALL_SOURCE.replace(
+        "    first.set(secondSeed)\n    second.set(firstSeed)",
+        "    first.set(secondSeed)\n    first.set(firstSeed)",
+    );
+    assert_ne!(reversed_declarations, TWO_CALL_SOURCE);
+    assert_ne!(reversed_calls, TWO_CALL_SOURCE);
+    assert_ne!(same_receiver, TWO_CALL_SOURCE);
+
+    let variants = [
+        ("ordered", TWO_CALL_SOURCE, 21911, [0, 1], [2, 1], false),
+        (
+            "declarations-reversed",
+            reversed_declarations.as_str(),
+            21912,
+            [0, 1],
+            [2, 1],
+            false,
+        ),
+        (
+            "calls-reversed",
+            reversed_calls.as_str(),
+            21913,
+            [1, 0],
+            [1, 2],
+            false,
+        ),
+        (
+            "same-receiver",
+            same_receiver.as_str(),
+            21914,
+            [0, 0],
+            [2, 1],
+            true,
+        ),
+    ];
+    let mut primary: Option<PrimaryRuntimeBatch> = None;
+    let mut compiled_consumer = false;
+    for (label, source, source_id, receiver_ordinals, argument_slots, same_receiver) in variants {
         let batch = emit_paired_jvm_tasty_batch(
             source,
             "OrderedLocalUnitCalls.scala",
@@ -837,16 +896,70 @@ fn ordered_two_local_unit_calls_execute_under_strict_jdk21() {
             .filter(|instruction| matches!(instruction.opcode, 0xb7 | 0xb6))
             .collect::<Vec<_>>();
         assert_eq!(calls.len(), 5, "two constructors, two setters, Pair");
-        for setter in &calls[2..4] {
+        assert_eq!(
+            method_ref(&class, ConstantPoolIndex(calls[0].cp.unwrap())),
+            ("example/Counter", "<init>", "(I)V")
+        );
+        assert_eq!(
+            method_ref(&class, ConstantPoolIndex(calls[1].cp.unwrap())),
+            ("example/Counter", "<init>", "(I)V")
+        );
+        let mut local_for_formal = [None, None];
+        for constructor in &calls[..2] {
+            let seed = instructions
+                .iter()
+                .find(|instruction| instruction.pc + instruction.len == constructor.pc)
+                .expect("constructor seed load");
+            let seed_slot = iload_slot(seed).expect("Counter constructor receives an int local");
+            assert!(matches!(seed_slot, 1 | 2));
+            let store = instructions
+                .iter()
+                .find(|instruction| instruction.pc == constructor.pc + constructor.len)
+                .expect("initialized Counter is stored immediately after construction");
+            let local_slot = astore_slot(store).expect("Counter initializer stores a local");
+            let entry = &mut local_for_formal[(seed_slot - 1) as usize];
+            assert!(
+                entry.replace(local_slot).is_none(),
+                "one local per seed formal"
+            );
+        }
+        let first_slot = local_for_formal[0].expect("first is initialized from firstSeed");
+        let second_slot = local_for_formal[1].expect("second is initialized from secondSeed");
+        assert_ne!(
+            first_slot, second_slot,
+            "Pair locals have distinct JVM slots"
+        );
+
+        let setter_calls = &calls[2..4];
+        for setter in setter_calls {
             assert_eq!(setter.opcode, 0xb6, "Unit calls use invokevirtual");
             assert_eq!(
                 method_ref(&class, ConstantPoolIndex(setter.cp.unwrap())),
                 ("example/Counter", "set", "(I)V")
             );
         }
-        assert!(calls[1].pc < calls[2].pc);
-        assert!(calls[2].pc < calls[3].pc);
-        assert!(calls[3].pc < calls[4].pc);
+        let semantic_locals = [first_slot, second_slot];
+        for (index, setter) in setter_calls.iter().enumerate() {
+            let argument = instructions
+                .iter()
+                .find(|instruction| instruction.pc + instruction.len == setter.pc)
+                .expect("Int formal load immediately precedes Counter.set");
+            let receiver = instructions
+                .iter()
+                .find(|instruction| instruction.pc + instruction.len == argument.pc)
+                .expect("local receiver load immediately precedes the Int argument");
+            assert_eq!(
+                aload_slot(receiver),
+                Some(semantic_locals[receiver_ordinals[index]]),
+                "{label} call {index} receiver is derived from its initialized local"
+            );
+            assert_eq!(
+                iload_slot(argument),
+                Some(argument_slots[index]),
+                "{label} call {index} uses its authenticated Int formal"
+            );
+            assert!(calls[1].pc < setter.pc);
+        }
         assert_eq!(
             method_ref(&class, ConstantPoolIndex(calls[4].cp.unwrap())),
             (
@@ -855,10 +968,29 @@ fn ordered_two_local_unit_calls_execute_under_strict_jdk21() {
                 "(Lexample/Counter;Lexample/Counter;)V"
             )
         );
+        let pair_new = instructions
+            .iter()
+            .find(|instruction| {
+                instruction.opcode == 0xbb
+                    && class_name(&class, ConstantPoolIndex(instruction.cp.unwrap()))
+                        == "example/Pair"
+            })
+            .expect("Pair is allocated after both local Unit calls");
+        assert!(calls[3].pc < pair_new.pc && pair_new.pc < calls[4].pc);
+        let pair_loads = instructions
+            .iter()
+            .filter(|instruction| instruction.pc > pair_new.pc && instruction.pc < calls[4].pc)
+            .filter_map(aload_slot)
+            .collect::<Vec<_>>();
+        assert_eq!(pair_loads, [first_slot, second_slot]);
 
         let runtime = root.join(format!("runtime-{label}"));
         std::fs::create_dir_all(&runtime).unwrap();
         write_runtime(&runtime, &originals);
+        let original_hashes = originals
+            .iter()
+            .map(|(path, bytes)| (path.clone(), sha256_bytes(bytes)))
+            .collect::<Vec<_>>();
         let javap = java_tool("javap", root)
             .args(["-c", "-v", "-p", "-classpath"])
             .arg(&runtime)
@@ -871,39 +1003,39 @@ fn ordered_two_local_unit_calls_execute_under_strict_jdk21() {
             String::from_utf8_lossy(&javap.stderr)
         );
         let dump = String::from_utf8_lossy(&javap.stdout);
-        assert_eq!(
-            dump.lines()
-                .filter(|line| {
-                    line.contains("invokevirtual") && line.contains("example/Counter.set:(I)V")
-                })
-                .count(),
-            2
-        );
+        let setter_lines = dump
+            .lines()
+            .filter(|line| {
+                line.contains("invokevirtual") && line.contains("example/Counter.set:(I)V")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(setter_lines.len(), 2, "javap shows exactly two set sites");
         assert!(dump.contains("major version: 65"));
         assert!(dump.contains("stack=4, locals=5"));
 
-        let javac = java_tool("javac", root)
-            .args(["--release", "21", "-classpath"])
-            .arg(&runtime)
-            .arg("-d")
-            .arg(&harness_classes)
-            .arg(&harness)
-            .output()
-            .expect("javac independent two-call consumer");
-        assert!(
-            javac.status.success(),
-            "javac: {}{}",
-            String::from_utf8_lossy(&javac.stdout),
-            String::from_utf8_lossy(&javac.stderr)
-        );
-        let classpath =
-            std::env::join_paths([harness_classes.as_path(), runtime.as_path()]).unwrap();
-        let java = java_tool("java", root)
-            .args(["-Xverify:all", "-ea", "-classpath"])
-            .arg(classpath)
-            .arg("example.RuntimeProbe")
-            .output()
-            .expect("strict JDK 21 execution of two-call Rust classes");
+        if !compiled_consumer {
+            let javac = java_tool("javac", root)
+                .args(["--release", "21", "-classpath"])
+                .arg(&runtime)
+                .arg("-d")
+                .arg(&harness_classes)
+                .arg(&harness)
+                .output()
+                .expect("javac independent two-call consumer");
+            assert!(
+                javac.status.success(),
+                "javac: {}{}",
+                String::from_utf8_lossy(&javac.stdout),
+                String::from_utf8_lossy(&javac.stderr)
+            );
+            compiled_consumer = true;
+        }
+        let mode = if same_receiver {
+            "same-receiver"
+        } else {
+            "cross-receiver"
+        };
+        let java = run_runtime_probe(&harness_classes, &runtime, mode);
         assert!(
             java.status.success(),
             "java -Xverify:all: {}{}",
@@ -912,9 +1044,274 @@ fn ordered_two_local_unit_calls_execute_under_strict_jdk21() {
         );
         assert_eq!(
             String::from_utf8_lossy(&java.stdout).trim(),
-            "3/7 distinct=true\n42/-9 distinct=true"
+            format!(
+                "two-call-runtime=positive-cases;identity=distinct;mutation=independent;mode={mode}"
+            )
         );
+        assert_runtime_artifacts_unchanged(&runtime, &originals, &original_hashes);
+        if label == "ordered" {
+            primary = Some(PrimaryRuntimeBatch {
+                originals,
+                runtime,
+                first_local_slot: first_slot,
+            });
+        }
     }
+
+    let PrimaryRuntimeBatch {
+        originals,
+        runtime: primary_runtime,
+        first_local_slot,
+    } = primary.expect("primary Rust batch is retained");
+    let factory_index = originals
+        .iter()
+        .position(|(path, _)| path == "example/PairFactory.class")
+        .expect("PairFactory artifact");
+    let factory = originals[factory_index].1.as_slice();
+    let original_hashes = originals
+        .iter()
+        .map(|(path, bytes)| (path.clone(), sha256_bytes(bytes)))
+        .collect::<Vec<_>>();
+    assert_runtime_artifacts_unchanged(&primary_runtime, &originals, &original_hashes);
+
+    let mut factory_reader = Reader::new(factory);
+    let class = ClassFile::decode(&mut factory_reader).expect("decode primary PairFactory");
+    let (code, _, _) = method_code(&class, "create");
+    let code_start = code.as_ptr() as usize - factory.as_ptr() as usize;
+    let code_len = code.len();
+    let instructions = decode(code);
+    let invocations = instructions
+        .iter()
+        .filter(|instruction| matches!(instruction.opcode, 0xb7 | 0xb6))
+        .collect::<Vec<_>>();
+    assert_eq!(invocations.len(), 5);
+    let setters = [invocations[2], invocations[3]];
+    let load_before = |insn: &Insn| {
+        instructions
+            .iter()
+            .find(|instruction| instruction.pc + instruction.len == insn.pc)
+            .copied()
+            .expect("immediately preceding bytecode instruction")
+    };
+    let first_argument = load_before(setters[0]);
+    let first_receiver = load_before(&first_argument);
+    let second_argument = load_before(setters[1]);
+    let second_receiver = load_before(&second_argument);
+    let pair_new = instructions
+        .iter()
+        .find(|instruction| {
+            instruction.opcode == 0xbb
+                && class_name(&class, ConstantPoolIndex(instruction.cp.unwrap())) == "example/Pair"
+        })
+        .copied()
+        .unwrap();
+    let setter_cp = setters[0].cp.unwrap();
+    assert_eq!(require_exactly_two_setter_sites(factory), Ok(()));
+
+    let run_corrupted = |name: &str, edit: &dyn Fn(&mut Vec<u8>)| {
+        let mut corrupted = originals.clone();
+        edit(&mut corrupted[factory_index].1);
+        let directory = root.join(format!("negative-{name}"));
+        std::fs::create_dir_all(&directory).unwrap();
+        write_runtime(&directory, &corrupted);
+        run_runtime_probe(&harness_classes, &directory, "cross-receiver")
+    };
+
+    let swapped_receivers = run_corrupted("swapped-receivers", &|bytes| {
+        let mut replacement = aload(aload_slot(&second_receiver).unwrap());
+        replacement
+            .extend_from_slice(&code[first_argument.pc..first_argument.pc + first_argument.len]);
+        replacement.extend_from_slice(&code[setters[0].pc..setters[0].pc + setters[0].len]);
+        replacement.extend(aload(aload_slot(&first_receiver).unwrap()));
+        replacement
+            .extend_from_slice(&code[second_argument.pc..second_argument.pc + second_argument.len]);
+        replacement.extend_from_slice(&code[setters[1].pc..setters[1].pc + setters[1].len]);
+        replace_code_range(
+            bytes,
+            code_start,
+            code_len,
+            first_receiver.pc,
+            setters[1].pc + setters[1].len,
+            &replacement,
+        );
+    });
+    assert_failure_at(
+        &swapped_receivers,
+        "JVM-valid wrong receiver runtime assertion",
+        "unexpected pair for seeds 7/3",
+    );
+
+    let swapped_arguments = run_corrupted("swapped-arguments", &|bytes| {
+        let first_slot = iload_slot(&first_argument).unwrap();
+        let second_slot = iload_slot(&second_argument).unwrap();
+        bytes[code_start + first_argument.pc] = iload_opcode(second_slot);
+        bytes[code_start + second_argument.pc] = iload_opcode(first_slot);
+    });
+    assert_failure_at(
+        &swapped_arguments,
+        "JVM-valid wrong seed runtime assertion",
+        "unexpected pair for seeds 7/3",
+    );
+
+    let skipped_setter = run_corrupted("skipped-second-setter", &|bytes| {
+        let start = second_receiver.pc;
+        let end = setters[1].pc + setters[1].len;
+        replace_code_range(
+            bytes,
+            code_start,
+            code_len,
+            start,
+            end,
+            &vec![0x00; end - start],
+        );
+    });
+    assert_failure_at(
+        &skipped_setter,
+        "JVM-valid skipped-call runtime assertion",
+        "unexpected pair for seeds 7/3",
+    );
+
+    let mut duplicate = originals.clone();
+    let mut duplicate_call = Vec::new();
+    duplicate_call.extend_from_slice(&code[first_receiver.pc..setters[0].pc + setters[0].len]);
+    replace_code_range(
+        &mut duplicate[factory_index].1,
+        code_start,
+        code_len,
+        pair_new.pc,
+        pair_new.pc,
+        &duplicate_call,
+    );
+    assert_eq!(
+        require_exactly_two_setter_sites(&duplicate[factory_index].1),
+        Err(3),
+        "the exact-two-sites bytecode contract rejects a duplicated setter"
+    );
+    let duplicate_dir = root.join("negative-duplicated-setter");
+    std::fs::create_dir_all(&duplicate_dir).unwrap();
+    write_runtime(&duplicate_dir, &duplicate);
+    let duplicate_java = run_runtime_probe(&harness_classes, &duplicate_dir, "cross-receiver");
+    assert!(
+        duplicate_java.status.success(),
+        "duplicating a same-value setter can preserve final values; exact call-site assertion must reject it: {}{}",
+        String::from_utf8_lossy(&duplicate_java.stdout),
+        String::from_utf8_lossy(&duplicate_java.stderr)
+    );
+
+    let bad_opcode = run_corrupted("wrong-opcode", &|bytes| {
+        bytes[code_start + setters[0].pc] = 0xb8;
+    });
+    assert_failure_at(&bad_opcode, "bytecode verification", "VerifyError");
+
+    let pair_class_index = (1..256u16)
+        .map(ConstantPoolIndex)
+        .find(|index| {
+            matches!(
+                class.constant_pool.get(*index),
+                Some(ConstantPoolEntry::Class { name_index })
+                    if class.constant_pool.utf8(*name_index) == Ok("example/Pair")
+            )
+        })
+        .expect("Pair Class constant");
+    let bad_owner = run_corrupted("wrong-methodref-owner", &|bytes| {
+        let offset = constant_pool_entry_offset(bytes, setter_cp);
+        bytes[offset + 1..offset + 3].copy_from_slice(&pair_class_index.0.to_be_bytes());
+    });
+    assert_failure_at(&bad_owner, "bytecode verification", "VerifyError");
+
+    let bad_descriptor = run_corrupted("wrong-methodref-descriptor", &|bytes| {
+        let count = u16::from_be_bytes(bytes[8..10].try_into().unwrap());
+        let utf8_index = count;
+        let nat_index = count + 1;
+        let cp_end = constant_pool_end(bytes);
+        let mut additions = vec![0x01, 0x00, 0x03, b'(', b')', b'I'];
+        additions.extend_from_slice(&[0x0c]);
+        let ConstantPoolEntry::Methodref {
+            name_and_type_index,
+            ..
+        } = class
+            .constant_pool
+            .get(ConstantPoolIndex(setter_cp))
+            .expect("set Methodref")
+        else {
+            panic!("set uses Methodref");
+        };
+        let ConstantPoolEntry::NameAndType { name_index, .. } = class
+            .constant_pool
+            .get(*name_and_type_index)
+            .expect("set NameAndType")
+        else {
+            panic!("set has NameAndType");
+        };
+        additions.extend_from_slice(&name_index.0.to_be_bytes());
+        additions.extend_from_slice(&utf8_index.to_be_bytes());
+        bytes.splice(cp_end..cp_end, additions);
+        bytes[8..10].copy_from_slice(&(count + 2).to_be_bytes());
+        let offset = constant_pool_entry_offset(bytes, setter_cp);
+        bytes[offset + 3..offset + 5].copy_from_slice(&nat_index.to_be_bytes());
+    });
+    assert_failure_at(&bad_descriptor, "bytecode verification", "VerifyError");
+
+    let bad_stack = run_corrupted("small-max-stack", &|bytes| {
+        bytes[code_start - 8..code_start - 6].copy_from_slice(&1u16.to_be_bytes());
+    });
+    assert_failure_at(&bad_stack, "bytecode verification", "VerifyError");
+
+    let bad_locals = run_corrupted("small-max-locals", &|bytes| {
+        bytes[code_start - 6..code_start - 4].copy_from_slice(&4u16.to_be_bytes());
+    });
+    assert_failure_at(&bad_locals, "bytecode verification", "VerifyError");
+
+    let first_store = instructions
+        .iter()
+        .find(|instruction| astore_slot(instruction).is_some())
+        .copied()
+        .expect("first local initializer store");
+    let before_store = run_corrupted("use-before-store", &|bytes| {
+        let mut early_call = aload(first_local_slot);
+        early_call.push(0x1c);
+        early_call.push(0xb6);
+        early_call.extend_from_slice(&setter_cp.to_be_bytes());
+        replace_code_range(
+            bytes,
+            code_start,
+            code_len,
+            first_store.pc,
+            first_store.pc,
+            &early_call,
+        );
+    });
+    assert_failure_at(&before_store, "bytecode verification", "VerifyError");
+
+    let missing_method = run_corrupted("missing-set-abi", &|bytes| {
+        replace_utf8_constant(bytes, b"set", b"bad");
+    });
+    assert_failure_at(&missing_method, "method resolution", "NoSuchMethodError");
+
+    let stale_factory = run_corrupted("stale-factory-abi", &|bytes| {
+        replace_utf8_constant(bytes, b"create", b"crater");
+    });
+    assert_failure_at(&stale_factory, "stale factory ABI", "NoSuchMethodError");
+
+    let missing_factory_dir = root.join("negative-missing-factory-class");
+    std::fs::create_dir_all(&missing_factory_dir).unwrap();
+    write_runtime(
+        &missing_factory_dir,
+        &originals
+            .iter()
+            .filter(|(path, _)| path != "example/PairFactory.class")
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
+    let missing_factory =
+        run_runtime_probe(&harness_classes, &missing_factory_dir, "cross-receiver");
+    assert_failure_at(
+        &missing_factory,
+        "stale class linkage",
+        "NoClassDefFoundError",
+    );
+
+    assert_runtime_artifacts_unchanged(&primary_runtime, &originals, &original_hashes);
 }
 
 fn sha256_bytes(bytes: &[u8]) -> String {
@@ -1018,6 +1415,62 @@ fn write_runtime(root: &std::path::Path, artifacts: &[(String, Vec<u8>)]) {
     }
 }
 
+fn run_runtime_probe(
+    harness_classes: &std::path::Path,
+    runtime: &std::path::Path,
+    mode: &str,
+) -> std::process::Output {
+    let classpath = std::env::join_paths([harness_classes, runtime]).unwrap();
+    java_tool("java", runtime)
+        .args(["-Xverify:all", "-ea", "-classpath"])
+        .arg(classpath)
+        .arg("example.RuntimeProbe")
+        .arg(mode)
+        .output()
+        .expect("run strict JDK 21 two-call runtime probe")
+}
+
+fn assert_runtime_artifacts_unchanged(
+    runtime: &Path,
+    originals: &[(String, Vec<u8>)],
+    hashes: &[(String, String)],
+) {
+    assert_eq!(originals.len(), 6);
+    assert_eq!(hashes.len(), 6);
+    for (relative, bytes) in originals {
+        let path = runtime.join(relative);
+        assert_eq!(
+            std::fs::read(&path).unwrap().as_slice(),
+            bytes.as_slice(),
+            "artifact changed: {relative}"
+        );
+        assert_eq!(
+            sha256(&path),
+            hashes.iter().find(|(name, _)| name == relative).unwrap().1,
+            "artifact hash changed: {relative}"
+        );
+    }
+}
+
+fn exact_setter_invocation_count(factory: &[u8]) -> usize {
+    let mut reader = Reader::new(factory);
+    let class = ClassFile::decode(&mut reader).expect("decode PairFactory");
+    let (code, _, _) = method_code(&class, "create");
+    decode(code)
+        .iter()
+        .filter(|instruction| {
+            instruction.opcode == 0xb6
+                && method_ref(&class, ConstantPoolIndex(instruction.cp.unwrap()))
+                    == ("example/Counter", "set", "(I)V")
+        })
+        .count()
+}
+
+fn require_exactly_two_setter_sites(factory: &[u8]) -> Result<(), usize> {
+    let count = exact_setter_invocation_count(factory);
+    (count == 2).then_some(()).ok_or(count)
+}
+
 fn run_harness(
     harness_classes: &std::path::Path,
     runtime: &std::path::Path,
@@ -1037,6 +1490,28 @@ fn aload(slot: u8) -> Vec<u8> {
     } else {
         vec![0x19, slot]
     }
+}
+
+fn iload_opcode(slot: u8) -> u8 {
+    assert!(slot <= 3, "fixture Int formals use compact local loads");
+    0x1a + slot
+}
+
+fn replace_utf8_constant(classfile: &mut [u8], original: &[u8], replacement: &[u8]) {
+    assert_eq!(original.len(), replacement.len());
+    let length = u16::try_from(original.len()).unwrap().to_be_bytes();
+    let mut entry = vec![0x01, length[0], length[1]];
+    entry.extend_from_slice(original);
+    let matches = classfile
+        .get(..constant_pool_end(classfile))
+        .expect("constant-pool range")
+        .windows(entry.len())
+        .enumerate()
+        .filter_map(|(offset, window)| (window == entry).then_some(offset))
+        .collect::<Vec<_>>();
+    assert_eq!(matches.len(), 1, "one constant-pool UTF8 entry is mutated");
+    let value_start = matches[0] + 3;
+    classfile[value_start..value_start + replacement.len()].copy_from_slice(replacement);
 }
 
 fn assert_failure_at(output: &std::process::Output, stage: &str, message: &str) {

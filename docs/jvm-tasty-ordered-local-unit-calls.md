@@ -15,6 +15,9 @@ one-call fixture. Its `create` method contains exactly two immutable
 `Counter` locals, then `first.set(secondSeed)`, `second.set(firstSeed)`, and the
 final `Pair` construction. The Java runtime probe checks `(7, 3) -> (3, 7)` and
 `(-9, 42) -> (42, -9)`, and verifies that the two stored counters are distinct.
+`RuntimeProbe.java` is the frozen #2187 oracle input; its manifest SHA-256 is
+`207e7a5bca59ace13abe384655b9ea825ac3e9f4023e298156c9de7095ebe0ad`. The
+expanded #2192 Java consumer is stored separately as `RuntimeProbe2192.java`.
 
 ## Reproduce the Scala oracle
 
