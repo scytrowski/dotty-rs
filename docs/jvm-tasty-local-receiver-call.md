@@ -1,5 +1,32 @@
 # Scala oracle and paired-path audit: local receiver `Unit` call
 
+## Independent Scala 3.9 consumer: two ordered calls
+
+The existing strict target `jvm_tasty_two_local_counter_set_scala_consumer`
+also covers the producer's two-call block from
+[`OrderedLocalUnitCalls.scala`](../tests/fixtures/jvm_tasty_ordered_local_unit_calls/OrderedLocalUnitCalls.scala).
+With `DOTTY_REQUIRE_SCALA_TASTY_TWO_LOCAL_COUNTER_SET_CONSUMER=1`, it emits
+the authentic Rust six-file `Counter`/`Pair`/`PairFactory` batch, compiles a
+separate Scala client against the original classfiles and sidecars, and runs it
+under the pinned JDK 21 runtime. The client checks `create(7, 3) == 3/7`,
+`create(-9, 42) == 42/-9`, equal-seed object identity, independent mutation,
+and fresh allocations. It repeats declaration-order and supported call-order
+variants through the same Scala compile/run path.
+
+The Scala `-print-tasty`, `-decompile` and `-from-tasty` inspections use the
+original Rust sidecars. The test checks that the reader sees two ordered
+`Counter.set(Int): Unit` applications with the original local and formal
+addresses, followed by `new Pair(first, second)`. Reconstructed classfiles are
+kept as inspection outputs. Negative controls cover sidecar placement and
+integrity, classfile/TASTy UUID agreement, local TERMREF addresses, method
+signature and ABI changes, and an artifact missing the second call. Scala's
+reader accepts the valid one-call control; the Rust source-bound contract
+rejects it for the two-call producer source. The test compares the six original
+paths, hashes and UUID links around Scala compilation and execution.
+
+This remains part of the existing four-shard strict consumer inventory; it does
+not add a target or workflow.
+
 This is an evidence-only audit for [issue #2164](https://github.com/scytrowski/dotty-rs/issues/2164). The target source is preserved verbatim in [`LocalReceiverCall.scala`](../tests/fixtures/jvm_tasty_local_receiver_call/LocalReceiverCall.scala), SHA-256 `d00efdafda78682532599fbd9017a2037d1579241fa388c744f8f58d13b42eb8`. It adds exactly `first.set(secondSeed)` between the original two immutable local declarations and `new Pair(first, second)`. No production compiler code or accepted source boundary changed.
 
 ## Oracle provenance and reproduction

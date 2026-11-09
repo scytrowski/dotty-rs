@@ -200,6 +200,15 @@ struct ResolverUndo {
     semantic_info_pair_loaded: bool,
 }
 
+struct SemanticInfoRootIdentity<'a> {
+    class: SymbolId,
+    member_name: Name,
+    binary_name: &'a BinaryName,
+    kind: SymbolKind,
+    constructor_type_parameter: &'a str,
+    constructor_params: &'a [SymbolId],
+}
+
 #[derive(Debug)]
 // This staged, crate-private handoff is intentionally opt-in and has no
 // production caller until the follow-up convergence increment.
@@ -711,34 +720,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             let cached_wrapped = self.session.identified.get(&wrapped_name).copied();
             let cached_pair_is_published = match (cached_base, cached_wrapped) {
                 (Some(base), Some(wrapped)) => {
-                    let package = self.session.packages.get(&[
-                        "me",
-                        "cytrowski",
-                        "tastyfixtures",
-                        "semantic",
-                    ]);
-                    let package_scope =
-                        package.and_then(|package| self.session.packages.scope_of(package));
-                    self.session.resolved.get(&base_name) == Some(&base)
-                        && self.session.resolved.get(&wrapped_name) == Some(&wrapped)
-                        && self.session.origins.contains_key(&base)
-                        && self.session.origins.contains_key(&wrapped)
-                        && store.symbols.contains(base)
-                        && store.symbols.contains(wrapped)
-                        && store.symbols.get(base).kind == SymbolKind::Trait
-                        && store.symbols.get(wrapped).kind == SymbolKind::Class
-                        && package_scope.is_some_and(|scope| {
-                            let (Some(base_name_id), Some(wrapped_name_id)) =
-                                (store.names.get("InfoBase"), store.names.get("InfoWrapped"))
-                            else {
-                                return false;
-                            };
-                            let base_type = Name::new(base_name_id, Namespace::Type);
-                            let wrapped_type = Name::new(wrapped_name_id, Namespace::Type);
-                            store.scopes.contains(scope)
-                                && store.scopes.get(scope).lookup_all(&base_type) == [base]
-                                && store.scopes.get(scope).lookup_all(&wrapped_type) == [wrapped]
-                        })
+                    self.is_semantic_info_pair_identity(store, base, wrapped)
                 }
                 _ => false,
             };
@@ -749,6 +731,12 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                     cached_wrapped.expect("validated pair contains InfoWrapped")
                 });
             }
+            return Err(SemanticMemberLoadFailure {
+                binary_name: requested.clone(),
+                source: SemanticTastyLoadError::UnsupportedShape(
+                    "the cached semantic pair no longer has canonical complete class identities",
+                ),
+            });
         }
 
         let profile_started = self.collect_resolver_profile.then(Instant::now);
@@ -811,7 +799,13 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                 } else {
                     false
                 };
-                if adopted {
+                let pair_is_valid = adopted
+                    && self.is_semantic_info_pair_identity(
+                        store,
+                        self.session.identified[&base_name],
+                        self.session.identified[&wrapped_name],
+                    );
+                if pair_is_valid {
                     self.semantic_info_pair_loaded = true;
                     Ok(selected)
                 } else {
@@ -839,9 +833,11 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                     );
                     Err(SemanticMemberLoadFailure {
                         binary_name: requested.clone(),
-                        source: SemanticTastyLoadError::UnsupportedShape(
-                            "the semantic pair's package entries could not be adopted by the resolver",
-                        ),
+                        source: SemanticTastyLoadError::UnsupportedShape(if adopted {
+                            "the semantic pair's package entries did not form canonical complete identities"
+                        } else {
+                            "the semantic pair's package entries could not be adopted by the resolver"
+                        }),
                     })
                 }
             }
@@ -850,6 +846,307 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                 source,
             }),
         }
+    }
+
+    fn is_semantic_info_root_identity(
+        &self,
+        store: &SemanticStore,
+        package: SymbolId,
+        package_scope: dotty_core::ScopeId,
+        root: SemanticInfoRootIdentity<'_>,
+    ) -> bool {
+        let SemanticInfoRootIdentity {
+            class,
+            member_name,
+            binary_name,
+            kind,
+            constructor_type_parameter,
+            constructor_params,
+        } = root;
+        if self.session.identified.get(binary_name) != Some(&class)
+            || self.session.resolved.get(binary_name) != Some(&class)
+            || !self.session.origins.contains_key(&class)
+            || !store.symbols.contains(class)
+            || !store.symbols.contains(package)
+            || store.symbols.get(package).kind != SymbolKind::Package
+            || !store.scopes.contains(package_scope)
+            || store.scopes.get(package_scope).owner != Some(package)
+            || self
+                .session
+                .packages
+                .get(&["me", "cytrowski", "tastyfixtures", "semantic"])
+                != Some(package)
+            || self.session.packages.scope_of(package) != Some(package_scope)
+            || store.scopes.get(package_scope).lookup_all(&member_name) != [class]
+        {
+            return false;
+        }
+        let symbol = store.symbols.get(class);
+        if !matches!(symbol.origin, SymbolOrigin::Tasty(_))
+            || symbol.kind != kind
+            || symbol.name != member_name
+            || !member_name.is_type()
+            || symbol.owner != Some(package)
+            || BinaryName::from_internal(format!(
+                "me/cytrowski/tastyfixtures/semantic/{}",
+                store.names.resolve(member_name.text())
+            )) != *binary_name
+        {
+            return false;
+        }
+        let SymbolInfo::Complete(info) = symbol.info else {
+            return false;
+        };
+        let Some(Type::ClassInfo(class_info)) = store.types.try_get(info) else {
+            return false;
+        };
+        if class_info.class != class
+            || !store.scopes.contains(class_info.declarations)
+            || store.scopes.get(class_info.declarations).owner != Some(class)
+        {
+            return false;
+        }
+        let constructors = store
+            .scopes
+            .get(class_info.declarations)
+            .entered_symbols()
+            .filter(|constructor| {
+                store.symbols.contains(*constructor)
+                    && store.symbols.get(*constructor).kind == SymbolKind::Constructor
+            })
+            .collect::<Vec<_>>();
+        let [constructor] = constructors.as_slice() else {
+            return false;
+        };
+        let constructor = store.symbols.get(*constructor);
+        if constructor.name.namespace() != Namespace::Term
+            || store.names.resolve(constructor.name.text()) != "<init>"
+            || constructor.owner != Some(class)
+        {
+            return false;
+        }
+        let SymbolInfo::Complete(constructor_info) = constructor.info else {
+            return false;
+        };
+        let Some(Type::Poly(constructor_poly)) = store.types.try_get(constructor_info) else {
+            return false;
+        };
+        if constructor_poly.params.len() != 1
+            || constructor_poly.params[0].name.as_name().namespace() != Namespace::Type
+            || store
+                .names
+                .resolve(constructor_poly.params[0].name.as_name().text())
+                != constructor_type_parameter
+        {
+            return false;
+        }
+        let Some(Type::Method(constructor_method)) = store.types.try_get(constructor_poly.result)
+        else {
+            return false;
+        };
+        let constructor_result_is_class = match store.types.try_get(constructor_method.result) {
+            Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(result),
+                ..
+            }) => *result == class,
+            Some(Type::Applied { tycon, args }) => {
+                store.types.try_get(*tycon).and_then(Type::reference_symbol) == Some(class)
+                    && args.len() == 1
+                    && matches!(
+                        store.types.try_get(args[0]),
+                        Some(Type::ParamRef { binder, index: 0 }) if *binder == constructor_info
+                    )
+            }
+            _ => false,
+        };
+        if constructor_method.kind != MethodKind::Plain
+            || constructor_method.params.len() != constructor_params.len()
+            || !constructor_result_is_class
+        {
+            return false;
+        }
+        constructor_method
+            .params
+            .iter()
+            .zip(constructor_params)
+            .all(|(parameter, expected)| {
+                store
+                    .types
+                    .try_get(parameter.ty)
+                    .and_then(Type::reference_symbol)
+                    == Some(*expected)
+            })
+    }
+
+    fn is_semantic_info_pair_identity(
+        &self,
+        store: &SemanticStore,
+        base: SymbolId,
+        wrapped: SymbolId,
+    ) -> bool {
+        const PACKAGE_PATH: &[&str] = &["me", "cytrowski", "tastyfixtures", "semantic"];
+        let base_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
+        let wrapped_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
+        let Some(package) = self.session.packages.get(PACKAGE_PATH) else {
+            return false;
+        };
+        let Some(package_scope) = self.session.packages.scope_of(package) else {
+            return false;
+        };
+        let (Some(base_member), Some(wrapped_member)) = (
+            store
+                .names
+                .get("InfoBase")
+                .map(|name| Name::new(name, Namespace::Type)),
+            store
+                .names
+                .get("InfoWrapped")
+                .map(|name| Name::new(name, Namespace::Type)),
+        ) else {
+            return false;
+        };
+        let Some(canonical_int) = store.types.get(self.definitions.int).reference_symbol() else {
+            return false;
+        };
+        let wrapped_constructor_params = [canonical_int];
+        if !self.is_semantic_info_root_identity(
+            store,
+            package,
+            package_scope,
+            SemanticInfoRootIdentity {
+                class: base,
+                member_name: base_member,
+                binary_name: &base_name,
+                kind: SymbolKind::Trait,
+                constructor_type_parameter: "A",
+                constructor_params: &[],
+            },
+        ) || !self.is_semantic_info_root_identity(
+            store,
+            package,
+            package_scope,
+            SemanticInfoRootIdentity {
+                class: wrapped,
+                member_name: wrapped_member,
+                binary_name: &wrapped_name,
+                kind: SymbolKind::Class,
+                constructor_type_parameter: "F",
+                constructor_params: &wrapped_constructor_params,
+            },
+        ) {
+            return false;
+        }
+
+        let wrapped_info_id = match store.symbols.get(wrapped).info {
+            SymbolInfo::Complete(info) => info,
+            SymbolInfo::Missing | SymbolInfo::Deferred(_) | SymbolInfo::Error => return false,
+        };
+        let Some(Type::ClassInfo(wrapped_info)) = store.types.try_get(wrapped_info_id) else {
+            return false;
+        };
+        let declarations = store.scopes.get(wrapped_info.declarations);
+        let f_parameters = declarations
+            .entered_symbols()
+            .filter(|symbol| {
+                store.symbols.contains(*symbol)
+                    && store.symbols.get(*symbol).kind == SymbolKind::TypeParameter
+                    && store.names.resolve(store.symbols.get(*symbol).name.text()) == "F"
+            })
+            .collect::<Vec<_>>();
+        let [f_parameter] = f_parameters.as_slice() else {
+            return false;
+        };
+        let f_parameter = *f_parameter;
+        if store.symbols.get(f_parameter).owner != Some(wrapped) {
+            return false;
+        }
+
+        let applied_base_args = wrapped_info.parents.iter().find_map(|parent| {
+            let Type::Applied { tycon, args } = store.types.try_get(*parent)? else {
+                return None;
+            };
+            (store.types.try_get(*tycon).and_then(Type::reference_symbol) == Some(base)
+                && args.len() == 1)
+                .then_some(args[0])
+        });
+        let Some(applied_f_int) = applied_base_args else {
+            return false;
+        };
+        let Some(Type::Applied {
+            tycon: parent_f,
+            args: parent_args,
+        }) = store.types.try_get(applied_f_int)
+        else {
+            return false;
+        };
+        if parent_args.len() != 1
+            || store
+                .types
+                .try_get(*parent_f)
+                .and_then(Type::reference_symbol)
+                != Some(f_parameter)
+            || store
+                .types
+                .try_get(parent_args[0])
+                .and_then(Type::reference_symbol)
+                != Some(canonical_int)
+        {
+            return false;
+        }
+
+        let methods = declarations
+            .entered_symbols()
+            .filter(|member| {
+                store.symbols.contains(*member)
+                    && store.symbols.get(*member).kind == SymbolKind::Method
+                    && store.names.resolve(store.symbols.get(*member).name.text()) == "m"
+                    && store.symbols.get(*member).name.namespace() == Namespace::Term
+            })
+            .collect::<Vec<_>>();
+        let [method] = methods.as_slice() else {
+            return false;
+        };
+        let method = store.symbols.get(*method);
+        if method.owner != Some(wrapped) {
+            return false;
+        }
+        let SymbolInfo::Complete(method_info) = method.info else {
+            return false;
+        };
+        let method_result = match store.types.try_get(method_info) {
+            Some(Type::Method(method_type))
+                if method_type.kind == MethodKind::Plain && method_type.params.is_empty() =>
+            {
+                method_type.result
+            }
+            Some(Type::Method(_)) => return false,
+            Some(_) => method_info,
+            None => return false,
+        };
+        let method_result = match store.types.try_get(method_result) {
+            Some(Type::ByName { result }) => *result,
+            Some(_) => method_result,
+            None => return false,
+        };
+        let Some(Type::Applied {
+            tycon: method_f,
+            args: method_args,
+        }) = store.types.try_get(method_result)
+        else {
+            return false;
+        };
+        method_args.len() == 1
+            && store
+                .types
+                .try_get(*method_f)
+                .and_then(Type::reference_symbol)
+                == Some(f_parameter)
+            && store
+                .types
+                .try_get(method_args[0])
+                .and_then(Type::reference_symbol)
+                == Some(canonical_int)
     }
 
     #[allow(dead_code)]
@@ -1078,6 +1375,88 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
     ) -> Result<Option<SymbolId>, ResolutionError> {
         self.transact(store, |resolver, store| {
             resolver.resolve_member_inner_with_semantic_request(store, request, selected_name)
+        })
+        .map_err(MemberResolutionFailure::into_resolution_error)
+    }
+
+    fn resolve_member_inner_with_semantic_info_pair(
+        &mut self,
+        store: &mut SemanticStore,
+        request: &MemberRequest,
+    ) -> Result<Option<SymbolId>, MemberResolutionFailure> {
+        const PACKAGE_PATH: &[&str] = &["me", "cytrowski", "tastyfixtures", "semantic"];
+        let selected_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
+        let info_wrapped = store.names.intern("InfoWrapped");
+        let exact_request = request.selector == MemberSelector::Unique
+            && request.name == Name::new(info_wrapped, Namespace::Type)
+            && matches!(request.space, MemberSpace::Prefix);
+        if !exact_request {
+            return self
+                .resolve_member_inner(store, request)
+                .map_err(MemberResolutionFailure::Resolver);
+        }
+
+        let target = self
+            .prefix_target(store, request.prefix)
+            .map_err(MemberResolutionFailure::Resolver)?;
+        let package = match target {
+            Some(target) => self
+                .resolve_target(store, target)
+                .map_err(MemberResolutionFailure::Resolver)?,
+            None => None,
+        };
+        let Some((package, package_scope)) = package.filter(|(package, _)| {
+            store.symbols.contains(*package)
+                && store.symbols.get(*package).kind == SymbolKind::Package
+                && package_path_of_symbol(store, *package).is_some_and(|path| {
+                    path.iter()
+                        .map(String::as_str)
+                        .eq(PACKAGE_PATH.iter().copied())
+                })
+                && self.session.packages.get(PACKAGE_PATH) == Some(*package)
+        }) else {
+            return self
+                .resolve_member_inner(store, request)
+                .map_err(MemberResolutionFailure::Resolver);
+        };
+        if !store.scopes.contains(package_scope)
+            || store.scopes.get(package_scope).owner != Some(package)
+            || self.session.packages.scope_of(package) != Some(package_scope)
+        {
+            return Err(MemberResolutionFailure::Resolver(
+                ResolutionError::Malformed {
+                    reason:
+                        "selected package declaration scope is not owned by its canonical package"
+                            .to_owned(),
+                },
+            ));
+        }
+
+        let selected = self
+            .load_semantic_info_pair_for_member(store, &selected_name)
+            .map_err(MemberResolutionFailure::SemanticLoad)?;
+        if self.session.identified.get(&selected_name) != Some(&selected) {
+            return Err(MemberResolutionFailure::SemanticLoad(
+                SemanticMemberLoadFailure {
+                    binary_name: selected_name,
+                    source: SemanticTastyLoadError::UnsupportedShape(
+                        "the semantic pair did not return its selected canonical child identity",
+                    ),
+                },
+            ));
+        }
+        Ok(Some(selected))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn resolve_member_with_semantic_info_pair(
+        &mut self,
+        store: &mut SemanticStore,
+        request: &MemberRequest,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.transact(store, |resolver, store| {
+            resolver.resolve_member_inner_with_semantic_info_pair(store, request)
         })
         .map_err(MemberResolutionFailure::into_resolution_error)
     }
@@ -4447,6 +4826,378 @@ mod tests {
             assert_eq!(resolver.session.resolved.get(&wrapped_name), Some(&wrapped));
             assert!(resolver.class_path.is_some());
         }
+    }
+
+    #[test]
+    fn explicit_infowrapped_member_request_loads_and_reuses_the_semantic_pair() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            info_pair_audit_class_path(),
+            definitions,
+            LoadingSession::new(),
+        );
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "semantic"],
+            )
+            .unwrap()
+            .expect("semantic fixture package");
+        let request =
+            semantic_member_request(&mut store, package, definitions.no_prefix, "InfoWrapped");
+        let wrapped_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
+        let base_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
+        let fixture_origin = ClassOrigin::Directory(fixture_path(
+            "../dotty-tasty-unpickler/tests/fixtures/semantic",
+        ));
+
+        let wrapped = resolver
+            .resolve_member_with_semantic_info_pair(&mut store, &request)
+            .unwrap()
+            .expect("explicit request selects InfoWrapped");
+        let base = resolver.session.identified[&base_name];
+        assert_eq!(resolver.session.resolved.get(&wrapped_name), Some(&wrapped));
+        assert_eq!(resolver.session.resolved.get(&base_name), Some(&base));
+        assert_eq!(
+            resolver.session.origins.get(&wrapped),
+            Some(&fixture_origin)
+        );
+        assert_eq!(resolver.session.origins.get(&base), Some(&fixture_origin));
+        assert!(resolver.semantic_info_pair_loaded);
+
+        let SymbolInfo::Complete(wrapped_type) = store.symbols.get(wrapped).info else {
+            panic!("InfoWrapped is complete");
+        };
+        let Type::ClassInfo(wrapped_info) = store.types.get(wrapped_type) else {
+            panic!("InfoWrapped has ClassInfo");
+        };
+        assert_eq!(store.symbols.get(wrapped).kind, SymbolKind::Class);
+        assert_eq!(store.symbols.get(wrapped).owner, Some(package));
+        assert_eq!(store.symbols.get(base).kind, SymbolKind::Trait);
+        assert_eq!(store.symbols.get(base).owner, Some(package));
+        let base_parent = wrapped_info
+            .parents
+            .iter()
+            .find(|parent| {
+                matches!(
+                    store.types.get(**parent),
+                    Type::Applied { tycon, .. }
+                        if info_pair_type_symbol(&store, *tycon) == Some(base)
+                )
+            })
+            .expect("InfoWrapped extends applied InfoBase");
+        let Type::Applied { args, .. } = store.types.get(*base_parent) else {
+            panic!("InfoBase parent is applied");
+        };
+        let [applied_f_int] = args.as_slice() else {
+            panic!("InfoBase parent has one type argument");
+        };
+        let Type::Applied {
+            tycon: f_tycon,
+            args: f_args,
+        } = store.types.get(*applied_f_int)
+        else {
+            panic!("InfoBase argument is F[Int]");
+        };
+        assert_eq!(f_args.len(), 1);
+        let f_parameter = store
+            .scopes
+            .get(wrapped_info.declarations)
+            .entered_symbols()
+            .find(|id| {
+                let symbol = store.symbols.get(*id);
+                symbol.kind == SymbolKind::TypeParameter
+                    && store.names.resolve(symbol.name.text()) == "F"
+            })
+            .expect("InfoWrapped declares F");
+        assert_eq!(info_pair_type_symbol(&store, *f_tycon), Some(f_parameter));
+        assert_eq!(
+            info_pair_type_symbol(&store, f_args[0]),
+            info_pair_type_symbol(&store, definitions.int)
+        );
+        let method = store
+            .scopes
+            .get(wrapped_info.declarations)
+            .entered_symbols()
+            .find(|id| {
+                let symbol = store.symbols.get(*id);
+                symbol.kind == SymbolKind::Method && store.names.resolve(symbol.name.text()) == "m"
+            })
+            .expect("InfoWrapped directly declares m");
+        let SymbolInfo::Complete(method_type) = store.symbols.get(method).info else {
+            panic!("m is complete");
+        };
+        let method_result = match store.types.get(method_type) {
+            Type::Method(method) => method.result,
+            _ => method_type,
+        };
+        let method_result = match store.types.get(method_result) {
+            Type::ByName { result } => *result,
+            _ => method_result,
+        };
+        assert_eq!(
+            store.types.get(method_result),
+            store.types.get(*applied_f_int)
+        );
+
+        let repeated = resolver
+            .resolve_member_with_semantic_info_pair(&mut store, &request)
+            .unwrap()
+            .expect("repeat explicit request reuses InfoWrapped");
+        assert_eq!(repeated, wrapped);
+        assert_eq!(resolver.session.identified.get(&base_name), Some(&base));
+        assert_eq!(
+            resolver.session.identified.get(&wrapped_name),
+            Some(&wrapped)
+        );
+        assert_eq!(
+            resolver
+                .session
+                .packages
+                .get(&["me", "cytrowski", "tastyfixtures", "semantic",]),
+            Some(package)
+        );
+    }
+
+    #[test]
+    fn infowrapped_repeat_rejects_corrupt_pair_identity_and_retries_after_restore() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            info_pair_audit_class_path(),
+            definitions,
+            LoadingSession::new(),
+        );
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "semantic"],
+            )
+            .unwrap()
+            .expect("semantic fixture package");
+        let request =
+            semantic_member_request(&mut store, package, definitions.no_prefix, "InfoWrapped");
+        let wrapped = resolver
+            .resolve_member_with_semantic_info_pair(&mut store, &request)
+            .unwrap()
+            .expect("initial pair load");
+        let base = resolver.session.identified
+            [&BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase")];
+        let base_info = store.symbols.get(base).info;
+        let wrapped_info = store.symbols.get(wrapped).info;
+        let SymbolInfo::Complete(wrapped_info_id) = wrapped_info else {
+            panic!("InfoWrapped is complete");
+        };
+        let Type::ClassInfo(wrapped_class_info) = store.types.get(wrapped_info_id).clone() else {
+            panic!("InfoWrapped has ClassInfo");
+        };
+        let SymbolInfo::Complete(base_info_id) = base_info else {
+            panic!("InfoBase is complete");
+        };
+        let Type::ClassInfo(base_class_info) = store.types.get(base_info_id).clone() else {
+            panic!("InfoBase has ClassInfo");
+        };
+        let constructor = store
+            .scopes
+            .get(wrapped_class_info.declarations)
+            .entered_symbols()
+            .find(|symbol| store.symbols.get(*symbol).kind == SymbolKind::Constructor)
+            .expect("InfoWrapped constructor");
+        let constructor_info = store.symbols.get(constructor).info;
+
+        store.symbols.get_mut(wrapped).info = SymbolInfo::Missing;
+        assert!(matches!(
+            resolver.resolve_member_with_semantic_info_pair(&mut store, &request),
+            Err(ResolutionError::Malformed { .. })
+        ));
+        store.symbols.get_mut(wrapped).info = wrapped_info;
+        assert_eq!(
+            resolver.resolve_member_with_semantic_info_pair(&mut store, &request),
+            Ok(Some(wrapped))
+        );
+
+        store.symbols.get_mut(wrapped).info = SymbolInfo::Complete(definitions.int);
+        assert!(matches!(
+            resolver.resolve_member_with_semantic_info_pair(&mut store, &request),
+            Err(ResolutionError::Malformed { .. })
+        ));
+        store.symbols.get_mut(wrapped).info = wrapped_info;
+        assert_eq!(
+            resolver.resolve_member_with_semantic_info_pair(&mut store, &request),
+            Ok(Some(wrapped))
+        );
+
+        let foreign_scope_info = store.types.alloc(Type::ClassInfo(ClassInfo {
+            declarations: base_class_info.declarations,
+            ..wrapped_class_info.clone()
+        }));
+        store.symbols.get_mut(wrapped).info = SymbolInfo::Complete(foreign_scope_info);
+        assert!(matches!(
+            resolver.resolve_member_with_semantic_info_pair(&mut store, &request),
+            Err(ResolutionError::Malformed { .. })
+        ));
+        store.symbols.get_mut(wrapped).info = wrapped_info;
+        assert_eq!(
+            resolver.resolve_member_with_semantic_info_pair(&mut store, &request),
+            Ok(Some(wrapped))
+        );
+
+        store.symbols.get_mut(constructor).info = SymbolInfo::Missing;
+        assert!(matches!(
+            resolver.resolve_member_with_semantic_info_pair(&mut store, &request),
+            Err(ResolutionError::Malformed { .. })
+        ));
+        store.symbols.get_mut(constructor).info = constructor_info;
+        assert_eq!(
+            resolver.resolve_member_with_semantic_info_pair(&mut store, &request),
+            Ok(Some(wrapped))
+        );
+
+        store.symbols.get_mut(base).info = SymbolInfo::Missing;
+        assert!(matches!(
+            resolver.resolve_member_with_semantic_info_pair(&mut store, &request),
+            Err(ResolutionError::Malformed { .. })
+        ));
+        store.symbols.get_mut(base).info = base_info;
+        assert_eq!(
+            resolver.resolve_member_with_semantic_info_pair(&mut store, &request),
+            Ok(Some(wrapped))
+        );
+    }
+
+    #[test]
+    fn infowrapped_pair_opt_in_requires_the_exact_request_and_default_stays_legacy() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            semantic_pair_class_path(),
+            definitions,
+            LoadingSession::new(),
+        );
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "semantic"],
+            )
+            .unwrap()
+            .expect("semantic fixture package");
+        let exact =
+            semantic_member_request(&mut store, package, definitions.no_prefix, "InfoWrapped");
+
+        let mut wrong_namespace = exact.clone();
+        wrong_namespace.name = Name::new(store.names.intern("InfoWrapped"), Namespace::Term);
+        assert!(
+            resolver
+                .resolve_member_with_semantic_info_pair(&mut store, &wrong_namespace)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!resolver.semantic_info_pair_loaded);
+
+        let wrong_package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "visibility"],
+            )
+            .unwrap()
+            .expect("visibility package");
+        let wrong_package_request = semantic_member_request(
+            &mut store,
+            wrong_package,
+            definitions.no_prefix,
+            "InfoWrapped",
+        );
+        assert!(
+            resolver
+                .resolve_member_with_semantic_info_pair(&mut store, &wrong_package_request)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!resolver.semantic_info_pair_loaded);
+
+        let mut wrong_space = exact.clone();
+        wrong_space.space = MemberSpace::Explicit(wrong_space.prefix);
+        assert!(
+            resolver
+                .resolve_member_with_semantic_info_pair(&mut store, &wrong_space)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!resolver.semantic_info_pair_loaded);
+
+        let ordinary = resolver.resolve_member(&mut store, &exact);
+        assert!(!resolver.semantic_info_pair_loaded);
+        assert!(
+            !resolver
+                .session
+                .identified
+                .contains_key(&BinaryName::from_internal(
+                    "me/cytrowski/tastyfixtures/semantic/InfoBase"
+                ))
+        );
+        let _ = ordinary;
+    }
+
+    #[test]
+    fn infowrapped_pair_opt_in_fails_closed_on_a_preexisting_package_identity() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            info_pair_audit_class_path(),
+            definitions,
+            LoadingSession::new(),
+        );
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "semantic"],
+            )
+            .unwrap()
+            .expect("semantic fixture package");
+        let package_scope = resolver.package_scope(package).expect("package scope");
+        let request =
+            semantic_member_request(&mut store, package, definitions.no_prefix, "InfoWrapped");
+        let preexisting = store.symbols.alloc(Symbol {
+            name: request.name,
+            owner: Some(package),
+            kind: SymbolKind::Class,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: Default::default(),
+        });
+        store
+            .scopes
+            .get_mut(package_scope)
+            .enter(request.name, preexisting);
+        let store_before = store.checkpoint();
+        let session_before = resolver.session.checkpoint();
+
+        assert!(matches!(
+            resolver.resolve_member_with_semantic_info_pair(&mut store, &request),
+            Err(ResolutionError::Malformed { .. })
+        ));
+        assert_eq!(store.checkpoint(), store_before);
+        assert_eq!(resolver.session.checkpoint(), session_before);
+        assert!(!resolver.semantic_info_pair_loaded);
+        assert!(
+            !resolver
+                .session
+                .identified
+                .contains_key(&BinaryName::from_internal(
+                    "me/cytrowski/tastyfixtures/semantic/InfoBase"
+                ))
+        );
+        assert!(store.symbols.contains(preexisting));
+        assert_eq!(
+            store.scopes.get(package_scope).lookup_all(&request.name),
+            [preexisting]
+        );
     }
 
     #[test]
