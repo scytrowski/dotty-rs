@@ -890,6 +890,54 @@ jobs:
           printf 'Focused-only coverage: 3 files / 31 methods; not a full-corpus result.\n' \
             > "$DOTTY_AUDIT_REPORT_DIR/focused-status.txt"
 
+      - name: Enforce Stdlib Acceptance IV closeout
+        if: always()
+        shell: bash
+        env:
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+          DOTTY_HOSTED_RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DOTTY_PRIOR_JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$DOTTY_AUDIT_REPORT_DIR"
+          if test "$(sha256sum docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv | cut -d' ' -f1)" \
+              != 59bb65f48e7d94423de0f0a00029b98a0b41583e601c700687311e9e17fc5244 \
+            || test "$(sha256sum docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv | cut -d' ' -f1)" \
+              != afa5a2064efd0bfcd31bb0bcb4fb08030db2d180a7619ac3a0843ebbe867f7bc; then
+            cat > "$DOTTY_AUDIT_REPORT_DIR/acceptance-iv-closeout.md" <<EOF
+          # Stdlib Acceptance IV closeout (Scala 3.9.0)
+
+          **Outcome: SPRINT GOAL UNMET.** One or both frozen cohort manifests changed.
+
+          Hosted run: $DOTTY_HOSTED_RUN
+          EOF
+            exit 1
+          fi
+          if ! test -s "$DOTTY_AUDIT_REPORT_DIR/main-cohort-first.tsv" \
+            || ! test -s "$DOTTY_AUDIT_REPORT_DIR/analysis-cohort-first.tsv"; then
+            cat > "$DOTTY_AUDIT_REPORT_DIR/acceptance-iv-closeout.md" <<EOF
+          # Stdlib Acceptance IV closeout (Scala 3.9.0)
+
+          **Outcome: SPRINT GOAL UNMET.** One or both fresh ordinary cohort reports are missing.
+
+          Hosted run: $DOTTY_HOSTED_RUN
+          EOF
+            exit 1
+          fi
+          PYTHONDONTWRITEBYTECODE=1 python3 \
+            tools/typer-classpath-corpus-audit/verify_ordinary_cohort.py acceptance-iv \
+              --main-report "$DOTTY_AUDIT_REPORT_DIR/main-cohort-first.tsv" \
+              --analysis-report "$DOTTY_AUDIT_REPORT_DIR/analysis-cohort-first.tsv" \
+              --baseline-receipt docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv \
+              --required-main docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-main.tsv \
+              --required-analysis docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-analysis.tsv \
+              --output "$DOTTY_AUDIT_REPORT_DIR/stdlib-acceptance-iv.tsv" \
+              --report "$DOTTY_AUDIT_REPORT_DIR/acceptance-iv-closeout.md" \
+              --tested-revision "$(git rev-parse HEAD)" \
+              --pr-head-sha "${{ github.event.pull_request.head.sha || github.sha }}" \
+              --prior-checks-status "$DOTTY_PRIOR_JOB_STATUS" \
+              --hosted-run "$DOTTY_HOSTED_RUN"
+
       - name: Write run-bound sealed Event acceptance report
         if: always()
         shell: bash

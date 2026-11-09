@@ -284,5 +284,152 @@ class OrdinaryCohortGateTests(unittest.TestCase):
                 MODULE.verify(cohort, report)
 
 
+class AcceptanceIVCloseoutTests(unittest.TestCase):
+    def write_closeout_inputs(self, directory: Path, typed_main: int = 17, target: bool = True):
+        baseline = directory / "baseline.tsv"
+        main_required = directory / "required-main.tsv"
+        analysis_required = directory / "required-analysis.tsv"
+        manifests = {"main": directory / "main-manifest.tsv", "analysis": directory / "analysis-manifest.tsv"}
+        reports = {"main": directory / "main.tsv", "analysis": directory / "analysis.tsv"}
+        baseline_rows = []
+        required_rows = {"main": [], "analysis": []}
+        report_rows = {"main": [], "analysis": []}
+        columns = "cohort\tidentity\tsource_tree\tbaseline_status\tgate\tsecond_status\tactual_result\tprotected_success\n"
+        protected_count = {"main": 16, "analysis": 15}
+        for cohort in ("main", "analysis"):
+            manifest_rows = []
+            for index in range(25):
+                identity = (
+                    "library/src/scala/Option.scala#tree=214"
+                    if cohort == "main" and index == 24
+                    else "library/src/scala/Tuple.scala#tree=23"
+                    if cohort == "main" and index == 23
+                    else f"library/src/{cohort}/Method{index}.scala#tree={index}"
+                )
+                protected = index < protected_count[cohort]
+                status = "typed" if (protected and (cohort == "analysis" or index < 16)) else "blocked::MemberNotFound"
+                result = "Int" if status == "typed" else "not_available"
+                if cohort == "main" and index == 24:
+                    status = "typed" if target else "blocked::IfBranchJoinUnsupported"
+                    result = "scala.Option[typeparam#0]" if target else "not_available"
+                expected_result = (
+                    "scala.Option[typeparam#0]"
+                    if cohort == "main" and index == 24
+                    else "Int"
+                )
+                if cohort == "main" and index == 23:
+                    status = "blocked::ApplicationArgumentConformanceUnsupported"
+                    result = "not_available"
+                baseline_rows.append(
+                    f"{cohort}\t{identity}\t{index}\t{'typed' if protected else 'blocked'}\t"
+                    f"{'true' if protected else 'false'}\t{result if protected else '-'}\n"
+                )
+                if protected:
+                    required_rows[cohort].append(f"{identity}\t{index}\tInt\n")
+                report_rows[cohort].append([
+                    identity, cohort, f"method{index}", "1", "0..1", "[]", expected_result,
+                    result, "1", status,
+                    "214" if cohort == "main" and index == 24 else "23" if cohort == "main" and index == 23 else str(index),
+                    str(index + 100) if status == "typed" else "-",
+                ])
+                source_tree = (
+                    214 if cohort == "main" and index == 24
+                    else 23 if cohort == "main" and index == 23
+                    else index
+                )
+                manifest_rows.append(f"{identity}\t{source_tree}\n")
+            manifests[cohort].write_text(
+                "identity\tsource_tree\n" + "".join(manifest_rows), encoding="utf-8"
+            )
+        baseline.write_text(
+            "cohort\tidentity\tsource_tree\tbaseline_status\tprotected_success\tactual_result\n"
+            + "".join(baseline_rows), encoding="utf-8"
+        )
+        for cohort, path in (("main", main_required), ("analysis", analysis_required)):
+            required_rows[cohort] = [row.replace("\t", "\trequired_typed\t", 1) for row in required_rows[cohort]]
+            path.write_text("identity\tgate\tsource_tree\toracle_result\n" + "".join(required_rows[cohort]), encoding="utf-8")
+            with reports[cohort].open("w", encoding="utf-8", newline="") as output:
+                typed = sum(row[9] == "typed" for row in report_rows[cohort])
+                output.write(
+                    "schema=1\npinned_scala_revision=777528f19a58e794c9954a42f433373472ec57f8\n"
+                    "selected=25\nattempted=25\n"
+                    f"typed={typed}\nblocked={25 - typed}\nexcluded=0\nnot_attempted=0\n"
+                )
+                writer = csv.writer(output, delimiter="\t", lineterminator="\n")
+                writer.writerow(MODULE.REPORT_COLUMNS)
+                writer.writerows(report_rows[cohort])
+        return reports, baseline, main_required, analysis_required, manifests
+
+    def test_closeout_requires_threshold_and_exact_target_in_ordinary_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            reports, baseline, main_required, analysis_required, manifests = self.write_closeout_inputs(Path(temporary))
+            failures, rows = MODULE.verify_acceptance_iv(
+                reports["main"], reports["analysis"], baseline, main_required, analysis_required,
+                main_manifest_path=manifests["main"], analysis_manifest_path=manifests["analysis"],
+            )
+            self.assertEqual(failures, [])
+            self.assertEqual(len(rows), 50)
+            report = Path(temporary) / "closeout.md"
+            MODULE._write_acceptance_iv_markdown(
+                report, rows, True, "tested-sha", "pr-head-sha", "https://actions/run/1"
+            )
+            closeout = report.read_text(encoding="utf-8")
+            self.assertIn("Outcome: SPRINT GOAL UNMET pending independent review", closeout)
+            self.assertIn("Hosted acceptance gate: PASS", closeout)
+
+    def test_closeout_rejects_unprepared_tuple_proof_without_ordinary_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            reports, baseline, main_required, analysis_required, manifests = self.write_closeout_inputs(
+                Path(temporary), typed_main=16, target=False
+            )
+            failures, _ = MODULE.verify_acceptance_iv(
+                reports["main"], reports["analysis"], baseline, main_required, analysis_required,
+                main_manifest_path=manifests["main"], analysis_manifest_path=manifests["analysis"],
+            )
+            self.assertTrue(any("requires at least 17/25" in failure for failure in failures))
+            self.assertTrue(any("no exact original" in failure for failure in failures))
+
+    def test_closeout_rejects_changed_protected_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            reports, baseline, main_required, analysis_required, manifests = self.write_closeout_inputs(Path(temporary))
+            text = reports["main"].read_text(encoding="utf-8")
+            reports["main"].write_text(text.replace("\tInt\t1\ttyped\t0\t100\n", "\tString\t1\ttyped\t0\t100\n", 1), encoding="utf-8")
+            failures, _ = MODULE.verify_acceptance_iv(
+                reports["main"], reports["analysis"], baseline, main_required, analysis_required,
+                main_manifest_path=manifests["main"], analysis_manifest_path=manifests["analysis"],
+            )
+            self.assertTrue(any("protected identity or result changed" in failure for failure in failures))
+
+    def test_closeout_rejects_typed_root_with_nonoracle_result_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            reports, baseline, main_required, analysis_required, manifests = self.write_closeout_inputs(Path(temporary))
+            text = reports["main"].read_text(encoding="utf-8")
+            reports["main"].write_text(
+                text.replace("\tInt\tInt\t1\ttyped\t0\t100\n", "\tInt\tString\t1\ttyped\t0\t100\n", 1),
+                encoding="utf-8",
+            )
+            failures, _ = MODULE.verify_acceptance_iv(
+                reports["main"], reports["analysis"], baseline, main_required, analysis_required,
+                main_manifest_path=manifests["main"], analysis_manifest_path=manifests["analysis"],
+            )
+            self.assertTrue(any("typed result differs from frozen expected result" in failure for failure in failures))
+
+    def test_closeout_requires_target_to_be_new_since_frozen_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            reports, baseline, main_required, analysis_required, manifests = self.write_closeout_inputs(Path(temporary))
+            baseline.write_text(
+                baseline.read_text(encoding="utf-8").replace(
+                    "library/src/scala/Option.scala#tree=214\t24\tblocked\tfalse\t-",
+                    "library/src/scala/Option.scala#tree=214\t24\ttyped\tfalse\t-",
+                ),
+                encoding="utf-8",
+            )
+            failures, _ = MODULE.verify_acceptance_iv(
+                reports["main"], reports["analysis"], baseline, main_required, analysis_required,
+                main_manifest_path=manifests["main"], analysis_manifest_path=manifests["analysis"],
+            )
+            self.assertTrue(any("no exact original" in failure for failure in failures))
+
+
 if __name__ == "__main__":
     unittest.main()
