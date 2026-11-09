@@ -69,11 +69,31 @@ consumer runs its checked-in consumer tests against pinned Scala 3.9.0 and JDK
 
 ## Functional and telemetry verdict
 
-Functional verdict: **PENDING** until the listed focused tests, historical
-comparators, and required local and hosted CI gates execute on the final
-revision. Telemetry status: **PARTIAL** as recorded by the historical
-convergence-IV trace. The trace is historical and is not a compiler-failure
-verdict; no new telemetry evidence is claimed here.
+Functional verdict: **PARTIAL** pending required hosted checks. The focused
+resolver matrix, classloader/unpickler suites, historical comparators and all
+local required Rust/JDK checks passed on code/test commit
+`f907485d6a`; the final evidence-only documentation commit is validated again
+locally. Required hosted Rust/JDK and pinned Scala 3.9 consumer runs remain
+pending and are tracked in `acceptance.tsv`. Do not read this local result as a
+claim that hosted gates have passed.
+
+Telemetry status: **PARTIAL** as recorded by the historical convergence-IV
+trace. The trace is historical and is not a compiler-failure verdict; no new
+telemetry evidence is claimed here.
+
+Local validation on `f907485d6a` used Rust 1.98.1 and Temurin JDK 21.0.13:
+
+- `cargo test -p dotty-classloader --locked` — passed, including all resolver
+  unit and integration tests.
+- `cargo test -p dotty-tasty-unpickler --locked` — passed.
+- The frozen 14-unit/126-row comparator and original four-member comparator
+  each passed twice. Their checked-in SHA-256 values match `acceptance.tsv`.
+- `cargo fmt --all -- --check`, `python3 tools/check-frontend-boundaries.py`,
+  workspace Clippy with `-D warnings`, and workspace rustdoc with warnings
+  denied — passed.
+- `cargo test --workspace --all-targets --locked` — passed.
+- The strict JDK 21 gate with `DOTTY_CLASSFILE_REQUIRE_JDK=1` — passed.
+- `git diff --check` — passed.
 
 ## Reproduction
 
