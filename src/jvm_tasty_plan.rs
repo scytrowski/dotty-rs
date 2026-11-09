@@ -159,6 +159,7 @@ struct BatchSourceTypedBindings<'a> {
     local_values: Vec<(SourceId, SymbolId, LocalValueBinding)>,
     local_counter_initializers: Vec<(SourceId, SymbolId, LocalCounterInitializerBinding)>,
     local_receiver_unit_calls: Vec<(SourceId, SymbolId, LocalReceiverUnitCallBinding)>,
+    local_receiver_unit_call_pairs: Vec<(SourceId, SymbolId, [LocalReceiverUnitCallBinding; 2])>,
     formal_local_constructor_call_pairs:
         Vec<(SourceId, SymbolId, FormalLocalConstructorCallPairBinding)>,
 }
@@ -292,6 +293,18 @@ impl SourceTypedBindings for BatchSourceTypedBindings<'_> {
             .find_map(|(proof_source, proof_method, binding)| {
                 (*proof_source == source && *proof_method == method).then_some(*binding)
             })
+    }
+
+    fn local_receiver_unit_call_pair(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<[LocalReceiverUnitCallBinding; 2]> {
+        self.local_receiver_unit_call_pairs.iter().find_map(
+            |(proof_source, proof_method, calls)| {
+                (*proof_source == source && *proof_method == method).then_some(*calls)
+            },
+        )
     }
 }
 
@@ -1129,28 +1142,30 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                     });
                     // Project only original immutable ValDefs in bounded
                     // constructor-result Blocks. The cross-class contract
-                    // authenticates any third Counter.set stat and both local
-                    // initializer receipts before a producer plan is accepted.
+                    // authenticates the ordered Counter.set statements and
+                    // both local initializer receipts before acceptance.
                     let locals = match &parsed.ast.get(rhs).kind {
                         TreeKind::Block(block)
-                            if ((1..=2).contains(&block.stats.len())
+                            if (1..=2).contains(&block.stats.len())
                                 && block.stats.iter().all(|declaration| {
                                     matches!(
                                         parsed.ast.try_get(*declaration).map(|node| &node.kind),
                                         Some(TreeKind::ValDef(_))
                                     )
                                 })
-                                || (block.stats.len() == 3
+                                || ((3..=4).contains(&block.stats.len())
                                     && block.stats[..2].iter().all(|declaration| {
                                         matches!(
                                             parsed.ast.try_get(*declaration).map(|node| &node.kind),
                                             Some(TreeKind::ValDef(_))
                                         )
                                     })
-                                    && matches!(
-                                        parsed.ast.try_get(block.stats[2]).map(|node| &node.kind),
-                                        Some(TreeKind::Apply(_))
-                                    ))) =>
+                                    && block.stats[2..].iter().all(|stat| {
+                                        matches!(
+                                            parsed.ast.try_get(*stat).map(|node| &node.kind),
+                                            Some(TreeKind::Apply(_))
+                                        )
+                                    })) =>
                         {
                             let final_constructor_uses_local = matches!(
                                 parsed.ast.try_get(block.expr).map(|node| &node.kind),
@@ -1167,7 +1182,7 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                                 block
                                     .stats
                                     .iter()
-                                    .take(if block.stats.len() == 3 {
+                                    .take(if block.stats.len() >= 3 {
                                         2
                                     } else {
                                         block.stats.len()
@@ -1693,9 +1708,34 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                         source_argument: call.source_argument,
                         typed_argument: call.typed_argument,
                         receiver: call.receiver,
+                        receiver_scope: call.receiver_scope,
                         method: call.method,
                         argument_formal: call.argument_formal,
                     },
+                ))
+            })
+            .collect(),
+        local_receiver_unit_call_pairs: constructor_call_proofs
+            .iter()
+            .filter_map(|proof| {
+                let calls = proof.local_receiver_unit_calls()?.calls;
+                Some((
+                    proof.source_id(),
+                    proof.method(),
+                    calls.map(|call| LocalReceiverUnitCallBinding {
+                        source_apply: call.source_apply,
+                        typed_apply: call.typed_apply,
+                        source_select: call.source_select,
+                        typed_select: call.typed_select,
+                        source_receiver: call.source_receiver,
+                        typed_receiver: call.typed_receiver,
+                        source_argument: call.source_argument,
+                        typed_argument: call.typed_argument,
+                        receiver: call.receiver,
+                        receiver_scope: call.receiver_scope,
+                        method: call.method,
+                        argument_formal: call.argument_formal,
+                    }),
                 ))
             })
             .collect(),
