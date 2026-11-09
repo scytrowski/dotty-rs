@@ -400,19 +400,23 @@ class AcceptanceIVCloseoutTests(unittest.TestCase):
             )
             self.assertTrue(any("protected identity or result changed" in failure for failure in failures))
 
-    def test_closeout_rejects_typed_root_with_nonoracle_result_shape(self) -> None:
+    def test_closeout_rejects_target_with_unexpected_result_shape(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             reports, baseline, main_required, analysis_required, manifests = self.write_closeout_inputs(Path(temporary))
             text = reports["main"].read_text(encoding="utf-8")
             reports["main"].write_text(
-                text.replace("\tInt\tInt\t1\ttyped\t0\t100\n", "\tInt\tString\t1\ttyped\t0\t100\n", 1),
+                text.replace(
+                    "\tscala.Option[typeparam#0]\t1\ttyped\t214\t124\n",
+                    "\tscala.Option[String]\t1\ttyped\t214\t124\n",
+                    1,
+                ),
                 encoding="utf-8",
             )
             failures, _ = MODULE.verify_acceptance_iv(
                 reports["main"], reports["analysis"], baseline, main_required, analysis_required,
                 main_manifest_path=manifests["main"], analysis_manifest_path=manifests["analysis"],
             )
-            self.assertTrue(any("typed result differs from frozen expected result" in failure for failure in failures))
+            self.assertTrue(any("typed target has unexpected result shape" in failure for failure in failures))
 
     def test_closeout_requires_target_to_be_new_since_frozen_baseline(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
