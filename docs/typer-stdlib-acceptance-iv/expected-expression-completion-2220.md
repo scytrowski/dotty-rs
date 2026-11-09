@@ -98,6 +98,35 @@ The main report includes `Option.map` as typed at tree 214. The report hashes
 cover the generated TSVs; the runner compared both passes byte-for-byte before
 accepting each required cohort.
 
+The focused replay and both cohort gates were rerun at tested HEAD
+`449540463ce19826b90aaec648f6888cb1a4fcb7`, which merges current integrated
+baseline `a3319e43dac3aa08021d0cf4bb9b6fc65a75e7fc`. The baseline is an ancestor
+of that tested HEAD; this fixes the ancestry precondition that caused the
+earlier hosted focused gate to stop before running semantic tests. Report
+hashes and acceptance counts remained unchanged.
+
+## Transaction failure and retry regression
+
+`injected_failure_after_expected_preparation_rolls_back_and_retry_succeeds`
+uses the existing one-shot outermost-transaction failure injection after the
+otherwise successful `type_method_definition`. Its pre-rollback observer
+requires the reachable `Parent` and derived `Empty$` ClassInfo to be Complete
+and the typed root mapping to exist. The test then verifies restoration of
+the semantic allocation checkpoint, source type cache, typed arena, typed
+tree index, and source-to-typed index. It also confirms newly prepared
+ClassInfo returns to Missing, a `Marker` ClassInfo that was Complete before
+the transaction keeps its original TypeId, and an unrelated `Child` remains
+Missing. With the one-shot injection consumed, retrying the same method in the
+same `SourceTyper` succeeds and publishes the canonical root mapping.
+
+The unrelated-target control now asserts the exact
+`ExpectedExpressionTypeMismatch` at the method RHS. It no longer accepts the
+pre-preparation `ExpectedExpressionConformanceUnsupported` path.
+
+At the merged-base revision, `cargo test -p dotty-typer --lib --locked`
+passed (1,027 passed; 2 ignored), and
+`cargo clippy -p dotty-typer --all-targets --locked -- -D warnings` passed.
+
 Reproduce these gates with the same pinned source, artifact classpath, JDK,
 and persistent scratch configuration:
 
