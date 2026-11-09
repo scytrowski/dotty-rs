@@ -166,11 +166,28 @@ Unsupported language forms remain those in the bounded controls above. This PR a
 `ordered_two_local_unit_calls_execute_under_strict_jdk21` runs the six
 Rust-produced artifacts from
 [`OrderedLocalUnitCalls.scala`](../tests/fixtures/jvm_tasty_ordered_local_unit_calls/OrderedLocalUnitCalls.scala)
-with a separate Java consumer compiled by `javac --release 21`. The accepted
-runtime classpath contains only those Rust classfiles and the Java consumer.
-The test invokes `javap -v -c`, then runs the consumer with
-`java -Xverify:all -ea`; it checks all six class/TASTy hashes before and after
-the tools.
+with the supplemental
+[`RuntimeProbe2192.java`](../tests/fixtures/jvm_tasty_ordered_local_unit_calls/RuntimeProbe2192.java)
+consumer compiled by `javac --release 21`. The historical
+[`RuntimeProbe.java`](../tests/fixtures/jvm_tasty_ordered_local_unit_calls/RuntimeProbe.java)
+remains unchanged for the #2187 Scala oracle; its frozen SHA-256 is
+`207e7a5bca59ace13abe384655b9ea825ac3e9f4023e298156c9de7095ebe0ad`. The
+runtime test copies only the supplemental source to its managed test scratch
+using the Java filename required by `javac`.
+
+Reproduce the mandatory JDK test with Temurin 21 on `PATH` and managed
+`TMPDIR`, `TMP`, `TEMP`, and `CARGO_TARGET_DIR`:
+
+```sh
+DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test --locked \
+  --test jvm_tasty_local_receiver_call_runtime \
+  ordered_two_local_unit_calls_execute_under_strict_jdk21 -- --exact --nocapture
+```
+
+The accepted runtime classpath contains only the original Rust classfiles and
+the compiled supplemental Java consumer. The test invokes `javap -v -c`, then
+runs the consumer with `java -Xverify:all -ea`; it checks all six class/TASTy
+hashes before and after the Java tools.
 
 The positive matrix covers both declaration orders, both call orders, and two
 ordered writes to the same receiver. It checks distinct Pair/Counter identity,

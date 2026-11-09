@@ -11,7 +11,7 @@ const SOURCE: &str = include_str!("fixtures/jvm_tasty_local_receiver_call/LocalR
 const TWO_CALL_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_ordered_local_unit_calls/OrderedLocalUnitCalls.scala");
 const TWO_CALL_HARNESS: &str =
-    include_str!("fixtures/jvm_tasty_ordered_local_unit_calls/RuntimeProbe.java");
+    include_str!("fixtures/jvm_tasty_ordered_local_unit_calls/RuntimeProbe2192.java");
 const HARNESS: &str = r#"package example;
 
 import java.lang.reflect.Field;
