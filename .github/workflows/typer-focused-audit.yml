@@ -317,9 +317,13 @@ jobs:
               captures_acceptance_iv_relation_operands_before_transaction_rollback \
               -- --ignored --nocapture \
               > "$DOTTY_AUDIT_REPORT_DIR/option-map-session-$session.log" 2>&1
-            grep '^OPTION_MAP_ACCEPTED ' \
+            if ! grep -o 'OPTION_MAP_ACCEPTED [^[:cntrl:]]*' \
               "$DOTTY_AUDIT_REPORT_DIR/option-map-session-$session.log" \
-              > "$DOTTY_AUDIT_REPORT_DIR/option-map-session-$session.receipt"
+              > "$DOTTY_AUDIT_REPORT_DIR/option-map-session-$session.receipt"; then
+              echo "Option.map acceptance marker missing from session $session log" >&2
+              exit 1
+            fi
+            test "$(wc -l < "$DOTTY_AUDIT_REPORT_DIR/option-map-session-$session.receipt")" -eq 1
             grep -q 'test result: ok. 1 passed' \
               "$DOTTY_AUDIT_REPORT_DIR/option-map-session-$session.log"
           done

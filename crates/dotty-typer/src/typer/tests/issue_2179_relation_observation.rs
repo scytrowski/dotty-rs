@@ -107,6 +107,52 @@ fn type_symbols(
     }
 }
 
+fn normalized_type(store: &SemanticStore, ty: TypeId, method_binder: TypeId) -> String {
+    match store.types.get(ty) {
+        Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        }
+        | Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        } => observed_symbol_path(store, *symbol),
+        Type::TermRef {
+            target: TermRefTarget::Name(name),
+            ..
+        } => store.names.resolve(name.as_name().text()).to_owned(),
+        Type::TypeRef {
+            target: TypeRefTarget::Name(name),
+            ..
+        } => store.names.resolve(name.as_name().text()).to_owned(),
+        Type::Applied { tycon, args } => format!(
+            "{}[{}]",
+            normalized_type(store, *tycon, method_binder),
+            args.iter()
+                .map(|arg| normalized_type(store, *arg, method_binder))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        Type::ParamRef { binder, index } => {
+            assert_eq!(
+                *binder, method_binder,
+                "parameter ref belongs to Option.map[B]"
+            );
+            format!("B#{index}")
+        }
+        Type::Or { left, right } => {
+            let mut operands = [
+                normalized_type(store, *left, method_binder),
+                normalized_type(store, *right, method_binder),
+            ];
+            operands.sort();
+            format!("{}|{}", operands[0], operands[1])
+        }
+        Type::ThisType { class } => format!("{}.this", observed_symbol_path(store, *class)),
+        other => panic!("unexpected Option.map receipt type shape: {other:?}"),
+    }
+}
+
 #[test]
 #[ignore = "requires pinned Scala 3.9.0 sources, classpath jars, and JDK environment"]
 fn captures_acceptance_iv_relation_operands_before_transaction_rollback() {
@@ -704,9 +750,88 @@ fn captures_acceptance_iv_relation_operands_before_transaction_rollback() {
                 .collect::<std::collections::BTreeMap<_, _>>();
             let option = source_classes["Option"];
             let some = source_classes["Some"];
+            let none_tree = parsed_ast
+                .iter()
+                .find_map(|(decl_tree, node)| match &node.kind {
+                    TreeKind::PhaseSpecific(UntypedNode::ModuleDef(definition))
+                        if typer
+                            .store()
+                            .names
+                            .resolve(definition.name.as_name().text())
+                            == "None" =>
+                    {
+                        Some(decl_tree)
+                    }
+                    _ => None,
+                })
+                .expect("canonical source None declaration");
+            let none = typer.index.symbol_at(source, none_tree).unwrap();
+            let none_module_class = typer
+                .index
+                .derived_symbol_at(
+                    typer.store().symbols.get(none).owner.unwrap(),
+                    source,
+                    none_tree,
+                )
+                .unwrap();
             let Type::Method(method_type) = typer.store().types.get(poly.result) else {
                 panic!("Option.map must preserve its original function method clause");
             };
+            assert_eq!(method_type.params.len(), 1);
+            assert_eq!(
+                typer
+                    .store()
+                    .names
+                    .resolve(method_type.params[0].name.as_name().text()),
+                "f"
+            );
+            let source_f = match &parsed_ast.get(tree).kind {
+                TreeKind::DefDef(definition) => index
+                    .symbol_at(source, definition.value_param_clauses[0][0])
+                    .expect("original Option.map function parameter is canonical"),
+                _ => unreachable!("selected source tree is Option.map DefDef"),
+            };
+            let Type::Applied {
+                tycon: function_tycon,
+                args: function_args,
+            } = typer.store().types.get(method_type.params[0].ty)
+            else {
+                panic!("Option.map f must retain its Function1[A, B] type");
+            };
+            assert_eq!(function_args.len(), 2);
+            let mut function_heads = Vec::new();
+            type_symbols(
+                typer.store(),
+                *function_tycon,
+                &mut function_heads,
+                &mut Vec::new(),
+            );
+            assert!(function_heads.iter().any(|symbol| {
+                observed_symbol_path(typer.store(), *symbol) == ".scala.Function1"
+            }));
+            let mut a_symbols = Vec::new();
+            type_symbols(
+                typer.store(),
+                function_args[0],
+                &mut a_symbols,
+                &mut Vec::new(),
+            );
+            assert!(a_symbols.iter().any(|symbol| {
+                let info = typer.store().symbols.get(*symbol);
+                info.owner == Some(option) && typer.store().names.resolve(info.name.text()) == "A"
+            }));
+            assert!(
+                matches!(
+                    typer.store().types.get(function_args[1]),
+                    Type::TypeRef {
+                        target: TypeRefTarget::Symbol(symbol),
+                        ..
+                    } if *symbol == source_binder
+                ) || matches!(
+                    typer.store().types.get(function_args[1]),
+                    Type::ParamRef { binder, index: 0 } if *binder == signature
+                )
+            );
             let Type::Applied {
                 tycon,
                 args: result_args,
@@ -729,36 +854,219 @@ fn captures_acceptance_iv_relation_operands_before_transaction_rollback() {
             let typed_rhs = typed_definition
                 .rhs
                 .expect("the original Option.map DefDef retains its RHS");
+            let source_rhs = match &parsed_ast.get(tree).kind {
+                TreeKind::DefDef(definition) => definition
+                    .rhs
+                    .expect("original Option.map has its source RHS"),
+                _ => unreachable!("selected source tree is Option.map DefDef"),
+            };
+            assert_eq!(
+                typer.source_typed_index().get(source, source_rhs),
+                Some(typed_rhs),
+                "the typed RHS must be the exact mapping of the original DefDef RHS"
+            );
+            let TreeKind::If(source_if) = &parsed_ast.get(source_rhs).kind else {
+                panic!("the original Option.map RHS must remain its source conditional");
+            };
             let TreeKind::If(typed_if) = &typer.typed_ast().get(typed_rhs).kind else {
                 panic!("the original Option.map conditional must remain typed");
             };
-            if !matches!(
-                typer.store().types.get(typer.typed_ast().get(typed_rhs).ty),
-                Type::Or { .. }
-            ) {
+            assert_eq!(
+                typer
+                    .source_typed_index()
+                    .get(source, source_if.else_branch),
+                Some(typed_if.else_branch),
+                "the typed Some branch must map the original source branch"
+            );
+            let TreeKind::Apply(source_some_call) = &parsed_ast.get(source_if.else_branch).kind
+            else {
+                panic!("the original Some branch must be an application");
+            };
+            assert_eq!(source_some_call.args.len(), 1);
+            let source_function_call = source_some_call.args[0];
+            let Type::Or { left, right } =
+                typer.store().types.get(typer.typed_ast().get(typed_rhs).ty)
+            else {
                 panic!("the original None/Some branch join must retain its union shape");
-            }
-            let some_apply = typer.typed_ast().iter().find_map(|(_, candidate)| {
-                let TreeKind::Select(selection) = &candidate.kind else {
-                    return None;
+            };
+            let union_type = typer.typed_ast().get(typed_rhs).ty;
+            let mut union_operands = [
+                normalized_type(typer.store(), *left, signature),
+                normalized_type(typer.store(), *right, signature),
+            ];
+            union_operands.sort();
+            assert_eq!(
+                union_operands,
+                [".scala.None$", ".scala.Some[.scala.Option.map.B]"],
+                "the union must contain the canonical None$ and Some[B] operands"
+            );
+            assert!([*left, *right].into_iter().any(|operand| matches!(
+                typer.store().types.get(operand),
+                Type::TypeRef {
+                    target: TypeRefTarget::Symbol(symbol),
+                    ..
+                } if *symbol == none_module_class
+            )));
+            assert!([*left, *right].into_iter().any(|operand| {
+                let Type::Applied { tycon, args } = typer.store().types.get(operand) else {
+                    return false;
                 };
-                if typer.store().names.resolve(selection.name.text()) != "apply" {
-                    return None;
-                }
-                let Type::TermRef {
+                let mut symbols = Vec::new();
+                type_symbols(typer.store(), *tycon, &mut symbols, &mut Vec::new());
+                symbols.contains(&some)
+                    && args.len() == 1
+                    && matches!(
+                        typer.store().types.get(args[0]),
+                        Type::TypeRef {
+                            target: TypeRefTarget::Symbol(symbol),
+                            ..
+                        } if *symbol == source_binder
+                    )
+            }));
+            let TreeKind::Apply(some_call) = &typer.typed_ast().get(typed_if.else_branch).kind
+            else {
+                panic!("the mapped Some branch must retain its reachable application");
+            };
+            assert_eq!(some_call.args.len(), 1);
+            let TreeKind::Select(some_function) = &typer.typed_ast().get(some_call.function).kind
+            else {
+                panic!("Some.apply selection is missing from the mapped branch");
+            };
+            assert_eq!(
+                typer.store().names.resolve(some_function.name.text()),
+                "apply"
+            );
+            let Type::TermRef {
+                target: TermRefTarget::Symbol(some_apply),
+                ..
+            } = typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(some_call.function).ty)
+            else {
+                panic!("Some.apply selection must retain its canonical symbol");
+            };
+            assert_eq!(
+                observed_symbol_path(typer.store(), *some_apply),
+                ".scala.Some$.apply"
+            );
+            let function_call_id = some_call.args[0];
+            assert_eq!(
+                typer.source_typed_index().get(source, source_function_call),
+                Some(function_call_id),
+                "the nested typed call must map the original f(this.get) source call"
+            );
+            let TreeKind::Apply(source_f_call) = &parsed_ast.get(source_function_call).kind else {
+                panic!("the original branch argument must be f(this.get)");
+            };
+            assert_eq!(source_f_call.args.len(), 1);
+            let source_get_argument = source_f_call.args[0];
+            let TreeKind::Apply(function_call) = &typer.typed_ast().get(function_call_id).kind
+            else {
+                panic!("Some.apply must receive the original f(this.get) application");
+            };
+            assert_eq!(function_call.args.len(), 1);
+            assert_eq!(
+                typer.source_typed_index().get(source, source_get_argument),
+                Some(function_call.args[0]),
+                "the typed argument must map the original this.get source tree"
+            );
+            assert!(matches!(
+                parsed_ast.get(source_get_argument).kind,
+                TreeKind::Select(_)
+            ));
+            let TreeKind::Select(function_apply) =
+                &typer.typed_ast().get(function_call.function).kind
+            else {
+                panic!("f application must retain Function1.apply");
+            };
+            assert_eq!(
+                typer.store().names.resolve(function_apply.name.text()),
+                "apply"
+            );
+            let Type::TermRef {
+                target: TermRefTarget::Symbol(function_apply_symbol),
+                ..
+            } = typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(function_call.function).ty)
+            else {
+                panic!("Function1.apply must retain its canonical symbol");
+            };
+            assert_eq!(
+                observed_symbol_path(typer.store(), *function_apply_symbol),
+                ".scala.Function1.apply"
+            );
+            assert!(matches!(
+                &typer.typed_ast().get(function_apply.qualifier).kind,
+                TreeKind::Ident(_)
+            ));
+            assert!(matches!(
+                typer
+                    .store()
+                    .types
+                    .get(typer.typed_ast().get(function_apply.qualifier).ty),
+                Type::TermRef {
                     target: TermRefTarget::Symbol(symbol),
                     ..
-                } = typer.store().types.get(candidate.ty)
-                else {
-                    return None;
-                };
-                (observed_symbol_path(typer.store(), *symbol) == ".scala.Some$.apply")
-                    .then_some(*symbol)
-            });
-            assert!(
-                some_apply.is_some(),
-                "the original Some branch must select canonical Some.apply"
+                } if *symbol == source_f
+            ));
+            let get_argument = function_call.args[0];
+            let TreeKind::Select(get_selection) = &typer.typed_ast().get(get_argument).kind else {
+                panic!("f's original argument must remain this.get");
+            };
+            assert_eq!(
+                typer.store().names.resolve(get_selection.name.text()),
+                "get"
             );
+            assert!(matches!(
+                typer.typed_ast().get(get_selection.qualifier).kind,
+                TreeKind::This(_)
+            ));
+            let Type::TermRef {
+                target: TermRefTarget::Symbol(get_symbol),
+                ..
+            } = typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(get_argument).ty)
+            else {
+                panic!("this.get must retain its canonical Option.get symbol");
+            };
+            assert_eq!(
+                observed_symbol_path(typer.store(), *get_symbol),
+                ".scala.Option.get"
+            );
+            let SymbolInfo::Complete(get_signature) = *typer.store().symbols.info(*get_symbol)
+            else {
+                panic!("the canonical Option.get signature must be complete");
+            };
+            assert_eq!(
+                normalized_type(typer.store(), get_signature, signature),
+                ".scala.Option.A"
+            );
+            assert_eq!(
+                normalized_type(
+                    typer.store(),
+                    typer.typed_ast().get(function_call_id).ty,
+                    signature
+                ),
+                ".scala.Option.map.B"
+            );
+            let normalized_f_type =
+                normalized_type(typer.store(), method_type.params[0].ty, signature);
+            assert!(normalized_f_type.starts_with(".scala.Function1[.scala.Option.A,"));
+            let normalized_result_type =
+                normalized_type(typer.store(), method_type.result, signature);
+            assert_eq!(normalized_result_type, ".scala.Option[B#0]");
+            let normalized_union = normalized_type(typer.store(), union_type, signature);
+            let normalized_some_result = normalized_type(
+                typer.store(),
+                typer.typed_ast().get(typed_if.else_branch).ty,
+                signature,
+            );
+            assert_eq!(normalized_some_result, ".scala.Some[.scala.Option.map.B]");
             let Type::Applied {
                 tycon,
                 args: some_args,
@@ -795,30 +1103,6 @@ fn captures_acceptance_iv_relation_operands_before_transaction_rollback() {
                 ".scala.None"
             );
 
-            let none_tree = parsed_ast
-                .iter()
-                .find_map(|(decl_tree, node)| match &node.kind {
-                    TreeKind::PhaseSpecific(UntypedNode::ModuleDef(definition))
-                        if typer
-                            .store()
-                            .names
-                            .resolve(definition.name.as_name().text())
-                            == "None" =>
-                    {
-                        Some(decl_tree)
-                    }
-                    _ => None,
-                })
-                .expect("canonical source None declaration");
-            let none = typer.index.symbol_at(typer.source, none_tree).unwrap();
-            let none_module_class = typer
-                .index
-                .derived_symbol_at(
-                    typer.store().symbols.get(none).owner.unwrap(),
-                    typer.source,
-                    none_tree,
-                )
-                .unwrap();
             for symbol in [option, some, none_module_class] {
                 assert!(
                     matches!(*typer.store().symbols.info(symbol), SymbolInfo::Complete(_)),
@@ -876,9 +1160,24 @@ fn captures_acceptance_iv_relation_operands_before_transaction_rollback() {
                 .map(str::to_owned),
                 "the complete original Option.map source subtree must map deterministically"
             );
+            let normalized_receipt = format!(
+                "method={} owner={} function={} function_apply={} get={} some_apply={} some_argument={} branches={} result={}",
+                observed_symbol_path(typer.store(), method_symbol),
+                observed_symbol_path(typer.store(), owner),
+                normalized_f_type,
+                observed_symbol_path(typer.store(), *function_apply_symbol),
+                observed_symbol_path(typer.store(), *get_symbol),
+                observed_symbol_path(typer.store(), *some_apply),
+                normalized_type(
+                    typer.store(),
+                    typer.typed_ast().get(function_call_id).ty,
+                    signature
+                ),
+                normalized_union,
+                normalized_result_type
+            );
             println!(
-                "OPTION_MAP_ACCEPTED session=independent canonical=scala.Option.map binder=B some_apply=canonical:scala.Some$.apply branches=None|Some[B] result=Option[B] mapping={} rollback=full_and_retry spans=preserved",
-                mappings.join(",")
+                "OPTION_MAP_ACCEPTED {normalized_receipt} rollback=full_and_retry spans=preserved"
             );
             println!(
                 "OPTION_MAP_TYPED_BEGIN\nmethod=canonical:scala.Option.map\nbinder=B\nsource_typed_mappings={}\nOPTION_MAP_TYPED_END",

@@ -23,11 +23,15 @@ The retry then checks the canonical `.scala.Option.map` owner and source
 definition, the method-owned `B` binder, the preserved polymorphic method
 signature, and its exact `Option[B]` result (`ParamRef` index 0 under the
 method binder). The complete typed root remains a `DefDef` with the original
-conditional RHS. Its branches retain canonical `scala.None` and
-`scala.Some[B]`, the latter selecting canonical `scala.Some$.apply`; the
-conditional retains the `None | Some[B]` join. Every source-to-typed mapping
-preserves its source identity and remains within the original source span.
-The asserted mapping is:
+conditional RHS. It verifies that the callable parameter has type
+`Function1[Option.A, B]`, then walks the mapped else branch through
+`Some$.apply` to the `Function1.apply` call on the original `f` parameter and
+its mapped `this.get` argument. It checks the canonical targets, argument
+ownership, branch result types, and both canonical `None` and `Some[B]` union
+operands. The normalized acceptance receipt is constructed from those
+observed semantic types and symbols, without arena IDs. Every source-to-typed
+mapping preserves its source identity and remains within the original source
+span. The asserted mapping is:
 
 ```text
 195:0,196:1,199:2,200:3,203:4,204:5,205:5,206:6,207:7,208:9,209:11,210:12,211:13,212:14,213:15,214:16
@@ -36,9 +40,11 @@ The asserted mapping is:
 The same test retains the unrelated original `Tuple.toArray` negative control;
 its unsupported receiver conformance remains an explicit separate outcome.
 
-On the implementation checkout, two separate local Cargo test processes
-passed and emitted byte-identical normalized acceptance lines
-(SHA-256 `87495844124e0ce0162ef36296a891eb89985facc121bafe0c7e90d04e9642ac`).
+With `RUST_TEST_THREADS=1`, two separate local Cargo test processes passed and
+emitted byte-identical normalized acceptance lines (SHA-256
+`c8dd1346629c38bc79c4fabf25da6ce0d50d8186fd3e5443dfc3996e7b571bd7`). The
+workflow extracts the marker even when libtest prefixes it on the same line,
+then requires exactly one extracted receipt per process.
 
 ## Independent sessions and protected cohorts
 
