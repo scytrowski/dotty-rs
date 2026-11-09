@@ -6211,6 +6211,10 @@ mod tests {
             definitions,
             LoadingSession::new(),
         );
+        let control_name = BinaryName::from_internal("java/lang/String");
+        let committed = resolver
+            .load_class(&mut store, &control_name)
+            .expect("the control class commits before the selected pair");
         let package = resolver
             .resolve_package(
                 &mut store,
@@ -6257,64 +6261,161 @@ mod tests {
         assert!(resolver.class_path.is_some());
         resolver.inject_semantic_pair_adoption_failure = false;
 
-        let enclosing_checkpoint = resolver.checkpoint();
-        let store_before_enclosing_rollback = store.checkpoint();
-        let session_before_enclosing_rollback = resolver.session.checkpoint();
-        let loaded = resolver
-            .transact(&mut store, |resolver, store| {
+        let fixture_root = fixture_path("../dotty-tasty-unpickler/tests/fixtures/semantic");
+        for (selected_name, other_name, selected_type, other_type) in [
+            (&base_name, &wrapped_name, &base_type, &wrapped_type),
+            (&wrapped_name, &base_name, &wrapped_type, &base_type),
+        ] {
+            let enclosing_checkpoint = resolver.checkpoint();
+            let store_before_enclosing_rollback = store.checkpoint();
+            let session_before_enclosing_rollback = resolver.session.checkpoint();
+            let object_before = store.symbols.get(definitions.object_class).clone();
+            let unit_before = store.types.get(definitions.unit).clone();
+            let package_before =
                 resolver
-                    .load_semantic_info_pair_for_member(store, &wrapped_name)
-                    .map(Some)
-                    .map_err(MemberResolutionFailure::SemanticLoad)
-            })
-            .expect("successful handoff commits in the enclosing resolver transaction")
-            .expect("selected pair root");
-        let base = resolver.session.identified[&base_name];
-        let wrapped = resolver.session.identified[&wrapped_name];
-        assert_eq!(loaded, wrapped);
-        assert!(resolver.semantic_info_pair_loaded);
-        assert_eq!(
-            store.scopes.get(package_scope).lookup_all(&base_type),
-            [base]
-        );
-        assert_eq!(
-            store.scopes.get(package_scope).lookup_all(&wrapped_type),
-            [wrapped]
-        );
+                    .session
+                    .packages
+                    .get(&["me", "cytrowski", "tastyfixtures", "semantic"]);
+            let loaded = resolver
+                .transact(&mut store, |resolver, store| {
+                    resolver
+                        .load_semantic_info_pair_for_member(store, selected_name)
+                        .map(Some)
+                        .map_err(MemberResolutionFailure::SemanticLoad)
+                })
+                .expect("successful handoff commits in the enclosing resolver transaction")
+                .expect("selected pair root");
+            let base = resolver.session.identified[&base_name];
+            let wrapped = resolver.session.identified[&wrapped_name];
+            let selected = resolver.session.identified[selected_name];
+            let other = resolver.session.identified[other_name];
+            assert_eq!(loaded, selected);
+            assert_ne!(selected, other);
+            assert!(resolver.semantic_info_pair_loaded);
+            assert!(resolver.is_semantic_info_pair_identity(&store, base, wrapped));
+            for (name, symbol) in [(&base_name, base), (&wrapped_name, wrapped)] {
+                assert_eq!(resolver.session.resolved.get(name), Some(&symbol));
+                assert_eq!(
+                    resolver.session.origins.get(&symbol),
+                    Some(&ClassOrigin::Directory(fixture_root.clone()))
+                );
+            }
+            assert_eq!(
+                store.scopes.get(package_scope).lookup_all(selected_type),
+                [selected]
+            );
+            assert_eq!(
+                store.scopes.get(package_scope).lookup_all(other_type),
+                [other]
+            );
+            assert_eq!(
+                resolver
+                    .session
+                    .packages
+                    .get(&["me", "cytrowski", "tastyfixtures", "semantic",]),
+                package_before
+            );
 
-        resolver.rollback_to(&mut store, enclosing_checkpoint);
-        store.rollback_to(store_before_enclosing_rollback);
-        assert_eq!(
-            resolver.session.checkpoint(),
-            session_before_enclosing_rollback
-        );
-        assert!(!resolver.semantic_info_pair_loaded);
-        assert!(!store.symbols.contains(base));
-        assert!(!store.symbols.contains(wrapped));
-        assert!(!resolver.session.identified.contains_key(&base_name));
-        assert!(!resolver.session.identified.contains_key(&wrapped_name));
-        assert!(
-            store
-                .scopes
-                .get(package_scope)
-                .lookup_all(&base_type)
-                .is_empty()
-        );
-        assert!(
-            store
-                .scopes
-                .get(package_scope)
-                .lookup_all(&wrapped_type)
-                .is_empty()
-        );
+            resolver.rollback_to(&mut store, enclosing_checkpoint);
+            store.rollback_to(store_before_enclosing_rollback);
+            assert_eq!(
+                resolver.session.checkpoint(),
+                session_before_enclosing_rollback
+            );
+            assert!(!resolver.semantic_info_pair_loaded);
+            assert!(resolver.semantic_info_base_parameter.is_none());
+            assert_eq!(store.symbols.get(definitions.object_class), &object_before);
+            assert_eq!(store.types.get(definitions.unit), &unit_before);
+            assert_eq!(
+                resolver
+                    .session
+                    .packages
+                    .get(&["me", "cytrowski", "tastyfixtures", "semantic",]),
+                package_before
+            );
+            assert!(!store.symbols.contains(base));
+            assert!(!store.symbols.contains(wrapped));
+            for (name, symbol) in [(&base_name, base), (&wrapped_name, wrapped)] {
+                assert!(!resolver.session.identified.contains_key(name));
+                assert!(!resolver.session.resolved.contains_key(name));
+                assert!(!resolver.session.origins.contains_key(&symbol));
+                assert!(!resolver.session.metadata.contains_key(&symbol));
+                assert!(!resolver.session.class_type_parameters.contains_key(&symbol));
+            }
+            assert!(
+                store
+                    .scopes
+                    .get(package_scope)
+                    .lookup_all(&base_type)
+                    .is_empty()
+            );
+            assert!(
+                store
+                    .scopes
+                    .get(package_scope)
+                    .lookup_all(&wrapped_type)
+                    .is_empty()
+            );
+            assert_eq!(
+                resolver.session.identified.get(&control_name),
+                Some(&committed)
+            );
+            assert_eq!(
+                resolver.session.resolved.get(&control_name),
+                Some(&committed)
+            );
+            assert!(resolver.session.origins.contains_key(&committed));
+            assert_eq!(store.symbols.get(definitions.object_class), &object_before);
 
-        let retry = resolver
-            .load_semantic_info_pair_for_member(&mut store, &base_name)
-            .expect("retry after enclosing rollback delegates and commits cleanly");
-        assert!(resolver.semantic_info_pair_loaded);
-        assert_eq!(resolver.session.identified.get(&base_name), Some(&retry));
-        assert!(store.symbols.contains(retry));
-        assert!(resolver.class_path.is_some());
+            let retry_checkpoint = resolver.checkpoint();
+            let retry_store_checkpoint = store.checkpoint();
+            let retry = resolver
+                .transact(&mut store, |resolver, store| {
+                    resolver
+                        .load_semantic_info_pair_for_member(store, selected_name)
+                        .map(Some)
+                        .map_err(MemberResolutionFailure::SemanticLoad)
+                })
+                .expect("same-resolver retry after enclosing rollback commits cleanly")
+                .expect("retry resolves a selected pair root");
+            let retry_base = resolver.session.identified[&base_name];
+            let retry_wrapped = resolver.session.identified[&wrapped_name];
+            assert_eq!(retry, resolver.session.identified[selected_name]);
+            assert!(resolver.semantic_info_pair_loaded);
+            assert!(resolver.is_semantic_info_pair_identity(&store, retry_base, retry_wrapped));
+            assert_eq!(
+                store.scopes.get(package_scope).lookup_all(&base_type),
+                [retry_base]
+            );
+            assert_eq!(
+                store.scopes.get(package_scope).lookup_all(&wrapped_type),
+                [retry_wrapped]
+            );
+            assert_eq!(
+                resolver.session.origins.get(&retry_base),
+                Some(&ClassOrigin::Directory(fixture_root.clone()))
+            );
+            assert_eq!(
+                resolver.session.origins.get(&retry_wrapped),
+                Some(&ClassOrigin::Directory(fixture_root.clone()))
+            );
+            assert_eq!(
+                resolver
+                    .load_semantic_info_pair_for_member(&mut store, selected_name)
+                    .expect("repeated selection reuses the canonical pair"),
+                retry
+            );
+            assert_eq!(resolver.session.identified[&base_name], retry_base);
+            assert_eq!(resolver.session.identified[&wrapped_name], retry_wrapped);
+            assert_eq!(
+                resolver.session.identified.get(&control_name),
+                Some(&committed)
+            );
+            assert!(resolver.class_path.is_some());
+            resolver.rollback_to(&mut store, retry_checkpoint);
+            store.rollback_to(retry_store_checkpoint);
+            assert!(!resolver.semantic_info_pair_loaded);
+        }
     }
 
     #[test]
