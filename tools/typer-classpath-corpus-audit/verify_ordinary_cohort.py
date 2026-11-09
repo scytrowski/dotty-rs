@@ -39,6 +39,13 @@ ACCEPTANCE_IV_TARGETS = {
     "library/src/scala/Option.scala#tree=214": "scala.Option[typeparam#0]",
     "library/src/scala/Tuple.scala#tree=23": "scala.Array[java.lang.Object]",
 }
+ACCEPTANCE_IV_BASELINE_REVISION = "89f81940fc538a7b24323b82b9415cdb6a7c5404"
+ACCEPTANCE_IV_BASELINE_WORKFLOW_HEAD = "92a291efad106555b2be6aa5255ef2a45eac1985"
+ACCEPTANCE_IV_BASELINE_RUN_ID = "42427679560"
+ACCEPTANCE_IV_BASELINE_ARTIFACT_ID = "13595484615"
+ACCEPTANCE_IV_BASELINE_ARTIFACT_SHA256 = "ca52bc903a18a45c3e408290a9728fc770fc2ceabb8e4d7c337e970182a43084"
+ACCEPTANCE_IV_INTEGRATION_REVISION = "f9b94d2b2bb0480de32c4fd6689a4e7813148a1f"
+ACCEPTANCE_IV_INTEGRATION_RECEIPT_SHA256 = "e783ece1710b7b271c3ca3f9dd12b566b212b655c28d89da35bc900fbccf486e"
 
 
 def read_tsv(path: Path) -> list[dict[str, str]]:
@@ -244,7 +251,8 @@ def verify(
 def verify_acceptance_iv(
     main_report_path: Path,
     analysis_report_path: Path,
-    baseline_receipt_path: Path,
+    measured_baseline_path: Path,
+    integration_receipt_path: Path,
     required_main_path: Path,
     required_analysis_path: Path,
     minimum_main: int = 17,
@@ -253,10 +261,76 @@ def verify_acceptance_iv(
 ) -> tuple[list[str], list[dict[str, str]]]:
     """Enforce the frozen 25+25 acceptance-IV closeout without cohort reshaping."""
     failures: list[str] = []
-    baseline_rows = read_tsv(baseline_receipt_path)
-    baseline = {row["identity"]: row for row in baseline_rows}
-    if len(baseline) != len(baseline_rows):
-        failures.append(f"{baseline_receipt_path}: duplicate baseline identity")
+    measured_rows = read_tsv(measured_baseline_path)
+    integration_rows = read_tsv(integration_receipt_path)
+    measured = {row["identity"]: row for row in measured_rows}
+    integration = {row["identity"]: row for row in integration_rows}
+    if len(measured) != len(measured_rows):
+        failures.append(f"{measured_baseline_path}: duplicate measured #2179 identity")
+    if len(integration) != len(integration_rows):
+        failures.append(f"{integration_receipt_path}: duplicate integration identity")
+    for row in measured_rows:
+        expected = {
+            "scala_revision": PINNED_SCALA_REVISION,
+            "measured_revision": ACCEPTANCE_IV_BASELINE_REVISION,
+            "workflow_head_sha": ACCEPTANCE_IV_BASELINE_WORKFLOW_HEAD,
+            "workflow_run_id": ACCEPTANCE_IV_BASELINE_RUN_ID,
+            "artifact_id": ACCEPTANCE_IV_BASELINE_ARTIFACT_ID,
+            "artifact_sha256": ACCEPTANCE_IV_BASELINE_ARTIFACT_SHA256,
+        }
+        for key, value in expected.items():
+            if row.get(key) != value:
+                failures.append(f"{measured_baseline_path}: unexpected #2179 receipt {key}")
+        if row.get("first_status") != row.get("second_status"):
+            failures.append(f"{row.get('identity')}: #2179 measured attempts disagree")
+        if row.get("first_actual_result") != row.get("second_actual_result"):
+            failures.append(f"{row.get('identity')}: #2179 measured results disagree")
+    for row in integration_rows:
+        if row.get("first_status") != row.get("second_status") or row.get("two_pass_equal") != "true":
+            failures.append(f"{row.get('identity')}: #2183 integration attempts disagree")
+    if set(measured) != set(integration):
+        failures.append("measured #2179 and integration receipts must contain the same exact roots")
+    for cohort, expected_typed, expected_integrated in (("main", 16, 18), ("analysis", 15, 16)):
+        rows = [row for row in measured_rows if row.get("cohort") == cohort]
+        typed = 0
+        if len(rows) != 25:
+            failures.append(f"{measured_baseline_path}: #2179 {cohort} receipt must have 25 roots")
+        for row in rows:
+            identity_tree = _identity_tree(row.get("identity", ""))
+            if identity_tree is None or row.get("source_tree") != identity_tree:
+                failures.append(f"{row.get('identity')}: invalid measured #2179 source-tree mapping")
+            status = row.get("first_status", "")
+            if status == "typed":
+                typed += 1
+                if row.get("first_actual_result") in ("", "not_available"):
+                    failures.append(f"{row.get('identity')}: typed #2179 root has no result")
+            elif not status.startswith("blocked::") or row.get("first_actual_result") != "not_available":
+                failures.append(f"{row.get('identity')}: malformed measured #2179 outcome")
+        if typed != expected_typed:
+            failures.append(
+                f"{measured_baseline_path}: #2179 {cohort} measured {typed}/25 typed roots; expected {expected_typed}/25"
+            )
+        integrated = [row for row in integration_rows if row.get("cohort") == cohort]
+        if len(integrated) != 25:
+            failures.append(f"{integration_receipt_path}: integration {cohort} receipt must have 25 roots")
+        integrated_typed = 0
+        for row in integrated:
+            identity_tree = _identity_tree(row.get("identity", ""))
+            status = row.get("first_status", "")
+            if identity_tree is None or row.get("source_tree") != identity_tree:
+                failures.append(f"{row.get('identity')}: invalid integration source-tree mapping")
+            if status != "typed" and not status.startswith("blocked::"):
+                failures.append(f"{row.get('identity')}: malformed integration outcome")
+            if status == "typed":
+                integrated_typed += 1
+                if row.get("actual_result") in ("", "not_available"):
+                    failures.append(f"{row.get('identity')}: typed integration root has no result")
+            elif row.get("actual_result") != "not_available":
+                failures.append(f"{row.get('identity')}: blocked integration root has inconsistent result")
+        if integrated_typed != expected_integrated:
+            failures.append(
+                f"{integration_receipt_path}: #2183 {cohort} receipt has {integrated_typed}/25 typed roots; expected {expected_integrated}/25"
+            )
     inputs = {
         "main": (
             main_report_path,
@@ -269,37 +343,73 @@ def verify_acceptance_iv(
             analysis_manifest_path,
         ),
     }
+    for cohort, (_, protected_path, _) in inputs.items():
+        required = read_tsv(protected_path)
+        protected_ids = {
+            row["identity"] for row in required if row.get("gate") == "required_typed"
+        }
+        measured_typed_ids = {
+            row["identity"]
+            for row in measured_rows
+            if row.get("cohort") == cohort and row.get("first_status") == "typed"
+        }
+        if measured_typed_ids != protected_ids:
+            failures.append(
+                f"{measured_baseline_path}: measured #2179 {cohort} typed identities "
+                "do not match the protected identity set"
+            )
     output_rows: list[dict[str, str]] = []
     typed_main = 0
     for cohort, (report_path, protected_path, manifest_path) in inputs.items():
         failures.extend(verify(protected_path, report_path, manifest_path))
         report, summary = parse_report(report_path)
-        cohort_ids = {row["identity"] for row in baseline_rows if row.get("cohort") == cohort}
+        cohort_ids = {row["identity"] for row in measured_rows if row.get("cohort") == cohort}
         if len(cohort_ids) != 25 or set(report) != cohort_ids or summary["selected"] != 25:
             failures.append(f"{cohort}: expected the unchanged exact 25-root cohort")
-        if any(row.get("cohort") not in inputs for row in baseline_rows):
-            failures.append(f"{baseline_receipt_path}: unexpected cohort")
+        integration_ids = {row["identity"] for row in integration_rows if row.get("cohort") == cohort}
+        if integration_ids != cohort_ids:
+            failures.append(f"{cohort}: integration receipt does not preserve the exact 25-root cohort")
+        if any(row.get("cohort") not in inputs for row in measured_rows + integration_rows):
+            failures.append("measured or integration receipt contains an unexpected cohort")
         typed_count = sum(row["status"] == "typed" for row in report.values())
         if cohort == "main":
             typed_main = typed_count
         for identity, row in report.items():
-            prior = baseline.get(identity, {})
-            if prior.get("protected_success") == "true" and (
-                row["status"] != "typed" or row["actual_result"] != prior.get("actual_result")
+            prior = measured.get(identity, {})
+            integrated = integration.get(identity, {})
+            measured_status = prior.get("first_status", "")
+            measured_result = prior.get("first_actual_result", "")
+            integration_status = integrated.get("first_status", "")
+            integration_result = integrated.get("actual_result", "")
+            identity_tree = _identity_tree(identity)
+            if identity_tree is None or prior.get("source_tree") != identity_tree:
+                failures.append(f"{identity}: missing or malformed measured #2179 identity")
+            if integrated.get("source_tree") != identity_tree:
+                failures.append(f"{identity}: missing or malformed integration identity")
+            if measured_status == "typed" and (
+                integration_status != "typed" or integration_result != measured_result
+            ):
+                failures.append(f"{identity}: measured #2179 success changed in the integration receipt")
+            if measured_status == "typed" and (
+                row["status"] != "typed" or row["actual_result"] != measured_result
             ):
                 failures.append(f"{identity}: protected identity or result changed")
             output_rows.append({
                 "cohort": cohort,
                 "identity": identity,
                 "source_tree": row["source_tree"],
-                "baseline_status": prior.get("baseline_status", ""),
+                "measured_first_status": prior.get("first_status", ""),
+                "measured_second_status": prior.get("second_status", ""),
+                "integration_status": integration_status,
                 "after_status": row["status"],
+                "measured_actual_result": measured_result,
+                "integration_actual_result": integration_result,
                 "expected_result": row["expected_result"],
                 "result_comparison": (
                     "target two-session proof required"
                     if identity in ACCEPTANCE_IV_TARGETS
                     else "protected result retained"
-                    if prior.get("protected_success") == "true" and row["status"] == "typed"
+                    if measured_status == "typed" and row["status"] == "typed"
                     else "additional typed root; observed result recorded"
                     if row["status"] == "typed"
                     else "not typed"
@@ -314,7 +424,8 @@ def verify_acceptance_iv(
     typed_targets = [
         identity for identity, expected_result in ACCEPTANCE_IV_TARGETS.items()
         if identity in main
-        and baseline.get(identity, {}).get("baseline_status") != "typed"
+        and measured.get(identity, {}).get("first_status") != "typed"
+        and measured.get(identity, {}).get("second_status") != "typed"
         and main[identity]["status"] == "typed"
         and main[identity]["typed_tree"] not in ("", "-")
         and main[identity]["actual_result"] == expected_result
@@ -325,9 +436,9 @@ def verify_acceptance_iv(
         row = main.get(identity)
         if row is None:
             failures.append(f"main cohort is missing target identity {identity}")
-        elif identity not in baseline:
-            failures.append(f"baseline receipt is missing target identity {identity}")
-        elif baseline[identity].get("baseline_status") == "typed" and row["status"] == "typed":
+        elif identity not in measured:
+            failures.append(f"measured #2179 receipt is missing target identity {identity}")
+        elif measured[identity].get("first_status") == "typed" or measured[identity].get("second_status") == "typed":
             failures.append(f"{identity}: target was already typed in the #2179 baseline")
         elif row["status"] == "typed" and row["actual_result"] != expected_result:
             failures.append(f"{identity}: typed target has unexpected result shape {row['actual_result']!r}")
@@ -342,9 +453,12 @@ def _write_acceptance_iv_tsv(
     hosted_run: str,
 ) -> None:
     columns = (
-        "cohort", "identity", "source_tree", "baseline_status", "after_status",
-        "first_blocker", "expected_result", "actual_result", "result_comparison", "typed_tree", "scala_revision",
-        "baseline_revision", "integration_revision", "tested_revision",
+        "cohort", "identity", "source_tree", "measured_first_status", "measured_second_status",
+        "integration_status", "after_status", "first_blocker", "measured_actual_result",
+        "integration_actual_result", "expected_result", "actual_result", "result_comparison", "typed_tree", "scala_revision",
+        "baseline_revision", "baseline_workflow_run", "baseline_artifact_id",
+        "baseline_artifact_sha256", "integration_revision", "integration_receipt_sha256",
+        "tested_revision",
         "pr_head_sha", "final_merge_sha", "focused_tests", "regression_guard", "hosted_run",
     )
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -355,8 +469,12 @@ def _write_acceptance_iv_tsv(
             writer.writerow({
                 **row,
                 "scala_revision": PINNED_SCALA_REVISION,
-                "baseline_revision": "89f81940fc538a7b24323b82b9415cdb6a7c5404",
-                "integration_revision": "f9b94d2b2bb0480de32c4fd6689a4e7813148a1f",
+                "baseline_revision": ACCEPTANCE_IV_BASELINE_REVISION,
+                "baseline_workflow_run": ACCEPTANCE_IV_BASELINE_RUN_ID,
+                "baseline_artifact_id": ACCEPTANCE_IV_BASELINE_ARTIFACT_ID,
+                "baseline_artifact_sha256": ACCEPTANCE_IV_BASELINE_ARTIFACT_SHA256,
+                "integration_revision": ACCEPTANCE_IV_INTEGRATION_REVISION,
+                "integration_receipt_sha256": ACCEPTANCE_IV_INTEGRATION_RECEIPT_SHA256,
                 "tested_revision": tested_revision,
                 "pr_head_sha": pr_head_sha,
                 "final_merge_sha": "pending until merge",
@@ -382,25 +500,44 @@ def _write_acceptance_iv_markdown(
         (
             row["identity"]
             for row in main_rows
-            if row["identity"] in ACCEPTANCE_IV_TARGETS and row["after_status"] == "typed"
+            if row["identity"] in ACCEPTANCE_IV_TARGETS
+            and row["measured_first_status"] != "typed"
+            and row["measured_second_status"] != "typed"
+            and row["after_status"] == "typed"
         ),
         None,
     )
+    target_integration = next(
+        (
+            row["integration_status"]
+            for row in main_rows
+            if row["identity"] == target
+        ),
+        "unavailable",
+    )
+    measured_main = sum(row["measured_first_status"] == "typed" for row in main_rows)
+    measured_analysis = sum(row["measured_first_status"] == "typed" for row in analysis_rows)
+    integration_main = sum(row["integration_status"] == "typed" for row in main_rows)
+    integration_analysis = sum(row["integration_status"] == "typed" for row in analysis_rows)
     gate_status = "PASS" if passed else "FAIL"
     path.write_text(
         "# Stdlib Acceptance IV closeout (Scala 3.9.0)\n\n"
         f"**Outcome: SPRINT GOAL UNMET pending independent review.** Hosted acceptance gate: {gate_status}. "
         f"Main: {typed_main}/25; analysis: {typed_analysis}/25.\n\n"
-        f"New unchanged-cohort target: {target or 'none'}.\n\n"
+        f"New unchanged-cohort target since measured #2179: {target or 'none'}; "
+        f"its separate #2183 integration-receipt status is {target_integration}.\n\n"
         "Prepared `Tuple.toArray` proof is conditional on explicit owner preparation; "
         "only a typed original target row in the ordinary audit counts toward acceptance.\n\n"
-        f"Source revision: `{PINNED_SCALA_REVISION}`; baseline: `89f81940fc538a7b24323b82b9415cdb6a7c5404`; "
-        "integration: `f9b94d2b2bb0480de32c4fd6689a4e7813148a1f`; "
+        f"Source revision: `{PINNED_SCALA_REVISION}`; measured #2179: `89f81940fc538a7b24323b82b9415cdb6a7c5404` "
+        f"({measured_main}/25 main, {measured_analysis}/25 analysis); "
+        f"separate #2183 integration receipt: `f9b94d2b2bb0480de32c4fd6689a4e7813148a1f` "
+        f"({integration_main}/25 main, {integration_analysis}/25 analysis); "
         f"tested revision: `{tested_revision}`; PR head: `{pr_head_sha}`; final merge SHA: pending.\n\n"
         f"Hosted run: {hosted_run}\n\n"
         "The gate verifies all 50 exact ordinary roots, complete attempted-root accounting, "
-        "the 16 main and 15 analysis protected identities and results, and the 17/25 plus "
-        "new-target requirement.\n",
+        "the measured first/second #2179 outcomes, the separate #2183 integration outcomes, "
+        "the 16 main and 15 analysis protected results, and the 17/25 plus newly typed "
+        "since #2179 target requirement. Historical manifest status is not a measured outcome.\n",
         encoding="utf-8",
     )
 
@@ -411,7 +548,8 @@ def main() -> int:
         parser.add_argument("command")
         parser.add_argument("--main-report", type=Path, required=True)
         parser.add_argument("--analysis-report", type=Path, required=True)
-        parser.add_argument("--baseline-receipt", type=Path, required=True)
+        parser.add_argument("--measured-baseline", type=Path, required=True)
+        parser.add_argument("--integration-receipt", type=Path, required=True)
         parser.add_argument("--required-main", type=Path, required=True)
         parser.add_argument("--required-analysis", type=Path, required=True)
         parser.add_argument("--minimum-main", type=int, default=17)
@@ -434,7 +572,8 @@ def main() -> int:
             failures, rows = verify_acceptance_iv(
                 arguments.main_report,
                 arguments.analysis_report,
-                arguments.baseline_receipt,
+                arguments.measured_baseline,
+                arguments.integration_receipt,
                 arguments.required_main,
                 arguments.required_analysis,
                 arguments.minimum_main,

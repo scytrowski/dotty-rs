@@ -903,11 +903,15 @@ jobs:
           if test "$(sha256sum docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv | cut -d' ' -f1)" \
               != 59bb65f48e7d94423de0f0a00029b98a0b41583e601c700687311e9e17fc5244 \
             || test "$(sha256sum docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv | cut -d' ' -f1)" \
-              != afa5a2064efd0bfcd31bb0bcb4fb08030db2d180a7619ac3a0843ebbe867f7bc; then
+              != afa5a2064efd0bfcd31bb0bcb4fb08030db2d180a7619ac3a0843ebbe867f7bc \
+            || test "$(sha256sum docs/typer-stdlib-acceptance-iv/measured-2179.tsv | cut -d' ' -f1)" \
+              != c616d3d2c93c4522d26375f8809bb362ac30bfffc1c37c6402bdc31e7c7ea752 \
+            || test "$(sha256sum docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv | cut -d' ' -f1)" \
+              != e783ece1710b7b271c3ca3f9dd12b566b212b655c28d89da35bc900fbccf486e; then
             cat > "$DOTTY_AUDIT_REPORT_DIR/acceptance-iv-closeout.md" <<EOF
           # Stdlib Acceptance IV closeout (Scala 3.9.0)
 
-          **Outcome: SPRINT GOAL UNMET.** One or both frozen cohort manifests changed.
+          **Outcome: SPRINT GOAL UNMET.** A frozen cohort manifest or measured receipt changed.
 
           Hosted run: $DOTTY_HOSTED_RUN
           EOF
@@ -928,7 +932,8 @@ jobs:
             tools/typer-classpath-corpus-audit/verify_ordinary_cohort.py acceptance-iv \
               --main-report "$DOTTY_AUDIT_REPORT_DIR/main-cohort-first.tsv" \
               --analysis-report "$DOTTY_AUDIT_REPORT_DIR/analysis-cohort-first.tsv" \
-              --baseline-receipt docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv \
+              --measured-baseline docs/typer-stdlib-acceptance-iv/measured-2179.tsv \
+              --integration-receipt docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv \
               --required-main docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-main.tsv \
               --required-analysis docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-analysis.tsv \
               --output "$DOTTY_AUDIT_REPORT_DIR/stdlib-acceptance-iv.tsv" \
