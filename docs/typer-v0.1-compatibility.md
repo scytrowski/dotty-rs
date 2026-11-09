@@ -62,7 +62,15 @@ control for metadata identity and variance. The diagnostic precondition from
 issue #2212 explicitly completes source `Option`, `Some` and `None$` ClassInfo;
 the resulting `None$ <: Option[B]` and union checks do not establish that the
 unchanged full `Option.map` root is accepted, because ordinary source
-completion ordering remains a separate boundary.
+completion ordering remained a separate boundary at that stage. Issue #2220
+closes that caller-ordering gap: the final expected-expression conformance
+boundary now prepares only its adapted actual and expected operands through
+the existing journaled relation-type completion helper. The unchanged
+`Option.scala#tree=214` full `DefDef` types in fresh sessions without
+diagnostic precompletion. Direct `is_subtype` and `conforms` calls still do not
+complete missing source ClassInfo implicitly. The replay and protected cohort
+receipts are recorded in
+[`typer-stdlib-acceptance-iv/expected-expression-completion-2220.md`](typer-stdlib-acceptance-iv/expected-expression-completion-2220.md).
 
 The recorded pre-change diagnostic used dotty-rs base
 `39828fa7eb6916845a01395e761089fcd6f21854` and pinned Scala revision

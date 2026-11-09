@@ -2935,6 +2935,325 @@ mod tests {
     }
 
     #[test]
+    fn expected_expression_prepares_only_reachable_source_class_info() {
+        let source_text = "trait Parent[+A]; class Child[+A] extends Parent[A]; object Empty extends Parent[Nothing]; class Marker; class Unused; class Runner { def result: Parent[Marker] = Empty }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let parent = class_symbol(&parsed, &store, &index, source, "Parent");
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let marker = class_symbol(&parsed, &store, &index, source, "Marker");
+        let unused = class_symbol(&parsed, &store, &index, source, "Unused");
+        let (empty_tree, empty_object) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module))
+                    if store.names.resolve(module.name.as_name().text()) == "Empty" =>
+                {
+                    Some((tree, index.symbol_at(source, tree).unwrap()))
+                }
+                _ => None,
+            })
+            .expect("Empty object should be present");
+        let empty_module_class = index
+            .derived_symbol_at(
+                store.symbols.get(empty_object).owner.unwrap(),
+                source,
+                empty_tree,
+            )
+            .unwrap();
+        let method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "result" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .expect("result method should be present");
+
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        assert!(matches!(
+            *typer.store().symbols.info(parent),
+            SymbolInfo::Missing
+        ));
+        assert!(matches!(
+            *typer.store().symbols.info(empty_module_class),
+            SymbolInfo::Missing
+        ));
+
+        let typed_method = typer.type_method_definition(method_tree).unwrap();
+
+        assert_eq!(
+            typer.source_typed_index().get(source, method_tree),
+            Some(typed_method)
+        );
+        assert!(matches!(
+            *typer.store().symbols.info(parent),
+            SymbolInfo::Complete(_)
+        ));
+        assert!(matches!(
+            *typer.store().symbols.info(empty_module_class),
+            SymbolInfo::Complete(_)
+        ));
+        assert!(matches!(
+            *typer.store().symbols.info(marker),
+            SymbolInfo::Complete(_)
+        ));
+        assert_eq!(
+            index.derived_symbol_at(
+                typer.store().symbols.get(empty_object).owner.unwrap(),
+                source,
+                empty_tree
+            ),
+            Some(empty_module_class)
+        );
+        assert!(matches!(
+            *typer.store().symbols.info(child),
+            SymbolInfo::Missing
+        ));
+        assert!(matches!(
+            *typer.store().symbols.info(unused),
+            SymbolInfo::Missing
+        ));
+        let TreeKind::DefDef(method) = &typer.typed_ast().get(typed_method).kind else {
+            panic!("method typing should preserve the DefDef");
+        };
+        assert!(method.rhs.is_some());
+    }
+
+    #[test]
+    fn unrelated_expected_expression_reports_a_precise_mismatch() {
+        let source_text = "trait Parent[+A]; object Empty extends Parent[Nothing]; class Unrelated; class Runner { def wrong: Unrelated = Empty }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let parent = class_symbol(&parsed, &store, &index, source, "Parent");
+        let unrelated = class_symbol(&parsed, &store, &index, source, "Unrelated");
+        let (empty_tree, empty_object) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module))
+                    if store.names.resolve(module.name.as_name().text()) == "Empty" =>
+                {
+                    Some((tree, index.symbol_at(source, tree).unwrap()))
+                }
+                _ => None,
+            })
+            .expect("Empty object should be present");
+        let empty_module_class = index
+            .derived_symbol_at(
+                store.symbols.get(empty_object).owner.unwrap(),
+                source,
+                empty_tree,
+            )
+            .unwrap();
+        let method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "wrong" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .expect("wrong method should be present");
+        let rhs_tree = match &parsed.ast.get(method_tree).kind {
+            TreeKind::DefDef(definition) => {
+                definition.rhs.expect("wrong method should have a body")
+            }
+            _ => unreachable!("selected tree should be a DefDef"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let error = typer
+            .type_method_definition(method_tree)
+            .expect_err("an unrelated expected target must be rejected");
+        assert!(
+            matches!(
+                &error,
+                TyperError::ExpectedExpressionTypeMismatch {
+                    source: error_source,
+                    tree_index,
+                    ..
+                } if *error_source == source && *tree_index == rhs_tree.index()
+            ),
+            "unrelated target should produce one precise expected type mismatch: {error:?}"
+        );
+        assert!(matches!(
+            *typer.store().symbols.info(parent),
+            SymbolInfo::Missing
+        ));
+        assert!(matches!(
+            *typer.store().symbols.info(empty_module_class),
+            SymbolInfo::Missing
+        ));
+        assert!(matches!(
+            *typer.store().symbols.info(unrelated),
+            SymbolInfo::Missing
+        ));
+        assert_eq!(typer.source_typed_index().get(source, method_tree), None);
+    }
+
+    #[test]
+    fn injected_failure_after_expected_preparation_rolls_back_and_retry_succeeds() {
+        let source_text = "trait Parent[+A]; class Child[+A] extends Parent[A]; object Empty extends Parent[Nothing]; class Marker; class Runner { def result: Parent[Marker] = Empty }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let parent = class_symbol(&parsed, &store, &index, source, "Parent");
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let marker = class_symbol(&parsed, &store, &index, source, "Marker");
+        let (empty_tree, empty_object) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module))
+                    if store.names.resolve(module.name.as_name().text()) == "Empty" =>
+                {
+                    Some((tree, index.symbol_at(source, tree).unwrap()))
+                }
+                _ => None,
+            })
+            .expect("Empty object should be present");
+        let empty_module_class = index
+            .derived_symbol_at(
+                store.symbols.get(empty_object).owner.unwrap(),
+                source,
+                empty_tree,
+            )
+            .unwrap();
+        let method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "result" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .expect("result method should be present");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let marker_info = typer.complete_symbol(marker).unwrap();
+        let marker_before = *typer.store().symbols.info(marker);
+        assert_eq!(marker_before, SymbolInfo::Complete(marker_info));
+        let store_before = typer.store().checkpoint();
+        let typed_ast_before = typer.typed_ast().checkpoint();
+        let type_cache_before = format!("{:?}", typer.type_index.checkpoint());
+        let typed_index_before = format!("{:?}", typer.typed_index.clone());
+        let source_typed_index_before = format!("{:?}", typer.source_typed_index());
+        let observations = Rc::new(RefCell::new(None::<bool>));
+        let observed = observations.clone();
+        typer.transaction_failure_observer = Some(Rc::new(move |typer| {
+            let prepared = [parent, empty_module_class].into_iter().all(|symbol| {
+                matches!(*typer.store().symbols.info(symbol), SymbolInfo::Complete(_))
+            });
+            let existing_complete_preserved =
+                *typer.store().symbols.info(marker) == SymbolInfo::Complete(marker_info);
+            let operation_typed_root = typer
+                .source_typed_index()
+                .get(source, method_tree)
+                .is_some();
+            *observed.borrow_mut() =
+                Some(prepared && existing_complete_preserved && operation_typed_root);
+        }));
+
+        typer.inject_failure_after_outermost_success = true;
+        assert!(matches!(
+            typer.type_method_definition(method_tree),
+            Err(TyperError::SymbolResolution {
+                source: error_source,
+                error: ResolutionError::Malformed { ref reason },
+                ..
+            }) if error_source == source
+                && reason == "test-injected failure after successful source typing"
+        ));
+        assert_eq!(
+            *observations.borrow(),
+            Some(true),
+            "the observer must see prepared reachable ClassInfo and the typed root before rollback"
+        );
+        assert_eq!(typer.store().checkpoint(), store_before);
+        assert_eq!(typer.typed_ast().checkpoint(), typed_ast_before);
+        assert_eq!(
+            format!("{:?}", typer.type_index.checkpoint()),
+            type_cache_before
+        );
+        assert_eq!(
+            format!("{:?}", typer.typed_index.clone()),
+            typed_index_before
+        );
+        assert_eq!(
+            format!("{:?}", typer.source_typed_index()),
+            source_typed_index_before
+        );
+        assert_eq!(*typer.store().symbols.info(parent), SymbolInfo::Missing);
+        assert_eq!(
+            *typer.store().symbols.info(empty_module_class),
+            SymbolInfo::Missing
+        );
+        assert_eq!(
+            *typer.store().symbols.info(marker),
+            marker_before,
+            "metadata that was complete before the transaction stays intact"
+        );
+        assert!(matches!(
+            *typer.store().symbols.info(child),
+            SymbolInfo::Missing
+        ));
+        assert_eq!(typer.source_typed_index().get(source, method_tree), None);
+        assert!(!typer.inject_failure_after_outermost_success);
+
+        let typed_method = typer
+            .type_method_definition(method_tree)
+            .expect("the same SourceTyper should retry successfully after rollback");
+        assert_eq!(
+            typer.source_typed_index().get(source, method_tree),
+            Some(typed_method)
+        );
+        assert!(matches!(
+            *typer.store().symbols.info(parent),
+            SymbolInfo::Complete(_)
+        ));
+        assert!(matches!(
+            *typer.store().symbols.info(empty_module_class),
+            SymbolInfo::Complete(_)
+        ));
+        assert_eq!(
+            index.derived_symbol_at(
+                typer.store().symbols.get(empty_object).owner.unwrap(),
+                source,
+                empty_tree,
+            ),
+            Some(empty_module_class)
+        );
+    }
+
+    #[test]
     fn null_conformance_preserves_failed_and_malformed_target_class_info() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class Box; class Runner");

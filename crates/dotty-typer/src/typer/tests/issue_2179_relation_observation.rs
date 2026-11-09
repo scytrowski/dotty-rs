@@ -592,9 +592,121 @@ fn captures_acceptance_iv_relation_operands_before_transaction_rollback() {
             }
             *capture.borrow_mut() = Some(lines.join("\n"));
         }));
-        let error = typer
-            .type_method_definition(tree)
-            .expect_err("the original full DefDef remains blocked");
+        let result = typer.type_method_definition(tree);
+        if relative.ends_with("Option.scala") {
+            let typed_method = result.expect("the original full Option.map DefDef should type");
+            assert!(
+                observed.borrow().is_none(),
+                "successful typing must not use the failure observer"
+            );
+            assert_eq!(
+                typer.source_typed_index().get(source, tree),
+                Some(typed_method)
+            );
+            let method_symbol = index.symbol_at(source, tree).unwrap();
+            let owner = typer.store().symbols.get(method_symbol).owner.unwrap();
+            assert_eq!(observed_symbol_path(typer.store(), owner), ".scala.Option");
+            assert!(matches!(index.definition_of(method_symbol),
+                Some(SourceDefinition::Canonical { source: actual_source, tree: actual_tree })
+                    if actual_source == source && actual_tree == tree));
+            let SymbolInfo::Complete(signature) = *typer.store().symbols.info(method_symbol) else {
+                panic!("typed Option.map should retain its complete source signature");
+            };
+            let Type::Poly(poly) = typer.store().types.get(signature) else {
+                panic!("Option.map should retain its polymorphic method binder");
+            };
+            assert_eq!(poly.params.len(), 1);
+            assert_eq!(
+                typer
+                    .store()
+                    .names
+                    .resolve(poly.params[0].name.as_name().text()),
+                "B"
+            );
+
+            let source_classes = parsed_ast
+                .iter()
+                .filter_map(|(decl_tree, node)| match &node.kind {
+                    TreeKind::TypeDef(definition) => Some((
+                        typer
+                            .store()
+                            .names
+                            .resolve(definition.name.as_name().text())
+                            .to_owned(),
+                        (typer.index.symbol_at(typer.source, decl_tree)?, decl_tree),
+                    )),
+                    _ => None,
+                })
+                .collect::<std::collections::BTreeMap<_, _>>();
+            let option = source_classes["Option"].0;
+            let some = source_classes["Some"].0;
+            let none_tree = parsed_ast
+                .iter()
+                .find_map(|(decl_tree, node)| match &node.kind {
+                    TreeKind::PhaseSpecific(UntypedNode::ModuleDef(definition))
+                        if typer
+                            .store()
+                            .names
+                            .resolve(definition.name.as_name().text())
+                            == "None" =>
+                    {
+                        Some(decl_tree)
+                    }
+                    _ => None,
+                })
+                .expect("canonical source None declaration");
+            let none = typer.index.symbol_at(typer.source, none_tree).unwrap();
+            let none_module_class = typer
+                .index
+                .derived_symbol_at(
+                    typer.store().symbols.get(none).owner.unwrap(),
+                    typer.source,
+                    none_tree,
+                )
+                .unwrap();
+            for symbol in [option, some, none_module_class] {
+                assert!(
+                    matches!(*typer.store().symbols.info(symbol), SymbolInfo::Complete(_)),
+                    "reachable canonical source class metadata should be complete: {}",
+                    observed_symbol_path(typer.store(), symbol)
+                );
+            }
+            for symbol in [option, some] {
+                assert!(matches!(
+                    typer.index.definition_of(symbol),
+                    Some(SourceDefinition::Canonical { source: actual_source, .. })
+                        if actual_source == source
+                ));
+            }
+            assert!(matches!(
+                typer.index.definition_of(none),
+                Some(SourceDefinition::Canonical { source: actual_source, tree: actual_tree })
+                    if actual_source == source && actual_tree == none_tree
+            ));
+            assert_eq!(
+                typer.index.derived_symbol_at(
+                    typer.store().symbols.get(none).owner.unwrap(),
+                    source,
+                    none_tree,
+                ),
+                Some(none_module_class)
+            );
+            let mappings = parsed_ast
+                .iter()
+                .filter_map(|(source_tree, _)| {
+                    typer
+                        .source_typed_index()
+                        .get(source, source_tree)
+                        .map(|typed_tree| format!("{}:{}", source_tree.index(), typed_tree.index()))
+                })
+                .collect::<Vec<_>>();
+            println!(
+                "OPTION_MAP_TYPED_BEGIN\nmethod=canonical:scala.Option.map\nbinder=B\nsource_typed_mappings={}\nOPTION_MAP_TYPED_END",
+                mappings.join(",")
+            );
+            continue;
+        }
+        let error = result.expect_err("the original Tuple.toArray DefDef remains blocked");
         assert!(
             observed.borrow().is_some(),
             "observer runs before rollback: {error:?}"
