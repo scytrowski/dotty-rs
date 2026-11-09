@@ -6,7 +6,7 @@ use crate::error::ClassLoadError;
 use crate::loader::{ClassLoadProfile, ClassLoader, SemanticTastyLoadError};
 use crate::session::{LoadingSession, SessionCheckpoint};
 use dotty_core::{
-    Definitions, MemberRequest, MemberSelector, MemberSpace, Name, Namespace, Packages,
+    Definitions, MemberRequest, MemberSelector, MemberSpace, MethodKind, Name, Namespace, Packages,
     ResolutionError, ResolverCheckpoint, SemanticStore, Symbol, SymbolId, SymbolInfo, SymbolKind,
     SymbolOrigin, SymbolResolver, Type, TypeId, TypeRefTarget,
 };
@@ -753,7 +753,17 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         let Some(Type::Method(method)) = store.types.try_get(constructor_type) else {
             return false;
         };
-        method.params.is_empty()
+        let canonical_int = store.types.get(self.definitions.int).reference_symbol();
+        let supported_constructor_params = match method.params.as_slice() {
+            [] => true,
+            [parameter] => {
+                canonical_int.is_some()
+                    && store.types.get(parameter.ty).reference_symbol() == canonical_int
+            }
+            _ => false,
+        };
+        method.kind == MethodKind::Plain
+            && supported_constructor_params
             && matches!(
                 store.types.get(method.result),
                 Type::TypeRef { target: TypeRefTarget::Symbol(result), .. } if *result == class
@@ -2563,6 +2573,90 @@ mod tests {
         }
     }
 
+    fn semantic_member_request(
+        store: &mut SemanticStore,
+        package: SymbolId,
+        no_prefix: TypeId,
+        simple_name: &str,
+    ) -> MemberRequest {
+        MemberRequest {
+            prefix: store.types.alloc(Type::type_ref(no_prefix, package)),
+            name: Name::new(store.names.intern(simple_name), Namespace::Type),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        }
+    }
+
+    struct ConstructorSemanticFixture {
+        root: PathBuf,
+    }
+
+    impl ClassPathEntry for ConstructorSemanticFixture {
+        fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            let file = match name.as_internal() {
+                "me/cytrowski/tastyfixtures/semantic/CtorWithVal" => "CtorWithVal.tasty",
+                _ => return Ok(None),
+            };
+            let bytes = std::fs::read(self.root.join(file)).map_err(ClassPathError::from)?;
+            Ok(Some(ClassResource::new(
+                bytes,
+                ClassFormat::Tasty,
+                ClassOrigin::Directory(self.root.clone()),
+            )))
+        }
+
+        fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            Ok(package == ["me", "cytrowski", "tastyfixtures", "semantic"])
+        }
+
+        fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            const PACKAGE: &[&str] = &["me", "cytrowski", "tastyfixtures", "semantic"];
+            Ok(PACKAGE.starts_with(package))
+        }
+    }
+
+    fn semantic_pair_class_path() -> CompositeClassPath {
+        let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+        let semantic_root = fixture_path("../dotty-tasty-unpickler/tests/fixtures/semantic");
+        CompositeClassPath::new(vec![
+            Box::new(ConstructorSemanticFixture {
+                root: semantic_root,
+            }),
+            Box::new(DirectoryClassPath::new(fixture_path(
+                "tests/fixtures/tasty_visibility",
+            ))),
+            Box::new(JdkClassPath::new(java_home.join("jmods")).expect("JDK 21 jmods")),
+        ])
+    }
+
+    struct SelectedResourceControl {
+        inner: CompositeClassPath,
+        selected_name: &'static str,
+        selected: Arc<Mutex<Option<ClassResource>>>,
+    }
+
+    impl ClassPathEntry for SelectedResourceControl {
+        fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            if name.as_internal() == self.selected_name {
+                Ok(self
+                    .selected
+                    .lock()
+                    .expect("selected resource lock")
+                    .clone())
+            } else {
+                self.inner.find_class(name)
+            }
+        }
+
+        fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            self.inner.contains_package(package)
+        }
+
+        fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            self.inner.contains_package_prefix(package)
+        }
+    }
+
     struct InfoPairAuditClassPath {
         fixture_root: PathBuf,
         jdk: JdkClassPath,
@@ -2920,6 +3014,404 @@ mod tests {
             store.symbols.get(retried).owner,
             Some(package),
             "the same arena slot is safe to reuse after its prior allocation was rolled back"
+        );
+    }
+
+    #[test]
+    fn two_explicit_semantic_class_requests_coexist_in_one_resolver_session() {
+        fn run(order: [usize; 2]) -> (Vec<String>, Vec<SymbolId>) {
+            let cases = [
+                (
+                    "Open",
+                    ["me", "cytrowski", "tastyfixtures", "visibility"].as_slice(),
+                    "me/cytrowski/tastyfixtures/visibility/Open",
+                    "tests/fixtures/tasty_visibility",
+                    false,
+                ),
+                (
+                    "CtorWithVal",
+                    ["me", "cytrowski", "tastyfixtures", "semantic"].as_slice(),
+                    "me/cytrowski/tastyfixtures/semantic/CtorWithVal",
+                    "../dotty-tasty-unpickler/tests/fixtures/semantic",
+                    true,
+                ),
+            ];
+            let mut store = SemanticStore::new();
+            let definitions = Definitions::bootstrap(&mut store);
+            let mut resolver = ClasspathSymbolResolver::new(
+                semantic_pair_class_path(),
+                definitions,
+                LoadingSession::new(),
+            );
+            let mut packages = Vec::new();
+            let mut requests = Vec::new();
+            let mut names = Vec::new();
+            for (simple, package_path, binary, _, _) in cases {
+                let package = resolver
+                    .session
+                    .packages
+                    .resolve_package(&mut store, &package_path.join("/"));
+                packages.push(package);
+                requests.push(semantic_member_request(
+                    &mut store,
+                    package,
+                    definitions.no_prefix,
+                    simple,
+                ));
+                names.push(BinaryName::from_internal(binary));
+            }
+            assert_ne!(packages[0], packages[1]);
+            let definitions_before = resolver.definitions;
+            let mut classes = vec![None; cases.len()];
+            for index in order {
+                let class = resolver
+                    .resolve_member_with_semantic_class(&mut store, &requests[index], &names[index])
+                    .unwrap()
+                    .expect("explicit semantic class request");
+                classes[index] = Some(class);
+            }
+            assert_eq!(resolver.definitions, definitions_before);
+            for name in &names {
+                assert!(resolver.session.identified.contains_key(name));
+                assert!(resolver.session.resolved.contains_key(name));
+            }
+
+            let mut summary = Vec::new();
+            let mut identities = Vec::new();
+            for (index, (simple, _, _, relative_origin, has_val)) in cases.into_iter().enumerate() {
+                let class = classes[index].expect("both classes were explicitly loaded");
+                identities.push(class);
+                assert_eq!(resolver.session.identified.get(&names[index]), Some(&class));
+                assert_eq!(resolver.session.resolved.get(&names[index]), Some(&class));
+                assert_eq!(
+                    resolver.session.origins.get(&class),
+                    Some(&ClassOrigin::Directory(fixture_path(relative_origin)))
+                );
+                let class_symbol = store.symbols.get(class);
+                assert_eq!(class_symbol.kind, SymbolKind::Class);
+                assert_eq!(class_symbol.name, requests[index].name);
+                assert_eq!(class_symbol.owner, Some(packages[index]));
+                assert_eq!(class_symbol.visibility, Visibility::Public);
+                let package_scope = resolver
+                    .package_scope(packages[index])
+                    .expect("package scope");
+                assert_eq!(
+                    store
+                        .scopes
+                        .get(package_scope)
+                        .lookup_all(&requests[index].name),
+                    [class]
+                );
+                let SymbolInfo::Complete(class_info_type) = class_symbol.info else {
+                    panic!("{simple} is complete");
+                };
+                let Type::ClassInfo(class_info) = store.types.get(class_info_type) else {
+                    panic!("{simple} has class info");
+                };
+                assert_eq!(class_info.class, class);
+                assert_eq!(class_info.parents.len(), 1);
+                assert!(matches!(
+                    store.types.get(class_info.parents[0]),
+                    Type::TypeRef { target: TypeRefTarget::Symbol(parent), .. }
+                        if *parent == definitions.object_class
+                ));
+                assert_eq!(store.scopes.get(class_info.declarations).owner, Some(class));
+                let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+                let constructor = store
+                    .scopes
+                    .get(class_info.declarations)
+                    .lookup(&constructor_name)
+                    .expect("primary constructor");
+                let constructor_symbol = store.symbols.get(constructor);
+                assert_eq!(constructor_symbol.kind, SymbolKind::Constructor);
+                assert_eq!(constructor_symbol.owner, Some(class));
+                let SymbolInfo::Complete(constructor_type) = constructor_symbol.info else {
+                    panic!("{simple} constructor is complete");
+                };
+                let Type::Method(method) = store.types.get(constructor_type) else {
+                    panic!("{simple} constructor has a method type");
+                };
+                assert_eq!(method.kind, MethodKind::Plain);
+                assert_eq!(method.params.len(), usize::from(has_val));
+                assert!(matches!(
+                    store.types.get(method.result),
+                    Type::TypeRef { target: TypeRefTarget::Symbol(result), .. }
+                        if *result == class
+                ));
+                if has_val {
+                    let field_name = Name::new(store.names.intern("x"), Namespace::Term);
+                    let field = store
+                        .scopes
+                        .get(class_info.declarations)
+                        .lookup(&field_name)
+                        .expect("CtorWithVal immutable field");
+                    assert_ne!(field, constructor);
+                    assert_eq!(store.symbols.get(field).kind, SymbolKind::Field);
+                    assert_eq!(store.symbols.get(field).owner, Some(class));
+                    assert_eq!(store.symbols.get(field).visibility, Visibility::Public);
+                    assert_eq!(
+                        store
+                            .scopes
+                            .get(class_info.declarations)
+                            .lookup_all(&field_name),
+                        [field]
+                    );
+                    assert_eq!(
+                        store.symbols.get(field).name,
+                        *method.params[0].name.as_name()
+                    );
+                    assert_eq!(
+                        store.types.get(method.params[0].ty).reference_symbol(),
+                        store.types.get(definitions.int).reference_symbol(),
+                        "constructor formal has canonical Int",
+                    );
+                    let SymbolInfo::Complete(field_type) = store.symbols.get(field).info else {
+                        panic!("CtorWithVal field is complete");
+                    };
+                    assert_eq!(
+                        store.types.get(field_type).reference_symbol(),
+                        store.types.get(definitions.int).reference_symbol(),
+                        "field has canonical Int",
+                    );
+                    summary.push(format!(
+                        "{simple}:field-owner=self:formal={}:Int",
+                        store.names.resolve(method.params[0].name.as_name().text())
+                    ));
+                } else {
+                    assert_eq!(class_symbol.visibility, Visibility::Public);
+                    summary.push(format!("{simple}:public:zero-arg:result=self"));
+                }
+            }
+
+            for index in 0..cases.len() {
+                let class = classes[index].expect("loaded class");
+                let selected_repeat = resolver
+                    .resolve_member_with_semantic_class(&mut store, &requests[index], &names[index])
+                    .unwrap()
+                    .expect("selected repeat");
+                assert_eq!(selected_repeat, class);
+                let ordinary_repeat = resolver
+                    .resolve_member(&mut store, &requests[index])
+                    .unwrap()
+                    .expect("ordinary repeat after selected publication");
+                assert_eq!(ordinary_repeat, class);
+                assert_eq!(
+                    store
+                        .scopes
+                        .get(resolver.package_scope(packages[index]).unwrap())
+                        .lookup_all(&requests[index].name),
+                    [class]
+                );
+            }
+
+            // PlainPrivate is intentionally not selected and must keep the legacy route.
+            let private_package = packages[0];
+            let private_request = semantic_member_request(
+                &mut store,
+                private_package,
+                definitions.no_prefix,
+                "PlainPrivate",
+            );
+            let private_name =
+                BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/PlainPrivate");
+            let private = resolver
+                .resolve_member(&mut store, &private_request)
+                .unwrap()
+                .expect("unselected PlainPrivate legacy load");
+            assert_eq!(store.symbols.get(private).owner, Some(private_package));
+            assert_eq!(
+                store.symbols.get(private).visibility,
+                Visibility::PrivateWithin(private_package)
+            );
+            assert_eq!(resolver.session.resolved.get(&private_name), Some(&private));
+            assert_eq!(
+                resolver.session.origins.get(&private),
+                Some(&ClassOrigin::Directory(fixture_path(
+                    "tests/fixtures/tasty_visibility"
+                )))
+            );
+            summary.push("PlainPrivate:legacy-private-within-package".to_owned());
+            summary.sort();
+            (summary, identities)
+        }
+
+        let (forward, forward_ids) = run([0, 1]);
+        let (reverse, reverse_ids) = run([1, 0]);
+        assert_eq!(
+            forward, reverse,
+            "fresh stores have normalized equal semantics in both orders"
+        );
+        assert_ne!(
+            forward_ids, reverse_ids,
+            "fresh stores own distinct symbol identities"
+        );
+    }
+
+    #[test]
+    fn selected_semantic_request_mismatch_does_not_select_the_named_class() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            semantic_pair_class_path(),
+            definitions,
+            LoadingSession::new(),
+        );
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "visibility"],
+            )
+            .unwrap()
+            .expect("visibility package");
+        let request = open_member_request(&mut store, package, definitions.no_prefix);
+        let wrong_selected_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorWithVal");
+        let result = resolver
+            .resolve_member_with_semantic_class(&mut store, &request, &wrong_selected_name)
+            .unwrap()
+            .expect("request mismatch follows the ordinary Open route");
+        let open_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Open");
+        assert_eq!(resolver.session.resolved.get(&open_name), Some(&result));
+        assert!(
+            !resolver
+                .session
+                .identified
+                .contains_key(&wrong_selected_name)
+        );
+        assert!(!resolver.session.resolved.contains_key(&wrong_selected_name));
+        let package_scope = resolver.package_scope(package).expect("package scope");
+        assert_eq!(
+            store.scopes.get(package_scope).lookup_all(&request.name),
+            [result]
+        );
+    }
+
+    #[test]
+    fn failed_second_selected_class_preserves_first_and_retries_in_same_session() {
+        let bad_resource = ClassResource::new(
+            vec![0, 1, 2],
+            ClassFormat::Tasty,
+            ClassOrigin::Directory(PathBuf::from("<malformed-CtorWithVal>")),
+        );
+        let selected = Arc::new(Mutex::new(Some(bad_resource)));
+        let path = CompositeClassPath::new(vec![Box::new(SelectedResourceControl {
+            inner: semantic_pair_class_path(),
+            selected_name: "me/cytrowski/tastyfixtures/semantic/CtorWithVal",
+            selected: selected.clone(),
+        })]);
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(path, definitions, LoadingSession::new());
+        let visibility_package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "visibility"],
+            )
+            .unwrap()
+            .expect("visibility package");
+        let semantic_package = resolver
+            .session
+            .packages
+            .resolve_package(&mut store, "me/cytrowski/tastyfixtures/semantic");
+        let open_request = semantic_member_request(
+            &mut store,
+            visibility_package,
+            definitions.no_prefix,
+            "Open",
+        );
+        let ctor_request = semantic_member_request(
+            &mut store,
+            semantic_package,
+            definitions.no_prefix,
+            "CtorWithVal",
+        );
+        let open_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Open");
+        let ctor_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorWithVal");
+
+        let open = resolver
+            .resolve_member_with_semantic_class(&mut store, &open_request, &open_name)
+            .unwrap()
+            .expect("first selected class commits");
+        let before_failed_second = store.checkpoint();
+        let session_before_failed_second = resolver.session.checkpoint();
+        let error = resolver
+            .transact(&mut store, |resolver, store| {
+                resolver.resolve_member_inner_with_semantic_request(
+                    store,
+                    &ctor_request,
+                    &ctor_name,
+                )
+            })
+            .expect_err("malformed second selected resource is terminal");
+        let MemberResolutionFailure::SemanticLoad(failure) = error else {
+            panic!("selected malformed resource remains a typed failure: {error:?}");
+        };
+        assert_eq!(failure.binary_name, ctor_name);
+        assert!(matches!(
+            failure.source,
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(_, _))
+        ));
+        assert_eq!(store.checkpoint(), before_failed_second);
+        assert_eq!(resolver.session.checkpoint(), session_before_failed_second);
+        assert_eq!(resolver.session.resolved.get(&open_name), Some(&open));
+        assert_eq!(resolver.session.identified.get(&open_name), Some(&open));
+        assert!(!resolver.session.resolved.contains_key(&ctor_name));
+        assert!(!resolver.session.identified.contains_key(&ctor_name));
+        assert!(resolver.class_path.is_some());
+        assert_eq!(
+            store
+                .scopes
+                .get(
+                    resolver
+                        .package_scope(visibility_package)
+                        .expect("visibility scope")
+                )
+                .lookup_all(&open_request.name),
+            [open]
+        );
+
+        let original_path = fixture_path("../dotty-tasty-unpickler/tests/fixtures/semantic");
+        *selected.lock().expect("selected resource lock") = Some(ClassResource::new(
+            std::fs::read(original_path.join("CtorWithVal.tasty")).unwrap(),
+            ClassFormat::Tasty,
+            ClassOrigin::Directory(original_path),
+        ));
+        let ctor = resolver
+            .resolve_member_with_semantic_class(&mut store, &ctor_request, &ctor_name)
+            .unwrap()
+            .expect("same-session retry with original bytes succeeds");
+        assert_ne!(ctor, open);
+        assert_eq!(resolver.session.resolved.get(&open_name), Some(&open));
+        assert_eq!(resolver.session.resolved.get(&ctor_name), Some(&ctor));
+        assert_eq!(resolver.session.identified.get(&ctor_name), Some(&ctor));
+        assert_eq!(
+            resolver.session.origins.get(&ctor),
+            Some(&ClassOrigin::Directory(fixture_path(
+                "../dotty-tasty-unpickler/tests/fixtures/semantic",
+            )))
+        );
+        assert_eq!(
+            store
+                .scopes
+                .get(
+                    resolver
+                        .package_scope(visibility_package)
+                        .expect("visibility scope")
+                )
+                .lookup_all(&open_request.name),
+            [open]
+        );
+        assert_eq!(
+            store
+                .scopes
+                .get(
+                    resolver
+                        .package_scope(semantic_package)
+                        .expect("semantic scope")
+                )
+                .lookup_all(&ctor_request.name),
+            [ctor]
         );
     }
 
