@@ -673,6 +673,86 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
     }
 
     #[allow(dead_code)]
+    pub(crate) fn load_semantic_info_pair_for_member(
+        &mut self,
+        store: &mut SemanticStore,
+        requested: &BinaryName,
+    ) -> Result<SymbolId, SemanticMemberLoadFailure> {
+        let base_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
+        let wrapped_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
+        if requested == &base_name || requested == &wrapped_name {
+            let cached_base = self.session.identified.get(&base_name).copied();
+            let cached_wrapped = self.session.identified.get(&wrapped_name).copied();
+            let cached_pair_is_published = match (cached_base, cached_wrapped) {
+                (Some(base), Some(wrapped)) => {
+                    let package = self.session.packages.get(&[
+                        "me",
+                        "cytrowski",
+                        "tastyfixtures",
+                        "semantic",
+                    ]);
+                    let package_scope =
+                        package.and_then(|package| self.session.packages.scope_of(package));
+                    self.session.resolved.get(&base_name) == Some(&base)
+                        && self.session.resolved.get(&wrapped_name) == Some(&wrapped)
+                        && self.session.origins.contains_key(&base)
+                        && self.session.origins.contains_key(&wrapped)
+                        && store.symbols.contains(base)
+                        && store.symbols.contains(wrapped)
+                        && store.symbols.get(base).kind == SymbolKind::Trait
+                        && store.symbols.get(wrapped).kind == SymbolKind::Class
+                        && package_scope.is_some_and(|scope| {
+                            let (Some(base_name_id), Some(wrapped_name_id)) =
+                                (store.names.get("InfoBase"), store.names.get("InfoWrapped"))
+                            else {
+                                return false;
+                            };
+                            let base_type = Name::new(base_name_id, Namespace::Type);
+                            let wrapped_type = Name::new(wrapped_name_id, Namespace::Type);
+                            store.scopes.contains(scope)
+                                && store.scopes.get(scope).lookup_all(&base_type) == [base]
+                                && store.scopes.get(scope).lookup_all(&wrapped_type) == [wrapped]
+                        })
+                }
+                _ => false,
+            };
+            if cached_pair_is_published {
+                return Ok(if requested == &base_name {
+                    cached_base.expect("validated pair contains InfoBase")
+                } else {
+                    cached_wrapped.expect("validated pair contains InfoWrapped")
+                });
+            }
+        }
+
+        let profile_started = self.collect_resolver_profile.then(Instant::now);
+        let class_path = self
+            .class_path
+            .take()
+            .expect("resolver operation is exclusive");
+        let session = std::mem::replace(&mut self.session, LoadingSession::new());
+        let mut loader =
+            ClassLoader::with_definitions(class_path, store, self.definitions, session);
+        loader.set_load_profile_collection(
+            self.collect_load_profiles || self.collect_resolver_profile,
+        );
+        let result = loader.load_info_pair_with_tasty_unpickler(requested);
+        for profile in loader.take_load_profiles() {
+            self.collect_class_load_profile(&profile);
+            self.load_profiles.push(profile);
+        }
+        let (class_path, session) = loader.into_parts();
+        self.class_path = Some(class_path);
+        self.session = session;
+        self.record_resolver_phase(ResolverProfilePhase::ClassLoadingInclusive, profile_started);
+        result.map_err(|source| SemanticMemberLoadFailure {
+            binary_name: requested.clone(),
+            source,
+        })
+    }
+
+    #[allow(dead_code)]
     fn is_semantic_class_identity(
         &self,
         store: &SemanticStore,
@@ -2706,6 +2786,16 @@ mod tests {
         }
     }
 
+    fn info_pair_type_symbol(store: &SemanticStore, ty: TypeId) -> Option<SymbolId> {
+        match store.types.get(ty) {
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            } => Some(*symbol),
+            _ => None,
+        }
+    }
+
     fn open_class_path(include_jdk: bool) -> CompositeClassPath {
         let mut entries: Vec<Box<dyn ClassPathEntry>> = vec![Box::new(DirectoryClassPath::new(
             fixture_path("tests/fixtures/tasty_visibility"),
@@ -4036,6 +4126,214 @@ mod tests {
             assert!(!resolver.session.resolved.contains_key(&binary_name));
             assert!(resolver.session.origins.is_empty());
         }
+    }
+
+    #[test]
+    fn semantic_info_pair_resolver_handoff_preserves_graph_session_and_origin_for_both_roots() {
+        let base_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
+        let wrapped_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
+        let fixture_origin = ClassOrigin::Directory(fixture_path(
+            "../dotty-tasty-unpickler/tests/fixtures/semantic",
+        ));
+
+        for requested in [&base_name, &wrapped_name] {
+            let mut store = SemanticStore::new();
+            let definitions = Definitions::bootstrap(&mut store);
+            let mut resolver = ClasspathSymbolResolver::new(
+                info_pair_audit_class_path(),
+                definitions,
+                LoadingSession::new(),
+            );
+
+            let selected = resolver
+                .load_semantic_info_pair_for_member(&mut store, requested)
+                .expect("the selected root loads the authentic two-unit pair");
+            let base = resolver.session.identified[&base_name];
+            let wrapped = resolver.session.identified[&wrapped_name];
+            assert_eq!(selected, resolver.session.resolved[requested]);
+            assert_eq!(resolver.session.resolved.get(&base_name), Some(&base));
+            assert_eq!(resolver.session.resolved.get(&wrapped_name), Some(&wrapped));
+            assert_eq!(resolver.session.origins.get(&base), Some(&fixture_origin));
+            assert_eq!(
+                resolver.session.origins.get(&wrapped),
+                Some(&fixture_origin)
+            );
+            assert!(resolver.class_path.is_some());
+
+            let package = resolver
+                .session
+                .packages
+                .get(&["me", "cytrowski", "tastyfixtures", "semantic"])
+                .expect("the pair keeps its canonical package");
+            let package_scope = resolver
+                .session
+                .packages
+                .scope_of(package)
+                .expect("canonical package scope");
+            let base_type = Name::new(store.names.intern("InfoBase"), Namespace::Type);
+            let wrapped_type = Name::new(store.names.intern("InfoWrapped"), Namespace::Type);
+            assert_eq!(
+                store.scopes.get(package_scope).lookup_all(&base_type),
+                [base]
+            );
+            assert_eq!(
+                store.scopes.get(package_scope).lookup_all(&wrapped_type),
+                [wrapped]
+            );
+
+            let SymbolInfo::Complete(wrapped_info) = store.symbols.get(wrapped).info else {
+                panic!("InfoWrapped must be complete after pair loading");
+            };
+            let Type::ClassInfo(wrapped_info) = store.types.get(wrapped_info) else {
+                panic!("InfoWrapped has ClassInfo");
+            };
+            let base_parents = wrapped_info
+                .parents
+                .iter()
+                .filter(|parent| {
+                    matches!(
+                        store.types.get(**parent),
+                        Type::Applied { tycon, .. }
+                            if info_pair_type_symbol(&store, *tycon) == Some(base)
+                    )
+                })
+                .collect::<Vec<_>>();
+            let [parent] = base_parents.as_slice() else {
+                panic!("InfoWrapped keeps exactly one direct InfoBase parent");
+            };
+            let Type::Applied { tycon, args } = store.types.get(**parent) else {
+                panic!("InfoWrapped's direct parent is applied InfoBase");
+            };
+            assert_eq!(info_pair_type_symbol(&store, *tycon), Some(base));
+            assert_eq!(args.len(), 1);
+            let applied_f = args[0];
+            let Type::Applied {
+                tycon: f_tycon,
+                args: f_args,
+            } = store.types.get(applied_f)
+            else {
+                panic!("InfoBase parent argument is the applied F[Int] type");
+            };
+            let f_parameter = store
+                .scopes
+                .get(wrapped_info.declarations)
+                .entered_symbols()
+                .find(|id| {
+                    let symbol = store.symbols.get(*id);
+                    symbol.kind == SymbolKind::TypeParameter
+                        && store.names.resolve(symbol.name.text()) == "F"
+                })
+                .expect("InfoWrapped directly declares F");
+            assert_eq!(info_pair_type_symbol(&store, *f_tycon), Some(f_parameter));
+            assert_eq!(f_args.len(), 1);
+            assert_eq!(
+                info_pair_type_symbol(&store, f_args[0]),
+                info_pair_type_symbol(&store, definitions.int)
+            );
+
+            let method = store
+                .scopes
+                .get(wrapped_info.declarations)
+                .entered_symbols()
+                .find(|id| {
+                    let symbol = store.symbols.get(*id);
+                    symbol.kind == SymbolKind::Method
+                        && store.names.resolve(symbol.name.text()) == "m"
+                })
+                .expect("InfoWrapped directly declares m");
+            assert_eq!(store.symbols.get(method).owner, Some(wrapped));
+            let SymbolInfo::Complete(method_info) = store.symbols.get(method).info else {
+                panic!("m must be complete");
+            };
+            let method_result = match store.types.get(method_info) {
+                Type::Method(method) => method.result,
+                _ => method_info,
+            };
+            let method_result = match store.types.get(method_result) {
+                Type::ByName { result } => *result,
+                _ => method_result,
+            };
+            assert_eq!(store.types.get(method_result), store.types.get(applied_f));
+
+            assert_eq!(
+                resolver
+                    .load_semantic_info_pair_for_member(&mut store, &base_name)
+                    .expect("repeat base request reuses the pair"),
+                base
+            );
+            assert_eq!(
+                resolver
+                    .load_semantic_info_pair_for_member(&mut store, &wrapped_name)
+                    .expect("repeat wrapped request reuses the pair"),
+                wrapped
+            );
+            assert_eq!(resolver.session.identified.get(&base_name), Some(&base));
+            assert_eq!(
+                resolver.session.identified.get(&wrapped_name),
+                Some(&wrapped)
+            );
+
+            let ordinary_name = BinaryName::from_internal("java/lang/String");
+            let ordinary = resolver
+                .load_class(&mut store, &ordinary_name)
+                .expect("the restored classpath and session support ordinary lookup");
+            assert_eq!(
+                resolver.session.identified.get(&ordinary_name),
+                Some(&ordinary)
+            );
+            assert_eq!(resolver.session.resolved.get(&base_name), Some(&base));
+            assert_eq!(resolver.session.resolved.get(&wrapped_name), Some(&wrapped));
+            assert!(resolver.class_path.is_some());
+        }
+    }
+
+    #[test]
+    fn semantic_info_pair_resolver_handoff_restores_state_after_missing_pair_unit() {
+        let base_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
+        let wrapped_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
+        let control_name = BinaryName::from_internal("java/lang/String");
+        let missing_resource = Arc::new(Mutex::new(None));
+        let class_path = SelectedResourceControl {
+            inner: CompositeClassPath::new(vec![Box::new(info_pair_audit_class_path())]),
+            selected_name: "me/cytrowski/tastyfixtures/semantic/InfoBase",
+            selected: missing_resource,
+        };
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver =
+            ClasspathSymbolResolver::new(class_path, definitions, LoadingSession::new());
+        let committed_control = resolver
+            .load_class(&mut store, &control_name)
+            .expect("the control class commits before the bounded failure");
+        let store_before = store.checkpoint();
+        let session_before = resolver.session.checkpoint();
+
+        let error = resolver
+            .load_semantic_info_pair_for_member(&mut store, &wrapped_name)
+            .expect_err("missing second selected resource returns a typed error");
+        assert_eq!(error.binary_name, wrapped_name);
+        assert!(matches!(
+            error.source,
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::NotFound(ref name))
+                if name == &base_name
+        ));
+        assert_eq!(store.checkpoint(), store_before);
+        assert_eq!(resolver.session.checkpoint(), session_before);
+        assert!(resolver.class_path.is_some());
+        assert!(!resolver.session.identified.contains_key(&base_name));
+        assert!(!resolver.session.identified.contains_key(&wrapped_name));
+        assert!(!resolver.session.resolved.contains_key(&base_name));
+        assert!(!resolver.session.resolved.contains_key(&wrapped_name));
+
+        assert_eq!(
+            resolver
+                .load_class(&mut store, &control_name)
+                .expect("the committed control remains usable after the pair failure"),
+            committed_control
+        );
+        assert!(resolver.class_path.is_some());
     }
 
     #[test]
