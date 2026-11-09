@@ -289,6 +289,52 @@ jobs:
           cp crates/dotty-typer/tests/fixtures/lexical-closure-contract/scala-artifacts.sha256.tsv \
             "$DOTTY_AUDIT_REPORT_DIR/scala-artifacts.sha256.tsv"
 
+      - name: Type original Option.map in two fresh sessions with rollback retry
+        shell: bash
+        env:
+          COURSIER_MAVEN_ROOT: ${{ github.workspace }}/target/coursier/v1/https/repo1.maven.org/maven2
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+        run: |
+          set -euo pipefail
+          mkdir -p "$DOTTY_AUDIT_REPORT_DIR"
+          export SCALA39_CLASSPATH="$(printf '%s:' \
+            "$COURSIER_MAVEN_ROOT/org/scala-lang/scala3-library_3/3.9.0/scala3-library_3-3.9.0.jar" \
+            "$COURSIER_MAVEN_ROOT/org/scala-lang/scala-library/3.9.0/scala-library-3.9.0.jar" \
+            "$COURSIER_MAVEN_ROOT/org/scala-lang/scala3-compiler_3/3.9.0/scala3-compiler_3-3.9.0.jar" \
+            "$COURSIER_MAVEN_ROOT/org/scala-lang/tasty-core_3/3.9.0/tasty-core_3-3.9.0.jar" \
+            "$COURSIER_MAVEN_ROOT/org/scala-lang/scala3-interfaces/3.9.0/scala3-interfaces-3.9.0.jar" \
+            "$COURSIER_MAVEN_ROOT/org/scala-lang/modules/scala-asm/9.9.0-scala-1/scala-asm-9.9.0-scala-1.jar" \
+            "$COURSIER_MAVEN_ROOT/org/scala-sbt/compiler-interface/1.12.0/compiler-interface-1.12.0.jar" \
+            "$COURSIER_MAVEN_ROOT/org/scala-sbt/util-interface/1.11.5/util-interface-1.11.5.jar")"
+          export SCALA39_CLASSPATH="${SCALA39_CLASSPATH%:}"
+          test "$(git -C "$SCALA39_ROOT" rev-parse HEAD)" = \
+            "777528f19a58e794c9954a42f433373472ec57f8"
+          test "$(sha256sum "$SCALA39_ROOT/library/src/scala/Option.scala" | cut -d' ' -f1)" = \
+            "fadeb6620ab6cdadfd539409e335b38142fa1f6ba6b9143b2d6cfcb90e0076c3"
+          for session in 1 2; do
+            cargo +1.98.1 test -p dotty-typer --lib --locked \
+              captures_acceptance_iv_relation_operands_before_transaction_rollback \
+              -- --ignored --nocapture \
+              > "$DOTTY_AUDIT_REPORT_DIR/option-map-session-$session.log" 2>&1
+            grep '^OPTION_MAP_ACCEPTED ' \
+              "$DOTTY_AUDIT_REPORT_DIR/option-map-session-$session.log" \
+              > "$DOTTY_AUDIT_REPORT_DIR/option-map-session-$session.receipt"
+            grep -q 'test result: ok. 1 passed' \
+              "$DOTTY_AUDIT_REPORT_DIR/option-map-session-$session.log"
+          done
+          cmp "$DOTTY_AUDIT_REPORT_DIR/option-map-session-1.receipt" \
+            "$DOTTY_AUDIT_REPORT_DIR/option-map-session-2.receipt"
+          {
+            printf 'session_1_receipt_sha256\t%s\n' \
+              "$(sha256sum "$DOTTY_AUDIT_REPORT_DIR/option-map-session-1.receipt" | cut -d' ' -f1)"
+            printf 'session_2_receipt_sha256\t%s\n' \
+              "$(sha256sum "$DOTTY_AUDIT_REPORT_DIR/option-map-session-2.receipt" | cut -d' ' -f1)"
+            printf 'source_sha256\t%s\n' \
+              "$(sha256sum "$SCALA39_ROOT/library/src/scala/Option.scala" | cut -d' ' -f1)"
+            printf 'source_revision\t%s\n' "$(git -C "$SCALA39_ROOT" rev-parse HEAD)"
+            printf 'dotty_rs_tested_sha\t%s\n' "$(git rev-parse HEAD)"
+          } > "$DOTTY_AUDIT_REPORT_DIR/option-map-two-session.tsv"
+
       - name: Run pinned inherited-member Scala oracle
         shell: bash
         env:

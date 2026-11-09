@@ -229,6 +229,10 @@ fn captures_acceptance_iv_relation_operands_before_transaction_rollback() {
                 })
                 .collect::<std::collections::BTreeMap<_, _>>();
             match error {
+                TyperError::SymbolResolution {
+                    error: dotty_core::resolution::ResolutionError::Malformed { reason },
+                    ..
+                } if reason == "test-injected failure after successful source typing" => {}
                 TyperError::IfBranchJoinUnsupported {
                     left,
                     right,
@@ -592,8 +596,52 @@ fn captures_acceptance_iv_relation_operands_before_transaction_rollback() {
             }
             *capture.borrow_mut() = Some(lines.join("\n"));
         }));
-        let result = typer.type_method_definition(tree);
+        let store_before_method = typer.store().checkpoint();
+        let typed_before_method = typer.typed_ast().checkpoint();
+        let type_index_before_method = format!("{:?}", typer.type_index.checkpoint());
+        let typed_index_before_method = format!("{:?}", typer.typed_index.clone());
+        let source_typed_index_before_method = format!("{:?}", typer.source_typed_index());
+        let rollback_observed = Rc::new(RefCell::new(false));
+        let rollback_observed_by_callback = rollback_observed.clone();
         if relative.ends_with("Option.scala") {
+            typer.transaction_failure_observer = Some(Rc::new(move |typer| {
+                *rollback_observed_by_callback.borrow_mut() =
+                    typer.source_typed_index().get(source, tree).is_some();
+            }));
+            typer.inject_failure_after_outermost_success = true;
+        }
+        let mut result = typer.type_method_definition(tree);
+        if relative.ends_with("Option.scala") {
+            assert!(matches!(
+                result,
+                Err(TyperError::SymbolResolution {
+                    source: failure_source,
+                    error: ResolutionError::Malformed { ref reason },
+                    ..
+                }) if failure_source == source
+                    && reason == "test-injected failure after successful source typing"
+            ));
+            assert!(*rollback_observed.borrow());
+            assert_eq!(typer.store().checkpoint(), store_before_method);
+            assert_eq!(typer.typed_ast().checkpoint(), typed_before_method);
+            assert_eq!(
+                format!("{:?}", typer.type_index.checkpoint()),
+                type_index_before_method
+            );
+            assert_eq!(
+                format!("{:?}", typer.typed_index.clone()),
+                typed_index_before_method
+            );
+            assert_eq!(
+                format!("{:?}", typer.source_typed_index()),
+                source_typed_index_before_method
+            );
+            assert_eq!(typer.source_typed_index().get(source, tree), None);
+            assert!(!typer.inject_failure_after_outermost_success);
+            typer.transaction_failure_observer = None;
+            typer.transaction_failure_error_observer = None;
+            *observed.borrow_mut() = None;
+            result = typer.type_method_definition(tree);
             let typed_method = result.expect("the original full Option.map DefDef should type");
             assert!(
                 observed.borrow().is_none(),
@@ -604,6 +652,23 @@ fn captures_acceptance_iv_relation_operands_before_transaction_rollback() {
                 Some(typed_method)
             );
             let method_symbol = index.symbol_at(source, tree).unwrap();
+            let source_binder = match &parsed_ast.get(tree).kind {
+                TreeKind::DefDef(definition) => index
+                    .symbol_at(source, definition.type_params[0])
+                    .expect("original Option.map B binder has a canonical symbol"),
+                _ => unreachable!("selected source tree is Option.map DefDef"),
+            };
+            assert_eq!(
+                typer.store().symbols.get(source_binder).owner,
+                Some(method_symbol)
+            );
+            assert_eq!(
+                typer
+                    .store()
+                    .names
+                    .resolve(typer.store().symbols.get(source_binder).name.text()),
+                "B"
+            );
             let owner = typer.store().symbols.get(method_symbol).owner.unwrap();
             assert_eq!(observed_symbol_path(typer.store(), owner), ".scala.Option");
             assert!(matches!(index.definition_of(method_symbol),
@@ -623,7 +688,6 @@ fn captures_acceptance_iv_relation_operands_before_transaction_rollback() {
                     .resolve(poly.params[0].name.as_name().text()),
                 "B"
             );
-
             let source_classes = parsed_ast
                 .iter()
                 .filter_map(|(decl_tree, node)| match &node.kind {
@@ -633,13 +697,104 @@ fn captures_acceptance_iv_relation_operands_before_transaction_rollback() {
                             .names
                             .resolve(definition.name.as_name().text())
                             .to_owned(),
-                        (typer.index.symbol_at(typer.source, decl_tree)?, decl_tree),
+                        typer.index.symbol_at(typer.source, decl_tree)?,
                     )),
                     _ => None,
                 })
                 .collect::<std::collections::BTreeMap<_, _>>();
-            let option = source_classes["Option"].0;
-            let some = source_classes["Some"].0;
+            let option = source_classes["Option"];
+            let some = source_classes["Some"];
+            let Type::Method(method_type) = typer.store().types.get(poly.result) else {
+                panic!("Option.map must preserve its original function method clause");
+            };
+            let Type::Applied {
+                tycon,
+                args: result_args,
+            } = typer.store().types.get(method_type.result)
+            else {
+                panic!("Option.map must retain its applied Option result");
+            };
+            let mut result_symbols = Vec::new();
+            type_symbols(typer.store(), *tycon, &mut result_symbols, &mut Vec::new());
+            assert!(result_symbols.contains(&option));
+            assert_eq!(result_args.len(), 1);
+            assert!(matches!(
+                typer.store().types.get(result_args[0]),
+                Type::ParamRef { binder, index: 0 } if *binder == signature
+            ));
+            let typed_root = typer.typed_ast().get(typed_method);
+            let TreeKind::DefDef(typed_definition) = &typed_root.kind else {
+                panic!("the source root must publish a complete typed DefDef");
+            };
+            let typed_rhs = typed_definition
+                .rhs
+                .expect("the original Option.map DefDef retains its RHS");
+            let TreeKind::If(typed_if) = &typer.typed_ast().get(typed_rhs).kind else {
+                panic!("the original Option.map conditional must remain typed");
+            };
+            if !matches!(
+                typer.store().types.get(typer.typed_ast().get(typed_rhs).ty),
+                Type::Or { .. }
+            ) {
+                panic!("the original None/Some branch join must retain its union shape");
+            }
+            let some_apply = typer.typed_ast().iter().find_map(|(_, candidate)| {
+                let TreeKind::Select(selection) = &candidate.kind else {
+                    return None;
+                };
+                if typer.store().names.resolve(selection.name.text()) != "apply" {
+                    return None;
+                }
+                let Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                } = typer.store().types.get(candidate.ty)
+                else {
+                    return None;
+                };
+                (observed_symbol_path(typer.store(), *symbol) == ".scala.Some$.apply")
+                    .then_some(*symbol)
+            });
+            assert!(
+                some_apply.is_some(),
+                "the original Some branch must select canonical Some.apply"
+            );
+            let Type::Applied {
+                tycon,
+                args: some_args,
+            } = typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(typed_if.else_branch).ty)
+            else {
+                panic!("the original Some branch must retain its applied result type");
+            };
+            let mut some_symbols = Vec::new();
+            type_symbols(typer.store(), *tycon, &mut some_symbols, &mut Vec::new());
+            assert!(some_symbols.contains(&some));
+            assert_eq!(some_args.len(), 1);
+            assert!(matches!(
+                typer.store().types.get(some_args[0]),
+                Type::TypeRef {
+                    target: TypeRefTarget::Symbol(symbol),
+                    ..
+                } if *symbol == source_binder
+            ));
+            let Type::TermRef {
+                target: TermRefTarget::Symbol(none_branch),
+                ..
+            } = typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(typed_if.then_branch).ty)
+            else {
+                panic!("the original None branch must retain its canonical module reference");
+            };
+            assert_eq!(
+                observed_symbol_path(typer.store(), *none_branch),
+                ".scala.None"
+            );
+
             let none_tree = parsed_ast
                 .iter()
                 .find_map(|(decl_tree, node)| match &node.kind {
@@ -700,6 +855,31 @@ fn captures_acceptance_iv_relation_operands_before_transaction_rollback() {
                         .map(|typed_tree| format!("{}:{}", source_tree.index(), typed_tree.index()))
                 })
                 .collect::<Vec<_>>();
+            for (source_tree, _) in parsed_ast.iter() {
+                if let Some(mapped) = typer.source_typed_index().get(source, source_tree) {
+                    let source_span = parsed_ast.get(source_tree).position.unwrap();
+                    let typed_span = typer.typed_ast().get(mapped).position.unwrap();
+                    assert_eq!(source_span.source(), typed_span.source());
+                    assert!(
+                        source_span.span().range().start() <= typed_span.span().range().start()
+                            && source_span.span().range().end() >= typed_span.span().range().end(),
+                        "mapped typed span must remain within its original source span"
+                    );
+                }
+            }
+            assert_eq!(
+                mappings,
+                [
+                    "195:0", "196:1", "199:2", "200:3", "203:4", "204:5", "205:5", "206:6",
+                    "207:7", "208:9", "209:11", "210:12", "211:13", "212:14", "213:15", "214:16",
+                ]
+                .map(str::to_owned),
+                "the complete original Option.map source subtree must map deterministically"
+            );
+            println!(
+                "OPTION_MAP_ACCEPTED session=independent canonical=scala.Option.map binder=B some_apply=canonical:scala.Some$.apply branches=None|Some[B] result=Option[B] mapping={} rollback=full_and_retry spans=preserved",
+                mappings.join(",")
+            );
             println!(
                 "OPTION_MAP_TYPED_BEGIN\nmethod=canonical:scala.Option.map\nbinder=B\nsource_typed_mappings={}\nOPTION_MAP_TYPED_END",
                 mappings.join(",")
