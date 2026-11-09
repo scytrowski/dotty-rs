@@ -89,7 +89,7 @@
     },
     {
       "name": "jvm_tasty_two_local_counter_set_scala_consumer",
-      "measured_seconds": 86.14
+      "measured_seconds": 272.3
     },
     {
       "name": "jvm_tasty_direct_formal_constructor_pair",
@@ -119,12 +119,12 @@
   "sharding": {
     "strategy": "longest-processing-time-first; ties by target name, next shard by lowest accumulated time then ordinal",
     "shard_count": 4,
-    "estimated_runner_minutes": 23.7,
-    "estimated_critical_path_minutes": 5.97,
+    "estimated_runner_minutes": 26.81,
+    "estimated_critical_path_minutes": 10.44,
     "shards": [
       {
         "id": "shard-1",
-        "estimated_test_seconds": 440.35,
+        "estimated_test_seconds": 626.51,
         "targets": [
           "jvm_tasty_mixed_origin_constructor_scala_consumer",
           "jvm_tasty_constructor_injection_scala_consumer",
