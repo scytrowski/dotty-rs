@@ -189,6 +189,30 @@ existing `jvm-tasty-factory-scala-consumer` workflow also runs when this
 receipt changes, so documentation-only edits cannot bypass the integrated
 gate. The focused Java 21 test
 `ordered_two_local_unit_calls_execute_under_strict_jdk21` passed with
-`DOTTY_CLASSFILE_REQUIRE_JDK=1` (1 passed, 8 filtered). The tested PR head was
-`146257a33c8eeb8f3b44675a602c10ebea314f42`; final-head hosted workflow URLs and
-outcomes are recorded below after the required jobs complete.
+`DOTTY_CLASSFILE_REQUIRE_JDK=1` (1 passed, 8 filtered). The integrated
+acceptance and full local workspace test head was
+`e3ef99e6b62ec33120d99b1e117cd0861cc3cfc1`; all source, client, graph, artifact,
+bytecode, Scala, Java, and negative-control evidence above was captured from
+that checkout. The receipt appendix itself is a documentation-only successor.
+
+### Hosted workflow evidence for the integrated test head
+
+Both required pull-request workflows completed successfully on the integrated
+test head `e3ef99e6b62ec33120d99b1e117cd0861cc3cfc1`:
+
+| Workflow/job | Outcome | Run / job |
+| --- | --- | --- |
+| Strict Scala/TASTy shard 1/4 | success | [job 129090838306](https://github.com/scytrowski/dotty-rs/actions/runs/42596602664/jobs/129090838306) |
+| Strict Scala/TASTy shard 2/4 | success | [job 129090837832](https://github.com/scytrowski/dotty-rs/actions/runs/42596602664/jobs/129090837832) |
+| Strict Scala/TASTy shard 3/4 | success | [job 129090838099](https://github.com/scytrowski/dotty-rs/actions/runs/42596602664/jobs/129090838099) |
+| Strict Scala/TASTy shard 4/4 | success | [job 129090838307](https://github.com/scytrowski/dotty-rs/actions/runs/42596602664/jobs/129090838307) |
+| Pinned Scala 3.9 factory TASTy aggregate consumer | success | [job 129098549506](https://github.com/scytrowski/dotty-rs/actions/runs/42596602664/jobs/129098549506) |
+| Rust checks (format, frontend boundaries, Clippy, rustdoc, workspace tests, diff) | success | [job 129090752270](https://github.com/scytrowski/dotty-rs/actions/runs/42596602689/jobs/129090752270) |
+| Classfile JVM encoder gate | success | [job 129090752790](https://github.com/scytrowski/dotty-rs/actions/runs/42596602689/jobs/129090752790) |
+
+The full local locked workspace test also passed on the integrated test head
+with every required strict consumer flag, the pinned Scala source/compiler and
+runtime jars, and JDK 21.0.13+9. The current PR head is available from
+[PR #2222](https://github.com/scytrowski/dotty-rs/pull/2222); its receipt-only
+successor changes this evidence document, not the tested producer or consumer
+code.
