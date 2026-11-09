@@ -528,6 +528,9 @@ impl SourceTyper<'_> {
                     error,
                 })?;
         }
+        let mut completed_relation_types = std::collections::HashSet::new();
+        self.complete_relation_type(actual, info_journal, &mut completed_relation_types, 0)?;
+        self.complete_relation_type(expected, info_journal, &mut completed_relation_types, 0)?;
         match self.conforms(actual, expected) {
             Ok(true) => Ok(typed),
             Ok(false) => Err(TyperError::ExpectedExpressionTypeMismatch {
