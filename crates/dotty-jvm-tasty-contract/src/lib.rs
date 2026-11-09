@@ -25,7 +25,7 @@ use dotty_jvm::{
 };
 use dotty_tasty::tasty::{TastyFile, TastyFileError};
 use dotty_tasty_pickler::{
-    ClassMemberPicklePlan, FormalLocalConstructorCallArgumentOrigin,
+    ClassMemberPicklePlan, FormalLocalConstructorCallArgumentOrigin, LocalReceiverUnitCallBinding,
     OrderedConstructorCallArgumentOrigin, PickleError, ValidatedClassStatePlan,
 };
 
@@ -1711,6 +1711,7 @@ struct MixedConstructorPairRef {
     arguments: [MixedConstructorArgumentRef; 2],
     local_initializers: Vec<LocalCounterInitializerRef>,
     local_receiver_call: Option<LocalReceiverUnitCallRef>,
+    local_receiver_call_pair: Option<[LocalReceiverUnitCallRef; 2]>,
     max_stack: u16,
     max_locals: u16,
 }
@@ -1770,12 +1771,20 @@ fn validate_two_local_constructor_pair(
     let local_receiver_call = tasty
         .typed_bindings
         .local_receiver_unit_call(source_id, caller);
+    let local_receiver_call_pair = tasty
+        .typed_bindings
+        .local_receiver_unit_call_pair(source_id, caller);
     if source_block.stats.len() != typed_block.stats.len()
-        || (source_block.stats.len() == 2 && local_receiver_call.is_some())
-        || (source_block.stats.len() == 3 && local_receiver_call.is_none())
-        || !matches!(source_block.stats.len(), 2 | 3)
+        || match source_block.stats.len() {
+            2 => local_receiver_call.is_some() || local_receiver_call_pair.is_some(),
+            3 => local_receiver_call.is_none() || local_receiver_call_pair.is_some(),
+            4 => local_receiver_call.is_some() || local_receiver_call_pair.is_none(),
+            _ => true,
+        }
     {
-        return Err("two-local Block must contain its exact optional Counter.set stat".into());
+        return Err(
+            "two-local Block must contain exactly zero, one, or two Counter.set stats".into(),
+        );
     }
     let initializers = tasty
         .typed_bindings
@@ -2029,23 +2038,27 @@ fn validate_two_local_constructor_pair(
         FormalLocalConstructorCallArgumentOrigin::LocalValue { symbol, .. } => symbol,
         _ => return Err("first Pair argument is not an authenticated local value".into()),
     };
-    let local_receiver_call = if let Some(binding) = local_receiver_call {
+    let validate_receiver_call = |binding: LocalReceiverUnitCallBinding,
+                                  call_index: usize,
+                                  required_receiver: Option<SymbolId>,
+                                  required_formal: Option<SymbolId>|
+     -> Result<LocalReceiverUnitCallRef, String> {
         let source_call_tree = *source_block
             .stats
-            .get(2)
-            .ok_or_else(|| "Counter.set source stat is missing".to_owned())?;
+            .get(call_index + 2)
+            .ok_or_else(|| format!("Counter.set source stat {call_index} is missing"))?;
         let typed_call_tree = *typed_block
             .stats
-            .get(2)
-            .ok_or_else(|| "Counter.set typed stat is missing".to_owned())?;
+            .get(call_index + 2)
+            .ok_or_else(|| format!("Counter.set typed stat {call_index} is missing"))?;
         let source_apply = tasty
             .source_ast
             .try_get(binding.source_apply)
-            .ok_or_else(|| "Counter.set source Apply is stale".to_owned())?;
+            .ok_or_else(|| format!("Counter.set source Apply {call_index} is stale"))?;
         let typed_apply = tasty
             .typed_ast
             .try_get(binding.typed_apply)
-            .ok_or_else(|| "Counter.set typed Apply is stale".to_owned())?;
+            .ok_or_else(|| format!("Counter.set typed Apply {call_index} is stale"))?;
         let (TreeKind::Apply(source_apply), TreeKind::Apply(typed_apply)) =
             (&source_apply.kind, &typed_apply.kind)
         else {
@@ -2077,8 +2090,8 @@ fn validate_two_local_constructor_pair(
                 != Some(binding.typed_argument)
             || !matches!(tasty.source_ast.try_get(binding.source_select).map(|tree| &tree.kind), Some(TreeKind::Select(select)) if select.qualifier == binding.source_receiver)
             || !matches!(tasty.typed_ast.try_get(binding.typed_select).map(|tree| &tree.kind), Some(TreeKind::Select(select)) if select.qualifier == binding.typed_receiver)
-            || !matches!(tasty.store.types.try_get(tasty.typed_ast.get(binding.typed_receiver).ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == binding.receiver && *symbol == expected_receiver && local_symbols.contains(symbol))
-            || !matches!(tasty.store.types.try_get(tasty.typed_ast.get(binding.typed_argument).ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == binding.argument_formal && *symbol == pair.method_formals[1])
+            || !matches!(tasty.store.types.try_get(tasty.typed_ast.get(binding.typed_receiver).ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == binding.receiver && local_symbols.contains(symbol) && required_receiver.is_none_or(|expected| expected == *symbol))
+            || !matches!(tasty.store.types.try_get(tasty.typed_ast.get(binding.typed_argument).ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == binding.argument_formal && pair.method_formals.contains(symbol) && required_formal.is_none_or(|expected| expected == *symbol))
             || !matches!(tasty.store.types.try_get(tasty.typed_ast.get(binding.typed_select).ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == binding.method)
             || tasty.typed_ast.get(binding.typed_apply).ty != tasty.definitions.unit
         {
@@ -2099,8 +2112,18 @@ fn validate_two_local_constructor_pair(
         if set_method.name() != "set"
             || set_method.descriptor().as_str() != "(I)V"
             || set_method.access_flags().contains(ACC_STATIC)
+            || tasty.store.symbols.get(binding.method).owner != Some(counter_class)
         {
             return Err("Counter.set JVM target must be the selected instance set(I)V".into());
+        }
+        let receiver_initializer = initializers
+            .iter()
+            .find(|initializer| initializer.local == binding.receiver)
+            .ok_or_else(|| {
+                "Counter.set receiver has no authenticated local initializer".to_owned()
+            })?;
+        if binding.receiver_scope != receiver_initializer.scope {
+            return Err("Counter.set receiver scope differs from its initialized local".into());
         }
         let receiver_index = local_symbols
             .iter()
@@ -2117,15 +2140,37 @@ fn validate_two_local_constructor_pair(
             .find(|parameter| parameter.symbol() == binding.argument_formal)
             .ok_or_else(|| "Counter.set formal is absent from the factory method".to_owned())?
             .slot();
-        Some(LocalReceiverUnitCallRef {
+        Ok(LocalReceiverUnitCallRef {
             owner_internal_name: counter_metadata.identity().internal_name().to_owned(),
             name: set_method.name().to_owned(),
             descriptor: set_method.descriptor().as_str().to_owned(),
             receiver_local_slot,
             argument_local_slot,
         })
-    } else {
-        None
+    };
+    let local_receiver_call = local_receiver_call
+        .map(|binding| {
+            validate_receiver_call(
+                binding,
+                0,
+                Some(expected_receiver),
+                Some(pair.method_formals[1]),
+            )
+        })
+        .transpose()?;
+    let local_receiver_call_pair = local_receiver_call_pair
+        .map(|bindings| {
+            if bindings[0].argument_formal == bindings[1].argument_formal {
+                return Err("Counter.set pair must use distinct factory formals".to_owned());
+            }
+            Ok([
+                validate_receiver_call(bindings[0], 0, None, None)?,
+                validate_receiver_call(bindings[1], 1, None, None)?,
+            ])
+        })
+        .transpose()?;
+    if local_receiver_call.is_some() && local_receiver_call_pair.is_some() {
+        return Err("two-local Block has both single-call and paired-call receipts".into());
     };
 
     let outer_constructor = outer_metadata
@@ -2203,6 +2248,7 @@ fn validate_two_local_constructor_pair(
             .map_err(|_| "two-local Pair argument receipt is incomplete")?,
         local_initializers,
         local_receiver_call,
+        local_receiver_call_pair,
         max_stack: 4,
         max_locals: layout.max_locals(),
     })
@@ -2695,6 +2741,7 @@ fn validate_formal_local_constructor_pair(
             result_local_slot: local_slot.slot(),
         }],
         local_receiver_call: None,
+        local_receiver_call_pair: None,
         max_stack: 4,
         max_locals: layout.max_locals(),
     })
@@ -3184,6 +3231,7 @@ fn validate_mixed_constructor_pair(
         arguments: [first, second],
         local_initializers: Vec::new(),
         local_receiver_call: None,
+        local_receiver_call_pair: None,
         max_stack,
         max_locals: 3,
     })
@@ -3888,7 +3936,7 @@ fn validate_cross_class_call_code(
                     .ok_or_else(|| "FormalLocalPair Pair class is outside the batch".to_owned())?;
                 let mixed_pair = if matches!(
                     tasty.source_ast.try_get(rhs).map(|tree| &tree.kind),
-                    Some(TreeKind::Block(block)) if matches!(block.stats.len(), 2 | 3)
+                    Some(TreeKind::Block(block)) if matches!(block.stats.len(), 2..=4)
                 ) {
                     validate_two_local_constructor_pair(
                         proof,
@@ -4872,7 +4920,12 @@ fn validate_cross_class_call_code(
                     ));
                 }
             }
-            if let Some(call) = &mixed_pair.local_receiver_call {
+            let local_receiver_calls = if let Some(calls) = &mixed_pair.local_receiver_call_pair {
+                calls.iter().collect::<Vec<_>>()
+            } else {
+                mixed_pair.local_receiver_call.iter().collect::<Vec<_>>()
+            };
+            for call in local_receiver_calls {
                 take_factory_local(code.code, &mut pc, false, call.receiver_local_slot)?;
                 take_int_local(code.code, &mut pc, call.argument_local_slot)?;
                 let invocation =

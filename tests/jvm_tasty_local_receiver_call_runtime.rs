@@ -8,6 +8,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SOURCE: &str = include_str!("fixtures/jvm_tasty_local_receiver_call/LocalReceiverCall.scala");
+const TWO_CALL_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_ordered_local_unit_calls/OrderedLocalUnitCalls.scala");
+const TWO_CALL_HARNESS: &str =
+    include_str!("fixtures/jvm_tasty_ordered_local_unit_calls/RuntimeProbe.java");
 const HARNESS: &str = r#"package example;
 
 import java.lang.reflect.Field;
@@ -772,6 +776,143 @@ fn local_counter_set_runs_on_unchanged_rust_batch_under_strict_jdk21() {
         }
         eprintln!(
             "local-receiver-runtime {label}: JDK verification passed; Counter.set(I)V once; six artifact hashes unchanged"
+        );
+    }
+}
+
+#[test]
+fn ordered_two_local_unit_calls_execute_under_strict_jdk21() {
+    if !require_jdk_21() {
+        return;
+    }
+    let scratch = TestDirectory::new("ordered-two-call-runtime");
+    let root = scratch.path();
+    let harness_src = root.join("harness-src");
+    let harness_classes = root.join("harness-classes");
+    std::fs::create_dir_all(&harness_src).unwrap();
+    std::fs::create_dir_all(&harness_classes).unwrap();
+    let harness = harness_src.join("RuntimeProbe.java");
+    std::fs::write(&harness, TWO_CALL_HARNESS).unwrap();
+
+    let reversed = TWO_CALL_SOURCE.replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
+        "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
+    );
+    assert_ne!(reversed, TWO_CALL_SOURCE);
+    for (label, source, source_id) in [
+        ("primary", TWO_CALL_SOURCE, 21911),
+        ("reversed", reversed.as_str(), 21912),
+    ] {
+        let batch = emit_paired_jvm_tasty_batch(
+            source,
+            "OrderedLocalUnitCalls.scala",
+            SourceId::from_index(source_id),
+        )
+        .unwrap_or_else(|error| panic!("{label} two-call batch emits: {error:?}"));
+        let originals = artifacts(&batch);
+        let repeated = emit_paired_jvm_tasty_batch(
+            source,
+            "OrderedLocalUnitCalls.scala",
+            SourceId::from_index(source_id),
+        )
+        .unwrap_or_else(|error| panic!("fresh {label} two-call session emits: {error:?}"));
+        assert_eq!(
+            originals,
+            artifacts(&repeated),
+            "{label} two-call output is deterministic across fresh sessions"
+        );
+
+        let factory = originals
+            .iter()
+            .find(|(path, _)| path == "example/PairFactory.class")
+            .unwrap()
+            .1
+            .as_slice();
+        let class = ClassFile::decode(&mut Reader::new(factory)).expect("decode PairFactory");
+        let (code, max_stack, max_locals) = method_code(&class, "create");
+        assert_eq!((max_stack, max_locals), (4, 5));
+        let instructions = decode(code);
+        let calls = instructions
+            .iter()
+            .filter(|instruction| matches!(instruction.opcode, 0xb7 | 0xb6))
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 5, "two constructors, two setters, Pair");
+        for setter in &calls[2..4] {
+            assert_eq!(setter.opcode, 0xb6, "Unit calls use invokevirtual");
+            assert_eq!(
+                method_ref(&class, ConstantPoolIndex(setter.cp.unwrap())),
+                ("example/Counter", "set", "(I)V")
+            );
+        }
+        assert!(calls[1].pc < calls[2].pc);
+        assert!(calls[2].pc < calls[3].pc);
+        assert!(calls[3].pc < calls[4].pc);
+        assert_eq!(
+            method_ref(&class, ConstantPoolIndex(calls[4].cp.unwrap())),
+            (
+                "example/Pair",
+                "<init>",
+                "(Lexample/Counter;Lexample/Counter;)V"
+            )
+        );
+
+        let runtime = root.join(format!("runtime-{label}"));
+        std::fs::create_dir_all(&runtime).unwrap();
+        write_runtime(&runtime, &originals);
+        let javap = java_tool("javap", root)
+            .args(["-c", "-v", "-p", "-classpath"])
+            .arg(&runtime)
+            .arg("example.PairFactory")
+            .output()
+            .expect("javap two-call Rust PairFactory");
+        assert!(
+            javap.status.success(),
+            "javap failed: {}",
+            String::from_utf8_lossy(&javap.stderr)
+        );
+        let dump = String::from_utf8_lossy(&javap.stdout);
+        assert_eq!(
+            dump.lines()
+                .filter(|line| {
+                    line.contains("invokevirtual") && line.contains("example/Counter.set:(I)V")
+                })
+                .count(),
+            2
+        );
+        assert!(dump.contains("major version: 65"));
+        assert!(dump.contains("stack=4, locals=5"));
+
+        let javac = java_tool("javac", root)
+            .args(["--release", "21", "-classpath"])
+            .arg(&runtime)
+            .arg("-d")
+            .arg(&harness_classes)
+            .arg(&harness)
+            .output()
+            .expect("javac independent two-call consumer");
+        assert!(
+            javac.status.success(),
+            "javac: {}{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let classpath =
+            std::env::join_paths([harness_classes.as_path(), runtime.as_path()]).unwrap();
+        let java = java_tool("java", root)
+            .args(["-Xverify:all", "-ea", "-classpath"])
+            .arg(classpath)
+            .arg("example.RuntimeProbe")
+            .output()
+            .expect("strict JDK 21 execution of two-call Rust classes");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all: {}{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&java.stdout).trim(),
+            "3/7 distinct=true\n42/-9 distinct=true"
         );
     }
 }
