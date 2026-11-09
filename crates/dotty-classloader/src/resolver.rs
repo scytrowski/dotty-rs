@@ -228,6 +228,20 @@ pub(crate) struct SemanticMemberLoadFailure {
     pub(crate) source: SemanticTastyLoadError,
 }
 
+fn semantic_pair_failure_name(
+    requested: &BinaryName,
+    source: &SemanticTastyLoadError,
+) -> BinaryName {
+    match source {
+        SemanticTastyLoadError::PairUnitFailure { binary_name, .. } => binary_name.clone(),
+        SemanticTastyLoadError::PairRootCollision { binary_name } => binary_name.clone(),
+        SemanticTastyLoadError::ClassLoad(
+            ClassLoadError::NotFound(name) | ClassLoadError::Io(name, _),
+        ) => name.clone(),
+        _ => requested.clone(),
+    }
+}
+
 #[derive(Debug)]
 #[allow(dead_code)]
 enum MemberResolutionFailure {
@@ -871,10 +885,13 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                     })
                 }
             }
-            Err(source) => Err(SemanticMemberLoadFailure {
-                binary_name: requested.clone(),
-                source,
-            }),
+            Err(source) => {
+                let binary_name = semantic_pair_failure_name(requested, &source);
+                Err(SemanticMemberLoadFailure {
+                    binary_name,
+                    source,
+                })
+            }
         }
     }
 
@@ -5817,62 +5834,86 @@ mod tests {
 
     #[test]
     fn infowrapped_pair_opt_in_fails_closed_on_a_preexisting_package_identity() {
-        let mut store = SemanticStore::new();
-        let definitions = Definitions::bootstrap(&mut store);
-        let mut resolver = ClasspathSymbolResolver::new(
-            info_pair_audit_class_path(),
-            definitions,
-            LoadingSession::new(),
-        );
-        let package = resolver
-            .resolve_package(
-                &mut store,
-                &["me", "cytrowski", "tastyfixtures", "semantic"],
-            )
-            .unwrap()
-            .expect("semantic fixture package");
-        let package_scope = resolver.package_scope(package).expect("package scope");
-        let request =
-            semantic_member_request(&mut store, package, definitions.no_prefix, "InfoWrapped");
-        let preexisting = store.symbols.alloc(Symbol {
-            name: request.name,
-            owner: Some(package),
-            kind: SymbolKind::Class,
-            flags: SymbolFlags::EMPTY,
-            visibility: Visibility::Public,
-            info: SymbolInfo::Missing,
-            origin: SymbolOrigin::Synthetic,
-            annotations: Vec::new(),
-            position: None,
-            links: Default::default(),
-        });
-        store
-            .scopes
-            .get_mut(package_scope)
-            .enter(request.name, preexisting);
-        let store_before = store.checkpoint();
-        let session_before = resolver.session.checkpoint();
+        for (colliding_root, requested_root) in
+            [("InfoBase", "InfoWrapped"), ("InfoWrapped", "InfoBase")]
+        {
+            let mut store = SemanticStore::new();
+            let definitions = Definitions::bootstrap(&mut store);
+            let mut resolver = ClasspathSymbolResolver::new(
+                info_pair_audit_class_path(),
+                definitions,
+                LoadingSession::new(),
+            );
+            let control_name = BinaryName::from_internal("java/lang/String");
+            let committed_control = resolver
+                .load_class(&mut store, &control_name)
+                .expect("the unrelated control class commits before the collision");
+            let package = resolver
+                .resolve_package(
+                    &mut store,
+                    &["me", "cytrowski", "tastyfixtures", "semantic"],
+                )
+                .unwrap()
+                .expect("semantic fixture package");
+            let package_scope = resolver.package_scope(package).expect("package scope");
+            let request =
+                semantic_member_request(&mut store, package, definitions.no_prefix, requested_root);
+            let colliding_name = Name::new(store.names.intern(colliding_root), Namespace::Type);
+            let preexisting = store.symbols.alloc(Symbol {
+                name: colliding_name,
+                owner: Some(package),
+                kind: SymbolKind::Class,
+                flags: SymbolFlags::EMPTY,
+                visibility: Visibility::Public,
+                info: SymbolInfo::Missing,
+                origin: SymbolOrigin::Synthetic,
+                annotations: Vec::new(),
+                position: None,
+                links: Default::default(),
+            });
+            store
+                .scopes
+                .get_mut(package_scope)
+                .enter(colliding_name, preexisting);
+            let colliding_binary = BinaryName::from_internal(format!(
+                "me/cytrowski/tastyfixtures/semantic/{colliding_root}"
+            ));
+            let store_before = store.checkpoint();
+            let session_before = resolver.session.checkpoint();
 
-        assert!(matches!(
-            resolver.resolve_member_with_semantic_info_pair(&mut store, &request),
-            Err(ResolutionError::Malformed { .. })
-        ));
-        assert_eq!(store.checkpoint(), store_before);
-        assert_eq!(resolver.session.checkpoint(), session_before);
-        assert!(!resolver.semantic_info_pair_loaded);
-        assert!(
-            !resolver
-                .session
-                .identified
-                .contains_key(&BinaryName::from_internal(
-                    "me/cytrowski/tastyfixtures/semantic/InfoBase"
-                ))
-        );
-        assert!(store.symbols.contains(preexisting));
-        assert_eq!(
-            store.scopes.get(package_scope).lookup_all(&request.name),
-            [preexisting]
-        );
+            let internal_error = resolver
+                .transact(&mut store, |resolver, store| {
+                    resolver.resolve_member_inner_with_semantic_info_pair(store, &request)
+                })
+                .expect_err("the root collision remains a typed selected failure");
+            let MemberResolutionFailure::SemanticLoad(internal_error) = internal_error else {
+                panic!("the collision is attributed to semantic loading: {internal_error:?}");
+            };
+            assert_eq!(internal_error.binary_name, colliding_binary);
+            assert!(matches!(
+                internal_error.source,
+                SemanticTastyLoadError::PairRootCollision { binary_name }
+                    if binary_name == colliding_binary
+            ));
+
+            assert!(matches!(
+                resolver.resolve_member_with_semantic_info_pair(&mut store, &request),
+                Err(ResolutionError::Malformed { .. })
+            ));
+            assert_eq!(store.checkpoint(), store_before);
+            assert_eq!(resolver.session.checkpoint(), session_before);
+            assert_eq!(
+                resolver.session.identified.get(&control_name),
+                Some(&committed_control)
+            );
+            assert!(!resolver.semantic_info_pair_loaded);
+            assert!(!resolver.session.identified.contains_key(&colliding_binary));
+            assert!(store.symbols.contains(preexisting));
+            assert_eq!(
+                store.scopes.get(package_scope).lookup_all(&colliding_name),
+                [preexisting]
+            );
+        }
     }
 
     #[test]
@@ -5900,7 +5941,7 @@ mod tests {
         let error = resolver
             .load_semantic_info_pair_for_member(&mut store, &wrapped_name)
             .expect_err("missing second selected resource returns a typed error");
-        assert_eq!(error.binary_name, wrapped_name);
+        assert_eq!(error.binary_name, base_name);
         assert!(matches!(
             error.source,
             SemanticTastyLoadError::ClassLoad(ClassLoadError::NotFound(ref name))
@@ -5921,6 +5962,170 @@ mod tests {
             committed_control
         );
         assert!(resolver.class_path.is_some());
+    }
+
+    #[test]
+    fn selected_info_pair_resolver_reports_first_unit_failure_and_rolls_back() {
+        let base_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
+        let wrapped_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
+        let wrapped_origin = ClassOrigin::Directory(PathBuf::from("<controlled-info-pair>"));
+        let malformed = Some(ClassResource::new(
+            vec![0, 1, 2, 3],
+            ClassFormat::Tasty,
+            wrapped_origin.clone(),
+        ));
+        let classfile = info_pair_class_file_class_path()
+            .find_class(&base_name)
+            .expect("classfile control lookup")
+            .expect("classfile control resource");
+        let fixture_root = fixture_path("../dotty-tasty-unpickler/tests/fixtures/semantic");
+        let base_tasty = ClassResource::new(
+            std::fs::read(fixture_root.join("InfoBase.tasty")).expect("original InfoBase bytes"),
+            ClassFormat::Tasty,
+            ClassOrigin::Directory(fixture_root.clone()),
+        );
+        let wrapped_tasty = ClassResource::new(
+            std::fs::read(fixture_root.join("InfoWrapped.tasty"))
+                .expect("original InfoWrapped bytes"),
+            ClassFormat::Tasty,
+            ClassOrigin::Directory(fixture_root),
+        );
+
+        // The pair request enters through the selected resolver route. A valid
+        // unrelated class is already committed so rollback must retain earlier
+        // state while discarding everything from the failed pair transaction.
+        for (selected_name, selected, retry_resource, request_root, expected) in [
+            (
+                "me/cytrowski/tastyfixtures/semantic/InfoWrapped",
+                None,
+                wrapped_tasty.clone(),
+                "InfoWrapped",
+                "missing wrapped unit",
+            ),
+            (
+                "me/cytrowski/tastyfixtures/semantic/InfoWrapped",
+                malformed,
+                wrapped_tasty.clone(),
+                "InfoBase",
+                "malformed wrapped unit",
+            ),
+            (
+                "me/cytrowski/tastyfixtures/semantic/InfoBase",
+                Some(classfile),
+                base_tasty,
+                "InfoWrapped",
+                "classfile wins before TASTy",
+            ),
+        ] {
+            let selected = Arc::new(Mutex::new(selected));
+            let class_path = SelectedResourceControl {
+                inner: CompositeClassPath::new(vec![Box::new(info_pair_audit_class_path())]),
+                selected_name,
+                selected: selected.clone(),
+            };
+            let mut store = SemanticStore::new();
+            let definitions = Definitions::bootstrap(&mut store);
+            let mut resolver =
+                ClasspathSymbolResolver::new(class_path, definitions, LoadingSession::new());
+            let package = resolver
+                .resolve_package(
+                    &mut store,
+                    &["me", "cytrowski", "tastyfixtures", "semantic"],
+                )
+                .unwrap()
+                .expect("semantic fixture package");
+            let committed = resolver
+                .load_class(&mut store, &BinaryName::from_internal("java/lang/String"))
+                .expect("the earlier control class commits");
+            let control_name = BinaryName::from_internal("java/lang/String");
+            let object_before = store.symbols.get(definitions.object_class).clone();
+            let request =
+                semantic_member_request(&mut store, package, definitions.no_prefix, request_root);
+            let store_before = store.checkpoint();
+            let session_before = resolver.session.checkpoint();
+
+            let failure = resolver
+                .transact(&mut store, |resolver, store| {
+                    resolver.resolve_member_inner_with_semantic_info_pair(store, &request)
+                })
+                .expect_err(expected);
+            let MemberResolutionFailure::SemanticLoad(failure) = failure else {
+                panic!("a selected pair error must remain typed: {failure:?}");
+            };
+            let (failed_name, source) = (failure.binary_name, failure.source);
+            match expected {
+                "missing wrapped unit" => {
+                    assert_eq!(failed_name, wrapped_name);
+                    assert!(matches!(source, SemanticTastyLoadError::ClassLoad(
+                        ClassLoadError::NotFound(ref name)
+                    ) if name == &wrapped_name));
+                }
+                "malformed wrapped unit" => {
+                    assert_eq!(failed_name, wrapped_name);
+                    assert!(matches!(source, SemanticTastyLoadError::PairUnitFailure {
+                        binary_name, origin, format: ClassFormat::Tasty, cause,
+                    } if binary_name == wrapped_name
+                        && origin == wrapped_origin
+                        && matches!(*cause, SemanticTastyLoadError::ClassLoad(
+                            ClassLoadError::InvalidTastyFile(ref name, _)
+                        ) if name == &wrapped_name)));
+                }
+                "classfile wins before TASTy" => {
+                    assert_eq!(failed_name, base_name);
+                    assert!(matches!(source, SemanticTastyLoadError::PairUnitFailure {
+                        binary_name, format: ClassFormat::Class, cause, ..
+                    } if binary_name == base_name
+                        && matches!(*cause, SemanticTastyLoadError::UnsupportedShape(
+                            "both selected pair resources must be TASTy"
+                        ))));
+                }
+                _ => unreachable!(),
+            }
+
+            let public_error = resolver
+                .resolve_member_with_semantic_info_pair(&mut store, &request)
+                .expect_err("selected resource failures map at the public trait boundary");
+            let expected_binary = if expected == "classfile wins before TASTy" {
+                &base_name
+            } else {
+                &wrapped_name
+            };
+            assert!(matches!(
+                public_error,
+                ResolutionError::Malformed { reason }
+                    if reason.contains(expected_binary.as_internal())
+            ));
+
+            assert_eq!(store.checkpoint(), store_before);
+            assert_eq!(store.symbols.get(definitions.object_class), &object_before);
+            assert_eq!(resolver.session.checkpoint(), session_before);
+            assert_eq!(
+                resolver.session.identified.get(&control_name),
+                Some(&committed)
+            );
+            assert!(resolver.class_path.is_some());
+            assert!(!resolver.semantic_info_pair_loaded);
+            assert!(!resolver.session.identified.contains_key(&base_name));
+            assert!(!resolver.session.identified.contains_key(&wrapped_name));
+            assert!(!resolver.session.resolved.contains_key(&base_name));
+            assert!(!resolver.session.resolved.contains_key(&wrapped_name));
+            assert!(resolver.session.origins.contains_key(&committed));
+            assert_eq!(
+                resolver
+                    .load_class(&mut store, &control_name)
+                    .expect("the committed control remains usable after the failure"),
+                committed
+            );
+            *selected.lock().expect("selected resource lock") = Some(retry_resource);
+            assert!(
+                resolver
+                    .resolve_member_with_semantic_info_pair(&mut store, &request)
+                    .expect("restored genuine resources retry in the same resolver")
+                    .is_some()
+            );
+            assert!(resolver.semantic_info_pair_loaded);
+        }
     }
 
     #[test]
@@ -5952,12 +6157,11 @@ mod tests {
             let error = resolver
                 .load_semantic_info_pair_for_member(&mut store, &wrapped_name)
                 .expect_err("ordinary identities cannot stand in for a semantic pair load");
-            assert_eq!(error.binary_name, wrapped_name);
+            assert_eq!(error.binary_name, base_name);
             assert!(matches!(
                 error.source,
-                SemanticTastyLoadError::UnsupportedShape(
-                    "a pair class already has a loader identity or package declaration"
-                )
+                SemanticTastyLoadError::PairRootCollision { binary_name }
+                    if binary_name == base_name
             ));
             assert_eq!(store.checkpoint(), store_before);
             assert_eq!(resolver.session.checkpoint(), session_before);
@@ -5972,11 +6176,11 @@ mod tests {
             let repeated_error = resolver
                 .load_semantic_info_pair_for_member(&mut store, &base_name)
                 .expect_err("failed pair attempts never record reusable semantic proof");
+            assert_eq!(repeated_error.binary_name, base_name);
             assert!(matches!(
                 repeated_error.source,
-                SemanticTastyLoadError::UnsupportedShape(
-                    "a pair class already has a loader identity or package declaration"
-                )
+                SemanticTastyLoadError::PairRootCollision { binary_name }
+                    if binary_name == base_name
             ));
             assert!(!resolver.semantic_info_pair_loaded);
 

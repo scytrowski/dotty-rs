@@ -244,6 +244,73 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
             with self.assertRaises(gate.ReceiptError):
                 gate.validate_recorded_cohort_receipt(root)
 
+    def cohort_reports(self, receipt_rows, directory: Path, overrides=None):
+        overrides = overrides or {}
+        header = "method\towner_path\tmethod_name\tline\trange\tmodifiers\tstatus\tactual_result\tsource_tree"
+        reports = []
+        for cohort in ("main", "analysis"):
+            cohort_rows = [row for row in receipt_rows if row["cohort"] == cohort]
+            for pass_name in ("first", "second"):
+                lines = [header]
+                for row in cohort_rows:
+                    identity = row["identity"]
+                    status, actual = overrides.get(identity, (row[f"{pass_name}_status"], row["actual_result"]))
+                    lines.append("\t".join((identity, "", "", "0", "", "", status, actual, row["source_tree"])))
+                path = directory / f"{cohort}-{pass_name}.tsv"
+                path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                reports.append(path)
+        return reports
+
+    def test_live_cohort_receipt_rejects_wrong_schema_and_root_set(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        baseline = repository / "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv"
+        receipt_rows = gate.read_tsv(baseline)[1]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reports = self.cohort_reports(receipt_rows, root)
+            output = root / "live.tsv"
+            bad_schema = root / "bad-schema.tsv"
+            lines = baseline.read_text(encoding="utf-8").splitlines()
+            lines[0] = lines[0].replace("cohort", "kind", 1)
+            bad_schema.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(gate.ReceiptError, "wrong schema"):
+                gate.validate_cohorts(repository, reports, output, bad_schema)
+
+            bad_roots = root / "bad-roots.tsv"
+            lines = baseline.read_text(encoding="utf-8").splitlines()
+            lines[1] = lines[1].replace("Option.scala#tree=118", "Option.scala#tree=999", 1)
+            bad_roots.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(gate.ReceiptError, "root set/order"):
+                gate.validate_cohorts(repository, reports, output, bad_roots)
+
+    def test_live_cohort_receipt_accepts_exact_per_root_evidence(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        baseline = repository / "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv"
+        receipt_rows = gate.read_tsv(baseline)[1]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reports = self.cohort_reports(receipt_rows, root)
+            output = root / "live.tsv"
+            gate.validate_cohorts(repository, reports, output, baseline)
+            self.assertEqual(gate.read_tsv(output), gate.read_tsv(baseline))
+
+    def test_live_cohort_receipt_reports_unexpected_per_root_drift(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        baseline = repository / "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv"
+        receipt_rows = gate.read_tsv(baseline)[1]
+        changed_root = "library/src/scala/util/Either.scala#tree=84"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reports = self.cohort_reports(
+                receipt_rows,
+                root,
+                {changed_root: ("typed", "scala.util.Either[typeparam#0,typeparam#1]")},
+            )
+            with self.assertRaisesRegex(gate.ReceiptError, changed_root):
+                gate.validate_cohorts(
+                    repository, reports, root / "live.tsv", baseline
+                )
+
     def test_rust_receipt_rejects_mismatched_tested_revision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             log = self.write_log(Path(directory) / "rust.log", "")
