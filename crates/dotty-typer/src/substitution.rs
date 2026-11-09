@@ -207,6 +207,17 @@ impl SourceTyper<'_> {
         &self,
         class: SymbolId,
     ) -> Result<Vec<SymbolId>, TyperError> {
+        Ok(self
+            .source_class_type_parameter_metadata(class)?
+            .into_iter()
+            .map(|parameter| parameter.symbol)
+            .collect())
+    }
+
+    pub(super) fn source_class_type_parameter_metadata(
+        &self,
+        class: SymbolId,
+    ) -> Result<Vec<dotty_core::ClassTypeParameter>, TyperError> {
         if !self.store.symbols.contains(class) {
             return Err(TyperError::UnknownSymbol { symbol: class });
         }
@@ -273,16 +284,14 @@ impl SourceTyper<'_> {
 
         let mut parameters = Vec::with_capacity(constructor.type_params.len());
         for parameter_tree in &constructor.type_params {
-            let valid_tree = self
-                .arena
-                .try_get(*parameter_tree)
-                .is_some_and(|node| matches!(node.kind, TreeKind::TypeDef(_)));
-            if !valid_tree {
+            let Some(TreeKind::TypeDef(parameter_definition)) =
+                self.arena.try_get(*parameter_tree).map(|node| &node.kind)
+            else {
                 return Err(TyperError::MalformedSourceClassTypeParameters {
                     class,
                     tree_index: parameter_tree.index(),
                 });
-            }
+            };
             let parameter = self.index.symbol_at(source, *parameter_tree).ok_or(
                 TyperError::ClassTypeParameterSymbolMissing {
                     class,
@@ -292,18 +301,40 @@ impl SourceTyper<'_> {
             if !self.store.symbols.contains(parameter)
                 || self.store.symbols.get(parameter).kind != SymbolKind::TypeParameter
                 || self.store.symbols.get(parameter).owner != Some(class)
+                || parameters
+                    .iter()
+                    .any(|existing: &dotty_core::ClassTypeParameter| existing.symbol == parameter)
             {
                 return Err(TyperError::ClassTypeParameterSymbolMissing {
                     class,
                     tree_index: parameter_tree.index(),
                 });
             }
-            parameters.push(parameter);
+            parameters.push(dotty_core::ClassTypeParameter {
+                symbol: parameter,
+                variance: Some(
+                    parameter_definition
+                        .variance
+                        .unwrap_or(dotty_core::Variance::Invariant),
+                ),
+            });
         }
         Ok(parameters)
     }
 
     pub(super) fn external_class_type_parameters(&self, class: SymbolId) -> Option<Vec<SymbolId>> {
+        Some(
+            self.external_class_type_parameter_metadata(class)?
+                .into_iter()
+                .map(|parameter| parameter.symbol)
+                .collect(),
+        )
+    }
+
+    pub(super) fn external_class_type_parameter_metadata(
+        &self,
+        class: SymbolId,
+    ) -> Option<Vec<dotty_core::ClassTypeParameter>> {
         if !self.store.symbols.contains(class) {
             return None;
         }
@@ -328,7 +359,13 @@ impl SourceTyper<'_> {
         }
         let resolver = &self.resolver;
         let parameters = resolver.class_type_parameters(self.store, class)?;
-        for &symbol in &parameters {
+        let mut seen = Vec::with_capacity(parameters.len());
+        for parameter in &parameters {
+            let symbol = parameter.symbol;
+            if seen.contains(&symbol) {
+                return None;
+            }
+            seen.push(symbol);
             if !self.store.symbols.contains(symbol) {
                 return None;
             }
@@ -336,6 +373,8 @@ impl SourceTyper<'_> {
             if member.kind != SymbolKind::TypeParameter
                 || member.owner != Some(class)
                 || !matches!(member.info, SymbolInfo::Complete(_))
+                || member.origin != declaration.origin
+                || !scope.lookup_all(&member.name).contains(&symbol)
             {
                 return None;
             }

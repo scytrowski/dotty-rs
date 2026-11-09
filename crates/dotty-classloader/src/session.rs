@@ -2,7 +2,7 @@ use crate::binary_name::BinaryName;
 use crate::class_path::ClassOrigin;
 use crate::packages::PackageRegistry;
 use crate::symbol::ClassfileMetadata;
-use dotty_core::{Symbol, SymbolId};
+use dotty_core::{ClassTypeParameter, Symbol, SymbolId};
 use std::collections::HashMap;
 
 /// The `SymbolId`-allocating state that must be shared, by value, across
@@ -75,8 +75,8 @@ pub struct LoadingSession {
     pub(crate) packages: PackageRegistry,
     pub(crate) metadata: HashMap<SymbolId, ClassfileMetadata>,
     metadata_order: Vec<SymbolId>,
-    pub(crate) class_type_parameters: HashMap<SymbolId, Vec<SymbolId>>,
-    class_type_parameters_undo: Vec<(SymbolId, Option<Vec<SymbolId>>)>,
+    pub(crate) class_type_parameters: HashMap<SymbolId, Vec<ClassTypeParameter>>,
+    class_type_parameters_undo: Vec<(SymbolId, Option<Vec<ClassTypeParameter>>)>,
     pub(crate) origins: HashMap<SymbolId, ClassOrigin>,
     origin_undo: Vec<(SymbolId, Option<ClassOrigin>)>,
     symbol_undo: Vec<(SymbolId, Symbol)>,
@@ -211,7 +211,7 @@ impl LoadingSession {
     pub(crate) fn record_class_type_parameters(
         &mut self,
         class: SymbolId,
-        parameters: Vec<SymbolId>,
+        parameters: Vec<ClassTypeParameter>,
     ) {
         if self.class_type_parameters.get(&class) == Some(&parameters) {
             return;
@@ -416,16 +416,24 @@ mod tests {
         let replacement = symbol(&mut store, "B");
         let new_class = symbol(&mut store, "NewGeneric");
         let mut session = LoadingSession::new();
-        session.record_class_type_parameters(class, vec![first]);
+        let first_parameter = ClassTypeParameter {
+            symbol: first,
+            variance: Some(dotty_core::Variance::Invariant),
+        };
+        let replacement_parameter = ClassTypeParameter {
+            symbol: replacement,
+            variance: Some(dotty_core::Variance::Covariant),
+        };
+        session.record_class_type_parameters(class, vec![first_parameter]);
         let existing = session.checkpoint();
 
-        session.record_class_type_parameters(class, vec![replacement]);
-        session.record_class_type_parameters(new_class, vec![replacement]);
+        session.record_class_type_parameters(class, vec![replacement_parameter]);
+        session.record_class_type_parameters(new_class, vec![replacement_parameter]);
         session.rollback_to(&mut store, existing);
 
         assert_eq!(
             session.class_type_parameters.get(&class),
-            Some(&vec![first])
+            Some(&vec![first_parameter])
         );
         assert!(!session.class_type_parameters.contains_key(&new_class));
     }
@@ -474,7 +482,11 @@ mod tests {
                 annotations: Vec::new(),
             },
         );
-        session.record_class_type_parameters(class, vec![parameter]);
+        let parameter_metadata = ClassTypeParameter {
+            symbol: parameter,
+            variance: Some(dotty_core::Variance::Invariant),
+        };
+        session.record_class_type_parameters(class, vec![parameter_metadata]);
 
         let packages = session.packages.take_packages();
 
@@ -493,7 +505,7 @@ mod tests {
         );
         assert_eq!(
             session.class_type_parameters.get(&class),
-            Some(&vec![parameter])
+            Some(&vec![parameter_metadata])
         );
     }
 }

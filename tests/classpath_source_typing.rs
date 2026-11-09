@@ -7,8 +7,9 @@ use dotty_classloader::classloader::{
 use dotty_core::ast::{TreeKind, Untyped};
 use dotty_core::types::{TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
-    Definitions, Name, Namespace, Packages, ResolutionError, ResolverCheckpoint, SemanticStore,
-    SourceId, SourceText, SymbolId, SymbolInfo, SymbolResolver, TreeId,
+    ClassTypeParameter, Definitions, Name, Namespace, Packages, ResolutionError,
+    ResolverCheckpoint, SemanticStore, SourceId, SourceText, SymbolId, SymbolInfo, SymbolResolver,
+    TreeId,
 };
 use dotty_lexer::ContextualScanner;
 use dotty_namer::name_compilation_unit;
@@ -667,7 +668,7 @@ impl<E: ClassPathEntry> SymbolResolver for RecordingResolver<E> {
         &self,
         store: &SemanticStore,
         class: SymbolId,
-    ) -> Option<Vec<SymbolId>> {
+    ) -> Option<Vec<ClassTypeParameter>> {
         self.inner
             .as_ref()
             .unwrap()

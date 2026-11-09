@@ -6,9 +6,9 @@ use crate::error::ClassLoadError;
 use crate::loader::{ClassLoadProfile, ClassLoader, SemanticTastyLoadError};
 use crate::session::{LoadingSession, SessionCheckpoint};
 use dotty_core::{
-    Definitions, MemberRequest, MemberSelector, MemberSpace, MethodKind, Name, Namespace, Packages,
-    ResolutionError, ResolverCheckpoint, SemanticStore, Symbol, SymbolId, SymbolInfo, SymbolKind,
-    SymbolOrigin, SymbolResolver, Type, TypeId, TypeRefTarget,
+    ClassTypeParameter, Definitions, MemberRequest, MemberSelector, MemberSpace, MethodKind, Name,
+    Namespace, Packages, ResolutionError, ResolverCheckpoint, SemanticStore, Symbol, SymbolId,
+    SymbolInfo, SymbolKind, SymbolOrigin, SymbolResolver, Type, TypeId, TypeRefTarget,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
@@ -2282,7 +2282,7 @@ impl<E: ClassPathEntry> SymbolResolver for ClasspathSymbolResolver<E> {
         &self,
         _store: &SemanticStore,
         class: SymbolId,
-    ) -> Option<Vec<SymbolId>> {
+    ) -> Option<Vec<ClassTypeParameter>> {
         self.session.class_type_parameters.get(&class).cloned()
     }
 
@@ -8592,7 +8592,7 @@ mod tests {
     struct LiveClassReceipt {
         class: Option<SymbolId>,
         rolled_back_class: Option<SymbolId>,
-        type_parameters: Option<Vec<SymbolId>>,
+        type_parameters: Option<Vec<ClassTypeParameter>>,
         injected_failure: bool,
         rollback_cleared_resolver_state: bool,
         retained_after_handoff: bool,
@@ -8635,7 +8635,7 @@ mod tests {
             &self,
             store: &SemanticStore,
             class: SymbolId,
-        ) -> Option<Vec<SymbolId>> {
+        ) -> Option<Vec<ClassTypeParameter>> {
             self.inner.class_type_parameters(store, class)
         }
 

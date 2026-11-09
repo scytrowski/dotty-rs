@@ -6,7 +6,8 @@ use std::fmt;
 use dotty_core::Namespace;
 use dotty_core::types::{ClassInfo, Type, TypeRefTarget};
 use dotty_core::{
-    Constant, ResolutionError, ScopeId, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, TypeId,
+    ClassTypeParameter, Constant, ResolutionError, ScopeId, SymbolId, SymbolInfo, SymbolKind,
+    SymbolOrigin, TypeId, Variance,
 };
 
 use crate::types::{SymbolInfoState, TypeNormalizeError, TypeNormalizer};
@@ -67,6 +68,8 @@ pub enum TypeRelationError {
     ParentTypeAdaptation { symbol: SymbolId, error: TyperError },
     /// An external applied generic class has no modeled parameter order.
     ExternalGenericInstantiationDeferred { class: SymbolId },
+    /// A class's canonical ordered parameter metadata is missing or malformed.
+    ClassTypeParameterMetadataUnavailable { class: SymbolId },
     /// A parent graph revisits a class along one inheritance path.
     InheritanceCycle { symbol: SymbolId },
     /// The nominal inheritance path exceeds [`MAX_TYPE_RELATION_DEPTH`].
@@ -117,26 +120,64 @@ impl SourceTyper<'_> {
     pub fn conforms(&mut self, found: TypeId, expected: TypeId) -> Result<bool, TypeRelationError> {
         self.is_subtype(found, expected)
     }
+
+    #[cfg(test)]
+    pub(crate) fn subtype_sequence_with_cache_size(
+        &mut self,
+        pairs: &[(TypeId, TypeId)],
+    ) -> Result<(Vec<bool>, usize), TypeRelationError> {
+        let mut relation = TypeRelation::new(self);
+        let mut results = Vec::with_capacity(pairs.len());
+        for (found, expected) in pairs {
+            results.push(relation.is_subtype(*found, *expected)?);
+        }
+        Ok((results, relation.subtype_pairs.len()))
+    }
 }
 
 struct TypeRelation<'typer, 'store> {
     typer: &'typer mut SourceTyper<'store>,
+    subtype_pairs: HashMap<(TypeId, TypeId), bool>,
     equivalent_pairs: HashMap<(TypeId, TypeId), bool>,
     active_equivalent_pairs: HashSet<(TypeId, TypeId)>,
     union_comparisons: usize,
+    subtype_depth: usize,
 }
 
 impl<'typer, 'store> TypeRelation<'typer, 'store> {
     fn new(typer: &'typer mut SourceTyper<'store>) -> Self {
         Self {
             typer,
+            subtype_pairs: HashMap::new(),
             equivalent_pairs: HashMap::new(),
             active_equivalent_pairs: HashSet::new(),
             union_comparisons: 0,
+            subtype_depth: 0,
         }
     }
 
     fn is_subtype(&mut self, found: TypeId, expected: TypeId) -> Result<bool, TypeRelationError> {
+        if self.subtype_depth >= MAX_TYPE_RELATION_DEPTH {
+            return Err(TypeRelationError::TooDeep);
+        }
+        let pair = (found, expected);
+        if let Some(is_subtype) = self.subtype_pairs.get(&pair) {
+            return Ok(*is_subtype);
+        }
+        self.subtype_depth += 1;
+        let result = self.is_subtype_inner(found, expected);
+        self.subtype_depth -= 1;
+        if let Ok(is_subtype) = result {
+            self.subtype_pairs.insert(pair, is_subtype);
+        }
+        result
+    }
+
+    fn is_subtype_inner(
+        &mut self,
+        found: TypeId,
+        expected: TypeId,
+    ) -> Result<bool, TypeRelationError> {
         let type_parameter = |ty: TypeId| match self.typer.store.types.try_get(ty) {
             Some(Type::TypeRef {
                 target: TypeRefTarget::Symbol(symbol),
@@ -290,7 +331,7 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         self.reject_unmodeled_external_generic(&expected_view)?;
         self.check_view_arity(&found_view, &expected_view, found, expected)?;
         if found_view.class == expected_view.class {
-            return self.equivalent_class_views(&found_view, &expected_view, 0);
+            return self.subtype_class_views(&found_view, &expected_view, 0);
         }
         self.inherited_subtype(found_view, expected_view, expected)
     }
@@ -695,7 +736,7 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
 
                 if parent_view.class == expected.class {
                     self.check_view_arity(&parent_view, &expected, parent, expected_type)?;
-                    if self.equivalent_class_views(&parent_view, &expected, 0)? {
+                    if self.subtype_class_views(&parent_view, &expected, 0)? {
                         matched_expected = true;
                     }
                 }
@@ -730,7 +771,7 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         Ok(matched_expected)
     }
 
-    fn equivalent_class_views(
+    fn subtype_class_views(
         &mut self,
         left: &ClassView,
         right: &ClassView,
@@ -745,8 +786,69 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
                 expected: right.ty,
             });
         }
-        for (left, right) in left.args.iter().zip(&right.args) {
-            if !self.equivalent(*left, *right, depth + 1)? {
+        if depth >= MAX_TYPE_RELATION_DEPTH {
+            return Err(TypeRelationError::TooDeep);
+        }
+        let parameter_count = if self.typer.is_current_source_symbol(left.class) {
+            self.typer
+                .source_class_type_parameter_metadata(left.class)
+                .map_err(
+                    |_| TypeRelationError::ClassTypeParameterMetadataUnavailable {
+                        class: left.class,
+                    },
+                )?
+                .len()
+        } else if self.typer.store.symbols.get(left.class).origin == SymbolOrigin::Builtin {
+            0
+        } else {
+            let info = self.class_info(left.class)?;
+            self.typer
+                .store
+                .scopes
+                .get(info.declarations)
+                .entered_symbols()
+                .filter(|symbol| {
+                    self.typer.store.symbols.contains(*symbol)
+                        && self.typer.store.symbols.get(*symbol).kind == SymbolKind::TypeParameter
+                        && self.typer.store.symbols.get(*symbol).owner == Some(left.class)
+                })
+                .count()
+        };
+        if !left.applied && parameter_count != 0 {
+            return Err(TypeRelationError::UnsupportedType {
+                found: left.ty,
+                expected: right.ty,
+            });
+        }
+        if left.applied && parameter_count != left.args.len() {
+            return Err(TypeRelationError::UnsupportedType {
+                found: left.ty,
+                expected: right.ty,
+            });
+        }
+        let parameters = if parameter_count == 0 {
+            Vec::new()
+        } else {
+            self.class_type_parameter_metadata(left.class)?
+        };
+        if parameters.len() != left.args.len() {
+            return Err(TypeRelationError::ClassTypeParameterMetadataUnavailable {
+                class: left.class,
+            });
+        }
+        for ((left_arg, right_arg), parameter) in left.args.iter().zip(&right.args).zip(parameters)
+        {
+            let related = match parameter.variance {
+                Some(Variance::Covariant) => self.is_subtype(*left_arg, *right_arg)?,
+                Some(Variance::Contravariant) => self.is_subtype(*right_arg, *left_arg)?,
+                Some(Variance::Invariant) => self.equivalent(*left_arg, *right_arg, depth + 1)?,
+                None => {
+                    return Err(TypeRelationError::ClassTypeParameterMetadataUnavailable {
+                        class: left.class,
+                    });
+                }
+            };
+            if !related {
                 return Ok(false);
             }
         }
@@ -765,6 +867,21 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         }
 
         self.equivalent(left_constructor, right_constructor, depth + 1)
+    }
+
+    fn class_type_parameter_metadata(
+        &self,
+        class: SymbolId,
+    ) -> Result<Vec<ClassTypeParameter>, TypeRelationError> {
+        if self.typer.is_current_source_symbol(class) {
+            return self
+                .typer
+                .source_class_type_parameter_metadata(class)
+                .map_err(|_| TypeRelationError::ClassTypeParameterMetadataUnavailable { class });
+        }
+        self.typer
+            .external_class_type_parameter_metadata(class)
+            .ok_or(TypeRelationError::ExternalGenericInstantiationDeferred { class })
     }
 
     fn type_constructor(&self, ty: TypeId) -> Result<TypeId, TypeRelationError> {

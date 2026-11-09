@@ -1068,7 +1068,7 @@ mod tests {
             &self,
             store: &SemanticStore,
             class: SymbolId,
-        ) -> Option<Vec<SymbolId>> {
+        ) -> Option<Vec<dotty_core::ClassTypeParameter>> {
             self.inner.class_type_parameters(store, class)
         }
 
@@ -2644,6 +2644,269 @@ mod tests {
     }
 
     #[test]
+    fn inherited_generic_parent_substitutes_child_parameter_before_variance() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Base; class Sub extends Base; class Parent[+A]; class Child[B] extends Parent[B]",
+        );
+        let base = class_symbol(&parsed, &store, &index, source, "Base");
+        let sub = class_symbol(&parsed, &store, &index, source, "Sub");
+        let parent = class_symbol(&parsed, &store, &index, source, "Parent");
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        for class in [base, sub, parent, child] {
+            typer.complete_symbol(class).unwrap();
+        }
+        let base_type = nominal_type_ref(typer.store, definitions, base);
+        let sub_type = nominal_type_ref(typer.store, definitions, sub);
+        let child_sub = applied_class_type(typer.store, definitions, child, &[sub_type]);
+        let parent_base = applied_class_type(typer.store, definitions, parent, &[base_type]);
+        let child_base = applied_class_type(typer.store, definitions, child, &[base_type]);
+        let parent_sub = applied_class_type(typer.store, definitions, parent, &[sub_type]);
+        assert!(typer.is_subtype(child_sub, parent_base).unwrap());
+        assert!(!typer.is_subtype(child_base, parent_sub).unwrap());
+    }
+
+    #[test]
+    fn scala39_tasty_function1_variance_controls_bounded_nominal_subtyping() {
+        use dotty_classloader::classloader::{
+            ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, LoadingSession,
+        };
+
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Base; class Sub extends Base; class Use");
+        let base = class_symbol(&parsed, &store, &index, source, "Base");
+        let sub = class_symbol(&parsed, &store, &index, source, "Sub");
+        for class in [base, sub] {
+            SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            )
+            .complete_symbol(class)
+            .unwrap();
+        }
+        let library_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-tasty/tests/fixtures/scala3-library");
+        let mut resolver = ClasspathSymbolResolver::new(
+            CompositeClassPath::new(vec![
+                Box::new(DirectoryClassPath::new(library_root)),
+                Box::new(JavaObjectStubPath),
+            ]),
+            definitions,
+            LoadingSession::with_packages(packages.snapshot()),
+        );
+        let scala_package = resolver
+            .resolve_package(&mut store, &["scala"])
+            .unwrap()
+            .unwrap();
+        let scala_prefix = store.types.alloc(Type::TermRef {
+            prefix: definitions.no_prefix,
+            target: TermRefTarget::Symbol(scala_package),
+        });
+        let function1_request = dotty_core::MemberRequest {
+            prefix: scala_prefix,
+            name: Name::new(store.names.intern("Function1"), Namespace::Type),
+            selector: dotty_core::MemberSelector::Unique,
+            space: dotty_core::MemberSpace::Prefix,
+        };
+        let function1 = resolver
+            .resolve_member(&mut store, &function1_request)
+            .unwrap()
+            .expect("pinned Scala Function1 should resolve from TASTy");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+        let base_type = nominal_type_ref(typer.store, definitions, base);
+        let sub_type = nominal_type_ref(typer.store, definitions, sub);
+        let base_sub =
+            applied_class_type(typer.store, definitions, function1, &[base_type, sub_type]);
+        let sub_base =
+            applied_class_type(typer.store, definitions, function1, &[sub_type, base_type]);
+        assert!(typer.is_subtype(base_sub, sub_base).unwrap());
+        assert!(!typer.is_subtype(sub_base, base_sub).unwrap());
+    }
+
+    #[test]
+    fn explicitly_completed_option_none_some_views_conform_through_covariance() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Base; class Sub extends Base; class Option[+A]; class Some[+A] extends Option[A]; class None$ extends Option[Nothing]",
+        );
+        let base = class_symbol(&parsed, &store, &index, source, "Base");
+        let sub = class_symbol(&parsed, &store, &index, source, "Sub");
+        let option = class_symbol(&parsed, &store, &index, source, "Option");
+        let some = class_symbol(&parsed, &store, &index, source, "Some");
+        let none = class_symbol(&parsed, &store, &index, source, "None$");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        for class in [base, sub, option, some, none] {
+            typer.complete_symbol(class).unwrap();
+        }
+        let base_type = nominal_type_ref(typer.store, definitions, base);
+        let sub_type = nominal_type_ref(typer.store, definitions, sub);
+        let none_type = nominal_type_ref(typer.store, definitions, none);
+        let some_sub = applied_class_type(typer.store, definitions, some, &[sub_type]);
+        let option_base = applied_class_type(typer.store, definitions, option, &[base_type]);
+        assert_ne!(none, option, "None$ remains a distinct canonical class");
+        assert!(typer.is_subtype(none_type, option_base).unwrap());
+        assert!(typer.is_subtype(some_sub, option_base).unwrap());
+        let union = typer.store.types.alloc(Type::Or {
+            left: none_type,
+            right: some_sub,
+        });
+        assert!(typer.is_subtype(union, option_base).unwrap());
+    }
+
+    #[test]
+    fn source_class_parameter_variance_controls_bounded_nominal_subtyping() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Base; class Sub extends Base; class Co[+A]; trait Contra[-A]; class Inv[A]; class Mix[+A, -B, C]",
+        );
+        let base = class_symbol(&parsed, &store, &index, source, "Base");
+        let sub = class_symbol(&parsed, &store, &index, source, "Sub");
+        let co = class_symbol(&parsed, &store, &index, source, "Co");
+        let contra = class_symbol(&parsed, &store, &index, source, "Contra");
+        let inv = class_symbol(&parsed, &store, &index, source, "Inv");
+        let mix = class_symbol(&parsed, &store, &index, source, "Mix");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        for class in [base, sub, co, contra, inv, mix] {
+            typer.complete_symbol(class).unwrap();
+        }
+        let metadata = |class| typer.source_class_type_parameter_metadata(class).unwrap();
+        let co_parameter = metadata(co)[0];
+        let contra_parameter = metadata(contra)[0];
+        let inv_parameter = metadata(inv)[0];
+        assert_eq!(typer.store.symbols.get(co_parameter.symbol).owner, Some(co));
+        assert_eq!(co_parameter.variance, Some(dotty_core::Variance::Covariant));
+        assert_eq!(
+            contra_parameter.variance,
+            Some(dotty_core::Variance::Contravariant)
+        );
+        assert_eq!(
+            inv_parameter.variance,
+            Some(dotty_core::Variance::Invariant)
+        );
+        let mixed = typer.source_class_type_parameter_metadata(mix).unwrap();
+        assert_eq!(mixed.len(), 3);
+        assert_eq!(
+            mixed
+                .iter()
+                .map(|parameter| parameter.variance)
+                .collect::<Vec<_>>(),
+            [
+                Some(dotty_core::Variance::Covariant),
+                Some(dotty_core::Variance::Contravariant),
+                Some(dotty_core::Variance::Invariant),
+            ]
+        );
+        assert!(
+            mixed
+                .iter()
+                .all(|parameter| { typer.store.symbols.get(parameter.symbol).owner == Some(mix) })
+        );
+
+        let sub_type = nominal_type_ref(typer.store, definitions, sub);
+        let base_type = nominal_type_ref(typer.store, definitions, base);
+        let co_sub = applied_class_type(typer.store, definitions, co, &[sub_type]);
+        let co_base = applied_class_type(typer.store, definitions, co, &[base_type]);
+        assert!(typer.is_subtype(co_sub, co_base).unwrap());
+        assert!(!typer.is_subtype(co_base, co_sub).unwrap());
+
+        let contra_sub = applied_class_type(typer.store, definitions, contra, &[sub_type]);
+        let contra_base = applied_class_type(typer.store, definitions, contra, &[base_type]);
+        assert!(typer.is_subtype(contra_base, contra_sub).unwrap());
+        assert!(!typer.is_subtype(contra_sub, contra_base).unwrap());
+
+        let inv_sub = applied_class_type(typer.store, definitions, inv, &[sub_type]);
+        let inv_base = applied_class_type(typer.store, definitions, inv, &[base_type]);
+        assert!(typer.is_subtype(inv_sub, inv_sub).unwrap());
+        assert!(!typer.is_subtype(inv_sub, inv_base).unwrap());
+    }
+
+    #[test]
+    fn subtype_memoization_bounds_shared_nominal_dags_in_both_variance_directions() {
+        const DEPTH: usize = 32;
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Base; class Sub extends Base; class Pair[+A, +B]; trait Contra[-A, -B]",
+        );
+        let base = class_symbol(&parsed, &store, &index, source, "Base");
+        let sub = class_symbol(&parsed, &store, &index, source, "Sub");
+        let pair = class_symbol(&parsed, &store, &index, source, "Pair");
+        let contra = class_symbol(&parsed, &store, &index, source, "Contra");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        for class in [base, sub, pair, contra] {
+            typer.complete_symbol(class).unwrap();
+        }
+
+        let base_type = nominal_type_ref(typer.store, definitions, base);
+        let sub_type = nominal_type_ref(typer.store, definitions, sub);
+        let mut found = sub_type;
+        let mut expected = base_type;
+        for _ in 0..DEPTH {
+            found = applied_class_type(typer.store, definitions, pair, &[found, found]);
+            expected = applied_class_type(typer.store, definitions, pair, &[expected, expected]);
+        }
+        let covariant_found = applied_class_type(typer.store, definitions, pair, &[found, found]);
+        let covariant_expected =
+            applied_class_type(typer.store, definitions, pair, &[expected, expected]);
+        let contravariant_found =
+            applied_class_type(typer.store, definitions, contra, &[expected, expected]);
+        let contravariant_expected =
+            applied_class_type(typer.store, definitions, contra, &[found, found]);
+
+        // Keep both orders in one relation instance. A symmetric cache would
+        // incorrectly reuse the first successful pair for its failed reverse.
+        let (results, cached_pairs) = typer
+            .subtype_sequence_with_cache_size(&[
+                (covariant_found, covariant_expected),
+                (covariant_expected, covariant_found),
+                (contravariant_found, contravariant_expected),
+                (contravariant_expected, contravariant_found),
+            ])
+            .unwrap();
+        assert_eq!(results, [true, false, true, false]);
+        assert!(
+            cached_pairs <= DEPTH * 2 + 16,
+            "shared nominal DAG required {cached_pairs} completed directional pairs at depth {DEPTH}"
+        );
+    }
+
+    #[test]
     fn missing_class_info_is_reported_without_implicit_completion() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class A; class B");
@@ -3384,7 +3647,16 @@ mod tests {
     }
 
     #[test]
-    fn union_relation_rejects_cycles_and_excessive_nesting() {
+    fn union_relation_rejects_cycles_and_excessive_depth_but_memoizes_shared_nodes() {
+        fn full_union(store: &mut SemanticStore, leaves: &[TypeId], depth: usize) -> TypeId {
+            if depth == 0 {
+                return leaves[depth % leaves.len()];
+            }
+            let left = full_union(store, leaves, depth - 1);
+            let right = full_union(store, leaves, depth - 1);
+            store.types.alloc(Type::Or { left, right })
+        }
+
         let (arena, mut store, packages, definitions) = setup();
         let reserved = store.types.reserve();
         let recursive_union = reserved.id();
@@ -3412,6 +3684,7 @@ mod tests {
                 right: wide,
             });
         }
+        let full = full_union(&mut store, &[definitions.int, definitions.boolean], 13);
         let index = SourceSemanticIndex::new();
         let source = SourceId::from_index(0);
         let mut typer =
@@ -3425,8 +3698,9 @@ mod tests {
             typer.is_subtype(nested, definitions.any_type),
             Err(TypeRelationError::TooDeep)
         ));
+        assert!(typer.is_subtype(wide, definitions.any_type).unwrap());
         assert!(matches!(
-            typer.is_subtype(wide, definitions.any_type),
+            typer.is_subtype(full, definitions.any_type),
             Err(TypeRelationError::TooManyUnionRelations)
         ));
     }

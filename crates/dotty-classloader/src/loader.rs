@@ -26,10 +26,10 @@ use dotty_classfile::signature::{
 };
 use dotty_core::resolution::SymbolResolver;
 use dotty_core::{
-    Annotation as CoreAnnotation, ClassInfo, Definitions, ErrorType, MemberRequest, MemberSelector,
-    MemberSpace, MethodKind, MethodParam, MethodType, Name, Namespace, PolyType, Scope, ScopeId,
-    SemanticStore, Symbol, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolLinks,
-    SymbolOrigin, TermName, Type, TypeId, TypeName, TypeParam, Visibility,
+    Annotation as CoreAnnotation, ClassInfo, ClassTypeParameter, Definitions, ErrorType,
+    MemberRequest, MemberSelector, MemberSpace, MethodKind, MethodParam, MethodType, Name,
+    Namespace, PolyType, Scope, ScopeId, SemanticStore, Symbol, SymbolFlags, SymbolId, SymbolInfo,
+    SymbolKind, SymbolLinks, SymbolOrigin, TermName, Type, TypeId, TypeName, TypeParam, Visibility,
 };
 use dotty_tasty_unpickler::tasty_unpickler::{
     TastySemanticIndex, TastySession, TastyUnpickler, UnpickleError,
@@ -5683,7 +5683,13 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         if let Some(class_symbol) = class_symbol {
             self.session.record_class_type_parameters(
                 class_symbol,
-                entered.iter().map(|(symbol, _)| *symbol).collect(),
+                entered
+                    .iter()
+                    .map(|(symbol, _)| ClassTypeParameter {
+                        symbol: *symbol,
+                        variance: Some(dotty_core::Variance::Invariant),
+                    })
+                    .collect(),
             );
         }
 
@@ -6197,8 +6203,29 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .map(|symbol| self.type_ref(symbol))
             .collect::<Vec<_>>();
         if let Some(class_symbol) = class_symbol {
+            let parameter_metadata = symbols
+                .iter()
+                .zip(parameters)
+                .map(|(symbol, parameter)| {
+                    let variance = parameter
+                        .bounds_supported
+                        .then_some(match parameter.variance {
+                            Some(tag) if tag == dotty_tasty::tasty::COVARIANT_TAG => {
+                                dotty_core::Variance::Covariant
+                            }
+                            Some(tag) if tag == dotty_tasty::tasty::CONTRAVARIANT_TAG => {
+                                dotty_core::Variance::Contravariant
+                            }
+                            Some(_) | None => dotty_core::Variance::Invariant,
+                        });
+                    ClassTypeParameter {
+                        symbol: *symbol,
+                        variance,
+                    }
+                })
+                .collect();
             self.session
-                .record_class_type_parameters(class_symbol, symbols.clone());
+                .record_class_type_parameters(class_symbol, parameter_metadata);
         }
 
         for (symbol, parameter) in symbols.into_iter().zip(parameters) {
@@ -14777,6 +14804,11 @@ mod tests {
             .expect("pinned artifacts should contain Some.tasty");
         let decoded_some = tasty_symbol::decode(some_resource.bytes(), &some_name)
             .expect("pinned Some.tasty should decode");
+        assert_eq!(
+            decoded_some.type_parameters[0].variance,
+            Some(dotty_tasty::tasty::COVARIANT_TAG),
+            "Scala 3.9 Some declares its class parameter covariant"
+        );
         assert!(decoded_some.parent_types.iter().any(|parent| {
             matches!(
                 parent,
@@ -14844,7 +14876,18 @@ mod tests {
             .clone();
         assert_eq!(some_parameters.len(), 1);
         assert_eq!(option_parameters.len(), 1);
-        for (class, parameter) in [(some, some_parameters[0]), (option, option_parameters[0])] {
+        assert_eq!(
+            some_parameters[0].variance,
+            Some(dotty_core::Variance::Covariant)
+        );
+        assert_eq!(
+            option_parameters[0].variance,
+            Some(dotty_core::Variance::Covariant)
+        );
+        for (class, parameter) in [
+            (some, some_parameters[0].symbol),
+            (option, option_parameters[0].symbol),
+        ] {
             let info = loader.store.symbols.get(parameter);
             assert_eq!(info.kind, SymbolKind::TypeParameter);
             assert_eq!(info.owner, Some(class));
@@ -14879,11 +14922,11 @@ mod tests {
         assert_eq!(args.len(), 1);
         assert_eq!(
             loader.store.types.get(args[0]).reference_symbol(),
-            Some(some_parameters[0]),
+            Some(some_parameters[0].symbol),
             "Some's Option parent argument must be its exact canonical class parameter"
         );
 
-        let class_parameter_ref = loader.type_ref(some_parameters[0]);
+        let class_parameter_ref = loader.type_ref(some_parameters[0].symbol);
         let out_of_range_parent = tasty_symbol::DecodedTastyType::Applied {
             tycon: Box::new(tasty_symbol::DecodedTastyType::Named(option_name.clone())),
             arguments: vec![tasty_symbol::DecodedTastyType::ClassParamRef(1)],
@@ -14928,6 +14971,44 @@ mod tests {
                 .get(&first_option),
             Some(&first_option_parameters)
         );
+    }
+
+    #[test]
+    fn pinned_scala39_option_and_some_publish_canonical_covariance() {
+        let library = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-tasty/tests/fixtures/scala3-library");
+        let java_home =
+            std::path::PathBuf::from(std::env::var_os("JAVA_HOME").expect("JDK 21 JAVA_HOME"));
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(crate::class_path::DirectoryClassPath::new(library)),
+            Box::new(crate::jdk_class_path::JdkClassPath::new(java_home.join("jmods")).unwrap()),
+        ]);
+        let mut loader = ClassLoader::with_definitions(
+            class_path,
+            &mut store,
+            definitions,
+            LoadingSession::new(),
+        );
+        let option = loader
+            .load_class(&BinaryName::from_internal("scala/Option"))
+            .unwrap();
+        let some = loader
+            .load_class(&BinaryName::from_internal("scala/Some"))
+            .unwrap();
+        for class in [option, some] {
+            let parameters = loader.session.class_type_parameters.get(&class).unwrap();
+            assert_eq!(parameters.len(), 1);
+            assert_eq!(
+                parameters[0].variance,
+                Some(dotty_core::Variance::Covariant)
+            );
+            assert_eq!(
+                loader.store.symbols.get(parameters[0].symbol).owner,
+                Some(class)
+            );
+        }
     }
 
     #[test]
