@@ -197,6 +197,7 @@ impl ResolverPhaseProfile {
 struct ResolverUndo {
     session: SessionCheckpoint,
     object_class: Symbol,
+    semantic_info_pair_loaded: bool,
 }
 
 #[derive(Debug)]
@@ -304,6 +305,9 @@ pub struct ClasspathSymbolResolver<E: ClassPathEntry> {
     package_failure_after_segment: Option<usize>,
     #[cfg(test)]
     inject_semantic_late_failure: bool,
+    #[cfg(test)]
+    inject_semantic_pair_adoption_failure: bool,
+    semantic_info_pair_loaded: bool,
 }
 
 impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
@@ -327,6 +331,9 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             package_failure_after_segment: None,
             #[cfg(test)]
             inject_semantic_late_failure: false,
+            #[cfg(test)]
+            inject_semantic_pair_adoption_failure: false,
+            semantic_info_pair_loaded: false,
         }
     }
 
@@ -539,6 +546,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         let transaction_started = self.collect_resolver_profile.then(Instant::now);
         let store_checkpoint = store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
+        let semantic_info_pair_loaded = self.semantic_info_pair_loaded;
         let object_class = store.symbols.get(self.definitions.object_class).clone();
         let rollback_before = self.resolver_profile.rollback.elapsed_ns;
         let operation_started = self.collect_resolver_profile.then(Instant::now);
@@ -549,21 +557,35 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         let result = match operation_result {
             Ok(Some(value)) => {
                 let changed = self.session.checkpoint() != session_checkpoint
+                    || self.semantic_info_pair_loaded != semantic_info_pair_loaded
                     || *store.symbols.get(self.definitions.object_class) != object_class;
                 if changed {
                     self.undo.push(ResolverUndo {
                         session: session_checkpoint,
                         object_class,
+                        semantic_info_pair_loaded,
                     });
                 }
                 Ok(Some(value))
             }
             Ok(None) => {
-                self.rollback_operation(store, store_checkpoint, session_checkpoint, object_class);
+                self.rollback_operation(
+                    store,
+                    store_checkpoint,
+                    session_checkpoint,
+                    object_class,
+                    semantic_info_pair_loaded,
+                );
                 Ok(None)
             }
             Err(error) => {
-                self.rollback_operation(store, store_checkpoint, session_checkpoint, object_class);
+                self.rollback_operation(
+                    store,
+                    store_checkpoint,
+                    session_checkpoint,
+                    object_class,
+                    semantic_info_pair_loaded,
+                );
                 Err(error)
             }
         };
@@ -590,9 +612,11 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         store_checkpoint: dotty_core::StoreCheckpoint,
         session_checkpoint: SessionCheckpoint,
         object_class: Symbol,
+        semantic_info_pair_loaded: bool,
     ) {
         let rollback_started = self.collect_resolver_profile.then(Instant::now);
         self.session.rollback_to(store, session_checkpoint);
+        self.semantic_info_pair_loaded = semantic_info_pair_loaded;
         *store.symbols.get_mut(self.definitions.object_class) = object_class;
         store.rollback_to(store_checkpoint);
         self.record_resolver_phase(ResolverProfilePhase::Rollback, rollback_started);
@@ -681,7 +705,8 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         let base_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
         let wrapped_name =
             BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
-        if requested == &base_name || requested == &wrapped_name {
+        if self.semantic_info_pair_loaded && (requested == &base_name || requested == &wrapped_name)
+        {
             let cached_base = self.session.identified.get(&base_name).copied();
             let cached_wrapped = self.session.identified.get(&wrapped_name).copied();
             let cached_pair_is_published = match (cached_base, cached_wrapped) {
@@ -727,6 +752,10 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         }
 
         let profile_started = self.collect_resolver_profile.then(Instant::now);
+        let store_checkpoint = store.checkpoint();
+        let session_checkpoint = self.session.checkpoint();
+        let object_class = store.symbols.get(self.definitions.object_class).clone();
+        let semantic_info_pair_loaded = self.semantic_info_pair_loaded;
         let class_path = self
             .class_path
             .take()
@@ -746,10 +775,81 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         self.class_path = Some(class_path);
         self.session = session;
         self.record_resolver_phase(ResolverProfilePhase::ClassLoadingInclusive, profile_started);
-        result.map_err(|source| SemanticMemberLoadFailure {
-            binary_name: requested.clone(),
-            source,
-        })
+        match result {
+            Ok(selected) => {
+                let roots = [&base_name, &wrapped_name];
+                let pair_is_adoptable = roots.iter().all(|name| {
+                    let Some(class) = self.session.identified.get(*name).copied() else {
+                        return false;
+                    };
+                    if !store.symbols.contains(class) {
+                        return false;
+                    }
+                    let Some(owner) = store.symbols.get(class).owner else {
+                        return false;
+                    };
+                    self.session.packages.scope_of(owner).is_some_and(|scope| {
+                        store.scopes.contains(scope)
+                            && store
+                                .scopes
+                                .get(scope)
+                                .lookup_all(&store.symbols.get(class).name)
+                                .contains(&class)
+                    })
+                });
+                let adopted = if pair_is_adoptable {
+                    let base = self.session.identified[&base_name];
+                    let wrapped = self.session.identified[&wrapped_name];
+                    let base_adopted = self.session.packages.track_existing_class(store, base);
+                    #[cfg(test)]
+                    let wrapped_adopted = !self.inject_semantic_pair_adoption_failure
+                        && self.session.packages.track_existing_class(store, wrapped);
+                    #[cfg(not(test))]
+                    let wrapped_adopted =
+                        self.session.packages.track_existing_class(store, wrapped);
+                    base_adopted && wrapped_adopted
+                } else {
+                    false
+                };
+                if adopted {
+                    self.semantic_info_pair_loaded = true;
+                    Ok(selected)
+                } else {
+                    // The pair loader has committed the package entries, but
+                    // they are not yet in this resolver's rollback journal.
+                    // Remove both links before rolling its session/store work
+                    // back, including the case where adopting the second link
+                    // fails after the first was journaled.
+                    for name in [&base_name, &wrapped_name] {
+                        if let Some(class) = self.session.identified.get(name).copied()
+                            && store.symbols.contains(class)
+                            && let Some(owner) = store.symbols.get(class).owner
+                            && let Some(scope) = self.session.packages.scope_of(owner)
+                            && store.scopes.contains(scope)
+                        {
+                            store.scopes.get_mut(scope).remove(class);
+                        }
+                    }
+                    self.rollback_operation(
+                        store,
+                        store_checkpoint,
+                        session_checkpoint,
+                        object_class,
+                        semantic_info_pair_loaded,
+                    );
+                    Err(SemanticMemberLoadFailure {
+                        binary_name: requested.clone(),
+                        source: SemanticTastyLoadError::UnsupportedShape(
+                            "the semantic pair's package entries could not be adopted by the resolver",
+                        ),
+                    })
+                }
+            }
+            Err(source) => Err(SemanticMemberLoadFailure {
+                binary_name: requested.clone(),
+                source,
+            }),
+        }
     }
 
     #[allow(dead_code)]
@@ -2342,6 +2442,7 @@ impl<E: ClassPathEntry> SymbolResolver for ClasspathSymbolResolver<E> {
             let undo = self.undo.pop().expect("length checked");
             self.session.rollback_to(store, undo.session);
             *store.symbols.get_mut(self.definitions.object_class) = undo.object_class;
+            self.semantic_info_pair_loaded = undo.semantic_info_pair_loaded;
         }
     }
 
@@ -2783,6 +2884,66 @@ mod tests {
         InfoPairAuditClassPath {
             fixture_root,
             jdk: JdkClassPath::new(java_home.join("jmods")).expect("JDK 21 jmods"),
+        }
+    }
+
+    struct InfoPairClassFileClassPath {
+        inner: InfoPairAuditClassPath,
+        base: Vec<u8>,
+        wrapped: Vec<u8>,
+    }
+
+    impl ClassPathEntry for InfoPairClassFileClassPath {
+        fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            let bytes = match name.as_internal() {
+                "me/cytrowski/tastyfixtures/semantic/InfoBase" => Some(&self.base),
+                "me/cytrowski/tastyfixtures/semantic/InfoWrapped" => Some(&self.wrapped),
+                _ => None,
+            };
+            if let Some(bytes) = bytes {
+                return Ok(Some(ClassResource::new(
+                    bytes.clone(),
+                    ClassFormat::Class,
+                    ClassOrigin::Directory(PathBuf::from("<classfile-info-pair>")),
+                )));
+            }
+            self.inner.find_class(name)
+        }
+
+        fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            self.inner.contains_package(package)
+        }
+
+        fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            self.inner.contains_package_prefix(package)
+        }
+    }
+
+    fn info_pair_class_file_class_path() -> InfoPairClassFileClassPath {
+        use dotty_classfile::classfile::{
+            ACC_ABSTRACT, ACC_INTERFACE, ACC_PUBLIC, ClassAccessFlags, ClassFileBuilder,
+            ClassFileVersion,
+        };
+
+        let version = ClassFileVersion {
+            major: 65,
+            minor: 0,
+        };
+        let mut base =
+            ClassFileBuilder::new("me/cytrowski/tastyfixtures/semantic/InfoBase", version)
+                .expect("valid InfoBase class name");
+        base.set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT))
+            .expect("valid trait flags");
+        let mut wrapped =
+            ClassFileBuilder::new("me/cytrowski/tastyfixtures/semantic/InfoWrapped", version)
+                .expect("valid InfoWrapped class name");
+        wrapped
+            .set_access_flags(ClassAccessFlags(ACC_PUBLIC))
+            .expect("valid class flags");
+        InfoPairClassFileClassPath {
+            inner: info_pair_audit_class_path(),
+            base: base.encode().expect("encode InfoBase classfile"),
+            wrapped: wrapped.encode().expect("encode InfoWrapped classfile"),
         }
     }
 
@@ -4333,6 +4494,183 @@ mod tests {
                 .expect("the committed control remains usable after the pair failure"),
             committed_control
         );
+        assert!(resolver.class_path.is_some());
+    }
+
+    #[test]
+    fn ordinary_classfile_and_structural_tasty_pair_identities_do_not_prove_semantic_pair_success()
+    {
+        let base_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
+        let wrapped_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
+
+        for classfile_first in [false, true] {
+            let class_path = if classfile_first {
+                CompositeClassPath::new(vec![Box::new(info_pair_class_file_class_path())])
+            } else {
+                CompositeClassPath::new(vec![Box::new(info_pair_audit_class_path())])
+            };
+            let mut store = SemanticStore::new();
+            let definitions = Definitions::bootstrap(&mut store);
+            let mut resolver =
+                ClasspathSymbolResolver::new(class_path, definitions, LoadingSession::new());
+            let base = resolver
+                .load_class(&mut store, &base_name)
+                .expect("ordinary class loading establishes the base identity");
+            let wrapped = resolver
+                .load_class(&mut store, &wrapped_name)
+                .expect("ordinary class loading establishes the wrapped identity");
+            let store_before = store.checkpoint();
+            let session_before = resolver.session.checkpoint();
+
+            let error = resolver
+                .load_semantic_info_pair_for_member(&mut store, &wrapped_name)
+                .expect_err("ordinary identities cannot stand in for a semantic pair load");
+            assert_eq!(error.binary_name, wrapped_name);
+            assert!(matches!(
+                error.source,
+                SemanticTastyLoadError::UnsupportedShape(
+                    "a pair class already has a loader identity or package declaration"
+                )
+            ));
+            assert_eq!(store.checkpoint(), store_before);
+            assert_eq!(resolver.session.checkpoint(), session_before);
+            assert_eq!(resolver.session.identified.get(&base_name), Some(&base));
+            assert_eq!(
+                resolver.session.identified.get(&wrapped_name),
+                Some(&wrapped)
+            );
+            assert!(!resolver.semantic_info_pair_loaded);
+            assert!(resolver.class_path.is_some());
+
+            let repeated_error = resolver
+                .load_semantic_info_pair_for_member(&mut store, &base_name)
+                .expect_err("failed pair attempts never record reusable semantic proof");
+            assert!(matches!(
+                repeated_error.source,
+                SemanticTastyLoadError::UnsupportedShape(
+                    "a pair class already has a loader identity or package declaration"
+                )
+            ));
+            assert!(!resolver.semantic_info_pair_loaded);
+        }
+    }
+
+    #[test]
+    fn semantic_pair_proof_and_package_adoption_roll_back_with_enclosing_resolver_checkpoint() {
+        let base_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
+        let wrapped_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            info_pair_audit_class_path(),
+            definitions,
+            LoadingSession::new(),
+        );
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "semantic"],
+            )
+            .unwrap()
+            .expect("preexisting fixture package");
+        let package_scope = resolver.session.packages.scope_of(package).unwrap();
+        let base_type = Name::new(store.names.intern("InfoBase"), Namespace::Type);
+        let wrapped_type = Name::new(store.names.intern("InfoWrapped"), Namespace::Type);
+
+        let store_before_failed_adoption = store.checkpoint();
+        let session_before_failed_adoption = resolver.session.checkpoint();
+        resolver.inject_semantic_pair_adoption_failure = true;
+        let adoption_error = resolver
+            .load_semantic_info_pair_for_member(&mut store, &wrapped_name)
+            .expect_err("failed second-link adoption rolls the pair publication back");
+        assert!(matches!(
+            adoption_error.source,
+            SemanticTastyLoadError::UnsupportedShape(
+                "the semantic pair's package entries could not be adopted by the resolver"
+            )
+        ));
+        assert_eq!(store.checkpoint(), store_before_failed_adoption);
+        assert_eq!(
+            resolver.session.checkpoint(),
+            session_before_failed_adoption
+        );
+        assert!(
+            store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&base_type)
+                .is_empty()
+        );
+        assert!(
+            store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&wrapped_type)
+                .is_empty()
+        );
+        assert!(!resolver.semantic_info_pair_loaded);
+        assert!(resolver.class_path.is_some());
+        resolver.inject_semantic_pair_adoption_failure = false;
+
+        let enclosing_checkpoint = resolver.checkpoint();
+        let store_before_enclosing_rollback = store.checkpoint();
+        let session_before_enclosing_rollback = resolver.session.checkpoint();
+        let loaded = resolver
+            .transact(&mut store, |resolver, store| {
+                resolver
+                    .load_semantic_info_pair_for_member(store, &wrapped_name)
+                    .map(Some)
+                    .map_err(MemberResolutionFailure::SemanticLoad)
+            })
+            .expect("successful handoff commits in the enclosing resolver transaction")
+            .expect("selected pair root");
+        let base = resolver.session.identified[&base_name];
+        let wrapped = resolver.session.identified[&wrapped_name];
+        assert_eq!(loaded, wrapped);
+        assert!(resolver.semantic_info_pair_loaded);
+        assert_eq!(
+            store.scopes.get(package_scope).lookup_all(&base_type),
+            [base]
+        );
+        assert_eq!(
+            store.scopes.get(package_scope).lookup_all(&wrapped_type),
+            [wrapped]
+        );
+
+        resolver.rollback_to(&mut store, enclosing_checkpoint);
+        store.rollback_to(store_before_enclosing_rollback);
+        assert_eq!(
+            resolver.session.checkpoint(),
+            session_before_enclosing_rollback
+        );
+        assert!(!resolver.semantic_info_pair_loaded);
+        assert!(!store.symbols.contains(base));
+        assert!(!store.symbols.contains(wrapped));
+        assert!(!resolver.session.identified.contains_key(&base_name));
+        assert!(!resolver.session.identified.contains_key(&wrapped_name));
+        assert!(
+            store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&base_type)
+                .is_empty()
+        );
+        assert!(
+            store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&wrapped_type)
+                .is_empty()
+        );
+
+        let retry = resolver
+            .load_semantic_info_pair_for_member(&mut store, &base_name)
+            .expect("retry after enclosing rollback delegates and commits cleanly");
+        assert!(resolver.semantic_info_pair_loaded);
+        assert_eq!(resolver.session.identified.get(&base_name), Some(&retry));
+        assert!(store.symbols.contains(retry));
         assert!(resolver.class_path.is_some());
     }
 
