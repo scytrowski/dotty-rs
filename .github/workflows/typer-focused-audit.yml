@@ -340,6 +340,56 @@ jobs:
             printf 'dotty_rs_tested_sha\t%s\n' "$(git rev-parse HEAD)"
           } > "$DOTTY_AUDIT_REPORT_DIR/option-map-two-session.tsv"
 
+      - name: Type original Tuple.toArray after explicit canonical owner preparation
+        shell: bash
+        env:
+          COURSIER_MAVEN_ROOT: ${{ github.workspace }}/target/coursier/v1/https/repo1.maven.org/maven2
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+        run: |
+          set -euo pipefail
+          mkdir -p "$DOTTY_AUDIT_REPORT_DIR"
+          SCALA39_CLASSPATH="$(printf '%s:' \
+            "$COURSIER_MAVEN_ROOT/org/scala-lang/scala3-library_3/3.9.0/scala3-library_3-3.9.0.jar" \
+            "$COURSIER_MAVEN_ROOT/org/scala-lang/scala-library/3.9.0/scala-library-3.9.0.jar" \
+            "$COURSIER_MAVEN_ROOT/org/scala-lang/scala3-compiler_3/3.9.0/scala3-compiler_3-3.9.0.jar" \
+            "$COURSIER_MAVEN_ROOT/org/scala-lang/tasty-core_3/3.9.0/tasty-core_3-3.9.0.jar" \
+            "$COURSIER_MAVEN_ROOT/org/scala-lang/scala3-interfaces/3.9.0/scala3-interfaces-3.9.0.jar" \
+            "$COURSIER_MAVEN_ROOT/org/scala-lang/modules/scala-asm/9.9.0-scala-1/scala-asm-9.9.0-scala-1.jar" \
+            "$COURSIER_MAVEN_ROOT/org/scala-sbt/compiler-interface/1.12.0/compiler-interface-1.12.0.jar" \
+            "$COURSIER_MAVEN_ROOT/org/scala-sbt/util-interface/1.11.5/util-interface-1.11.5.jar")"
+          export SCALA39_CLASSPATH="${SCALA39_CLASSPATH%:}"
+          test "$(git -C "$SCALA39_ROOT" rev-parse HEAD)" = \
+            "777528f19a58e794c9954a42f433373472ec57f8"
+          for session in 1 2; do
+            cargo +1.98.1 test -p dotty-typer --lib --locked \
+              original_tuple_to_array_types_after_explicit_canonical_owner_preparation \
+              -- --ignored --nocapture \
+              > "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-$session.log" 2>&1
+            if ! grep -o 'TUPLE_TO_ARRAY_ACCEPTED [^[:cntrl:]]*' \
+              "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-$session.log" \
+              > "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-$session.receipt"; then
+              echo "Tuple.toArray acceptance marker missing from session $session log" >&2
+              exit 1
+            fi
+            grep -q 'TUPLE_TO_ARRAY_BEFORE outcome=ApplicationArgumentConformanceUnsupported' \
+              "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-$session.log"
+            test "$(wc -l < "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-$session.receipt")" -eq 1
+            grep -q 'test result: ok. 1 passed' \
+              "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-$session.log"
+          done
+          cmp "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-1.receipt" \
+            "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-2.receipt"
+          {
+            printf 'session_1_receipt_sha256\t%s\n' \
+              "$(sha256sum "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-1.receipt" | cut -d' ' -f1)"
+            printf 'session_2_receipt_sha256\t%s\n' \
+              "$(sha256sum "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-2.receipt" | cut -d' ' -f1)"
+            printf 'source_sha256\t%s\n' \
+              "$(sha256sum "$SCALA39_ROOT/library/src/scala/Tuple.scala" | cut -d' ' -f1)"
+            printf 'source_revision\t%s\n' "$(git -C "$SCALA39_ROOT" rev-parse HEAD)"
+            printf 'dotty_rs_tested_sha\t%s\n' "$(git rev-parse HEAD)"
+          } > "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-two-session.tsv"
+
       - name: Run pinned inherited-member Scala oracle
         shell: bash
         env:
