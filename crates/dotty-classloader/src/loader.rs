@@ -63,6 +63,9 @@ pub(crate) enum SemanticTastyLoadError {
         format: ClassFormat,
         cause: Box<SemanticTastyLoadError>,
     },
+    PairRootCollision {
+        binary_name: BinaryName,
+    },
 }
 
 impl SemanticTastyLoadError {
@@ -1443,9 +1446,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 || self.repository.get(name).is_some()
                 || self.open_package_contains_type_declaration(name)
             {
-                return Err(SemanticTastyLoadError::UnsupportedShape(
-                    "a pair class already has a loader identity or package declaration",
-                ));
+                return Err(SemanticTastyLoadError::PairRootCollision {
+                    binary_name: name.clone(),
+                });
             }
         }
 
