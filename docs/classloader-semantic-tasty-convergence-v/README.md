@@ -69,13 +69,11 @@ consumer runs its checked-in consumer tests against pinned Scala 3.9.0 and JDK
 
 ## Functional and telemetry verdict
 
-Functional verdict: **PARTIAL** pending required hosted checks. The focused
-resolver matrix, classloader/unpickler suites, historical comparators and all
-local required Rust/JDK checks passed on code/test commit
-`f907485d6a`; the final evidence-only documentation commit is validated again
-locally. Required hosted Rust/JDK and pinned Scala 3.9 consumer runs remain
-pending and are tracked in `acceptance.tsv`. Do not read this local result as a
-claim that hosted gates have passed.
+Functional verdict: **MET** on tested commit
+`d1eefc5674db8076bbecf7f4af009c41ace91fa9`. The focused resolver matrix,
+classloader/unpickler suites, historical comparators, local required Rust/JDK
+checks, all eight hosted checks, and the pinned Scala 3.9 consumer shards
+passed. The hosted job URLs and tested SHA are recorded in `acceptance.tsv`.
 
 Telemetry status: **PARTIAL** as recorded by the historical convergence-IV
 trace. The trace is historical and is not a compiler-failure verdict; no new
@@ -94,6 +92,39 @@ Local validation on `f907485d6a` used Rust 1.98.1 and Temurin JDK 21.0.13:
 - `cargo test --workspace --all-targets --locked` — passed.
 - The strict JDK 21 gate with `DOTTY_CLASSFILE_REQUIRE_JDK=1` — passed.
 - `git diff --check` — passed.
+
+The final receipt-only documentation update was checked with
+`cargo fmt --all -- --check` and `git diff --check`. It does not change tests,
+source, or workflow behavior. The hosted Rust CI job also ran the workflow
+lint step successfully.
+
+## Hosted required checks
+
+All eight PR check runs completed successfully on
+`d1eefc5674db8076bbecf7f4af009c41ace91fa9`:
+
+| Check | Result | Job |
+| --- | --- | --- |
+| Rust checks (format, boundary guard, Clippy, rustdoc, workspace tests, diff) | success | [job 129461622577](https://github.com/scytrowski/dotty-rs/actions/runs/42705652022/job/129461622577) |
+| Classfile JVM encoder gate (JDK required) | success | [job 129461622204](https://github.com/scytrowski/dotty-rs/actions/runs/42705652022/job/129461622204) |
+| Focused semantic regression gate | success | [job 129461615925](https://github.com/scytrowski/dotty-rs/actions/runs/42705652046/job/129461615925) |
+| Strict Scala 3.9 TASTy shard 1/4 | success | [job 129461609616](https://github.com/scytrowski/dotty-rs/actions/runs/42705651574/job/129461609616) |
+| Strict Scala 3.9 TASTy shard 2/4 | success | [job 129461609978](https://github.com/scytrowski/dotty-rs/actions/runs/42705651574/job/129461609978) |
+| Strict Scala 3.9 TASTy shard 3/4 | success | [job 129461610704](https://github.com/scytrowski/dotty-rs/actions/runs/42705651574/job/129461610704) |
+| Strict Scala 3.9 TASTy shard 4/4 | success | [job 129461610204](https://github.com/scytrowski/dotty-rs/actions/runs/42705651574/job/129461610204) |
+| Pinned Scala 3.9 factory TASTy consumer aggregate | success | [job 129472600137](https://github.com/scytrowski/dotty-rs/actions/runs/42705651574/job/129472600137) |
+
+The hosted Scala workflow checked out Scala 3.9.0 at
+`777528f19a58e794c9954a42f433373472ec57f8`, used Temurin JDK 21.0.13 and Rust
+1.98.1, validated the strict target manifest, and ran all four shards plus the
+required semantic-loader secondary-constructor rejection. The exact workflow
+and reproducible command forms are recorded below.
+
+Review receipt: PR #2229 received a logical `CHANGES_REQUESTED` finding for
+this missing receipt. This update addresses that blocking documentation
+finding; it does not alter the previously published review or claim a new
+review verdict. See the [review summary](https://github.com/scytrowski/dotty-rs/pull/2229#pullrequestreview-5833315772)
+and [blocking inline thread](https://github.com/scytrowski/dotty-rs/pull/2229#discussion_r4518406340).
 
 ## Reproduction
 
@@ -115,5 +146,72 @@ cargo test -p dotty-classloader --test semantic_tasty_member_completion four_fro
 ```
 
 The two historical comparator commands must each pass twice; their frozen
-artifacts must retain the hashes recorded in `acceptance.tsv`. Full required
-commands and actual hosted check URLs will be appended after they have run.
+artifacts must retain the hashes recorded in `acceptance.tsv`.
+
+## Required gate commands
+
+From the repository root, with pinned Rust 1.98.1 and a Temurin JDK 21
+installation, run the Rust and strict JDK jobs as follows:
+
+```sh
+cargo fmt --all -- --check
+python3 tools/check-frontend-boundaries.py
+cargo clippy --workspace --all-targets --locked -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+export TMPDIR="$PWD/target/rust-tests-tmp"
+mkdir -p "$TMPDIR"
+cargo test --workspace --all-targets --locked
+git diff --check
+
+export JAVA_HOME=/path/to/temurin-21.0.13
+export PATH="$JAVA_HOME/bin:$PATH"
+export TMPDIR="$PWD/target/classfile-jvm-tmp"
+mkdir -p "$TMPDIR"
+DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo +stable test \
+  -p dotty-classfile --test classfile_jvm_encoder \
+  -p dotty-jvm --lib \
+  -p dotty --test jvm_source_compilation \
+  -p dotty --test jvm_stateful_class_contract \
+  --locked -- --nocapture
+```
+
+For the pinned Scala consumer, prepare the Scala 3.9.0 source checkout and
+verified dependencies at the revisions/pins specified by the workflow, then run
+its strict target manifest for all four shards. The workflow sets the strict
+consumer/oracle requirement variables and provisions JDK 21 before running
+this manifest-driven command:
+
+```sh
+export SCALA39_SOURCE_SHA=777528f19a58e794c9954a42f433373472ec57f8
+python3 tools/ci/validate_strict_tasty_targets.py
+for shard in shard-1 shard-2 shard-3 shard-4; do
+  mapfile -t strict_targets < <(python3 tools/ci/validate_strict_tasty_targets.py --shard "$shard")
+  test "${#strict_targets[@]}" -gt 0
+  test_args=()
+  for target in "${strict_targets[@]}"; do test_args+=(--test "$target"); done
+  cargo +1.98.1 test "${test_args[@]}" --locked -- --nocapture --test-threads=1
+done
+export DOTTY_REQUIRE_SCALA39_SECONDARY_CONSTRUCTOR_TEST=1
+cargo +1.98.1 test -p dotty-classloader --lib \
+  semantic_class_loader_rejects_secondary_constructor_with_rollback \
+  --locked -- --nocapture --test-threads=1
+```
+
+The hosted run used the complete environment and setup in
+[the pinned Scala consumer workflow](../../.github/workflows/jvm-tasty-factory-scala-consumer.yml).
+Its four shard job URLs and aggregate result are in `acceptance.tsv`.
+
+Re-run both frozen comparators twice each with:
+
+```sh
+for _ in 1 2; do
+  cargo test -p dotty-classloader --test semantic_tasty_parity \
+    frozen_cohort_is_complete_and_both_fresh_adapter_runs_are_deterministic \
+    --locked -- --nocapture --test-threads=1
+done
+for _ in 1 2; do
+  cargo test -p dotty-classloader --test semantic_tasty_member_completion \
+    four_frozen_members_are_explicitly_completed_in_fresh_deterministic_runs \
+    --locked -- --nocapture --test-threads=1
+done
+```
