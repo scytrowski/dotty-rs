@@ -144,10 +144,17 @@ cargo +1.98.1 test -p dotty \
   --locked -- --nocapture --test-threads=1
 ```
 
-All nine tests passed. The original Rust source SHA-256 was
-`e2411637c892feb474d6d70526d471b524cd7de49a3db2565923cd69736f73c3`; the
-two-call Scala client source SHA-256 was
-`977c8742af2c6175bbe57f651d74845ddb50444cc107eb692190436cd7c6f7a0`. Its six
+All nine tests passed. The explicitly labelled `two-call-original` input is
+`tests/fixtures/jvm_tasty_ordered_local_unit_calls/OrderedLocalUnitCalls.scala`
+(SHA-256
+`2e60a40b35587559589b431c9cc191f5d752ea3b4219aa2fc71b99edd2da3b8b`). Its
+Scala client is
+`tests/fixtures/jvm_tasty_two_local_counter_set/TwoCallConsumer.scala` (SHA-256
+`977c8742af2c6175bbe57f651d74845ddb50444cc107eb692190436cd7c6f7a0`), and the
+expanded Java 21 client is
+`tests/fixtures/jvm_tasty_ordered_local_unit_calls/RuntimeProbe2192.java`
+(SHA-256
+`1e4704b49a79591c80f60ae97ed26850a75bea5d25fa247e68b6db423e0d8269`). Its six
 original Rust artifacts were emitted and linked as follows:
 
 | Artifact | SHA-256 | TASTy UUID |
@@ -156,24 +163,32 @@ original Rust artifacts were emitted and linked as follows:
 | `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | linked by Counter class |
 | `example/Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` | `000b7d8d7441c7f00000000000008198` |
 | `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | linked by Pair class |
-| `example/PairFactory.class` | `16f734ec97d054a2ff1ec40400b6583b9d60476babcf0ba8617fd98dc0feebea` | `000a7216f3d105c8000000000000819a` |
-| `example/PairFactory.tasty` | `9415f52a7476d72554ba8943b9b657d588385fc339b3ff639a3c7d51e3d685e4` | linked by PairFactory class |
+| `example/PairFactory.class` | `5b9b6633c58972cb795e32beafa3e4b8d38eb3d942b9246063aefe6eb35c430e` | `004181d6451a3bc2000000000000819d` |
+| `example/PairFactory.tasty` | `9e1a96a9670922573b2f3ba782070df738f9ff90fdba5838139ecae2088c4632` | linked by PairFactory class |
 
-The Rust graph check observed two direct local addresses `[72, 97]`, used
-those same addresses as the final `Pair` arguments, and retained the source
-order of both calls. The pinned Scala reader observed a two-call `BLOCK` with
-addresses `[75, 100]`, calls `[(0, 1), (1, 0)]`, and final Pair arguments
-`[75, 100]`. The original Rust artifacts remained unchanged after Scala
-compilation and runtime execution. The test also exercised reversed local
-declarations, reversed calls, same-receiver calls, malformed/missing-call
-controls, source-contract rejection, Scala lookup and TASTy negatives, and
+The `two-call-original` Rust graph check observed TASTy block `57` with direct
+local addresses `[75, 100]`, used those same addresses as final `Pair`
+arguments, and retained the source order of both calls. The pinned Scala reader
+observed the same block and addresses, calls `[(0, 1), (1, 0)]`, and final Pair
+arguments `[75, 100]`. Its `PairFactory.class` is classfile major `65`, method
+descriptor `(II)Lexample/Pair;`, `max_stack=4`, and `max_locals=5`. `javap -c`
+confirmed `aload_3; iload_2; invokevirtual Counter.set(I)V`, then
+`aload 4; iload_1; invokevirtual Counter.set(I)V`, followed by the Pair
+constructor with locals 3 and 4. The original Rust artifacts remained
+unchanged after Scala compilation and runtime execution. The test also
+exercised reversed local declarations, reversed calls, same-receiver calls,
+malformed and missing-call controls, source-contract rejection, Scala lookup
+and TASTy negatives, and
 Java verifier descriptor negatives; observed first failures are recorded by
 the test output without treating them as acceptance failures.
 
 The test verifies two distinct counter instances and the expected results for
 `create(7, 3)` and `create(-9, 42)`. The strict target manifest validates 25
 required targets over four shards and includes this Scala consumer. The
-existing `jvm-tasty-factory-scala-consumer` workflow now also runs when this
+existing `jvm-tasty-factory-scala-consumer` workflow also runs when this
 receipt changes, so documentation-only edits cannot bypass the integrated
-gate. Final PR-head CI run and job URLs are recorded with the PR validation
-receipt.
+gate. The focused Java 21 test
+`ordered_two_local_unit_calls_execute_under_strict_jdk21` passed with
+`DOTTY_CLASSFILE_REQUIRE_JDK=1` (1 passed, 8 filtered). The tested PR head was
+`146257a33c8eeb8f3b44675a602c10ebea314f42`; final-head hosted workflow URLs and
+outcomes are recorded below after the required jobs complete.
