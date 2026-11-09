@@ -79,21 +79,20 @@ symbol and whose ordered arguments retain local identities `SymbolId(63)` and
 `SymbolId(64)`. These identities come from the session indexes and typed
 references, not spelling or statement position.
 
-The real paired planner rejects only after frontend typing, at
-`cross-class constructor-call identity proof`:
+At the original #2187 audit baseline, the paired planner rejected after
+frontend typing at `cross-class constructor-call identity proof`:
 
 ```text
 SourceShape("factory body must be a direct Apply or a one- or two-local Block")
 ```
 
-The two calls are typed and ordered in the source and typed blocks, but the
-paired source-shape proof expects the final constructor application after no
-calls or one supported local receiver call. The paired artifact API returns an
-error and publishes no accepted artifact batch.
+That historical observation predates the merged #2189–#2191 producer work.
+The integrated acceptance run below verifies the current two-call path and
+must be used for the final-gate result.
 
 ## Control matrix
 
-| Input | Scala/source validity | Current paired-path first result |
+| Input | Scala/source validity | Original #2187 paired-path result |
 | --- | --- | --- |
 | Existing no-call two-local fixture | Accepted | Accepted |
 | Existing one-call fixture | Accepted | Accepted |
@@ -108,7 +107,73 @@ error and publishes no accepted artifact batch.
 | Boolean argument | Rejected by Rust typer | Method body typing: `ApplicationArgumentTypeMismatch` |
 
 The zero-call and one-call paths remain covered by their existing tests. The
-controls keep source-shape rejection distinct from invalid typed syntax; they
-do not claim that the Rust compiler accepts the two-call target. A third call
-remains outside this audit. No producer, pickler, JVM, or public API behavior
-was changed.
+controls keep source-shape rejection distinct from invalid typed syntax. A
+third call remains outside this audit. No producer, pickler, JVM, or public API
+behavior was changed by this final evidence gate.
+
+## Integrated two-call gate on merged prerequisites
+
+The final-gate baseline is `d71d912b1803efc0b8346b57846f1233b4d13734`,
+which includes the reviewed merges for issues #2187–#2193. This integrated
+run used Rust 1.98.1, Scala 3.9.0 at
+`777528f19a58e794c9954a42f433373472ec57f8` (TASTy 28.9), and Temurin JDK
+21.0.13+9. The compiler reported
+`3.9.0-bin-SNAPSHOT-git-777528f`; the selected JDK binary SHA-256 was
+`9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155`.
+Temporary files and generated outputs were kept in the registered task scratch
+directory.
+
+| Issue | Reviewed PR head | Published review | Merge commit |
+| --- | --- | --- | --- |
+| #2187 | `dcf8ebaf01101b0b64d9f323d816bf05ca193c6a` | [PR #2196 review](https://github.com/scytrowski/dotty-rs/pull/2196#pullrequestreview-5818058666) | `69f3404c5d371b326573a765876cec957dab1ce1` |
+| #2188 | `b5f2984fda543b064b7a86d6b6591641cd59caa3` | [PR #2199 review](https://github.com/scytrowski/dotty-rs/pull/2199#pullrequestreview-5818645168) | `3161f47445873deff36085f3aabeaea56489d921` |
+| #2189 | `2a38a58d2057c55d938e4cb10ec1f6322216a662` | [PR #2200 review](https://github.com/scytrowski/dotty-rs/pull/2200#pullrequestreview-5819184225) | `7d568478c4e7d8c9e44b100447ab11de9eb9bde0` |
+| #2190 | `1d0a29c9738d7501c5572a287fe0e31539e2672f` | [PR #2209 review](https://github.com/scytrowski/dotty-rs/pull/2209#pullrequestreview-5819905091) | `93e1ec9a6252f1995ff83f9cfe76488a3598b5a8` |
+| #2191 | `4966977cd39de186e13299c5608727f1672b577f` | [PR #2214 review](https://github.com/scytrowski/dotty-rs/pull/2214#pullrequestreview-5820316026) | `34b802eb451c0fc9dd2914e031e69313cc29e1ec` |
+| #2192 | `9857709ce0f7a0e7d11d20a9ebd8fb2436cd8705` | [PR #2217 review](https://github.com/scytrowski/dotty-rs/pull/2217#pullrequestreview-5820616099) | `b26e5a4286a2af1278316d7ea6e48392131f628b` |
+| #2193 | `626b9ce1df954879f76105dabb2078358ff812a5` | [PR #2219 review](https://github.com/scytrowski/dotty-rs/pull/2219#pullrequestreview-5823122087) | `d71d912b1803efc0b8346b57846f1233b4d13734` |
+
+The required test command was run with
+`DOTTY_REQUIRE_SCALA_TASTY_TWO_LOCAL_COUNTER_SET_CONSUMER=1`,
+`DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1`, and
+`DOTTY_CLASSFILE_REQUIRE_JDK=1`:
+
+```sh
+cargo +1.98.1 test -p dotty \
+  --test jvm_tasty_two_local_counter_set_scala_consumer \
+  --locked -- --nocapture --test-threads=1
+```
+
+All nine tests passed. The original Rust source SHA-256 was
+`e2411637c892feb474d6d70526d471b524cd7de49a3db2565923cd69736f73c3`; the
+two-call Scala client source SHA-256 was
+`977c8742af2c6175bbe57f651d74845ddb50444cc107eb692190436cd7c6f7a0`. Its six
+original Rust artifacts were emitted and linked as follows:
+
+| Artifact | SHA-256 | TASTy UUID |
+| --- | --- | --- |
+| `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | `008071c3c00968ac0000000000008193` |
+| `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | linked by Counter class |
+| `example/Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` | `000b7d8d7441c7f00000000000008198` |
+| `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | linked by Pair class |
+| `example/PairFactory.class` | `16f734ec97d054a2ff1ec40400b6583b9d60476babcf0ba8617fd98dc0feebea` | `000a7216f3d105c8000000000000819a` |
+| `example/PairFactory.tasty` | `9415f52a7476d72554ba8943b9b657d588385fc339b3ff639a3c7d51e3d685e4` | linked by PairFactory class |
+
+The Rust graph check observed two direct local addresses `[72, 97]`, used
+those same addresses as the final `Pair` arguments, and retained the source
+order of both calls. The pinned Scala reader observed a two-call `BLOCK` with
+addresses `[75, 100]`, calls `[(0, 1), (1, 0)]`, and final Pair arguments
+`[75, 100]`. The original Rust artifacts remained unchanged after Scala
+compilation and runtime execution. The test also exercised reversed local
+declarations, reversed calls, same-receiver calls, malformed/missing-call
+controls, source-contract rejection, Scala lookup and TASTy negatives, and
+Java verifier descriptor negatives; observed first failures are recorded by
+the test output without treating them as acceptance failures.
+
+The test verifies two distinct counter instances and the expected results for
+`create(7, 3)` and `create(-9, 42)`. The strict target manifest validates 25
+required targets over four shards and includes this Scala consumer. The
+existing `jvm-tasty-factory-scala-consumer` workflow now also runs when this
+receipt changes, so documentation-only edits cannot bypass the integrated
+gate. Final PR-head CI run and job URLs are recorded with the PR validation
+receipt.
