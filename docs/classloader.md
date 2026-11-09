@@ -37,6 +37,19 @@ implement the full JVM lifecycle.
 
 ## 2. Relationship to existing crates
 
+### Ordered class type-parameter metadata
+
+The classloader session publishes one ordered record per supported generic
+class parameter: its canonical class-owned `SymbolId` and declared variance.
+Scala TASTy variance markers are preserved; a supported absent marker means
+invariant. A declaration with unsupported bounds keeps its canonical
+parameter identity but marks its variance unavailable, so consumers that only
+need order can continue while subtype comparison fails closed. Java
+class-signature parameters are invariant. The resolver
+contract is target-independent and retains the records through normal loading
+session transfer and rollback; the typer authenticates each parameter's owner,
+kind and identity before using it.
+
 ```text
 classpath
     |

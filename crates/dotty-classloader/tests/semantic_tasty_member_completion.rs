@@ -16,7 +16,10 @@ use dotty_core::names::Name;
 use dotty_core::packages::Packages;
 use dotty_core::resolution::{MemberRequest, ResolutionError, ResolverCheckpoint, SymbolResolver};
 use dotty_core::types::PolyType;
-use dotty_core::{Definitions, SemanticStore, SymbolId, SymbolInfo, Type, TypeParam, Visibility};
+use dotty_core::{
+    ClassTypeParameter, Definitions, SemanticStore, SymbolId, SymbolInfo, Type, TypeParam,
+    Visibility,
+};
 use dotty_tasty::tasty::{DEFDEF_TAG, DefinitionBody, StructuredNode, TYPEDEF_TAG, TastyFile};
 use dotty_tasty_unpickler::tasty_unpickler::{TastySession, TastyUnpickler, UnpickleError};
 
@@ -281,7 +284,7 @@ impl SymbolResolver for TracingResolver {
         &self,
         store: &SemanticStore,
         class: SymbolId,
-    ) -> Option<Vec<SymbolId>> {
+    ) -> Option<Vec<ClassTypeParameter>> {
         self.inner.class_type_parameters(store, class)
     }
 

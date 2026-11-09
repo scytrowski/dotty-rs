@@ -39,6 +39,7 @@ use crate::ids::{SymbolId, TypeId};
 use crate::names::Name;
 use crate::packages::Packages;
 use crate::store::SemanticStore;
+use crate::types::ClassTypeParameter;
 
 /// Which member of the prefix a request names.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,15 +154,15 @@ pub trait SymbolResolver {
         self.checkpoint()
     }
 
-    /// Returns the class's canonical type-parameter symbols in declaration
-    /// order when this resolver owns the class. The order is semantic data:
-    /// callers must not infer it from a name lookup scope, whose iteration
-    /// order is intentionally unspecified.
+    /// Returns the class's canonical type-parameter records in declaration
+    /// order when this resolver owns the class. Identity and declared
+    /// variance are kept together because order is semantic data and must not
+    /// be reconstructed from a name lookup scope.
     fn class_type_parameters(
         &self,
         _store: &SemanticStore,
         _class: SymbolId,
-    ) -> Option<Vec<SymbolId>> {
+    ) -> Option<Vec<ClassTypeParameter>> {
         None
     }
 

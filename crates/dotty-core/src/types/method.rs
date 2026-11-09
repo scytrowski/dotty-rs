@@ -67,6 +67,19 @@ pub enum Variance {
     Contravariant,
 }
 
+/// A canonical class-owned type parameter and its declaration-site variance.
+/// Class parameter lists are ordered semantic metadata; keeping identity and
+/// variance together prevents adapters from publishing parallel lists that
+/// can drift out of alignment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClassTypeParameter {
+    pub symbol: crate::SymbolId,
+    /// `None` means an adapter could authenticate the parameter identity but
+    /// could not interpret its variance evidence. A supported absent class
+    /// variance marker is represented as `Some(Variance::Invariant)`.
+    pub variance: Option<Variance>,
+}
+
 /// `[params]: result`, e.g. the type of `def head[A](xs: List[A]): A`'s
 /// leading type-parameter clause.
 #[derive(Clone, Debug, PartialEq, Eq)]

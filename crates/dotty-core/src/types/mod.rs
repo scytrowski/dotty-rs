@@ -18,7 +18,10 @@ pub use arena::TypeArena;
 pub use binder::ReservedTypeId;
 pub use class_info::ClassInfo;
 pub use constant::Constant;
-pub use method::{MethodKind, MethodParam, MethodType, PolyType, TypeLambda, TypeParam, Variance};
+pub use method::{
+    ClassTypeParameter, MethodKind, MethodParam, MethodType, PolyType, TypeLambda, TypeParam,
+    Variance,
+};
 pub use rebind::{
     InstantiatedPoly, InstantiatedTypeLambda, MethodParamSpec, TypeParamSpec, TypeRebindError,
     close_over_this, instantiate_poly, instantiate_type_lambda, method_type_from_symbols,

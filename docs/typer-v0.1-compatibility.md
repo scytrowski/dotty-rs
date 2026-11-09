@@ -39,6 +39,42 @@ is deliberately limited to named Scala and `java.lang` builtin targets.
 
 ## Expression typing layout
 
+## Bounded class-parameter variance (issue #2212)
+
+The Typer records canonical class-owned type-parameter symbols and their
+declared variance in constructor declaration order. Missing source `+`/`-` and
+missing supported TASTy variance markers mean invariant class parameters.
+The existing `TypeParam::declared_variance` optionality for polymorphic and
+type-lambda binders remains a separate contract.
+
+For supported first-order nominal views, direct and inherited matching class
+views compare covariant arguments by subtyping in the found-to-expected
+direction, contravariant arguments in the reverse direction, and invariant
+arguments by the existing equivalence relation. Nested comparisons use the
+existing bounded relation. This does not add declaration-site variance
+position checking, higher-kinded variance, inference, wildcard capture,
+recursive types, or general bound reasoning. Declaring variance is preserved;
+its legality is not certified by this Typer slice. Incomplete source ClassInfo
+is still not completed implicitly by `TypeRelation`.
+
+The pinned Scala 3.9 `Option[+A]` / `Some[+A]` artifacts provide a loader
+control for metadata identity and variance. The diagnostic precondition from
+issue #2212 explicitly completes source `Option`, `Some` and `None$` ClassInfo;
+the resulting `None$ <: Option[B]` and union checks do not establish that the
+unchanged full `Option.map` root is accepted, because ordinary source
+completion ordering remains a separate boundary.
+
+The recorded pre-change diagnostic used dotty-rs base
+`39828fa7eb6916845a01395e761089fcd6f21854` and pinned Scala revision
+`777528f19a58e794c9954a42f433373472ec57f8`. With those three source ClassInfo
+values explicitly completed, `Some[B] <: Option[B]` and `Nothing <: B` were
+true, but `None$ <: Option[B]` was false because `equivalent_class_views`
+required invariant argument equivalence. Therefore the unchanged union check
+was false and the full `Option.scala#tree=214` replay stopped at
+`ExpectedExpressionTypeMismatch` on tree 213 under that diagnostic
+precompletion. This before-state is recorded in the issue #2212 diagnostic
+report; it is not an ordinary-completion success claim.
+
 `SourceTyper::type_expression_inner` is the expression dispatcher. It handles
 typed-tree cache lookups, raw generic-constructor preparation, dispatch, and
 source-to-typed index updates. Expression-specific behavior lives under

@@ -2894,14 +2894,25 @@ fn decode_tasty_type_parameter(
         }
         if decoded.bounds_supported {
             decoded.lower_bound = Some(lower_bound);
-            decoded.variance = body.tail.iter().find_map(|item| match item {
-                DefinitionTail::Modifier(tag)
-                    if matches!(*tag, COVARIANT_TAG | CONTRAVARIANT_TAG | STABLE_TAG) =>
-                {
-                    Some(*tag)
-                }
-                _ => None,
-            });
+            let variance_markers = body
+                .tail
+                .iter()
+                .filter_map(|item| match item {
+                    DefinitionTail::Modifier(tag)
+                        if matches!(*tag, COVARIANT_TAG | CONTRAVARIANT_TAG | STABLE_TAG) =>
+                    {
+                        Some(*tag)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if variance_markers.len() > 1 {
+                decoded.bounds_supported = false;
+                decoded.lower_bound = None;
+                decoded.upper_bound = None;
+            } else {
+                decoded.variance = variance_markers.first().copied();
+            }
         }
     }
     Some(decoded)
