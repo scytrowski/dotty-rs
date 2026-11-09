@@ -198,6 +198,14 @@ struct ResolverUndo {
     session: SessionCheckpoint,
     object_class: Symbol,
     semantic_info_pair_loaded: bool,
+    semantic_info_base_parameter: Option<SemanticInfoTypeParameterIdentity>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct SemanticInfoTypeParameterIdentity {
+    symbol: SymbolId,
+    symbol_snapshot: Symbol,
+    info_snapshot: Type,
 }
 
 struct SemanticInfoRootIdentity<'a> {
@@ -317,6 +325,7 @@ pub struct ClasspathSymbolResolver<E: ClassPathEntry> {
     #[cfg(test)]
     inject_semantic_pair_adoption_failure: bool,
     semantic_info_pair_loaded: bool,
+    semantic_info_base_parameter: Option<SemanticInfoTypeParameterIdentity>,
 }
 
 impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
@@ -343,6 +352,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             #[cfg(test)]
             inject_semantic_pair_adoption_failure: false,
             semantic_info_pair_loaded: false,
+            semantic_info_base_parameter: None,
         }
     }
 
@@ -556,6 +566,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         let store_checkpoint = store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
         let semantic_info_pair_loaded = self.semantic_info_pair_loaded;
+        let semantic_info_base_parameter = self.semantic_info_base_parameter.clone();
         let object_class = store.symbols.get(self.definitions.object_class).clone();
         let rollback_before = self.resolver_profile.rollback.elapsed_ns;
         let operation_started = self.collect_resolver_profile.then(Instant::now);
@@ -567,12 +578,14 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             Ok(Some(value)) => {
                 let changed = self.session.checkpoint() != session_checkpoint
                     || self.semantic_info_pair_loaded != semantic_info_pair_loaded
+                    || self.semantic_info_base_parameter != semantic_info_base_parameter
                     || *store.symbols.get(self.definitions.object_class) != object_class;
                 if changed {
                     self.undo.push(ResolverUndo {
                         session: session_checkpoint,
                         object_class,
                         semantic_info_pair_loaded,
+                        semantic_info_base_parameter,
                     });
                 }
                 Ok(Some(value))
@@ -584,6 +597,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                     session_checkpoint,
                     object_class,
                     semantic_info_pair_loaded,
+                    semantic_info_base_parameter,
                 );
                 Ok(None)
             }
@@ -594,6 +608,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                     session_checkpoint,
                     object_class,
                     semantic_info_pair_loaded,
+                    semantic_info_base_parameter,
                 );
                 Err(error)
             }
@@ -622,10 +637,12 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         session_checkpoint: SessionCheckpoint,
         object_class: Symbol,
         semantic_info_pair_loaded: bool,
+        semantic_info_base_parameter: Option<SemanticInfoTypeParameterIdentity>,
     ) {
         let rollback_started = self.collect_resolver_profile.then(Instant::now);
         self.session.rollback_to(store, session_checkpoint);
         self.semantic_info_pair_loaded = semantic_info_pair_loaded;
+        self.semantic_info_base_parameter = semantic_info_base_parameter;
         *store.symbols.get_mut(self.definitions.object_class) = object_class;
         store.rollback_to(store_checkpoint);
         self.record_resolver_phase(ResolverProfilePhase::Rollback, rollback_started);
@@ -744,6 +761,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         let session_checkpoint = self.session.checkpoint();
         let object_class = store.symbols.get(self.definitions.object_class).clone();
         let semantic_info_pair_loaded = self.semantic_info_pair_loaded;
+        let semantic_info_base_parameter = self.semantic_info_base_parameter.clone();
         let class_path = self
             .class_path
             .take()
@@ -799,7 +817,16 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                 } else {
                     false
                 };
+                self.semantic_info_base_parameter = adopted
+                    .then(|| {
+                        self.semantic_info_base_parameter_identity(
+                            store,
+                            self.session.identified[&base_name],
+                        )
+                    })
+                    .flatten();
                 let pair_is_valid = adopted
+                    && self.semantic_info_base_parameter.is_some()
                     && self.is_semantic_info_pair_identity(
                         store,
                         self.session.identified[&base_name],
@@ -830,6 +857,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                         session_checkpoint,
                         object_class,
                         semantic_info_pair_loaded,
+                        semantic_info_base_parameter,
                     );
                     Err(SemanticMemberLoadFailure {
                         binary_name: requested.clone(),
@@ -919,12 +947,27 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         let [class_type_parameter] = class_type_parameters.as_slice() else {
             return false;
         };
-        let class_type_parameter = store.symbols.get(*class_type_parameter);
+        let class_type_parameter_id = *class_type_parameter;
+        let class_type_parameter = store.symbols.get(class_type_parameter_id);
         if class_type_parameter.owner != Some(class)
             || class_type_parameter.name.namespace() != Namespace::Type
             || store.names.resolve(class_type_parameter.name.text()) != constructor_type_parameter
         {
             return false;
+        }
+        if kind == SymbolKind::Trait {
+            let Some(identity) = self.semantic_info_base_parameter.as_ref() else {
+                return false;
+            };
+            let SymbolInfo::Complete(info) = class_type_parameter.info else {
+                return false;
+            };
+            if identity.symbol != class_type_parameter_id
+                || identity.symbol_snapshot != *class_type_parameter
+                || store.types.try_get(info) != Some(&identity.info_snapshot)
+            {
+                return false;
+            }
         }
         let constructors = store
             .scopes
@@ -964,20 +1007,36 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         else {
             return false;
         };
-        let constructor_result_is_class = match store.types.try_get(constructor_method.result) {
-            Some(Type::TypeRef {
-                target: TypeRefTarget::Symbol(result),
-                ..
-            }) => *result == class,
-            Some(Type::Applied { tycon, args }) => {
-                store.types.try_get(*tycon).and_then(Type::reference_symbol) == Some(class)
-                    && args.len() == 1
-                    && matches!(
-                        store.types.try_get(args[0]),
-                        Some(Type::ParamRef { binder, index: 0 }) if *binder == constructor_info
-                    )
+        let constructor_result_is_class = if kind == SymbolKind::Trait {
+            matches!(
+                store.types.try_get(constructor_method.result),
+                Some(Type::Applied { tycon, args })
+                    if store.types.try_get(*tycon).and_then(Type::reference_symbol) == Some(class)
+                        && matches!(
+                            args.as_slice(),
+                            [argument] if matches!(
+                                store.types.try_get(*argument),
+                                Some(Type::ParamRef { binder, index: 0 })
+                                    if *binder == constructor_info
+                            )
+                        )
+            )
+        } else {
+            match store.types.try_get(constructor_method.result) {
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(result),
+                    ..
+                }) => *result == class,
+                Some(Type::Applied { tycon, args }) => {
+                    store.types.try_get(*tycon).and_then(Type::reference_symbol) == Some(class)
+                        && args.len() == 1
+                        && matches!(
+                            store.types.try_get(args[0]),
+                            Some(Type::ParamRef { binder, index: 0 }) if *binder == constructor_info
+                        )
+                }
+                _ => false,
             }
-            _ => false,
         };
         if constructor_method.kind != MethodKind::Plain
             || constructor_method.params.len() != constructor_params.len()
@@ -996,6 +1055,66 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                     .and_then(Type::reference_symbol)
                     == Some(*expected)
             })
+    }
+
+    fn semantic_info_base_parameter_identity(
+        &self,
+        store: &SemanticStore,
+        class: SymbolId,
+    ) -> Option<SemanticInfoTypeParameterIdentity> {
+        let symbol = store.symbols.get(class);
+        let SymbolInfo::Complete(info) = symbol.info else {
+            return None;
+        };
+        let Type::ClassInfo(class_info) = store.types.try_get(info)? else {
+            return None;
+        };
+        if class_info.class != class
+            || !store.scopes.contains(class_info.declarations)
+            || store.scopes.get(class_info.declarations).owner != Some(class)
+        {
+            return None;
+        }
+        let parameters = store
+            .scopes
+            .get(class_info.declarations)
+            .entered_symbols()
+            .filter(|parameter| {
+                store.symbols.contains(*parameter)
+                    && store.symbols.get(*parameter).kind == SymbolKind::TypeParameter
+            })
+            .collect::<Vec<_>>();
+        let [parameter] = parameters.as_slice() else {
+            return None;
+        };
+        let parameter_id = *parameter;
+        let parameter = store.symbols.get(parameter_id);
+        if parameter.owner != Some(class)
+            || parameter.name.namespace() != Namespace::Type
+            || store.names.resolve(parameter.name.text()) != "A"
+            || !matches!(parameter.origin, SymbolOrigin::Tasty(_))
+        {
+            return None;
+        }
+        let SymbolInfo::Complete(parameter_info) = parameter.info else {
+            return None;
+        };
+        let info_snapshot = store.types.try_get(parameter_info)?.clone();
+        let Type::Bounds { low, high } = &info_snapshot else {
+            return None;
+        };
+        if store.types.try_get(*low).and_then(Type::reference_symbol)
+            != Some(self.definitions.nothing_class)
+            || store.types.try_get(*high).and_then(Type::reference_symbol)
+                != Some(self.definitions.any_class)
+        {
+            return None;
+        }
+        Some(SemanticInfoTypeParameterIdentity {
+            symbol: parameter_id,
+            symbol_snapshot: parameter.clone(),
+            info_snapshot,
+        })
     }
 
     fn is_semantic_info_pair_identity(
@@ -2874,6 +2993,7 @@ impl<E: ClassPathEntry> SymbolResolver for ClasspathSymbolResolver<E> {
             self.session.rollback_to(store, undo.session);
             *store.symbols.get_mut(self.definitions.object_class) = undo.object_class;
             self.semantic_info_pair_loaded = undo.semantic_info_pair_loaded;
+            self.semantic_info_base_parameter = undo.semantic_info_base_parameter;
         }
     }
 
@@ -3386,6 +3506,22 @@ mod tests {
             } => Some(*symbol),
             _ => None,
         }
+    }
+
+    fn replace_poly_constructor_result(
+        store: &mut SemanticStore,
+        constructor_type: TypeId,
+        result: TypeId,
+    ) -> TypeId {
+        let Type::Poly(mut poly) = store.types.get(constructor_type).clone() else {
+            panic!("constructor info is polymorphic");
+        };
+        let Type::Method(mut method) = store.types.get(poly.result).clone() else {
+            panic!("constructor polytype contains a method result");
+        };
+        method.result = result;
+        poly.result = store.types.alloc(Type::Method(method));
+        store.types.alloc(Type::Poly(poly))
     }
 
     fn open_class_path(include_jdk: bool) -> CompositeClassPath {
@@ -5211,6 +5347,148 @@ mod tests {
             BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
         let wrapped = resolver.session.identified[&wrapped_name];
         assert_eq!(resolver.session.identified[&base_name], base);
+
+        let SymbolInfo::Complete(base_info) = store.symbols.get(base).info else {
+            panic!("InfoBase is complete");
+        };
+        let Type::ClassInfo(base_info) = store.types.get(base_info) else {
+            panic!("InfoBase has ClassInfo");
+        };
+        let declarations = base_info.declarations;
+        let indexed_parameter = store
+            .scopes
+            .get(declarations)
+            .entered_symbols()
+            .find(|symbol| {
+                store.symbols.get(*symbol).kind == SymbolKind::TypeParameter
+                    && store.names.resolve(store.symbols.get(*symbol).name.text()) == "A"
+            })
+            .expect("InfoBase's indexed A parameter");
+        let indexed_parameter_symbol = store.symbols.get(indexed_parameter).clone();
+        let SymbolInfo::Complete(parameter_info) = indexed_parameter_symbol.info else {
+            panic!("indexed A parameter has complete bounds");
+        };
+        let original_parameter_info = store.types.get(parameter_info).clone();
+        let mut replacement_parameter_symbol = indexed_parameter_symbol.clone();
+        replacement_parameter_symbol.info = SymbolInfo::Missing;
+        replacement_parameter_symbol.origin = SymbolOrigin::Synthetic;
+        let replacement_parameter = store.symbols.alloc(replacement_parameter_symbol);
+        store.scopes.get_mut(declarations).remove(indexed_parameter);
+        store
+            .scopes
+            .get_mut(declarations)
+            .enter(indexed_parameter_symbol.name, replacement_parameter);
+        assert!(matches!(
+            resolver.resolve_member_with_semantic_info_pair(&mut store, &request),
+            Err(ResolutionError::Malformed { .. })
+        ));
+        store
+            .scopes
+            .get_mut(declarations)
+            .remove(replacement_parameter);
+        store
+            .scopes
+            .get_mut(declarations)
+            .enter(indexed_parameter_symbol.name, indexed_parameter);
+        assert_eq!(
+            resolver.resolve_member_with_semantic_info_pair(&mut store, &request),
+            Ok(Some(base))
+        );
+
+        store.symbols.get_mut(indexed_parameter).info = SymbolInfo::Missing;
+        assert!(matches!(
+            resolver.resolve_member_with_semantic_info_pair(&mut store, &request),
+            Err(ResolutionError::Malformed { .. })
+        ));
+        store.symbols.get_mut(indexed_parameter).info = indexed_parameter_symbol.info;
+        assert_eq!(
+            resolver.resolve_member_with_semantic_info_pair(&mut store, &request),
+            Ok(Some(base))
+        );
+        let any_ref = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, definitions.any_class));
+        *store.types.get_mut(parameter_info) = Type::Bounds {
+            low: any_ref,
+            high: any_ref,
+        };
+        assert!(matches!(
+            resolver.resolve_member_with_semantic_info_pair(&mut store, &request),
+            Err(ResolutionError::Malformed { .. })
+        ));
+        *store.types.get_mut(parameter_info) = original_parameter_info;
+        assert_eq!(
+            resolver.resolve_member_with_semantic_info_pair(&mut store, &request),
+            Ok(Some(base))
+        );
+
+        let constructor = store
+            .scopes
+            .get(declarations)
+            .entered_symbols()
+            .find(|symbol| store.symbols.get(*symbol).kind == SymbolKind::Constructor)
+            .expect("InfoBase constructor");
+        let constructor_info = store.symbols.get(constructor).info;
+        let SymbolInfo::Complete(constructor_type) = constructor_info else {
+            panic!("InfoBase constructor is complete");
+        };
+        let Type::Poly(constructor_poly) = store.types.get(constructor_type) else {
+            panic!("InfoBase constructor retains its type parameter");
+        };
+        let Type::Method(_) = store.types.get(constructor_poly.result) else {
+            panic!("InfoBase constructor has a method result");
+        };
+        let constructor_result_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, base));
+        let raw_constructor_result = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, base));
+        let missing_argument_result = store.types.alloc(Type::Applied {
+            tycon: constructor_result_prefix,
+            args: Vec::new(),
+        });
+        let wrong_argument_result = store.types.alloc(Type::Applied {
+            tycon: constructor_result_prefix,
+            args: vec![definitions.int],
+        });
+        let wrong_binder = store.types.alloc(Type::ParamRef {
+            binder: constructor_result_prefix,
+            index: 0,
+        });
+        let wrong_binder_result = store.types.alloc(Type::Applied {
+            tycon: constructor_result_prefix,
+            args: vec![wrong_binder],
+        });
+        let wrong_index = store.types.alloc(Type::ParamRef {
+            binder: constructor_type,
+            index: 1,
+        });
+        let wrong_index_result = store.types.alloc(Type::Applied {
+            tycon: constructor_result_prefix,
+            args: vec![wrong_index],
+        });
+        for invalid_result in [
+            raw_constructor_result,
+            missing_argument_result,
+            wrong_argument_result,
+            wrong_binder_result,
+            wrong_index_result,
+        ] {
+            let replacement_constructor_info =
+                replace_poly_constructor_result(&mut store, constructor_type, invalid_result);
+            store.symbols.get_mut(constructor).info =
+                SymbolInfo::Complete(replacement_constructor_info);
+            assert!(matches!(
+                resolver.resolve_member_with_semantic_info_pair(&mut store, &request),
+                Err(ResolutionError::Malformed { .. })
+            ));
+            store.symbols.get_mut(constructor).info = constructor_info;
+            assert_eq!(
+                resolver.resolve_member_with_semantic_info_pair(&mut store, &request),
+                Ok(Some(base))
+            );
+        }
 
         let original_kind = store.symbols.get(base).kind;
         store.symbols.get_mut(base).kind = SymbolKind::Class;
