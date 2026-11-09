@@ -6419,6 +6419,217 @@ mod tests {
     }
 
     #[test]
+    fn selected_pair_late_completion_failure_rolls_back_and_retries_in_both_orders() {
+        let base_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
+        let wrapped_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
+        let fixture_root = fixture_path("../dotty-tasty-unpickler/tests/fixtures/semantic");
+        let original_base = std::fs::read(fixture_root.join("InfoBase.tasty"))
+            .expect("original InfoBase fixture bytes");
+        let original_wrapped = std::fs::read(fixture_root.join("InfoWrapped.tasty"))
+            .expect("original InfoWrapped fixture bytes");
+        let controlled_origin = ClassOrigin::Directory(PathBuf::from("<controlled-info-pair>"));
+
+        // The selected root is entered first. Corrupt the other root so the
+        // failure comes from completion of the second unit, after the first
+        // one has been entered into the same session/store.
+        for (
+            requested_name,
+            request_root,
+            failing_name,
+            selected_name,
+            needle,
+            replacement,
+            good_bytes,
+            corrupt_bytes,
+        ) in [
+            (
+                &base_name,
+                "InfoBase",
+                &wrapped_name,
+                "me/cytrowski/tastyfixtures/semantic/InfoWrapped",
+                b"Int".as_slice(),
+                b"Foo".as_slice(),
+                original_wrapped.clone(),
+                original_wrapped.clone(),
+            ),
+            (
+                &wrapped_name,
+                "InfoWrapped",
+                &base_name,
+                "me/cytrowski/tastyfixtures/semantic/InfoBase",
+                b"Nothing".as_slice(),
+                b"FooType".as_slice(),
+                original_base.clone(),
+                original_base.clone(),
+            ),
+        ] {
+            let mut corrupt_bytes = corrupt_bytes;
+            let type_name = corrupt_bytes
+                .windows(needle.len())
+                .position(|window| window == needle)
+                .expect("the selected second unit contains its member type");
+            corrupt_bytes[type_name..type_name + needle.len()].copy_from_slice(replacement);
+            let selected = Arc::new(Mutex::new(Some(ClassResource::new(
+                corrupt_bytes,
+                ClassFormat::Tasty,
+                controlled_origin.clone(),
+            ))));
+            let class_path = SelectedResourceControl {
+                inner: CompositeClassPath::new(vec![Box::new(info_pair_audit_class_path())]),
+                selected_name,
+                selected: selected.clone(),
+            };
+            let mut store = SemanticStore::new();
+            let definitions = Definitions::bootstrap(&mut store);
+            let mut resolver =
+                ClasspathSymbolResolver::new(class_path, definitions, LoadingSession::new());
+            let control_name = BinaryName::from_internal("java/lang/String");
+            let committed = resolver
+                .load_class(&mut store, &control_name)
+                .expect("the committed control loads before the selected pair");
+            let package = resolver
+                .resolve_package(
+                    &mut store,
+                    &["me", "cytrowski", "tastyfixtures", "semantic"],
+                )
+                .unwrap()
+                .expect("semantic fixture package");
+            let package_scope = resolver.session.packages.scope_of(package).unwrap();
+            let base_type = Name::new(store.names.intern("InfoBase"), Namespace::Type);
+            let wrapped_type = Name::new(store.names.intern("InfoWrapped"), Namespace::Type);
+            let request =
+                semantic_member_request(&mut store, package, definitions.no_prefix, request_root);
+            let resolver_checkpoint = resolver.checkpoint();
+            let store_checkpoint = store.checkpoint();
+            let object_before = store.symbols.get(definitions.object_class).clone();
+            let unit_before = store.types.get(definitions.unit).clone();
+            let package_before =
+                resolver
+                    .session
+                    .packages
+                    .get(&["me", "cytrowski", "tastyfixtures", "semantic"]);
+            let committed_origin = resolver.session.origins[&committed].clone();
+
+            let failure = resolver
+                .transact(&mut store, |resolver, store| {
+                    resolver.resolve_member_inner_with_semantic_info_pair(store, &request)
+                })
+                .expect_err("the corrupted second pair unit fails completion");
+            let MemberResolutionFailure::SemanticLoad(failure) = failure else {
+                panic!("selected pair completion failure remains typed: {failure:?}");
+            };
+            assert_eq!(failure.binary_name, *failing_name);
+            assert!(matches!(
+                failure.source,
+                SemanticTastyLoadError::PairUnitFailure {
+                    ref binary_name,
+                    origin: ClassOrigin::Directory(ref origin),
+                    format: ClassFormat::Tasty,
+                    cause,
+                } if binary_name == failing_name
+                    && origin == &PathBuf::from("<controlled-info-pair>")
+                    && matches!(*cause, SemanticTastyLoadError::Unpickle { .. })
+            ));
+            resolver.rollback_to(&mut store, resolver_checkpoint);
+            store.rollback_to(store_checkpoint);
+
+            assert_eq!(store.symbols.get(definitions.object_class), &object_before);
+            assert_eq!(store.types.get(definitions.unit), &unit_before);
+            assert_eq!(
+                resolver
+                    .session
+                    .packages
+                    .get(&["me", "cytrowski", "tastyfixtures", "semantic",]),
+                package_before
+            );
+            assert!(!resolver.semantic_info_pair_loaded);
+            assert!(resolver.semantic_info_base_parameter.is_none());
+            for name in [&base_name, &wrapped_name] {
+                assert!(!resolver.session.identified.contains_key(name));
+                assert!(!resolver.session.resolved.contains_key(name));
+            }
+            assert!(resolver.session.origins.contains_key(&committed));
+            assert_eq!(
+                resolver.session.origins.get(&committed),
+                Some(&committed_origin)
+            );
+            assert_eq!(
+                resolver.session.resolved.get(&control_name),
+                Some(&committed)
+            );
+            assert!(resolver.class_path.is_some());
+            assert!(
+                store
+                    .scopes
+                    .get(package_scope)
+                    .lookup_all(&base_type)
+                    .is_empty()
+            );
+            assert!(
+                store
+                    .scopes
+                    .get(package_scope)
+                    .lookup_all(&wrapped_type)
+                    .is_empty()
+            );
+
+            *selected.lock().expect("selected resource lock") = Some(ClassResource::new(
+                good_bytes,
+                ClassFormat::Tasty,
+                controlled_origin.clone(),
+            ));
+            let retry = resolver
+                .transact(&mut store, |resolver, store| {
+                    resolver.resolve_member_inner_with_semantic_info_pair(store, &request)
+                })
+                .expect("original pair bytes retry in the same resolver")
+                .expect("the selected pair root resolves after retry");
+            let base = resolver.session.identified[&base_name];
+            let wrapped = resolver.session.identified[&wrapped_name];
+            assert_eq!(retry, resolver.session.identified[requested_name]);
+            assert!(resolver.semantic_info_pair_loaded);
+            assert!(resolver.is_semantic_info_pair_identity(&store, base, wrapped));
+            assert_eq!(
+                store.scopes.get(package_scope).lookup_all(&base_type),
+                [base]
+            );
+            assert_eq!(
+                store.scopes.get(package_scope).lookup_all(&wrapped_type),
+                [wrapped]
+            );
+            let base_origin = if failing_name == &base_name {
+                controlled_origin.clone()
+            } else {
+                ClassOrigin::Directory(fixture_root.clone())
+            };
+            let wrapped_origin = if failing_name == &wrapped_name {
+                controlled_origin.clone()
+            } else {
+                ClassOrigin::Directory(fixture_root.clone())
+            };
+            assert_eq!(resolver.session.origins[&base], base_origin);
+            assert_eq!(resolver.session.origins[&wrapped], wrapped_origin);
+            assert_eq!(
+                resolver.session.resolved.get(&control_name),
+                Some(&committed)
+            );
+            assert_eq!(
+                resolver.session.origins.get(&committed),
+                Some(&committed_origin)
+            );
+            assert_eq!(
+                resolver
+                    .resolve_member_with_semantic_info_pair(&mut store, &request)
+                    .expect("repeated request reuses the retried pair"),
+                Some(retry)
+            );
+            assert_eq!(resolver.session.identified[&base_name], base);
+            assert_eq!(resolver.session.identified[&wrapped_name], wrapped);
+        }
+    }
+
+    #[test]
     fn independent_selected_open_resolvers_have_the_same_normalized_graph() {
         let (first, first_class) = selected_open_graph_with_padding(false);
         let (second, second_class) = selected_open_graph_with_padding(true);
