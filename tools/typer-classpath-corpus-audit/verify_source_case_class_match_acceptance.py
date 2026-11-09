@@ -1311,8 +1311,44 @@ def validate_cohorts(root: Path, reports: list[Path], output: Path, baseline_rec
         baseline_receipt = root / baseline_receipt
     recorded_header, recorded_rows = read_tsv(baseline_receipt)
     expected = [dict(zip(header, row, strict=True)) for row in rows_out]
-    if recorded_header != list(header) or recorded_rows != expected:
-        raise ReceiptError("live 25 + 25 two-pass receipt differs from the committed per-root evidence")
+    if recorded_header != list(header):
+        raise ReceiptError(
+            "committed case-class Match receipt has the wrong schema: "
+            f"expected {list(header)!r}, found {recorded_header!r}"
+        )
+
+    expected_keys = [(row["cohort"], row["identity"]) for row in expected]
+    recorded_keys = [(row["cohort"], row["identity"]) for row in recorded_rows]
+    if recorded_keys != expected_keys:
+        expected_key_set, recorded_key_set = set(expected_keys), set(recorded_keys)
+        changed = [
+            f"{cohort}:{identity}"
+            for cohort, identity in expected_keys
+            if (cohort, identity) not in recorded_key_set
+        ]
+        changed.extend(
+            f"unexpected {cohort}:{identity}"
+            for cohort, identity in recorded_keys
+            if (cohort, identity) not in expected_key_set
+        )
+        if not changed:
+            changed = [f"{cohort}:{identity} (row order)" for cohort, identity in expected_keys]
+        raise ReceiptError(
+            "committed case-class Match receipt changed the exact 25 + 25 root set/order: "
+            + ", ".join(changed)
+        )
+
+    differences = [
+        (wanted, found)
+        for wanted, found in zip(expected, recorded_rows, strict=True)
+        if wanted != found
+    ]
+    if differences:
+        roots = [f"{wanted['cohort']}:{wanted['identity']}" for wanted, _ in differences]
+        raise ReceiptError(
+            "live 25 + 25 two-pass receipt differs from committed evidence at: "
+            + ", ".join(roots)
+        )
 
 
 def main() -> int:
