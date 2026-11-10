@@ -373,6 +373,8 @@ pub struct ValidatedImmutableLocalReferenceAliasProof<'session> {
     scope: dotty_core::ScopeId,
     source_initializer: TreeId<Untyped>,
     typed_initializer: TreeId<Typed>,
+    source_type_tree: TreeId<Untyped>,
+    typed_type_tree: TreeId<Typed>,
     source_target: TreeId<Untyped>,
     typed_target: TreeId<Typed>,
     target: SymbolId,
@@ -400,6 +402,12 @@ impl<'session> ValidatedImmutableLocalReferenceAliasProof<'session> {
     }
     pub const fn typed_initializer(&self) -> TreeId<Typed> {
         self.typed_initializer
+    }
+    pub const fn source_type_tree(&self) -> TreeId<Untyped> {
+        self.source_type_tree
+    }
+    pub const fn typed_type_tree(&self) -> TreeId<Typed> {
+        self.typed_type_tree
     }
     pub const fn source_target(&self) -> TreeId<Untyped> {
         self.source_target
@@ -5898,7 +5906,7 @@ fn validate_immutable_local_reference_alias_from_pair<'session>(
     let source_initializer = alias_def
         .rhs
         .ok_or_else(|| source_error("alias local must have one initializer"))?;
-    let TreeKind::Ident(_) = &pair
+    let TreeKind::Ident(source_alias_ident) = &pair
         ._source_ast
         .try_get(source_initializer)
         .ok_or_else(|| source_error("alias initializer tree is stale"))?
@@ -5919,12 +5927,27 @@ fn validate_immutable_local_reference_alias_from_pair<'session>(
             "Typer alias binding must name this exact original ValDef",
         ));
     }
+    let source_type_tree = alias_def.tpt;
+    if matches!(
+        pair._source_ast
+            .try_get(source_type_tree)
+            .map(|tree| &tree.kind),
+        Some(TreeKind::TypeTree(_))
+    ) {
+        return Err(source_error(
+            "alias must retain its explicit source Counter type",
+        ));
+    }
+    let typed_type_tree = pair
+        ._source_typed_index
+        .get(pair.source_id, source_type_tree)
+        .ok_or_else(|| typed_error("alias explicit type tree has no source-to-typed mapping"))?;
     let typed_initializer = pair
         ._source_typed_index
         .get(pair.source_id, source_initializer)
         .ok_or_else(|| typed_error("alias Ident has no source-to-typed binding"))?;
     let typed_target = typed_initializer;
-    let TreeKind::Ident(_) = &pair
+    let TreeKind::Ident(typed_alias_ident) = &pair
         ._typed_ast
         .try_get(typed_target)
         .ok_or_else(|| typed_error("typed alias target is stale"))?
@@ -5932,6 +5955,11 @@ fn validate_immutable_local_reference_alias_from_pair<'session>(
     else {
         return Err(typed_error("typed alias target must remain Ident"));
     };
+    if source_alias_ident.name != typed_alias_ident.name {
+        return Err(typed_error(
+            "source and typed alias Ident roots must preserve the same original reference",
+        ));
+    }
     let target = match pair._store.types.try_get(
         pair._typed_ast
             .try_get(typed_target)
@@ -5973,6 +6001,85 @@ fn validate_immutable_local_reference_alias_from_pair<'session>(
         })?;
     let original = initializers[first_initializer_index].symbol();
     let other = initializers[1 - first_initializer_index].symbol();
+    let TreeKind::Apply(source_pair_apply) = &pair
+        ._source_ast
+        .try_get(pair.source_final_expression)
+        .ok_or_else(|| source_error("final Pair Apply is stale"))?
+        .kind
+    else {
+        return Err(source_error(
+            "final expression must remain the original Pair Apply",
+        ));
+    };
+    if source_pair_apply.args.len() != 2 {
+        return Err(source_error(
+            "final Pair Apply must retain exactly two arguments",
+        ));
+    }
+    let source_pair_first_argument = source_pair_apply.args[0];
+    let TreeKind::Ident(source_pair_first_ident) = &pair
+        ._source_ast
+        .try_get(source_pair_first_argument)
+        .ok_or_else(|| source_error("first final Pair argument is stale"))?
+        .kind
+    else {
+        return Err(source_error(
+            "first final Pair argument must be the original local Ident",
+        ));
+    };
+    let typed_pair_first_argument = pair
+        ._source_typed_index
+        .get(pair.source_id, source_pair_first_argument)
+        .ok_or_else(|| typed_error("first final Pair argument has no typed mapping"))?;
+    let TreeKind::Apply(typed_pair_apply) = &pair
+        ._typed_ast
+        .try_get(pair.typed_final_expression)
+        .ok_or_else(|| typed_error("typed final Pair Apply is stale"))?
+        .kind
+    else {
+        return Err(typed_error("typed final expression must remain Pair Apply"));
+    };
+    if typed_pair_apply.args.len() != 2 || typed_pair_apply.args[0] != typed_pair_first_argument {
+        return Err(typed_error(
+            "typed Pair arg[0] must retain its exact source mapping",
+        ));
+    }
+    let TreeKind::Ident(typed_pair_first_ident) = &pair
+        ._typed_ast
+        .try_get(typed_pair_first_argument)
+        .ok_or_else(|| typed_error("typed first final Pair argument is stale"))?
+        .kind
+    else {
+        return Err(typed_error(
+            "typed first final Pair argument must remain Ident",
+        ));
+    };
+    let pair_first_target = match pair._store.types.try_get(
+        pair._typed_ast
+            .try_get(typed_pair_first_argument)
+            .ok_or_else(|| typed_error("typed first final Pair argument is stale"))?
+            .ty,
+    ) {
+        Some(Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        }) => *symbol,
+        _ => {
+            return Err(typed_error(
+                "typed first final Pair argument must retain its local TermRef",
+            ));
+        }
+    };
+    if pair_first_target != original {
+        return Err(identity_error(
+            "alias target must be the canonical first final Pair argument local",
+        ));
+    }
+    if source_pair_first_ident.name != typed_pair_first_ident.name {
+        return Err(typed_error(
+            "source and typed first Pair argument Idents must preserve the same reference",
+        ));
+    }
     let symbol = binding.symbol();
     if target != original {
         return Err(identity_error(
@@ -6086,6 +6193,22 @@ fn validate_immutable_local_reference_alias_from_pair<'session>(
         typed_initializer,
         "alias Ident",
     )?;
+    require_matching_source_typed_positions(
+        pair._source_ast,
+        pair._typed_ast,
+        pair.source_id,
+        source_type_tree,
+        typed_type_tree,
+        "alias explicit type tree",
+    )?;
+    require_matching_source_typed_positions(
+        pair._source_ast,
+        pair._typed_ast,
+        pair.source_id,
+        source_pair_first_argument,
+        typed_pair_first_argument,
+        "first final Pair argument",
+    )?;
     let typed_block = pair
         ._source_typed_index
         .get(pair.source_id, pair.source_block)
@@ -6103,18 +6226,26 @@ fn validate_immutable_local_reference_alias_from_pair<'session>(
             "typed Block must preserve the exact alias declaration at its source position",
         ));
     }
-    let typed_alias_type = match &pair
+    let (typed_alias_type, typed_annotation_type) = match &pair
         ._typed_ast
         .try_get(typed_declaration)
         .ok_or_else(|| typed_error("typed alias ValDef is stale"))?
         .kind
     {
-        TreeKind::ValDef(value) if value.rhs == Some(typed_initializer) => {
-            pair._typed_ast.get(typed_declaration).ty
+        TreeKind::ValDef(value)
+            if value.rhs == Some(typed_initializer) && value.tpt == typed_type_tree =>
+        {
+            (
+                pair._typed_ast.get(typed_declaration).ty,
+                pair._typed_ast
+                    .try_get(typed_type_tree)
+                    .ok_or_else(|| typed_error("typed alias explicit type tree is stale"))?
+                    .ty,
+            )
         }
         TreeKind::ValDef(_) => {
             return Err(typed_error(
-                "typed alias ValDef must preserve its exact initializer edge",
+                "typed alias ValDef must preserve its exact initializer and type-tree edges",
             ));
         }
         _ => return Err(typed_error("typed alias declaration must remain ValDef")),
@@ -6122,6 +6253,12 @@ fn validate_immutable_local_reference_alias_from_pair<'session>(
     if !is_canonical_class_type_ref(
         pair._store,
         typed_alias_type,
+        pair.counter,
+        package,
+        pair._definitions.no_prefix,
+    ) || !is_canonical_class_type_ref(
+        pair._store,
+        typed_annotation_type,
         pair.counter,
         package,
         pair._definitions.no_prefix,
@@ -6140,6 +6277,8 @@ fn validate_immutable_local_reference_alias_from_pair<'session>(
         scope,
         source_initializer,
         typed_initializer,
+        source_type_tree,
+        typed_type_tree,
         source_target: source_initializer,
         typed_target,
         target: original,
