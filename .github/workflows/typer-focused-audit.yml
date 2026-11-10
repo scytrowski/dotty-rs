@@ -342,7 +342,7 @@ jobs:
             other_package_tuple_does_not_match_pinned_classpath_tuple_formal \
             -- --ignored --nocapture \
             > "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-wrong-owner.log" 2>&1
-          grep -Fq 'TUPLE_TO_ARRAY_WRONG_OWNER_REJECTED receiver=.other.Tuple selected=.scala.runtime.Tuples$.toArray formal=.scala.Tuple error=ApplicationArgumentTypeMismatch rollback=passed' \
+          grep -Fq 'TUPLE_TO_ARRAY_WRONG_OWNER_REJECTED application_span=38..79 receiver=.other.Tuple receiver_origin=Source selected=.scala.runtime.Tuples$.toArray selected_origin=Tasty formal=.scala.Tuple formal_origin=Tasty error=ApplicationArgumentTypeMismatch rollback=passed' \
             "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-wrong-owner.log"
           grep -q 'test result: ok. 1 passed' \
             "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-wrong-owner.log"

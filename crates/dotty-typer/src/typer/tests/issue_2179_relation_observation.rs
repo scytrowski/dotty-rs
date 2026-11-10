@@ -1803,6 +1803,40 @@ fn other_package_tuple_does_not_match_pinned_classpath_tuple_formal() {
             _ => None,
         })
         .expect("the ordinary method root is present");
+    let rhs = match &parsed.ast.get(method_tree).kind {
+        TreeKind::DefDef(definition) => definition.rhs.unwrap(),
+        _ => unreachable!(),
+    };
+    let TreeKind::Apply(original_application) = &parsed.ast.get(rhs).kind else {
+        panic!("the wrong-owner method body retains its original application");
+    };
+    assert_eq!(original_application.args.len(), 1);
+    let argument_tree = original_application.args[0];
+    assert!(matches!(
+        parsed.ast.get(argument_tree).kind,
+        TreeKind::This(_)
+    ));
+    let rhs_span = parsed.ast.get(rhs).position.unwrap().span().range();
+    let selection_tree = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            if !node.position.is_some_and(|position| {
+                let range = position.span().range();
+                rhs_span.start() <= range.start() && range.end() <= rhs_span.end()
+            }) {
+                return None;
+            }
+            match &node.kind {
+                TreeKind::Select(select)
+                    if store.names.resolve(select.name.text()) == "toArray" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            }
+        })
+        .expect("the original selection names toArray");
     let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
     let release = std::env::var("SCALA39_JDK_RELEASE")
         .expect("SCALA39_JDK_RELEASE")
@@ -1836,6 +1870,125 @@ fn other_package_tuple_does_not_match_pinned_classpath_tuple_formal() {
         *typer.store().symbols.info(tuple),
         SymbolInfo::Missing
     ));
+    type WrongOwnerObservation = (
+        String,
+        String,
+        &'static str,
+        String,
+        &'static str,
+        String,
+        &'static str,
+    );
+    let observed = Rc::new(RefCell::new(None::<WrongOwnerObservation>));
+    let capture = observed.clone();
+    let parsed_ast = &parsed.ast;
+    let tuple_definition = index.definition_of(tuple);
+    typer.transaction_failure_error_observer = Some(Rc::new(move |typer, error| {
+        assert!(
+            matches!(
+                error,
+                TyperError::ApplicationArgumentTypeMismatch {
+                    source: error_source,
+                    tree_index,
+                    argument_index: 0,
+                    ..
+                } if *error_source == source && *tree_index == rhs.index()
+            ),
+            "unexpected pre-rollback wrong-owner error: {error:?}"
+        );
+        assert!(matches!(
+            tuple_definition,
+            Some(SourceDefinition::Canonical {
+                source: definition_source,
+                tree,
+            }) if definition_source == source && tree == tuple_tree
+        ));
+        let receiver_info = typer.store.symbols.get(tuple);
+        assert_eq!(receiver_info.origin, SymbolOrigin::Source(source));
+        assert_eq!(observed_symbol_path(typer.store, tuple), ".other.Tuple");
+
+        let source_application = parsed_ast.get(rhs);
+        let TreeKind::Apply(application) = &source_application.kind else {
+            panic!("the original failing source node is not an Apply");
+        };
+        assert_eq!(application.args, vec![argument_tree]);
+        let actual_type = match error {
+            TyperError::ApplicationArgumentTypeMismatch { actual, .. } => *actual,
+            _ => unreachable!("the error variant was checked above"),
+        };
+        assert!(matches!(
+            typer.store.types.get(actual_type),
+            Type::ThisType { class } if *class == tuple
+        ));
+
+        let selection_span = parsed_ast
+            .get(selection_tree)
+            .position
+            .unwrap()
+            .span()
+            .range();
+        let typed_selection = typer
+            .typed_ast()
+            .iter()
+            .find_map(|(_, node)| {
+                let range = node.position?.span().range();
+                (range.start() == selection_span.start()
+                    && range.end() == selection_span.end()
+                    && matches!(node.kind, TreeKind::Select(_)))
+                .then_some(node)
+            })
+            .expect("the external selection is typed before application conformance fails");
+        let Type::TermRef {
+            target: TermRefTarget::Symbol(selected),
+            ..
+        } = typer.store.types.get(typed_selection.ty)
+        else {
+            panic!("the external selection does not reference a canonical symbol");
+        };
+        let selected = *selected;
+        let selected_info = typer.store.symbols.get(selected);
+        let selected_path = observed_symbol_path(typer.store, selected);
+        assert_eq!(selected_path, ".scala.runtime.Tuples$.toArray");
+        let selected_origin = match selected_info.origin {
+            SymbolOrigin::Tasty(_) => "Tasty",
+            other => panic!("selected member is not from binary TASTy: {other:?}"),
+        };
+        assert_eq!(selected_info.kind, SymbolKind::Method);
+        let SymbolInfo::Complete(mut signature) = selected_info.info else {
+            panic!("the external selected member has no complete signature");
+        };
+        while let Type::Poly(poly) = typer.store.types.get(signature) {
+            signature = poly.result;
+        }
+        let Type::Method(method_signature) = typer.store.types.get(signature) else {
+            panic!("the external selected member does not have a method signature");
+        };
+        assert_eq!(method_signature.params.len(), 1);
+        let Type::TypeRef {
+            target: TypeRefTarget::Symbol(formal),
+            ..
+        } = typer.store.types.get(method_signature.params[0].ty)
+        else {
+            panic!("the selected formal is not a canonical symbol TypeRef");
+        };
+        let formal = *formal;
+        let formal_path = observed_symbol_path(typer.store, formal);
+        assert_eq!(formal_path, ".scala.Tuple");
+        let formal_origin = match typer.store.symbols.get(formal).origin {
+            SymbolOrigin::Tasty(_) => "Tasty",
+            other => panic!("the expected formal is not from binary TASTy: {other:?}"),
+        };
+        let application_span = format!("{}..{}", rhs_span.start(), rhs_span.end());
+        *capture.borrow_mut() = Some((
+            application_span,
+            observed_symbol_path(typer.store, tuple),
+            "Source",
+            selected_path,
+            selected_origin,
+            formal_path,
+            formal_origin,
+        ));
+    }));
     let error = typer
         .type_method_definition(method_tree)
         .expect_err("other.Tuple must not be accepted as scala.Tuple");
@@ -1844,20 +1997,30 @@ fn other_package_tuple_does_not_match_pinned_classpath_tuple_formal() {
             error,
             TyperError::ApplicationArgumentTypeMismatch {
                 source: error_source,
+                tree_index,
                 argument_index: 0,
                 ..
-            } if error_source == source
+            } if error_source == source && tree_index == rhs.index()
         ),
         "unexpected classpath-owner conflict result: {error:?}"
     );
+    assert!(observed.borrow().is_some());
     assert!(matches!(
         *typer.store().symbols.info(tuple),
         SymbolInfo::Missing
     ));
     assert_eq!(typer.source_typed_index().get(source, method_tree), None);
+    let (
+        application_span,
+        receiver_path,
+        receiver_origin,
+        selected_path,
+        selected_origin,
+        formal_path,
+        formal_origin,
+    ) = observed.borrow().clone().unwrap();
     println!(
-        "TUPLE_TO_ARRAY_WRONG_OWNER_REJECTED receiver={} selected=.scala.runtime.Tuples$.toArray formal=.scala.Tuple error=ApplicationArgumentTypeMismatch rollback=passed",
-        observed_symbol_path(typer.store(), tuple)
+        "TUPLE_TO_ARRAY_WRONG_OWNER_REJECTED application_span={application_span} receiver={receiver_path} receiver_origin={receiver_origin} selected={selected_path} selected_origin={selected_origin} formal={formal_path} formal_origin={formal_origin} error=ApplicationArgumentTypeMismatch rollback=passed"
     );
 }
 
