@@ -1,9 +1,10 @@
 use dotty::jvm_tasty_artifacts::emit_paired_jvm_tasty_batch;
 use dotty::jvm_tasty_cross_class::{
     CrossClassConstructorCallProofInput, ImmutableLocalInitializerPairProofInput,
-    validate_cross_class_constructor_call_proofs,
+    ImmutableLocalReferenceAliasProofInput, validate_cross_class_constructor_call_proofs,
     validate_cross_class_constructor_call_proofs_with_typer,
     validate_immutable_local_counter_set_call_proof,
+    validate_immutable_local_counter_set_calls_after_alias_proof,
     validate_immutable_local_counter_set_calls_proof,
 };
 use dotty::jvm_tasty_plan::{PairedPlanError, with_paired_jvm_tasty_batch_plan};
@@ -35,9 +36,10 @@ use dotty_tasty_pickler::{
     ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan,
     FormalLocalConstructorCallArgumentBinding, FormalLocalConstructorCallArgumentOrigin,
     FormalLocalConstructorCallPairBinding, LimitKind, LocalCounterInitializerBinding,
-    LocalReceiverUnitCallBinding, LocalValueBinding, NestedConstructorCallBinding, PickleError,
-    PickleLimits, PlannedCallBinding, PrimaryConstructorInputPlan, ProjectionLimits,
-    SourceMetadata, SourceTypedBindings, UnsupportedFeature,
+    LocalReceiverUnitCallBinding, LocalReferenceAliasBinding, LocalValueBinding,
+    NestedConstructorCallBinding, PickleError, PickleLimits, PlannedCallBinding,
+    PrimaryConstructorInputPlan, ProjectionLimits, SourceMetadata, SourceTypedBindings,
+    UnsupportedFeature,
 };
 use dotty_typer::SourceTyper;
 use std::fs;
@@ -55,6 +57,8 @@ const IMMUTABLE_LOCAL_PAIR_REVERSED_BATCH: &str =
     include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactoryReversed.scala");
 const TWO_CALL_TARGET: &str =
     include_str!("fixtures/jvm_tasty_ordered_local_unit_calls/OrderedLocalUnitCalls.scala");
+const ALIAS_TWO_CALL_TARGET: &str =
+    include_str!("fixtures/jvm_tasty_local_reference_alias/LocalReferenceAlias.scala");
 
 struct AuditBindings<'a> {
     index: &'a SourceTypedIndex,
@@ -79,6 +83,7 @@ struct StandaloneCallBindings<'a> {
     pair: FormalLocalConstructorCallPairBinding,
     initializers: Vec<LocalCounterInitializerBinding>,
     locals: Vec<LocalValueBinding>,
+    alias: Option<LocalReferenceAliasBinding>,
     call: Option<LocalReceiverUnitCallBinding>,
     calls: Option<[LocalReceiverUnitCallBinding; 2]>,
 }
@@ -118,6 +123,16 @@ impl SourceTypedBindings for StandaloneCallBindings<'_> {
         } else {
             Vec::new()
         }
+    }
+
+    fn local_reference_alias(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<LocalReferenceAliasBinding> {
+        (source == self.source && method == self.method)
+            .then_some(self.alias)
+            .flatten()
     }
 
     fn local_value_bindings(&self, source: SourceId, method: SymbolId) -> Vec<LocalValueBinding> {
@@ -1078,6 +1093,7 @@ fn run_pinned_local_receiver_unit_call_reader(
     bytes: &[u8],
     call_count: usize,
     reversed_calls: bool,
+    alias: bool,
 ) {
     let scala_root = PathBuf::from(
         std::env::var_os("SCALA39_ROOT").expect("pinned Scala 3.9 checkout is required"),
@@ -1137,9 +1153,14 @@ fn run_pinned_local_receiver_unit_call_reader(
         "val second: example.Counter",
         "new example.Counter(firstSeed)",
         "new example.Counter(secondSeed)",
-        "first.set(secondSeed)",
         "new example.Pair(first, second)",
     ];
+    if alias {
+        required.push("val alias: example.Counter = first");
+        required.push("alias.set(secondSeed)");
+    } else {
+        required.push("first.set(secondSeed)");
+    }
     if call_count == 2 {
         required.push("second.set(firstSeed)");
     }
@@ -1150,9 +1171,14 @@ fn run_pinned_local_receiver_unit_call_reader(
         );
     }
     let mut stat_order = vec!["val first: example.Counter", "val second: example.Counter"];
+    if alias {
+        stat_order.push("val alias: example.Counter = first");
+    }
     if call_count == 2 {
         let calls = if reversed_calls {
             ["second.set(firstSeed)", "first.set(secondSeed)"]
+        } else if alias {
+            ["alias.set(secondSeed)", "second.set(firstSeed)"]
         } else {
             ["first.set(secondSeed)", "second.set(firstSeed)"]
         };
@@ -1163,7 +1189,11 @@ fn run_pinned_local_receiver_unit_call_reader(
     stat_order.push("new example.Pair(first, second)");
     let stat_order = stat_order
         .into_iter()
-        .map(|text| decompiled.find(text).unwrap())
+        .map(|text| {
+            decompiled
+                .find(text)
+                .unwrap_or_else(|| panic!("missing ordered statement {text:?}: {decompiled}"))
+        })
         .collect::<Vec<_>>();
     assert!(
         stat_order.windows(2).all(|pair| pair[0] < pair[1]),
@@ -3275,6 +3305,26 @@ fn standalone_ordered_two_local_receiver_calls_use_the_original_proof_pair() {
 }
 
 #[test]
+fn standalone_alias_two_local_receiver_calls_use_original_local_identities() {
+    let first = standalone_local_receiver_call_candidate(
+        ALIAS_TWO_CALL_TARGET,
+        SourceId::from_index(22390),
+        true,
+    );
+    let second = standalone_local_receiver_call_candidate(
+        ALIAS_TWO_CALL_TARGET,
+        SourceId::from_index(22391),
+        true,
+    );
+    assert_eq!(
+        first, second,
+        "fresh sessions emit deterministic alias TASTy"
+    );
+    TastyFile::parse_and_validate_scala_3_9(&first)
+        .expect("structural reader accepts the alias candidate");
+}
+
+#[test]
 fn standalone_reversed_two_local_receiver_calls_preserve_source_order() {
     let reversed_source = TWO_CALL_TARGET.replace(
         "    first.set(secondSeed)\n    second.set(firstSeed)",
@@ -3431,7 +3481,7 @@ fn standalone_local_receiver_call_candidate(
     let TreeKind::Block(source_block) = &parsed.ast.get(source_rhs).kind else {
         panic!("original factory body block")
     };
-    assert!((3..=4).contains(&source_block.stats.len()));
+    assert!((3..=5).contains(&source_block.stats.len()));
     let locals = [source_block.stats[0], source_block.stats[1]]
         .map(|tree| typer.typed_local_binding_at(source_id, tree).unwrap());
     let jvm_unit = JvmCompilationUnit {
@@ -3468,7 +3518,11 @@ fn standalone_local_receiver_call_candidate(
                 argument_formal: call.formal(),
             }
         };
-    let (initializer_receipts, call_binding, call_pair_binding) = if source_block.stats.len() == 3 {
+    let (initializer_receipts, call_binding, call_pair_binding, alias_binding) = if source_block
+        .stats
+        .len()
+        == 3
+    {
         let call_proof: dotty::jvm_tasty_cross_class::ValidatedImmutableLocalCounterSetCallProof<
             '_,
         > = validate_immutable_local_counter_set_call_proof(input)
@@ -3477,6 +3531,48 @@ fn standalone_local_receiver_call_candidate(
             call_proof.initializer_pair().initializers(),
             Some(call_to_binding(&call_proof)),
             None,
+            None,
+        )
+    } else if source_block.stats.len() == 5 {
+        let alias_typer_binding = typer
+            .typed_local_binding_at(source_id, source_block.stats[2])
+            .expect("alias declaration retains the original Typer binding");
+        let calls_proof = validate_immutable_local_counter_set_calls_after_alias_proof(
+            ImmutableLocalReferenceAliasProofInput {
+                initializers: input,
+                alias_binding: Some(alias_typer_binding),
+            },
+        )
+        .expect("the merged proof authenticates the original alias and ordered calls");
+        let alias = calls_proof.alias();
+        (
+            alias.initializers().initializers(),
+            None,
+            Some(
+                calls_proof
+                    .calls()
+                    .iter()
+                    .map(call_to_binding)
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap(),
+            ),
+            Some(LocalReferenceAliasBinding {
+                source_block: alias.initializers().source_block(),
+                typed_block: alias.initializers().typed_block(),
+                source_declaration: alias.source_declaration(),
+                typed_declaration: alias.typed_declaration(),
+                source_initializer: alias.source_initializer(),
+                typed_initializer: alias.typed_initializer(),
+                source_type_tree: alias.source_type_tree(),
+                typed_type_tree: alias.typed_type_tree(),
+                source_target: alias.source_target(),
+                typed_target: alias.typed_target(),
+                local: alias.symbol(),
+                target: alias.target(),
+                scope: alias.scope(),
+                local_type: alias.local_type(),
+            }),
         )
     } else {
         let calls_proof = validate_immutable_local_counter_set_calls_proof(input)
@@ -3493,14 +3589,26 @@ fn standalone_local_receiver_call_candidate(
                     .try_into()
                     .unwrap(),
             ),
+            None,
         )
     };
-    let local_values = initializer_receipts.map(|receipt| LocalValueBinding {
-        source_tree: receipt.source_declaration(),
-        symbol: receipt.symbol(),
-        typed_declaration: receipt.typed_declaration(),
-        scope: receipt.scope(),
-    });
+    let call_pair_binding: Option<[LocalReceiverUnitCallBinding; 2]> = call_pair_binding;
+    let mut local_values = initializer_receipts
+        .map(|receipt| LocalValueBinding {
+            source_tree: receipt.source_declaration(),
+            symbol: receipt.symbol(),
+            typed_declaration: receipt.typed_declaration(),
+            scope: receipt.scope(),
+        })
+        .to_vec();
+    if let Some(alias) = alias_binding {
+        local_values.push(LocalValueBinding {
+            source_tree: alias.source_declaration,
+            symbol: alias.local,
+            typed_declaration: alias.typed_declaration,
+            scope: alias.scope,
+        });
+    }
     let local_initializers = initializer_receipts.map(|receipt| {
         let class = match typer.store().types.get(receipt.initializer_result_type()) {
             Type::TypeRef {
@@ -3599,6 +3707,7 @@ fn standalone_local_receiver_call_candidate(
         pair: formal_local_pair,
         initializers: local_initializers.to_vec(),
         locals: local_values.to_vec(),
+        alias: alias_binding,
         call: call_binding,
         calls: call_pair_binding,
     };
@@ -3653,7 +3762,9 @@ fn standalone_local_receiver_call_candidate(
         },
         members: &members,
     };
-    if let Some(mut calls) = call_pair_binding {
+    if alias_binding.is_none()
+        && let Some(mut calls) = call_pair_binding
+    {
         calls.swap(0, 1);
         let mut forged_bindings = bindings.clone();
         forged_bindings.calls = Some(calls);
@@ -3778,6 +3889,7 @@ fn standalone_local_receiver_call_candidate(
             candidate.bytes(),
             if call_pair_binding.is_some() { 2 } else { 1 },
             source_text.contains("second.set(firstSeed)\n    first.set(secondSeed)"),
+            alias_binding.is_some(),
         );
     }
     let factory_file = TastyFile::parse_and_validate_scala_3_9(candidate.bytes()).unwrap();
@@ -3806,7 +3918,9 @@ fn standalone_local_receiver_call_candidate(
         RawTree::Ast { tag, .. } | RawTree::NatAst { tag, .. } => *tag,
         RawTree::LengthNode(node) => node.tag,
     };
-    let expected_tags = if call_pair_binding.is_some() {
+    let expected_tags = if alias_binding.is_some() {
+        vec![VALDEF_TAG, VALDEF_TAG, VALDEF_TAG, APPLY_TAG, APPLY_TAG]
+    } else if call_pair_binding.is_some() {
         vec![VALDEF_TAG, VALDEF_TAG, APPLY_TAG, APPLY_TAG]
     } else {
         vec![VALDEF_TAG, VALDEF_TAG, APPLY_TAG]
@@ -3834,20 +3948,72 @@ fn standalone_local_receiver_call_candidate(
         })
         .map(|node| node.offset as u32)
         .collect::<Vec<_>>();
-    assert_eq!(local_addresses.len(), 2);
+    assert_eq!(
+        local_addresses.len(),
+        if alias_binding.is_some() { 3 } else { 2 }
+    );
     if let Some(calls) = call_pair_binding {
-        assert_eq!(block.stats.len(), 4);
-        assert_eq!(
-            block.stats.iter().map(raw_tag).collect::<Vec<_>>(),
-            [VALDEF_TAG, VALDEF_TAG, APPLY_TAG, APPLY_TAG]
-        );
+        let call_start = if let Some(alias) = alias_binding {
+            assert_eq!(block.stats.len(), 5);
+            assert_eq!(
+                block.stats.iter().map(raw_tag).collect::<Vec<_>>(),
+                [VALDEF_TAG, VALDEF_TAG, VALDEF_TAG, APPLY_TAG, APPLY_TAG]
+            );
+            assert_eq!(alias.target, local_values[0].symbol);
+            let RawTree::LengthNode(alias_node) = &block.stats[2] else {
+                panic!("alias stat remains a VALDEF")
+            };
+            let DefinitionBody::ValDef {
+                rhs: Some(alias_rhs),
+                ..
+            } = alias_node.decode_definition_body().unwrap()
+            else {
+                panic!("alias VALDEF retains its source Ident RHS")
+            };
+            let alias_rhs_references = alias_rhs.ast_refs();
+            let local_references = alias_rhs_references
+                .iter()
+                .filter(|reference| {
+                    matches!(
+                        reference.kind,
+                        AstRefKind::TermRefDirect | AstRefKind::SharedTerm
+                    )
+                })
+                .collect::<Vec<_>>();
+            let [alias_rhs_reference] = local_references.as_slice() else {
+                panic!("alias VALDEF RHS has one original-local TERMREF")
+            };
+            match alias_rhs_reference.kind {
+                AstRefKind::TermRefDirect => {
+                    assert_eq!(alias_rhs_reference.address, local_addresses[0]);
+                }
+                AstRefKind::SharedTerm => {
+                    let shared = address_index.get(alias_rhs_reference.address).unwrap();
+                    assert_eq!(shared.tag, TERMREFDIRECT_TAG);
+                    let shared_references = shared.ast_refs().unwrap();
+                    let [target] = shared_references.as_slice() else {
+                        panic!("shared alias RHS points to one direct original-local TERMREF")
+                    };
+                    assert_eq!(target.address, local_addresses[0]);
+                }
+                other => panic!("alias RHS uses a TERMREF, got {other:?}"),
+            }
+            3
+        } else {
+            assert_eq!(block.stats.len(), 4);
+            assert_eq!(
+                block.stats.iter().map(raw_tag).collect::<Vec<_>>(),
+                [VALDEF_TAG, VALDEF_TAG, APPLY_TAG, APPLY_TAG]
+            );
+            2
+        };
         let local_index = |symbol| {
             local_values
                 .iter()
                 .position(|local| local.symbol == symbol)
-                .expect("receiver belongs to the original local pair")
+                .expect("receiver belongs to the original local pair or its authenticated alias")
         };
-        for (stat, binding) in block.stats[2..].iter().zip(calls) {
+        for (stat, binding) in block.stats[call_start..].iter().zip(calls) {
             let RawTree::LengthNode(call_node) = stat else {
                 panic!("each authenticated call remains an APPLY")
             };

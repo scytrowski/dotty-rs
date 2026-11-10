@@ -214,7 +214,13 @@ impl Validator<'_, '_> {
                 .plan
                 .typed_bindings
                 .local_counter_initializers(self.plan.source.id, method.symbol);
-            if let Some(initializer) = initializers
+            let alias = self
+                .plan
+                .typed_bindings
+                .local_reference_alias(self.plan.source.id, method.symbol);
+            if let Some(alias) = alias.filter(|alias| alias.source_declaration == source_id) {
+                self.validate_local_reference_alias_initializer(alias, binding, method, visited)?;
+            } else if let Some(initializer) = initializers
                 .iter()
                 .find(|initializer| initializer.source_declaration == source_id)
                 .copied()
@@ -316,6 +322,112 @@ impl Validator<'_, '_> {
             });
         }
         self.visible_locals.insert(binding.symbol);
+        Ok(())
+    }
+
+    fn validate_local_reference_alias_initializer(
+        &mut self,
+        alias: crate::LocalReferenceAliasBinding,
+        binding: LocalValueBinding,
+        method: &MethodPicklePlan,
+        visited: &mut HashSet<TreeId<Typed>>,
+    ) -> Result<(), PickleError> {
+        let p = self.plan;
+        let source_declaration = binding.source_tree;
+        let typed_declaration = binding.typed_declaration;
+        let source_initializer = alias.source_initializer;
+        let typed_initializer = alias.typed_initializer;
+        let local_type = alias.local_type;
+        let source_block = self.source_tree(alias.source_block)?;
+        let typed_block =
+            p.typed_ast
+                .try_get(alias.typed_block)
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: alias.typed_block,
+                })?;
+        let source_alias = self.source_tree(source_declaration)?;
+        let typed_alias =
+            p.typed_ast
+                .try_get(typed_declaration)
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: typed_declaration,
+                })?;
+        let source_target = self.source_tree(alias.source_target)?;
+        let typed_target =
+            p.typed_ast
+                .try_get(alias.typed_target)
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: alias.typed_target,
+                })?;
+        let (TreeKind::Block(source_block), TreeKind::Block(typed_block)) =
+            (&source_block.kind, &typed_block.kind)
+        else {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        };
+        let (TreeKind::ValDef(source_alias), TreeKind::ValDef(typed_alias)) =
+            (&source_alias.kind, &typed_alias.kind)
+        else {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        };
+        let (TreeKind::Ident(source_target_ident), TreeKind::Ident(typed_target_ident)) =
+            (&source_target.kind, &typed_target.kind)
+        else {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        };
+        let target_initializer = p
+            .typed_bindings
+            .local_counter_initializers(p.source.id, method.symbol)
+            .into_iter()
+            .find(|initializer| initializer.local == alias.target);
+        let target_type = self.complete(alias.target)?;
+        let target_has_same_reference_type = matches!(
+            (self.ty(target_type)?, self.ty(local_type)?),
+            (
+                Type::TypeRef { target: target_class, .. },
+                Type::TypeRef { target: alias_class, .. }
+            ) if target_class == alias_class
+        );
+        if alias.source_declaration != source_declaration
+            || alias.typed_declaration != typed_declaration
+            || alias.source_initializer != source_initializer
+            || alias.typed_initializer != typed_initializer
+            || alias.source_target != source_initializer
+            || alias.typed_target != typed_initializer
+            || alias.local != binding.symbol
+            || alias.scope != binding.scope
+            || source_alias.rhs != Some(source_initializer)
+            || typed_alias.rhs != Some(typed_initializer)
+            || source_block.stats.get(2) != Some(&source_declaration)
+            || typed_block.stats.get(2) != Some(&typed_declaration)
+            || alias.local == alias.target
+            || alias.local_type != local_type
+            || p.store.symbols.get(alias.target).kind != SymbolKind::Local
+            || p.store.symbols.get(alias.target).owner != Some(method.symbol)
+            || p.store.symbols.get(alias.target).flags != SymbolFlags::EMPTY
+            || !self.visible_locals.contains(&alias.target)
+            || source_target_ident.name != self.symbol(alias.target)?.name
+            || typed_target_ident.name != source_target_ident.name
+            || !target_has_same_reference_type
+            || !matches!(
+                self.ty(typed_target.ty)?,
+                Type::TermRef { prefix, target: TermRefTarget::Symbol(symbol) }
+                    if *prefix == p.definitions.no_prefix && *symbol == alias.target
+            )
+            || target_initializer.is_none_or(|initializer| initializer.local_type != target_type)
+        {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        }
+        self.source_typed_binding(alias.source_target, alias.typed_target)?;
+        self.paired_source_typed_span(
+            source_target.position,
+            typed_target.position,
+            alias.typed_target,
+        )?;
+        if !visited.insert(alias.typed_target) {
+            return Err(PickleError::RepeatedExpression {
+                tree: alias.typed_target,
+            });
+        }
         Ok(())
     }
 }

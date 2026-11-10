@@ -134,6 +134,17 @@ pub trait SourceTypedBindings {
             .collect()
     }
 
+    /// Authenticated immutable local reference alias for the one supported
+    /// three-local Counter block. The alias remains a declaration of its own;
+    /// its initializer target is the original first local.
+    fn local_reference_alias(
+        &self,
+        _source: SourceId,
+        _method: SymbolId,
+    ) -> Option<LocalReferenceAliasBinding> {
+        None
+    }
+
     /// Exact ordered direct-formal/local pair receipt from the source proof.
     fn formal_local_constructor_call_pair(
         &self,
@@ -284,6 +295,26 @@ pub struct LocalCounterInitializerBinding {
     pub local_type: TypeId,
     pub argument_formal: SymbolId,
     pub call: NestedConstructorCallBinding,
+}
+
+/// Original source/typed roots proving one immutable local aliases an earlier
+/// local of the same reference type in the same method scope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocalReferenceAliasBinding {
+    pub source_block: TreeId<Untyped>,
+    pub typed_block: TreeId<Typed>,
+    pub source_declaration: TreeId<Untyped>,
+    pub typed_declaration: TreeId<Typed>,
+    pub source_initializer: TreeId<Untyped>,
+    pub typed_initializer: TreeId<Typed>,
+    pub source_type_tree: TreeId<Untyped>,
+    pub typed_type_tree: TreeId<Typed>,
+    pub source_target: TreeId<Untyped>,
+    pub typed_target: TreeId<Typed>,
+    pub local: SymbolId,
+    pub target: SymbolId,
+    pub scope: dotty_core::ScopeId,
+    pub local_type: TypeId,
 }
 
 /// Exact source and typed roots plus the source-proven origin for one outer

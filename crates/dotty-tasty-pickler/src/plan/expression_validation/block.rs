@@ -116,6 +116,10 @@ impl Validator<'_, '_> {
                 .plan
                 .typed_bindings
                 .local_receiver_unit_call_pair(self.plan.source.id, method.symbol);
+            let alias_binding = self
+                .plan
+                .typed_bindings
+                .local_reference_alias(self.plan.source.id, method.symbol);
             let call_bindings = match (call_binding, call_pair_binding) {
                 (Some(call), None) => vec![call],
                 (None, Some(calls)) => calls.to_vec(),
@@ -177,6 +181,53 @@ impl Validator<'_, '_> {
                             Some(TreeKind::Apply(_))
                         )
                     });
+            let alias_call_stat_shape = call_pair_binding.is_some()
+                && call_binding.is_none()
+                && pair_formals_valid
+                && alias_binding.is_some_and(|alias| {
+                    source_block.stats.len() == 5
+                        && alias.source_block == source_id
+                        && alias.typed_block == typed_id
+                        && alias.source_declaration == source_block.stats[2]
+                        && alias.typed_declaration == typed_block.stats[2]
+                        && alias.source_initializer == alias.source_target
+                        && alias.typed_initializer == alias.typed_target
+                })
+                && call_bindings.len() == 2
+                && source_block.stats[..3]
+                    .iter()
+                    .zip(&typed_block.stats[..3])
+                    .all(|(&source_stat, &typed_stat)| {
+                        matches!(
+                            self.source_tree(source_stat).map(|tree| &tree.kind),
+                            Ok(TreeKind::ValDef(_))
+                        ) && matches!(
+                            self.plan
+                                .typed_ast
+                                .try_get(typed_stat)
+                                .map(|tree| &tree.kind),
+                            Some(TreeKind::ValDef(_))
+                        )
+                    })
+                && source_block.stats[3..]
+                    .iter()
+                    .zip(&typed_block.stats[3..])
+                    .all(|(&source_stat, &typed_stat)| {
+                        matches!(
+                            self.source_tree(source_stat).map(|tree| &tree.kind),
+                            Ok(TreeKind::Apply(_))
+                        ) && matches!(
+                            self.plan
+                                .typed_ast
+                                .try_get(typed_stat)
+                                .map(|tree| &tree.kind),
+                            Some(TreeKind::Apply(_))
+                        )
+                    })
+                && call_bindings.iter().enumerate().all(|(index, binding)| {
+                    binding.source_apply == source_block.stats[index + 3]
+                        && binding.typed_apply == typed_block.stats[index + 3]
+                });
             let local_stat_shape = (1..=2).contains(&source_block.stats.len())
                 && source_block.stats.iter().zip(&typed_block.stats).all(
                     |(&source_stat, &typed_stat)| {
@@ -192,12 +243,13 @@ impl Validator<'_, '_> {
                         )
                     },
                 );
-            let exact_shape = (local_stat_shape || verified_call_stat_shape)
-                && matches!(
-                    self.source_tree(source_block.expr)?.kind,
-                    TreeKind::Apply(_)
-                )
-                && matches!(&typed_result.kind, TreeKind::Apply(_));
+            let exact_shape =
+                (local_stat_shape || verified_call_stat_shape || alias_call_stat_shape)
+                    && matches!(
+                        self.source_tree(source_block.expr)?.kind,
+                        TreeKind::Apply(_)
+                    )
+                    && matches!(&typed_result.kind, TreeKind::Apply(_));
             if !exact_shape {
                 return Err(
                     self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
@@ -282,7 +334,24 @@ impl Validator<'_, '_> {
                         && initializer.typed_declaration == typed_block.stats[0]
                 })
                 && self.source_tree(source_block.stats[0])?.position.is_some();
-            if !(two_local_shape || one_local_shape) {
+            let three_local_alias_shape = alias_call_stat_shape
+                && initializers.len() == 2
+                && alias_binding.is_some_and(|alias| initializers[0].local == alias.target)
+                && initializers[0].local != initializers[1].local
+                && initializers[0].scope == initializers[1].scope
+                && source_block
+                    .stats
+                    .iter()
+                    .take(2)
+                    .zip(&typed_block.stats)
+                    .zip(&initializers)
+                    .all(|((&source_stat, &typed_stat), initializer)| {
+                        initializer.source_block == source_id
+                            && initializer.typed_block == typed_id
+                            && initializer.source_declaration == source_stat
+                            && initializer.typed_declaration == typed_stat
+                    });
+            if !(two_local_shape || one_local_shape || three_local_alias_shape) {
                 return Err(
                     self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
                 );
@@ -301,7 +370,7 @@ impl Validator<'_, '_> {
                     );
                 }
             };
-            if two_local_shape {
+            if two_local_shape || three_local_alias_shape {
                 let pair = pair.expect("two-local shape has a pair receipt");
                 for index in 0..2 {
                     let argument = pair.arguments[index];
@@ -378,9 +447,10 @@ impl Validator<'_, '_> {
                 )?;
                 continue;
             }
-            if index >= 2
+            let call_start = if source_block.stats.len() == 5 { 3 } else { 2 };
+            if index >= call_start
                 && let Some(binding) = unit_call_pair
-                    .and_then(|calls| calls.get(index - 2).copied())
+                    .and_then(|calls| calls.get(index - call_start).copied())
                     .or_else(|| (index == 2).then_some(unit_call).flatten())
             {
                 self.validate_local_receiver_unit_call(
@@ -502,6 +572,25 @@ impl Validator<'_, '_> {
         let receiver_initializer = initializers
             .iter()
             .find(|initializer| initializer.local == binding.receiver);
+        let alias_binding = p
+            .typed_bindings
+            .local_reference_alias(p.source.id, method.symbol);
+        let receiver_is_alias = alias_binding.is_some_and(|alias| {
+            alias.local == binding.receiver
+                && alias.target == initializers.first().map_or(alias.target, |item| item.local)
+                && alias.scope == binding.receiver_scope
+        });
+        let receiver_class = receiver_initializer
+            .map(|initializer| initializer.call.class)
+            .or_else(|| {
+                alias_binding.and_then(|alias| match p.store.types.try_get(alias.local_type) {
+                    Some(Type::TypeRef {
+                        target: TypeRefTarget::Symbol(class),
+                        ..
+                    }) => Some(*class),
+                    _ => None,
+                })
+            });
         let calls_pair = p
             .typed_bindings
             .local_receiver_unit_call_pair(p.source.id, method.symbol);
@@ -543,7 +632,7 @@ impl Validator<'_, '_> {
             || source_selection.qualifier != binding.source_receiver
             || typed_selection.qualifier != binding.typed_receiver
             || initializers.len() != 2
-            || receiver_initializer.is_none()
+            || (receiver_initializer.is_none() && !receiver_is_alias)
             || !self.visible_locals.contains(&binding.receiver)
             || !canonical_method
             || expected_argument_formal != Some(binding.argument_formal)
@@ -558,8 +647,7 @@ impl Validator<'_, '_> {
             || !matches!(self.ty(typed_argument.ty)?, Type::TermRef { .. })
             || self.symbol(binding.argument_formal)?.kind != SymbolKind::Parameter
             || self.symbol(binding.argument_formal)?.owner != Some(method.symbol)
-            || self.symbol(binding.method)?.owner
-                != receiver_initializer.map(|initializer| initializer.call.class)
+            || self.symbol(binding.method)?.owner != receiver_class
             || self.symbol(binding.method)?.kind != SymbolKind::Method
             || source_selection.name != self.symbol(binding.method)?.name
             || typed_selection.name != source_selection.name
