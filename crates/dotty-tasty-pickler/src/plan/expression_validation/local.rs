@@ -219,7 +219,9 @@ impl Validator<'_, '_> {
                 .typed_bindings
                 .local_reference_alias(self.plan.source.id, method.symbol);
             if let Some(alias) = alias.filter(|alias| alias.source_declaration == source_id) {
-                self.validate_local_reference_alias_initializer(alias, binding, method, visited)?;
+                self.validate_local_reference_alias_initializer(
+                    alias, binding, local_type, method, visited,
+                )?;
             } else if let Some(initializer) = initializers
                 .iter()
                 .find(|initializer| initializer.source_declaration == source_id)
@@ -329,6 +331,7 @@ impl Validator<'_, '_> {
         &mut self,
         alias: crate::LocalReferenceAliasBinding,
         binding: LocalValueBinding,
+        local_type: TypeId,
         method: &MethodPicklePlan,
         visited: &mut HashSet<TreeId<Typed>>,
     ) -> Result<(), PickleError> {
@@ -337,7 +340,6 @@ impl Validator<'_, '_> {
         let typed_declaration = binding.typed_declaration;
         let source_initializer = alias.source_initializer;
         let typed_initializer = alias.typed_initializer;
-        let local_type = alias.local_type;
         let source_block = self.source_tree(alias.source_block)?;
         let typed_block =
             p.typed_ast
@@ -397,6 +399,8 @@ impl Validator<'_, '_> {
             || alias.scope != binding.scope
             || source_alias.rhs != Some(source_initializer)
             || typed_alias.rhs != Some(typed_initializer)
+            || alias.source_type_tree != source_alias.tpt
+            || alias.typed_type_tree != typed_alias.tpt
             || source_block.stats.get(2) != Some(&source_declaration)
             || typed_block.stats.get(2) != Some(&typed_declaration)
             || alias.local == alias.target
