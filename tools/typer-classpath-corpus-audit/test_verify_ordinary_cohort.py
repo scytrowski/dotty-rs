@@ -13,6 +13,86 @@ SPEC.loader.exec_module(MODULE)
 
 
 class OrdinaryCohortGateTests(unittest.TestCase):
+    def test_acceptance_v_requires_additive_tuple_and_preserves_exact_baseline(self) -> None:
+        repository = MODULE_PATH.parents[2]
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            main = temporary_path / "main.tsv"
+            source = repository / "docs/typer-stdlib-acceptance-v/main-audit.tsv"
+            lines = source.read_text(encoding="utf-8").splitlines()
+            identity = MODULE.ACCEPTANCE_V_TUPLE_IDENTITY
+            index = next(i for i, line in enumerate(lines) if line.startswith(identity + "\t"))
+            columns = lines[index].split("\t")
+            columns[7] = MODULE.ACCEPTANCE_V_TUPLE_RESULT
+            columns[9] = "typed"
+            columns[11] = "999"
+            lines[index] = "\t".join(columns)
+            lines = [line.replace("typed=18", "typed=19").replace("blocked=7", "blocked=6") if line.startswith(("typed=", "blocked=")) else line for line in lines]
+            main.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            analysis = repository / "docs/typer-stdlib-acceptance-v/analysis-audit.tsv"
+            failures, rows = MODULE.verify_acceptance_v(
+                main, main, analysis, analysis,
+                repository / "docs/typer-stdlib-acceptance-v/successful-roots.tsv",
+                repository / "docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv",
+                repository / "docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv",
+            )
+            self.assertEqual(failures, [])
+            self.assertIn(identity, {row["identity"] for row in rows})
+
+    def test_acceptance_v_rejects_prepared_only_or_wrong_tuple_result(self) -> None:
+        repository = MODULE_PATH.parents[2]
+        with tempfile.TemporaryDirectory() as temporary:
+            report = Path(temporary) / "main.tsv"
+            lines = (repository / "docs/typer-stdlib-acceptance-v/main-audit.tsv").read_text(encoding="utf-8").splitlines()
+            identity = MODULE.ACCEPTANCE_V_TUPLE_IDENTITY
+            index = next(i for i, line in enumerate(lines) if line.startswith(identity + "\t"))
+            columns = lines[index].split("\t")
+            columns[7] = "scala.Array[java.lang.String]"
+            columns[9] = "typed"
+            columns[11] = "999"
+            lines[index] = "\t".join(columns)
+            lines = [line.replace("typed=18", "typed=19").replace("blocked=7", "blocked=6") if line.startswith(("typed=", "blocked=")) else line for line in lines]
+            report.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            analysis = repository / "docs/typer-stdlib-acceptance-v/analysis-audit.tsv"
+            failures, _ = MODULE.verify_acceptance_v(
+                report, report, analysis, analysis,
+                repository / "docs/typer-stdlib-acceptance-v/successful-roots.tsv",
+                repository / "docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv",
+                repository / "docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv",
+            )
+            self.assertTrue(any("unexpected result shape" in failure for failure in failures))
+
+    def test_acceptance_v_rejects_baseline_without_ordinary_tuple_credit(self) -> None:
+        repository = MODULE_PATH.parents[2]
+        main = repository / "docs/typer-stdlib-acceptance-v/main-audit.tsv"
+        analysis = repository / "docs/typer-stdlib-acceptance-v/analysis-audit.tsv"
+        failures, _ = MODULE.verify_acceptance_v(
+            main, main, analysis, analysis,
+            repository / "docs/typer-stdlib-acceptance-v/successful-roots.tsv",
+            repository / "docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv",
+            repository / "docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv",
+        )
+        self.assertTrue(any("requires at least 19/25" in failure for failure in failures))
+        self.assertTrue(any("Tuple.toArray whole-method" in failure for failure in failures))
+
+    def test_acceptance_v_rejects_changed_protected_receipt(self) -> None:
+        repository = MODULE_PATH.parents[2]
+        with tempfile.TemporaryDirectory() as temporary:
+            protected = Path(temporary) / "protected.tsv"
+            protected.write_text(
+                (repository / "docs/typer-stdlib-acceptance-v/successful-roots.tsv").read_text(encoding="utf-8")
+                + "main\tspoofed#tree=3\tBoolean\t3\n",
+                encoding="utf-8",
+            )
+            main = repository / "docs/typer-stdlib-acceptance-v/main-audit.tsv"
+            analysis = repository / "docs/typer-stdlib-acceptance-v/analysis-audit.tsv"
+            failures, _ = MODULE.verify_acceptance_v(
+                main, main, analysis, analysis, protected,
+                repository / "docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv",
+                repository / "docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv",
+            )
+            self.assertTrue(any("frozen #2233 protected-success receipt changed" in failure for failure in failures))
+
     def write_fixture(
         self, directory: Path, status: str, actual_result: str = "Int", typed_tree: str = "2"
     ) -> tuple[Path, Path]:

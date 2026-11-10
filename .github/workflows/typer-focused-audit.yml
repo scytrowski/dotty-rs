@@ -969,6 +969,39 @@ jobs:
               --prior-checks-status "$DOTTY_PRIOR_JOB_STATUS" \
               --hosted-run "$DOTTY_HOSTED_RUN"
 
+      - name: Enforce Stdlib Acceptance V release gate
+        if: always()
+        shell: bash
+        env:
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+          DOTTY_HOSTED_RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DOTTY_PRIOR_JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$DOTTY_AUDIT_REPORT_DIR"
+          if test "$(sha256sum docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv | cut -d' ' -f1)" \
+              != 59bb65f48e7d94423de0f0a00029b98a0b41583e601c700687311e9e17fc5244 \
+            || test "$(sha256sum docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv | cut -d' ' -f1)" \
+              != afa5a2064efd0bfcd31bb0bcb4fb08030db2d180a7619ac3a0843ebbe867f7bc \
+            || test "$(sha256sum docs/typer-stdlib-acceptance-v/successful-roots.tsv | cut -d' ' -f1)" \
+              != 2a31b0b10cac7fe86d3c30f2d4e632ac93f2037e9a392efaf6e6b548e5284c4d; then
+            echo 'Acceptance V frozen manifests or #2233 protected successes changed' >&2
+            exit 1
+          fi
+          PYTHONDONTWRITEBYTECODE=1 python3 \
+            tools/typer-classpath-corpus-audit/verify_ordinary_cohort.py acceptance-v \
+              --main-first "$DOTTY_AUDIT_REPORT_DIR/main-cohort-first.tsv" \
+              --main-second "$DOTTY_AUDIT_REPORT_DIR/main-cohort-second.tsv" \
+              --analysis-first "$DOTTY_AUDIT_REPORT_DIR/analysis-cohort-first.tsv" \
+              --analysis-second "$DOTTY_AUDIT_REPORT_DIR/analysis-cohort-second.tsv" \
+              --protected-successes docs/typer-stdlib-acceptance-v/successful-roots.tsv \
+              --output "$DOTTY_AUDIT_REPORT_DIR/typer-stdlib-acceptance-v.tsv" \
+              --report "$DOTTY_AUDIT_REPORT_DIR/typer-stdlib-acceptance-v-closeout.md" \
+              --tested-revision "$(git rev-parse HEAD)" \
+              --pr-head-sha "${{ github.event.pull_request.head.sha || github.sha }}" \
+              --prior-checks-status "$DOTTY_PRIOR_JOB_STATUS" \
+              --hosted-run "$DOTTY_HOSTED_RUN"
+
       - name: Write run-bound sealed Event acceptance report
         if: always()
         shell: bash
