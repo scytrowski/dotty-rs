@@ -343,6 +343,10 @@ jobs:
               "$(sha256sum "$DOTTY_AUDIT_REPORT_DIR/option-map-session-1.receipt" | cut -d' ' -f1)"
             printf 'session_2_receipt_sha256\t%s\n' \
               "$(sha256sum "$DOTTY_AUDIT_REPORT_DIR/option-map-session-2.receipt" | cut -d' ' -f1)"
+            printf 'tuple_session_1_receipt_sha256\t%s\n' \
+              "$(sha256sum "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-1.receipt" | cut -d' ' -f1)"
+            printf 'tuple_session_2_receipt_sha256\t%s\n' \
+              "$(sha256sum "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-2.receipt" | cut -d' ' -f1)"
             printf 'source_sha256\t%s\n' \
               "$(sha256sum "$SCALA39_ROOT/library/src/scala/Option.scala" | cut -d' ' -f1)"
             printf 'source_revision\t%s\n' "$(git -C "$SCALA39_ROOT" rev-parse HEAD)"
@@ -380,7 +384,7 @@ jobs:
               echo "Tuple.toArray acceptance marker missing from session $session log" >&2
               exit 1
             fi
-            grep -q 'TUPLE_TO_ARRAY_BEFORE outcome=ApplicationArgumentConformanceUnsupported' \
+            grep -Fq 'TUPLE_TO_ARRAY_AUTOMATIC_PREPARATION source_owner=.scala.Tuple external_formal=TypeRef(source_owner) rollback_retry=passed' \
               "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-$session.log"
             test "$(wc -l < "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-$session.receipt")" -eq 1
             grep -q 'test result: ok. 1 passed' \

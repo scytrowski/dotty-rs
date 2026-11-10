@@ -170,6 +170,7 @@ impl SourceTyper<'_> {
                 context,
                 tree.index(),
                 info_journal,
+                new_mappings,
             )?;
         }
         let explicit_super_selection = matches!(
@@ -255,29 +256,17 @@ impl SourceTyper<'_> {
         context: ExpressionContext,
         tree_index: u32,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<(), TyperError> {
         let Some(TreeKind::Select(selection)) =
             self.arena.try_get(function_tree).map(|node| &node.kind)
         else {
             return Ok(());
         };
-        if self.store.names.resolve(selection.name.text()) != "toArray"
-            || !matches!(
-                self.arena
-                    .try_get(selection.qualifier)
-                    .map(|node| &node.kind),
-                Some(TreeKind::Select(receiver))
-                    if self.store.names.resolve(receiver.name.text()) == "Tuples"
-            )
-        {
+        if self.store.names.resolve(selection.name.text()) != "toArray" {
             return Ok(());
         }
-        if !matches!(
-            self.arena
-                .try_get(selection.qualifier)
-                .map(|node| &node.kind),
-            Some(TreeKind::Select(_))
-        ) {
+        if !self.is_scala_runtime_tuples_path(selection.qualifier) {
             return Ok(());
         }
         let qualifier = match self.arena.try_get(argument_tree).map(|node| &node.kind) {
@@ -285,13 +274,68 @@ impl SourceTyper<'_> {
             _ => return Ok(()),
         };
         let owner = self.enclosing_this_owner(qualifier, context.owner, tree_index)?;
+        if !self.is_authenticated_source_tuple_owner(owner) {
+            return Ok(());
+        }
+        let receiver =
+            self.type_expression_inner(selection.qualifier, context, info_journal, new_mappings)?;
+        if !self.is_canonical_external_tuples_receiver(receiver, tree_index)? {
+            return Ok(());
+        }
+        self.prepare_authenticated_source_owner(owner, info_journal)
+    }
+
+    fn is_scala_runtime_tuples_path(&self, tree: TreeId<Untyped>) -> bool {
+        fn collect_path(
+            arena: &AstArena<Untyped>,
+            tree: TreeId<Untyped>,
+            output: &mut Vec<dotty_core::NameId>,
+        ) -> bool {
+            match arena.try_get(tree).map(|node| &node.kind) {
+                Some(TreeKind::Ident(identifier)) => {
+                    output.push(identifier.name.text());
+                    true
+                }
+                Some(TreeKind::Select(selection)) => {
+                    if !collect_path(arena, selection.qualifier, output) {
+                        return false;
+                    }
+                    output.push(selection.name.text());
+                    true
+                }
+                _ => false,
+            }
+        }
+
+        let mut names = Vec::new();
+        if !collect_path(self.arena, tree, &mut names) {
+            return false;
+        }
+        let mut path = names
+            .into_iter()
+            .map(|name| self.store.names.resolve(name).to_owned())
+            .collect::<Vec<_>>();
+        if path.first().is_some_and(|name| name == "_root_") {
+            path.remove(0);
+        }
+        matches!(
+            path.as_slice(),
+            [runtime, tuples] if runtime == "runtime" && tuples == "Tuples"
+        ) || matches!(
+            path.as_slice(),
+            [scala, runtime, tuples]
+                if scala == "scala" && runtime == "runtime" && tuples == "Tuples"
+        )
+    }
+
+    fn is_authenticated_source_tuple_owner(&self, owner: SymbolId) -> bool {
         if !self.store.symbols.contains(owner)
             || !matches!(
                 self.store.symbols.get(owner).kind,
-                SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+                SymbolKind::Class | SymbolKind::Trait
             )
         {
-            return Ok(());
+            return false;
         }
         if self
             .store
@@ -300,7 +344,7 @@ impl SourceTyper<'_> {
             != "Tuple"
             || self.store.symbols.get(owner).owner != self.packages.symbol(&["scala"])
         {
-            return Ok(());
+            return false;
         }
         let authenticated = match self.index.definition_of(owner) {
             Some(SourceDefinition::Canonical { source, tree })
@@ -319,7 +363,76 @@ impl SourceTyper<'_> {
             }
             _ => false,
         };
-        if !authenticated || !self.is_current_source_symbol(owner) {
+        authenticated && self.is_current_source_symbol(owner)
+    }
+
+    fn is_canonical_external_tuples_receiver(
+        &mut self,
+        receiver: TreeId<Typed>,
+        tree_index: u32,
+    ) -> Result<bool, TyperError> {
+        let Some(Type::TermRef {
+            target: TermRefTarget::Symbol(object),
+            ..
+        }) = self.store.types.try_get(self.typed_arena.get(receiver).ty)
+        else {
+            return Ok(false);
+        };
+        let object = *object;
+        if !self.store.symbols.contains(object)
+            || self.store.symbols.get(object).kind != SymbolKind::Object
+            || !matches!(
+                self.store.symbols.get(object).origin,
+                SymbolOrigin::Tasty(_)
+            )
+            || self
+                .store
+                .names
+                .resolve(self.store.symbols.get(object).name.text())
+                != "Tuples"
+        {
+            return Ok(false);
+        }
+        let Some(package) = self.store.symbols.get(object).owner else {
+            return Ok(false);
+        };
+        if self.package_path(package) != ["scala", "runtime"] {
+            return Ok(false);
+        }
+        let runtime_path = ["scala".to_owned(), "runtime".to_owned()];
+        let Some(canonical_package) = self.resolve_external_package(&runtime_path, tree_index)?
+        else {
+            return Ok(false);
+        };
+        if package != canonical_package {
+            return Ok(false);
+        }
+        let Some(module_class) = self
+            .resolver
+            .module_class_of_object(self.store, object)
+            .map_err(|error| TyperError::SymbolResolution {
+                source: self.source,
+                tree_index,
+                error,
+            })?
+        else {
+            return Ok(false);
+        };
+        Ok(self.store.symbols.contains(module_class)
+            && self.store.symbols.get(module_class).kind == SymbolKind::ModuleClass
+            && self.store.symbols.get(module_class).owner == Some(package)
+            && matches!(
+                self.store.symbols.get(module_class).origin,
+                SymbolOrigin::Tasty(_)
+            ))
+    }
+
+    pub(in crate::typer) fn prepare_authenticated_source_owner(
+        &mut self,
+        owner: SymbolId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<(), TyperError> {
+        if !self.is_authenticated_source_tuple_owner(owner) {
             return Ok(());
         }
         self.index

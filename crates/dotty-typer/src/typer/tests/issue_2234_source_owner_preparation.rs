@@ -45,15 +45,11 @@ fn direct_this_call(
 }
 
 #[test]
-fn canonical_tuple_to_array_prepares_only_the_authenticated_source_owner() {
+fn authenticated_source_owner_preparation_completes_only_one_declaration() {
     let source_text = "package scala\nclass Tuple {\n  def use = runtime.Tuples.toArray(this)\n  def plain = consume(this)\n}\nobject runtime { object Tuples { def toArray(value: Tuple): Int = 0 } }\nclass Unused";
     let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
     let tuple = class_symbol(&parsed, &store, &index, source, "Tuple");
     let unused = class_symbol(&parsed, &store, &index, source, "Unused");
-    let (use_method, use_function, use_argument) = {
-        let (method, function, argument) = direct_this_call(&parsed, &store, &index, source, "use");
-        (method, function, argument)
-    };
     let (plain_method, plain_function, plain_argument) = {
         let (method, function, argument) =
             direct_this_call(&parsed, &store, &index, source, "plain");
@@ -86,11 +82,6 @@ fn canonical_tuple_to_array_prepares_only_the_authenticated_source_owner() {
             tuples_tree,
         )
         .unwrap();
-    let use_context = ExpressionContext {
-        lexical: index.declaration_context_of(use_method).unwrap(),
-        owner: use_method,
-        local_scopes: None,
-    };
     let plain_context = ExpressionContext {
         lexical: index.declaration_context_of(plain_method).unwrap(),
         owner: plain_method,
@@ -124,6 +115,7 @@ fn canonical_tuple_to_array_prepares_only_the_authenticated_source_owner() {
             plain_context,
             plain_function.index(),
             &mut Vec::new(),
+            &mut Vec::new(),
         )
         .unwrap();
     assert!(matches!(
@@ -132,13 +124,7 @@ fn canonical_tuple_to_array_prepares_only_the_authenticated_source_owner() {
     ));
 
     typer
-        .prepare_source_owner_for_qualified_this_argument(
-            use_function,
-            use_argument,
-            use_context,
-            use_function.index(),
-            &mut Vec::new(),
-        )
+        .prepare_authenticated_source_owner(tuple, &mut Vec::new())
         .unwrap();
     let SymbolInfo::Complete(class_info_type) = *typer.store.symbols.info(tuple) else {
         panic!("the authentic source owner should be completed");
@@ -197,6 +183,7 @@ fn same_named_non_scala_tuple_is_not_prepared() {
             context,
             function.index(),
             &mut Vec::new(),
+            &mut Vec::new(),
         )
         .unwrap();
     assert!(matches!(
@@ -231,17 +218,39 @@ fn unrelated_qualified_this_call_does_not_complete_product_owner() {
 }
 
 #[test]
+fn wrong_package_tuples_callee_does_not_complete_source_tuple() {
+    let source_text = "package scala\ncase class Tuple(x: Boolean, y: Int) { def f: Int = _root_.scala.fake.Tuples.toArray(this) }\nobject fake { object Tuples { def toArray(x: Any): Int = 1 } }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+    let tuple = class_symbol(&parsed, &store, &index, source, "Tuple");
+    let method_tree = method_definition_tree(&parsed, &store, "f");
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+
+    let typed_method = typer
+        .type_method_definition(method_tree)
+        .expect("a wrong-package source callee retaining Any should type lazily");
+    assert_eq!(
+        typer.source_typed_index().get(source, method_tree),
+        Some(typed_method)
+    );
+    assert!(matches!(
+        *typer.store.symbols.info(tuple),
+        SymbolInfo::Missing
+    ));
+}
+
+#[test]
 fn malformed_completed_source_owner_is_rejected_without_replacement() {
     let source_text = "package scala\nclass Tuple { def use = runtime.Tuples.toArray(this) }\nobject runtime { object Tuples { def toArray(value: Tuple): Int = 0 } }";
     let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
     let tuple = class_symbol(&parsed, &store, &index, source, "Tuple");
-    let (method, function, argument) = direct_this_call(&parsed, &store, &index, source, "use");
     let method_tree = method_definition_tree(&parsed, &store, "use");
-    let context = ExpressionContext {
-        lexical: index.declaration_context_of(method).unwrap(),
-        owner: method,
-        local_scopes: None,
-    };
     let mut typer = SourceTyper::new(
         &parsed.ast,
         source,
@@ -255,13 +264,7 @@ fn malformed_completed_source_owner_is_rejected_without_replacement() {
         .symbols
         .set_info(tuple, SymbolInfo::Complete(definitions.int));
     assert!(matches!(
-        typer.prepare_source_owner_for_qualified_this_argument(
-            function,
-            argument,
-            context,
-            function.index(),
-            &mut Vec::new(),
-        ),
+        typer.prepare_authenticated_source_owner(tuple, &mut Vec::new()),
         Err(TyperError::MalformedClassInfo { symbol, info })
             if symbol == tuple && info == definitions.int
     ));
@@ -274,7 +277,7 @@ fn malformed_completed_source_owner_is_rejected_without_replacement() {
 }
 
 #[test]
-fn inconsistent_selected_formal_stays_a_rejection_and_rolls_back_owner_preparation() {
+fn noncanonical_selected_formal_mismatch_does_not_coerce_source_tuple() {
     let source_text = "package scala\nclass Tuple { def use: Int = runtime.Tuples.toArray(this) }\nobject runtime { object Tuples { def toArray(value: Int): Int = value } }";
     let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
     let tuple = class_symbol(&parsed, &store, &index, source, "Tuple");
@@ -300,10 +303,10 @@ fn inconsistent_selected_formal_stays_a_rejection_and_rolls_back_owner_preparati
         ),
         "unexpected inconsistent-formal result: {error:?}"
     );
-    assert!(
-        matches!(*typer.store.symbols.info(tuple), SymbolInfo::Missing),
-        "the failed call rolls back its source-owner preparation"
-    );
+    assert!(matches!(
+        *typer.store.symbols.info(tuple),
+        SymbolInfo::Missing
+    ));
     assert_eq!(typer.source_typed_index().get(source, method_tree), None);
     assert!(index.definition_of(method).is_some());
 }
