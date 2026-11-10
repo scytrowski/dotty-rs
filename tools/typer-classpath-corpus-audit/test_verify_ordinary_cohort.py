@@ -1,7 +1,12 @@
 import csv
+import contextlib
 import importlib.util
+import io
+import os
+import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -13,6 +18,165 @@ SPEC.loader.exec_module(MODULE)
 
 
 class OrdinaryCohortGateTests(unittest.TestCase):
+    def acceptance_v_cli_arguments(self, directory: Path, tested: str, head: str, status: str, hosted: str) -> list[str]:
+        repository = MODULE_PATH.parents[2]
+        main = directory / "main.tsv"
+        lines = (repository / "docs/typer-stdlib-acceptance-v/main-audit.tsv").read_text(encoding="utf-8").splitlines()
+        identity = MODULE.ACCEPTANCE_V_TUPLE_IDENTITY
+        index = next(i for i, line in enumerate(lines) if line.startswith(identity + "\t"))
+        columns = lines[index].split("\t")
+        columns[7] = MODULE.ACCEPTANCE_V_TUPLE_RESULT
+        columns[9] = "typed"
+        columns[11] = "999"
+        lines[index] = "\t".join(columns)
+        lines = [line.replace("typed=18", "typed=19").replace("blocked=7", "blocked=6") if line.startswith(("typed=", "blocked=")) else line for line in lines]
+        main.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        analysis = repository / "docs/typer-stdlib-acceptance-v/analysis-audit.tsv"
+        return [
+            "verify_ordinary_cohort.py", "acceptance-v",
+            "--main-first", str(main), "--main-second", str(main),
+            "--analysis-first", str(analysis), "--analysis-second", str(analysis),
+            "--protected-successes", str(repository / "docs/typer-stdlib-acceptance-v/successful-roots.tsv"),
+            "--output", str(directory / "closeout.tsv"),
+            "--report", str(directory / "closeout.md"),
+            "--tested-revision", tested, "--pr-head-sha", head,
+            "--prior-checks-status", status, "--hosted-run", hosted,
+        ]
+
+    def run_acceptance_v_cli(self, directory: Path, args: list[str], environment: dict[str, str]) -> tuple[int, str, str]:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "argv", args), mock.patch.dict(os.environ, environment, clear=True):
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                result = MODULE.main()
+        return result, (directory / "closeout.md").read_text(encoding="utf-8"), stderr.getvalue()
+
+    def test_acceptance_v_cli_keeps_pending_hosted_run_unmet(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            sha = "a" * 40
+            args = self.acceptance_v_cli_arguments(directory, sha, sha, "success", "pending")
+            env = {
+                "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "pull_request",
+                "GITHUB_RUN_ID": "123", "GITHUB_SERVER_URL": "https://github.com",
+                "GITHUB_REPOSITORY": "scytrowski/dotty-rs", "DOTTY_EXPECTED_SOURCE_SHA": sha,
+            }
+            result, report, stderr = self.run_acceptance_v_cli(directory, args, env)
+            self.assertEqual(result, 1, stderr)
+            self.assertIn("Outcome: SPRINT GOAL UNMET", report)
+            self.assertIn("hosted-run link does not identify this GitHub Actions run", report)
+
+    def test_acceptance_v_cli_keeps_unsuccessful_hosted_audit_unmet(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            sha = "a" * 40
+            hosted = "https://github.com/scytrowski/dotty-rs/actions/runs/123"
+            args = self.acceptance_v_cli_arguments(directory, sha, sha, "failure", hosted)
+            env = {
+                "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "pull_request",
+                "GITHUB_RUN_ID": "123", "GITHUB_SERVER_URL": "https://github.com",
+                "GITHUB_REPOSITORY": "scytrowski/dotty-rs", "DOTTY_EXPECTED_SOURCE_SHA": sha,
+            }
+            result, report, stderr = self.run_acceptance_v_cli(directory, args, env)
+            self.assertEqual(result, 1, stderr)
+            self.assertIn("Outcome: SPRINT GOAL UNMET", report)
+            self.assertIn("hosted focused audit prerequisites did not complete successfully", report)
+
+    def test_acceptance_v_cli_rejects_tested_revision_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            tested, head = "a" * 40, "b" * 40
+            hosted = "https://github.com/scytrowski/dotty-rs/actions/runs/123"
+            args = self.acceptance_v_cli_arguments(directory, tested, head, "success", hosted)
+            env = {
+                "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "pull_request",
+                "GITHUB_RUN_ID": "123", "GITHUB_SERVER_URL": "https://github.com",
+                "GITHUB_REPOSITORY": "scytrowski/dotty-rs", "DOTTY_EXPECTED_SOURCE_SHA": tested,
+            }
+            result, report, stderr = self.run_acceptance_v_cli(directory, args, env)
+            self.assertEqual(result, 1, stderr)
+            self.assertIn("Outcome: SPRINT GOAL UNMET", report)
+            self.assertIn("tested revision does not equal the reviewed PR head", report)
+
+    def test_acceptance_v_requires_additive_tuple_and_preserves_exact_baseline(self) -> None:
+        repository = MODULE_PATH.parents[2]
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            main = temporary_path / "main.tsv"
+            source = repository / "docs/typer-stdlib-acceptance-v/main-audit.tsv"
+            lines = source.read_text(encoding="utf-8").splitlines()
+            identity = MODULE.ACCEPTANCE_V_TUPLE_IDENTITY
+            index = next(i for i, line in enumerate(lines) if line.startswith(identity + "\t"))
+            columns = lines[index].split("\t")
+            columns[7] = MODULE.ACCEPTANCE_V_TUPLE_RESULT
+            columns[9] = "typed"
+            columns[11] = "999"
+            lines[index] = "\t".join(columns)
+            lines = [line.replace("typed=18", "typed=19").replace("blocked=7", "blocked=6") if line.startswith(("typed=", "blocked=")) else line for line in lines]
+            main.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            analysis = repository / "docs/typer-stdlib-acceptance-v/analysis-audit.tsv"
+            failures, rows = MODULE.verify_acceptance_v(
+                main, main, analysis, analysis,
+                repository / "docs/typer-stdlib-acceptance-v/successful-roots.tsv",
+                repository / "docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv",
+                repository / "docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv",
+            )
+            self.assertEqual(failures, [])
+            self.assertIn(identity, {row["identity"] for row in rows})
+
+    def test_acceptance_v_rejects_prepared_only_or_wrong_tuple_result(self) -> None:
+        repository = MODULE_PATH.parents[2]
+        with tempfile.TemporaryDirectory() as temporary:
+            report = Path(temporary) / "main.tsv"
+            lines = (repository / "docs/typer-stdlib-acceptance-v/main-audit.tsv").read_text(encoding="utf-8").splitlines()
+            identity = MODULE.ACCEPTANCE_V_TUPLE_IDENTITY
+            index = next(i for i, line in enumerate(lines) if line.startswith(identity + "\t"))
+            columns = lines[index].split("\t")
+            columns[7] = "scala.Array[java.lang.String]"
+            columns[9] = "typed"
+            columns[11] = "999"
+            lines[index] = "\t".join(columns)
+            lines = [line.replace("typed=18", "typed=19").replace("blocked=7", "blocked=6") if line.startswith(("typed=", "blocked=")) else line for line in lines]
+            report.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            analysis = repository / "docs/typer-stdlib-acceptance-v/analysis-audit.tsv"
+            failures, _ = MODULE.verify_acceptance_v(
+                report, report, analysis, analysis,
+                repository / "docs/typer-stdlib-acceptance-v/successful-roots.tsv",
+                repository / "docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv",
+                repository / "docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv",
+            )
+            self.assertTrue(any("unexpected result shape" in failure for failure in failures))
+
+    def test_acceptance_v_rejects_baseline_without_ordinary_tuple_credit(self) -> None:
+        repository = MODULE_PATH.parents[2]
+        main = repository / "docs/typer-stdlib-acceptance-v/main-audit.tsv"
+        analysis = repository / "docs/typer-stdlib-acceptance-v/analysis-audit.tsv"
+        failures, _ = MODULE.verify_acceptance_v(
+            main, main, analysis, analysis,
+            repository / "docs/typer-stdlib-acceptance-v/successful-roots.tsv",
+            repository / "docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv",
+            repository / "docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv",
+        )
+        self.assertTrue(any("requires at least 19/25" in failure for failure in failures))
+        self.assertTrue(any("Tuple.toArray whole-method" in failure for failure in failures))
+
+    def test_acceptance_v_rejects_changed_protected_receipt(self) -> None:
+        repository = MODULE_PATH.parents[2]
+        with tempfile.TemporaryDirectory() as temporary:
+            protected = Path(temporary) / "protected.tsv"
+            protected.write_text(
+                (repository / "docs/typer-stdlib-acceptance-v/successful-roots.tsv").read_text(encoding="utf-8")
+                + "main\tspoofed#tree=3\tBoolean\t3\n",
+                encoding="utf-8",
+            )
+            main = repository / "docs/typer-stdlib-acceptance-v/main-audit.tsv"
+            analysis = repository / "docs/typer-stdlib-acceptance-v/analysis-audit.tsv"
+            failures, _ = MODULE.verify_acceptance_v(
+                main, main, analysis, analysis, protected,
+                repository / "docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv",
+                repository / "docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv",
+            )
+            self.assertTrue(any("frozen #2233 protected-success receipt changed" in failure for failure in failures))
+
     def write_fixture(
         self, directory: Path, status: str, actual_result: str = "Int", typed_tree: str = "2"
     ) -> tuple[Path, Path]:

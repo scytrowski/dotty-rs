@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import re
 import sys
 from pathlib import Path
@@ -85,6 +86,10 @@ ACCEPTANCE_IV_BASELINE_ARTIFACT_ID = "13595484615"
 ACCEPTANCE_IV_BASELINE_ARTIFACT_SHA256 = "ca52bc903a18a45c3e408290a9728fc770fc2ceabb8e4d7c337e970182a43084"
 ACCEPTANCE_IV_INTEGRATION_REVISION = "f9b94d2b2bb0480de32c4fd6689a4e7813148a1f"
 ACCEPTANCE_IV_INTEGRATION_RECEIPT_SHA256 = "c13ba07650429146cfc7148a35e08780af8c3b08989f0b149d3b8d04bd64d9e7"
+ACCEPTANCE_V_TUPLE_IDENTITY = "library/src/scala/Tuple.scala#tree=23"
+ACCEPTANCE_V_TUPLE_RESULT = "scala.Array[java.lang.Object]"
+ACCEPTANCE_V_EITHER_IDENTITY = "library/src/scala/util/Either.scala#tree=84"
+ACCEPTANCE_V_PROTECTED_SHA256 = "2a31b0b10cac7fe86d3c30f2d4e632ac93f2037e9a392efaf6e6b548e5284c4d"
 
 
 def read_tsv(path: Path) -> list[dict[str, str]]:
@@ -520,6 +525,110 @@ def verify_acceptance_iv(
     return failures, output_rows
 
 
+def verify_acceptance_v(
+    main_first: Path, main_second: Path, analysis_first: Path, analysis_second: Path,
+    protected_successes_path: Path, main_manifest_path: Path, analysis_manifest_path: Path,
+    minimum_main: int = 19,
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Enforce Acceptance V against the frozen #2233 successful identities/results."""
+    failures: list[str] = []
+    import hashlib
+    if hashlib.sha256(protected_successes_path.read_bytes()).hexdigest() != ACCEPTANCE_V_PROTECTED_SHA256:
+        failures.append(f"{protected_successes_path}: frozen #2233 protected-success receipt changed")
+    reports = {
+        "main": (main_first, main_second, main_manifest_path),
+        "analysis": (analysis_first, analysis_second, analysis_manifest_path),
+    }
+    frozen_rows = read_tsv(protected_successes_path)
+    frozen: dict[str, dict[str, str]] = {}
+    for row in frozen_rows:
+        identity = row.get("identity", "")
+        cohort = row.get("cohort", "")
+        if cohort not in reports or not identity or identity in frozen:
+            failures.append(f"{protected_successes_path}: malformed or duplicate protected root {identity!r}")
+        else:
+            frozen[identity] = row
+    for cohort in reports:
+        protected = [row for row in frozen.values() if row.get("cohort") == cohort]
+        expected_count = 18 if cohort == "main" else 16
+        if len(protected) != expected_count:
+            failures.append(f"{protected_successes_path}: expected {expected_count} protected {cohort} roots")
+
+    output_rows: list[dict[str, str]] = []
+    for cohort, (first_path, second_path, manifest_path) in reports.items():
+        first_bytes, second_bytes = first_path.read_bytes(), second_path.read_bytes()
+        if first_bytes != second_bytes:
+            failures.append(f"{cohort}: normalized first and second ordinary reports differ")
+        failures.extend(verify(Path("docs/typer-lexical-closure-acceptance-recovery-3.9.0") /
+                               ("required-main.tsv" if cohort == "main" else "required-analysis.tsv"),
+                               first_path, manifest_path))
+        first, summary = parse_report(first_path)
+        second, second_summary = parse_report(second_path)
+        if first != second or summary != second_summary:
+            failures.append(f"{cohort}: independent ordinary session outcomes differ")
+        if summary["selected"] != 25 or summary["attempted"] != 25:
+            failures.append(f"{cohort}: expected all 25 frozen roots attempted")
+        typed = {identity: row for identity, row in first.items() if row["status"] == "typed"}
+        expected_protected = {identity: row for identity, row in frozen.items() if row.get("cohort") == cohort}
+        for identity, baseline in expected_protected.items():
+            current = typed.get(identity)
+            if current is None:
+                failures.append(f"{cohort}: protected #2233 success regressed: {identity}")
+            elif current["actual_result"] != baseline.get("result_type"):
+                failures.append(f"{identity}: protected result changed from {baseline.get('result_type')!r} to {current['actual_result']!r}")
+        for identity, row in first.items():
+            output_rows.append({"cohort": cohort, "identity": identity,
+                                "result_type": row["actual_result"],
+                                "baseline": "protected #2233" if identity in expected_protected else "-",
+                                "status": row["status"], "source_tree": row["source_tree"],
+                                "typed_tree": row["typed_tree"] if row["typed_tree"] not in ("", "-") else "-"})
+    main, _ = parse_report(main_first)
+    typed_main = sum(row["status"] == "typed" for row in main.values())
+    if typed_main < minimum_main:
+        failures.append(f"main cohort has {typed_main}/25 typed roots; requires at least {minimum_main}/25")
+    tuple_row = main.get(ACCEPTANCE_V_TUPLE_IDENTITY)
+    if tuple_row is None or tuple_row["status"] != "typed" or tuple_row["typed_tree"] in ("", "-"):
+        failures.append("original Tuple.toArray whole-method root is not complete in ordinary typing")
+    elif tuple_row["actual_result"] != ACCEPTANCE_V_TUPLE_RESULT:
+        failures.append(f"Tuple.toArray has unexpected result shape {tuple_row['actual_result']!r}")
+    elif ACCEPTANCE_V_TUPLE_IDENTITY in frozen:
+        failures.append("Tuple.toArray must be additive to the frozen #2233 success set")
+    return failures, output_rows
+
+
+def acceptance_v_provenance_failures(
+    tested_revision: str,
+    pr_head_sha: str,
+    prior_checks_status: str,
+    hosted_run: str,
+    environment: dict[str, str] | None = None,
+) -> list[str]:
+    """Require the report to be emitted by the successful PR-head audit run."""
+    env = os.environ if environment is None else environment
+    failures: list[str] = []
+    if not re.fullmatch(r"[0-9a-f]{40}", tested_revision) or not re.fullmatch(r"[0-9a-f]{40}", pr_head_sha):
+        failures.append("tested revision and reviewed PR head must be full commit SHAs")
+    elif tested_revision != pr_head_sha:
+        failures.append("tested revision does not equal the reviewed PR head")
+    if prior_checks_status != "success":
+        failures.append("hosted focused audit prerequisites did not complete successfully")
+    if env.get("GITHUB_ACTIONS") != "true" or env.get("GITHUB_EVENT_NAME") != "pull_request":
+        failures.append("final Acceptance V PASS requires a GitHub Actions pull_request run")
+    run_id = env.get("GITHUB_RUN_ID", "")
+    server_url = env.get("GITHUB_SERVER_URL", "")
+    repository = env.get("GITHUB_REPOSITORY", "")
+    expected_source = env.get("DOTTY_EXPECTED_SOURCE_SHA", "")
+    if not run_id.isdecimal() or not server_url or not repository:
+        failures.append("hosted focused audit run identity is missing")
+    else:
+        expected_run = f"{server_url}/{repository}/actions/runs/{run_id}"
+        if hosted_run != expected_run:
+            failures.append("hosted-run link does not identify this GitHub Actions run")
+    if expected_source != tested_revision:
+        failures.append("tested revision does not match the workflow's expected PR source SHA")
+    return failures
+
+
 def _write_acceptance_iv_tsv(
     path: Path,
     rows: list[dict[str, str]],
@@ -621,7 +730,22 @@ def _write_acceptance_iv_markdown(
 
 
 def main() -> int:
-    if sys.argv[1:2] == ["acceptance-iv"]:
+    if sys.argv[1:2] == ["acceptance-v"]:
+        parser = argparse.ArgumentParser()
+        parser.add_argument("command")
+        parser.add_argument("--main-first", type=Path, required=True)
+        parser.add_argument("--main-second", type=Path, required=True)
+        parser.add_argument("--analysis-first", type=Path, required=True)
+        parser.add_argument("--analysis-second", type=Path, required=True)
+        parser.add_argument("--protected-successes", type=Path, required=True)
+        parser.add_argument("--output", type=Path, required=True)
+        parser.add_argument("--tested-revision", required=True)
+        parser.add_argument("--pr-head-sha", required=True)
+        parser.add_argument("--report", type=Path, required=True)
+        parser.add_argument("--prior-checks-status", default="unknown")
+        parser.add_argument("--hosted-run", default="pending")
+        arguments = parser.parse_args()
+    elif sys.argv[1:2] == ["acceptance-iv"]:
         parser = argparse.ArgumentParser()
         parser.add_argument("command")
         parser.add_argument("--main-report", type=Path, required=True)
@@ -646,7 +770,48 @@ def main() -> int:
         arguments = parser.parse_args()
         arguments.command = "ordinary"
     try:
-        if arguments.command == "acceptance-iv":
+        if arguments.command == "acceptance-v":
+            gate_failures, rows = verify_acceptance_v(
+                arguments.main_first, arguments.main_second, arguments.analysis_first,
+                arguments.analysis_second, arguments.protected_successes,
+                Path("docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv"),
+                Path("docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv"),
+            )
+            provenance_failures = acceptance_v_provenance_failures(
+                arguments.tested_revision, arguments.pr_head_sha,
+                arguments.prior_checks_status, arguments.hosted_run,
+            )
+            failures = gate_failures + provenance_failures
+            arguments.output.parent.mkdir(parents=True, exist_ok=True)
+            with arguments.output.open("w", encoding="utf-8", newline="") as output:
+                writer = csv.DictWriter(output, fieldnames=("cohort", "identity", "result_type", "baseline", "status", "source_tree", "typed_tree"), delimiter="\t", lineterminator="\n")
+                writer.writeheader()
+                writer.writerows(rows)
+            passed = not failures
+            main_count = sum(row["cohort"] == "main" and row["status"] == "typed" for row in rows)
+            analysis_count = sum(row["cohort"] == "analysis" and row["status"] == "typed" for row in rows)
+            either = next((row for row in rows if row["identity"] == ACCEPTANCE_V_EITHER_IDENTITY), None)
+            stretch = (
+                "not present in frozen report" if either is None
+                else "blocked" if either["status"].startswith("blocked::")
+                else either["status"]
+            )
+            arguments.report.parent.mkdir(parents=True, exist_ok=True)
+            arguments.report.write_text(
+                "# Typer Stdlib Acceptance V closeout (Scala 3.9.0)\n\n"
+                f"**Outcome: {'PASS' if passed else 'SPRINT GOAL UNMET'}**; main {main_count}/25, analysis {analysis_count}/25.\n\n"
+                f"Tested revision: `{arguments.tested_revision}`; PR head: `{arguments.pr_head_sha}`; final merge SHA: pending.\n\n"
+                f"Hosted focused audit: {arguments.hosted_run}\n\n"
+                "Both frozen 25-root cohorts were compared across two independent deterministic sessions. "
+                "The exact #2233 successful identities and result shapes are protected, and the original "
+                "unprepared Tuple.toArray DefDef must be complete with its exact result. Analysis retains its "
+                f"original denominator and protected successes. Optional Either.swap stretch: {stretch}. "
+                "Prepared-only Tuple evidence receives no credit.\n\n"
+                + ("Closeout blockers:\n" + "".join(f"- {failure}\n" for failure in failures)
+                   if failures else "Hosted provenance checks passed for this reviewed PR head.\n"),
+                encoding="utf-8",
+            )
+        elif arguments.command == "acceptance-iv":
             failures, rows = verify_acceptance_iv(
                 arguments.main_report,
                 arguments.analysis_report,
@@ -674,7 +839,7 @@ def main() -> int:
         elif arguments.command == "ordinary":
             failures = verify(arguments.cohort, arguments.report, arguments.manifest)
         else:
-            parser.error("select ordinary or acceptance-iv")
+            parser.error("select ordinary, acceptance-iv, or acceptance-v")
     except (OSError, ValueError, KeyError) as error:
         if getattr(arguments, "command", None) == "acceptance-iv":
             _write_acceptance_iv_markdown(
@@ -685,6 +850,15 @@ def main() -> int:
                 arguments.pr_head_sha,
                 arguments.hosted_run,
             )
+        elif getattr(arguments, "command", None) == "acceptance-v":
+            arguments.report.parent.mkdir(parents=True, exist_ok=True)
+            arguments.report.write_text(
+                "# Typer Stdlib Acceptance V closeout (Scala 3.9.0)\n\n"
+                "**Outcome: SPRINT GOAL UNMET.** The fresh acceptance evidence could not be validated.\n\n"
+                f"Tested revision: `{arguments.tested_revision}`; PR head: `{arguments.pr_head_sha}`.\n\n"
+                f"Hosted focused audit: {arguments.hosted_run}\n",
+                encoding="utf-8",
+            )
         print(error, file=sys.stderr)
         return 2
     if failures:
@@ -692,7 +866,7 @@ def main() -> int:
         for failure in failures:
             print(f"- {failure}", file=sys.stderr)
         return 1
-    print("Stdlib Acceptance IV closeout passed" if arguments.command == "acceptance-iv" else "ordinary cohort gate passed")
+    print("Stdlib Acceptance closeout passed" if arguments.command in {"acceptance-iv", "acceptance-v"} else "ordinary cohort gate passed")
     return 0
 
 
