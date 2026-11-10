@@ -311,6 +311,121 @@ fn noncanonical_selected_formal_mismatch_does_not_coerce_source_tuple() {
     assert!(index.definition_of(method).is_some());
 }
 
+#[test]
+fn malformed_selected_formal_is_rejected_and_rolls_back_source_owner() {
+    let source_text = "package scala\nclass Tuple { def use: Int = runtime.Tuples.toArray(this) }\nobject runtime { object Tuples { def toArray(value: Tuple): Int = 0 } }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+    let tuple = class_symbol(&parsed, &store, &index, source, "Tuple");
+    let method_tree = method_definition_tree(&parsed, &store, "use");
+    let rhs = match &parsed.ast.get(method_tree).kind {
+        TreeKind::DefDef(definition) => definition.rhs.unwrap(),
+        _ => unreachable!(),
+    };
+    let selected_tree = method_definition_tree(&parsed, &store, "toArray");
+    let selected = index.symbol_at(source, selected_tree).unwrap();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+
+    // Inject only an unavailable formal slot into the selected signature. This
+    // exercises application conformance's existing fail-closed path; it does
+    // not model binary decoding or change the source method's origin.
+    let message = typer
+        .store
+        .names
+        .intern("missing dependency in selected method formal");
+    let malformed_formal = typer
+        .store
+        .types
+        .alloc(Type::Error(dotty_core::ErrorType { message }));
+    let parameter_name = typer.store.names.intern("value");
+    let signature = typer
+        .store
+        .types
+        .alloc(Type::Method(dotty_core::MethodType {
+            params: vec![dotty_core::MethodParam {
+                name: dotty_core::TermName::new(parameter_name),
+                ty: malformed_formal,
+                erased: false,
+                varargs: false,
+            }],
+            result: definitions.int,
+            kind: dotty_core::MethodKind::Plain,
+        }));
+    typer
+        .store
+        .symbols
+        .set_info(selected, SymbolInfo::Complete(signature));
+
+    let error = typer
+        .type_method_definition(method_tree)
+        .expect_err("an unavailable selected formal is not guessed");
+    assert!(
+        matches!(
+            error,
+            TyperError::ApplicationArgumentConformanceUnsupported {
+                source: error_source,
+                tree_index,
+                argument_index: 0,
+                ..
+            } if error_source == source
+                && tree_index == rhs.index()
+        ),
+        "unexpected unavailable-formal error: {error:?}"
+    );
+    assert!(matches!(
+        *typer.store.symbols.info(tuple),
+        SymbolInfo::Missing
+    ));
+    assert_eq!(typer.source_typed_index().get(source, method_tree), None);
+}
+
+#[test]
+fn invalid_expected_result_rejects_original_shape_and_rolls_back_owner() {
+    let source_text = "package scala\nclass Tuple { def use: Boolean = runtime.Tuples.toArray(this) }\nobject runtime { object Tuples { def toArray(value: Tuple): Int = 0 } }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+    let tuple = class_symbol(&parsed, &store, &index, source, "Tuple");
+    let method_tree = method_definition_tree(&parsed, &store, "use");
+    let rhs = match &parsed.ast.get(method_tree).kind {
+        TreeKind::DefDef(definition) => definition.rhs.unwrap(),
+        _ => unreachable!(),
+    };
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+
+    let error = typer
+        .type_method_definition(method_tree)
+        .expect_err("Int result must not satisfy the method's declared Boolean result");
+    assert!(
+        matches!(
+            error,
+            TyperError::ExpectedExpressionTypeMismatch {
+                source: error_source,
+                tree_index,
+                ..
+            } if error_source == source && tree_index == rhs.index()
+        ),
+        "unexpected invalid-expected-result error: {error:?}"
+    );
+    assert!(matches!(
+        *typer.store.symbols.info(tuple),
+        SymbolInfo::Missing
+    ));
+    assert_eq!(typer.source_typed_index().get(source, method_tree), None);
+    assert_eq!(typer.source_typed_index().get(source, rhs), None);
+}
+
 fn tuple_tree(
     parsed: &dotty_parser::ParseResult,
     store: &SemanticStore,

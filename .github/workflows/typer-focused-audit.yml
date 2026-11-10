@@ -338,6 +338,14 @@ jobs:
             "$DOTTY_AUDIT_REPORT_DIR/option-map-session-2.receipt"
           cmp "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-1.receipt" \
             "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-2.receipt"
+          cargo +1.98.1 test -p dotty-typer --lib --locked \
+            other_package_tuple_does_not_match_pinned_classpath_tuple_formal \
+            -- --ignored --nocapture \
+            > "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-wrong-owner.log" 2>&1
+          grep -Fq 'TUPLE_TO_ARRAY_WRONG_OWNER_REJECTED application_span=38..79 receiver=.other.Tuple receiver_origin=Source selected=.scala.runtime.Tuples$.toArray selected_origin=Tasty formal=.scala.Tuple formal_origin=Tasty error=ApplicationArgumentTypeMismatch rollback=passed' \
+            "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-wrong-owner.log"
+          grep -q 'test result: ok. 1 passed' \
+            "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-wrong-owner.log"
           {
             printf 'session_1_receipt_sha256\t%s\n' \
               "$(sha256sum "$DOTTY_AUDIT_REPORT_DIR/option-map-session-1.receipt" | cut -d' ' -f1)"
@@ -402,6 +410,11 @@ jobs:
             printf 'source_revision\t%s\n' "$(git -C "$SCALA39_ROOT" rev-parse HEAD)"
             printf 'dotty_rs_tested_sha\t%s\n' "$(git rev-parse HEAD)"
           } > "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-two-session.tsv"
+
+      - name: Run Tuple.toArray fail-closed controls
+        run: |
+          cargo +1.98.1 test -p dotty-typer --lib --locked \
+            issue_2234_source_owner_preparation -- --nocapture
 
       - name: Run pinned inherited-member Scala oracle
         shell: bash
