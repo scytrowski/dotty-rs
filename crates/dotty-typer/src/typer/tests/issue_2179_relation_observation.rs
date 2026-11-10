@@ -1199,6 +1199,196 @@ fn captures_acceptance_iv_relation_operands_before_transaction_rollback() {
 
 #[test]
 #[ignore = "requires pinned Scala 3.9.0 sources, classpath jars, and JDK environment"]
+fn captures_acceptance_v_either_swap_failure_before_transaction_rollback() {
+    let scala_root = PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT"));
+    let revision = Command::new("git")
+        .args(["-C", scala_root.to_str().unwrap(), "rev-parse", "HEAD"])
+        .output()
+        .expect("git reads the pinned Scala source revision");
+    assert!(revision.status.success());
+    assert_eq!(
+        String::from_utf8(revision.stdout).unwrap().trim(),
+        "777528f19a58e794c9954a42f433373472ec57f8",
+        "the Acceptance V observation uses pinned Scala 3.9.0 sources"
+    );
+    let relative = "library/src/scala/util/Either.scala";
+    let text = fs::read_to_string(scala_root.join(relative)).unwrap();
+    let source = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let scanner = ContextualScanner::new(&text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(&text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        relative,
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let (tree, _) = parsed
+        .ast
+        .iter()
+        .find(|(tree, node)| tree.index() == 84 && matches!(node.kind, TreeKind::DefDef(_)))
+        .expect("selected original Either.swap DefDef");
+    let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+    let release = std::env::var("SCALA39_JDK_RELEASE")
+        .expect("SCALA39_JDK_RELEASE")
+        .parse()
+        .unwrap();
+    assert_eq!(release, 21, "the classpath resolver uses JDK 21");
+    let jars =
+        std::env::split_paths(&std::env::var_os("SCALA39_CLASSPATH").expect("SCALA39_CLASSPATH"))
+            .collect::<Vec<_>>();
+    let mut entries: Vec<Box<dyn ClassPathEntry>> = vec![Box::new(
+        JdkClassPath::new(java_home.join("jmods")).unwrap(),
+    )];
+    for jar in &jars {
+        entries.push(Box::new(JarClassPath::new(jar.clone(), release).unwrap()));
+    }
+    let resolver = ClasspathSymbolResolver::new(
+        CompositeClassPath::new(entries),
+        definitions,
+        LoadingSession::with_packages(packages.snapshot()),
+    );
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(resolver));
+    let observed = Rc::new(RefCell::new(None::<String>));
+    let capture = observed.clone();
+    let parsed_ast = &parsed.ast;
+    typer.transaction_failure_error_observer = Some(Rc::new(move |typer, error| {
+        let method = typer.index.symbol_at(typer.source, tree).unwrap();
+        let method_info = typer.store.symbols.get(method);
+        let mut lines = vec![
+            format!(
+                "root={relative}#tree=84 source_span={:?}",
+                parsed_ast.get(tree).position
+            ),
+            format!("error={error:?}"),
+            format!(
+                "canonical_source_method={method:?} path={} owner={:?} owner_path={} origin={:?} canonical={}",
+                observed_symbol_path(typer.store, method),
+                method_info.owner,
+                method_info
+                    .owner
+                    .map(|owner| observed_symbol_path(typer.store, owner))
+                    .unwrap_or_else(|| "unavailable".to_owned()),
+                method_info.origin,
+                matches!(typer.index.definition_of(method), Some(SourceDefinition::Canonical { source, tree: definition_tree }) if source == typer.source && definition_tree == tree)
+            ),
+        ];
+        for (source_tree, node) in parsed_ast.iter() {
+            if !(65..=75).contains(&source_tree.index()) {
+                continue;
+            }
+            lines.push(format!(
+                "original_pattern_tree={} span={:?} shape={:?}",
+                source_tree.index(),
+                node.position,
+                node.kind
+            ));
+        }
+        let source_declarations = parsed_ast
+            .iter()
+            .filter_map(|(source_tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition) => {
+                    let name = typer.store.names.resolve(definition.name.as_name().text());
+                    matches!(name, "Either" | "Left" | "Right")
+                        .then_some((name.to_owned(), source_tree))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for (name, source_tree) in source_declarations {
+            let Some(class) = typer.index.symbol_at(typer.source, source_tree) else {
+                lines.push(format!(
+                    "canonical_source_class={name} unavailable=no_source_symbol"
+                ));
+                continue;
+            };
+            let info = typer.store.symbols.get(class);
+            lines.push(format!(
+                "canonical_source_class={class:?} path={} kind={:?} origin={:?} links={:?} info={:?} tree={}",
+                observed_symbol_path(typer.store, class), info.kind, info.origin, info.links, info.info, source_tree.index()
+            ));
+            if matches!(name.as_str(), "Left" | "Right") {
+                if let Some(companion) = info.links.companion {
+                    let companion_info = typer.store.symbols.get(companion);
+                    lines.push(format!(
+                        "generated_companion={companion:?} path={} kind={:?} origin={:?} info={:?} links={:?}",
+                        observed_symbol_path(typer.store, companion), companion_info.kind,
+                        companion_info.origin, companion_info.info, companion_info.links
+                    ));
+                }
+                let generated = typer.index.generated_case_class_method(
+                    class,
+                    dotty_core::source_semantics::GeneratedCaseClassMethodRole::Unapply,
+                );
+                lines.push(format!("generated_unapply={generated:?} class={class:?}"));
+                if let Some(unapply) = generated {
+                    let unapply_info = typer.store.symbols.get(unapply);
+                    lines.push(format!("generated_unapply_info={unapply:?} path={} owner={:?} info={:?} origin={:?}", observed_symbol_path(typer.store, unapply), unapply_info.owner, unapply_info.info, unapply_info.origin));
+                    lines.push(format!(
+                        "generated_unapply_identity={:?}",
+                        typer.index.generated_case_class_method_identity(unapply)
+                    ));
+                }
+            }
+        }
+        if let TyperError::ExtractorUnapplyNotFound {
+            source,
+            tree_index,
+            extractor,
+        } = error
+        {
+            let extractor_info = typer.store.symbols.get(*extractor);
+            lines.push(format!(
+                "extractor_failure=source:{source:?} tree:{tree_index} symbol:{extractor:?} path:{} kind:{:?} origin:{:?} info:{:?} links:{:?}",
+                observed_symbol_path(typer.store, *extractor), extractor_info.kind, extractor_info.origin, extractor_info.info, extractor_info.links
+            ));
+        }
+        *capture.borrow_mut() = Some(lines.join("\n"));
+    }));
+    let result = typer.type_method_definition(tree);
+    assert!(matches!(
+        result,
+        Err(TyperError::ExtractorUnapplyNotFound {
+            source: error_source,
+            tree_index: 69,
+            ..
+        }) if error_source == source
+    ));
+    let receipt = observed
+        .borrow()
+        .clone()
+        .expect("failure observer captured before rollback");
+    assert!(receipt.contains("root=library/src/scala/util/Either.scala#tree=84"));
+    assert!(receipt.contains("canonical_source_method="));
+    assert_eq!(receipt.matches("generated_unapply=None").count(), 2);
+    assert!(receipt.contains("original_pattern_tree=69 span="));
+    assert!(receipt.contains("original_pattern_tree=72 span="));
+    assert!(receipt.contains("extractor_failure="));
+    println!(
+        "ACCEPTANCE_V_EITHER_SWAP_OBSERVATION_BEGIN\n{receipt}\nACCEPTANCE_V_EITHER_SWAP_OBSERVATION_END"
+    );
+}
+
+#[test]
+#[ignore = "requires pinned Scala 3.9.0 sources, classpath jars, and JDK environment"]
 fn original_tuple_to_array_types_after_explicit_canonical_owner_preparation() {
     let scala_root = PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT"));
     let revision = Command::new("git")
