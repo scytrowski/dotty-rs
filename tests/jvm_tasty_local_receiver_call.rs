@@ -737,18 +737,54 @@ fn local_reference_alias_audit_authenticates_frontend_identities_and_first_paire
         .split_once("class PairFactory:")
         .map(|(prefix, _)| prefix)
         .expect("target has the shared Counter and Pair declarations");
-    for (name, control, source_id) in [
-        ("renamed-local-alias", ALIAS_CONTROL_RENAMED, 22326),
-        ("reversed-declarations", ALIAS_CONTROL_REVERSED, 22327),
-        ("alias-of-second", ALIAS_CONTROL_SECOND, 22328),
+    enum ControlExpectation {
+        ValidDeferred,
+        InvalidForwardReference,
+        InvalidAliasType,
+    }
+    for (name, control, source_id, expectation) in [
+        (
+            "renamed-local-alias",
+            ALIAS_CONTROL_RENAMED,
+            22326,
+            ControlExpectation::ValidDeferred,
+        ),
+        (
+            "reversed-declarations",
+            ALIAS_CONTROL_REVERSED,
+            22327,
+            ControlExpectation::ValidDeferred,
+        ),
+        (
+            "alias-of-second",
+            ALIAS_CONTROL_SECOND,
+            22328,
+            ControlExpectation::ValidDeferred,
+        ),
         (
             "alias-before-initialization",
             ALIAS_CONTROL_BEFORE_INIT,
             22329,
+            ControlExpectation::InvalidForwardReference,
         ),
-        ("wrong-alias-type", ALIAS_CONTROL_WRONG_TYPE, 22330),
-        ("mutable-alias", ALIAS_CONTROL_MUTABLE, 22331),
-        ("alias-chain", ALIAS_CONTROL_CHAIN, 22332),
+        (
+            "wrong-alias-type",
+            ALIAS_CONTROL_WRONG_TYPE,
+            22330,
+            ControlExpectation::InvalidAliasType,
+        ),
+        (
+            "mutable-alias",
+            ALIAS_CONTROL_MUTABLE,
+            22331,
+            ControlExpectation::ValidDeferred,
+        ),
+        (
+            "alias-chain",
+            ALIAS_CONTROL_CHAIN,
+            22332,
+            ControlExpectation::ValidDeferred,
+        ),
     ] {
         let factory_source = control
             .strip_prefix("package example\n\n")
@@ -756,10 +792,47 @@ fn local_reference_alias_audit_authenticates_frontend_identities_and_first_paire
         let source = format!("{source_prefix}{factory_source}");
         let result = paired_result(&source, source_id);
         println!("alias control {name}: {result:?}");
-        assert!(
-            result.is_err(),
-            "alias control {name} stays outside current paired acceptance"
-        );
+        match expectation {
+            ControlExpectation::ValidDeferred => assert!(
+                matches!(
+                    result,
+                    Err(PairedPlanError::BatchUnit {
+                        phase: "cross-class constructor-call identity proof",
+                        ref reason
+                    }) if reason == "SourceShape(\"factory body must be a direct Apply or a one- or two-local Block\")"
+                ),
+                "valid control {name} must reach the deferred source-shape rejection"
+            ),
+            ControlExpectation::InvalidForwardReference => match result {
+                Err(PairedPlanError::BatchClass {
+                    class_index: 2,
+                    declaration_index: 0,
+                    phase: "method body typing",
+                    reason,
+                }) => {
+                    assert!(reason.starts_with("TermNameNotFound"));
+                    assert!(reason.contains(&format!("source: SourceId({source_id})")));
+                    assert!(reason.contains(&format!("source: SourceId({source_id}), span:")));
+                    assert!(reason.contains("start: 445, end: 450"));
+                }
+                other => panic!("invalid forward-reference control fails during typing: {other:?}"),
+            },
+            ControlExpectation::InvalidAliasType => match result {
+                Err(PairedPlanError::BatchClass {
+                    class_index: 2,
+                    declaration_index: 0,
+                    phase: "method body typing",
+                    reason,
+                }) => {
+                    assert!(reason.starts_with(
+                        "LocalValueTypeMismatch { source: SourceId(22330), tree_index: 65, "
+                    ));
+                    assert!(reason.contains(", actual: TypeId("));
+                    assert!(reason.contains(", expected: TypeId("));
+                }
+                other => panic!("invalid alias-type control fails during typing: {other:?}"),
+            },
+        }
     }
 }
 
