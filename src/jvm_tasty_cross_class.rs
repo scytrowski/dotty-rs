@@ -13,6 +13,7 @@ use dotty_core::{
     TypeId, TypeRefTarget,
 };
 use dotty_jvm::{JvmClassPlan, JvmCompilationUnit};
+use dotty_tasty_pickler::LocalReferenceAliasBinding;
 use dotty_typer::{SourceTyper, TypedLocalBinding};
 
 mod local_receiver_call;
@@ -99,6 +100,7 @@ pub struct ValidatedCrossClassConstructorCallProof<'session> {
     argument_proof: ConstructorArgumentProof,
     local_receiver_unit_call: Option<LocalReceiverUnitCallReceipt>,
     local_receiver_unit_calls: Option<LocalReceiverUnitCallsReceipt>,
+    local_reference_alias: Option<LocalReferenceAliasBinding>,
     formal_type: TypeId,
     constructor_formal_type: TypeId,
     result_type: TypeId,
@@ -1698,6 +1700,11 @@ impl ValidatedCrossClassConstructorCallProof<'_> {
     pub const fn local_receiver_unit_calls(&self) -> Option<LocalReceiverUnitCallsReceipt> {
         self.local_receiver_unit_calls
     }
+    /// Exact canonical source/typed evidence for the third local in the
+    /// bounded alias-plus-two-calls factory shape.
+    pub const fn local_reference_alias(&self) -> Option<LocalReferenceAliasBinding> {
+        self.local_reference_alias
+    }
     /// Canonical semantic type of the method formal and constructor argument.
     pub const fn formal_type(&self) -> TypeId {
         self.formal_type
@@ -2191,13 +2198,24 @@ fn validate_two_argument_constructor_call_candidate<'session>(
                                 source_ast.try_get(*stat).map(|node| &node.kind),
                                 Some(TreeKind::Apply(_))
                             )
+                        }))
+                    || (block.stats.len() == 5
+                        && matches!(
+                            source_ast.try_get(block.stats[2]).map(|node| &node.kind),
+                            Some(TreeKind::ValDef(_))
+                        )
+                        && block.stats[3..].iter().all(|stat| {
+                            matches!(
+                                source_ast.try_get(*stat).map(|node| &node.kind),
+                                Some(TreeKind::Apply(_))
+                            )
                         })) =>
             {
                 (block.expr, Some(block))
             }
             _ => {
                 return Err(source_error(
-                    "factory body must be a direct Apply or a one- or two-local Block",
+                    "factory body must be a direct Apply or a bounded local Pair block",
                 ));
             }
         };
@@ -2239,8 +2257,9 @@ fn validate_two_argument_constructor_call_candidate<'session>(
     };
     let mut local_receiver_unit_call = None;
     let mut local_receiver_unit_calls = None;
+    let mut local_reference_alias = None;
     let immutable_local_pair = if let Some(block) =
-        source_block.filter(|block| matches!(block.stats.len(), 2..=4))
+        source_block.filter(|block| matches!(block.stats.len(), 2..=5))
     {
         if block.stats.iter().any(|declaration| {
             !matches!(
@@ -2257,12 +2276,12 @@ fn validate_two_argument_constructor_call_candidate<'session>(
             || block.stats[2..].iter().any(|stat| {
                 !matches!(
                     source_ast.try_get(*stat).map(|node| &node.kind),
-                    Some(TreeKind::Apply(_))
+                    Some(TreeKind::Apply(_)) | Some(TreeKind::ValDef(_))
                 )
             }))
         {
             return Err(source_error(
-                "local Pair call block must contain two vals followed only by Counter.set calls",
+                "local Pair call block must contain two vals, an optional alias, then Counter.set calls",
             ));
         }
         let typer = typer_for_locals
@@ -2282,7 +2301,52 @@ fn validate_two_argument_constructor_call_candidate<'session>(
             ],
             jvm_unit,
         };
-        if block.stats.len() == 3 {
+        if block.stats.len() == 5 {
+            let calls = validate_immutable_local_counter_set_calls_after_alias_proof(
+                ImmutableLocalReferenceAliasProofInput {
+                    initializers: input,
+                    alias_binding: typer.typed_local_binding_at(source_id, block.stats[2]),
+                },
+            )?;
+            let alias = calls.alias();
+            local_reference_alias = Some(LocalReferenceAliasBinding {
+                source_block: alias.initializers.source_block(),
+                typed_block: alias.initializers.typed_block(),
+                source_declaration: alias.source_declaration,
+                typed_declaration: alias.typed_declaration,
+                source_initializer: alias.source_initializer,
+                typed_initializer: alias.typed_initializer,
+                source_type_tree: alias.source_type_tree,
+                typed_type_tree: alias.typed_type_tree,
+                source_target: alias.source_target,
+                typed_target: alias.typed_target,
+                local: alias.symbol,
+                target: alias.target,
+                scope: alias.scope,
+                local_type: alias.local_type,
+            });
+            let pair = *alias.initializers();
+            let [first, second] = calls.calls();
+            local_receiver_unit_calls = Some(LocalReceiverUnitCallsReceipt {
+                calls: [first, second].map(|call| LocalReceiverUnitCallReceipt {
+                    source_apply: call.source_call(),
+                    typed_apply: call.typed_call(),
+                    source_select: call.source_select(),
+                    typed_select: call.typed_select(),
+                    source_receiver: call.source_receiver(),
+                    typed_receiver: call.typed_receiver(),
+                    source_argument: call.source_argument(),
+                    typed_argument: call.typed_argument(),
+                    receiver: call.receiver(),
+                    method: call.method(),
+                    argument_formal: call.formal(),
+                    receiver_scope: call.receiver_scope(),
+                    argument_type: call.argument_type(),
+                    result_type: call.result_type(),
+                }),
+            });
+            Some(pair)
+        } else if block.stats.len() == 3 {
             let call = validate_immutable_local_counter_set_call_proof(input)?;
             let pair = *call.initializer_pair();
             local_receiver_unit_call = Some(LocalReceiverUnitCallReceipt {
@@ -3813,6 +3877,7 @@ fn validate_two_argument_constructor_call_candidate<'session>(
         },
         local_receiver_unit_call,
         local_receiver_unit_calls,
+        local_reference_alias,
         formal_type: method_formal_types[0],
         constructor_formal_type,
         result_type,
@@ -8655,6 +8720,7 @@ fn validate_constructor_call_candidate<'session>(
         argument_proof,
         local_receiver_unit_call: None,
         local_receiver_unit_calls: None,
+        local_reference_alias: None,
         formal_type,
         constructor_formal_type,
         result_type,

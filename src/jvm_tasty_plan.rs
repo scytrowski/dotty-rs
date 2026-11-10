@@ -24,8 +24,8 @@ use dotty_tasty_pickler::{
     ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan,
     DirectFormalConstructorCallPairBinding, FormalLocalConstructorCallArgumentBinding,
     FormalLocalConstructorCallArgumentOrigin, FormalLocalConstructorCallPairBinding,
-    LocalCounterInitializerBinding, LocalReceiverUnitCallBinding, LocalValueBinding,
-    NestedConstructorCallBinding, NestedConstructorCallPairBinding,
+    LocalCounterInitializerBinding, LocalReceiverUnitCallBinding, LocalReferenceAliasBinding,
+    LocalValueBinding, NestedConstructorCallBinding, NestedConstructorCallPairBinding,
     OrderedConstructorCallArgumentBinding, OrderedConstructorCallArgumentOrigin,
     OrderedConstructorCallArgumentPairBinding, PickleError, PlannedCallBinding,
     PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings, ValidatedClassStatePlan,
@@ -158,6 +158,7 @@ struct BatchSourceTypedBindings<'a> {
     planned_calls: Vec<(SourceId, SymbolId, PlannedCallBinding)>,
     local_values: Vec<(SourceId, SymbolId, LocalValueBinding)>,
     local_counter_initializers: Vec<(SourceId, SymbolId, LocalCounterInitializerBinding)>,
+    local_reference_aliases: Vec<(SourceId, SymbolId, LocalReferenceAliasBinding)>,
     local_receiver_unit_calls: Vec<(SourceId, SymbolId, LocalReceiverUnitCallBinding)>,
     local_receiver_unit_call_pairs: Vec<(SourceId, SymbolId, [LocalReceiverUnitCallBinding; 2])>,
     formal_local_constructor_call_pairs:
@@ -269,6 +270,18 @@ impl SourceTypedBindings for BatchSourceTypedBindings<'_> {
                 (*proof_source == source && *proof_method == method).then_some(*binding)
             })
             .collect()
+    }
+
+    fn local_reference_alias(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<LocalReferenceAliasBinding> {
+        self.local_reference_aliases
+            .iter()
+            .find_map(|(proof_source, proof_method, binding)| {
+                (*proof_source == source && *proof_method == method).then_some(*binding)
+            })
     }
 
     fn formal_local_constructor_call_pair(
@@ -1165,6 +1178,19 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                                             parsed.ast.try_get(*stat).map(|node| &node.kind),
                                             Some(TreeKind::Apply(_))
                                         )
+                                    }))
+                                || (block.stats.len() == 5
+                                    && block.stats[..3].iter().all(|declaration| {
+                                        matches!(
+                                            parsed.ast.try_get(*declaration).map(|node| &node.kind),
+                                            Some(TreeKind::ValDef(_))
+                                        )
+                                    })
+                                    && block.stats[3..].iter().all(|stat| {
+                                        matches!(
+                                            parsed.ast.try_get(*stat).map(|node| &node.kind),
+                                            Some(TreeKind::Apply(_))
+                                        )
                                     })) =>
                         {
                             let final_constructor_uses_local = matches!(
@@ -1179,14 +1205,27 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                             if !final_constructor_uses_local {
                                 Vec::new()
                             } else {
+                                let local_count = if block.stats.len() == 5
+                                    && matches!(
+                                        parsed.ast.try_get(block.stats[2]).map(|node| &node.kind),
+                                        Some(TreeKind::ValDef(_))
+                                    )
+                                    && block.stats[3..].iter().all(|stat| {
+                                        matches!(
+                                            parsed.ast.try_get(*stat).map(|node| &node.kind),
+                                            Some(TreeKind::Apply(_))
+                                        )
+                                    }) {
+                                    3
+                                } else if block.stats.len() >= 3 {
+                                    2
+                                } else {
+                                    block.stats.len()
+                                };
                                 block
                                     .stats
                                     .iter()
-                                    .take(if block.stats.len() >= 3 {
-                                        2
-                                    } else {
-                                        block.stats.len()
-                                    })
+                                    .take(local_count)
                                     .filter_map(|declaration| {
                                         typer
                                             .typed_local_binding_at(source_id, *declaration)
@@ -1581,7 +1620,7 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
         local_values: constructor_call_proofs
             .iter()
             .flat_map(|proof| {
-                let locals = if let Some(local) = proof.argument_proof().local_val() {
+                let mut locals = if let Some(local) = proof.argument_proof().local_val() {
                     vec![(local.source_declaration(), local.symbol(), local.typed_declaration(), local.scope())]
                 } else {
                     proof
@@ -1598,6 +1637,14 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                         })
                         .unwrap_or_default()
                 };
+                if let Some(alias) = proof.local_reference_alias() {
+                    locals.push((
+                        alias.source_declaration,
+                        alias.local,
+                        alias.typed_declaration,
+                        alias.scope,
+                    ));
+                }
                 locals.into_iter().map(|local| {
                     (
                         proof.source_id(),
@@ -1689,6 +1736,14 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                         }))
                     }).collect()
                 }
+            })
+            .collect(),
+        local_reference_aliases: constructor_call_proofs
+            .iter()
+            .filter_map(|proof| {
+                proof.local_reference_alias().map(|binding| {
+                    (proof.source_id(), proof.method(), binding)
+                })
             })
             .collect(),
         local_receiver_unit_calls: constructor_call_proofs

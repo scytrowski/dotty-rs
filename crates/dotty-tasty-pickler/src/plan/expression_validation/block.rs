@@ -238,19 +238,17 @@ impl Validator<'_, '_> {
                 })
                 && initializers.len() == 2
                 && pair.is_some_and(|pair| {
-                    matches!(
-                        pair.arguments[0].origin,
+                    let argument_symbols = pair.arguments.map(|argument| match argument.origin {
                         crate::FormalLocalConstructorCallArgumentOrigin::LocalValue {
                             symbol,
                             ..
-                        } if symbol == initializers[0].local
-                    ) && matches!(
-                        pair.arguments[1].origin,
-                        crate::FormalLocalConstructorCallArgumentOrigin::LocalValue {
-                            symbol,
-                            ..
-                        } if symbol == initializers[1].local
-                    )
+                        } => Some(symbol),
+                        _ => None,
+                    });
+                    matches!(argument_symbols, [Some(first), Some(second)]
+                        if first != second
+                            && initializers.iter().any(|initializer| initializer.local == first)
+                            && initializers.iter().any(|initializer| initializer.local == second))
                 })
                 && self.source_tree(source_block.expr).is_ok_and(|result| {
                     matches!(&result.kind, TreeKind::Apply(application) if application.args.len() == 2)
@@ -354,17 +352,37 @@ impl Validator<'_, '_> {
                         && initializer.typed_declaration == typed_block.stats[0]
                 })
                 && self.source_tree(source_block.stats[0])?.position.is_some();
+            let first_argument_local = method_formals.and_then(|formals| {
+                initializers
+                    .iter()
+                    .find(|initializer| initializer.argument_formal == formals[0])
+                    .map(|initializer| initializer.local)
+            });
+            let second_argument_local = method_formals.and_then(|formals| {
+                initializers
+                    .iter()
+                    .find(|initializer| initializer.argument_formal == formals[1])
+                    .map(|initializer| initializer.local)
+            });
             let three_local_alias_shape = alias_call_stat_shape
                 && initializers.len() == 2
-                && alias_binding.is_some_and(|alias| initializers[0].local == alias.target)
+                && alias_binding.is_some_and(|alias| Some(alias.target) == first_argument_local)
                 && initializers[0].local != initializers[1].local
                 && initializers[0].scope == initializers[1].scope
                 && alias_binding.is_some_and(|alias| {
                     call_bindings.len() == 2
                         && call_bindings[0].receiver == alias.local
                         && call_bindings[0].receiver_scope == alias.scope
-                        && call_bindings[1].receiver == initializers[1].local
-                        && call_bindings[1].receiver_scope == initializers[1].scope
+                        && Some(call_bindings[1].receiver) == second_argument_local
+                        && call_bindings[1].receiver_scope
+                            == initializers
+                                .iter()
+                                .find(|initializer| {
+                                    Some(initializer.local) == second_argument_local
+                                })
+                                .map_or(call_bindings[1].receiver_scope, |initializer| {
+                                    initializer.scope
+                                })
                 })
                 && source_block
                     .stats
@@ -606,9 +624,19 @@ impl Validator<'_, '_> {
         let alias_binding = p
             .typed_bindings
             .local_reference_alias(p.source.id, method.symbol);
+        let first_argument_local = method
+            .parameter_clauses
+            .first()
+            .and_then(|formals| formals.first())
+            .and_then(|formal| {
+                initializers
+                    .iter()
+                    .find(|initializer| initializer.argument_formal == *formal)
+                    .map(|initializer| initializer.local)
+            });
         let receiver_is_alias = alias_binding.is_some_and(|alias| {
             alias.local == binding.receiver
-                && alias.target == initializers.first().map_or(alias.target, |item| item.local)
+                && Some(alias.target) == first_argument_local
                 && alias.scope == binding.receiver_scope
         });
         let receiver_class = receiver_initializer
