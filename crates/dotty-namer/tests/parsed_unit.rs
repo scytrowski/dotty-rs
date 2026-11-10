@@ -4795,6 +4795,244 @@ fn diagnostic_aware_naming_accepts_a_shared_synthetic_package_owner() {
 }
 
 #[test]
+fn generic_product1_case_classes_publish_only_canonical_unapply_identity() {
+    let cases = [
+        (
+            "package scala.util\nsealed trait Either[+A, +B]\nfinal case class Left[+A, +B](value: A) extends Either[A, B]\nfinal case class Right[+A, +B](value: B) extends Either[A, B]",
+            vec!["Left", "Right"],
+        ),
+        ("case class Box[X, Y](value: X)", vec!["Box"]),
+        ("case class Swapped[X, Y](value: Y)", vec!["Swapped"]),
+    ];
+    for (source_index, (source_text, expected_classes)) in cases.into_iter().enumerate() {
+        let mut named = named_source(source_text, 22_380 + source_index as u32);
+        let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+            panic!("source should have a package root");
+        };
+        let class_trees = package
+            .stats
+            .iter()
+            .copied()
+            .filter(|tree| matches!(named.parsed.ast.get(*tree).kind, TreeKind::TypeDef(_)))
+            .collect::<Vec<_>>();
+        let class_trees = if class_trees.is_empty() {
+            vec![named.parsed.root]
+        } else {
+            class_trees
+        };
+        let mut found = Vec::new();
+        for class_tree in class_trees {
+            let TreeKind::TypeDef(definition) = &named.parsed.ast.get(class_tree).kind else {
+                continue;
+            };
+            let class_name = named.store.names.resolve(definition.name.as_name().text());
+            if !expected_classes.contains(&class_name) {
+                continue;
+            }
+            found.push(class_name.to_owned());
+            let class = named.index.symbol_at(named.source, class_tree).unwrap();
+            let unapply = named
+                .index
+                .generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply)
+                .expect(
+                    "eligible two-parameter Product1 case class gets generated unapply identity",
+                );
+            let apply = named
+                .index
+                .generated_case_class_method(class, GeneratedCaseClassMethodRole::Apply)
+                .expect("existing generic apply identity remains available");
+            assert_ne!(apply, unapply);
+            assert_eq!(
+                named.index.definition_of(class),
+                Some(SourceDefinition::Canonical {
+                    source: named.source,
+                    tree: class_tree,
+                })
+            );
+            let TreeKind::TypeDef(definition) = &named.parsed.ast.get(class_tree).kind else {
+                unreachable!()
+            };
+            let TreeKind::Template(template) = &named.parsed.ast.get(definition.rhs).kind else {
+                unreachable!()
+            };
+            let TreeKind::DefDef(constructor) = &named.parsed.ast.get(template.constructor).kind
+            else {
+                unreachable!()
+            };
+            let apply_type_parameters = constructor
+                .type_params
+                .iter()
+                .map(|tree| {
+                    named
+                        .index
+                        .derived_symbol_at(apply, named.source, *tree)
+                        .expect("apply type parameters preserve source order and tree identity")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(apply_type_parameters.len(), 2);
+            for (parameter, source_tree) in
+                apply_type_parameters.iter().zip(&constructor.type_params)
+            {
+                assert_eq!(named.store.symbols.get(*parameter).owner, Some(apply));
+                assert_eq!(
+                    named.index.definition_of(*parameter),
+                    Some(SourceDefinition::Derived {
+                        source: named.source,
+                        tree: *source_tree,
+                    })
+                );
+            }
+            assert_eq!(
+                named.index.generated_case_class_method_identity(unapply),
+                Some(dotty_core::GeneratedCaseClassMethod {
+                    class,
+                    role: GeneratedCaseClassMethodRole::Unapply
+                })
+            );
+            let owner = named.store.symbols.get(unapply).owner.unwrap();
+            assert_eq!(named.store.symbols.get(owner).kind, SymbolKind::ModuleClass);
+            assert_eq!(
+                named.index.definition_of(unapply),
+                Some(SourceDefinition::Derived {
+                    source: named.source,
+                    tree: class_tree,
+                })
+            );
+            assert_eq!(
+                named.store.symbols.get(unapply).info,
+                dotty_core::SymbolInfo::Missing
+            );
+            assert_eq!(
+                named.store.symbols.get(unapply).origin,
+                dotty_core::SymbolOrigin::Source(named.source)
+            );
+            let unapply_scope = named.index.scope_of(unapply).unwrap();
+            assert_eq!(named.store.scopes.get(unapply_scope).owner, Some(unapply));
+            let formal = named
+                .store
+                .scopes
+                .get(unapply_scope)
+                .lookup_all(TermName::new(named.store.names.intern("x$1")).as_name());
+            assert_eq!(formal.len(), 1);
+            assert_eq!(named.store.symbols.get(formal[0]).owner, Some(unapply));
+            assert_eq!(
+                named.store.symbols.get(formal[0]).kind,
+                SymbolKind::Parameter
+            );
+            assert_eq!(
+                named.index.definition_of(formal[0]),
+                Some(SourceDefinition::Derived {
+                    source: named.source,
+                    tree: class_tree,
+                })
+            );
+            assert!(
+                named
+                    .store
+                    .scopes
+                    .get(named.index.scope_of(class).unwrap())
+                    .lookup_all(TermName::new(named.store.names.intern("_1")).as_name())
+                    .is_empty(),
+                "generic unapply identity must not synthesize Product1 selectors"
+            );
+        }
+        assert_eq!(found.len(), expected_classes.len());
+        for expected in expected_classes {
+            assert!(found.contains(&expected.to_string()));
+        }
+    }
+}
+
+#[test]
+fn generic_unapply_identity_rejects_shapes_outside_the_bounded_product1_rule() {
+    let sources = [
+        "case class Unrelated[X, Y](value: String)",
+        "case class WrongArity[X](value: X)",
+        "case class TooMany[X, Y, Z](value: X)",
+        "case class Bounded[X <: Any, Y](value: X)",
+        "case class TwoFields[X, Y](first: X, second: Y)",
+        "case class Curried[X, Y](value: X)(other: Y)",
+        "case class Defaulted[X, Y](value: X = ???)",
+        "case class Repeated[X, Y](value: X*)",
+        "case class Contextual[X, Y](using value: X)",
+    ];
+    for (source_index, source_text) in sources.into_iter().enumerate() {
+        let named = named_source(source_text, 22_390 + source_index as u32);
+        let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+            panic!("source should have a package root");
+        };
+        let class_tree = *package
+            .stats
+            .iter()
+            .find(|tree| matches!(named.parsed.ast.get(**tree).kind, TreeKind::TypeDef(_)))
+            .unwrap();
+        let class = named.index.symbol_at(named.source, class_tree).unwrap();
+        assert_eq!(
+            named
+                .index
+                .generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply),
+            None,
+            "unsupported shape must not receive generated identity: {source_text}"
+        );
+    }
+}
+
+#[test]
+fn incomparable_generic_companion_unapply_fails_without_publishing_a_candidate() {
+    let source_text = "case class Box[X, Y](value: X)\nobject Box { def unapply(value: String): Option[String] = Some(value) }";
+    let (parsed, source, mut store) = parsed_source(source_text, 22_399);
+    let checkpoint = store.checkpoint();
+    let mut packages = Packages::new();
+    let error = name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "GenericUnapplyCollision.scala",
+        SourceParseStatus::Clean,
+        &mut store,
+        &mut packages,
+    )
+    .expect_err("unresolved explicit unapply identity must fail closed");
+    assert!(matches!(
+        error,
+        NamerError::UnsupportedCaseClassCompanionShape {
+            reason: "explicit companion unapply signature cannot be compared without type completion",
+            ..
+        }
+    ));
+    assert_eq!(store.checkpoint(), checkpoint);
+    assert!(packages.is_empty());
+
+    let retry_text = "case class Retry[X, Y](value: Y)";
+    let retry_source = SourceId::from_index(22_400);
+    let scanner = dotty_lexer::ContextualScanner::new(retry_text).expect("retry source should lex");
+    let retry = parse_compilation_unit(
+        SourceText::new(retry_text).unwrap(),
+        retry_source,
+        scanner,
+        &mut store.names,
+    );
+    let index = name_compilation_unit(
+        &retry.ast,
+        retry.root,
+        retry_source,
+        "GenericUnapplyRetry.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect("a valid generic Product1 declaration can retry after rollback");
+    let TreeKind::PackageDef(package) = &retry.ast.get(retry.root).kind else {
+        panic!("retry source should have a package root");
+    };
+    let class = index.symbol_at(retry_source, package.stats[0]).unwrap();
+    assert!(
+        index
+            .generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply)
+            .is_some()
+    );
+}
+
+#[test]
 fn diagnostic_aware_naming_keeps_malformed_root_internal_and_rolls_back() {
     let (mut parsed, source, mut store) = parsed_source("class C", 321);
     let malformed_root_kind = {
