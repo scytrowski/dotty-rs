@@ -116,6 +116,14 @@ impl Validator<'_, '_> {
                 .plan
                 .typed_bindings
                 .local_receiver_unit_call_pair(self.plan.source.id, method.symbol);
+            let pair = self
+                .plan
+                .typed_bindings
+                .formal_local_constructor_call_pair(self.plan.source.id, method.symbol);
+            let initializers = self
+                .plan
+                .typed_bindings
+                .local_counter_initializers(self.plan.source.id, method.symbol);
             let alias_binding = self
                 .plan
                 .typed_bindings
@@ -227,7 +235,27 @@ impl Validator<'_, '_> {
                 && call_bindings.iter().enumerate().all(|(index, binding)| {
                     binding.source_apply == source_block.stats[index + 3]
                         && binding.typed_apply == typed_block.stats[index + 3]
-                });
+                })
+                && initializers.len() == 2
+                && pair.is_some_and(|pair| {
+                    matches!(
+                        pair.arguments[0].origin,
+                        crate::FormalLocalConstructorCallArgumentOrigin::LocalValue {
+                            symbol,
+                            ..
+                        } if symbol == initializers[0].local
+                    ) && matches!(
+                        pair.arguments[1].origin,
+                        crate::FormalLocalConstructorCallArgumentOrigin::LocalValue {
+                            symbol,
+                            ..
+                        } if symbol == initializers[1].local
+                    )
+                })
+                && self.source_tree(source_block.expr).is_ok_and(|result| {
+                    matches!(&result.kind, TreeKind::Apply(application) if application.args.len() == 2)
+                })
+                && matches!(&typed_result.kind, TreeKind::Apply(application) if application.args.len() == 2);
             let local_stat_shape = (1..=2).contains(&source_block.stats.len())
                 && source_block.stats.iter().zip(&typed_block.stats).all(
                     |(&source_stat, &typed_stat)| {
@@ -259,10 +287,6 @@ impl Validator<'_, '_> {
             else {
                 unreachable!("reference block shape was checked")
             };
-            let pair = self
-                .plan
-                .typed_bindings
-                .formal_local_constructor_call_pair(self.plan.source.id, method.symbol);
             let local_argument_indices = pair
                 .map(|pair| {
                     pair.arguments
@@ -289,10 +313,6 @@ impl Validator<'_, '_> {
                     self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
                 );
             }
-            let initializers = self
-                .plan
-                .typed_bindings
-                .local_counter_initializers(self.plan.source.id, method.symbol);
             let distinct_local_pair_matches_initializers = pair.is_some_and(|pair| {
                 let local_symbols = pair.arguments.map(|argument| match argument.origin {
                     crate::FormalLocalConstructorCallArgumentOrigin::LocalValue {
@@ -371,7 +391,11 @@ impl Validator<'_, '_> {
                 }
             };
             if two_local_shape || three_local_alias_shape {
-                let pair = pair.expect("two-local shape has a pair receipt");
+                let Some(pair) = pair else {
+                    return Err(
+                        self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                    );
+                };
                 for index in 0..2 {
                     let argument = pair.arguments[index];
                     if argument.source_argument != source_result_apply.args[index]

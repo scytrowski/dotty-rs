@@ -80,6 +80,7 @@ struct StandaloneCallBindings<'a> {
     method: SymbolId,
     classes: Vec<SymbolId>,
     methods: Vec<SymbolId>,
+    pair_available: bool,
     pair: FormalLocalConstructorCallPairBinding,
     initializers: Vec<LocalCounterInitializerBinding>,
     locals: Vec<LocalValueBinding>,
@@ -110,7 +111,7 @@ impl SourceTypedBindings for StandaloneCallBindings<'_> {
         source: SourceId,
         method: SymbolId,
     ) -> Option<FormalLocalConstructorCallPairBinding> {
-        (source == self.source && method == self.method).then_some(self.pair)
+        (self.pair_available && source == self.source && method == self.method).then_some(self.pair)
     }
 
     fn local_counter_initializers(
@@ -3325,6 +3326,17 @@ fn standalone_alias_two_local_receiver_calls_use_original_local_identities() {
 }
 
 #[test]
+fn standalone_alias_pair_and_missing_receipt_corruptions_fail_closed() {
+    let candidate = standalone_local_receiver_call_candidate(
+        ALIAS_TWO_CALL_TARGET,
+        SourceId::from_index(22392),
+        false,
+    );
+    TastyFile::parse_and_validate_scala_3_9(&candidate)
+        .expect("the uncorrupted fixture still produces structurally valid TASTy");
+}
+
+#[test]
 fn standalone_reversed_two_local_receiver_calls_preserve_source_order() {
     let reversed_source = TWO_CALL_TARGET.replace(
         "    first.set(secondSeed)\n    second.set(firstSeed)",
@@ -3704,6 +3716,7 @@ fn standalone_local_receiver_call_candidate(
         method: create,
         classes: classes.clone(),
         methods: all_methods,
+        pair_available: true,
         pair: formal_local_pair,
         initializers: local_initializers.to_vec(),
         locals: local_values.to_vec(),
@@ -3762,6 +3775,133 @@ fn standalone_local_receiver_call_candidate(
         },
         members: &members,
     };
+    if let Some(alias) = alias_binding {
+        let initializer_symbols = [
+            initializer_receipts[0].symbol(),
+            initializer_receipts[1].symbol(),
+        ];
+        let corruptions = [(1usize, initializer_symbols[0]), (0usize, alias.local)];
+        for (argument_index, replacement) in corruptions {
+            let mut malformed_source_ast = clone_untyped_ast(&parsed.ast);
+            let mut malformed_typed_ast = clone_typed_ast(typer.typed_ast());
+            let mut malformed_bindings = bindings.clone();
+            let mut pair = malformed_bindings.pair;
+            let replacement_name = typer.store().symbols.get(replacement).name;
+            let replacement_type = if replacement == alias.local {
+                alias.local_type
+            } else {
+                pair.arguments
+                    .iter()
+                    .find_map(|argument| match argument.origin {
+                        FormalLocalConstructorCallArgumentOrigin::LocalValue {
+                            symbol,
+                            result_type,
+                        } if symbol == replacement => Some(result_type),
+                        _ => None,
+                    })
+                    .expect("replacement is an original Pair local")
+            };
+            let source_argument = pair.arguments[argument_index].source_argument;
+            let typed_argument = pair.arguments[argument_index].typed_argument;
+            let TreeKind::Ident(source_ident) =
+                &mut malformed_source_ast.get_mut(source_argument).kind
+            else {
+                panic!("Pair constructor argument remains an Ident");
+            };
+            source_ident.name = replacement_name;
+            let typed_argument_tree = malformed_typed_ast.get_mut(typed_argument);
+            typed_argument_tree.ty = replacement_type;
+            let TreeKind::Ident(typed_ident) = &mut typed_argument_tree.kind else {
+                panic!("typed Pair constructor argument remains an Ident");
+            };
+            typed_ident.name = replacement_name;
+            pair.arguments[argument_index].origin =
+                FormalLocalConstructorCallArgumentOrigin::LocalValue {
+                    symbol: replacement,
+                    result_type: replacement_type,
+                };
+            malformed_bindings.pair = pair;
+            let malformed_plan = ClassStatePicklePlan {
+                store: typer.store(),
+                definitions: &definitions,
+                source_ast: &malformed_source_ast,
+                typed_ast: &malformed_typed_ast,
+                source_index: &source_index,
+                typed_bindings: &malformed_bindings,
+                source: SourceMetadata {
+                    id: source_id,
+                    name: "LocalReceiverCall.scala".to_owned(),
+                },
+                class: factory,
+                class_tree: factory_tree,
+                constructor: PrimaryConstructorInputPlan {
+                    symbol: constructor,
+                    source_tree: factory_template.constructor,
+                    parameter_clauses: constructor_clauses.clone(),
+                },
+                members: &members,
+            };
+            let validated = malformed_plan
+                .validate()
+                .expect("corrupted Pair identities reach method-body validation");
+            assert!(
+                validated.validate_method_bodies().is_err(),
+                "duplicate or alias-substituted Pair identities are rejected"
+            );
+            assert!(
+                validated.pickle().is_err(),
+                "duplicate or alias-substituted Pair identities cannot be pickled"
+            );
+        }
+
+        let mut truncated_source_ast = clone_untyped_ast(&parsed.ast);
+        let mut truncated_typed_ast = clone_typed_ast(typer.typed_ast());
+        let TreeKind::Apply(source_result_apply) =
+            &mut truncated_source_ast.get_mut(source_result).kind
+        else {
+            unreachable!("source Pair result remains an application")
+        };
+        source_result_apply.args.pop();
+        let TreeKind::Apply(typed_result_apply) =
+            &mut truncated_typed_ast.get_mut(typed_result).kind
+        else {
+            unreachable!("typed Pair result remains an application")
+        };
+        typed_result_apply.args.pop();
+        let mut missing_pair_bindings = bindings.clone();
+        missing_pair_bindings.pair_available = false;
+        let missing_pair_plan = ClassStatePicklePlan {
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &truncated_source_ast,
+            typed_ast: &truncated_typed_ast,
+            source_index: &source_index,
+            typed_bindings: &missing_pair_bindings,
+            source: SourceMetadata {
+                id: source_id,
+                name: "LocalReceiverCall.scala".to_owned(),
+            },
+            class: factory,
+            class_tree: factory_tree,
+            constructor: PrimaryConstructorInputPlan {
+                symbol: constructor,
+                source_tree: factory_template.constructor,
+                parameter_clauses: constructor_clauses.clone(),
+            },
+            members: &members,
+        };
+        let validated = missing_pair_plan
+            .validate()
+            .expect("truncated result reaches method-body validation");
+        assert!(
+            validated.validate_method_bodies().is_err(),
+            "a truncated Pair result without its receipt fails with a typed error"
+        );
+        assert!(
+            validated.pickle().is_err(),
+            "a truncated Pair result without its receipt cannot be pickled"
+        );
+    }
     if alias_binding.is_none()
         && let Some(mut calls) = call_pair_binding
     {
