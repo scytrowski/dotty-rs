@@ -155,7 +155,7 @@ fn normalized_type(store: &SemanticStore, ty: TypeId, method_binder: TypeId) -> 
 
 #[test]
 #[ignore = "requires pinned Scala 3.9.0 sources, classpath jars, and JDK environment"]
-fn captures_acceptance_iv_relation_operands_before_transaction_rollback() {
+fn preserves_option_map_rollback_and_tuple_to_array_automatic_preparation() {
     let scala_root = PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT"));
     let revision = Command::new("git")
         .args(["-C", scala_root.to_str().unwrap(), "rev-parse", "HEAD"])
@@ -1182,6 +1182,34 @@ fn captures_acceptance_iv_relation_operands_before_transaction_rollback() {
             println!(
                 "OPTION_MAP_TYPED_BEGIN\nmethod=canonical:scala.Option.map\nbinder=B\nsource_typed_mappings={}\nOPTION_MAP_TYPED_END",
                 mappings.join(",")
+            );
+            continue;
+        }
+        if relative.ends_with("Tuple.scala") {
+            let typed_method = result.expect(
+                "the original Tuple.toArray DefDef should type after automatic preparation",
+            );
+            assert_eq!(
+                typer.source_typed_index().get(source, tree),
+                Some(typed_method),
+                "successful Tuple.toArray typing retains the original source-to-typed root"
+            );
+            assert!(
+                observed.borrow().is_none(),
+                "successful Tuple.toArray typing must not report a pre-rollback failure"
+            );
+            let TreeKind::DefDef(typed_definition) = &typer.typed_ast().get(typed_method).kind
+            else {
+                panic!("the original Tuple.toArray root must remain a typed DefDef");
+            };
+            let typed_rhs = typed_definition
+                .rhs
+                .expect("the original Tuple.toArray DefDef keeps its RHS");
+            println!(
+                "TUPLE_TO_ARRAY_ACCEPTED_AFTER_AUTOMATIC_PREPARATION source_tree={} typed_root={} typed_rhs={:?}",
+                tree.index(),
+                typed_method.index(),
+                typer.typed_ast().get(typed_rhs).kind
             );
             continue;
         }

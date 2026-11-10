@@ -289,7 +289,7 @@ jobs:
           cp crates/dotty-typer/tests/fixtures/lexical-closure-contract/scala-artifacts.sha256.tsv \
             "$DOTTY_AUDIT_REPORT_DIR/scala-artifacts.sha256.tsv"
 
-      - name: Type original Option.map in two fresh sessions with rollback retry
+      - name: Type original Option.map and Tuple.toArray in two fresh sessions
         shell: bash
         env:
           COURSIER_MAVEN_ROOT: ${{ github.workspace }}/target/coursier/v1/https/repo1.maven.org/maven2
@@ -314,7 +314,7 @@ jobs:
             "fadeb6620ab6cdadfd539409e335b38142fa1f6ba6b9143b2d6cfcb90e0076c3"
           for session in 1 2; do
             cargo +1.98.1 test -p dotty-typer --lib --locked \
-              captures_acceptance_iv_relation_operands_before_transaction_rollback \
+              preserves_option_map_rollback_and_tuple_to_array_automatic_preparation \
               -- --ignored --nocapture \
               > "$DOTTY_AUDIT_REPORT_DIR/option-map-session-$session.log" 2>&1
             if ! grep -o 'OPTION_MAP_ACCEPTED [^[:cntrl:]]*' \
@@ -326,9 +326,18 @@ jobs:
             test "$(wc -l < "$DOTTY_AUDIT_REPORT_DIR/option-map-session-$session.receipt")" -eq 1
             grep -q 'test result: ok. 1 passed' \
               "$DOTTY_AUDIT_REPORT_DIR/option-map-session-$session.log"
+            if ! grep -o 'TUPLE_TO_ARRAY_ACCEPTED_AFTER_AUTOMATIC_PREPARATION [^[:cntrl:]]*' \
+              "$DOTTY_AUDIT_REPORT_DIR/option-map-session-$session.log" \
+              > "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-$session.receipt"; then
+              echo "Tuple.toArray automatic preparation marker missing from session $session log" >&2
+              exit 1
+            fi
+            test "$(wc -l < "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-$session.receipt")" -eq 1
           done
           cmp "$DOTTY_AUDIT_REPORT_DIR/option-map-session-1.receipt" \
             "$DOTTY_AUDIT_REPORT_DIR/option-map-session-2.receipt"
+          cmp "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-1.receipt" \
+            "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-2.receipt"
           {
             printf 'session_1_receipt_sha256\t%s\n' \
               "$(sha256sum "$DOTTY_AUDIT_REPORT_DIR/option-map-session-1.receipt" | cut -d' ' -f1)"

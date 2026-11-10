@@ -261,6 +261,17 @@ impl SourceTyper<'_> {
         else {
             return Ok(());
         };
+        if self.store.names.resolve(selection.name.text()) != "toArray"
+            || !matches!(
+                self.arena
+                    .try_get(selection.qualifier)
+                    .map(|node| &node.kind),
+                Some(TreeKind::Select(receiver))
+                    if self.store.names.resolve(receiver.name.text()) == "Tuples"
+            )
+        {
+            return Ok(());
+        }
         if !matches!(
             self.arena
                 .try_get(selection.qualifier)
@@ -279,6 +290,15 @@ impl SourceTyper<'_> {
                 self.store.symbols.get(owner).kind,
                 SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
             )
+        {
+            return Ok(());
+        }
+        if self
+            .store
+            .names
+            .resolve(self.store.symbols.get(owner).name.text())
+            != "Tuple"
+            || self.store.symbols.get(owner).owner != self.packages.symbol(&["scala"])
         {
             return Ok(());
         }

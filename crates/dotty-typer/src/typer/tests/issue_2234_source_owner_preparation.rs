@@ -45,8 +45,8 @@ fn direct_this_call(
 }
 
 #[test]
-fn qualified_direct_this_prepares_only_the_authenticated_source_owner() {
-    let source_text = "package other\nclass Tuple {\n  def use = runtime.Tuples.toArray(this)\n  def plain = consume(this)\n}\nobject runtime { object Tuples { def toArray(value: Tuple): Int = 0 } }\nclass Unused";
+fn canonical_tuple_to_array_prepares_only_the_authenticated_source_owner() {
+    let source_text = "package scala\nclass Tuple {\n  def use = runtime.Tuples.toArray(this)\n  def plain = consume(this)\n}\nobject runtime { object Tuples { def toArray(value: Tuple): Int = 0 } }\nclass Unused";
     let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
     let tuple = class_symbol(&parsed, &store, &index, source, "Tuple");
     let unused = class_symbol(&parsed, &store, &index, source, "Unused");
@@ -167,13 +167,72 @@ fn qualified_direct_this_prepares_only_the_authenticated_source_owner() {
             .store
             .names
             .resolve(typer.store.symbols.get(package).name.text()),
-        "other"
+        "scala"
     );
 }
 
 #[test]
-fn malformed_completed_source_owner_is_rejected_without_replacement() {
+fn same_named_non_scala_tuple_is_not_prepared() {
     let source_text = "package other\nclass Tuple { def use = runtime.Tuples.toArray(this) }\nobject runtime { object Tuples { def toArray(value: Tuple): Int = 0 } }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+    let tuple = class_symbol(&parsed, &store, &index, source, "Tuple");
+    let (method, function, argument) = direct_this_call(&parsed, &store, &index, source, "use");
+    let context = ExpressionContext {
+        lexical: index.declaration_context_of(method).unwrap(),
+        owner: method,
+        local_scopes: None,
+    };
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    typer
+        .prepare_source_owner_for_qualified_this_argument(
+            function,
+            argument,
+            context,
+            function.index(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+    assert!(matches!(
+        *typer.store.symbols.info(tuple),
+        SymbolInfo::Missing
+    ));
+}
+
+#[test]
+fn unrelated_qualified_this_call_does_not_complete_product_owner() {
+    let source_text = "case class A(x: Boolean, y: Int) { def f: Int = _root_.runtime.Helper.consume(this) }\nobject runtime { object Helper { def consume(x: Any): Int = 1 } }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+    let a = class_symbol(&parsed, &store, &index, source, "A");
+    let method_tree = method_definition_tree(&parsed, &store, "f");
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+
+    let typed_method = typer
+        .type_method_definition(method_tree)
+        .expect("unrelated qualified source calls retain base behavior");
+    assert_eq!(
+        typer.source_typed_index().get(source, method_tree),
+        Some(typed_method)
+    );
+    assert!(matches!(*typer.store.symbols.info(a), SymbolInfo::Missing));
+}
+
+#[test]
+fn malformed_completed_source_owner_is_rejected_without_replacement() {
+    let source_text = "package scala\nclass Tuple { def use = runtime.Tuples.toArray(this) }\nobject runtime { object Tuples { def toArray(value: Tuple): Int = 0 } }";
     let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
     let tuple = class_symbol(&parsed, &store, &index, source, "Tuple");
     let (method, function, argument) = direct_this_call(&parsed, &store, &index, source, "use");
@@ -216,7 +275,7 @@ fn malformed_completed_source_owner_is_rejected_without_replacement() {
 
 #[test]
 fn inconsistent_selected_formal_stays_a_rejection_and_rolls_back_owner_preparation() {
-    let source_text = "package other\nclass Tuple { def use: Int = runtime.Tuples.toArray(this) }\nobject runtime { object Tuples { def toArray(value: Int): Int = value } }";
+    let source_text = "package scala\nclass Tuple { def use: Int = runtime.Tuples.toArray(this) }\nobject runtime { object Tuples { def toArray(value: Int): Int = value } }";
     let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
     let tuple = class_symbol(&parsed, &store, &index, source, "Tuple");
     let method_tree = method_definition_tree(&parsed, &store, "use");
