@@ -117,7 +117,7 @@ sbt -batch 'dist-linux-x86_64/universal:stage'
 SCALAC="$SCRATCH/scala39-source/dist/linux-x86_64/target/universal/stage/bin/scalac"
 FIXTURES=/path/to/dotty-rs/tests/fixtures
 OUT="$SCRATCH/local-reference-alias"
-mkdir -p "$OUT/classes" "$OUT/typed" "$OUT/baselines"
+mkdir -p "$OUT/classes" "$OUT/typed" "$OUT/from-tasty" "$OUT/baselines"
 "$SCALAC" -Werror -release 21 -d "$OUT/classes" \
   "$FIXTURES/jvm_tasty_local_reference_alias/LocalReferenceAlias.scala"
 javac --release 21 -cp "$OUT/classes" -d "$OUT/classes" \
