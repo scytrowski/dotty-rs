@@ -74,6 +74,7 @@ const IMMUTABLE_LOCAL_PAIR_REVERSED_BATCH: &str =
     include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactoryReversed.scala");
 const TWO_IMMUTABLE_LOCAL_PAIR_BATCH: &str =
     include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
+const IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH: &str = "package example\n\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\n\nclass Pair(first: Counter, second: Counter):\n  private val left: Counter = first\n  private val right: Counter = second\n  def leftValue(): Int = left.get()\n  def rightValue(): Int = right.get()\n\nclass PairFactory:\n  def create(firstSeed: Int, secondSeed: Int): Pair =\n    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)\n    val alias: Counter = first\n    alias.set(secondSeed)\n    second.set(firstSeed)\n    new Pair(first, second)\n";
 const COUNTER_FACTORY_IDENTITY_ONLY: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n";
 const COUNTER_FACTORY_PRIMITIVE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n  def create(seed: Int): Int = seed\n";
 const COUNTER_FACTORY_REFERENCE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def create(counter: Counter): Counter = counter\n";
@@ -834,6 +835,18 @@ public final class ReferenceLocalBatchHarness {
         undersized_stack[code_start - 8..code_start - 6].copy_from_slice(&2u16.to_be_bytes());
         run_local_negative("undersized-reference-local-stack", &undersized_stack);
     }
+}
+
+#[test]
+fn immutable_alias_and_ordered_calls_frozen_source_is_currently_rejected() {
+    let result = with_paired_jvm_tasty_batch_plan(
+        IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH,
+        "PairFactory.scala",
+        SourceId::from_index(22400),
+        |_| (),
+    );
+    assert!(result.is_err(), "frozen source rejection audit: {result:?}");
+    eprintln!("frozen source first rejection: {result:?}");
 }
 
 #[test]
