@@ -340,7 +340,7 @@ jobs:
             printf 'dotty_rs_tested_sha\t%s\n' "$(git rev-parse HEAD)"
           } > "$DOTTY_AUDIT_REPORT_DIR/option-map-two-session.tsv"
 
-      - name: Type original Tuple.toArray after explicit canonical owner preparation
+      - name: Type original Tuple.toArray with automatic canonical owner preparation
         shell: bash
         env:
           COURSIER_MAVEN_ROOT: ${{ github.workspace }}/target/coursier/v1/https/repo1.maven.org/maven2
@@ -362,7 +362,7 @@ jobs:
             "777528f19a58e794c9954a42f433373472ec57f8"
           for session in 1 2; do
             cargo +1.98.1 test -p dotty-typer --lib --locked \
-              original_tuple_to_array_types_after_explicit_canonical_owner_preparation \
+              original_tuple_to_array_automatically_prepares_canonical_source_owner \
               -- --ignored --nocapture \
               > "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-$session.log" 2>&1
             if ! grep -o 'TUPLE_TO_ARRAY_ACCEPTED [^[:cntrl:]]*' \

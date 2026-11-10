@@ -1389,7 +1389,7 @@ fn captures_acceptance_v_either_swap_failure_before_transaction_rollback() {
 
 #[test]
 #[ignore = "requires pinned Scala 3.9.0 sources, classpath jars, and JDK environment"]
-fn original_tuple_to_array_types_after_explicit_canonical_owner_preparation() {
+fn original_tuple_to_array_automatically_prepares_canonical_source_owner() {
     let scala_root = PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT"));
     let revision = Command::new("git")
         .args(["-C", scala_root.to_str().unwrap(), "rev-parse", "HEAD"])
@@ -1441,6 +1441,18 @@ fn original_tuple_to_array_types_after_explicit_canonical_owner_preparation() {
     let tuple = index
         .symbol_at(source, tuple_tree)
         .expect("Tuple has a source-index symbol");
+    let non_empty_tuple = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::TypeDef(definition)
+                if store.names.resolve(definition.name.as_name().text()) == "NonEmptyTuple" =>
+            {
+                index.symbol_at(source, tree)
+            }
+            _ => None,
+        })
+        .expect("unrelated source NonEmptyTuple trait");
     let method = index
         .symbol_at(source, method_tree)
         .expect("toArray has a canonical source symbol");
@@ -1473,53 +1485,62 @@ fn original_tuple_to_array_types_after_explicit_canonical_owner_preparation() {
     )
     .with_resolver(Box::new(resolver));
 
-    let before_observation = Rc::new(RefCell::new(None::<String>));
-    let observed_before = before_observation.clone();
-    typer.transaction_failure_error_observer = Some(Rc::new(move |typer, error| {
-        let TyperError::ApplicationArgumentConformanceUnsupported {
-            tree_index,
-            argument_index,
-            actual,
-            expected,
-            ..
-        } = error
-        else {
-            *observed_before.borrow_mut() = Some(format!("unexpected={error:?}"));
-            return;
-        };
-        let actual_is_tuple = matches!(
-            typer.store().types.get(*actual),
-            Type::ThisType { class } if *class == tuple
-        );
-        let expected_is_error = matches!(typer.store().types.get(*expected), Type::Error(_));
-        *observed_before.borrow_mut() = Some(format!(
-            "tree={tree_index} argument={argument_index} actual_tuple_this={actual_is_tuple} expected_error={expected_is_error}"
-        ));
-    }));
-    let before = typer
+    assert!(matches!(
+        *typer.store().symbols.info(non_empty_tuple),
+        SymbolInfo::Missing
+    ));
+    assert!(matches!(
+        *typer.store().symbols.info(tuple),
+        SymbolInfo::Missing
+    ));
+    typer.inject_failure_after_outermost_success = true;
+    let failed = typer
         .type_method_definition(method_tree)
-        .expect_err("the labelled unprepared source-owner attempt remains blocked");
+        .expect_err("the test-injected late failure follows automatic owner preparation");
     assert!(
         matches!(
-            before,
-            TyperError::ApplicationArgumentConformanceUnsupported {
-                tree_index: 22,
-                argument_index: 0,
+            failed,
+            TyperError::SymbolResolution {
+                source: failed_source,
+                error: ResolutionError::Malformed { ref reason },
                 ..
-            }
+            } if failed_source == source
+                && reason == "test-injected failure after successful source typing"
         ),
-        "unprepared before-state must retain the observed identity-resolution blocker: {before:?}"
+        "unexpected injected-transaction result: {failed:?}"
+    );
+    assert!(
+        matches!(*typer.store().symbols.info(tuple), SymbolInfo::Missing),
+        "failed method typing rolls back automatic source-owner completion"
     );
     assert_eq!(
-        before_observation.borrow().as_deref(),
-        Some("tree=22 argument=0 actual_tuple_this=true expected_error=true"),
-        "the before-state operands are captured before the failed method transaction rolls back"
+        typer.source_typed_index().get(source, method_tree),
+        None,
+        "failed method typing rolls back the source-to-typed mapping"
     );
-    typer.transaction_failure_error_observer = None;
+    assert!(!typer.inject_failure_after_outermost_success);
 
-    let prepared_type = typer
-        .complete_symbol(tuple)
-        .expect("explicit source owner completion");
+    let typed_method = match *typer.store().symbols.info(tuple) {
+        SymbolInfo::Missing => typer
+            .type_method_definition(method_tree)
+            .expect("the same SourceTyper retries after rollback"),
+        _ => unreachable!("failed transaction restored the source owner"),
+    };
+    assert_eq!(
+        typer.source_typed_index().get(source, method_tree),
+        Some(typed_method),
+        "ordinary method typing records its canonical source mapping"
+    );
+    let SymbolInfo::Complete(prepared_type) = *typer.store().symbols.info(tuple) else {
+        panic!("ordinary method typing completes its source owner");
+    };
+    assert!(
+        matches!(
+            *typer.store().symbols.info(non_empty_tuple),
+            SymbolInfo::Missing
+        ),
+        "owner preparation leaves the unrelated source trait incomplete"
+    );
     let Type::ClassInfo(class_info) = typer.store().types.get(prepared_type) else {
         panic!("Tuple completion publishes ClassInfo");
     };
@@ -1532,9 +1553,6 @@ fn original_tuple_to_array_types_after_explicit_canonical_owner_preparation() {
             if owner_source == source && tree == tuple_tree
     ));
 
-    let typed_method = typer
-        .type_method_definition(method_tree)
-        .expect("the unchanged original method types after explicit owner preparation");
     assert_eq!(
         typer.source_typed_index().get(source, method_tree),
         Some(typed_method)
@@ -1671,6 +1689,7 @@ fn original_tuple_to_array_types_after_explicit_canonical_owner_preparation() {
         observed_symbol_path(typer.store(), *selected)
     );
     println!(
-        "TUPLE_TO_ARRAY_BEFORE outcome=ApplicationArgumentConformanceUnsupported actual=ThisType(scala.Tuple) expected=ErrorType"
+        "TUPLE_TO_ARRAY_AUTOMATIC_PREPARATION source_owner={} external_formal=TypeRef(source_owner) rollback_retry=passed",
+        observed_symbol_path(typer.store(), tuple)
     );
 }

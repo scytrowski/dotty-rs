@@ -9,13 +9,15 @@ checkout is pinned to `777528f19a58e794c9954a42f433373472ec57f8`; the original
 
 ## Executable proof
 
-The focused regression is
+At the time of #2183, the focused regression
 `original_tuple_to_array_types_after_explicit_canonical_owner_preparation` in
-`crates/dotty-typer/src/typer/tests/issue_2179_relation_observation.rs`. It
-parses and names the unmodified pinned Scala source, resolves `scala.Tuple`
-through that source semantic index, and uses the existing public
-`SourceTyper::complete_symbol` API explicitly before retrying the original
-method.
+`crates/dotty-typer/src/typer/tests/issue_2179_relation_observation.rs`
+recorded the explicit-preparation proof described below. Issue #2234 replaced
+that caller requirement with automatic owner preparation; the current
+end-to-end regression is
+`original_tuple_to_array_automatically_prepares_canonical_source_owner`, and
+its causal trace is recorded in
+[`tuple-to-array-automatic-owner-preparation-2234.md`](../typer-stdlib-acceptance-v/tuple-to-array-automatic-owner-preparation-2234.md).
 
 The test first preserves the unprepared result as a labelled before-state. Its
 pre-rollback observer verifies the exact first blocker at tree 22, argument 0:

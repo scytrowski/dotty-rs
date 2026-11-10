@@ -163,6 +163,15 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
+        if application.args.len() == 1 {
+            self.prepare_source_owner_for_qualified_this_argument(
+                application.function,
+                application.args[0],
+                context,
+                tree.index(),
+                info_journal,
+            )?;
+        }
         let explicit_super_selection = matches!(
             self.arena
                 .try_get(application.function)
@@ -237,6 +246,76 @@ impl SourceTyper<'_> {
             info_journal,
             new_mappings,
         )
+    }
+
+    pub(in crate::typer) fn prepare_source_owner_for_qualified_this_argument(
+        &mut self,
+        function_tree: TreeId<Untyped>,
+        argument_tree: TreeId<Untyped>,
+        context: ExpressionContext,
+        tree_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<(), TyperError> {
+        let Some(TreeKind::Select(selection)) =
+            self.arena.try_get(function_tree).map(|node| &node.kind)
+        else {
+            return Ok(());
+        };
+        if !matches!(
+            self.arena
+                .try_get(selection.qualifier)
+                .map(|node| &node.kind),
+            Some(TreeKind::Select(_))
+        ) {
+            return Ok(());
+        }
+        let qualifier = match self.arena.try_get(argument_tree).map(|node| &node.kind) {
+            Some(TreeKind::This(this)) => this.qual,
+            _ => return Ok(()),
+        };
+        let owner = self.enclosing_this_owner(qualifier, context.owner, tree_index)?;
+        if !self.store.symbols.contains(owner)
+            || !matches!(
+                self.store.symbols.get(owner).kind,
+                SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+            )
+        {
+            return Ok(());
+        }
+        let authenticated = match self.index.definition_of(owner) {
+            Some(SourceDefinition::Canonical { source, tree })
+                if source == self.source && self.index.symbol_at(source, tree) == Some(owner) =>
+            {
+                true
+            }
+            Some(SourceDefinition::Derived { source, tree })
+                if source == self.source
+                    && self.store.symbols.get(owner).kind == SymbolKind::ModuleClass
+                    && self.store.symbols.get(owner).owner.is_some_and(|parent| {
+                        self.index.derived_symbol_at(parent, source, tree) == Some(owner)
+                    }) =>
+            {
+                true
+            }
+            _ => false,
+        };
+        if !authenticated || !self.is_current_source_symbol(owner) {
+            return Ok(());
+        }
+        self.index
+            .scope_of(owner)
+            .ok_or(TyperError::MissingClassScope { symbol: owner })?;
+        match *self.store.symbols.info(owner) {
+            SymbolInfo::Missing => {
+                self.complete_symbol_inner(owner, info_journal)?;
+            }
+            SymbolInfo::Complete(info) => self.validate_existing_class_info(owner, info)?,
+            SymbolInfo::Deferred(_) => {
+                return Err(TyperError::DeferredSymbolCompletion { symbol: owner });
+            }
+            SymbolInfo::Error => return Err(TyperError::SymbolAlreadyErrored { symbol: owner }),
+        }
+        Ok(())
     }
 
     fn resolve_apply_function(
