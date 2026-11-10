@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import re
 import sys
 from pathlib import Path
@@ -595,6 +596,39 @@ def verify_acceptance_v(
     return failures, output_rows
 
 
+def acceptance_v_provenance_failures(
+    tested_revision: str,
+    pr_head_sha: str,
+    prior_checks_status: str,
+    hosted_run: str,
+    environment: dict[str, str] | None = None,
+) -> list[str]:
+    """Require the report to be emitted by the successful PR-head audit run."""
+    env = os.environ if environment is None else environment
+    failures: list[str] = []
+    if not re.fullmatch(r"[0-9a-f]{40}", tested_revision) or not re.fullmatch(r"[0-9a-f]{40}", pr_head_sha):
+        failures.append("tested revision and reviewed PR head must be full commit SHAs")
+    elif tested_revision != pr_head_sha:
+        failures.append("tested revision does not equal the reviewed PR head")
+    if prior_checks_status != "success":
+        failures.append("hosted focused audit prerequisites did not complete successfully")
+    if env.get("GITHUB_ACTIONS") != "true" or env.get("GITHUB_EVENT_NAME") != "pull_request":
+        failures.append("final Acceptance V PASS requires a GitHub Actions pull_request run")
+    run_id = env.get("GITHUB_RUN_ID", "")
+    server_url = env.get("GITHUB_SERVER_URL", "")
+    repository = env.get("GITHUB_REPOSITORY", "")
+    expected_source = env.get("DOTTY_EXPECTED_SOURCE_SHA", "")
+    if not run_id.isdecimal() or not server_url or not repository:
+        failures.append("hosted focused audit run identity is missing")
+    else:
+        expected_run = f"{server_url}/{repository}/actions/runs/{run_id}"
+        if hosted_run != expected_run:
+            failures.append("hosted-run link does not identify this GitHub Actions run")
+    if expected_source != tested_revision:
+        failures.append("tested revision does not match the workflow's expected PR source SHA")
+    return failures
+
+
 def _write_acceptance_iv_tsv(
     path: Path,
     rows: list[dict[str, str]],
@@ -737,18 +771,23 @@ def main() -> int:
         arguments.command = "ordinary"
     try:
         if arguments.command == "acceptance-v":
-            failures, rows = verify_acceptance_v(
+            gate_failures, rows = verify_acceptance_v(
                 arguments.main_first, arguments.main_second, arguments.analysis_first,
                 arguments.analysis_second, arguments.protected_successes,
                 Path("docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv"),
                 Path("docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv"),
             )
+            provenance_failures = acceptance_v_provenance_failures(
+                arguments.tested_revision, arguments.pr_head_sha,
+                arguments.prior_checks_status, arguments.hosted_run,
+            )
+            failures = gate_failures + provenance_failures
             arguments.output.parent.mkdir(parents=True, exist_ok=True)
             with arguments.output.open("w", encoding="utf-8", newline="") as output:
                 writer = csv.DictWriter(output, fieldnames=("cohort", "identity", "result_type", "baseline", "status", "source_tree", "typed_tree"), delimiter="\t", lineterminator="\n")
                 writer.writeheader()
                 writer.writerows(rows)
-            passed = not failures and arguments.prior_checks_status == "success"
+            passed = not failures
             main_count = sum(row["cohort"] == "main" and row["status"] == "typed" for row in rows)
             analysis_count = sum(row["cohort"] == "analysis" and row["status"] == "typed" for row in rows)
             either = next((row for row in rows if row["identity"] == ACCEPTANCE_V_EITHER_IDENTITY), None)
@@ -767,7 +806,9 @@ def main() -> int:
                 "The exact #2233 successful identities and result shapes are protected, and the original "
                 "unprepared Tuple.toArray DefDef must be complete with its exact result. Analysis retains its "
                 f"original denominator and protected successes. Optional Either.swap stretch: {stretch}. "
-                "prepared-only Tuple evidence receives no credit.\n",
+                "Prepared-only Tuple evidence receives no credit.\n\n"
+                + ("Closeout blockers:\n" + "".join(f"- {failure}\n" for failure in failures)
+                   if failures else "Hosted provenance checks passed for this reviewed PR head.\n"),
                 encoding="utf-8",
             )
         elif arguments.command == "acceptance-iv":
