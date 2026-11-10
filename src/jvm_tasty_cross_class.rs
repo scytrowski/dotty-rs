@@ -17,8 +17,10 @@ use dotty_typer::{SourceTyper, TypedLocalBinding};
 
 mod local_receiver_call;
 pub use local_receiver_call::{
-    ValidatedImmutableLocalCounterSetCallProof, ValidatedImmutableLocalCounterSetCallsProof,
-    validate_immutable_local_counter_set_call_proof,
+    ValidatedImmutableLocalCounterSetCallProof,
+    ValidatedImmutableLocalCounterSetCallsAfterAliasProof,
+    ValidatedImmutableLocalCounterSetCallsProof, validate_immutable_local_counter_set_call_proof,
+    validate_immutable_local_counter_set_calls_after_alias_proof,
     validate_immutable_local_counter_set_calls_proof,
 };
 

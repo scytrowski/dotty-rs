@@ -31,9 +31,25 @@ pub struct ValidatedImmutableLocalCounterSetCallsProof<'session> {
     calls: [ValidatedImmutableLocalCounterSetCallProof<'session>; 2],
 }
 
+/// Borrowed proof of exactly two ordered Counter.set calls after the
+/// authenticated immutable alias initializer.
+pub struct ValidatedImmutableLocalCounterSetCallsAfterAliasProof<'session> {
+    alias: ValidatedImmutableLocalReferenceAliasProof<'session>,
+    calls: [ValidatedImmutableLocalCounterSetCallProof<'session>; 2],
+}
+
 impl<'session> ValidatedImmutableLocalCounterSetCallsProof<'session> {
     pub const fn initializer_pair(&self) -> &ValidatedImmutableLocalInitializerPairProof<'session> {
         &self.initializer_pair
+    }
+    pub const fn calls(&self) -> &[ValidatedImmutableLocalCounterSetCallProof<'session>; 2] {
+        &self.calls
+    }
+}
+
+impl<'session> ValidatedImmutableLocalCounterSetCallsAfterAliasProof<'session> {
+    pub const fn alias(&self) -> &ValidatedImmutableLocalReferenceAliasProof<'session> {
+        &self.alias
     }
     pub const fn calls(&self) -> &[ValidatedImmutableLocalCounterSetCallProof<'session>; 2] {
         &self.calls
@@ -95,7 +111,7 @@ pub fn validate_immutable_local_counter_set_call_proof<'session>(
     input: ImmutableLocalInitializerPairProofInput<'session>,
 ) -> Result<ValidatedImmutableLocalCounterSetCallProof<'session>, CrossClassConstructorCallProofError>
 {
-    validate_immutable_local_counter_set_call_at(input, 0, 1, 1)
+    validate_immutable_local_counter_set_call_at(input, 0, 1, 1, None, None)
 }
 
 /// Validate the two ordered non-final Counter.set statements after the two
@@ -107,8 +123,8 @@ pub fn validate_immutable_local_counter_set_calls_proof<'session>(
     CrossClassConstructorCallProofError,
 > {
     let initializer_pair = validate_immutable_local_initializer_pair_proof_inner(input, 2, false)?;
-    let first = validate_immutable_local_counter_set_call_at(input, 0, 2, usize::MAX)?;
-    let second = validate_immutable_local_counter_set_call_at(input, 1, 2, usize::MAX)?;
+    let first = validate_immutable_local_counter_set_call_at(input, 0, 2, usize::MAX, None, None)?;
+    let second = validate_immutable_local_counter_set_call_at(input, 1, 2, usize::MAX, None, None)?;
     if first.source_call == second.source_call
         || first.typed_call == second.typed_call
         || first.source_select == second.source_select
@@ -147,14 +163,96 @@ pub fn validate_immutable_local_counter_set_calls_proof<'session>(
     })
 }
 
+/// Validate exactly the alias-specific ordered pair:
+/// `alias.set(secondSeed)` followed by `second.set(firstSeed)`. The receipt
+/// composes the existing alias proof with the existing per-call validator and
+/// leaves emission to its separate producer contract.
+pub fn validate_immutable_local_counter_set_calls_after_alias_proof<'session>(
+    input: ImmutableLocalReferenceAliasProofInput<'session>,
+) -> Result<
+    ValidatedImmutableLocalCounterSetCallsAfterAliasProof<'session>,
+    CrossClassConstructorCallProofError,
+> {
+    let alias = validate_immutable_local_reference_alias_proof(input)?;
+    let other_receiver = alias
+        .initializers
+        .initializers
+        .iter()
+        .find(|initializer| initializer.declaration.symbol != alias.target)
+        .map(|initializer| initializer.declaration.symbol)
+        .ok_or(CrossClassConstructorCallProofError::SourceIdentity(
+            "alias proof must retain the distinct second original local",
+        ))?;
+    let first = validate_immutable_local_counter_set_call_at(
+        input.initializers,
+        0,
+        2,
+        1,
+        Some(&alias),
+        Some(alias.symbol),
+    )?;
+    let second = validate_immutable_local_counter_set_call_at(
+        input.initializers,
+        1,
+        2,
+        0,
+        Some(&alias),
+        Some(other_receiver),
+    )?;
+    if first.source_call == second.source_call
+        || first.typed_call == second.typed_call
+        || first.source_select == second.source_select
+        || first.typed_select == second.typed_select
+        || first.source_receiver == second.source_receiver
+        || first.typed_receiver == second.typed_receiver
+        || first.source_argument == second.source_argument
+        || first.typed_argument == second.typed_argument
+        || first.formal == second.formal
+        || first.receiver == second.receiver
+    {
+        return Err(CrossClassConstructorCallProofError::TypedBinding(
+            "alias and original Counter.set statements must retain distinct source and typed roots",
+        ));
+    }
+    let source_ast = input.initializers.source_ast;
+    let source_id = input.initializers.source_id;
+    let first_position = require_source_position(
+        source_ast,
+        source_id,
+        first.source_call,
+        "first alias Counter.set statement has a foreign source span",
+    )?;
+    let second_position = require_source_position(
+        source_ast,
+        source_id,
+        second.source_call,
+        "second Counter.set statement has a foreign source span",
+    )?;
+    if first_position.span().range().end() > second_position.span().range().start() {
+        return Err(CrossClassConstructorCallProofError::SourceShape(
+            "alias Counter.set statements must retain strict source order",
+        ));
+    }
+    Ok(ValidatedImmutableLocalCounterSetCallsAfterAliasProof {
+        alias,
+        calls: [first, second],
+    })
+}
+
 fn validate_immutable_local_counter_set_call_at<'session>(
     input: ImmutableLocalInitializerPairProofInput<'session>,
     call_offset: usize,
     call_count: usize,
     formal_index: usize,
+    alias: Option<&ValidatedImmutableLocalReferenceAliasProof<'session>>,
+    expected_receiver: Option<SymbolId>,
 ) -> Result<ValidatedImmutableLocalCounterSetCallProof<'session>, CrossClassConstructorCallProofError>
 {
-    let pair = validate_immutable_local_initializer_pair_proof_inner(input, call_count, false)?;
+    let pair = match alias {
+        Some(alias) => alias.initializers,
+        None => validate_immutable_local_initializer_pair_proof_inner(input, call_count, false)?,
+    };
+    let statement_prefix = if alias.is_some() { 3 } else { 2 };
     let source_error = |s| CrossClassConstructorCallProofError::SourceShape(s);
     let identity_error = |s| CrossClassConstructorCallProofError::SourceIdentity(s);
     let semantic_error = |s| CrossClassConstructorCallProofError::SemanticIdentity(s);
@@ -173,7 +271,7 @@ fn validate_immutable_local_counter_set_call_at<'session>(
     else {
         return Err(source_error("original local Block must remain a Block"));
     };
-    let source_call = block.stats[2 + call_offset];
+    let source_call = block.stats[statement_prefix + call_offset];
     let TreeKind::Apply(source_apply) = &source_ast
         .try_get(source_call)
         .ok_or_else(|| source_error("Counter.set statement is stale"))?
@@ -296,7 +394,8 @@ fn validate_immutable_local_counter_set_call_at<'session>(
     else {
         return Err(typed_error("original Block must remain a typed Block"));
     };
-    if typed_block.stats.len() != 2 + call_count || typed_block.stats[2 + call_offset] != typed_call
+    if typed_block.stats.len() != statement_prefix + call_count
+        || typed_block.stats[statement_prefix + call_offset] != typed_call
     {
         return Err(typed_error(if call_count == 1 {
             "typed Block must preserve exactly one original Counter.set stat after both locals"
@@ -462,15 +561,23 @@ fn validate_immutable_local_counter_set_call_at<'session>(
             ));
         }
     };
-    if receiver != first.declaration.symbol && receiver != second.declaration.symbol {
+    if receiver != first.declaration.symbol
+        && receiver != second.declaration.symbol
+        && !alias.is_some_and(|alias| receiver == alias.symbol)
+    {
         return Err(typed_error(
-            "typed Counter.set receiver must target one of the two initialized local declarations",
+            "typed Counter.set receiver must target an authenticated local declaration",
         ));
     }
-    let receiver_local_tree = if receiver == first.declaration.symbol {
-        first.declaration.declaration
-    } else {
-        second.declaration.declaration
+    if expected_receiver.is_some_and(|expected| receiver != expected) {
+        return Err(typed_error(
+            "typed Counter.set receiver must retain its exact ordered local identity",
+        ));
+    }
+    let receiver_local_tree = match alias {
+        Some(alias) if receiver == alias.symbol => alias.source_declaration,
+        _ if receiver == first.declaration.symbol => first.declaration.declaration,
+        _ => second.declaration.declaration,
     };
     let TreeKind::ValDef(receiver_local) = &source_ast
         .try_get(receiver_local_tree)
@@ -717,10 +824,10 @@ fn validate_immutable_local_counter_set_call_at<'session>(
         formal: call_formal,
         argument_type,
         result_type,
-        receiver_scope: if receiver == first.declaration.symbol {
-            first.declaration.scope
-        } else {
-            second.declaration.scope
+        receiver_scope: match alias {
+            Some(alias) if receiver == alias.symbol => alias.scope,
+            _ if receiver == first.declaration.symbol => first.declaration.scope,
+            _ => second.declaration.scope,
         },
     })
 }

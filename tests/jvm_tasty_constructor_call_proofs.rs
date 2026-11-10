@@ -3,6 +3,7 @@ use dotty::jvm_tasty_cross_class::{
     ImmutableLocalInitializerPairProofInput, ImmutableLocalReferenceAliasProofInput,
     ValidatedCrossClassConstructorCallProof, validate_cross_class_constructor_call_proofs,
     validate_immutable_local_counter_set_call_proof,
+    validate_immutable_local_counter_set_calls_after_alias_proof,
     validate_immutable_local_counter_set_calls_proof,
     validate_immutable_local_initialization_proof, validate_immutable_local_initializer_pair_proof,
     validate_immutable_local_reference_alias_proof, validate_ordered_constructor_argument_bindings,
@@ -4357,6 +4358,393 @@ fn immutable_local_reference_alias_proof_tracks_the_original_first_argument_by_i
         ),
         "unexpected deferred producer boundary: {deferred:?}"
     );
+}
+
+fn ordered_alias_call_proof_error(
+    source: &str,
+    source_number: u32,
+) -> Result<(), dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError> {
+    with_two_local_proof_session_retaining_typer(
+        source,
+        source_number,
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         _,
+         typer,
+         jvm_unit| {
+            let TreeKind::DefDef(method) = &source_ast.get(method_tree).kind else {
+                unreachable!()
+            };
+            let TreeKind::Block(block) = &source_ast.get(method.rhs.unwrap()).kind else {
+                unreachable!()
+            };
+            let alias_binding = block.stats.get(2).and_then(|tree| {
+                matches!(source_ast.get(*tree).kind, TreeKind::ValDef(_))
+                    .then(|| typer.unwrap().typed_local_binding_at(source_id, *tree))
+                    .flatten()
+            });
+            let local_jvm_unit = JvmCompilationUnit {
+                store,
+                typed_ast,
+                classes: jvm_unit.classes.clone(),
+            };
+            validate_immutable_local_counter_set_calls_after_alias_proof(
+                ImmutableLocalReferenceAliasProofInput {
+                    initializers: ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast,
+                        source_index,
+                        source_typed_index,
+                        local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                        jvm_unit: &local_jvm_unit,
+                    },
+                    alias_binding,
+                },
+            )
+            .map(|_| ())
+        },
+    )
+}
+
+#[test]
+fn ordered_counter_calls_after_alias_keep_alias_and_original_receiver_identity() {
+    let fixture =
+        include_str!("fixtures/jvm_tasty_local_reference_alias/LocalReferenceAlias.scala");
+    let renamed = fixture
+        .replace("firstSeed", "leftSeed")
+        .replace("secondSeed", "rightSeed")
+        .replace("first", "left")
+        .replace("second", "right")
+        .replace("alias", "view");
+    let reversed = fixture.replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
+        "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
+    );
+
+    for (source, source_id) in [
+        (fixture, 22361),
+        (renamed.as_str(), 22362),
+        (reversed.as_str(), 22363),
+    ] {
+        with_two_local_proof_session_retaining_typer(
+            source,
+            source_id,
+            |store,
+             definitions,
+             source_ast,
+             typed_ast,
+             source_index,
+             source_typed_index,
+             source_id,
+             method_tree,
+             bindings,
+             _,
+             typer,
+             jvm_unit| {
+                let TreeKind::DefDef(method) = &source_ast.get(method_tree).kind else {
+                    unreachable!()
+                };
+                let TreeKind::Block(block) = &source_ast.get(method.rhs.unwrap()).kind else {
+                    unreachable!()
+                };
+                assert_eq!(block.stats.len(), 5);
+                let alias_binding = typer
+                    .unwrap()
+                    .typed_local_binding_at(source_id, block.stats[2]);
+                let local_jvm_unit = JvmCompilationUnit {
+                    store,
+                    typed_ast,
+                    classes: jvm_unit.classes.clone(),
+                };
+                let proof = validate_immutable_local_counter_set_calls_after_alias_proof(
+                    ImmutableLocalReferenceAliasProofInput {
+                        initializers: ImmutableLocalInitializerPairProofInput {
+                            source_id,
+                            method_tree,
+                            store,
+                            definitions,
+                            source_ast,
+                            typed_ast,
+                            source_index,
+                            source_typed_index,
+                            local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                            jvm_unit: &local_jvm_unit,
+                        },
+                        alias_binding,
+                    },
+                )
+                .unwrap_or_else(|error| panic!("source {source_id:?}: {error:?}"));
+                let calls = proof.calls();
+                let TreeKind::Block(typed_block) = &typed_ast
+                    .get(
+                        source_typed_index
+                            .get(source_id, method.rhs.unwrap())
+                            .unwrap(),
+                    )
+                    .kind
+                else {
+                    unreachable!()
+                };
+                assert_eq!(calls[0].source_call(), block.stats[3]);
+                assert_eq!(calls[1].source_call(), block.stats[4]);
+                assert_eq!(calls[0].typed_call(), typed_block.stats[3]);
+                assert_eq!(calls[1].typed_call(), typed_block.stats[4]);
+                assert_eq!(calls[0].receiver(), proof.alias().symbol());
+                let first_formal = source_index
+                    .symbol_at(source_id, method.value_param_clauses[0][0])
+                    .unwrap();
+                let second_local = proof
+                    .alias()
+                    .initializers()
+                    .initializers()
+                    .into_iter()
+                    .find(|initializer| initializer.seed_formal() != first_formal)
+                    .unwrap()
+                    .symbol();
+                assert_eq!(
+                    proof.alias().target(),
+                    proof
+                        .alias()
+                        .initializers()
+                        .initializers()
+                        .into_iter()
+                        .find(|initializer| initializer.seed_formal() == first_formal)
+                        .unwrap()
+                        .symbol()
+                );
+                assert_eq!(calls[1].receiver(), second_local);
+                assert_eq!(calls[0].receiver_scope(), proof.alias().scope());
+                assert_eq!(calls[1].receiver_scope(), proof.alias().scope());
+                assert!(calls.iter().all(|call| {
+                    call.source_select() != call.source_receiver()
+                        && call.typed_select() != call.typed_receiver()
+                        && call.source_argument() != call.source_receiver()
+                        && call.typed_argument() != call.typed_receiver()
+                }));
+                assert_eq!(calls[0].method(), calls[1].method());
+                assert_eq!(calls[0].argument_type(), definitions.int);
+                assert_eq!(calls[1].argument_type(), definitions.int);
+                assert_eq!(calls[0].result_type(), definitions.unit);
+                assert_eq!(calls[1].result_type(), definitions.unit);
+                assert_eq!(
+                    calls[0].formal(),
+                    method.value_param_clauses[0]
+                        .iter()
+                        .map(|tree| source_index.symbol_at(source_id, *tree).unwrap())
+                        .nth(1)
+                        .unwrap()
+                );
+                assert_eq!(
+                    calls[1].formal(),
+                    method.value_param_clauses[0]
+                        .iter()
+                        .map(|tree| source_index.symbol_at(source_id, *tree).unwrap())
+                        .next()
+                        .unwrap()
+                );
+                assert_ne!(calls[0].source_call(), calls[1].source_call());
+                assert_ne!(calls[0].typed_call(), calls[1].typed_call());
+            },
+        );
+    }
+}
+
+#[test]
+fn ordered_counter_calls_after_alias_reject_invalid_source_shapes() {
+    let fixture =
+        include_str!("fixtures/jvm_tasty_local_reference_alias/LocalReferenceAlias.scala");
+    let invalid_before_alias = fixture.replace(
+        "    val alias: Counter = first\n    alias.set(secondSeed)",
+        "    first.set(secondSeed)\n    val alias: Counter = first\n    alias.set(secondSeed)",
+    );
+    let wrong_alias_receiver =
+        fixture.replace("    alias.set(secondSeed)", "    first.set(secondSeed)");
+    let wrong_second_receiver =
+        fixture.replace("    second.set(firstSeed)", "    alias.set(firstSeed)");
+    let wrong_first_formal =
+        fixture.replace("    alias.set(secondSeed)", "    alias.set(firstSeed)");
+    let wrong_second_formal =
+        fixture.replace("    second.set(firstSeed)", "    second.set(secondSeed)");
+    let reversed_calls = fixture.replace(
+        "    alias.set(secondSeed)\n    second.set(firstSeed)",
+        "    second.set(firstSeed)\n    alias.set(secondSeed)",
+    );
+    let missing_call = fixture.replace("    second.set(firstSeed)\n", "");
+    let repeated_call = fixture.replace("    second.set(firstSeed)", "    alias.set(firstSeed)");
+    let third_call = fixture.replace(
+        "    second.set(firstSeed)\n    new Pair",
+        "    second.set(firstSeed)\n    alias.set(firstSeed)\n    new Pair",
+    );
+
+    for (source, source_id, label) in [
+        (invalid_before_alias.as_str(), 22371, "call before alias"),
+        (wrong_alias_receiver.as_str(), 22372, "wrong alias receiver"),
+        (
+            wrong_second_receiver.as_str(),
+            22373,
+            "wrong second receiver",
+        ),
+        (wrong_first_formal.as_str(), 22374, "wrong first formal"),
+        (wrong_second_formal.as_str(), 22375, "wrong second formal"),
+        (reversed_calls.as_str(), 22376, "reversed source calls"),
+        (missing_call.as_str(), 22377, "missing call"),
+        (repeated_call.as_str(), 22378, "repeated receiver call"),
+        (third_call.as_str(), 22379, "third call"),
+    ] {
+        assert!(
+            ordered_alias_call_proof_error(source, source_id).is_err(),
+            "{label} was accepted"
+        );
+    }
+}
+
+#[test]
+fn ordered_counter_calls_after_alias_reject_forged_typed_provenance() {
+    let fixture =
+        include_str!("fixtures/jvm_tasty_local_reference_alias/LocalReferenceAlias.scala");
+    for (source_id, mutation) in [
+        (22381, 0), // Apply points at the other call's Select.
+        (22382, 1), // Select has a forged receiver edge.
+        (22383, 2), // Select resolves to a method owned by Pair.
+        (22384, 3), // Apply claims a non-Unit result.
+        (22385, 4), // Source call roots share one typed Apply.
+        (22386, 5), // Typed Block calls are mapped in reversed order.
+    ] {
+        with_two_local_proof_session_retaining_typer(
+            fixture,
+            source_id,
+            |store,
+             definitions,
+             source_ast,
+             typed_ast,
+             source_index,
+             source_typed_index,
+             source_id,
+             method_tree,
+             bindings,
+             _,
+             typer,
+             jvm_unit| {
+                let TreeKind::DefDef(method) = &source_ast.get(method_tree).kind else {
+                    unreachable!()
+                };
+                let TreeKind::Block(block) = &source_ast.get(method.rhs.unwrap()).kind else {
+                    unreachable!()
+                };
+                let source_calls = [block.stats[3], block.stats[4]];
+                let typed_calls =
+                    source_calls.map(|tree| source_typed_index.get(source_id, tree).unwrap());
+                let mut forged_ast = clone_arena(typed_ast);
+                let mut forged_index = source_typed_index.clone();
+                match mutation {
+                    0 => {
+                        let TreeKind::Apply(second) = &forged_ast.get(typed_calls[1]).kind else {
+                            unreachable!()
+                        };
+                        let second_select = second.function;
+                        let TreeKind::Apply(first) = &mut forged_ast.get_mut(typed_calls[0]).kind
+                        else {
+                            unreachable!()
+                        };
+                        first.function = second_select;
+                    }
+                    1 => {
+                        let TreeKind::Apply(second) = &forged_ast.get(typed_calls[1]).kind else {
+                            unreachable!()
+                        };
+                        let TreeKind::Select(second_select) = &forged_ast.get(second.function).kind
+                        else {
+                            unreachable!()
+                        };
+                        let forged_receiver = second_select.qualifier;
+                        let TreeKind::Apply(first) = &forged_ast.get(typed_calls[0]).kind else {
+                            unreachable!()
+                        };
+                        let TreeKind::Select(first_select) =
+                            &mut forged_ast.get_mut(first.function).kind
+                        else {
+                            unreachable!()
+                        };
+                        first_select.qualifier = forged_receiver;
+                    }
+                    2 => {
+                        let typed_final = source_typed_index
+                            .get(source_id, method.rhs.unwrap())
+                            .and_then(|tree| match &forged_ast.get(tree).kind {
+                                TreeKind::Block(typed_block) => Some(typed_block.expr),
+                                _ => None,
+                            })
+                            .unwrap();
+                        let TreeKind::Apply(pair_apply) = &forged_ast.get(typed_final).kind else {
+                            unreachable!()
+                        };
+                        let pair_select = pair_apply.function;
+                        let pair_method_type = forged_ast.get(pair_select).ty;
+                        let TreeKind::Apply(first) = &forged_ast.get(typed_calls[0]).kind else {
+                            unreachable!()
+                        };
+                        let first_select = first.function;
+                        forged_ast.get_mut(first_select).ty = pair_method_type;
+                    }
+                    3 => forged_ast.get_mut(typed_calls[0]).ty = definitions.int,
+                    4 | 5 => {
+                        forged_index.remove(source_id, source_calls[0]);
+                        forged_index.remove(source_id, source_calls[1]);
+                        let first = if mutation == 4 {
+                            typed_calls[0]
+                        } else {
+                            typed_calls[1]
+                        };
+                        let second = typed_calls[0];
+                        forged_index
+                            .insert(source_id, source_calls[0], first)
+                            .unwrap();
+                        forged_index
+                            .insert(source_id, source_calls[1], second)
+                            .unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                let alias_binding = typer
+                    .unwrap()
+                    .typed_local_binding_at(source_id, block.stats[2]);
+                let local_jvm_unit = JvmCompilationUnit {
+                    store,
+                    typed_ast: &forged_ast,
+                    classes: jvm_unit.classes.clone(),
+                };
+                let result = validate_immutable_local_counter_set_calls_after_alias_proof(
+                    ImmutableLocalReferenceAliasProofInput {
+                        initializers: ImmutableLocalInitializerPairProofInput {
+                            source_id,
+                            method_tree,
+                            store,
+                            definitions,
+                            source_ast,
+                            typed_ast: &forged_ast,
+                            source_index,
+                            source_typed_index: &forged_index,
+                            local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                            jvm_unit: &local_jvm_unit,
+                        },
+                        alias_binding,
+                    },
+                );
+                assert!(result.is_err(), "typed forgery {mutation} was accepted");
+            },
+        );
+    }
 }
 
 #[test]
