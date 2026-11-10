@@ -6001,6 +6001,12 @@ fn validate_immutable_local_reference_alias_from_pair<'session>(
         })?;
     let original = initializers[first_initializer_index].symbol();
     let other = initializers[1 - first_initializer_index].symbol();
+    let original_name = pair._store.symbols.get(original).name;
+    if source_alias_ident.name != original_name || typed_alias_ident.name != original_name {
+        return Err(typed_error(
+            "source and typed alias Idents must agree with the authenticated original local",
+        ));
+    }
     let TreeKind::Apply(source_pair_apply) = &pair
         ._source_ast
         .try_get(pair.source_final_expression)
@@ -6078,6 +6084,12 @@ fn validate_immutable_local_reference_alias_from_pair<'session>(
     if source_pair_first_ident.name != typed_pair_first_ident.name {
         return Err(typed_error(
             "source and typed first Pair argument Idents must preserve the same reference",
+        ));
+    }
+    if source_pair_first_ident.name != original_name || typed_pair_first_ident.name != original_name
+    {
+        return Err(typed_error(
+            "source and typed first Pair argument Idents must agree with the authenticated original local",
         ));
     }
     let symbol = binding.symbol();

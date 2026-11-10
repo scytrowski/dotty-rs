@@ -4505,6 +4505,151 @@ fn immutable_alias_source_ident_must_match_its_typed_reference_identity() {
 }
 
 #[test]
+fn immutable_alias_and_pair_idents_must_match_the_authenticated_local_name() {
+    let fixture =
+        include_str!("fixtures/jvm_tasty_local_reference_alias/LocalReferenceAlias.scala");
+    let alias_names_other_local =
+        fixture.replace("val alias: Counter = first", "val alias: Counter = second");
+    with_two_local_proof_session_retaining_typer(
+        &alias_names_other_local,
+        22368,
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         _,
+         typer,
+         jvm_unit| {
+            let TreeKind::DefDef(method) = &source_ast.get(method_tree).kind else {
+                unreachable!()
+            };
+            let TreeKind::Block(block) = &source_ast.get(method.rhs.unwrap()).kind else {
+                unreachable!()
+            };
+            let TreeKind::ValDef(alias_def) = &source_ast.get(block.stats[2]).kind else {
+                unreachable!()
+            };
+            let alias_rhs = alias_def.rhs.unwrap();
+            let TreeKind::Apply(pair_apply) = &source_ast.get(block.expr).kind else {
+                unreachable!()
+            };
+            let typed_alias_rhs = source_typed_index.get(source_id, alias_rhs).unwrap();
+            let typed_pair_first = source_typed_index
+                .get(source_id, pair_apply.args[0])
+                .unwrap();
+            let mut stale_typed_target = clone_arena(typed_ast);
+            stale_typed_target.get_mut(typed_alias_rhs).ty =
+                stale_typed_target.get(typed_pair_first).ty;
+            let local_jvm_unit = JvmCompilationUnit {
+                store,
+                typed_ast: &stale_typed_target,
+                classes: jvm_unit.classes.clone(),
+            };
+            let error = validate_immutable_local_reference_alias_proof(
+                ImmutableLocalReferenceAliasProofInput {
+                    initializers: ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast: &stale_typed_target,
+                        source_index,
+                        source_typed_index,
+                        local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                        jvm_unit: &local_jvm_unit,
+                    },
+                    alias_binding: typer
+                        .unwrap()
+                        .typed_local_binding_at(source_id, block.stats[2]),
+                },
+            )
+            .err()
+            .expect("stale typed TermRef must not override the alias Ident's name");
+            assert!(matches!(
+                error,
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(_)
+            ));
+        },
+    );
+
+    let swapped_pair = fixture.replace("new Pair(first, second)", "new Pair(second, first)");
+    with_two_local_proof_session_retaining_typer(
+        &swapped_pair,
+        22369,
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         _,
+         typer,
+         jvm_unit| {
+            let TreeKind::DefDef(method) = &source_ast.get(method_tree).kind else {
+                unreachable!()
+            };
+            let TreeKind::Block(block) = &source_ast.get(method.rhs.unwrap()).kind else {
+                unreachable!()
+            };
+            let TreeKind::Apply(pair_apply) = &source_ast.get(block.expr).kind else {
+                unreachable!()
+            };
+            let typed_pair_first = source_typed_index
+                .get(source_id, pair_apply.args[0])
+                .unwrap();
+            let TreeKind::ValDef(alias_def) = &source_ast.get(block.stats[2]).kind else {
+                unreachable!()
+            };
+            let typed_alias_rhs = source_typed_index
+                .get(source_id, alias_def.rhs.unwrap())
+                .unwrap();
+            let mut stale_typed_target = clone_arena(typed_ast);
+            stale_typed_target.get_mut(typed_pair_first).ty =
+                stale_typed_target.get(typed_alias_rhs).ty;
+            let local_jvm_unit = JvmCompilationUnit {
+                store,
+                typed_ast: &stale_typed_target,
+                classes: jvm_unit.classes.clone(),
+            };
+            let error = validate_immutable_local_reference_alias_proof(
+                ImmutableLocalReferenceAliasProofInput {
+                    initializers: ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast: &stale_typed_target,
+                        source_index,
+                        source_typed_index,
+                        local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                        jvm_unit: &local_jvm_unit,
+                    },
+                    alias_binding: typer
+                        .unwrap()
+                        .typed_local_binding_at(source_id, block.stats[2]),
+                },
+            )
+            .err()
+            .expect("stale typed Pair arg[0] TermRef must not override its Ident name");
+            assert!(matches!(
+                error,
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(_)
+            ));
+        },
+    );
+}
+
+#[test]
 fn immutable_alias_requires_its_exact_explicit_type_tree_and_counter_type() {
     with_two_local_proof_session_retaining_typer(
         include_str!("fixtures/jvm_tasty_local_reference_alias/LocalReferenceAlias.scala"),
@@ -4706,7 +4851,9 @@ fn immutable_local_reference_alias_rejects_wrong_shape_identity_and_provenance()
                 let error = validate_immutable_local_reference_alias_proof(input)
                     .err()
                     .expect("unsupported alias shape must return a typed proof error");
-                if source_shape {
+                if source_id == SourceId::from_index(22353) {
+                    assert!(matches!(error, dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(_)), "{error:?}");
+                } else if source_shape {
                     assert!(matches!(error, dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceShape(_)), "{error:?}");
                 } else {
                     assert!(matches!(error, dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(_)), "{error:?}");
