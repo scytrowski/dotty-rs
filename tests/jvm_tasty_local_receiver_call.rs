@@ -689,34 +689,22 @@ fn local_reference_alias_audit_authenticates_frontend_identities_and_first_paire
         SourceId::from_index(22321),
         |plan| observed_plan_classes.extend(plan.classes.iter().map(|_| ())),
     );
-    println!("current paired producer first rejection: {result:?}");
-    assert!(matches!(
-        result,
-        Err(PairedPlanError::BatchUnit {
-            phase: "cross-class constructor-call identity proof",
-            ..
-        })
-    ));
+    println!("current paired producer result: {result:?}");
     assert!(
-        observed_plan_classes.is_empty(),
-        "rejected target never reaches the plan callback"
+        result.is_ok(),
+        "the authenticated alias and calls reach paired planning"
     );
     assert!(
-        matches!(
-            emit_paired_jvm_tasty_batch(
-                LOCAL_REFERENCE_ALIAS_TARGET,
-                "LocalReferenceAlias.scala",
-                SourceId::from_index(22322)
-            ),
-            Err(dotty::jvm_tasty_artifacts::PairedBatchArtifactError::Plan(
-                PairedPlanError::BatchUnit {
-                    phase: "cross-class constructor-call identity proof",
-                    ref reason
-                }
-            )) if reason == "SourceShape(\"factory body must be a direct Apply or a one- or two-local Block\")"
-        ),
-        "artifact producer returns its observed first error before constructing a batch"
+        observed_plan_classes.len() == 3,
+        "the accepted target reaches the callback with all three class plans"
     );
+    let artifact_batch = emit_paired_jvm_tasty_batch(
+        LOCAL_REFERENCE_ALIAS_TARGET,
+        "LocalReferenceAlias.scala",
+        SourceId::from_index(22322),
+    )
+    .expect("the authenticated alias and calls produce all paired artifacts");
+    assert_eq!(artifact_batch.classes().len(), 3);
 
     let baseline =
         include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
@@ -738,7 +726,8 @@ fn local_reference_alias_audit_authenticates_frontend_identities_and_first_paire
         .map(|(prefix, _)| prefix)
         .expect("target has the shared Counter and Pair declarations");
     enum ControlExpectation {
-        ValidDeferred,
+        Accepted,
+        RejectedShape,
         InvalidForwardReference,
         InvalidAliasType,
     }
@@ -747,19 +736,19 @@ fn local_reference_alias_audit_authenticates_frontend_identities_and_first_paire
             "renamed-local-alias",
             ALIAS_CONTROL_RENAMED,
             22326,
-            ControlExpectation::ValidDeferred,
+            ControlExpectation::Accepted,
         ),
         (
             "reversed-declarations",
             ALIAS_CONTROL_REVERSED,
             22327,
-            ControlExpectation::ValidDeferred,
+            ControlExpectation::Accepted,
         ),
         (
             "alias-of-second",
             ALIAS_CONTROL_SECOND,
             22328,
-            ControlExpectation::ValidDeferred,
+            ControlExpectation::RejectedShape,
         ),
         (
             "alias-before-initialization",
@@ -777,13 +766,13 @@ fn local_reference_alias_audit_authenticates_frontend_identities_and_first_paire
             "mutable-alias",
             ALIAS_CONTROL_MUTABLE,
             22331,
-            ControlExpectation::ValidDeferred,
+            ControlExpectation::RejectedShape,
         ),
         (
             "alias-chain",
             ALIAS_CONTROL_CHAIN,
             22332,
-            ControlExpectation::ValidDeferred,
+            ControlExpectation::RejectedShape,
         ),
     ] {
         let factory_source = control
@@ -793,15 +782,19 @@ fn local_reference_alias_audit_authenticates_frontend_identities_and_first_paire
         let result = paired_result(&source, source_id);
         println!("alias control {name}: {result:?}");
         match expectation {
-            ControlExpectation::ValidDeferred => assert!(
+            ControlExpectation::Accepted => assert!(
+                result.is_ok(),
+                "valid control {name} preserves canonical alias identity"
+            ),
+            ControlExpectation::RejectedShape => assert!(
                 matches!(
                     result,
                     Err(PairedPlanError::BatchUnit {
                         phase: "cross-class constructor-call identity proof",
-                        ref reason
-                    }) if reason == "SourceShape(\"factory body must be a direct Apply or a one- or two-local Block\")"
+                        ..
+                    })
                 ),
-                "valid control {name} must reach the deferred source-shape rejection"
+                "out-of-contract control {name} remains rejected by the source-shape proof"
             ),
             ControlExpectation::InvalidForwardReference => match result {
                 Err(PairedPlanError::BatchClass {

@@ -838,15 +838,229 @@ public final class ReferenceLocalBatchHarness {
 }
 
 #[test]
-fn immutable_alias_and_ordered_calls_frozen_source_is_currently_rejected() {
-    let result = with_paired_jvm_tasty_batch_plan(
+fn immutable_alias_and_ordered_calls_frozen_source_emits_a_paired_batch() {
+    let first = emit_paired_jvm_tasty_batch(
         IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH,
         "PairFactory.scala",
         SourceId::from_index(22400),
-        |_| (),
+    )
+    .unwrap_or_else(|error| panic!("frozen source paired emission failed: {error:?}"));
+    let second = emit_paired_jvm_tasty_batch(
+        IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH,
+        "PairFactory.scala",
+        SourceId::from_index(22401),
+    )
+    .expect("fresh source session emits the same bounded paired batch");
+    assert_eq!(first.source_id(), SourceId::from_index(22400));
+    assert_eq!(first.classes().len(), 3);
+    let paths = first
+        .classes()
+        .iter()
+        .flat_map(|class| [class.classfile_path(), class.tasty_path()])
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paths,
+        [
+            "example/Counter.class",
+            "example/Counter.tasty",
+            "example/Pair.class",
+            "example/Pair.tasty",
+            "example/PairFactory.class",
+            "example/PairFactory.tasty",
+        ]
     );
-    assert!(result.is_err(), "frozen source rejection audit: {result:?}");
-    eprintln!("frozen source first rejection: {result:?}");
+    for (left, right) in first.classes().iter().zip(second.classes()) {
+        assert_eq!(left.classfile_path(), right.classfile_path());
+        assert_eq!(left.tasty_path(), right.tasty_path());
+        assert_eq!(left.classfile_bytes(), right.classfile_bytes());
+        assert_eq!(left.tasty_bytes(), right.tasty_bytes());
+        assert_eq!(left.tasty_link_id(), right.tasty_link_id());
+        let tasty = TastyFile::parse_and_validate_scala_3_9(left.tasty_bytes()).unwrap();
+        assert_eq!(
+            (
+                tasty.header().major_version,
+                tasty.header().minor_version,
+                tasty.header().experimental_version,
+            ),
+            (28, 9, 0)
+        );
+        assert_eq!(
+            left.tasty_link_id(),
+            TastyLinkId::from_bytes(tasty.header().uuid)
+        );
+        let mut reader = Reader::new(left.classfile_bytes());
+        let class = ClassFile::decode(&mut reader).unwrap();
+        assert!(reader.is_at_end());
+        assert_eq!((class.version.major, class.version.minor), (65, 0));
+        assert_eq!(class.tasty_link_id().unwrap(), Some(left.tasty_link_id()));
+        validate_classfile_tasty_link(&class, left.tasty_bytes()).unwrap();
+    }
+    let uuids = first
+        .classes()
+        .iter()
+        .map(|class| class.tasty_link_id())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(uuids.len(), 3);
+    let stage = TestDirectory::new("local-alias-six-artifacts");
+    let destination = stage.path().join("classes");
+    assert_eq!(
+        publish_paired_batch(&destination, &first, None)
+            .unwrap()
+            .len(),
+        6
+    );
+    for (index, fault) in (1..=6)
+        .map(BatchPublishFault::AfterStagedFiles)
+        .chain([
+            BatchPublishFault::BeforePromotion,
+            BatchPublishFault::AfterPromotion,
+        ])
+        .enumerate()
+    {
+        let failed_destination = stage.path().join(format!("failed-{index}"));
+        assert!(publish_paired_batch(&failed_destination, &first, Some(fault)).is_err());
+        assert!(!failed_destination.exists(), "fault case {index}");
+    }
+    let sentinel_destination = stage.path().join("existing");
+    std::fs::create_dir(&sentinel_destination).unwrap();
+    let sentinel = sentinel_destination.join("sentinel");
+    std::fs::write(&sentinel, b"leave alias output unchanged").unwrap();
+    assert!(publish_paired_batch(&sentinel_destination, &first, None).is_err());
+    assert_eq!(
+        std::fs::read(sentinel).unwrap(),
+        b"leave alias output unchanged"
+    );
+
+    if require_exact_jdk_21_or_skip() {
+        let runtime = TestDirectory::new("local-alias-two-setter-runtime");
+        let classes = runtime.path().join("classes");
+        assert_eq!(
+            publish_paired_batch(&classes, &first, None).unwrap().len(),
+            6
+        );
+        let harness = runtime.path().join("AliasPairHarness.java");
+        std::fs::write(
+            &harness,
+            r#"import example.Counter;
+import example.Pair;
+import example.PairFactory;
+import java.lang.reflect.Field;
+public final class AliasPairHarness {
+  public static void main(String[] args) throws Exception {
+    PairFactory factory = new PairFactory();
+    Pair positive = factory.create(7, 3);
+    Pair negative = factory.create(-9, 42);
+    if (positive.leftValue() != 3 || positive.rightValue() != 7
+        || negative.leftValue() != 42 || negative.rightValue() != -9)
+      throw new AssertionError("ordered alias setters");
+    Field left = Pair.class.getDeclaredField("left");
+    Field right = Pair.class.getDeclaredField("right");
+    left.setAccessible(true);
+    right.setAccessible(true);
+    Counter first = (Counter) left.get(positive);
+    Counter second = (Counter) right.get(positive);
+    if (first == second) throw new AssertionError("Pair locals must stay distinct");
+    System.out.println("alias-pair=3,7;42,-9;identities=distinct");
+  }
+}"#,
+        )
+        .unwrap();
+        let harness_classes = runtime.path().join("harness");
+        std::fs::create_dir_all(&harness_classes).unwrap();
+        let javac = Command::new("javac")
+            .args(["--release", "21", "-classpath"])
+            .arg(&classes)
+            .arg("-d")
+            .arg(&harness_classes)
+            .arg(&harness)
+            .output()
+            .expect("start JDK 21 javac for alias Pair runtime harness");
+        assert!(
+            javac.status.success(),
+            "javac rejected alias Pair harness: {}",
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let classpath =
+            std::env::join_paths([harness_classes.as_path(), classes.as_path()]).unwrap();
+        let java = Command::new("java")
+            .args(["-Xverify:all", "-ea", "-classpath"])
+            .arg(classpath)
+            .arg("AliasPairHarness")
+            .output()
+            .expect("start strict JDK 21 alias Pair verification");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected alias Pair batch:\n{}\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&java.stdout).trim(),
+            "alias-pair=3,7;42,-9;identities=distinct"
+        );
+    }
+
+    let renamed = IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH
+        .replace("val first: Counter", "val primary: Counter")
+        .replace("new Pair(first, second)", "new Pair(primary, second)")
+        .replace("alias: Counter = first", "view: Counter = primary")
+        .replace("alias.set", "view.set");
+    emit_paired_jvm_tasty_batch(
+        &renamed,
+        "RenamedPairFactory.scala",
+        SourceId::from_index(22402),
+    )
+    .expect("canonical alias/call receipts survive local renaming");
+
+    let reversed = IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH.replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
+        "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
+    );
+    emit_paired_jvm_tasty_batch(
+        &reversed,
+        "ReversedPairFactory.scala",
+        SourceId::from_index(22403),
+    )
+    .expect("canonical alias/call receipts survive reversed original declarations");
+
+    for rejected in [
+        IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH
+            .replace("val alias: Counter = first", "var alias: Counter = first"),
+        IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH
+            .replace("val alias: Counter = first", "val alias: Counter = second"),
+        IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH.replace(
+            "val alias: Counter = first",
+            "val alias: Counter = new Counter(firstSeed)",
+        ),
+        IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH
+            .replace("new Pair(first, second)", "new Pair(alias, second)"),
+        IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH.replace(
+            "second.set(firstSeed)",
+            "second.set(firstSeed)\n    second.set(secondSeed)",
+        ),
+        IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH.replace(
+            "val alias: Counter = first",
+            "val alias: Counter = first\n    val chained: Counter = alias",
+        ),
+        IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH.replace(
+            "val alias: Counter = first",
+            "val alias: Counter = first\n    val another: Counter = first",
+        ),
+        IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH.replace(
+            "alias.set(secondSeed)",
+            "if firstSeed > 0 then alias.set(secondSeed) else alias.set(firstSeed)",
+        ),
+    ] {
+        assert!(
+            emit_paired_jvm_tasty_batch(
+                &rejected,
+                "RejectedPairFactory.scala",
+                SourceId::from_index(22404)
+            )
+            .is_err(),
+            "unsupported or misbound alias/call source must fail before returning a batch"
+        );
+    }
 }
 
 #[test]

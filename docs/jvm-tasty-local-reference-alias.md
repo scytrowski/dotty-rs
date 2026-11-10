@@ -93,6 +93,31 @@ No production compiler, paired publisher, acceptance condition, or CI shard
 was changed. Proving alias support, changing the pickler, and widening paired
 acceptance remain with their respective future owner increments.
 
+## Paired JVM/TASTy producer integration (#2240)
+
+Issue #2240 integrates the exact frozen alias source above with the existing
+one-session three-class producer. The source and typed receipts now admit only
+the two original `new Counter(seed)` locals, a third immutable direct alias of
+the local passed as the first Pair argument, the two ordered original
+`Counter.set(I)V` calls, and the final Pair construction from the two original
+locals. The paired JVM contract derives every local slot from the original
+`JvmCompilationUnit` layout and checks the alias load/store before the setter
+calls; the TASTy plan serializes the alias as its own `VALDEF` with the original
+local's `TERMREF` target.
+
+The Rust paired-artifact regression compares all six paths, bytes, and UUIDs
+across two fresh source sessions; verifies class-file major 65, TASTy 28.9.0,
+and each class-file/sidecar UUID link; and executes the generated batch under
+JDK 21 `-Xverify:all` for the frozen values and distinct Pair fields. Renamed
+and reversed original declarations are accepted. Mutable aliases, aliases of
+the second local, alias chains, extra locals or allocations, nested conditional
+calls, duplicate setters, and Pair arguments changed to the alias are rejected.
+The original zero-, one-, and two-call no-alias producer paths remain on their
+existing branches and keep their focused output tests.
+
+The Scala evidence above remains the pinned-language oracle for this source
+shape. The integration adds no separate Java or Scala consumer feature.
+
 ## Reproduction
 
 Build from a copy of the pinned source checkout so sbt outputs stay in the
