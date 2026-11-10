@@ -282,6 +282,15 @@ pub struct ImmutableLocalInitializerPairProofInput<'session> {
     pub jvm_unit: &'session JvmCompilationUnit<'session>,
 }
 
+/// Borrowed input for authenticating one immutable local reference alias after
+/// the original two initialized Counter locals. The alias binding must come
+/// from the same source Typer session as the pair bindings.
+#[derive(Clone, Copy)]
+pub struct ImmutableLocalReferenceAliasProofInput<'session> {
+    pub initializers: ImmutableLocalInitializerPairProofInput<'session>,
+    pub alias_binding: Option<TypedLocalBinding>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ImmutableLocalInitializerReceipt {
     declaration: ImmutableLocalDeclarationCore,
@@ -351,6 +360,67 @@ pub struct ValidatedImmutableLocalInitializerPairProof<'session> {
     source_final_expression: TreeId<Untyped>,
     typed_final_expression: TreeId<Typed>,
     initializers: [ImmutableLocalInitializerReceipt; 2],
+}
+
+/// Read-only proof that a distinct immutable local directly aliases the first
+/// original Counter local in the same method Block.
+#[derive(Clone, Copy)]
+pub struct ValidatedImmutableLocalReferenceAliasProof<'session> {
+    initializers: ValidatedImmutableLocalInitializerPairProof<'session>,
+    source_declaration: TreeId<Untyped>,
+    typed_declaration: TreeId<Typed>,
+    symbol: SymbolId,
+    scope: dotty_core::ScopeId,
+    source_initializer: TreeId<Untyped>,
+    typed_initializer: TreeId<Typed>,
+    source_type_tree: TreeId<Untyped>,
+    typed_type_tree: TreeId<Typed>,
+    source_target: TreeId<Untyped>,
+    typed_target: TreeId<Typed>,
+    target: SymbolId,
+    local_type: TypeId,
+}
+
+impl<'session> ValidatedImmutableLocalReferenceAliasProof<'session> {
+    pub const fn initializers(&self) -> &ValidatedImmutableLocalInitializerPairProof<'session> {
+        &self.initializers
+    }
+    pub const fn source_declaration(&self) -> TreeId<Untyped> {
+        self.source_declaration
+    }
+    pub const fn typed_declaration(&self) -> TreeId<Typed> {
+        self.typed_declaration
+    }
+    pub const fn symbol(&self) -> SymbolId {
+        self.symbol
+    }
+    pub const fn scope(&self) -> dotty_core::ScopeId {
+        self.scope
+    }
+    pub const fn source_initializer(&self) -> TreeId<Untyped> {
+        self.source_initializer
+    }
+    pub const fn typed_initializer(&self) -> TreeId<Typed> {
+        self.typed_initializer
+    }
+    pub const fn source_type_tree(&self) -> TreeId<Untyped> {
+        self.source_type_tree
+    }
+    pub const fn typed_type_tree(&self) -> TreeId<Typed> {
+        self.typed_type_tree
+    }
+    pub const fn source_target(&self) -> TreeId<Untyped> {
+        self.source_target
+    }
+    pub const fn typed_target(&self) -> TreeId<Typed> {
+        self.typed_target
+    }
+    pub const fn target(&self) -> SymbolId {
+        self.target
+    }
+    pub const fn local_type(&self) -> TypeId {
+        self.local_type
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -4962,13 +5032,25 @@ pub fn validate_immutable_local_initializer_pair_proof<'session>(
     ValidatedImmutableLocalInitializerPairProof<'session>,
     CrossClassConstructorCallProofError,
 > {
-    validate_immutable_local_initializer_pair_proof_inner(input, 0)
+    validate_immutable_local_initializer_pair_proof_inner(input, 0, false)
+}
+
+/// Authenticate the supported immutable direct-reference alias of the first
+/// original Counter local. This proof deliberately leaves the following
+/// Counter.set statements and Pair construction outside its receipt.
+pub fn validate_immutable_local_reference_alias_proof<'session>(
+    input: ImmutableLocalReferenceAliasProofInput<'session>,
+) -> Result<ValidatedImmutableLocalReferenceAliasProof<'session>, CrossClassConstructorCallProofError>
+{
+    let pair = validate_immutable_local_initializer_pair_proof_inner(input.initializers, 2, true)?;
+    validate_immutable_local_reference_alias_from_pair(pair, input.alias_binding)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn validate_immutable_local_initializer_pair_proof_inner<'session>(
     input: ImmutableLocalInitializerPairProofInput<'session>,
     counter_set_call_count: usize,
+    alias_prefix: bool,
 ) -> Result<
     ValidatedImmutableLocalInitializerPairProof<'session>,
     CrossClassConstructorCallProofError,
@@ -5127,9 +5209,10 @@ fn validate_immutable_local_initializer_pair_proof_inner<'session>(
     else {
         return Err(source_error("factory body must be the original Block"));
     };
-    if block.stats.len() != 2 + counter_set_call_count {
+    let expected_stats = 2 + usize::from(alias_prefix) + counter_set_call_count;
+    if block.stats.len() != expected_stats {
         return Err(source_error(match counter_set_call_count {
-            0 => "factory Block must contain exactly two local ValDefs",
+            0 if !alias_prefix => "factory Block must contain exactly two local ValDefs",
             1 => "factory Block must contain exactly two local ValDefs and one Counter.set call",
             2 => "factory Block must contain exactly two local ValDefs and two Counter.set calls",
             _ => "factory Block has an unsupported number of Counter.set calls",
@@ -5140,12 +5223,25 @@ fn validate_immutable_local_initializer_pair_proof_inner<'session>(
             "two local declarations must have distinct original source roots",
         ));
     }
-    if block.stats[2..].iter().any(|stat| {
-        !matches!(
-            source_ast.try_get(*stat).map(|node| &node.kind),
-            Some(TreeKind::Apply(_))
+    if alias_prefix
+        && !matches!(
+            source_ast.try_get(block.stats[2]).map(|node| &node.kind),
+            Some(TreeKind::ValDef(_))
         )
-    }) {
+    {
+        return Err(source_error(
+            "third factory Block statistic must be the immutable local alias ValDef",
+        ));
+    }
+    if block.stats[2 + usize::from(alias_prefix)..]
+        .iter()
+        .any(|stat| {
+            !matches!(
+                source_ast.try_get(*stat).map(|node| &node.kind),
+                Some(TreeKind::Apply(_))
+            )
+        })
+    {
         return Err(source_error(if counter_set_call_count == 1 {
             "third factory Block statistic must be the original Counter.set Apply"
         } else {
@@ -5179,7 +5275,7 @@ fn validate_immutable_local_initializer_pair_proof_inner<'session>(
         return Err(typed_error("original source Block must remain typed Block"));
     };
     if typed_block_tree.stats.get(..2) != Some(typed_declarations.as_slice())
-        || typed_block_tree.stats.len() != 2 + counter_set_call_count
+        || typed_block_tree.stats.len() != expected_stats
         || typed_block_tree.expr != typed_final_expression
     {
         return Err(typed_error(
@@ -5551,7 +5647,7 @@ fn validate_immutable_local_initializer_pair_proof_inner<'session>(
     let scope = store.scopes.get(first_core.scope);
     let scope_entries = scope.entered_symbols().collect::<Vec<_>>();
     if scope.owner != Some(method)
-        || scope_entries.len() != 2
+        || scope_entries.len() != 2 + usize::from(alias_prefix)
         || !scope_entries.contains(&local_symbols[0])
         || !scope_entries.contains(&local_symbols[1])
     {
@@ -5776,6 +5872,429 @@ fn validate_immutable_local_initializer_pair_proof_inner<'session>(
         source_final_expression: block.expr,
         typed_final_expression,
         initializers: receipts,
+    })
+}
+
+fn validate_immutable_local_reference_alias_from_pair<'session>(
+    pair: ValidatedImmutableLocalInitializerPairProof<'session>,
+    alias_binding: Option<TypedLocalBinding>,
+) -> Result<ValidatedImmutableLocalReferenceAliasProof<'session>, CrossClassConstructorCallProofError>
+{
+    let source_error = |s| CrossClassConstructorCallProofError::SourceShape(s);
+    let identity_error = |s| CrossClassConstructorCallProofError::SourceIdentity(s);
+    let semantic_error = |s| CrossClassConstructorCallProofError::SemanticIdentity(s);
+    let typed_error = |s| CrossClassConstructorCallProofError::TypedBinding(s);
+    let TreeKind::Block(block) = &pair
+        ._source_ast
+        .try_get(pair.source_block)
+        .ok_or_else(|| source_error("original local Block is stale"))?
+        .kind
+    else {
+        return Err(source_error("original local Block must remain a Block"));
+    };
+    let source_declaration = block.stats[2];
+    let TreeKind::ValDef(alias_def) = &pair
+        ._source_ast
+        .try_get(source_declaration)
+        .ok_or_else(|| source_error("alias declaration tree is stale"))?
+        .kind
+    else {
+        return Err(source_error(
+            "third factory Block statistic must be the immutable local alias ValDef",
+        ));
+    };
+    let source_initializer = alias_def
+        .rhs
+        .ok_or_else(|| source_error("alias local must have one initializer"))?;
+    let TreeKind::Ident(source_alias_ident) = &pair
+        ._source_ast
+        .try_get(source_initializer)
+        .ok_or_else(|| source_error("alias initializer tree is stale"))?
+        .kind
+    else {
+        return Err(source_error(
+            "alias initializer must be the direct original local Ident",
+        ));
+    };
+    let binding = alias_binding
+        .ok_or_else(|| identity_error("alias declaration has no original Typer local binding"))?;
+    let typed_declaration = pair
+        ._source_typed_index
+        .get(pair.source_id, source_declaration)
+        .ok_or_else(|| typed_error("alias ValDef has no source-to-typed binding"))?;
+    if binding.declaration() != typed_declaration {
+        return Err(identity_error(
+            "Typer alias binding must name this exact original ValDef",
+        ));
+    }
+    let source_type_tree = alias_def.tpt;
+    if matches!(
+        pair._source_ast
+            .try_get(source_type_tree)
+            .map(|tree| &tree.kind),
+        Some(TreeKind::TypeTree(_))
+    ) {
+        return Err(source_error(
+            "alias must retain its explicit source Counter type",
+        ));
+    }
+    let typed_type_tree = pair
+        ._source_typed_index
+        .get(pair.source_id, source_type_tree)
+        .ok_or_else(|| typed_error("alias explicit type tree has no source-to-typed mapping"))?;
+    let typed_initializer = pair
+        ._source_typed_index
+        .get(pair.source_id, source_initializer)
+        .ok_or_else(|| typed_error("alias Ident has no source-to-typed binding"))?;
+    let typed_target = typed_initializer;
+    let TreeKind::Ident(typed_alias_ident) = &pair
+        ._typed_ast
+        .try_get(typed_target)
+        .ok_or_else(|| typed_error("typed alias target is stale"))?
+        .kind
+    else {
+        return Err(typed_error("typed alias target must remain Ident"));
+    };
+    if source_alias_ident.name != typed_alias_ident.name {
+        return Err(typed_error(
+            "source and typed alias Ident roots must preserve the same original reference",
+        ));
+    }
+    let target = match pair._store.types.try_get(
+        pair._typed_ast
+            .try_get(typed_target)
+            .ok_or_else(|| typed_error("typed alias target is stale"))?
+            .ty,
+    ) {
+        Some(Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        }) => *symbol,
+        _ => {
+            return Err(typed_error(
+                "typed alias target must retain its canonical local TermRef",
+            ));
+        }
+    };
+    let initializers = pair.initializers();
+    let method_tree = match pair._source_index.definition_of(pair.method) {
+        Some(SourceDefinition::Canonical { source, tree }) if source == pair.source_id => tree,
+        _ => return Err(identity_error("factory method is not canonically indexed")),
+    };
+    let TreeKind::DefDef(method_def) = &pair
+        ._source_ast
+        .try_get(method_tree)
+        .ok_or_else(|| identity_error("factory method tree is stale"))?
+        .kind
+    else {
+        return Err(identity_error("factory method source root is not DefDef"));
+    };
+    let first_formal = pair
+        ._source_index
+        .symbol_at(pair.source_id, method_def.value_param_clauses[0][0])
+        .ok_or_else(|| identity_error("first factory formal has no canonical source symbol"))?;
+    let first_initializer_index = initializers
+        .iter()
+        .position(|initializer| initializer.seed_formal() == first_formal)
+        .ok_or_else(|| {
+            identity_error("no original local initializer uses the first Pair argument")
+        })?;
+    let original = initializers[first_initializer_index].symbol();
+    let other = initializers[1 - first_initializer_index].symbol();
+    let original_name = pair._store.symbols.get(original).name;
+    if source_alias_ident.name != original_name || typed_alias_ident.name != original_name {
+        return Err(typed_error(
+            "source and typed alias Idents must agree with the authenticated original local",
+        ));
+    }
+    let TreeKind::Apply(source_pair_apply) = &pair
+        ._source_ast
+        .try_get(pair.source_final_expression)
+        .ok_or_else(|| source_error("final Pair Apply is stale"))?
+        .kind
+    else {
+        return Err(source_error(
+            "final expression must remain the original Pair Apply",
+        ));
+    };
+    if source_pair_apply.args.len() != 2 {
+        return Err(source_error(
+            "final Pair Apply must retain exactly two arguments",
+        ));
+    }
+    let source_pair_first_argument = source_pair_apply.args[0];
+    let TreeKind::Ident(source_pair_first_ident) = &pair
+        ._source_ast
+        .try_get(source_pair_first_argument)
+        .ok_or_else(|| source_error("first final Pair argument is stale"))?
+        .kind
+    else {
+        return Err(source_error(
+            "first final Pair argument must be the original local Ident",
+        ));
+    };
+    let typed_pair_first_argument = pair
+        ._source_typed_index
+        .get(pair.source_id, source_pair_first_argument)
+        .ok_or_else(|| typed_error("first final Pair argument has no typed mapping"))?;
+    let TreeKind::Apply(typed_pair_apply) = &pair
+        ._typed_ast
+        .try_get(pair.typed_final_expression)
+        .ok_or_else(|| typed_error("typed final Pair Apply is stale"))?
+        .kind
+    else {
+        return Err(typed_error("typed final expression must remain Pair Apply"));
+    };
+    if typed_pair_apply.args.len() != 2 || typed_pair_apply.args[0] != typed_pair_first_argument {
+        return Err(typed_error(
+            "typed Pair arg[0] must retain its exact source mapping",
+        ));
+    }
+    let TreeKind::Ident(typed_pair_first_ident) = &pair
+        ._typed_ast
+        .try_get(typed_pair_first_argument)
+        .ok_or_else(|| typed_error("typed first final Pair argument is stale"))?
+        .kind
+    else {
+        return Err(typed_error(
+            "typed first final Pair argument must remain Ident",
+        ));
+    };
+    let pair_first_target = match pair._store.types.try_get(
+        pair._typed_ast
+            .try_get(typed_pair_first_argument)
+            .ok_or_else(|| typed_error("typed first final Pair argument is stale"))?
+            .ty,
+    ) {
+        Some(Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        }) => *symbol,
+        _ => {
+            return Err(typed_error(
+                "typed first final Pair argument must retain its local TermRef",
+            ));
+        }
+    };
+    if pair_first_target != original {
+        return Err(identity_error(
+            "alias target must be the canonical first final Pair argument local",
+        ));
+    }
+    if source_pair_first_ident.name != typed_pair_first_ident.name {
+        return Err(typed_error(
+            "source and typed first Pair argument Idents must preserve the same reference",
+        ));
+    }
+    if source_pair_first_ident.name != original_name || typed_pair_first_ident.name != original_name
+    {
+        return Err(typed_error(
+            "source and typed first Pair argument Idents must agree with the authenticated original local",
+        ));
+    }
+    let symbol = binding.symbol();
+    if target != original {
+        return Err(identity_error(
+            "alias initializer must reference the canonical first original local",
+        ));
+    }
+    if symbol == original || symbol == other || !pair._store.symbols.contains(symbol) {
+        return Err(identity_error(
+            "alias must be a distinct original local symbol",
+        ));
+    }
+    let local_info = pair._store.symbols.get(symbol);
+    if local_info.kind != SymbolKind::Local
+        || local_info.owner != Some(pair.method)
+        || local_info.flags.contains(SymbolFlags::MUTABLE)
+        || !has_source_origin(pair._store, symbol, pair.source_id)
+    {
+        return Err(identity_error(
+            "alias must be the original immutable method-owned local",
+        ));
+    }
+    let scope = binding.scope();
+    if scope != initializers[0].scope()
+        || scope != initializers[1].scope()
+        || !pair._store.scopes.contains(scope)
+    {
+        return Err(identity_error(
+            "alias must belong to the original method Block scope",
+        ));
+    }
+    let scope_info = pair._store.scopes.get(scope);
+    let entries = scope_info.entered_symbols().collect::<Vec<_>>();
+    if scope_info.owner != Some(pair.method)
+        || entries.len() != 3
+        || ![original, other, symbol]
+            .iter()
+            .all(|local| entries.contains(local))
+    {
+        return Err(identity_error(
+            "the three original locals must occupy the exact method-owned Block scope",
+        ));
+    }
+    let local_type = match local_info.info {
+        SymbolInfo::Complete(ty) => ty,
+        _ => return Err(semantic_error("alias local type is incomplete")),
+    };
+    let package = pair
+        ._store
+        .symbols
+        .get(pair.method)
+        .owner
+        .and_then(|owner| pair._store.symbols.get(owner).owner)
+        .ok_or_else(|| identity_error("factory method has no canonical source package"))?;
+    if !is_canonical_class_type_ref(
+        pair._store,
+        local_type,
+        pair.counter,
+        package,
+        pair._definitions.no_prefix,
+    ) {
+        return Err(semantic_error(
+            "alias and original locals must retain the same completed Counter type",
+        ));
+    }
+    let source_position = require_source_position(
+        pair._source_ast,
+        pair.source_id,
+        source_declaration,
+        "alias ValDef has a foreign source span",
+    )?;
+    let initializer_position = require_source_position(
+        pair._source_ast,
+        pair.source_id,
+        source_initializer,
+        "alias Ident has a foreign source span",
+    )?;
+    let second = initializers[1];
+    let second_initializer_position = require_source_position(
+        pair._source_ast,
+        pair.source_id,
+        second.source_initializer(),
+        "second local initializer has a foreign source span",
+    )?;
+    let first_call_position = require_source_position(
+        pair._source_ast,
+        pair.source_id,
+        block.stats[3],
+        "first deferred Counter.set statement has a foreign source span",
+    )?;
+    if second_initializer_position.span().range().end() > source_position.span().range().start()
+        || source_position.span().range().start() >= initializer_position.span().range().start()
+        || initializer_position.span().range().end() > first_call_position.span().range().start()
+    {
+        return Err(source_error(
+            "alias must be initialized after the original locals and before later statements",
+        ));
+    }
+    require_matching_source_typed_positions(
+        pair._source_ast,
+        pair._typed_ast,
+        pair.source_id,
+        source_declaration,
+        typed_declaration,
+        "alias ValDef",
+    )?;
+    require_matching_source_typed_positions(
+        pair._source_ast,
+        pair._typed_ast,
+        pair.source_id,
+        source_initializer,
+        typed_initializer,
+        "alias Ident",
+    )?;
+    require_matching_source_typed_positions(
+        pair._source_ast,
+        pair._typed_ast,
+        pair.source_id,
+        source_type_tree,
+        typed_type_tree,
+        "alias explicit type tree",
+    )?;
+    require_matching_source_typed_positions(
+        pair._source_ast,
+        pair._typed_ast,
+        pair.source_id,
+        source_pair_first_argument,
+        typed_pair_first_argument,
+        "first final Pair argument",
+    )?;
+    let typed_block = pair
+        ._source_typed_index
+        .get(pair.source_id, pair.source_block)
+        .ok_or_else(|| typed_error("original Block has no typed mapping"))?;
+    let TreeKind::Block(typed_block_tree) = &pair
+        ._typed_ast
+        .try_get(typed_block)
+        .ok_or_else(|| typed_error("typed Block is stale"))?
+        .kind
+    else {
+        return Err(typed_error("source Block must remain a typed Block"));
+    };
+    if typed_block_tree.stats.get(2) != Some(&typed_declaration) {
+        return Err(typed_error(
+            "typed Block must preserve the exact alias declaration at its source position",
+        ));
+    }
+    let (typed_alias_type, typed_annotation_type) = match &pair
+        ._typed_ast
+        .try_get(typed_declaration)
+        .ok_or_else(|| typed_error("typed alias ValDef is stale"))?
+        .kind
+    {
+        TreeKind::ValDef(value)
+            if value.rhs == Some(typed_initializer) && value.tpt == typed_type_tree =>
+        {
+            (
+                pair._typed_ast.get(typed_declaration).ty,
+                pair._typed_ast
+                    .try_get(typed_type_tree)
+                    .ok_or_else(|| typed_error("typed alias explicit type tree is stale"))?
+                    .ty,
+            )
+        }
+        TreeKind::ValDef(_) => {
+            return Err(typed_error(
+                "typed alias ValDef must preserve its exact initializer and type-tree edges",
+            ));
+        }
+        _ => return Err(typed_error("typed alias declaration must remain ValDef")),
+    };
+    if !is_canonical_class_type_ref(
+        pair._store,
+        typed_alias_type,
+        pair.counter,
+        package,
+        pair._definitions.no_prefix,
+    ) || !is_canonical_class_type_ref(
+        pair._store,
+        typed_annotation_type,
+        pair.counter,
+        package,
+        pair._definitions.no_prefix,
+    ) || !matches!(pair._store.types.try_get(pair._typed_ast.get(typed_target).ty),
+            Some(Type::TermRef { target: TermRefTarget::Symbol(target_symbol), .. }) if *target_symbol == original)
+    {
+        return Err(typed_error(
+            "typed alias and target must retain the exact canonical Counter/local identities",
+        ));
+    }
+    Ok(ValidatedImmutableLocalReferenceAliasProof {
+        initializers: pair,
+        source_declaration,
+        typed_declaration,
+        symbol,
+        scope,
+        source_initializer,
+        typed_initializer,
+        source_type_tree,
+        typed_type_tree,
+        source_target: source_initializer,
+        typed_target,
+        target: original,
+        local_type,
     })
 }
 

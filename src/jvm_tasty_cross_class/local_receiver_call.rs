@@ -106,7 +106,7 @@ pub fn validate_immutable_local_counter_set_calls_proof<'session>(
     ValidatedImmutableLocalCounterSetCallsProof<'session>,
     CrossClassConstructorCallProofError,
 > {
-    let initializer_pair = validate_immutable_local_initializer_pair_proof_inner(input, 2)?;
+    let initializer_pair = validate_immutable_local_initializer_pair_proof_inner(input, 2, false)?;
     let first = validate_immutable_local_counter_set_call_at(input, 0, 2, usize::MAX)?;
     let second = validate_immutable_local_counter_set_call_at(input, 1, 2, usize::MAX)?;
     if first.source_call == second.source_call
@@ -154,7 +154,7 @@ fn validate_immutable_local_counter_set_call_at<'session>(
     formal_index: usize,
 ) -> Result<ValidatedImmutableLocalCounterSetCallProof<'session>, CrossClassConstructorCallProofError>
 {
-    let pair = validate_immutable_local_initializer_pair_proof_inner(input, call_count)?;
+    let pair = validate_immutable_local_initializer_pair_proof_inner(input, call_count, false)?;
     let source_error = |s| CrossClassConstructorCallProofError::SourceShape(s);
     let identity_error = |s| CrossClassConstructorCallProofError::SourceIdentity(s);
     let semantic_error = |s| CrossClassConstructorCallProofError::SemanticIdentity(s);
