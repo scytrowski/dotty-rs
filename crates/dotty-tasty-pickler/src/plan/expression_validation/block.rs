@@ -359,6 +359,13 @@ impl Validator<'_, '_> {
                 && alias_binding.is_some_and(|alias| initializers[0].local == alias.target)
                 && initializers[0].local != initializers[1].local
                 && initializers[0].scope == initializers[1].scope
+                && alias_binding.is_some_and(|alias| {
+                    call_bindings.len() == 2
+                        && call_bindings[0].receiver == alias.local
+                        && call_bindings[0].receiver_scope == alias.scope
+                        && call_bindings[1].receiver == initializers[1].local
+                        && call_bindings[1].receiver_scope == initializers[1].scope
+                })
                 && source_block
                     .stats
                     .iter()

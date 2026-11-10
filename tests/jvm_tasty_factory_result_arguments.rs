@@ -3326,7 +3326,7 @@ fn standalone_alias_two_local_receiver_calls_use_original_local_identities() {
 }
 
 #[test]
-fn standalone_alias_pair_and_missing_receipt_corruptions_fail_closed() {
+fn standalone_alias_pair_receiver_and_missing_receipt_corruptions_fail_closed() {
     let candidate = standalone_local_receiver_call_candidate(
         ALIAS_TWO_CALL_TARGET,
         SourceId::from_index(22392),
@@ -3790,7 +3790,9 @@ fn standalone_local_receiver_call_candidate(
             let replacement_type = if replacement == alias.local {
                 alias.local_type
             } else {
-                pair.arguments
+                bindings
+                    .pair
+                    .arguments
                     .iter()
                     .find_map(|argument| match argument.origin {
                         FormalLocalConstructorCallArgumentOrigin::LocalValue {
@@ -3851,6 +3853,102 @@ fn standalone_local_receiver_call_candidate(
             assert!(
                 validated.pickle().is_err(),
                 "duplicate or alias-substituted Pair identities cannot be pickled"
+            );
+        }
+
+        let original_calls = bindings.calls.expect("alias fixture has two calls");
+        let receiver_corruptions = [
+            (0usize, initializer_symbols[0]),
+            (0usize, initializer_symbols[1]),
+            (1usize, alias.local),
+        ];
+        for (call_index, replacement) in receiver_corruptions {
+            let mut malformed_source_ast = clone_untyped_ast(&parsed.ast);
+            let mut malformed_typed_ast = clone_typed_ast(typer.typed_ast());
+            let mut malformed_bindings = bindings.clone();
+            let mut calls = original_calls;
+            let replacement_name = typer.store().symbols.get(replacement).name;
+            let replacement_scope = if replacement == alias.local {
+                alias.scope
+            } else if replacement == initializer_symbols[0] {
+                initializer_receipts[0].scope()
+            } else {
+                initializer_receipts[1].scope()
+            };
+            let replacement_type = if replacement == alias.local {
+                malformed_typed_ast.get(calls[0].typed_receiver).ty
+            } else {
+                bindings
+                    .pair
+                    .arguments
+                    .iter()
+                    .find_map(|argument| match argument.origin {
+                        FormalLocalConstructorCallArgumentOrigin::LocalValue {
+                            symbol,
+                            result_type,
+                        } if symbol == replacement => Some(result_type),
+                        _ => None,
+                    })
+                    .expect("replacement is an original Pair local")
+            };
+            let source_receiver = calls[call_index].source_receiver;
+            let typed_receiver = calls[call_index].typed_receiver;
+            let TreeKind::Ident(source_ident) =
+                &mut malformed_source_ast.get_mut(source_receiver).kind
+            else {
+                panic!("call receiver remains a source Ident");
+            };
+            source_ident.name = replacement_name;
+            let typed_receiver_tree = malformed_typed_ast.get_mut(typed_receiver);
+            typed_receiver_tree.ty = replacement_type;
+            let TreeKind::Ident(typed_ident) = &mut typed_receiver_tree.kind else {
+                panic!("call receiver remains a typed Ident");
+            };
+            typed_ident.name = replacement_name;
+            if replacement != initializer_symbols[0] {
+                let selected_type_source = if replacement == alias.local {
+                    calls[0].typed_select
+                } else {
+                    calls[1].typed_select
+                };
+                let selected_type = malformed_typed_ast.get(selected_type_source).ty;
+                malformed_typed_ast
+                    .get_mut(calls[call_index].typed_select)
+                    .ty = selected_type;
+            }
+            calls[call_index].receiver = replacement;
+            calls[call_index].receiver_scope = replacement_scope;
+            malformed_bindings.calls = Some(calls);
+            let malformed_plan = ClassStatePicklePlan {
+                store: typer.store(),
+                definitions: &definitions,
+                source_ast: &malformed_source_ast,
+                typed_ast: &malformed_typed_ast,
+                source_index: &source_index,
+                typed_bindings: &malformed_bindings,
+                source: SourceMetadata {
+                    id: source_id,
+                    name: "LocalReceiverCall.scala".to_owned(),
+                },
+                class: factory,
+                class_tree: factory_tree,
+                constructor: PrimaryConstructorInputPlan {
+                    symbol: constructor,
+                    source_tree: factory_template.constructor,
+                    parameter_clauses: constructor_clauses.clone(),
+                },
+                members: &members,
+            };
+            let validated = malformed_plan
+                .validate()
+                .expect("receiver substitutions reach method-body validation");
+            assert!(
+                validated.validate_method_bodies().is_err(),
+                "receiver substitutions violate the alias-first/original-second contract"
+            );
+            assert!(
+                validated.pickle().is_err(),
+                "receiver substitutions cannot be pickled"
             );
         }
 
