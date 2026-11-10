@@ -920,7 +920,7 @@ jobs:
             || test "$(sha256sum docs/typer-stdlib-acceptance-iv/measured-2179.tsv | cut -d' ' -f1)" \
               != c616d3d2c93c4522d26375f8809bb362ac30bfffc1c37c6402bdc31e7c7ea752 \
             || test "$(sha256sum docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv | cut -d' ' -f1)" \
-              != e783ece1710b7b271c3ca3f9dd12b566b212b655c28d89da35bc900fbccf486e; then
+              != c13ba07650429146cfc7148a35e08780af8c3b08989f0b149d3b8d04bd64d9e7; then
             cat > "$DOTTY_AUDIT_REPORT_DIR/acceptance-iv-closeout.md" <<EOF
           # Stdlib Acceptance IV closeout (Scala 3.9.0)
 

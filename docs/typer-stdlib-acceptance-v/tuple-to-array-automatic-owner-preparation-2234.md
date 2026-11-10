@@ -50,3 +50,9 @@ Both unchanged ordinary manifests were run with determinism enabled. All 18
 protected main results and 16 protected analysis results retain their prior
 result shapes. The main cohort now has 19/25 typed roots (the original Tuple
 root is the one additional success); analysis remains 16/25.
+
+The shared two-pass cohort receipt records that additive result while retaining
+the frozen baseline classification `blocked` and gate `observe` for this root.
+Its `protected_success` value remains `false`: the original 18 main and 16
+analysis protected identities are unchanged. The two current passes both record
+`typed` with result `scala.Array[java.lang.Object]` for `Tuple.toArray`.
