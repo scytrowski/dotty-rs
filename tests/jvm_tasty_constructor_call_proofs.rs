@@ -1,10 +1,11 @@
 use dotty::jvm_tasty_cross_class::{
     CrossClassConstructorCallProofInput, ImmutableLocalInitializationProofInput,
-    ImmutableLocalInitializerPairProofInput, ValidatedCrossClassConstructorCallProof,
-    validate_cross_class_constructor_call_proofs, validate_immutable_local_counter_set_call_proof,
+    ImmutableLocalInitializerPairProofInput, ImmutableLocalReferenceAliasProofInput,
+    ValidatedCrossClassConstructorCallProof, validate_cross_class_constructor_call_proofs,
+    validate_immutable_local_counter_set_call_proof,
     validate_immutable_local_counter_set_calls_proof,
     validate_immutable_local_initialization_proof, validate_immutable_local_initializer_pair_proof,
-    validate_ordered_constructor_argument_bindings,
+    validate_immutable_local_reference_alias_proof, validate_ordered_constructor_argument_bindings,
 };
 use dotty::jvm_tasty_plan::{PairedPlanError, with_paired_jvm_tasty_batch_plan};
 use dotty_core::ast::{AstArena, AstPhase, TreeKind};
@@ -4235,5 +4236,414 @@ fn constructor_call_candidates_with_unsupported_argument_shapes_fail_closed() {
                 if reason.contains("planned helper body has no established same-batch constructor proof")
         ),
         "unexpected method-result rejection: {method_result_error:?}"
+    );
+}
+
+#[test]
+fn immutable_local_reference_alias_proof_tracks_the_original_first_argument_by_identity() {
+    let fixture =
+        include_str!("fixtures/jvm_tasty_local_reference_alias/LocalReferenceAlias.scala");
+    let renamed = fixture
+        .replace("PairFactory", "Assembler")
+        .replace("create", "assemble")
+        .replace("firstSeed", "leftSeed")
+        .replace("secondSeed", "rightSeed")
+        .replace("first", "left")
+        .replace("second", "right")
+        .replace("alias", "view");
+    let reversed = fixture.replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
+        "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
+    );
+    for (source, source_id) in [
+        (fixture, 22350),
+        (renamed.as_str(), 22351),
+        (reversed.as_str(), 22352),
+    ] {
+        with_two_local_proof_session_retaining_typer(
+            source,
+            source_id,
+            |store,
+             definitions,
+             source_ast,
+             typed_ast,
+             source_index,
+             source_typed_index,
+             source_id,
+             method_tree,
+             bindings,
+             _,
+             typer,
+             jvm_unit| {
+                let TreeKind::DefDef(method) = &source_ast.get(method_tree).kind else {
+                    unreachable!()
+                };
+                let TreeKind::Block(block) = &source_ast.get(method.rhs.unwrap()).kind else {
+                    unreachable!()
+                };
+                let alias_binding = typer
+                    .unwrap()
+                    .typed_local_binding_at(source_id, block.stats[2]);
+                let local_jvm_unit = JvmCompilationUnit {
+                    store,
+                    typed_ast,
+                    classes: jvm_unit.classes.clone(),
+                };
+                let proof = validate_immutable_local_reference_alias_proof(
+                    ImmutableLocalReferenceAliasProofInput {
+                        initializers: ImmutableLocalInitializerPairProofInput {
+                            source_id,
+                            method_tree,
+                            store,
+                            definitions,
+                            source_ast,
+                            typed_ast,
+                            source_index,
+                            source_typed_index,
+                            local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                            jvm_unit: &local_jvm_unit,
+                        },
+                        alias_binding,
+                    },
+                )
+                .unwrap_or_else(|error| panic!("source {source_id:?}: {error:?}"));
+                assert_ne!(proof.symbol(), proof.target());
+                assert_eq!(proof.source_declaration(), block.stats[2]);
+                assert_eq!(
+                    proof.typed_declaration(),
+                    source_typed_index.get(source_id, block.stats[2]).unwrap()
+                );
+                assert_eq!(proof.typed_target(), proof.typed_initializer());
+                let first_formal = source_index
+                    .symbol_at(source_id, method.value_param_clauses[0][0])
+                    .unwrap();
+                assert_eq!(
+                    proof.target(),
+                    proof
+                        .initializers()
+                        .initializers()
+                        .into_iter()
+                        .find(|initializer| initializer.seed_formal() == first_formal)
+                        .unwrap()
+                        .symbol()
+                );
+            },
+        );
+    }
+    let deferred = with_paired_jvm_tasty_batch_plan(
+        fixture,
+        "LocalReferenceAlias.scala",
+        SourceId::from_index(22360),
+        |_| (),
+    )
+    .expect_err("the proof-only alias must not authorize paired producer output");
+    assert!(
+        matches!(
+            deferred,
+            PairedPlanError::BatchUnit {
+                phase: "cross-class constructor-call identity proof",
+                ..
+            }
+        ),
+        "unexpected deferred producer boundary: {deferred:?}"
+    );
+}
+
+#[test]
+fn immutable_local_reference_alias_rejects_wrong_shape_identity_and_provenance() {
+    let fixture =
+        include_str!("fixtures/jvm_tasty_local_reference_alias/LocalReferenceAlias.scala");
+    let wrong_target = fixture.replace("val alias: Counter = first", "val alias: Counter = second");
+    let mutable_alias = fixture.replace("val alias: Counter = first", "var alias: Counter = first");
+    let nested_alias = fixture.replace(
+        "val alias: Counter = first",
+        "val alias: Counter = { first }",
+    );
+    let alias_chain = fixture.replace(
+        "    val alias: Counter = first",
+        "    val bridge: Counter = first\n    val alias: Counter = bridge",
+    );
+    let duplicate_alias = fixture.replace(
+        "val alias: Counter = first\n",
+        "val alias: Counter = first\n    val aliasAgain: Counter = first\n",
+    );
+    for (source, source_id, source_shape) in [
+        (wrong_target.as_str(), 22353, false),
+        (mutable_alias.as_str(), 22354, false),
+        (nested_alias.as_str(), 22355, true),
+        (duplicate_alias.as_str(), 22356, true),
+        (alias_chain.as_str(), 22359, true),
+    ] {
+        with_two_local_proof_session_retaining_typer(
+            source,
+            source_id,
+            |store,
+             definitions,
+             source_ast,
+             typed_ast,
+             source_index,
+             source_typed_index,
+             source_id,
+             method_tree,
+             bindings,
+             _,
+             typer,
+             jvm_unit| {
+                let TreeKind::DefDef(method) = &source_ast.get(method_tree).kind else {
+                    unreachable!()
+                };
+                let TreeKind::Block(block) = &source_ast.get(method.rhs.unwrap()).kind else {
+                    unreachable!()
+                };
+                let local_jvm_unit = JvmCompilationUnit {
+                    store,
+                    typed_ast,
+                    classes: jvm_unit.classes.clone(),
+                };
+                let input = ImmutableLocalReferenceAliasProofInput {
+                    initializers: ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast,
+                        source_index,
+                        source_typed_index,
+                        local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                        jvm_unit: &local_jvm_unit,
+                    },
+                    alias_binding: typer
+                        .unwrap()
+                        .typed_local_binding_at(source_id, block.stats[2]),
+                };
+                let error = validate_immutable_local_reference_alias_proof(input)
+                    .err()
+                    .expect("unsupported alias shape must return a typed proof error");
+                if source_shape {
+                    assert!(matches!(error, dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceShape(_)), "{error:?}");
+                } else {
+                    assert!(matches!(error, dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(_)), "{error:?}");
+                }
+            },
+        );
+    }
+
+    let with_foreign_local = fixture.replace(
+        "class PairFactory:\n",
+        "class PairFactory:\n  def other(otherSeed: Int): Counter =\n    val remote: Counter = new Counter(otherSeed)\n    remote\n",
+    );
+    with_two_local_proof_session_retaining_typer(
+        &with_foreign_local,
+        22361,
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         foreign_binding,
+         typer,
+         jvm_unit| {
+            let TreeKind::DefDef(method) = &source_ast.get(method_tree).kind else {
+                unreachable!()
+            };
+            let TreeKind::Block(block) = &source_ast.get(method.rhs.unwrap()).kind else {
+                unreachable!()
+            };
+            let local_jvm_unit = JvmCompilationUnit {
+                store,
+                typed_ast,
+                classes: jvm_unit.classes.clone(),
+            };
+            let error = validate_immutable_local_reference_alias_proof(
+                ImmutableLocalReferenceAliasProofInput {
+                    initializers: ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast,
+                        source_index,
+                        source_typed_index,
+                        local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                        jvm_unit: &local_jvm_unit,
+                    },
+                    alias_binding: foreign_binding,
+                },
+            )
+            .err()
+            .expect("a binding owned by a different method must fail");
+            assert!(matches!(
+                error,
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(
+                    _
+                )
+            ));
+            let _ = typer;
+            let _ = block;
+        },
+    );
+
+    with_two_local_proof_session_retaining_typer(
+        fixture,
+        22357,
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         _,
+         typer,
+         jvm_unit| {
+            let TreeKind::DefDef(method) = &source_ast.get(method_tree).kind else {
+                unreachable!()
+            };
+            let TreeKind::Block(block) = &source_ast.get(method.rhs.unwrap()).kind else {
+                unreachable!()
+            };
+            let TreeKind::ValDef(alias_def) = &source_ast.get(block.stats[2]).kind else {
+                unreachable!()
+            };
+            let alias_rhs = alias_def.rhs.unwrap();
+            let alias_binding = typer
+                .unwrap()
+                .typed_local_binding_at(source_id, block.stats[2]);
+            let local_jvm_unit = JvmCompilationUnit {
+                store,
+                typed_ast,
+                classes: jvm_unit.classes.clone(),
+            };
+            let base = ImmutableLocalInitializerPairProofInput {
+                source_id,
+                method_tree,
+                store,
+                definitions,
+                source_ast,
+                typed_ast,
+                source_index,
+                source_typed_index,
+                local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                jvm_unit: &local_jvm_unit,
+            };
+            let mut stale_index = source_typed_index.clone();
+            stale_index.remove(source_id, alias_rhs);
+            let foreign_source = validate_immutable_local_reference_alias_proof(
+                ImmutableLocalReferenceAliasProofInput {
+                    initializers: ImmutableLocalInitializerPairProofInput {
+                        source_typed_index: &stale_index,
+                        ..base
+                    },
+                    alias_binding,
+                },
+            )
+            .err()
+            .expect("foreign source identity must be rejected");
+            assert!(matches!(
+                foreign_source,
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(
+                    _
+                ) | dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+                    _
+                )
+            ));
+            let alias_typed_declaration =
+                source_typed_index.get(source_id, block.stats[2]).unwrap();
+            let mut wrong_typed_type = clone_arena(typed_ast);
+            wrong_typed_type.get_mut(alias_typed_declaration).ty = definitions.int;
+            let wrong_type_unit = JvmCompilationUnit {
+                store,
+                typed_ast: &wrong_typed_type,
+                classes: jvm_unit.classes.clone(),
+            };
+            let wrong_type = validate_immutable_local_reference_alias_proof(
+                ImmutableLocalReferenceAliasProofInput {
+                    initializers: ImmutableLocalInitializerPairProofInput {
+                        typed_ast: &wrong_typed_type,
+                        jvm_unit: &wrong_type_unit,
+                        ..base
+                    },
+                    alias_binding,
+                },
+            )
+            .err()
+            .expect("typed alias type must remain Counter");
+            assert!(matches!(
+                wrong_type,
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(_)
+            ));
+            let TreeKind::Apply(final_apply) = &source_ast.get(block.expr).kind else {
+                unreachable!()
+            };
+            let wrong_typed_target = source_typed_index
+                .get(source_id, final_apply.args[1])
+                .unwrap();
+            let mut forged_index = source_typed_index.clone();
+            forged_index.remove(source_id, alias_rhs);
+            forged_index
+                .insert(source_id, alias_rhs, wrong_typed_target)
+                .unwrap();
+            assert!(matches!(validate_immutable_local_reference_alias_proof(
+                ImmutableLocalReferenceAliasProofInput {
+                    initializers: ImmutableLocalInitializerPairProofInput { source_typed_index: &forged_index, ..base }, alias_binding,
+                }
+            ), Err(dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(_)
+                | dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(_))));
+            let foreign_source = validate_immutable_local_reference_alias_proof(
+                ImmutableLocalReferenceAliasProofInput {
+                    initializers: ImmutableLocalInitializerPairProofInput {
+                        source_id: SourceId::from_index(999_999),
+                        ..base
+                    },
+                    alias_binding,
+                },
+            )
+            .err()
+            .expect("foreign source identity must be rejected");
+            assert!(matches!(
+                foreign_source,
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(
+                    _
+                ) | dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+                    _
+                )
+            ));
+        },
+    );
+}
+
+#[test]
+fn immutable_local_reference_alias_before_initialization_fails_at_the_frontend() {
+    let fixture =
+        include_str!("fixtures/jvm_tasty_local_reference_alias/LocalReferenceAlias.scala");
+    let before = fixture.replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)\n    val alias: Counter = first",
+        "    val alias: Counter = first\n    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
+    );
+    let error = with_paired_jvm_tasty_batch_plan(
+        &before,
+        "AliasBeforeInitialization.scala",
+        SourceId::from_index(22362),
+        |_| (),
+    )
+    .expect_err("a forward alias use must fail before any producer output");
+    assert!(
+        matches!(
+            error,
+            PairedPlanError::BatchClass {
+                phase: "method body typing",
+                ref reason,
+                ..
+            } if reason.contains("TermNameNotFound")
+        ),
+        "unexpected first failure: {error:?}"
     );
 }
