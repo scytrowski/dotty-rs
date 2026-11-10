@@ -1691,17 +1691,39 @@ fn original_tuple_to_array_automatically_prepares_canonical_source_owner() {
         panic!("the original method application remains an Apply");
     };
     assert_eq!(typed_application.args, vec![typed_this]);
+    let method_span = parsed.ast.get(method_tree).position.unwrap().span().range();
     let mut mappings = parsed
         .ast
         .iter()
-        .filter_map(|(source_tree, _)| {
-            typer
-                .source_typed_index()
-                .get(source, source_tree)
-                .map(|typed_tree| format!("{}:{}", source_tree.index(), typed_tree.index()))
+        .filter_map(|(source_tree, source_node)| {
+            let source_range = source_node.position?.span().range();
+            if source_range.start() < method_span.start() || source_range.end() > method_span.end()
+            {
+                return None;
+            }
+            let typed_tree = typer.source_typed_index().get(source, source_tree)?;
+            let typed_node = typer.typed_ast().get(typed_tree);
+            let typed_range = typed_node.position?.span().range();
+            assert_eq!(
+                (source_range.start(), source_range.end()),
+                (typed_range.start(), typed_range.end()),
+                "source-to-typed mapping preserves the original source span"
+            );
+            Some(format!(
+                "{}..{}:{}=>{}",
+                source_range.start(),
+                source_range.end(),
+                tuple_tree_kind_label(&source_node.kind),
+                tuple_tree_kind_label(&typed_node.kind),
+            ))
         })
         .collect::<Vec<_>>();
     mappings.sort();
+    assert_eq!(
+        mappings.len(),
+        7,
+        "all seven original method nodes are mapped"
+    );
     let normalized = format!(
         "source=Tuple.scala#tree=23 method={} owner={} mappings={}",
         observed_symbol_path(typer.store(), method),
@@ -1720,4 +1742,136 @@ fn original_tuple_to_array_automatically_prepares_canonical_source_owner() {
         "TUPLE_TO_ARRAY_AUTOMATIC_PREPARATION source_owner={} external_formal=TypeRef(source_owner) rollback_retry=passed",
         observed_symbol_path(typer.store(), tuple)
     );
+}
+
+#[test]
+#[ignore = "requires pinned Scala 3.9.0 sources, classpath jars, and JDK environment"]
+fn other_package_tuple_does_not_match_pinned_classpath_tuple_formal() {
+    let scala_root = PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT"));
+    let revision = Command::new("git")
+        .args(["-C", scala_root.to_str().unwrap(), "rev-parse", "HEAD"])
+        .output()
+        .expect("git reads the pinned Scala source revision");
+    assert!(revision.status.success());
+    assert_eq!(
+        String::from_utf8(revision.stdout).unwrap().trim(),
+        "777528f19a58e794c9954a42f433373472ec57f8"
+    );
+    let source_text =
+        "package other\nclass Tuple { def use = _root_.scala.runtime.Tuples.toArray(this) }";
+    let source = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        ContextualScanner::new(source_text).unwrap(),
+        &mut store.names,
+    );
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "issue-2237/OtherTuple.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let tuple_tree = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::TypeDef(definition)
+                if store.names.resolve(definition.name.as_name().text()) == "Tuple" =>
+            {
+                Some(tree)
+            }
+            _ => None,
+        })
+        .expect("the same-spelled receiver is source-owned by package other");
+    let tuple = index.symbol_at(source, tuple_tree).unwrap();
+    let method_tree = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::DefDef(definition)
+                if store.names.resolve(definition.name.as_name().text()) == "use" =>
+            {
+                Some(tree)
+            }
+            _ => None,
+        })
+        .expect("the ordinary method root is present");
+    let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+    let release = std::env::var("SCALA39_JDK_RELEASE")
+        .expect("SCALA39_JDK_RELEASE")
+        .parse()
+        .unwrap();
+    let jars =
+        std::env::split_paths(&std::env::var_os("SCALA39_CLASSPATH").expect("SCALA39_CLASSPATH"))
+            .collect::<Vec<_>>();
+    let mut entries: Vec<Box<dyn ClassPathEntry>> = vec![Box::new(
+        JdkClassPath::new(java_home.join("jmods")).unwrap(),
+    )];
+    for jar in jars {
+        entries.push(Box::new(JarClassPath::new(jar, release).unwrap()));
+    }
+    let resolver = ClasspathSymbolResolver::new(
+        CompositeClassPath::new(entries),
+        definitions,
+        LoadingSession::with_packages(packages.snapshot()),
+    );
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(resolver));
+
+    assert!(matches!(
+        *typer.store().symbols.info(tuple),
+        SymbolInfo::Missing
+    ));
+    let error = typer
+        .type_method_definition(method_tree)
+        .expect_err("other.Tuple must not be accepted as scala.Tuple");
+    assert!(
+        matches!(
+            error,
+            TyperError::ApplicationArgumentTypeMismatch {
+                source: error_source,
+                argument_index: 0,
+                ..
+            } if error_source == source
+        ),
+        "unexpected classpath-owner conflict result: {error:?}"
+    );
+    assert!(matches!(
+        *typer.store().symbols.info(tuple),
+        SymbolInfo::Missing
+    ));
+    assert_eq!(typer.source_typed_index().get(source, method_tree), None);
+    println!(
+        "TUPLE_TO_ARRAY_WRONG_OWNER_REJECTED receiver={} selected=.scala.runtime.Tuples$.toArray formal=.scala.Tuple error=ApplicationArgumentTypeMismatch rollback=passed",
+        observed_symbol_path(typer.store(), tuple)
+    );
+}
+
+fn tuple_tree_kind_label<P: dotty_core::AstPhase>(kind: &TreeKind<P>) -> &'static str {
+    match kind {
+        TreeKind::DefDef(_) => "DefDef",
+        TreeKind::Apply(_) => "Apply",
+        TreeKind::Select(_) => "Select",
+        TreeKind::This(_) => "This",
+        TreeKind::Ident(_) => "Ident",
+        TreeKind::AppliedTypeTree(_) => "AppliedTypeTree",
+        TreeKind::ByNameTypeTree(_) => "ByNameTypeTree",
+        TreeKind::TypeTree(_) => "TypeTree",
+        TreeKind::PhaseSpecific(_) => "PhaseSpecific",
+        _ => "Other",
+    }
 }
