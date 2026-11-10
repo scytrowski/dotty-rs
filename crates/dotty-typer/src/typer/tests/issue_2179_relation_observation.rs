@@ -1199,7 +1199,7 @@ fn captures_acceptance_iv_relation_operands_before_transaction_rollback() {
 
 #[test]
 #[ignore = "requires pinned Scala 3.9.0 sources, classpath jars, and JDK environment"]
-fn captures_acceptance_v_either_swap_unapply_before_transaction_rollback() {
+fn captures_acceptance_v_either_swap_failure_before_transaction_rollback() {
     let scala_root = PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT"));
     let revision = Command::new("git")
         .args(["-C", scala_root.to_str().unwrap(), "rev-parse", "HEAD"])
