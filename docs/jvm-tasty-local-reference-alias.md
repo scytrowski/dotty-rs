@@ -49,10 +49,11 @@ resulting Pair arguments use references 72 and 74, preserving the original
 both class and TASTy files; its class bytes differ from the primary compile and
 are not claimed to be byte-identical.
 
-## Rust frontend identities and current first paired rejection
+## Rust frontend identities and measured initial paired rejection (pre-#2240)
 
-The focused Rust audit runs the real lexer, parser, namer and source typer over
-one source session (`SourceId(22320)`). The create method is `SymbolId(60)`,
+The first implementation checkpoint recorded the focused Rust audit over the
+real lexer, parser, namer and source typer in one source session
+(`SourceId(22320)`). The create method was `SymbolId(60)`,
 with formal symbols 61 and 62. Its immutable locals are symbols 63 (`first`),
 64 (`second`) and 65 (`alias`), all owned by create and in `ScopeId(18)`. The
 typed alias initializer refers to symbol 63. The two ordered call receivers
@@ -63,35 +64,38 @@ refer to symbols 65 and 64; the final typed Pair constructor arguments refer to
 source and typed `TreeId` indexes in this exact session. The test asserts each
 mapping and does not infer identities from names or allocation order.
 
-On the same verified main source, the current paired producer's first failure
-is phase `cross-class constructor-call identity proof` with
+At that checkpoint, the paired producer's first failure on the verified main
+source was phase `cross-class constructor-call identity proof` with
 `SourceShape("factory body must be a direct Apply or a one- or two-local
 Block")`. The plan callback is not reached and
 `emit_paired_jvm_tasty_batch` returns this planning error without a batch, so
-there are zero paired artifacts to publish. This is the measured current
-failure, not the historical error copied from an earlier audit. The strict
-zero-, one- and two-call baselines remain accepted by the current paired plan.
+there were zero paired artifacts to publish. This is the measured initial
+failure before #2240, not the historical error copied from an earlier audit.
+The strict zero-, one- and two-call baselines remain accepted by the paired
+plan.
 
 ## Control matrix
 
 Each alias control has its own source file and was independently compiled
 against the frozen fixture's unchanged `Counter`/`Pair` classes with the pinned
-Scala compiler and `-Werror -release 21`. Valid but currently
-deferred source controls are renamed locals/alias, reversed local declarations
+Scala compiler and `-Werror -release 21`. Valid controls recorded at the
+initial checkpoint were renamed locals/alias, reversed local declarations
 (alias still after both declarations), aliasing `second`, `var alias`, and an
-alias chain. The alias-of-second case is a valid Scala control outside this
-increment's acceptance. `AliasBeforeInitialization.scala` is invalid with
-Scala E039 (forward reference). `WrongAliasType.scala` is invalid with E007
-(Counter supplied where Pair is required) and E008 (`set` is not a Pair member).
-The paired source typer independently reports `TermNameNotFound` for the
-forward reference and `LocalValueTypeMismatch` for the wrong type. The valid
-alias controls currently stop at the measured `SourceShape` rejection. The
-old no-alias 0/1/2-call source fixtures were recompiled with the pinned Scala
-compiler and remain accepted by the Rust paired plan.
+alias chain. These all reached the measured `SourceShape` rejection then. The
+#2240 integration accepts renaming and reversed declarations for the bounded
+alias-to-first shape; aliasing `second`, `var alias`, and alias chains remain
+outside the accepted shape. The alias-of-second case is valid Scala.
+`AliasBeforeInitialization.scala` is invalid with Scala E039 (forward
+reference). `WrongAliasType.scala` is invalid with E007 (Counter supplied
+where Pair is required) and E008 (`set` is not a Pair member). The paired
+source typer reported `TermNameNotFound` for the forward reference and
+`LocalValueTypeMismatch` for the wrong type. The old no-alias 0/1/2-call source
+fixtures were recompiled with the pinned Scala compiler and remain accepted by
+the Rust paired plan.
 
-No production compiler, paired publisher, acceptance condition, or CI shard
-was changed. Proving alias support, changing the pickler, and widening paired
-acceptance remain with their respective future owner increments.
+At this initial checkpoint, no production compiler, paired publisher,
+acceptance condition, or CI shard had changed. The bounded producer integration
+and its artifact contract are implemented below in #2240.
 
 ## Paired JVM/TASTy producer integration (#2240)
 
@@ -112,6 +116,13 @@ JDK 21 `-Xverify:all` for the frozen values and distinct Pair fields. Renamed
 and reversed original declarations are accepted. Mutable aliases, aliases of
 the second local, alias chains, extra locals or allocations, nested conditional
 calls, duplicate setters, and Pair arguments changed to the alias are rejected.
+Artifact-level negatives mutate the alias copy load/store, setter receiver,
+setter order/count, extra allocation, and final Pair loads; the validator
+rejects each at `cross-class invocation` before a batch can be published. A
+TASTy alias `TERMREFdirect` mutation to the second local keeps the original
+UUID and class-file link valid, then fails at `TASTy plan identity`. The
+same-typed wrong JVM alias load also passes `-Xverify:all` and reaches the
+runtime harness's `AssertionError`, rather than a verifier or linkage error.
 The original zero-, one-, and two-call no-alias producer paths remain on their
 existing branches and keep their focused output tests.
 
