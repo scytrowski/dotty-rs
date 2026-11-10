@@ -289,7 +289,7 @@ jobs:
           cp crates/dotty-typer/tests/fixtures/lexical-closure-contract/scala-artifacts.sha256.tsv \
             "$DOTTY_AUDIT_REPORT_DIR/scala-artifacts.sha256.tsv"
 
-      - name: Type original Option.map in two fresh sessions with rollback retry
+      - name: Type original Option.map and Tuple.toArray in two fresh sessions
         shell: bash
         env:
           COURSIER_MAVEN_ROOT: ${{ github.workspace }}/target/coursier/v1/https/repo1.maven.org/maven2
@@ -314,7 +314,7 @@ jobs:
             "fadeb6620ab6cdadfd539409e335b38142fa1f6ba6b9143b2d6cfcb90e0076c3"
           for session in 1 2; do
             cargo +1.98.1 test -p dotty-typer --lib --locked \
-              captures_acceptance_iv_relation_operands_before_transaction_rollback \
+              preserves_option_map_rollback_and_tuple_to_array_automatic_preparation \
               -- --ignored --nocapture \
               > "$DOTTY_AUDIT_REPORT_DIR/option-map-session-$session.log" 2>&1
             if ! grep -o 'OPTION_MAP_ACCEPTED [^[:cntrl:]]*' \
@@ -326,21 +326,34 @@ jobs:
             test "$(wc -l < "$DOTTY_AUDIT_REPORT_DIR/option-map-session-$session.receipt")" -eq 1
             grep -q 'test result: ok. 1 passed' \
               "$DOTTY_AUDIT_REPORT_DIR/option-map-session-$session.log"
+            if ! grep -o 'TUPLE_TO_ARRAY_ACCEPTED_AFTER_AUTOMATIC_PREPARATION [^[:cntrl:]]*' \
+              "$DOTTY_AUDIT_REPORT_DIR/option-map-session-$session.log" \
+              > "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-$session.receipt"; then
+              echo "Tuple.toArray automatic preparation marker missing from session $session log" >&2
+              exit 1
+            fi
+            test "$(wc -l < "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-$session.receipt")" -eq 1
           done
           cmp "$DOTTY_AUDIT_REPORT_DIR/option-map-session-1.receipt" \
             "$DOTTY_AUDIT_REPORT_DIR/option-map-session-2.receipt"
+          cmp "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-1.receipt" \
+            "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-2.receipt"
           {
             printf 'session_1_receipt_sha256\t%s\n' \
               "$(sha256sum "$DOTTY_AUDIT_REPORT_DIR/option-map-session-1.receipt" | cut -d' ' -f1)"
             printf 'session_2_receipt_sha256\t%s\n' \
               "$(sha256sum "$DOTTY_AUDIT_REPORT_DIR/option-map-session-2.receipt" | cut -d' ' -f1)"
+            printf 'tuple_session_1_receipt_sha256\t%s\n' \
+              "$(sha256sum "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-1.receipt" | cut -d' ' -f1)"
+            printf 'tuple_session_2_receipt_sha256\t%s\n' \
+              "$(sha256sum "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-2.receipt" | cut -d' ' -f1)"
             printf 'source_sha256\t%s\n' \
               "$(sha256sum "$SCALA39_ROOT/library/src/scala/Option.scala" | cut -d' ' -f1)"
             printf 'source_revision\t%s\n' "$(git -C "$SCALA39_ROOT" rev-parse HEAD)"
             printf 'dotty_rs_tested_sha\t%s\n' "$(git rev-parse HEAD)"
           } > "$DOTTY_AUDIT_REPORT_DIR/option-map-two-session.tsv"
 
-      - name: Type original Tuple.toArray after explicit canonical owner preparation
+      - name: Type original Tuple.toArray with automatic canonical owner preparation
         shell: bash
         env:
           COURSIER_MAVEN_ROOT: ${{ github.workspace }}/target/coursier/v1/https/repo1.maven.org/maven2
@@ -362,7 +375,7 @@ jobs:
             "777528f19a58e794c9954a42f433373472ec57f8"
           for session in 1 2; do
             cargo +1.98.1 test -p dotty-typer --lib --locked \
-              original_tuple_to_array_types_after_explicit_canonical_owner_preparation \
+              original_tuple_to_array_automatically_prepares_canonical_source_owner \
               -- --ignored --nocapture \
               > "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-$session.log" 2>&1
             if ! grep -o 'TUPLE_TO_ARRAY_ACCEPTED [^[:cntrl:]]*' \
@@ -371,7 +384,7 @@ jobs:
               echo "Tuple.toArray acceptance marker missing from session $session log" >&2
               exit 1
             fi
-            grep -q 'TUPLE_TO_ARRAY_BEFORE outcome=ApplicationArgumentConformanceUnsupported' \
+            grep -Fq 'TUPLE_TO_ARRAY_AUTOMATIC_PREPARATION source_owner=.scala.Tuple external_formal=TypeRef(source_owner) rollback_retry=passed' \
               "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-$session.log"
             test "$(wc -l < "$DOTTY_AUDIT_REPORT_DIR/tuple-to-array-session-$session.receipt")" -eq 1
             grep -q 'test result: ok. 1 passed' \
@@ -907,7 +920,7 @@ jobs:
             || test "$(sha256sum docs/typer-stdlib-acceptance-iv/measured-2179.tsv | cut -d' ' -f1)" \
               != c616d3d2c93c4522d26375f8809bb362ac30bfffc1c37c6402bdc31e7c7ea752 \
             || test "$(sha256sum docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv | cut -d' ' -f1)" \
-              != e783ece1710b7b271c3ca3f9dd12b566b212b655c28d89da35bc900fbccf486e; then
+              != c13ba07650429146cfc7148a35e08780af8c3b08989f0b149d3b8d04bd64d9e7; then
             cat > "$DOTTY_AUDIT_REPORT_DIR/acceptance-iv-closeout.md" <<EOF
           # Stdlib Acceptance IV closeout (Scala 3.9.0)
 

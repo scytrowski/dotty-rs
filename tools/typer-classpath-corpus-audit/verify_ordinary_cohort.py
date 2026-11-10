@@ -39,13 +39,52 @@ ACCEPTANCE_IV_TARGETS = {
     "library/src/scala/Option.scala#tree=214": "scala.Option[typeparam#0]",
     "library/src/scala/Tuple.scala#tree=23": "scala.Array[java.lang.Object]",
 }
+ACCEPTANCE_IV_TUPLE_IDENTITY = "library/src/scala/Tuple.scala#tree=23"
+ACCEPTANCE_IV_HISTORICAL_MAIN_RESULTS = {
+    "library/src/scala/Option.scala#tree=118": "Boolean",
+    "library/src/scala/Option.scala#tree=122": "Boolean",
+    "library/src/scala/Option.scala#tree=129": "Int",
+    "library/src/scala/Option.scala#tree=214": "scala.Option[typeparam#0]",
+    "library/src/scala/Option.scala#tree=329": "Boolean",
+    "library/src/scala/Option.scala#tree=56": "scala.Option[typeparam#0]",
+    "library/src/scala/util/Either.scala#tree=19": "scala.util.Either$.LeftProjection[scala.util.Either.A,scala.util.Either.B]",
+    "library/src/scala/util/Either.scala#tree=31": "scala.util.Either$.RightProjection[scala.util.Either.A,scala.util.Either.B]",
+    "library/src/scala/util/Either.scala#tree=505": "Boolean",
+    "library/src/scala/util/Either.scala#tree=508": "Boolean",
+    "library/src/scala/util/Try.scala#tree=1098": "scala.util.Success.T",
+    "library/src/scala/util/Try.scala#tree=626": "Boolean",
+    "library/src/scala/util/Try.scala#tree=629": "Boolean",
+    "library/src/scala/Enumeration.scala#tree=172": "Int",
+    "library/src/scala/Predef.scala#tree=204": "typeparam#0",
+    "library/src/scala/Predef.scala#tree=239": "typeparam#0",
+    "library/src/scala/Function1.scala#tree=86": "scala.Function1[typeparam#0,scala.Function1.R]",
+    "library/src/scala/Function1.scala#tree=111": "scala.Function1[scala.Function1.T1,typeparam#0]",
+}
+ACCEPTANCE_IV_HISTORICAL_ANALYSIS_RESULTS = {
+    "library/src/scala/runtime/LazyRef.scala#tree=140": "Byte",
+    "library/src/scala/Function21.scala#tree=297": "java.lang.String",
+    "library/src/scala/Product16.scala#tree=119": "Int",
+    "library/src/scala/concurrent/BlockContext.scala#tree=35": "scala.concurrent.BlockContext",
+    "library/src/scala/Function4.scala#tree=95": "java.lang.String",
+    "library/src/scala/App.scala#tree=36": "scala.Array[java.lang.String]",
+    "library/src/scala/collection/mutable/ArrayBuilder.scala#tree=48": "Int",
+    "library/src/scala/util/matching/Regex.scala#tree=656": "scala.collection.immutable.Seq[java.lang.String]",
+    "library/src/scala/collection/immutable/Set.scala#tree=406": "Boolean",
+    "library/src/scala/sys/BooleanProp.scala#tree=116": "java.lang.String",
+    "library/src/scala/collection/mutable/PriorityQueue.scala#tree=250": "scala.collection.mutable.PriorityQueue.this",
+    "library/src/scala/Short.scala#tree=504": "Float",
+    "library/src/scala/Byte.scala#tree=516": "Double",
+    "library/src/scala/Char.scala#tree=510": "Double",
+    "library/src/scala/collection/mutable/HashMap.scala#tree=125": "Int",
+    "library/src/scala/io/Codec.scala#tree=483": "scala.io.Codec",
+}
 ACCEPTANCE_IV_BASELINE_REVISION = "89f81940fc538a7b24323b82b9415cdb6a7c5404"
 ACCEPTANCE_IV_BASELINE_WORKFLOW_HEAD = "92a291efad106555b2be6aa5255ef2a45eac1985"
 ACCEPTANCE_IV_BASELINE_RUN_ID = "42427679560"
 ACCEPTANCE_IV_BASELINE_ARTIFACT_ID = "13595484615"
 ACCEPTANCE_IV_BASELINE_ARTIFACT_SHA256 = "ca52bc903a18a45c3e408290a9728fc770fc2ceabb8e4d7c337e970182a43084"
 ACCEPTANCE_IV_INTEGRATION_REVISION = "f9b94d2b2bb0480de32c4fd6689a4e7813148a1f"
-ACCEPTANCE_IV_INTEGRATION_RECEIPT_SHA256 = "e783ece1710b7b271c3ca3f9dd12b566b212b655c28d89da35bc900fbccf486e"
+ACCEPTANCE_IV_INTEGRATION_RECEIPT_SHA256 = "c13ba07650429146cfc7148a35e08780af8c3b08989f0b149d3b8d04bd64d9e7"
 
 
 def read_tsv(path: Path) -> list[dict[str, str]]:
@@ -290,7 +329,7 @@ def verify_acceptance_iv(
             failures.append(f"{row.get('identity')}: #2183 integration attempts disagree")
     if set(measured) != set(integration):
         failures.append("measured #2179 and integration receipts must contain the same exact roots")
-    for cohort, expected_typed, expected_integrated in (("main", 16, 18), ("analysis", 15, 16)):
+    for cohort, expected_typed, expected_integrated in (("main", 16, 19), ("analysis", 15, 16)):
         rows = [row for row in measured_rows if row.get("cohort") == cohort]
         typed = 0
         if len(rows) != 25:
@@ -331,6 +370,42 @@ def verify_acceptance_iv(
             failures.append(
                 f"{integration_receipt_path}: #2183 {cohort} receipt has {integrated_typed}/25 typed roots; expected {expected_integrated}/25"
             )
+        if cohort == "main":
+            historical_results = {
+                row["identity"]: row["actual_result"]
+                for row in integrated
+                if row.get("first_status") == "typed"
+                and row.get("identity") != ACCEPTANCE_IV_TUPLE_IDENTITY
+            }
+            if historical_results != ACCEPTANCE_IV_HISTORICAL_MAIN_RESULTS:
+                failures.append(
+                    f"{integration_receipt_path}: the original 18 main typed identities/results changed"
+                )
+            tuple_row = integration.get(ACCEPTANCE_IV_TUPLE_IDENTITY, {})
+            if (
+                tuple_row.get("cohort") != "main"
+                or tuple_row.get("source_tree") != "23"
+                or tuple_row.get("baseline_status") != "blocked"
+                or tuple_row.get("gate") != "observe"
+                or tuple_row.get("first_status") != "typed"
+                or tuple_row.get("second_status") != "typed"
+                or tuple_row.get("actual_result") != ACCEPTANCE_IV_TARGETS[ACCEPTANCE_IV_TUPLE_IDENTITY]
+                or tuple_row.get("protected_success") != "false"
+                or tuple_row.get("two_pass_equal") != "true"
+            ):
+                failures.append(
+                    f"{integration_receipt_path}: the sole additive main success must be the observed Tuple.toArray root"
+                )
+        else:
+            historical_results = {
+                row["identity"]: row["actual_result"]
+                for row in integrated
+                if row.get("first_status") == "typed"
+            }
+            if historical_results != ACCEPTANCE_IV_HISTORICAL_ANALYSIS_RESULTS:
+                failures.append(
+                    f"{integration_receipt_path}: the original 16 analysis typed identities/results changed"
+                )
     inputs = {
         "main": (
             main_report_path,
@@ -530,13 +605,16 @@ def _write_acceptance_iv_markdown(
         "only a typed original target row in the ordinary audit counts toward acceptance.\n\n"
         f"Source revision: `{PINNED_SCALA_REVISION}`; measured #2179: `89f81940fc538a7b24323b82b9415cdb6a7c5404` "
         f"({measured_main}/25 main, {measured_analysis}/25 analysis); "
-        f"separate #2183 integration receipt: `f9b94d2b2bb0480de32c4fd6689a4e7813148a1f` "
-        f"({integration_main}/25 main, {integration_analysis}/25 analysis); "
+        f"shared #2183 integration receipt plus the additive #2234 Tuple result: "
+        f"`f9b94d2b2bb0480de32c4fd6689a4e7813148a1f` "
+        f"({integration_main}/25 main, including the unchanged prior 18 plus Tuple; "
+        f"{integration_analysis}/25 analysis); "
         f"tested revision: `{tested_revision}`; PR head: `{pr_head_sha}`; final merge SHA: pending.\n\n"
         f"Hosted run: {hosted_run}\n\n"
         "The gate verifies all 50 exact ordinary roots, complete attempted-root accounting, "
         "the measured first/second #2179 outcomes, the separate #2183 integration outcomes, "
-        "the 16 main and 15 analysis protected results, and the 17/25 plus newly typed "
+        "the 16 main and 15 analysis protected results, the exact original 18 main "
+        "integration results, the sole additive `Tuple.toArray` success, and the 17/25 plus newly typed "
         "since #2179 target requirement. Historical manifest status is not a measured outcome.\n",
         encoding="utf-8",
     )

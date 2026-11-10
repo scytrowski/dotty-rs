@@ -291,6 +291,7 @@ class AcceptanceIVCloseoutTests(unittest.TestCase):
         typed_main: int = 17,
         target: bool = True,
         measured_target_status: str = "blocked::IfBranchJoinUnsupported",
+        tuple_target: bool = True,
     ):
         measured = directory / "measured-2179.tsv"
         integration = directory / "integration-2183.tsv"
@@ -303,6 +304,11 @@ class AcceptanceIVCloseoutTests(unittest.TestCase):
         required_rows = {"main": [], "analysis": []}
         report_rows = {"main": [], "analysis": []}
         protected_count = {"main": 16, "analysis": 15}
+        historical_main = dict(MODULE.ACCEPTANCE_IV_HISTORICAL_MAIN_RESULTS)
+        historical_main.pop("library/src/scala/Option.scala#tree=214")
+        historical_main_ids = sorted(historical_main)
+        historical_analysis = dict(MODULE.ACCEPTANCE_IV_HISTORICAL_ANALYSIS_RESULTS)
+        historical_analysis_ids = sorted(historical_analysis)
         for cohort in ("main", "analysis"):
             manifest_rows = []
             for index in range(25):
@@ -311,27 +317,36 @@ class AcceptanceIVCloseoutTests(unittest.TestCase):
                     if cohort == "main" and index == 24
                     else "library/src/scala/Tuple.scala#tree=23"
                     if cohort == "main" and index == 23
+                    else historical_main_ids[index]
+                    if cohort == "main" and index < len(historical_main_ids)
+                    else historical_analysis_ids[index]
+                    if cohort == "analysis" and index < len(historical_analysis_ids)
                     else f"library/src/{cohort}/Method{index}.scala#tree={index}"
                 )
-                source_tree = (
-                    214 if cohort == "main" and index == 24
-                    else 23 if cohort == "main" and index == 23
-                    else index
-                )
+                source_tree = int(identity.rsplit("#tree=", 1)[1])
                 protected = index < protected_count[cohort]
                 status = "typed" if (protected and (cohort == "analysis" or index < 16)) else "blocked::MemberNotFound"
                 result = "Int" if status == "typed" else "not_available"
                 if cohort == "main" and index == 24:
                     status = "typed" if target else "blocked::IfBranchJoinUnsupported"
                     result = "scala.Option[typeparam#0]" if target else "not_available"
-                expected_result = (
-                    "scala.Option[typeparam#0]"
-                    if cohort == "main" and index == 24
-                    else "Int"
-                )
+                if cohort == "main" and index == 24:
+                    expected_result = "scala.Option[typeparam#0]"
+                elif cohort == "main" and index == 23:
+                    expected_result = "scala.Array[java.lang.Object]"
+                elif cohort == "main":
+                    expected_result = historical_main.get(identity, "Int")
+                else:
+                    expected_result = historical_analysis.get(identity, "Int")
                 if cohort == "main" and index == 23:
-                    status = "blocked::ApplicationArgumentConformanceUnsupported"
-                    result = "not_available"
+                    status = "typed" if tuple_target else "blocked::ApplicationArgumentConformanceUnsupported"
+                    result = expected_result if tuple_target else "not_available"
+                elif cohort == "main" and identity in historical_main:
+                    status = "typed" if protected else "blocked::MemberNotFound"
+                    result = expected_result if status == "typed" else "not_available"
+                elif cohort == "analysis" and identity in historical_analysis:
+                    status = "typed" if protected else "blocked::MemberNotFound"
+                    result = expected_result if status == "typed" else "not_available"
                 first_status = status if protected else "blocked::MemberNotFound"
                 first_result = result if protected else "not_available"
                 if cohort == "main" and index == 24:
@@ -354,19 +369,27 @@ class AcceptanceIVCloseoutTests(unittest.TestCase):
                     "artifact_sha256": MODULE.ACCEPTANCE_IV_BASELINE_ARTIFACT_SHA256,
                 })
                 if protected:
-                    required_rows[cohort].append(f"{identity}\t{index}\tInt\n")
+                    required_rows[cohort].append(f"{identity}\t{source_tree}\t{expected_result}\n")
                 report_rows[cohort].append([
                     identity, cohort, f"method{index}", "1", "0..1", "[]", expected_result,
                     result, "1", status,
-                    "214" if cohort == "main" and index == 24 else "23" if cohort == "main" and index == 23 else str(index),
+                    str(source_tree),
                     str(index + 100) if status == "typed" else "-",
                 ])
                 manifest_rows.append(f"{identity}\t{source_tree}\n")
                 integration_status = status
                 integration_result = result
-                if (cohort == "main" and index == 16) or (cohort == "analysis" and index == 15):
+                historical_results = (
+                    MODULE.ACCEPTANCE_IV_HISTORICAL_MAIN_RESULTS
+                    if cohort == "main"
+                    else MODULE.ACCEPTANCE_IV_HISTORICAL_ANALYSIS_RESULTS
+                )
+                if identity in historical_results:
                     integration_status = "typed"
-                    integration_result = "Int"
+                    integration_result = historical_results[identity]
+                if cohort == "main" and index == 23:
+                    integration_status = "typed"
+                    integration_result = expected_result
                 integration_rows.append({
                     "cohort": cohort,
                     "identity": identity,
@@ -429,10 +452,66 @@ class AcceptanceIVCloseoutTests(unittest.TestCase):
             self.assertIn("Outcome: SPRINT GOAL UNMET pending independent review", closeout)
             self.assertIn("Hosted acceptance gate: PASS", closeout)
 
+    def test_closeout_accepts_only_tuple_as_the_additive_main_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            reports, measured, integration, main_required, analysis_required, manifests = self.write_closeout_inputs(Path(temporary))
+            failures, rows = MODULE.verify_acceptance_iv(
+                reports["main"], reports["analysis"], measured, integration, main_required, analysis_required,
+                main_manifest_path=manifests["main"], analysis_manifest_path=manifests["analysis"],
+            )
+            self.assertEqual(failures, [])
+            tuple_row = next(row for row in rows if row["identity"] == MODULE.ACCEPTANCE_IV_TUPLE_IDENTITY)
+            self.assertEqual(tuple_row["integration_status"], "typed")
+            self.assertEqual(tuple_row["integration_actual_result"], "scala.Array[java.lang.Object]")
+            self.assertEqual(tuple_row["after_status"], "typed")
+
+    def test_closeout_rejects_lost_historical_success_even_with_tuple_addition(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            reports, measured, integration, main_required, analysis_required, manifests = self.write_closeout_inputs(Path(temporary))
+            text = integration.read_text(encoding="utf-8")
+            identity = "library/src/scala/Option.scala#tree=118"
+            lines = text.splitlines()
+            for index, line in enumerate(lines):
+                if line.startswith("main\t" + identity + "\t"):
+                    fields = line.split("\t")
+                    fields[5] = fields[6] = "blocked::Regression"
+                    fields[7] = "not_available"
+                    lines[index] = "\t".join(fields)
+                    break
+            else:
+                self.fail("fixture is missing the historical Option success")
+            integration.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            failures, _ = MODULE.verify_acceptance_iv(
+                reports["main"], reports["analysis"], measured, integration, main_required, analysis_required,
+                main_manifest_path=manifests["main"], analysis_manifest_path=manifests["analysis"],
+            )
+            self.assertTrue(any("original 18 main typed identities/results changed" in failure for failure in failures))
+
+    def test_closeout_rejects_analysis_receipt_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            reports, measured, integration, main_required, analysis_required, manifests = self.write_closeout_inputs(Path(temporary))
+            lines = integration.read_text(encoding="utf-8").splitlines()
+            identity = "library/src/scala/concurrent/BlockContext.scala#tree=35"
+            for index, line in enumerate(lines):
+                if line.startswith("analysis\t" + identity + "\t"):
+                    fields = line.split("\t")
+                    fields[5] = fields[6] = "blocked::Regression"
+                    fields[7] = "not_available"
+                    lines[index] = "\t".join(fields)
+                    break
+            else:
+                self.fail("fixture is missing the historical BlockContext success")
+            integration.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            failures, _ = MODULE.verify_acceptance_iv(
+                reports["main"], reports["analysis"], measured, integration, main_required, analysis_required,
+                main_manifest_path=manifests["main"], analysis_manifest_path=manifests["analysis"],
+            )
+            self.assertTrue(any("original 16 analysis typed identities/results changed" in failure for failure in failures))
+
     def test_closeout_rejects_unprepared_tuple_proof_without_ordinary_target(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             reports, measured, integration, main_required, analysis_required, manifests = self.write_closeout_inputs(
-                Path(temporary), typed_main=16, target=False
+                Path(temporary), typed_main=16, target=False, tuple_target=False
             )
             failures, _ = MODULE.verify_acceptance_iv(
                 reports["main"], reports["analysis"], measured, integration, main_required, analysis_required,
@@ -444,8 +523,15 @@ class AcceptanceIVCloseoutTests(unittest.TestCase):
     def test_closeout_rejects_changed_protected_result(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             reports, measured, integration, main_required, analysis_required, manifests = self.write_closeout_inputs(Path(temporary))
-            text = reports["main"].read_text(encoding="utf-8")
-            reports["main"].write_text(text.replace("\tInt\t1\ttyped\t0\t100\n", "\tString\t1\ttyped\t0\t100\n", 1), encoding="utf-8")
+            lines = reports["main"].read_text(encoding="utf-8").splitlines()
+            header = next(index for index, line in enumerate(lines) if line.startswith("method\t"))
+            row = header + 1
+            while row < len(lines) and lines[row].split("\t")[9] != "typed":
+                row += 1
+            fields = lines[row].split("\t")
+            fields[7] = "String"
+            lines[row] = "\t".join(fields)
+            reports["main"].write_text("\n".join(lines) + "\n", encoding="utf-8")
             failures, _ = MODULE.verify_acceptance_iv(
                 reports["main"], reports["analysis"], measured, integration, main_required, analysis_required,
                 main_manifest_path=manifests["main"], analysis_manifest_path=manifests["analysis"],
@@ -473,7 +559,7 @@ class AcceptanceIVCloseoutTests(unittest.TestCase):
     def test_closeout_uses_measured_baseline_not_historical_manifest_status(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             reports, measured, integration, main_required, analysis_required, manifests = self.write_closeout_inputs(
-                Path(temporary), measured_target_status="typed"
+                Path(temporary), measured_target_status="typed", tuple_target=False
             )
             failures, _ = MODULE.verify_acceptance_iv(
                 reports["main"], reports["analysis"], measured, integration, main_required, analysis_required,
