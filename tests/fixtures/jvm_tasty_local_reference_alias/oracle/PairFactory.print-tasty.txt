@@ -1,0 +1,189 @@
+--------------------------------------------------------------------------------
+/home/vdrake6/.cache/agent-worktrees/issue-2232-local-alias-tmp-9af7c2d1/local-reference-alias/classes/example/PairFactory.tasty
+--------------------------------------------------------------------------------
+Header:
+  version: 28.9.0
+  tooling: Scala 3.9.0-bin-SNAPSHOT-git-777528f
+     UUID: 003f6a83-d5b1-25d5-00ff-2d2c2264bd26
+
+Names (363 bytes, starting from 60):
+     0: ASTs
+     1: example
+     2: PairFactory
+     3: <init>
+     4: java
+     5: lang
+     6: java[Qualified . lang]
+     7: Object
+     8: java[Qualified . lang][Qualified . Object]
+     9: <init>[Signed Signature(List(),java.lang.Object) @<init>]
+    10: Unit
+    11: scala
+    12: create
+    13: firstSeed
+    14: Int
+    15: secondSeed
+    16: Pair
+    17: example[Qualified . Pair]
+    18: Counter
+    19: example[Qualified . Counter]
+    20: <init>[Signed Signature(List(example.Counter, example.Counter),example.Pair) @<init>]
+    21: first
+    22: scala[Qualified . Int]
+    23: <init>[Signed Signature(List(scala.Int),example.Counter) @<init>]
+    24: second
+    25: alias
+    26: set
+    27: scala[Qualified . Unit]
+    28: set[Signed Signature(List(scala.Int),scala.Unit) @set]
+    29: SourceFile
+    30: annotation
+    31: scala[Qualified . annotation]
+    32: internal
+    33: scala[Qualified . annotation][Qualified . internal]
+    34: scala[Qualified . annotation][Qualified . internal][Qualified . SourceFile]
+    35: String
+    36: java[Qualified . lang][Qualified . String]
+    37: <init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]
+    38: tests/fixtures/jvm_tasty_local_reference_alias/LocalReferenceAlias.scala
+    39: Positions
+    40: Comments
+    41: Attributes
+
+Trees (171 bytes, starting from 426):
+     0: PACKAGE(168)
+     3:   TERMREFpkg 1 [example]
+     5:   TYPEDEF(163) 2 [PairFactory]
+     9:     TEMPLATE(139)
+    12:       APPLY(10)
+    14:         SELECTin(8) 9 [<init>[Signed Signature(List(),java.lang.Object) @<init>]]
+    17:           NEW
+    18:             TYPEREF 7 [Object]
+    20:               TERMREFpkg 6 [java[Qualified . lang]]
+    22:           SHAREDtype 18
+    24:       DEFDEF(7) 3 [<init>]
+    27:         EMPTYCLAUSE
+    28:         TYPEREF 10 [Unit]
+    30:           TERMREFpkg 11 [scala]
+    32:         STABLE
+    33:       DEFDEF(116) 12 [create]
+    36:         PARAM(7) 13 [firstSeed]
+    39:           IDENTtpt 14 [Int]
+    41:             TYPEREF 14 [Int]
+    43:               TERMREFpkg 11 [scala]
+    45:         PARAM(5) 15 [secondSeed]
+    48:           IDENTtpt 14 [Int]
+    50:             SHAREDtype 41
+    52:         IDENTtpt 16 [Pair]
+    54:           TYPEREF 16 [Pair]
+    56:             TERMREFpkg 1 [example]
+    58:         BLOCK(91)
+    60:           APPLY(14)
+    62:             SELECTin(8) 20 [<init>[Signed Signature(List(example.Counter, example.Counter),example.Pair) @<init>]]
+    65:               NEW
+    66:                 IDENTtpt 16 [Pair]
+    68:                   SHAREDtype 54
+    70:               SHAREDtype 54
+    72:             TERMREFdirect 76
+    74:             TERMREFdirect 99
+    76:           VALDEF(21) 21 [first]
+    79:             IDENTtpt 18 [Counter]
+    81:               TYPEREF 18 [Counter]
+    83:                 SHAREDtype 56
+    85:             APPLY(12)
+    87:               SELECTin(8) 23 [<init>[Signed Signature(List(scala.Int),example.Counter) @<init>]]
+    90:                 NEW
+    91:                   IDENTtpt 18 [Counter]
+    93:                     SHAREDtype 81
+    95:                 SHAREDtype 81
+    97:               TERMREFdirect 36
+    99:           VALDEF(19) 24 [second]
+   102:             IDENTtpt 18 [Counter]
+   104:               SHAREDtype 81
+   106:             APPLY(12)
+   108:               SELECTin(8) 23 [<init>[Signed Signature(List(scala.Int),example.Counter) @<init>]]
+   111:                 NEW
+   112:                   IDENTtpt 18 [Counter]
+   114:                     SHAREDtype 81
+   116:                 SHAREDtype 81
+   118:               TERMREFdirect 45
+   120:           VALDEF(7) 25 [alias]
+   123:             IDENTtpt 18 [Counter]
+   125:               SHAREDtype 81
+   127:             SHAREDtype 72
+   129:           APPLY(9)
+   131:             SELECTin(5) 28 [set[Signed Signature(List(scala.Int),scala.Unit) @set]]
+   134:               TERMREFdirect 120
+   136:               SHAREDtype 81
+   138:             SHAREDtype 118
+   140:           APPLY(9)
+   142:             SELECTin(5) 28 [set[Signed Signature(List(scala.Int),scala.Unit) @set]]
+   145:               SHAREDtype 74
+   147:               SHAREDtype 81
+   149:             SHAREDtype 97
+   151:     ANNOTATION(18)
+   153:       TYPEREF 29 [SourceFile]
+   155:         TERMREFpkg 33 [scala[Qualified . annotation][Qualified . internal]]
+   157:       APPLY(12)
+   159:         SELECTin(8) 37 [<init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]]
+   162:           NEW
+   163:             SHAREDtype 153
+   166:           SHAREDtype 153
+   169:         STRINGconst 38 [tests/fixtures/jvm_tasty_local_reference_alias/LocalReferenceAlias.scala]
+   171:
+
+Positions (174 bytes, starting from 600):
+  lines: 22
+  line sizes:
+     15, 0, 26, 34, 26, 45, 0, 44, 35, 37, 35, 37, 0, 18, 53, 47, 49, 30, 25, 25
+     27, 0
+  positions:
+     0: 0 .. 628
+     5: 347 .. 628
+     9: 368 .. 628
+    18: 353 .. 353
+    24: 368 .. 368
+    28: 368 .. 368
+    33: 368 .. 628
+    36: 379 .. 393
+    39: 390 .. 393
+    45: 395 .. 410
+    48: 407 .. 410
+    52: 413 .. 417
+    60: 605 .. 628
+    66: 609 .. 613
+    72: 614 .. 619
+    74: 621 .. 627
+    76: 424 .. 467
+    79: 435 .. 442
+    85: 445 .. 467
+    91: 449 .. 456
+    97: 457 .. 466
+    99: 472 .. 517
+   102: 484 .. 491
+   106: 494 .. 517
+   112: 498 .. 505
+   118: 506 .. 516
+   120: 522 .. 548
+   123: 533 .. 540
+   127: 543 .. 548
+   129: 553 .. 574
+   131: 553 .. 562
+   134: 553 .. 558
+   138: 563 .. 573
+   140: 579 .. 600
+   142: 579 .. 589
+   145: 579 .. 585
+   149: 590 .. 599
+   157: 347 .. 628
+   163: 347 .. 347
+   169: 347 .. 347
+
+  source paths:
+     0: 38 [tests/fixtures/jvm_tasty_local_reference_alias/LocalReferenceAlias.scala]
+
+Attributes (2 bytes, starting from 778):
+  SOURCEFILEattr 38 [tests/fixtures/jvm_tasty_local_reference_alias/LocalReferenceAlias.scala]
+
+
+--------------------------------------------------------------------------------

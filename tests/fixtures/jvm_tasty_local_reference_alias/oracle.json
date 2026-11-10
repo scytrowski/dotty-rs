@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "purpose": "Pinned Scala 3.9.0/JDK 21 evidence for the immutable local reference alias audit in issue #2232. Artifacts in scala39/ are official Scala compiler outputs, not Rust outputs.",
+  "repository_baseline": {
+    "main_sha": "cd8d72f09c6e9342c0a761c8887bb2c48a52add8",
+    "predecessor_pr_2222_merge_sha": "ba75daff932703bab38115d6373763faaa7cb6b1",
+    "predecessor_is_ancestor": true
+  },
+  "source": {
+    "path": "LocalReferenceAlias.scala",
+    "sha256": "b1b200af5108685cf58b769b3ed0654c189d2fb28fa1c8eaaba5f02580d2b79f",
+    "client_path": "RuntimeProbe.java",
+    "client_sha256": "207e7a5bca59ace13abe384655b9ea825ac3e9f4023e298156c9de7095ebe0ad",
+    "counter_pair_declarations": "Copied without member changes from tests/fixtures/jvm_tasty_ordered_local_unit_calls/OrderedLocalUnitCalls.scala"
+  },
+  "toolchain": {
+    "scala": {
+      "version": "3.9.0-bin-SNAPSHOT-git-777528f",
+      "source_revision": "777528f19a58e794c9954a42f433373472ec57f8",
+      "compiler_jar_sha256": "cf8ebddf01b86e563c179f72ab973dbc679092ca1d8c733ead31516cc01b9295",
+      "scalac_launcher_sha256": "2981fa689c25ac031e1d923387c07ca65506ed7d8d88454e5d4dcd8e11726120",
+      "sbt_version": "1.12.1",
+      "sbt_runner_version": "2.0.9",
+      "build_command": "sbt -batch 'dist-linux-x86_64/universal:stage'"
+    },
+    "rust": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "jdk": {
+      "vendor": "Eclipse Temurin",
+      "version": "21.0.8+9",
+      "release": 21,
+      "java_sha256": "90d0a6d25da103678013f193db078b90ed8aeb27b66ebe78e0149616c9c1b811",
+      "javac_sha256": "b8c1509bfd245eaf891fcf453c02871ce7e794263e8f3af7655082ffc68281b2",
+      "javap_sha256": "a6f2fb0e2bb72b6233f245deab5083f05542972363420a0a2d1206e86026c008"
+    }
+  },
+  "commands": {
+    "compile": "scalac -Werror -release 21 -d classes LocalReferenceAlias.scala",
+    "java_probe_compile": "javac --release 21 -cp classes -d classes RuntimeProbe.java",
+    "java_probe_run": "java -Xverify:all -ea -cp classes example.RuntimeProbe",
+    "javap": "javap -v -c -p -classpath classes example.PairFactory",
+    "print_tasty": "scalac -color:never -print-tasty classes/example/PairFactory.tasty",
+    "from_tasty": "scalac -from-tasty -classpath classes -d from-tasty classes/example/PairFactory.tasty",
+    "typed_tree": "scalac -Werror -release 21 -Vprint:typer -d typed LocalReferenceAlias.scala"
+  },
+  "runtime": [
+    "3/7 distinct=true for seeds 7/3 under java -Xverify:all -ea",
+    "42/-9 distinct=true for seeds -9/42 under java -Xverify:all -ea"
+  ],
+  "pair_factory_create": {
+    "descriptor": "(II)Lexample/Pair;",
+    "classfile_major": 65,
+    "max_stack": 4,
+    "max_locals": 6,
+    "local_slots": {"first": 3, "second": 4, "alias": 5},
+    "allocations": ["Counter in slot 3", "Counter in slot 4", "Pair"],
+    "alias_bytecode": ["aload_3; astore 5", "aload 5; iload_2; invokevirtual Counter.set(I)V"],
+    "ordered_calls": [
+      "alias.set(secondSeed), receiver slot 5",
+      "second.set(firstSeed), receiver slot 4"
+    ],
+    "pair_constructor_arguments": ["slot 3 (first)", "slot 4 (second)"],
+    "tasty_version": "28.9.0",
+    "tasty_block_address": 58,
+    "tasty_block_stats": ["VALDEF@76 first", "VALDEF@99 second", "VALDEF@120 alias", "APPLY@129", "APPLY@140"],
+    "tasty_block_result": "APPLY@60",
+    "alias_rhs": "SHAREDtype@127 -> TERMREFdirect@72 -> first VALDEF@76",
+    "call_receivers": ["TERMREFdirect@134 -> alias VALDEF@120", "SHAREDtype@145 -> TERMREFdirect@74 -> second VALDEF@99"],
+    "pair_argument_refs": ["TERMREFdirect@72 -> first VALDEF@76", "TERMREFdirect@74 -> second VALDEF@99"]
+  },
+  "from_tasty": {
+    "result": "passed; PairFactory.class and PairFactory.tasty emitted",
+    "class_sha256": "2374bba6f125401d4ff4e593e18850488cda3a4d620c0ad2046ee9f755aa218d",
+    "byte_identical_to_primary_compile": false
+  },
+  "artifacts": [
+    {"path": "scala39/example/Counter.class", "sha256": "f3132eccda858aaa47399e885579bc9d2155452b3259511987b247df75d39773", "classfile_major": 65},
+    {"path": "scala39/example/Counter.tasty", "sha256": "531115b01c6b3693e89fbaf1863ba01e194ceaa8d1e453a98719dfb210fc4ac1", "tasty_version": "28.9.0"},
+    {"path": "scala39/example/Pair.class", "sha256": "4544762a335ad6538cde63a54e82456e35af50b757fc197ae1f8cccb99ec8223", "classfile_major": 65},
+    {"path": "scala39/example/Pair.tasty", "sha256": "e7ffcccb937003fe928c0ce843ecc1664b373c11f1112b57649246493e646953", "tasty_version": "28.9.0"},
+    {"path": "scala39/example/PairFactory.class", "sha256": "ec7927974137862c6949818f7ef32759076a0ae3bf6258081ab18ec8bb5bf960", "classfile_major": 65},
+    {"path": "scala39/example/PairFactory.tasty", "sha256": "3a6a3917f86c132babcbad6920c79b06f77b2494f0b77032990bc3849f79d78c", "tasty_version": "28.9.0"}
+  ],
+  "snapshots": {
+    "javap": {"path": "oracle/PairFactory.javap.txt", "sha256": "d6e91542626551cdec68c8dc7ef0c4dce0b85fe3e9cae4514ad3273b49bc08ed", "workspace_path_header_normalized": true},
+    "print_tasty": {"path": "oracle/PairFactory.print-tasty.txt", "sha256": "d88ebf183e4c0dd63c2dd76ff9497b70757c9d6720b85d6c29b29940d1a70e1c"},
+    "typed_tree": {"path": "oracle/typer.txt", "sha256": "ba1fcabffdb696c1c8a1e909b64923a4f5cc2c79aa630a1073df4ad79b53f095"}
+  },
+  "control_matrix": [
+    {"path": "controls/RenamedLocalAlias.scala", "sha256": "f084ddd5b3e977777194d1339668c7c6bf9951e36d1c35f8382c91908710c9ea", "scala": "valid", "paired_path": "SourceShape rejection"},
+    {"path": "controls/ReversedDeclarations.scala", "sha256": "b3de52971e5e219ef79ee305824e4160a54d553c921bf5c9e9fc2776947bd9fd", "scala": "valid; alias remains after both locals", "paired_path": "SourceShape rejection"},
+    {"path": "controls/AliasOfSecond.scala", "sha256": "ee14ec7c820bc503d8bf5d3a543ba3186fe58d5ad1c53c299540e5bd447b0980", "scala": "valid; separately valid and outside acceptance", "paired_path": "SourceShape rejection"},
+    {"path": "controls/AliasBeforeInitialization.scala", "sha256": "dbfbe09276592731830fcd460118075999a519a58ba01b84565e1594f9590f0d", "scala": "invalid: E039 forward reference", "paired_path": "method body typing: TermNameNotFound"},
+    {"path": "controls/WrongAliasType.scala", "sha256": "fb89c643dbbca29945bbf1d07536572366a3d062d33db55107183962fd27a982", "scala": "invalid: E007 type mismatch and E008 no set member", "paired_path": "method body typing: LocalValueTypeMismatch"},
+    {"path": "controls/MutableAlias.scala", "sha256": "bb490f793e5db61a5d4d4216cb3a5e8767560d01de9fdaca55af7b19f7290bf0", "scala": "valid", "paired_path": "SourceShape rejection"},
+    {"path": "controls/AliasChain.scala", "sha256": "a49fa36548772087e8e3d3c8ed89e3207b2d7eb15b492c76b4a3790a3ba1a14c", "scala": "valid", "paired_path": "SourceShape rejection"},
+    {"path": "../jvm_tasty_two_immutable_reference_locals/TwoLocals.scala", "sha256": "e2411637c892feb474d6d70526d471b524cd7de49a3db2565923cd69736f73c3", "scala": "valid zero-call baseline; paired path accepted"},
+    {"path": "../jvm_tasty_local_receiver_call/LocalReceiverCall.scala", "sha256": "d00efdafda78682532599fbd9017a2037d1579241fa388c744f8f58d13b42eb8", "scala": "valid one-call baseline; paired path accepted"},
+    {"path": "../jvm_tasty_ordered_local_unit_calls/OrderedLocalUnitCalls.scala", "sha256": "2e60a40b35587559589b431c9cc191f5d752ea3b4219aa2fc71b99edd2da3b8b", "scala": "valid two-call baseline; paired path accepted"}
+  ],
+  "current_rust_first_failure": {
+    "session": {
+      "source_id": 22320,
+      "factory_symbol": 42,
+      "create_symbol": 60,
+      "formal_symbols": [61, 62],
+      "locals": [
+        {"name": "first", "symbol": 63, "scope": 18, "source_tree": 55, "typed_declaration": 31},
+        {"name": "second", "symbol": 64, "scope": 18, "source_tree": 62, "typed_declaration": 38},
+        {"name": "alias", "symbol": 65, "scope": 18, "source_tree": 65, "typed_declaration": 41}
+      ],
+      "source_to_typed_statements": [[55, 31], [62, 38], [65, 41], [69, 45], [73, 49]],
+      "alias_initializer": {"source_tree": 64, "typed_tree": 39, "term_symbol": 63},
+      "ordered_call_receivers": [65, 64],
+      "final_pair_expression": {"source_tree": 79, "typed_tree": 55, "argument_symbols": [63, 64]}
+    },
+    "source_id": 22320,
+    "phase": "cross-class constructor-call identity proof",
+    "error": "SourceShape(\"factory body must be a direct Apply or a one- or two-local Block\")",
+    "callback_reached": false,
+    "paired_batch_returned": false,
+    "partial_artifacts": 0
+  }
+}

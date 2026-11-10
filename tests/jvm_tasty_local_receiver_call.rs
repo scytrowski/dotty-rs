@@ -28,6 +28,23 @@ mod batch_publisher;
 const TARGET: &str = include_str!("fixtures/jvm_tasty_local_receiver_call/LocalReceiverCall.scala");
 const TWO_CALL_TARGET: &str =
     include_str!("fixtures/jvm_tasty_ordered_local_unit_calls/OrderedLocalUnitCalls.scala");
+const LOCAL_REFERENCE_ALIAS_TARGET: &str =
+    include_str!("fixtures/jvm_tasty_local_reference_alias/LocalReferenceAlias.scala");
+const ALIAS_CONTROL_RENAMED: &str =
+    include_str!("fixtures/jvm_tasty_local_reference_alias/controls/RenamedLocalAlias.scala");
+const ALIAS_CONTROL_REVERSED: &str =
+    include_str!("fixtures/jvm_tasty_local_reference_alias/controls/ReversedDeclarations.scala");
+const ALIAS_CONTROL_SECOND: &str =
+    include_str!("fixtures/jvm_tasty_local_reference_alias/controls/AliasOfSecond.scala");
+const ALIAS_CONTROL_BEFORE_INIT: &str = include_str!(
+    "fixtures/jvm_tasty_local_reference_alias/controls/AliasBeforeInitialization.scala"
+);
+const ALIAS_CONTROL_WRONG_TYPE: &str =
+    include_str!("fixtures/jvm_tasty_local_reference_alias/controls/WrongAliasType.scala");
+const ALIAS_CONTROL_MUTABLE: &str =
+    include_str!("fixtures/jvm_tasty_local_reference_alias/controls/MutableAlias.scala");
+const ALIAS_CONTROL_CHAIN: &str =
+    include_str!("fixtures/jvm_tasty_local_reference_alias/controls/AliasChain.scala");
 const TWO_LOCAL_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
 const COUNTER_CLASS: &[u8] =
@@ -48,6 +65,18 @@ const TWO_CALL_FACTORY_CLASS: &[u8] =
     include_bytes!("fixtures/jvm_tasty_ordered_local_unit_calls/scala39/example/PairFactory.class");
 const TWO_CALL_FACTORY_TASTY: &[u8] =
     include_bytes!("fixtures/jvm_tasty_ordered_local_unit_calls/scala39/example/PairFactory.tasty");
+const LOCAL_REFERENCE_ALIAS_FACTORY_CLASS: &[u8] =
+    include_bytes!("fixtures/jvm_tasty_local_reference_alias/scala39/example/PairFactory.class");
+const LOCAL_REFERENCE_ALIAS_FACTORY_TASTY: &[u8] =
+    include_bytes!("fixtures/jvm_tasty_local_reference_alias/scala39/example/PairFactory.tasty");
+const LOCAL_REFERENCE_ALIAS_COUNTER_CLASS: &[u8] =
+    include_bytes!("fixtures/jvm_tasty_local_reference_alias/scala39/example/Counter.class");
+const LOCAL_REFERENCE_ALIAS_COUNTER_TASTY: &[u8] =
+    include_bytes!("fixtures/jvm_tasty_local_reference_alias/scala39/example/Counter.tasty");
+const LOCAL_REFERENCE_ALIAS_PAIR_CLASS: &[u8] =
+    include_bytes!("fixtures/jvm_tasty_local_reference_alias/scala39/example/Pair.class");
+const LOCAL_REFERENCE_ALIAS_PAIR_TASTY: &[u8] =
+    include_bytes!("fixtures/jvm_tasty_local_reference_alias/scala39/example/Pair.tasty");
 
 fn decode_class(bytes: &[u8]) -> ClassFile<'_> {
     let mut reader = ClassReader::new(bytes);
@@ -274,6 +303,141 @@ fn scala39_two_call_oracle_records_ordered_block_and_bytecode() {
     }
 }
 
+#[test]
+fn scala39_local_reference_alias_oracle_records_alias_block_and_bytecode() {
+    for (class_bytes, tasty_bytes, expected_name) in [
+        (
+            LOCAL_REFERENCE_ALIAS_COUNTER_CLASS,
+            LOCAL_REFERENCE_ALIAS_COUNTER_TASTY,
+            "example/Counter",
+        ),
+        (
+            LOCAL_REFERENCE_ALIAS_PAIR_CLASS,
+            LOCAL_REFERENCE_ALIAS_PAIR_TASTY,
+            "example/Pair",
+        ),
+        (
+            LOCAL_REFERENCE_ALIAS_FACTORY_CLASS,
+            LOCAL_REFERENCE_ALIAS_FACTORY_TASTY,
+            "example/PairFactory",
+        ),
+    ] {
+        let class = decode_class(class_bytes);
+        let tasty = TastyFile::parse_and_validate_scala_3_9(tasty_bytes).unwrap();
+        assert_eq!(class.version.major, 65);
+        assert_eq!(
+            class.constant_pool.class_name(class.this_class).unwrap(),
+            expected_name
+        );
+        assert_eq!(
+            class.tasty_link_id().unwrap().unwrap().as_bytes(),
+            &tasty.header().uuid
+        );
+        assert_eq!(
+            (
+                tasty.header().major_version,
+                tasty.header().minor_version,
+                tasty.header().experimental_version
+            ),
+            (28, 9, 0)
+        );
+    }
+    let class = decode_class(LOCAL_REFERENCE_ALIAS_FACTORY_CLASS);
+    let tasty =
+        TastyFile::parse_and_validate_scala_3_9(LOCAL_REFERENCE_ALIAS_FACTORY_TASTY).unwrap();
+    assert_eq!(class.version.major, 65);
+    assert_eq!(
+        class.constant_pool.class_name(class.this_class).unwrap(),
+        "example/PairFactory"
+    );
+    assert_eq!(
+        class.tasty_link_id().unwrap().unwrap().as_bytes(),
+        &tasty.header().uuid
+    );
+    assert_eq!(
+        (
+            tasty.header().major_version,
+            tasty.header().minor_version,
+            tasty.header().experimental_version
+        ),
+        (28, 9, 0)
+    );
+    let method = class
+        .methods
+        .iter()
+        .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "create")
+        .unwrap();
+    assert_eq!(
+        class.constant_pool.utf8(method.descriptor_index).unwrap(),
+        "(II)Lexample/Pair;"
+    );
+    let code = method
+        .attributes
+        .iter()
+        .find_map(|attribute| match attribute {
+            Attribute::Code(code) => Some(code),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!((code.max_stack, code.max_locals), (4, 6));
+
+    let index = tasty.ast_address_index().unwrap();
+    let (_, body) = index
+        .iter_nodes_with_tag(DEFDEF_TAG)
+        .find_map(|node| {
+            let body = index
+                .get(node.offset as u32)
+                .unwrap()
+                .decode_defdef_body()
+                .unwrap();
+            (tasty.names().render(body.name).unwrap() == "create")
+                .then_some((node.offset as u32, body))
+        })
+        .unwrap();
+    let RawTree::LengthNode(block_node) = body.rhs.unwrap() else {
+        panic!("Scala encodes create as a BLOCK");
+    };
+    assert_eq!(block_node.tag, BLOCK_TAG);
+    let block = block_node.decode_block().unwrap();
+    assert_eq!(block.stats.len(), 5);
+    assert_eq!(
+        block.stats.iter().map(raw_tag).collect::<Vec<_>>(),
+        [VALDEF_TAG, VALDEF_TAG, VALDEF_TAG, APPLY_TAG, APPLY_TAG]
+    );
+    assert_eq!(raw_tag(&block.expression), APPLY_TAG);
+
+    let printed =
+        include_str!("fixtures/jvm_tasty_local_reference_alias/oracle/PairFactory.print-tasty.txt");
+    for observation in [
+        "58:         BLOCK(91)",
+        "72:             TERMREFdirect 76",
+        "74:             TERMREFdirect 99",
+        "120:           VALDEF(7) 25 [alias]",
+        "127:             SHAREDtype 72",
+        "134:               TERMREFdirect 120",
+        "145:               SHAREDtype 74",
+    ] {
+        assert!(
+            printed.contains(observation),
+            "missing TASTy observation {observation:?}"
+        );
+    }
+    let javap =
+        include_str!("fixtures/jvm_tasty_local_reference_alias/oracle/PairFactory.javap.txt");
+    assert!(javap.contains("stack=4, locals=6, args_size=3"));
+    assert!(javap.contains("19: aload_3\n        20: astore        5"));
+    assert!(javap.contains("22: aload         5\n        24: iload_2"));
+    let alias_call = javap.find("Method example/Counter.set:(I)V").unwrap();
+    let second_call = javap[alias_call + 1..]
+        .find("Method example/Counter.set:(I)V")
+        .unwrap()
+        + alias_call
+        + 1;
+    let final_pair = javap.find("Method example/Pair.\"<init>\"").unwrap();
+    assert!(alias_call < second_call && second_call < final_pair);
+    assert!(javap.contains("38: aload_3\n        39: aload         4"));
+}
+
 fn paired_result(source: &str, source_id: u32) -> Result<(), PairedPlanError> {
     with_paired_jvm_tasty_batch_plan(
         source,
@@ -281,6 +445,395 @@ fn paired_result(source: &str, source_id: u32) -> Result<(), PairedPlanError> {
         SourceId::from_index(source_id),
         |_| (),
     )
+}
+
+#[test]
+fn local_reference_alias_audit_authenticates_frontend_identities_and_first_paired_failure() {
+    let source_id = SourceId::from_index(22320);
+    let source_text = SourceText::new(LOCAL_REFERENCE_ALIAS_TARGET).unwrap();
+    let scanner = ContextualScanner::new(LOCAL_REFERENCE_ALIAS_TARGET).unwrap();
+    assert!(scanner.diagnostics().is_empty());
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let parsed = parse_compilation_unit(source_text, source_id, scanner, &mut store.names);
+    assert!(parsed.diagnostics.is_empty());
+    let mut packages = Packages::new();
+    let source_index = match name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source_id,
+        "LocalReferenceAlias.scala",
+        SourceParseStatus::Clean,
+        &mut store,
+        &mut packages,
+    )
+    .unwrap()
+    {
+        NamingOutcome::Named { index, diagnostics } if diagnostics.is_empty() => index,
+        outcome => panic!("alias target names cleanly: {outcome:?}"),
+    };
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("target package root");
+    };
+    assert_eq!(package.stats.len(), 3);
+    let factory_tree = *package.stats.last().unwrap();
+    let factory = source_index.symbol_at(source_id, factory_tree).unwrap();
+    let TreeKind::TypeDef(factory_def) = &parsed.ast.get(factory_tree).kind else {
+        panic!("PairFactory is a class");
+    };
+    let TreeKind::Template(factory_template) = &parsed.ast.get(factory_def.rhs).kind else {
+        panic!("PairFactory has a template");
+    };
+    let create_tree = *factory_template
+        .body
+        .iter()
+        .find(|tree| matches!(&parsed.ast.get(**tree).kind, TreeKind::DefDef(def) if def.rhs.is_some()))
+        .unwrap();
+    let create = source_index.symbol_at(source_id, create_tree).unwrap();
+    let TreeKind::DefDef(create_def) = &parsed.ast.get(create_tree).kind else {
+        panic!("create is a method");
+    };
+    let formals = create_def.value_param_clauses[0]
+        .iter()
+        .map(|tree| source_index.symbol_at(source_id, *tree).unwrap())
+        .collect::<Vec<SymbolId>>();
+    let body_tree = create_def.rhs.expect("create has a body");
+    let TreeKind::Block(block) = &parsed.ast.get(body_tree).kind else {
+        panic!("create body is a source block");
+    };
+    assert_eq!(block.stats.len(), 5);
+    assert!(
+        block.stats[..3]
+            .iter()
+            .all(|tree| matches!(&parsed.ast.get(*tree).kind, TreeKind::ValDef(_)))
+    );
+    assert!(
+        block.stats[3..]
+            .iter()
+            .all(|tree| matches!(&parsed.ast.get(*tree).kind, TreeKind::Apply(_)))
+    );
+
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source_id,
+        &source_index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for class_tree in package.stats.iter().copied() {
+        let class = source_index.symbol_at(source_id, class_tree).unwrap();
+        typer.complete_symbol(class).unwrap();
+        let TreeKind::TypeDef(def) = &parsed.ast.get(class_tree).kind else {
+            unreachable!();
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(def.rhs).kind else {
+            unreachable!();
+        };
+        typer
+            .complete_symbol(
+                source_index
+                    .symbol_at(source_id, template.constructor)
+                    .unwrap(),
+            )
+            .unwrap();
+        for member in template.body.iter().copied() {
+            if matches!(&parsed.ast.get(member).kind, TreeKind::DefDef(_)) {
+                typer.type_method_definition(member).unwrap();
+            }
+        }
+    }
+
+    let bindings = block.stats[..3]
+        .iter()
+        .map(|tree| typer.typed_local_binding_at(source_id, *tree).unwrap())
+        .collect::<Vec<_>>();
+    let [first, second, alias] = bindings.as_slice() else {
+        panic!("target has exactly three immutable locals");
+    };
+    for binding in bindings.iter() {
+        assert_eq!(
+            typer.store().symbols.get(binding.symbol()).owner,
+            Some(create)
+        );
+        assert_eq!(
+            typer.store().scopes.get(binding.scope()).owner,
+            Some(create)
+        );
+    }
+    assert_ne!(first.symbol(), second.symbol());
+    assert_ne!(alias.symbol(), first.symbol());
+    assert_ne!(alias.symbol(), second.symbol());
+
+    let typed_ast = typer.typed_ast();
+    let typed_stats = block
+        .stats
+        .iter()
+        .map(|tree| {
+            typer
+                .source_typed_index()
+                .get(source_id, *tree)
+                .expect("each source statement has a typed identity")
+        })
+        .collect::<Vec<_>>();
+    let typed_body = typer
+        .source_typed_index()
+        .get(source_id, body_tree)
+        .expect("the source method block has a typed identity");
+    let TreeKind::Block(typed_block) = &typed_ast.get(typed_body).kind else {
+        panic!("create keeps a typed block");
+    };
+    assert_eq!(typed_block.stats, typed_stats);
+
+    let alias_declaration = typed_ast.get(alias.declaration());
+    let TreeKind::ValDef(alias_val) = &alias_declaration.kind else {
+        panic!("alias binding points to its typed ValDef");
+    };
+    let alias_rhs = alias_val.rhs.expect("alias has an initializer");
+    let alias_rhs_type = typer.store().types.get(typed_ast.get(alias_rhs).ty);
+    let dotty_core::Type::TermRef {
+        target: dotty_core::TermRefTarget::Symbol(alias_source),
+        ..
+    } = alias_rhs_type
+    else {
+        panic!("alias initializer retains a canonical local reference: {alias_rhs_type:?}");
+    };
+    assert_eq!(*alias_source, first.symbol());
+
+    for (ordinal, expected_receiver) in [(3, alias.symbol()), (4, second.symbol())] {
+        let call_tree = typed_stats[ordinal];
+        let TreeKind::Apply(call) = &typed_ast.get(call_tree).kind else {
+            panic!("set call is a typed application");
+        };
+        let TreeKind::Select(selection) = &typed_ast.get(call.function).kind else {
+            panic!("set call has a selected receiver");
+        };
+        let receiver_type = typer
+            .store()
+            .types
+            .get(typed_ast.get(selection.qualifier).ty);
+        let dotty_core::Type::TermRef {
+            target: dotty_core::TermRefTarget::Symbol(receiver),
+            ..
+        } = receiver_type
+        else {
+            panic!("call receiver retains a canonical local reference: {receiver_type:?}");
+        };
+        assert_eq!(*receiver, expected_receiver);
+    }
+
+    let typed_result = typer
+        .source_typed_index()
+        .get(source_id, block.expr)
+        .expect("the final Pair expression has a typed identity");
+    let TreeKind::Apply(pair_call) = &typed_ast.get(typed_result).kind else {
+        panic!("create result is a Pair constructor application");
+    };
+    let pair_argument_symbols = pair_call
+        .args
+        .iter()
+        .map(
+            |argument| match typer.store().types.get(typed_ast.get(*argument).ty) {
+                dotty_core::Type::TermRef {
+                    target: dotty_core::TermRefTarget::Symbol(symbol),
+                    ..
+                } => *symbol,
+                ty => panic!("constructor argument retains its local identity: {ty:?}"),
+            },
+        )
+        .collect::<Vec<_>>();
+    assert_eq!(pair_argument_symbols, [first.symbol(), second.symbol()]);
+    let source_to_typed = block
+        .stats
+        .iter()
+        .copied()
+        .zip(typed_stats.iter().copied())
+        .collect::<Vec<_>>();
+    let alias_source_rhs = match &parsed.ast.get(block.stats[2]).kind {
+        TreeKind::ValDef(alias) => alias.rhs.expect("source alias has an initializer"),
+        _ => unreachable!(),
+    };
+    let alias_rhs_mapping = (
+        alias_source_rhs,
+        typer
+            .source_typed_index()
+            .get(source_id, alias_source_rhs)
+            .expect("alias initializer maps to a typed tree"),
+    );
+    assert_eq!(alias_rhs_mapping.1, alias_rhs);
+    let result_mapping = (
+        block.expr,
+        typer
+            .source_typed_index()
+            .get(source_id, block.expr)
+            .expect("final Pair expression maps to a typed tree"),
+    );
+    assert_eq!(result_mapping.1, typed_result);
+
+    println!(
+        "local reference alias source_id={source_id:?}; factory={factory:?}; create={create:?}; formals={formals:?}; locals=[{:?}@{:?}, {:?}@{:?}, {:?}@{:?}]; source_to_typed={source_to_typed:?}; alias_rhs={alias_source:?} via {alias_rhs_mapping:?}; receivers=[{:?}, {:?}]; final_pair={result_mapping:?} args={pair_argument_symbols:?}",
+        first.symbol(),
+        first.scope(),
+        second.symbol(),
+        second.scope(),
+        alias.symbol(),
+        alias.scope(),
+        alias.symbol(),
+        second.symbol(),
+    );
+
+    let mut observed_plan_classes = Vec::new();
+    let result = with_paired_jvm_tasty_batch_plan(
+        LOCAL_REFERENCE_ALIAS_TARGET,
+        "LocalReferenceAlias.scala",
+        SourceId::from_index(22321),
+        |plan| observed_plan_classes.extend(plan.classes.iter().map(|_| ())),
+    );
+    println!("current paired producer first rejection: {result:?}");
+    assert!(matches!(
+        result,
+        Err(PairedPlanError::BatchUnit {
+            phase: "cross-class constructor-call identity proof",
+            ..
+        })
+    ));
+    assert!(
+        observed_plan_classes.is_empty(),
+        "rejected target never reaches the plan callback"
+    );
+    assert!(
+        matches!(
+            emit_paired_jvm_tasty_batch(
+                LOCAL_REFERENCE_ALIAS_TARGET,
+                "LocalReferenceAlias.scala",
+                SourceId::from_index(22322)
+            ),
+            Err(dotty::jvm_tasty_artifacts::PairedBatchArtifactError::Plan(
+                PairedPlanError::BatchUnit {
+                    phase: "cross-class constructor-call identity proof",
+                    ref reason
+                }
+            )) if reason == "SourceShape(\"factory body must be a direct Apply or a one- or two-local Block\")"
+        ),
+        "artifact producer returns its observed first error before constructing a batch"
+    );
+
+    let baseline =
+        include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
+    assert!(
+        paired_result(baseline, 22323).is_ok(),
+        "the zero-call baseline remains accepted"
+    );
+    assert!(
+        paired_result(TARGET, 22324).is_ok(),
+        "the one-call baseline remains accepted"
+    );
+    assert!(
+        paired_result(TWO_CALL_TARGET, 22325).is_ok(),
+        "the two-call baseline remains accepted"
+    );
+
+    let source_prefix = LOCAL_REFERENCE_ALIAS_TARGET
+        .split_once("class PairFactory:")
+        .map(|(prefix, _)| prefix)
+        .expect("target has the shared Counter and Pair declarations");
+    enum ControlExpectation {
+        ValidDeferred,
+        InvalidForwardReference,
+        InvalidAliasType,
+    }
+    for (name, control, source_id, expectation) in [
+        (
+            "renamed-local-alias",
+            ALIAS_CONTROL_RENAMED,
+            22326,
+            ControlExpectation::ValidDeferred,
+        ),
+        (
+            "reversed-declarations",
+            ALIAS_CONTROL_REVERSED,
+            22327,
+            ControlExpectation::ValidDeferred,
+        ),
+        (
+            "alias-of-second",
+            ALIAS_CONTROL_SECOND,
+            22328,
+            ControlExpectation::ValidDeferred,
+        ),
+        (
+            "alias-before-initialization",
+            ALIAS_CONTROL_BEFORE_INIT,
+            22329,
+            ControlExpectation::InvalidForwardReference,
+        ),
+        (
+            "wrong-alias-type",
+            ALIAS_CONTROL_WRONG_TYPE,
+            22330,
+            ControlExpectation::InvalidAliasType,
+        ),
+        (
+            "mutable-alias",
+            ALIAS_CONTROL_MUTABLE,
+            22331,
+            ControlExpectation::ValidDeferred,
+        ),
+        (
+            "alias-chain",
+            ALIAS_CONTROL_CHAIN,
+            22332,
+            ControlExpectation::ValidDeferred,
+        ),
+    ] {
+        let factory_source = control
+            .strip_prefix("package example\n\n")
+            .expect("independent control carries its package declaration");
+        let source = format!("{source_prefix}{factory_source}");
+        let result = paired_result(&source, source_id);
+        println!("alias control {name}: {result:?}");
+        match expectation {
+            ControlExpectation::ValidDeferred => assert!(
+                matches!(
+                    result,
+                    Err(PairedPlanError::BatchUnit {
+                        phase: "cross-class constructor-call identity proof",
+                        ref reason
+                    }) if reason == "SourceShape(\"factory body must be a direct Apply or a one- or two-local Block\")"
+                ),
+                "valid control {name} must reach the deferred source-shape rejection"
+            ),
+            ControlExpectation::InvalidForwardReference => match result {
+                Err(PairedPlanError::BatchClass {
+                    class_index: 2,
+                    declaration_index: 0,
+                    phase: "method body typing",
+                    reason,
+                }) => {
+                    assert!(reason.starts_with("TermNameNotFound"));
+                    assert!(reason.contains(&format!("source: SourceId({source_id})")));
+                    assert!(reason.contains(&format!("source: SourceId({source_id}), span:")));
+                    assert!(reason.contains("start: 445, end: 450"));
+                }
+                other => panic!("invalid forward-reference control fails during typing: {other:?}"),
+            },
+            ControlExpectation::InvalidAliasType => match result {
+                Err(PairedPlanError::BatchClass {
+                    class_index: 2,
+                    declaration_index: 0,
+                    phase: "method body typing",
+                    reason,
+                }) => {
+                    assert!(reason.starts_with(
+                        "LocalValueTypeMismatch { source: SourceId(22330), tree_index: 65, "
+                    ));
+                    assert!(reason.contains(", actual: TypeId("));
+                    assert!(reason.contains(", expected: TypeId("));
+                }
+                other => panic!("invalid alias-type control fails during typing: {other:?}"),
+            },
+        }
+    }
 }
 
 #[test]
