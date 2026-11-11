@@ -3,6 +3,120 @@
 use super::*;
 
 impl SourceTyper<'_> {
+    fn tree_qualified_name(&self, tree: TreeId<Untyped>) -> Option<Vec<String>> {
+        match &self.arena.try_get(tree)?.kind {
+            TreeKind::Ident(ident) => {
+                Some(vec![self.store.names.resolve(ident.name.text()).to_owned()])
+            }
+            TreeKind::Select(select) => {
+                let mut path = self.tree_qualified_name(select.qualifier)?;
+                path.push(self.store.names.resolve(select.name.text()).to_owned());
+                Some(path)
+            }
+            _ => None,
+        }
+    }
+
+    // Scala records this feature import on the whole compilation unit, so
+    // declarations before the import use the same mode. This arena contains
+    // one source unit; declaration-context ancestry is intentionally ignored.
+    fn source_uses_scala_2_13_case_class_unapply(&mut self) -> bool {
+        if let Some(enabled) = self.scala_2_13_source_mode {
+            return enabled;
+        }
+        let enabled = self.arena.iter().any(|(_, tree)| {
+            let TreeKind::Import(import) = &tree.kind else {
+                return false;
+            };
+            let path = self.tree_qualified_name(import.expr);
+            let whole_feature_import = import.selectors.is_empty()
+                && path.as_deref().is_some_and(|path| {
+                    path.iter()
+                        .map(String::as_str)
+                        .eq(["scala", "language", "2.13"])
+                });
+            let selected_feature_import = path
+                .as_deref()
+                .is_some_and(|path| path.iter().map(String::as_str).eq(["scala", "language"]))
+                && import.selectors.iter().any(|selector| {
+                    self.store.names.resolve(selector.imported.text()) == "2.13"
+                        && selector.renamed.is_none()
+                        && selector.bound.is_none()
+                });
+            whole_feature_import || selected_feature_import
+        });
+        self.scala_2_13_source_mode = Some(enabled);
+        enabled
+    }
+
+    fn canonical_scala_option(&mut self, tree_index: u32) -> Result<Option<SymbolId>, TyperError> {
+        let scala = match self.packages.symbol(&["scala"]) {
+            Some(scala) => Some(scala),
+            None => self.resolve_external_package(&["scala".to_owned()], tree_index)?,
+        };
+        let Some(scala) = scala else {
+            return Ok(None);
+        };
+        if self.package_path(scala) != ["scala"] {
+            return Err(TyperError::SymbolResolution {
+                source: self.source,
+                tree_index,
+                error: dotty_core::ResolutionError::Malformed {
+                    reason: "scala package resolution returned a non-canonical package".to_owned(),
+                },
+            });
+        }
+        let name = Name::new(
+            self.store.names.intern("Option"),
+            dotty_core::Namespace::Type,
+        );
+        let scoped = match self.packages.scope_of(scala) {
+            Some(scope) => {
+                let candidates = self
+                    .store
+                    .scopes
+                    .get(scope)
+                    .lookup_all(&name)
+                    .iter()
+                    .copied()
+                    .filter(|symbol| self.store.symbols.get(*symbol).kind == SymbolKind::Class)
+                    .collect::<Vec<_>>();
+                match candidates.as_slice() {
+                    [option] => Some(*option),
+                    [] => None,
+                    _ => {
+                        return Err(TyperError::SymbolResolution {
+                            source: self.source,
+                            tree_index,
+                            error: dotty_core::ResolutionError::Ambiguous {
+                                candidates: candidates.len(),
+                            },
+                        });
+                    }
+                }
+            }
+            None => None,
+        };
+        let option = if let Some(option) = scoped {
+            Some(option)
+        } else {
+            let request = dotty_core::MemberRequest {
+                prefix: self.package_type_prefix(scala),
+                name,
+                selector: dotty_core::MemberSelector::Unique,
+                space: dotty_core::MemberSpace::Prefix,
+            };
+            self.resolver
+                .resolve_member(self.store, &request)
+                .map_err(|error| TyperError::SymbolResolution {
+                    source: self.source,
+                    tree_index,
+                    error,
+                })?
+        };
+        Ok(option)
+    }
+
     pub(in crate::typer) fn is_deferred_case_class_companion_apply(
         &self,
         name: Name,
@@ -244,10 +358,9 @@ impl SourceTyper<'_> {
                 clause_index: 0,
             });
         };
-        if !constructor.type_params.is_empty()
-            || !self
-                .source_class_type_parameters(class)
-                .is_ok_and(|parameters| parameters.is_empty())
+        let class_parameters = self.source_class_type_parameters(class)?;
+        if !matches!(class_parameters.len(), 0 | 2)
+            || constructor.type_params.len() != class_parameters.len()
         {
             return Err(TyperError::MalformedMethodClause {
                 method,
@@ -268,7 +381,8 @@ impl SourceTyper<'_> {
             });
         };
         let expected_field_types = match parameter_trees.as_slice() {
-            [_] => vec![self.definitions.int],
+            [_] if class_parameters.is_empty() => vec![self.definitions.int],
+            [_] if class_parameters.len() == 2 => vec![self.definitions.any_type],
             [_, _] => vec![self.definitions.int, self.definitions.boolean],
             _ => {
                 return Err(TyperError::MalformedMethodClause {
@@ -288,6 +402,7 @@ impl SourceTyper<'_> {
         let mut two_reference_fields = false;
         let mut authenticated_reference_parent = None;
         let mut authenticated_fields = Vec::with_capacity(parameter_trees.len());
+        let mut generic_field_parameter = None;
         for (field_index, (parameter_tree, expected_type)) in parameter_trees
             .iter()
             .copied()
@@ -353,6 +468,22 @@ impl SourceTyper<'_> {
             } else {
                 two_reference_fields && template.parents.len() == 1
             };
+            let supported_generic_field = class_parameters.len() == 2
+                && parameter_trees.len() == 1
+                && matches!(
+                    self.store.types.get(field_type),
+                    Type::TypeRef { target: TypeRefTarget::Symbol(parameter), .. }
+                        if class_parameters.contains(parameter)
+                            && self.store.symbols.get(*parameter).owner == Some(class)
+                );
+            if supported_generic_field
+                && let Type::TypeRef {
+                    target: TypeRefTarget::Symbol(parameter),
+                    ..
+                } = self.store.types.get(field_type)
+            {
+                generic_field_parameter = Some(*parameter);
+            }
             let supported_reference_field = if reference_field_candidate {
                 let parent_tree = template.parents[0];
                 let parent_type =
@@ -372,11 +503,12 @@ impl SourceTyper<'_> {
             } else {
                 false
             };
-            let supported_field_type = if parameter_trees.len() == 2 && two_reference_fields {
-                supported_reference_field
-            } else {
-                field_type == expected_type || supported_reference_field
-            };
+            let supported_field_type = supported_generic_field
+                || if parameter_trees.len() == 2 && two_reference_fields {
+                    supported_reference_field
+                } else {
+                    field_type == expected_type || supported_reference_field
+                };
             if !supported_field_type {
                 return Err(TyperError::MalformedMethodClause {
                     method,
@@ -441,11 +573,90 @@ impl SourceTyper<'_> {
             });
         }
         let prefix = self.type_symbol_prefix(class);
-        let box_type = self.store.types.alloc(Type::TypeRef {
+        let box_tycon = self.store.types.alloc(Type::TypeRef {
             prefix,
             target: TypeRefTarget::Symbol(class),
         });
+        let box_type = if class_parameters.is_empty() {
+            box_tycon
+        } else {
+            let arguments = class_parameters
+                .iter()
+                .map(|parameter| {
+                    self.store.types.alloc(Type::TypeRef {
+                        prefix: self.definitions.no_prefix,
+                        target: TypeRefTarget::Symbol(*parameter),
+                    })
+                })
+                .collect::<Vec<_>>();
+            self.store.types.alloc(Type::Applied {
+                tycon: box_tycon,
+                args: arguments,
+            })
+        };
         let parameter_name = dotty_core::TermName::new(input_name.text());
+        let compatibility_field_parameter = if let Some(field_parameter) = generic_field_parameter {
+            self.source_uses_scala_2_13_case_class_unapply()
+                .then_some(field_parameter)
+        } else {
+            None
+        };
+        let result_type = if let Some(field_parameter) = compatibility_field_parameter {
+            let option = self.canonical_scala_option(class_tree.index())?.ok_or(
+                TyperError::TypeNameNotFound {
+                    source,
+                    tree_index: class_tree.index(),
+                    name: Name::new(
+                        self.store.names.intern("Option"),
+                        dotty_core::Namespace::Type,
+                    ),
+                    position: None,
+                },
+            )?;
+            if !self.store.symbols.contains(option)
+                || self.store.symbols.get(option).kind != SymbolKind::Class
+                || self.store.symbols.get(option).owner != self.packages.symbol(&["scala"])
+            {
+                return Err(TyperError::MalformedMethodClause {
+                    method,
+                    method_tree_index: class_tree.index(),
+                    clause_index: 0,
+                });
+            }
+            let option_parameters = if self.is_current_source_symbol(option) {
+                self.source_class_type_parameters(option)?
+            } else {
+                self.external_class_type_parameters(option).ok_or(
+                    TyperError::MalformedMethodClause {
+                        method,
+                        method_tree_index: class_tree.index(),
+                        clause_index: 0,
+                    },
+                )?
+            };
+            if option_parameters.len() != 1 {
+                return Err(TyperError::MalformedMethodClause {
+                    method,
+                    method_tree_index: class_tree.index(),
+                    clause_index: 0,
+                });
+            }
+            let option_prefix = self.type_symbol_prefix(option);
+            let option_tycon = self.store.types.alloc(Type::TypeRef {
+                prefix: option_prefix,
+                target: TypeRefTarget::Symbol(option),
+            });
+            let field = self.store.types.alloc(Type::TypeRef {
+                prefix: self.definitions.no_prefix,
+                target: TypeRefTarget::Symbol(field_parameter),
+            });
+            self.store.types.alloc(Type::Applied {
+                tycon: option_tycon,
+                args: vec![field],
+            })
+        } else {
+            box_type
+        };
         let signature = method_type_from_symbols(
             self.store,
             &[MethodParamSpec {
@@ -455,7 +666,7 @@ impl SourceTyper<'_> {
                 erased: false,
                 varargs: false,
             }],
-            box_type,
+            result_type,
             MethodKind::Plain,
         )
         .map_err(|error| TyperError::TypeRebinding {
@@ -468,7 +679,27 @@ impl SourceTyper<'_> {
         self.store
             .symbols
             .set_info(input, SymbolInfo::Complete(box_type));
-        Ok(signature)
+        if class_parameters.is_empty() {
+            Ok(signature)
+        } else {
+            let mut type_parameters = Vec::with_capacity(class_parameters.len());
+            for parameter in class_parameters {
+                let bounds = self.complete_signature_parameter(parameter, info_journal)?;
+                type_parameters.push(TypeParamSpec {
+                    symbol: parameter,
+                    name: dotty_core::TypeName::new(self.store.symbols.get(parameter).name.text()),
+                    bounds,
+                    declared_variance: None,
+                });
+            }
+            poly_type_from_symbols(self.store, &type_parameters, signature).map_err(|error| {
+                TyperError::TypeRebinding {
+                    source,
+                    tree_index: class_tree.index(),
+                    error,
+                }
+            })
+        }
     }
 
     pub(super) fn complete_generated_case_class_apply_signature(

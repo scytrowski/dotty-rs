@@ -336,6 +336,7 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
         receipt_rows = gate.read_tsv(baseline)[1]
         invalid_overrides = (
             ("blocked::DifferentFailure", "not_available"),
+            (gate.EITHER_SWAP_PREVIOUS_LIVE_BLOCKER, "not_available"),
             (gate.EITHER_SWAP_LIVE_BLOCKER, "scala.util.Either[typeparam#0,typeparam#1]"),
         )
         with tempfile.TemporaryDirectory() as directory:

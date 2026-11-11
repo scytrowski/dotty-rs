@@ -19,9 +19,13 @@ EITHER_SWAP_HISTORICAL_BLOCKER = (
     "blocked::ExtractorUnapplyNotFound { source: SourceId(0), tree_index: 69, "
     "extractor: SymbolId(106) }"
 )
-EITHER_SWAP_LIVE_BLOCKER = (
+EITHER_SWAP_PREVIOUS_LIVE_BLOCKER = (
     "blocked::MalformedMethodClause { method: SymbolId(112), "
     "method_tree_index: 521, clause_index: 0 }"
+)
+EITHER_SWAP_LIVE_BLOCKER = (
+    "blocked::ExtractorUnapplyPolymorphic { source: SourceId(0), tree_index: 69, "
+    "unapply: SymbolId(112), callable: TypeId(552) }"
 )
 PRODUCT2_FIXTURE = Path("crates/dotty-typer/tests/fixtures/source-case-class-product2-3.9.0")
 PRODUCT2_SOURCE_SHA256 = "4b144913df1d2021359c44633dc2a23f21bf6288bf2528c86cc6f53d79b8ee31"
@@ -133,6 +137,7 @@ TYPER_TESTS = {
     "typer::expression::patterns::tests::unary_extractor_falls_back_to_get_after_product_arity_mismatch",
     "typer::tests::generated_case_class_unapply_has_source_canonical_plain_signature_and_member_lookup",
     "typer::tests::generated_case_class_unapply_validates_and_rolls_back_source_class_info",
+    "typer::tests::generated_generic_unapply_uses_unit_scala_2_13_mode_and_preserves_parameter_order",
     "typer::tests::generated_product2_unapply_completes_the_canonical_flagged_signature",
     "typer::tests::generated_product2_unapply_rejects_forged_provenance_and_field_identities",
     "typer::tests::generated_two_reference_field_unapply_accepts_consistent_complete_field_info",
@@ -1355,9 +1360,10 @@ def validate_cohorts(root: Path, reports: list[Path], output: Path, baseline_rec
         if wanted == found:
             continue
         if wanted["identity"] == EITHER_SWAP_IDENTITY:
-            # Keep the checked-in 2026-09 receipt immutable. Permit only this
-            # measured first-blocker transition in the live cohorts, while
-            # requiring every non-status field to remain exactly historical.
+            # Keep the checked-in 2026-09 receipt immutable. Permit only the
+            # measured #2241 progression to the existing polymorphic extractor
+            # boundary in live cohorts, while requiring every non-status field
+            # to remain exactly historical.
             historical = dict(wanted)
             historical["first_status"] = EITHER_SWAP_HISTORICAL_BLOCKER
             historical["second_status"] = EITHER_SWAP_HISTORICAL_BLOCKER
