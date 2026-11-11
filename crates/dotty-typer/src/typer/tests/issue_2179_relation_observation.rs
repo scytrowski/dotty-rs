@@ -1394,7 +1394,7 @@ fn captures_acceptance_v_either_swap_failure_before_transaction_rollback() {
     let result = typer.type_method_definition(tree);
     assert!(matches!(
         result,
-        Err(TyperError::ExtractorUnapplyNotFound {
+        Err(TyperError::ExtractorUnapplyPolymorphic {
             source: error_source,
             tree_index: 69,
             ..
@@ -1406,10 +1406,8 @@ fn captures_acceptance_v_either_swap_failure_before_transaction_rollback() {
         .expect("failure observer captured before rollback");
     assert!(receipt.contains("root=library/src/scala/util/Either.scala#tree=84"));
     assert!(receipt.contains("canonical_source_method="));
-    assert_eq!(receipt.matches("generated_unapply=None").count(), 2);
     assert!(receipt.contains("original_pattern_tree=69 span="));
     assert!(receipt.contains("original_pattern_tree=72 span="));
-    assert!(receipt.contains("extractor_failure="));
     println!(
         "ACCEPTANCE_V_EITHER_SWAP_OBSERVATION_BEGIN\n{receipt}\nACCEPTANCE_V_EITHER_SWAP_OBSERVATION_END"
     );

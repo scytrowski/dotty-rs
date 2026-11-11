@@ -244,10 +244,9 @@ impl SourceTyper<'_> {
                 clause_index: 0,
             });
         };
-        if !constructor.type_params.is_empty()
-            || !self
-                .source_class_type_parameters(class)
-                .is_ok_and(|parameters| parameters.is_empty())
+        let class_parameters = self.source_class_type_parameters(class)?;
+        if !matches!(class_parameters.len(), 0 | 2)
+            || constructor.type_params.len() != class_parameters.len()
         {
             return Err(TyperError::MalformedMethodClause {
                 method,
@@ -268,7 +267,8 @@ impl SourceTyper<'_> {
             });
         };
         let expected_field_types = match parameter_trees.as_slice() {
-            [_] => vec![self.definitions.int],
+            [_] if class_parameters.is_empty() => vec![self.definitions.int],
+            [_] if class_parameters.len() == 2 => vec![self.definitions.any_type],
             [_, _] => vec![self.definitions.int, self.definitions.boolean],
             _ => {
                 return Err(TyperError::MalformedMethodClause {
@@ -288,6 +288,7 @@ impl SourceTyper<'_> {
         let mut two_reference_fields = false;
         let mut authenticated_reference_parent = None;
         let mut authenticated_fields = Vec::with_capacity(parameter_trees.len());
+        let mut generic_field_parameter = None;
         for (field_index, (parameter_tree, expected_type)) in parameter_trees
             .iter()
             .copied()
@@ -353,6 +354,22 @@ impl SourceTyper<'_> {
             } else {
                 two_reference_fields && template.parents.len() == 1
             };
+            let supported_generic_field = class_parameters.len() == 2
+                && parameter_trees.len() == 1
+                && matches!(
+                    self.store.types.get(field_type),
+                    Type::TypeRef { target: TypeRefTarget::Symbol(parameter), .. }
+                        if class_parameters.contains(parameter)
+                            && self.store.symbols.get(*parameter).owner == Some(class)
+                );
+            if supported_generic_field
+                && let Type::TypeRef {
+                    target: TypeRefTarget::Symbol(parameter),
+                    ..
+                } = self.store.types.get(field_type)
+            {
+                generic_field_parameter = Some(*parameter);
+            }
             let supported_reference_field = if reference_field_candidate {
                 let parent_tree = template.parents[0];
                 let parent_type =
@@ -372,11 +389,12 @@ impl SourceTyper<'_> {
             } else {
                 false
             };
-            let supported_field_type = if parameter_trees.len() == 2 && two_reference_fields {
-                supported_reference_field
-            } else {
-                field_type == expected_type || supported_reference_field
-            };
+            let supported_field_type = supported_generic_field
+                || if parameter_trees.len() == 2 && two_reference_fields {
+                    supported_reference_field
+                } else {
+                    field_type == expected_type || supported_reference_field
+                };
             if !supported_field_type {
                 return Err(TyperError::MalformedMethodClause {
                     method,
@@ -441,11 +459,97 @@ impl SourceTyper<'_> {
             });
         }
         let prefix = self.type_symbol_prefix(class);
-        let box_type = self.store.types.alloc(Type::TypeRef {
+        let box_tycon = self.store.types.alloc(Type::TypeRef {
             prefix,
             target: TypeRefTarget::Symbol(class),
         });
+        let box_type = if class_parameters.is_empty() {
+            box_tycon
+        } else {
+            let arguments = class_parameters
+                .iter()
+                .map(|parameter| {
+                    self.store.types.alloc(Type::TypeRef {
+                        prefix: self.definitions.no_prefix,
+                        target: TypeRefTarget::Symbol(*parameter),
+                    })
+                })
+                .collect::<Vec<_>>();
+            self.store.types.alloc(Type::Applied {
+                tycon: box_tycon,
+                args: arguments,
+            })
+        };
         let parameter_name = dotty_core::TermName::new(input_name.text());
+        let result_type = if let Some(field_parameter) = generic_field_parameter {
+            let context = self
+                .index
+                .declaration_context_of(class)
+                .ok_or(TyperError::DeclarationContextMissing { symbol: class })?;
+            let option_name = dotty_core::Name::new(
+                self.store.names.intern("Option"),
+                dotty_core::Namespace::Type,
+            );
+            let option = self
+                .lookup_type_symbol(option_name, context, class_tree.index(), None)?
+                .ok_or(TyperError::TypeNameNotFound {
+                    source,
+                    tree_index: class_tree.index(),
+                    name: option_name,
+                    position: None,
+                })?;
+            if !self.store.symbols.contains(option)
+                || self.store.symbols.get(option).kind != SymbolKind::Class
+                || self.store.symbols.get(option).owner.is_none_or(|owner| {
+                    !self.store.symbols.contains(owner)
+                        || self.store.symbols.get(owner).kind != SymbolKind::Package
+                        || self
+                            .store
+                            .names
+                            .resolve(self.store.symbols.get(owner).name.text())
+                            != "scala"
+                })
+            {
+                return Err(TyperError::MalformedMethodClause {
+                    method,
+                    method_tree_index: class_tree.index(),
+                    clause_index: 0,
+                });
+            }
+            let option_parameters = if self.is_current_source_symbol(option) {
+                self.source_class_type_parameters(option)?
+            } else {
+                self.external_class_type_parameters(option).ok_or(
+                    TyperError::MalformedMethodClause {
+                        method,
+                        method_tree_index: class_tree.index(),
+                        clause_index: 0,
+                    },
+                )?
+            };
+            if option_parameters.len() != 1 {
+                return Err(TyperError::MalformedMethodClause {
+                    method,
+                    method_tree_index: class_tree.index(),
+                    clause_index: 0,
+                });
+            }
+            let option_prefix = self.type_symbol_prefix(option);
+            let option_tycon = self.store.types.alloc(Type::TypeRef {
+                prefix: option_prefix,
+                target: TypeRefTarget::Symbol(option),
+            });
+            let field = self.store.types.alloc(Type::TypeRef {
+                prefix: self.definitions.no_prefix,
+                target: TypeRefTarget::Symbol(field_parameter),
+            });
+            self.store.types.alloc(Type::Applied {
+                tycon: option_tycon,
+                args: vec![field],
+            })
+        } else {
+            box_type
+        };
         let signature = method_type_from_symbols(
             self.store,
             &[MethodParamSpec {
@@ -455,7 +559,7 @@ impl SourceTyper<'_> {
                 erased: false,
                 varargs: false,
             }],
-            box_type,
+            result_type,
             MethodKind::Plain,
         )
         .map_err(|error| TyperError::TypeRebinding {
@@ -468,7 +572,27 @@ impl SourceTyper<'_> {
         self.store
             .symbols
             .set_info(input, SymbolInfo::Complete(box_type));
-        Ok(signature)
+        if class_parameters.is_empty() {
+            Ok(signature)
+        } else {
+            let mut type_parameters = Vec::with_capacity(class_parameters.len());
+            for parameter in class_parameters {
+                let bounds = self.complete_signature_parameter(parameter, info_journal)?;
+                type_parameters.push(TypeParamSpec {
+                    symbol: parameter,
+                    name: dotty_core::TypeName::new(self.store.symbols.get(parameter).name.text()),
+                    bounds,
+                    declared_variance: None,
+                });
+            }
+            poly_type_from_symbols(self.store, &type_parameters, signature).map_err(|error| {
+                TyperError::TypeRebinding {
+                    source,
+                    tree_index: class_tree.index(),
+                    error,
+                }
+            })
+        }
     }
 
     pub(super) fn complete_generated_case_class_apply_signature(

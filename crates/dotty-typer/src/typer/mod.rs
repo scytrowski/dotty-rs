@@ -4910,6 +4910,139 @@ mod tests {
     }
 
     #[test]
+    fn generated_generic_left_right_unapply_signatures_preserve_ordered_class_parameters() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package scala { trait Product; class Option[+X] }; package matching { case class Left[+A, +B](value: A); case class Right[+A, +B](value: B); case class Carrier[A, B](value: B); object Probe { def left = Left.unapply; def right = Right.unapply; def carrier = Carrier.unapply } }",
+        );
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let left_class = class_symbol(&parsed, typer.store(), &index, source, "Left");
+        let left_method = typer
+            .index
+            .generated_case_class_method(
+                left_class,
+                dotty_core::GeneratedCaseClassMethodRole::Unapply,
+            )
+            .expect("Left's canonical generated unapply");
+        let SourceDefinition::Canonical {
+            tree: left_tree, ..
+        } = typer.index.definition_of(left_class).unwrap()
+        else {
+            panic!("Left must have canonical source identity");
+        };
+        let left_input = typer
+            .index
+            .derived_symbol_at(left_method, source, left_tree)
+            .unwrap();
+        let option = class_symbol(&parsed, typer.store(), &index, source, "Option");
+        let scala_package = typer.store().symbols.get(option).owner.unwrap();
+        let scala_scope = packages.scope_of(scala_package).unwrap();
+        let option_name = typer.store().symbols.get(option).name;
+        typer.store.scopes.get_mut(scala_scope).remove(option);
+        assert!(matches!(
+            typer.complete_symbol(left_method),
+            Err(TyperError::TypeNameNotFound { .. })
+        ));
+        for symbol in [left_class, left_method, left_input] {
+            assert_eq!(*typer.store().symbols.info(symbol), SymbolInfo::Missing);
+        }
+        typer
+            .store
+            .scopes
+            .get_mut(scala_scope)
+            .enter(option_name, option);
+        for (class_name, expected_position) in [("Left", 0), ("Right", 1), ("Carrier", 1)] {
+            let class = class_symbol(&parsed, typer.store(), &index, source, class_name);
+            let method = typer
+                .index
+                .generated_case_class_method(
+                    class,
+                    dotty_core::GeneratedCaseClassMethodRole::Unapply,
+                )
+                .expect("canonical generic unapply");
+            let selected_name = class_name.to_lowercase();
+            let (selected_method, selected_rhs) =
+                method_definition_and_rhs(&parsed, typer.store(), &index, source, &selected_name);
+            let context = ExpressionContext {
+                lexical: index.declaration_context_of(selected_method).unwrap(),
+                owner: selected_method,
+                local_scopes: None,
+            };
+            let selected = typer.type_expression(selected_rhs, context).unwrap();
+            let selected_type = typer.typed_ast().get(selected).ty;
+            assert!(matches!(
+                typer.store().types.get(selected_type),
+                Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                    if *symbol == method
+            ));
+            let signature = typer
+                .complete_symbol(method)
+                .expect("generic generated unapply should complete");
+            let SourceDefinition::Canonical { tree, .. } =
+                typer.index.definition_of(class).unwrap()
+            else {
+                panic!("generic source class must remain canonical");
+            };
+            let input = typer.index.derived_symbol_at(method, source, tree).unwrap();
+            assert_eq!(typer.store().symbols.get(input).owner, Some(method));
+            let Type::Poly(poly) = typer.store().types.get(signature) else {
+                panic!("generic unapply must have a fresh polymorphic binder");
+            };
+            assert_eq!(poly.params.len(), 2);
+            assert!(
+                poly.params
+                    .iter()
+                    .all(|parameter| parameter.declared_variance.is_none())
+            );
+            let Type::Method(method_type) = typer.store().types.get(poly.result) else {
+                panic!("generic unapply must retain its ordinary method clause");
+            };
+            assert_eq!(method_type.kind, MethodKind::Plain);
+            assert_eq!(method_type.params.len(), 1);
+            assert!(!method_type.params[0].erased);
+            assert!(!method_type.params[0].varargs);
+            let Type::Applied { tycon, args } = typer.store().types.get(method_type.params[0].ty)
+            else {
+                panic!("unapply input must be an applied generic class type");
+            };
+            assert_eq!(type_symbol(typer.store(), *tycon), class);
+            assert_eq!(args.len(), 2);
+            for (position, argument) in args.iter().enumerate() {
+                assert!(matches!(
+                    typer.store().types.get(*argument),
+                    Type::ParamRef { binder, index }
+                        if *binder == signature && *index == position as u32
+                ));
+            }
+            let Type::Applied { tycon, args } = typer.store().types.get(method_type.result) else {
+                panic!("unapply result must be Option of its field type");
+            };
+            assert_ne!(type_symbol(typer.store(), *tycon), class);
+            assert_eq!(args.len(), 1);
+            assert!(matches!(
+                typer.store().types.get(args[0]),
+                Type::ParamRef { binder, index }
+                    if *binder == signature && *index == expected_position as u32
+            ));
+            let Type::Applied { args, .. } = typer.store().types.get(method_type.params[0].ty)
+            else {
+                unreachable!();
+            };
+            assert!(matches!(
+                typer.store().types.get(args[expected_position]),
+                Type::ParamRef { binder, index }
+                    if *binder == signature && *index == expected_position as u32
+            ));
+        }
+    }
+
+    #[test]
     fn generated_product2_unapply_completes_the_canonical_flagged_signature() {
         fn analyze(siblings: &str) -> String {
             let source_text = format!(
