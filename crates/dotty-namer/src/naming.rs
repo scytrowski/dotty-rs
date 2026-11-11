@@ -1982,7 +1982,7 @@ impl Namer<'_> {
                 value_parameters,
             )?;
         }
-        let synthesize_unapply = top_level
+        let synthesize_product_selectors = top_level
             && case_class_shape_supported
             && constructor.type_params.is_empty()
             && constructor.value_param_clauses.len() == 1
@@ -1993,7 +1993,18 @@ impl Namer<'_> {
                     template.constructor,
                     value_parameters,
                 ));
-        if synthesize_unapply {
+        let synthesize_unapply = synthesize_product_selectors
+            || (top_level
+                && case_class_shape_supported
+                && constructor.value_param_clauses.len() == 1
+                && self.is_generic_product1_source_shape(
+                    tree,
+                    class_symbol,
+                    template.constructor,
+                    &constructor.type_params,
+                    value_parameters,
+                ));
+        if synthesize_product_selectors {
             self.enter_case_class_product_selectors(tree, class_symbol, value_parameters)?;
         }
         if synthesize_unapply {
@@ -2102,6 +2113,116 @@ impl Namer<'_> {
             }
             true
         })
+    }
+
+    /// Admit the bounded polymorphic Product1 source shape used by Scala's
+    /// generated extractors: exactly two unbounded class parameters and one
+    /// ordinary field whose direct type reference names either parameter.
+    /// This publishes only the generated method identity; it does not infer
+    /// its signature or a Product1 selector.
+    fn is_generic_product1_source_shape(
+        &self,
+        class_tree: TreeId<Untyped>,
+        class_symbol: SymbolId,
+        constructor_tree: TreeId<Untyped>,
+        type_parameters: &[TreeId<Untyped>],
+        value_parameters: &[TreeId<Untyped>],
+    ) -> bool {
+        if type_parameters.len() != 2
+            || value_parameters.len() != 1
+            || self.index.symbol_at(self.source, class_tree) != Some(class_symbol)
+            || self.index.definition_of(class_symbol)
+                != Some(SourceDefinition::Canonical {
+                    source: self.source,
+                    tree: class_tree,
+                })
+            || self.store.symbols.get(class_symbol).kind != SymbolKind::Class
+            || !self
+                .store
+                .symbols
+                .get(class_symbol)
+                .flags
+                .contains(SymbolFlags::CASE)
+        {
+            return false;
+        }
+        let Some(TreeKind::TypeDef(definition)) =
+            self.arena.try_get(class_tree).map(|node| &node.kind)
+        else {
+            return false;
+        };
+        let Some(TreeKind::Template(template)) =
+            self.arena.try_get(definition.rhs).map(|node| &node.kind)
+        else {
+            return false;
+        };
+        let Some(TreeKind::DefDef(constructor)) =
+            self.arena.try_get(constructor_tree).map(|node| &node.kind)
+        else {
+            return false;
+        };
+        if template.constructor != constructor_tree
+            || constructor.type_params != type_parameters
+            || constructor.value_param_clauses.len() != 1
+            || constructor.value_param_clauses[0] != value_parameters
+            || constructor.source_param_clause_order.is_some()
+        {
+            return false;
+        }
+
+        let mut parameter_names = Vec::with_capacity(type_parameters.len());
+        let mut distinct_parameter_trees = std::collections::HashSet::new();
+        for parameter_tree in type_parameters {
+            if !distinct_parameter_trees.insert(*parameter_tree) {
+                return false;
+            }
+            let Some(TreeKind::TypeDef(parameter)) =
+                self.arena.try_get(*parameter_tree).map(|node| &node.kind)
+            else {
+                return false;
+            };
+            let Some(TreeKind::TypeBoundsTree(bounds)) =
+                self.arena.try_get(parameter.rhs).map(|node| &node.kind)
+            else {
+                return false;
+            };
+            if bounds.low.is_some()
+                || bounds.high.is_some()
+                || bounds.alias.is_some()
+                || parameter.metadata.visibility.is_some()
+                || !parameter.metadata.annotations.is_empty()
+                || parameter.metadata.modifiers != [Modifier::Param, Modifier::PrivateLocal]
+            {
+                return false;
+            }
+            let parameter_name = *parameter.name.as_name();
+            if parameter_names.contains(&parameter_name) {
+                return false;
+            }
+            parameter_names.push(parameter_name);
+        }
+        let Some(parameter_tree) = value_parameters.first() else {
+            return false;
+        };
+        let Some(node) = self.arena.try_get(*parameter_tree) else {
+            return false;
+        };
+        let TreeKind::ValDef(parameter) = &node.kind else {
+            return false;
+        };
+        if parameter.rhs.is_some()
+            || parameter.metadata.visibility.is_some()
+            || !parameter.metadata.annotations.is_empty()
+            || parameter.metadata.modifiers != [Modifier::ParamAccessor]
+        {
+            return false;
+        }
+        let Some(TreeKind::Ident(field_type)) =
+            self.arena.try_get(parameter.tpt).map(|node| &node.kind)
+        else {
+            return false;
+        };
+        field_type.name.is_type() && parameter_names.contains(&field_type.name)
     }
 
     /// Enters source-proven selectors for the bounded case-class product

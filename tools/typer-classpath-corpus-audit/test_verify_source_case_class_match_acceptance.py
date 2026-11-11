@@ -23,6 +23,21 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
             with self.assertRaises(gate.ReceiptError):
                 gate.require_test_log(log, {"required_case"})
 
+    def test_namer_inventory_includes_bounded_generic_product1_identity_cases(self) -> None:
+        self.assertEqual(
+            gate.NAMER_TESTS,
+            {
+                "class_pattern_bindings_follow_nested_bind_typed_and_unapply_patterns",
+                "explicit_companion_unapply_is_preserved_without_generated_identity_collisions",
+                "generated_unapply_is_independent_of_case_class_companion_declaration_order",
+                "generic_product1_case_classes_publish_only_canonical_unapply_identity",
+                "generic_unapply_identity_rejects_shapes_outside_the_bounded_product1_rule",
+                "incomparable_generic_companion_unapply_fails_without_publishing_a_candidate",
+                "ordinary_class_companion_does_not_receive_generated_unapply",
+                "unknown_explicit_unapply_parameter_identity_defers_generation_for_alias_contexts",
+            },
+        )
+
     def test_single_thread_nocapture_logs_keep_tests_with_interleaved_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             log = self.write_log(
@@ -293,6 +308,50 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
             output = root / "live.tsv"
             gate.validate_cohorts(repository, reports, output, baseline)
             self.assertEqual(gate.read_tsv(output), gate.read_tsv(baseline))
+
+    def test_live_cohort_receipt_accepts_only_measured_either_swap_blocker_movement(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        baseline = repository / "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv"
+        baseline_bytes = baseline.read_bytes()
+        receipt_rows = gate.read_tsv(baseline)[1]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reports = self.cohort_reports(
+                receipt_rows,
+                root,
+                {gate.EITHER_SWAP_IDENTITY: (gate.EITHER_SWAP_LIVE_BLOCKER, "not_available")},
+            )
+            output = root / "live.tsv"
+            gate.validate_cohorts(repository, reports, output, baseline)
+            live_rows = gate.read_tsv(output)[1]
+            live = next(row for row in live_rows if row["identity"] == gate.EITHER_SWAP_IDENTITY)
+            self.assertEqual(live["first_status"], gate.EITHER_SWAP_LIVE_BLOCKER)
+            self.assertEqual(live["second_status"], gate.EITHER_SWAP_LIVE_BLOCKER)
+            self.assertEqual(live["actual_result"], "not_available")
+            self.assertEqual(baseline.read_bytes(), baseline_bytes)
+
+    def test_live_cohort_receipt_rejects_other_either_swap_blocker_drift(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        baseline = repository / "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv"
+        receipt_rows = gate.read_tsv(baseline)[1]
+        invalid_overrides = (
+            ("blocked::DifferentFailure", "not_available"),
+            (gate.EITHER_SWAP_LIVE_BLOCKER, "scala.util.Either[typeparam#0,typeparam#1]"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index, override in enumerate(invalid_overrides):
+                reports = self.cohort_reports(
+                    receipt_rows,
+                    root,
+                    {gate.EITHER_SWAP_IDENTITY: override},
+                )
+                with self.subTest(override=override), self.assertRaisesRegex(
+                    gate.ReceiptError, gate.EITHER_SWAP_IDENTITY
+                ):
+                    gate.validate_cohorts(
+                        repository, reports, root / f"live-{index}.tsv", baseline
+                    )
 
     def test_live_cohort_receipt_reports_unexpected_per_root_drift(self) -> None:
         repository = Path(__file__).resolve().parents[2]

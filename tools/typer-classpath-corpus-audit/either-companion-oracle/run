@@ -89,6 +89,28 @@ for expected in \
         exit 1
     fi
 done
+
+# Compile the actual pinned Scala-library Either source in isolation, then
+# type generic extractor patterns against its generated Left/Right companions.
+either_source="$SCALA39_ROOT/library/src/scala/util/Either.scala"
+mkdir -p "$run_dir/either-classes" "$run_dir/generic-unapply-classes"
+"$java_home/bin/java" -cp "$classpath" dotty.tools.dotc.Main \
+    -classpath "$classpath" -d "$run_dir/either-classes" "$either_source" \
+    >"$run_dir/either-compile.log" 2>&1
+either_classpath="$run_dir/either-classes:$classpath"
+"$java_home/bin/java" -cp "$either_classpath" dotty.tools.dotc.Main \
+    -classpath "$either_classpath" -d "$run_dir/generic-unapply-classes" \
+    -Vprint:typer -color:never "$script_dir/GenericUnapply.scala" \
+    >"$run_dir/generic-unapply.log" 2>&1
+for expected in \
+    'scala.util.Left.unapply[A, B]' \
+    'scala.util.Right.unapply[A, B]'; do
+    if ! grep -Fq "$expected" "$run_dir/generic-unapply.log"; then
+        printf 'Scala typer output did not contain expected generic extractor: %s\n' "$expected" >&2
+        cat "$run_dir/generic-unapply.log" >&2
+        exit 1
+    fi
+done
 if grep -Fq 'issue1747oracle.Ordinary.Node.apply' "$run_dir/positive.log"; then
     printf '%s\n' 'ordinary nested class unexpectedly used a generated companion apply' >&2
     exit 1
