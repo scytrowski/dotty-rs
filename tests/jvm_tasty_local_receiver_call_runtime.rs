@@ -10,6 +10,36 @@ use std::process::Command;
 const SOURCE: &str = include_str!("fixtures/jvm_tasty_local_receiver_call/LocalReceiverCall.scala");
 const TWO_CALL_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_ordered_local_unit_calls/OrderedLocalUnitCalls.scala");
+const ALIAS_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_local_reference_alias/LocalReferenceAlias.scala");
+const ALIAS_RUNTIME_PROBE: &str =
+    include_str!("fixtures/jvm_tasty_local_reference_alias/RustRuntimeProbe.java");
+const ORIGINAL_ALIAS_ARTIFACT_HASHES: [(&str, &str); 6] = [
+    (
+        "example/Counter.class",
+        "68d6a0af84c82311ce06b38b1e98ea69493643c5c99acde2cc4b377d31913634",
+    ),
+    (
+        "example/Counter.tasty",
+        "ff7a6a332352b38dd2022f9a5c5b5de3a40d336eef1b2859bc226d43383dcc6e",
+    ),
+    (
+        "example/Pair.class",
+        "4ff943e4a8310b37c7010a3901b5d75979823524d240902cc25a67347953a9b0",
+    ),
+    (
+        "example/Pair.tasty",
+        "5d9083ae32ee7aec20702d6220c7f7fc3c6be3dca2019a93963ae33c1323f770",
+    ),
+    (
+        "example/PairFactory.class",
+        "4458dadc7c09d16e3868872e135b80233597a7d567fbc28964cf9468b96b5d7b",
+    ),
+    (
+        "example/PairFactory.tasty",
+        "8b1468fb6948a583210407f30a664a7dba2cf574e0bb8b114a04eb153fefd5bb",
+    ),
+];
 const TWO_CALL_HARNESS: &str =
     include_str!("fixtures/jvm_tasty_ordered_local_unit_calls/RuntimeProbe2192.java");
 const HARNESS: &str = r#"package example;
@@ -1312,6 +1342,494 @@ fn ordered_two_local_unit_calls_execute_under_strict_jdk21() {
     );
 
     assert_runtime_artifacts_unchanged(&primary_runtime, &originals, &original_hashes);
+}
+
+#[test]
+fn aliased_counter_identity_and_ordered_calls_execute_under_strict_jdk21() {
+    if !require_jdk_21() {
+        return;
+    }
+    let scratch = TestDirectory::new("alias-runtime");
+    let root = scratch.path();
+    let harness_src = root.join("harness-src");
+    let harness_classes = root.join("harness-classes");
+    std::fs::create_dir_all(&harness_src).unwrap();
+    std::fs::create_dir_all(&harness_classes).unwrap();
+    let harness = harness_src.join("RustRuntimeProbe.java");
+    std::fs::write(&harness, ALIAS_RUNTIME_PROBE).unwrap();
+
+    let batch = emit_paired_jvm_tasty_batch(
+        ALIAS_SOURCE,
+        "LocalReferenceAlias.scala",
+        SourceId::from_index(22430),
+    )
+    .expect("frozen alias source produces six linked Rust artifacts");
+    let originals = artifacts(&batch);
+    assert_eq!(
+        originals
+            .iter()
+            .map(|(path, bytes)| (path.as_str(), sha256_bytes(bytes)))
+            .collect::<Vec<_>>(),
+        ORIGINAL_ALIAS_ARTIFACT_HASHES.map(|(path, hash)| (path, hash.to_owned())),
+        "the source session reproduces the six original #2240 Rust artifacts"
+    );
+    let original_hashes = originals
+        .iter()
+        .map(|(path, bytes)| (path.clone(), sha256_bytes(bytes)))
+        .collect::<Vec<_>>();
+    let original_uuid_links = batch
+        .classes()
+        .iter()
+        .map(|artifact| {
+            (
+                artifact.classfile_path().to_owned(),
+                artifact.tasty_link_id(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(originals.len(), 6);
+    for artifact in batch.classes() {
+        eprintln!(
+            "rust-alias-artifact class={} sha256_class={} sha256_tasty={} tasty_uuid={}",
+            artifact.classfile_path(),
+            sha256_bytes(artifact.classfile_bytes()),
+            sha256_bytes(artifact.tasty_bytes()),
+            artifact
+                .tasty_link_id()
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+    }
+
+    let factory_index = originals
+        .iter()
+        .position(|(path, _)| path == "example/PairFactory.class")
+        .expect("PairFactory.class is present");
+    let factory = &originals[factory_index].1;
+    let class = ClassFile::decode(&mut Reader::new(factory)).expect("decode PairFactory");
+    let (code, max_stack, max_locals) = method_code(&class, "create");
+    assert_eq!((max_stack, max_locals), (4, 6));
+    let code_start = code.as_ptr() as usize - factory.as_ptr() as usize;
+    let code_len = code.len();
+    let instructions = decode(code);
+    let allocations = instructions
+        .iter()
+        .filter(|instruction| instruction.opcode == 0xbb)
+        .collect::<Vec<_>>();
+    let counter_allocations = allocations
+        .iter()
+        .filter(|instruction| {
+            class_name(&class, ConstantPoolIndex(instruction.cp.unwrap())) == "example/Counter"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        counter_allocations.len(),
+        2,
+        "exactly two Counter allocations"
+    );
+    assert_eq!(allocations.len(), 3, "the only other allocation is Pair");
+    assert_eq!(
+        allocations
+            .iter()
+            .map(|instruction| class_name(&class, ConstantPoolIndex(instruction.cp.unwrap())))
+            .collect::<Vec<_>>(),
+        ["example/Counter", "example/Counter", "example/Pair"]
+    );
+
+    let invocations = instructions
+        .iter()
+        .filter(|instruction| matches!(instruction.opcode, 0xb7 | 0xb6))
+        .collect::<Vec<_>>();
+    assert_eq!(invocations.len(), 5, "two constructors, two setters, Pair");
+    for constructor in &invocations[..2] {
+        assert_eq!(constructor.opcode, 0xb7);
+        assert_eq!(
+            method_ref(&class, ConstantPoolIndex(constructor.cp.unwrap())),
+            ("example/Counter", "<init>", "(I)V")
+        );
+    }
+    let mut initialized = [None, None];
+    for constructor in &invocations[..2] {
+        let seed_load = instructions
+            .iter()
+            .find(|instruction| instruction.pc + instruction.len == constructor.pc)
+            .expect("Counter constructor receives a seed local");
+        let seed_slot = iload_slot(seed_load).expect("seed argument is loaded from a local");
+        assert!(matches!(seed_slot, 1 | 2));
+        let store = instructions
+            .iter()
+            .find(|instruction| instruction.pc == constructor.pc + constructor.len)
+            .expect("initialized Counter is stored immediately");
+        let local_slot = astore_slot(store).expect("Counter initializer stores a local");
+        assert!(
+            initialized[(seed_slot - 1) as usize]
+                .replace(local_slot)
+                .is_none()
+        );
+    }
+    let first_slot = initialized[0].expect("first uses firstSeed");
+    let second_slot = initialized[1].expect("second uses secondSeed");
+    assert_ne!(first_slot, second_slot);
+    let first_setter = invocations[2];
+    let second_setter = invocations[3];
+    for setter in [first_setter, second_setter] {
+        assert_eq!(setter.opcode, 0xb6, "Unit setter uses invokevirtual");
+        assert_eq!(
+            method_ref(&class, ConstantPoolIndex(setter.cp.unwrap())),
+            ("example/Counter", "set", "(I)V")
+        );
+    }
+    let previous = |insn: &Insn| {
+        instructions
+            .iter()
+            .find(|candidate| candidate.pc + candidate.len == insn.pc)
+            .copied()
+            .expect("previous bytecode instruction")
+    };
+    let alias_argument = previous(first_setter);
+    let alias_load = previous(&alias_argument);
+    let alias_store = instructions
+        .iter()
+        .rfind(|instruction| {
+            instruction.pc > invocations[1].pc
+                && instruction.pc < first_setter.pc
+                && astore_slot(instruction).is_some()
+        })
+        .copied()
+        .expect("alias local store follows both initialized Counter locals");
+    let alias_slot = astore_slot(&alias_store).unwrap();
+    assert_ne!(alias_slot, first_slot);
+    assert_ne!(alias_slot, second_slot);
+    let alias_source_load = previous(&alias_store);
+    assert_eq!(aload_slot(&alias_source_load), Some(first_slot));
+    assert_eq!(aload_slot(&alias_load), Some(alias_slot));
+    assert_eq!(
+        iload_slot(&alias_argument),
+        Some(2),
+        "first call uses secondSeed"
+    );
+
+    let second_argument = previous(second_setter);
+    let second_receiver = previous(&second_argument);
+    assert_eq!(aload_slot(&second_receiver), Some(second_slot));
+    assert_eq!(
+        iload_slot(&second_argument),
+        Some(1),
+        "second call uses firstSeed"
+    );
+    assert!(invocations[1].pc < alias_store.pc && alias_store.pc < first_setter.pc);
+    assert!(first_setter.pc < second_setter.pc);
+    assert_eq!(
+        method_ref(&class, ConstantPoolIndex(invocations[4].cp.unwrap())),
+        (
+            "example/Pair",
+            "<init>",
+            "(Lexample/Counter;Lexample/Counter;)V"
+        )
+    );
+    let pair_new = allocations[2];
+    let pair_loads = instructions
+        .iter()
+        .filter(|instruction| instruction.pc > pair_new.pc && instruction.pc < invocations[4].pc)
+        .filter_map(aload_slot)
+        .collect::<Vec<_>>();
+    assert_eq!(pair_loads, [first_slot, second_slot]);
+    assert_eq!(require_exactly_two_setter_sites(factory), Ok(()));
+
+    let runtime = root.join("runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    write_runtime(&runtime, &originals);
+    let javap = java_tool("javap", root)
+        .args(["-v", "-c", "-p", "-classpath"])
+        .arg(&runtime)
+        .arg("example.PairFactory")
+        .output()
+        .expect("javap Rust PairFactory");
+    assert!(
+        javap.status.success(),
+        "javap failed: {}",
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let dump = String::from_utf8_lossy(&javap.stdout);
+    assert!(dump.contains("descriptor: (II)Lexample/Pair;"));
+    assert!(dump.contains("major version: 65"));
+    assert!(dump.contains("stack=4, locals=6"));
+    assert_eq!(
+        dump.lines()
+            .filter(|line| line.contains("invokevirtual") && line.contains("Counter.set:(I)V"))
+            .count(),
+        2,
+        "javap displays exactly two Counter.set(I)V calls"
+    );
+
+    let javac = java_tool("javac", root)
+        .args(["--release", "21", "-classpath"])
+        .arg(&runtime)
+        .arg("-d")
+        .arg(&harness_classes)
+        .arg(&harness)
+        .output()
+        .expect("javac independent Rust artifact consumer");
+    assert!(
+        javac.status.success(),
+        "javac: {}{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = run_alias_runtime(&harness_classes, &runtime);
+    assert!(
+        java.status.success(),
+        "java -Xverify:all: {}{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "alias-runtime=3/7,42/-9,7/7;identity=distinct;mutations=independent;repeat=fresh"
+    );
+    assert_runtime_artifacts_unchanged(&runtime, &originals, &original_hashes);
+    assert_eq!(
+        batch
+            .classes()
+            .iter()
+            .map(|artifact| (
+                artifact.classfile_path().to_owned(),
+                artifact.tasty_link_id()
+            ))
+            .collect::<Vec<_>>(),
+        original_uuid_links,
+        "javac, javap, and java preserve all six original UUID links"
+    );
+
+    let run_corrupted = |name: &str, edit: &dyn Fn(&mut Vec<u8>)| {
+        let mut corrupted = originals.clone();
+        edit(&mut corrupted[factory_index].1);
+        let directory = root.join(format!("negative-{name}"));
+        std::fs::create_dir_all(&directory).unwrap();
+        write_runtime(&directory, &corrupted);
+        run_alias_runtime(&harness_classes, &directory)
+    };
+    let wrong_alias_target = run_corrupted("wrong-alias-target", &|bytes| {
+        replace_code_range(
+            bytes,
+            code_start,
+            code_len,
+            alias_source_load.pc,
+            alias_source_load.pc + alias_source_load.len,
+            &aload(second_slot),
+        );
+    });
+    assert_failure_at(
+        &wrong_alias_target,
+        "JVM-valid wrong alias target runtime assertion",
+        "unexpected pair for seeds 7/3",
+    );
+
+    let alias_used_before_store = run_corrupted("alias-before-store", &|bytes| {
+        let mut early = aload(alias_slot);
+        early.extend(aload_slot(&alias_argument).map(iload_opcode));
+        early.push(0xb6);
+        early.extend_from_slice(&first_setter.cp.unwrap().to_be_bytes());
+        replace_code_range(
+            bytes,
+            code_start,
+            code_len,
+            alias_store.pc,
+            alias_store.pc,
+            &early,
+        );
+    });
+    assert_failure_at(
+        &alias_used_before_store,
+        "alias verifier control",
+        "VerifyError",
+    );
+
+    let omitted_setter = run_corrupted("omitted-alias-setter", &|bytes| {
+        replace_code_range(
+            bytes,
+            code_start,
+            code_len,
+            alias_load.pc,
+            first_setter.pc + first_setter.len,
+            &vec![0; first_setter.pc + first_setter.len - alias_load.pc],
+        );
+    });
+    assert_failure_at(
+        &omitted_setter,
+        "omitted setter runtime assertion",
+        "unexpected pair for seeds 7/3",
+    );
+
+    let mut duplicated = originals.clone();
+    let mut duplicate_call = Vec::new();
+    duplicate_call.extend_from_slice(&code[alias_load.pc..first_setter.pc + first_setter.len]);
+    replace_code_range(
+        &mut duplicated[factory_index].1,
+        code_start,
+        code_len,
+        pair_new.pc,
+        pair_new.pc,
+        &duplicate_call,
+    );
+    assert_eq!(
+        exact_setter_invocation_count(&duplicated[factory_index].1),
+        3,
+        "the observed bytecode contract catches a duplicated setter"
+    );
+
+    let pair_class_index = (1..256u16)
+        .map(ConstantPoolIndex)
+        .find(|index| {
+            matches!(
+                class.constant_pool.get(*index),
+                Some(ConstantPoolEntry::Class { name_index })
+                    if class.constant_pool.utf8(*name_index) == Ok("example/Pair")
+            )
+        })
+        .expect("Pair class constant");
+    let bad_owner = run_corrupted("wrong-setter-owner", &|bytes| {
+        let offset = constant_pool_entry_offset(bytes, first_setter.cp.unwrap());
+        bytes[offset + 1..offset + 3].copy_from_slice(&pair_class_index.0.to_be_bytes());
+    });
+    assert_failure_at(&bad_owner, "wrong setter owner verifier", "VerifyError");
+
+    let ConstantPoolEntry::Methodref {
+        name_and_type_index,
+        ..
+    } = class
+        .constant_pool
+        .get(ConstantPoolIndex(first_setter.cp.unwrap()))
+        .expect("setter Methodref")
+    else {
+        panic!("setter must use Methodref")
+    };
+    let ConstantPoolEntry::NameAndType { name_index, .. } = class
+        .constant_pool
+        .get(*name_and_type_index)
+        .expect("setter NameAndType")
+    else {
+        panic!("setter must have NameAndType")
+    };
+    let bad_descriptor = run_corrupted("wrong-setter-descriptor", &|bytes| {
+        let count = u16::from_be_bytes(bytes[8..10].try_into().unwrap());
+        let descriptor_index = count;
+        let nat_index = count + 1;
+        let cp_end = constant_pool_end(bytes);
+        let mut additions = vec![0x01, 0x00, 0x03, b'(', b')', b'V', 0x0c];
+        additions.extend_from_slice(&name_index.0.to_be_bytes());
+        additions.extend_from_slice(&descriptor_index.to_be_bytes());
+        bytes.splice(cp_end..cp_end, additions);
+        bytes[8..10].copy_from_slice(&(count + 2).to_be_bytes());
+        let offset = constant_pool_entry_offset(bytes, first_setter.cp.unwrap());
+        bytes[offset + 3..offset + 5].copy_from_slice(&nat_index.to_be_bytes());
+    });
+    assert_failure_at(
+        &bad_descriptor,
+        "wrong setter descriptor verifier",
+        "VerifyError",
+    );
+
+    let bad_stack = run_corrupted("bad-stack-bound", &|bytes| {
+        bytes[code_start - 8..code_start - 6].copy_from_slice(&1u16.to_be_bytes());
+    });
+    assert_failure_at(&bad_stack, "invalid max_stack verifier", "VerifyError");
+    let bad_locals = run_corrupted("bad-local-bound", &|bytes| {
+        bytes[code_start - 6..code_start - 4].copy_from_slice(&(alias_slot as u16).to_be_bytes());
+    });
+    assert_failure_at(&bad_locals, "invalid max_locals verifier", "VerifyError");
+
+    let missing_counter = root.join("negative-missing-counter");
+    std::fs::create_dir_all(&missing_counter).unwrap();
+    write_runtime(
+        &missing_counter,
+        &originals
+            .iter()
+            .filter(|(path, _)| path != "example/Counter.class")
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
+    let missing_counter_java = run_alias_runtime(&harness_classes, &missing_counter);
+    assert_failure_at(
+        &missing_counter_java,
+        "missing Counter linkage",
+        "NoClassDefFoundError",
+    );
+
+    let pair_argument_loads = instructions
+        .iter()
+        .filter(|instruction| instruction.pc > pair_new.pc && instruction.pc < invocations[4].pc)
+        .filter_map(|instruction| aload_slot(instruction).map(|slot| (instruction, slot)))
+        .collect::<Vec<_>>();
+    assert_eq!(pair_argument_loads.len(), 2);
+    let swapped_pair_order = run_corrupted("wrong-pair-local-order", &|bytes| {
+        let mut replacement = aload(second_slot);
+        replacement.extend(aload(first_slot));
+        replace_code_range(
+            bytes,
+            code_start,
+            code_len,
+            pair_argument_loads[0].0.pc,
+            pair_argument_loads[1].0.pc + pair_argument_loads[1].0.len,
+            &replacement,
+        );
+    });
+    assert_failure_at(
+        &swapped_pair_order,
+        "wrong Pair local order runtime assertion",
+        "unexpected pair for seeds 7/3",
+    );
+
+    let mut extra_allocation = originals.clone();
+    let mut unused_counter = vec![0xbb];
+    unused_counter.extend_from_slice(&counter_allocations[0].cp.unwrap().to_be_bytes());
+    unused_counter.push(0x59);
+    unused_counter.push(iload_opcode(1));
+    unused_counter.push(0xb7);
+    unused_counter.extend_from_slice(&invocations[0].cp.unwrap().to_be_bytes());
+    unused_counter.extend_from_slice(&[0x3a, 6]);
+    replace_code_range(
+        &mut extra_allocation[factory_index].1,
+        code_start,
+        code_len,
+        pair_new.pc,
+        pair_new.pc,
+        &unused_counter,
+    );
+    extra_allocation[factory_index].1[code_start - 6..code_start - 4]
+        .copy_from_slice(&7u16.to_be_bytes());
+    let mut extra_reader = Reader::new(&extra_allocation[factory_index].1);
+    let extra_class = ClassFile::decode(&mut extra_reader).expect("decode extra allocation");
+    let (extra_code, _, _) = method_code(&extra_class, "create");
+    assert_eq!(
+        decode(extra_code)
+            .iter()
+            .filter(|instruction| {
+                instruction.opcode == 0xbb
+                    && class_name(&extra_class, ConstantPoolIndex(instruction.cp.unwrap()))
+                        == "example/Counter"
+            })
+            .count(),
+        3,
+        "the observed allocation contract catches an extra Counter"
+    );
+
+    assert_runtime_artifacts_unchanged(&runtime, &originals, &original_hashes);
+}
+
+fn run_alias_runtime(
+    harness_classes: &std::path::Path,
+    runtime: &std::path::Path,
+) -> std::process::Output {
+    let classpath = std::env::join_paths([harness_classes, runtime]).unwrap();
+    java_tool("java", runtime)
+        .args(["-Xverify:all", "-ea", "-classpath"])
+        .arg(classpath)
+        .arg("example.RustRuntimeProbe")
+        .output()
+        .expect("run strict JDK 21 alias runtime probe")
 }
 
 fn sha256_bytes(bytes: &[u8]) -> String {

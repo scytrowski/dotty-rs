@@ -129,6 +129,50 @@ existing branches and keep their focused output tests.
 The Scala evidence above remains the pinned-language oracle for this source
 shape. The integration adds no separate Java or Scala consumer feature.
 
+## Independent Rust artifact runtime acceptance (#2243)
+
+`jvm_tasty_local_receiver_call_runtime::aliased_counter_identity_and_ordered_calls_execute_under_strict_jdk21`
+emits the unchanged `LocalReferenceAlias.scala` source through the paired Rust
+producer, then compiles the separate
+[`RustRuntimeProbe.java`](../tests/fixtures/jvm_tasty_local_reference_alias/RustRuntimeProbe.java)
+with `javac --release 21` against those six files. Temurin JDK 21 runs the
+client with `java -Xverify:all -ea`; it observes `3/7`, `42/-9`, and `7/7`,
+checks distinct Counter and Pair identities for equal values and repeated
+factory calls, and independently mutates both Counter fields by reflection.
+The probe source SHA-256 is
+`fd9b6bbd2b2d4ea1c02c8568341414a75e501a310e17a8d688adf8f87e2e5946`.
+
+The Rust artifacts are pinned by path and SHA-256 in the regression. Their
+class-file TASTY links point to these sidecar UUIDs:
+
+| Artifact path | SHA-256 | TASTy UUID |
+| --- | --- | --- |
+| `example/Counter.class` | `68d6a0af84c82311ce06b38b1e98ea69493643c5c99acde2cc4b377d31913634` | `00edafe3-c150-85ac-0000-000000008193` |
+| `example/Counter.tasty` | `ff7a6a332352b38dd2022f9a5c5b5de3a40d336eef1b2859bc226d43383dcc6e` | same |
+| `example/Pair.class` | `4ff943e4a8310b37c7010a3901b5d75979823524d240902cc25a67347953a9b0` | `00cda16b-8275-dff0-0000-000000008198` |
+| `example/Pair.tasty` | `5d9083ae32ee7aec20702d6220c7f7fc3c6be3dca2019a93963ae33c1323f770` | same |
+| `example/PairFactory.class` | `4458dadc7c09d16e3868872e135b80233597a7d567fbc28964cf9468b96b5d7b` | `0021e620-2123-f1c2-0000-00000000819e` |
+| `example/PairFactory.tasty` | `8b1468fb6948a583210407f30a664a7dba2cf574e0bb8b114a04eb153fefd5bb` | same |
+
+The test checks `create(II)Lexample/Pair;`, class-file major 65,
+`max_stack=4`, `max_locals=6`, exactly two Counter allocations, and the
+derived first, second and alias local slots. `javap -v -c -p` and decoded
+bytecode both show the alias copied from the initialized first local, the
+alias receiver with `secondSeed`, the original second receiver with
+`firstSeed`, and Pair construction from the original first and second locals.
+All six artifact bytes, paths and UUID links are rechecked after compilation,
+disassembly and execution.
+
+Bounded mutations observe the first actual failure: a valid wrong alias slot,
+omitted setter, and swapped Pair arguments reach the Java runtime assertions;
+loading the alias before its store and wrong setter owner/descriptor fail with
+`VerifyError`; missing `Counter.class` fails with `NoClassDefFoundError`.
+Reduced stack/local bounds also fail verification. Duplicate-setter and extra
+allocation controls are rejected by the observed bytecode contract at three
+setter sites and three Counter allocations, respectively. These controls use
+the existing runtime harness and mutation helpers; the test does not add a
+workflow or change the producer.
+
 ## Reproduction
 
 Build from a copy of the pinned source checkout so sbt outputs stay in the
