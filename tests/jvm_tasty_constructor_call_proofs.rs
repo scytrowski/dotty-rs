@@ -4341,23 +4341,13 @@ fn immutable_local_reference_alias_proof_tracks_the_original_first_argument_by_i
             },
         );
     }
-    let deferred = with_paired_jvm_tasty_batch_plan(
+    with_paired_jvm_tasty_batch_plan(
         fixture,
         "LocalReferenceAlias.scala",
         SourceId::from_index(22360),
         |_| (),
     )
-    .expect_err("the proof-only alias must not authorize paired producer output");
-    assert!(
-        matches!(
-            deferred,
-            PairedPlanError::BatchUnit {
-                phase: "cross-class constructor-call identity proof",
-                ..
-            }
-        ),
-        "unexpected deferred producer boundary: {deferred:?}"
-    );
+    .expect("the authenticated alias and ordered-call receipts compose into paired plans");
 }
 
 fn ordered_alias_call_proof_error(

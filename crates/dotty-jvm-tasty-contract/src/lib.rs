@@ -1710,10 +1710,17 @@ enum MixedConstructorArgumentRef {
 struct MixedConstructorPairRef {
     arguments: [MixedConstructorArgumentRef; 2],
     local_initializers: Vec<LocalCounterInitializerRef>,
+    local_alias_copy: Option<LocalReferenceAliasCopyRef>,
     local_receiver_call: Option<LocalReceiverUnitCallRef>,
     local_receiver_call_pair: Option<[LocalReceiverUnitCallRef; 2]>,
     max_stack: u16,
     max_locals: u16,
+}
+
+#[derive(Clone, Copy)]
+struct LocalReferenceAliasCopyRef {
+    source_local_slot: u16,
+    alias_local_slot: u16,
 }
 
 struct LocalReceiverUnitCallRef {
@@ -1774,11 +1781,19 @@ fn validate_two_local_constructor_pair(
     let local_receiver_call_pair = tasty
         .typed_bindings
         .local_receiver_unit_call_pair(source_id, caller);
+    let local_reference_alias = tasty
+        .typed_bindings
+        .local_reference_alias(source_id, caller);
     if source_block.stats.len() != typed_block.stats.len()
         || match source_block.stats.len() {
             2 => local_receiver_call.is_some() || local_receiver_call_pair.is_some(),
             3 => local_receiver_call.is_none() || local_receiver_call_pair.is_some(),
             4 => local_receiver_call.is_some() || local_receiver_call_pair.is_none(),
+            5 => {
+                local_receiver_call.is_some()
+                    || local_receiver_call_pair.is_none()
+                    || local_reference_alias.is_none()
+            }
             _ => true,
         }
     {
@@ -1804,8 +1819,9 @@ fn validate_two_local_constructor_pair(
     else {
         return Err("two-local typed Block result is not the original Pair Apply".into());
     };
+    let has_alias = source_block.stats.len() == 5;
     if initializers.len() != 2
-        || locals.len() != 2
+        || locals.len() != if has_alias { 3 } else { 2 }
         || tasty.typed_bindings.typed_at(source_id, source_rhs) != Some(typed_rhs)
         || source_outer.kind != dotty_core::ast::ApplyKind::Regular
         || typed_outer.kind != dotty_core::ast::ApplyKind::Regular
@@ -1814,6 +1830,62 @@ fn validate_two_local_constructor_pair(
         || tasty.typed_bindings.typed_at(source_id, source_block.expr) != Some(typed_block.expr)
     {
         return Err("two-local proof does not retain exactly two original declarations and initializer receipts".into());
+    }
+    if let Some(alias) = local_reference_alias {
+        let source_declaration = *source_block
+            .stats
+            .get(2)
+            .ok_or_else(|| "alias declaration is missing from the original Block".to_owned())?;
+        let typed_declaration = *typed_block.stats.get(2).ok_or_else(|| {
+            "typed alias declaration is missing from the original Block".to_owned()
+        })?;
+        let source_local = locals
+            .get(2)
+            .ok_or_else(|| "alias has no canonical local value binding".to_owned())?;
+        if alias.source_block != source_rhs
+            || alias.typed_block != typed_rhs
+            || alias.source_declaration != source_declaration
+            || alias.typed_declaration != typed_declaration
+            || alias.local != source_local.symbol
+            || alias.scope != source_local.scope
+            || alias.local == alias.target
+            || initializers
+                .iter()
+                .find(|initializer| initializer.argument_formal == pair.method_formals[0])
+                .map(|initializer| initializer.local)
+                != Some(alias.target)
+            || !matches!(tasty.source_ast.try_get(source_declaration).map(|tree| &tree.kind), Some(TreeKind::ValDef(value)) if value.rhs == Some(alias.source_initializer) && value.tpt == alias.source_type_tree)
+            || !matches!(tasty.typed_ast.try_get(typed_declaration).map(|tree| &tree.kind), Some(TreeKind::ValDef(value)) if value.rhs == Some(alias.typed_initializer) && value.tpt == alias.typed_type_tree)
+            || tasty.typed_bindings.typed_at(source_id, source_declaration)
+                != Some(typed_declaration)
+            || tasty
+                .typed_bindings
+                .typed_at(source_id, alias.source_initializer)
+                != Some(alias.typed_initializer)
+            || tasty
+                .typed_bindings
+                .typed_at(source_id, alias.source_target)
+                != Some(alias.typed_target)
+            || !matches!(
+                tasty
+                    .source_ast
+                    .try_get(alias.source_initializer)
+                    .map(|tree| &tree.kind),
+                Some(TreeKind::Ident(_))
+            )
+            || !matches!(
+                tasty
+                    .typed_ast
+                    .try_get(alias.typed_target)
+                    .map(|tree| &tree.kind),
+                Some(TreeKind::Ident(_))
+            )
+            || !matches!(tasty.store.types.try_get(tasty.typed_ast.get(alias.typed_target).ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == alias.target)
+        {
+            return Err("alias declaration does not preserve the canonical first-local source/typed identity".into());
+        }
+    } else if has_alias {
+        return Err("five-stat local Block requires its canonical alias receipt".into());
     }
     if pair.method_formals[0] == pair.method_formals[1]
         || pair.source_method_formals[0] == pair.source_method_formals[1]
@@ -2034,6 +2106,35 @@ fn validate_two_local_constructor_pair(
     let local_symbols = [initializers[0].local, initializers[1].local];
     let counter_class =
         local_class.ok_or_else(|| "two-local Counter class is absent".to_owned())?;
+    let local_alias_copy = local_reference_alias
+        .map(|alias| {
+            let source_index = local_symbols
+                .iter()
+                .position(|symbol| *symbol == alias.target)
+                .ok_or_else(|| {
+                    "alias target is not one of the original Counter locals".to_owned()
+                })?;
+            let source_local_slot = *local_slots
+                .get(source_index)
+                .ok_or_else(|| "alias target has no authenticated JVM local slot".to_owned())?;
+            let alias_slot = layout
+                .local(alias.local)
+                .map_err(|error| format!("alias has no canonical JVM local slot: {error:?}"))?;
+            if alias_slot.declaration() != alias.typed_declaration
+                || alias_slot.is_mutable()
+                || alias_slot.ty() != dotty_jvm::JvmType::Reference(counter_class)
+            {
+                return Err(
+                    "alias JVM slot differs from its canonical immutable reference declaration"
+                        .into(),
+                );
+            }
+            Ok::<LocalReferenceAliasCopyRef, String>(LocalReferenceAliasCopyRef {
+                source_local_slot,
+                alias_local_slot: alias_slot.slot(),
+            })
+        })
+        .transpose()?;
     let expected_receiver = match pair.arguments[0].origin {
         FormalLocalConstructorCallArgumentOrigin::LocalValue { symbol, .. } => symbol,
         _ => return Err("first Pair argument is not an authenticated local value".into()),
@@ -2043,13 +2144,14 @@ fn validate_two_local_constructor_pair(
                                   required_receiver: Option<SymbolId>,
                                   required_formal: Option<SymbolId>|
      -> Result<LocalReceiverUnitCallRef, String> {
+        let call_prefix = if has_alias { 3 } else { 2 };
         let source_call_tree = *source_block
             .stats
-            .get(call_index + 2)
+            .get(call_index + call_prefix)
             .ok_or_else(|| format!("Counter.set source stat {call_index} is missing"))?;
         let typed_call_tree = *typed_block
             .stats
-            .get(call_index + 2)
+            .get(call_index + call_prefix)
             .ok_or_else(|| format!("Counter.set typed stat {call_index} is missing"))?;
         let source_apply = tasty
             .source_ast
@@ -2090,7 +2192,7 @@ fn validate_two_local_constructor_pair(
                 != Some(binding.typed_argument)
             || !matches!(tasty.source_ast.try_get(binding.source_select).map(|tree| &tree.kind), Some(TreeKind::Select(select)) if select.qualifier == binding.source_receiver)
             || !matches!(tasty.typed_ast.try_get(binding.typed_select).map(|tree| &tree.kind), Some(TreeKind::Select(select)) if select.qualifier == binding.typed_receiver)
-            || !matches!(tasty.store.types.try_get(tasty.typed_ast.get(binding.typed_receiver).ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == binding.receiver && local_symbols.contains(symbol) && required_receiver.is_none_or(|expected| expected == *symbol))
+            || !matches!(tasty.store.types.try_get(tasty.typed_ast.get(binding.typed_receiver).ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == binding.receiver && (local_symbols.contains(symbol) || local_reference_alias.is_some_and(|alias| alias.local == *symbol)) && required_receiver.is_none_or(|expected| expected == *symbol))
             || !matches!(tasty.store.types.try_get(tasty.typed_ast.get(binding.typed_argument).ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == binding.argument_formal && pair.method_formals.contains(symbol) && required_formal.is_none_or(|expected| expected == *symbol))
             || !matches!(tasty.store.types.try_get(tasty.typed_ast.get(binding.typed_select).ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == binding.method)
             || tasty.typed_ast.get(binding.typed_apply).ty != tasty.definitions.unit
@@ -2116,24 +2218,45 @@ fn validate_two_local_constructor_pair(
         {
             return Err("Counter.set JVM target must be the selected instance set(I)V".into());
         }
-        let receiver_initializer = initializers
-            .iter()
-            .find(|initializer| initializer.local == binding.receiver)
-            .ok_or_else(|| {
-                "Counter.set receiver has no authenticated local initializer".to_owned()
-            })?;
-        if binding.receiver_scope != receiver_initializer.scope {
+        let receiver_scope = local_reference_alias
+            .filter(|alias| alias.local == binding.receiver)
+            .map(|alias| alias.scope)
+            .or_else(|| {
+                initializers
+                    .iter()
+                    .find(|initializer| initializer.local == binding.receiver)
+                    .map(|initializer| initializer.scope)
+            })
+            .ok_or_else(|| "Counter.set receiver has no authenticated local binding".to_owned())?;
+        if binding.receiver_scope != receiver_scope {
             return Err("Counter.set receiver scope differs from its initialized local".into());
         }
-        let receiver_index = local_symbols
-            .iter()
-            .position(|symbol| *symbol == binding.receiver)
-            .ok_or_else(|| {
-                "Counter.set receiver is not one of the authenticated locals".to_owned()
-            })?;
-        let receiver_local_slot = *local_slots
-            .get(receiver_index)
-            .ok_or_else(|| "Counter.set receiver has no authenticated JVM local slot".to_owned())?;
+        let receiver_local_slot = if let Some(alias) =
+            local_reference_alias.filter(|alias| alias.local == binding.receiver)
+        {
+            let slot = layout
+                .local(alias.local)
+                .map_err(|error| format!("alias has no canonical JVM local slot: {error:?}"))?;
+            if slot.declaration() != alias.typed_declaration
+                || slot.is_mutable()
+                || slot.ty() != dotty_jvm::JvmType::Reference(counter_class)
+            {
+                return Err(
+                    "alias JVM slot differs from its canonical immutable declaration".into(),
+                );
+            }
+            slot.slot()
+        } else {
+            let receiver_index = local_symbols
+                .iter()
+                .position(|symbol| *symbol == binding.receiver)
+                .ok_or_else(|| {
+                    "Counter.set receiver is not one of the authenticated locals".to_owned()
+                })?;
+            *local_slots.get(receiver_index).ok_or_else(|| {
+                "Counter.set receiver has no authenticated JVM local slot".to_owned()
+            })?
+        };
         let argument_local_slot = method
             .parameters()
             .iter()
@@ -2247,6 +2370,7 @@ fn validate_two_local_constructor_pair(
             .try_into()
             .map_err(|_| "two-local Pair argument receipt is incomplete")?,
         local_initializers,
+        local_alias_copy,
         local_receiver_call,
         local_receiver_call_pair,
         max_stack: 4,
@@ -2740,6 +2864,7 @@ fn validate_formal_local_constructor_pair(
             argument_local_slot: method.parameters()[1].slot(),
             result_local_slot: local_slot.slot(),
         }],
+        local_alias_copy: None,
         local_receiver_call: None,
         local_receiver_call_pair: None,
         max_stack: 4,
@@ -3230,6 +3355,7 @@ fn validate_mixed_constructor_pair(
     Ok(MixedConstructorPairRef {
         arguments: [first, second],
         local_initializers: Vec::new(),
+        local_alias_copy: None,
         local_receiver_call: None,
         local_receiver_call_pair: None,
         max_stack,
@@ -3936,7 +4062,7 @@ fn validate_cross_class_call_code(
                     .ok_or_else(|| "FormalLocalPair Pair class is outside the batch".to_owned())?;
                 let mixed_pair = if matches!(
                     tasty.source_ast.try_get(rhs).map(|tree| &tree.kind),
-                    Some(TreeKind::Block(block)) if matches!(block.stats.len(), 2..=4)
+                    Some(TreeKind::Block(block)) if matches!(block.stats.len(), 2..=5)
                 ) {
                     validate_two_local_constructor_pair(
                         proof,
@@ -4919,6 +5045,10 @@ fn validate_cross_class_call_code(
                         call.caller
                     ));
                 }
+            }
+            if let Some(alias) = mixed_pair.local_alias_copy {
+                take_factory_local(code.code, &mut pc, false, alias.source_local_slot)?;
+                take_factory_local(code.code, &mut pc, true, alias.alias_local_slot)?;
             }
             let local_receiver_calls = if let Some(calls) = &mixed_pair.local_receiver_call_pair {
                 calls.iter().collect::<Vec<_>>()

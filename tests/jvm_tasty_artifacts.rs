@@ -74,6 +74,7 @@ const IMMUTABLE_LOCAL_PAIR_REVERSED_BATCH: &str =
     include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactoryReversed.scala");
 const TWO_IMMUTABLE_LOCAL_PAIR_BATCH: &str =
     include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
+const IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH: &str = "package example\n\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\n\nclass Pair(first: Counter, second: Counter):\n  private val left: Counter = first\n  private val right: Counter = second\n  def leftValue(): Int = left.get()\n  def rightValue(): Int = right.get()\n\nclass PairFactory:\n  def create(firstSeed: Int, secondSeed: Int): Pair =\n    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)\n    val alias: Counter = first\n    alias.set(secondSeed)\n    second.set(firstSeed)\n    new Pair(first, second)\n";
 const COUNTER_FACTORY_IDENTITY_ONLY: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n";
 const COUNTER_FACTORY_PRIMITIVE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n  def create(seed: Int): Int = seed\n";
 const COUNTER_FACTORY_REFERENCE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def create(counter: Counter): Counter = counter\n";
@@ -834,6 +835,682 @@ public final class ReferenceLocalBatchHarness {
         undersized_stack[code_start - 8..code_start - 6].copy_from_slice(&2u16.to_be_bytes());
         run_local_negative("undersized-reference-local-stack", &undersized_stack);
     }
+}
+
+#[test]
+fn immutable_alias_and_ordered_calls_frozen_source_emits_a_paired_batch() {
+    let first = emit_paired_jvm_tasty_batch(
+        IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH,
+        "PairFactory.scala",
+        SourceId::from_index(22400),
+    )
+    .unwrap_or_else(|error| panic!("frozen source paired emission failed: {error:?}"));
+    let second = emit_paired_jvm_tasty_batch(
+        IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH,
+        "PairFactory.scala",
+        SourceId::from_index(22401),
+    )
+    .expect("fresh source session emits the same bounded paired batch");
+    assert_eq!(first.source_id(), SourceId::from_index(22400));
+    assert_eq!(first.classes().len(), 3);
+    let paths = first
+        .classes()
+        .iter()
+        .flat_map(|class| [class.classfile_path(), class.tasty_path()])
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paths,
+        [
+            "example/Counter.class",
+            "example/Counter.tasty",
+            "example/Pair.class",
+            "example/Pair.tasty",
+            "example/PairFactory.class",
+            "example/PairFactory.tasty",
+        ]
+    );
+    for (left, right) in first.classes().iter().zip(second.classes()) {
+        assert_eq!(left.classfile_path(), right.classfile_path());
+        assert_eq!(left.tasty_path(), right.tasty_path());
+        assert_eq!(left.classfile_bytes(), right.classfile_bytes());
+        assert_eq!(left.tasty_bytes(), right.tasty_bytes());
+        assert_eq!(left.tasty_link_id(), right.tasty_link_id());
+        let tasty = TastyFile::parse_and_validate_scala_3_9(left.tasty_bytes()).unwrap();
+        assert_eq!(
+            (
+                tasty.header().major_version,
+                tasty.header().minor_version,
+                tasty.header().experimental_version,
+            ),
+            (28, 9, 0)
+        );
+        assert_eq!(
+            left.tasty_link_id(),
+            TastyLinkId::from_bytes(tasty.header().uuid)
+        );
+        let mut reader = Reader::new(left.classfile_bytes());
+        let class = ClassFile::decode(&mut reader).unwrap();
+        assert!(reader.is_at_end());
+        assert_eq!((class.version.major, class.version.minor), (65, 0));
+        assert_eq!(class.tasty_link_id().unwrap(), Some(left.tasty_link_id()));
+        validate_classfile_tasty_link(&class, left.tasty_bytes()).unwrap();
+    }
+    let uuids = first
+        .classes()
+        .iter()
+        .map(|class| class.tasty_link_id())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(uuids.len(), 3);
+    let stage = TestDirectory::new("local-alias-six-artifacts");
+    let destination = stage.path().join("classes");
+    assert_eq!(
+        publish_paired_batch(&destination, &first, None)
+            .unwrap()
+            .len(),
+        6
+    );
+    for (index, fault) in (1..=6)
+        .map(BatchPublishFault::AfterStagedFiles)
+        .chain([
+            BatchPublishFault::BeforePromotion,
+            BatchPublishFault::AfterPromotion,
+        ])
+        .enumerate()
+    {
+        let failed_destination = stage.path().join(format!("failed-{index}"));
+        assert!(publish_paired_batch(&failed_destination, &first, Some(fault)).is_err());
+        assert!(!failed_destination.exists(), "fault case {index}");
+    }
+    let sentinel_destination = stage.path().join("existing");
+    std::fs::create_dir(&sentinel_destination).unwrap();
+    let sentinel = sentinel_destination.join("sentinel");
+    std::fs::write(&sentinel, b"leave alias output unchanged").unwrap();
+    assert!(publish_paired_batch(&sentinel_destination, &first, None).is_err());
+    assert_eq!(
+        std::fs::read(sentinel).unwrap(),
+        b"leave alias output unchanged"
+    );
+
+    if require_exact_jdk_21_or_skip() {
+        let runtime = TestDirectory::new("local-alias-two-setter-runtime");
+        let classes = runtime.path().join("classes");
+        assert_eq!(
+            publish_paired_batch(&classes, &first, None).unwrap().len(),
+            6
+        );
+        let harness = runtime.path().join("AliasPairHarness.java");
+        std::fs::write(
+            &harness,
+            r#"import example.Counter;
+import example.Pair;
+import example.PairFactory;
+import java.lang.reflect.Field;
+public final class AliasPairHarness {
+  public static void main(String[] args) throws Exception {
+    PairFactory factory = new PairFactory();
+    Pair positive = factory.create(7, 3);
+    Pair negative = factory.create(-9, 42);
+    if (positive.leftValue() != 3 || positive.rightValue() != 7
+        || negative.leftValue() != 42 || negative.rightValue() != -9)
+      throw new AssertionError("ordered alias setters");
+    Field left = Pair.class.getDeclaredField("left");
+    Field right = Pair.class.getDeclaredField("right");
+    left.setAccessible(true);
+    right.setAccessible(true);
+    Counter first = (Counter) left.get(positive);
+    Counter second = (Counter) right.get(positive);
+    if (first == second) throw new AssertionError("Pair locals must stay distinct");
+    System.out.println("alias-pair=3,7;42,-9;identities=distinct");
+  }
+}"#,
+        )
+        .unwrap();
+        let harness_classes = runtime.path().join("harness");
+        std::fs::create_dir_all(&harness_classes).unwrap();
+        let javac = Command::new("javac")
+            .args(["--release", "21", "-classpath"])
+            .arg(&classes)
+            .arg("-d")
+            .arg(&harness_classes)
+            .arg(&harness)
+            .output()
+            .expect("start JDK 21 javac for alias Pair runtime harness");
+        assert!(
+            javac.status.success(),
+            "javac rejected alias Pair harness: {}",
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let classpath =
+            std::env::join_paths([harness_classes.as_path(), classes.as_path()]).unwrap();
+        let java = Command::new("java")
+            .args(["-Xverify:all", "-ea", "-classpath"])
+            .arg(classpath)
+            .arg("AliasPairHarness")
+            .output()
+            .expect("start strict JDK 21 alias Pair verification");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected alias Pair batch:\n{}\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&java.stdout).trim(),
+            "alias-pair=3,7;42,-9;identities=distinct"
+        );
+    }
+
+    let renamed = IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH
+        .replace("val first: Counter", "val primary: Counter")
+        .replace("new Pair(first, second)", "new Pair(primary, second)")
+        .replace("alias: Counter = first", "view: Counter = primary")
+        .replace("alias.set", "view.set");
+    emit_paired_jvm_tasty_batch(
+        &renamed,
+        "RenamedPairFactory.scala",
+        SourceId::from_index(22402),
+    )
+    .expect("canonical alias/call receipts survive local renaming");
+
+    let reversed = IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH.replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
+        "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
+    );
+    emit_paired_jvm_tasty_batch(
+        &reversed,
+        "ReversedPairFactory.scala",
+        SourceId::from_index(22403),
+    )
+    .expect("canonical alias/call receipts survive reversed original declarations");
+
+    for rejected in [
+        IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH
+            .replace("val alias: Counter = first", "var alias: Counter = first"),
+        IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH
+            .replace("val alias: Counter = first", "val alias: Counter = second"),
+        IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH.replace(
+            "val alias: Counter = first",
+            "val alias: Counter = new Counter(firstSeed)",
+        ),
+        IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH
+            .replace("new Pair(first, second)", "new Pair(alias, second)"),
+        IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH.replace(
+            "second.set(firstSeed)",
+            "second.set(firstSeed)\n    second.set(secondSeed)",
+        ),
+        IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH.replace(
+            "val alias: Counter = first",
+            "val alias: Counter = first\n    val chained: Counter = alias",
+        ),
+        IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH.replace(
+            "val alias: Counter = first",
+            "val alias: Counter = first\n    val another: Counter = first",
+        ),
+        IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH.replace(
+            "alias.set(secondSeed)",
+            "if firstSeed > 0 then alias.set(secondSeed) else alias.set(firstSeed)",
+        ),
+    ] {
+        assert!(
+            emit_paired_jvm_tasty_batch(
+                &rejected,
+                "RejectedPairFactory.scala",
+                SourceId::from_index(22404)
+            )
+            .is_err(),
+            "unsupported or misbound alias/call source must fail before returning a batch"
+        );
+    }
+}
+
+#[test]
+fn immutable_alias_batch_artifact_contract_rejects_corrupted_receipts() {
+    let source_id = SourceId::from_index(22420);
+    let batch = emit_paired_jvm_tasty_batch(
+        IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH,
+        "PairFactory.scala",
+        source_id,
+    )
+    .expect("frozen source produces a paired alias batch");
+    let valid_artifacts = JvmTastyBatchArtifacts {
+        classfiles: batch
+            .classes()
+            .iter()
+            .map(|artifact| JvmTastyClassFileArtifact {
+                classfile_path: artifact.classfile_path().to_owned(),
+                classfile_bytes: artifact.classfile_bytes().to_vec(),
+            })
+            .collect(),
+        sidecars: batch
+            .classes()
+            .iter()
+            .map(|artifact| JvmTastySidecarArtifact {
+                tasty_path: artifact.tasty_path().to_owned(),
+                tasty_bytes: artifact.tasty_bytes().to_vec(),
+            })
+            .collect(),
+    };
+    with_paired_jvm_tasty_batch_plan(
+        IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH,
+        "PairFactory.scala",
+        source_id,
+        |plan| {
+            let tasty_plans = plan
+                .classes
+                .iter()
+                .map(|class| class.tasty_plan)
+                .collect::<Vec<_>>();
+            let validated = validate_jvm_tasty_batch(plan.jvm_unit, &tasty_plans).unwrap();
+            validate_jvm_tasty_batch_artifacts(&validated, valid_artifacts.clone()).unwrap();
+            let factory_original = valid_artifacts
+                .classfiles
+                .iter()
+                .find(|artifact| artifact.classfile_path == "example/PairFactory.class")
+                .unwrap();
+            let mut reader = Reader::new(&factory_original.classfile_bytes);
+            let decoded = ClassFile::decode(&mut reader).unwrap();
+            let create = decoded
+                .methods
+                .iter()
+                .find(|method| decoded.constant_pool.utf8(method.name_index).unwrap() == "create")
+                .unwrap();
+            let [Attribute::Code(code)] = create.attributes.as_slice() else {
+                panic!("PairFactory.create has one Code attribute");
+            };
+            let original_code = code.code.to_vec();
+            let code_start =
+                code.code.as_ptr() as usize - factory_original.classfile_bytes.as_ptr() as usize;
+            let find_unique = |pattern: &[u8]| {
+                let matches = original_code
+                    .windows(pattern.len())
+                    .enumerate()
+                    .filter_map(|(offset, bytes)| (bytes == pattern).then_some(offset))
+                    .collect::<Vec<_>>();
+                assert_eq!(matches.len(), 1, "bytecode pattern {pattern:02x?}");
+                matches[0]
+            };
+            let alias_copy = find_unique(&[0x2d, 0x3a, 0x05]); // aload_3; astore 5
+            let first_setter = find_unique(&[0x19, 0x05, 0x1c, 0xb6]); // alias.set(secondSeed)
+            let second_setter = find_unique(&[0x19, 0x04, 0x1b, 0xb6]); // second.set(firstSeed)
+            let pair_constructor = find_unique(&[0xbb, 0x00, 0x14, 0x59, 0x2d, 0x19, 0x04, 0xb7]);
+            let base = TestDirectory::new("alias-artifact-contract-rejections");
+            let assert_rejected =
+                |label: &str, corrupted: JvmTastyBatchArtifacts, expected_phase: &str| {
+                    let error = validate_jvm_tasty_batch_artifacts(&validated, corrupted)
+                        .expect_err("mutated alias artifacts must not pass the paired boundary");
+                    assert!(
+                        matches!(
+                            error,
+                            JvmTastyContractError::BatchArtifact {
+                                class_index: 2,
+                                phase,
+                                ..
+                            } if phase == expected_phase
+                        ),
+                        "{label} must fail at {expected_phase}, got {error:?}"
+                    );
+                    assert!(
+                        !base.path().join(label).exists(),
+                        "rejected {label} batch has no accepted or published subset"
+                    );
+                };
+            let mutate_factory_code =
+                |mut artifacts: JvmTastyBatchArtifacts, edit: &dyn Fn(&mut Vec<u8>, usize)| {
+                    let factory = artifacts
+                        .classfiles
+                        .iter_mut()
+                        .find(|artifact| artifact.classfile_path == "example/PairFactory.class")
+                        .unwrap();
+                    edit(&mut factory.classfile_bytes, code_start);
+                    artifacts
+                };
+            let splice_factory_code = |mut artifacts: JvmTastyBatchArtifacts,
+                                       offset: usize,
+                                       remove: usize,
+                                       insert: &[u8]| {
+                let factory = artifacts
+                    .classfiles
+                    .iter_mut()
+                    .find(|artifact| artifact.classfile_path == "example/PairFactory.class")
+                    .unwrap();
+                let bytes = &mut factory.classfile_bytes;
+                let code_length =
+                    u32::from_be_bytes(bytes[code_start - 4..code_start].try_into().unwrap());
+                let attribute_length =
+                    u32::from_be_bytes(bytes[code_start - 12..code_start - 8].try_into().unwrap());
+                bytes.splice(
+                    code_start + offset..code_start + offset + remove,
+                    insert.iter().copied(),
+                );
+                let delta = insert.len() as i64 - remove as i64;
+                bytes[code_start - 4..code_start].copy_from_slice(
+                    &u32::try_from(i64::from(code_length) + delta)
+                        .unwrap()
+                        .to_be_bytes(),
+                );
+                bytes[code_start - 12..code_start - 8].copy_from_slice(
+                    &u32::try_from(i64::from(attribute_length) + delta)
+                        .unwrap()
+                        .to_be_bytes(),
+                );
+                artifacts
+            };
+
+            let wrong_alias_load = splice_factory_code(
+                valid_artifacts.clone(),
+                alias_copy,
+                1,
+                &[0x19, 0x04], // aload 4: same-typed second Counter local
+            );
+            let wrong_alias_load_for_runtime = wrong_alias_load.clone();
+            assert_rejected(
+                "alias-load-wrong-local",
+                wrong_alias_load,
+                "cross-class invocation",
+            );
+            if require_exact_jdk_21_or_skip() {
+                let runtime = TestDirectory::new("alias-wrong-target-jvm-assertion");
+                let mutated_classes = runtime.path().join("classes");
+                for artifact in &valid_artifacts.classfiles {
+                    let path = mutated_classes.join(&artifact.classfile_path);
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    let bytes = if artifact.classfile_path == "example/PairFactory.class" {
+                        wrong_alias_load_for_runtime
+                            .classfiles
+                            .iter()
+                            .find(|candidate| candidate.classfile_path == artifact.classfile_path)
+                            .unwrap()
+                            .classfile_bytes
+                            .as_slice()
+                    } else {
+                        artifact.classfile_bytes.as_slice()
+                    };
+                    std::fs::write(path, bytes).unwrap();
+                }
+                let harness_source = runtime.path().join("WrongAliasTargetHarness.java");
+                std::fs::write(
+                    &harness_source,
+                    r#"import example.Pair;
+import example.PairFactory;
+public final class WrongAliasTargetHarness {
+  public static void main(String[] args) {
+    Pair pair = new PairFactory().create(7, 3);
+    if (pair.leftValue() != 3 || pair.rightValue() != 7)
+      throw new AssertionError("same-typed wrong alias target changed Pair values");
+  }
+}"#,
+                )
+                .unwrap();
+                let harness_classes = runtime.path().join("harness");
+                std::fs::create_dir_all(&harness_classes).unwrap();
+                let javac = Command::new("javac")
+                    .args(["--release", "21", "-classpath"])
+                    .arg(&mutated_classes)
+                    .arg("-d")
+                    .arg(&harness_classes)
+                    .arg(&harness_source)
+                    .output()
+                    .expect("start JDK 21 javac for wrong-target semantic probe");
+                assert!(
+                    javac.status.success(),
+                    "javac rejected the wrong-target harness: {}",
+                    String::from_utf8_lossy(&javac.stderr)
+                );
+                let classpath =
+                    std::env::join_paths([harness_classes.as_path(), mutated_classes.as_path()])
+                        .unwrap();
+                let java = Command::new("java")
+                    .args(["-Xverify:all", "-ea", "-classpath"])
+                    .arg(classpath)
+                    .arg("WrongAliasTargetHarness")
+                    .output()
+                    .expect("start strict JDK 21 wrong-target semantic probe");
+                let output = format!(
+                    "{}\n{}",
+                    String::from_utf8_lossy(&java.stdout),
+                    String::from_utf8_lossy(&java.stderr)
+                );
+                assert!(!java.status.success(), "wrong alias target fails assertion");
+                assert!(
+                    output.contains("AssertionError"),
+                    "same-typed target mutation reaches the semantic assertion:\n{output}"
+                );
+                assert!(
+                    !output.contains("VerifyError") && !output.contains("LinkageError"),
+                    "same-typed target mutation is verifier-valid and linked:\n{output}"
+                );
+            }
+
+            let wrong_alias_store =
+                mutate_factory_code(valid_artifacts.clone(), &|bytes, start| {
+                    bytes[start + alias_copy + 2] = 0x04; // astore 4 instead of alias slot 5
+                });
+            assert_rejected(
+                "alias-store-wrong-slot",
+                wrong_alias_store,
+                "cross-class invocation",
+            );
+
+            let wrong_setter_receiver =
+                mutate_factory_code(valid_artifacts.clone(), &|bytes, start| {
+                    bytes[start + first_setter + 1] = 0x04; // setter uses second, not alias
+                });
+            assert_rejected(
+                "setter-wrong-receiver",
+                wrong_setter_receiver,
+                "cross-class invocation",
+            );
+
+            let mut reversed_setters = valid_artifacts.clone();
+            let factory = reversed_setters
+                .classfiles
+                .iter_mut()
+                .find(|artifact| artifact.classfile_path == "example/PairFactory.class")
+                .unwrap();
+            factory.classfile_bytes[code_start + first_setter..code_start + first_setter + 6]
+                .copy_from_slice(&original_code[second_setter..second_setter + 6]);
+            factory.classfile_bytes[code_start + second_setter..code_start + second_setter + 6]
+                .copy_from_slice(&original_code[first_setter..first_setter + 6]);
+            assert_rejected(
+                "setter-order-reversed",
+                reversed_setters,
+                "cross-class invocation",
+            );
+
+            let duplicate_setter = splice_factory_code(
+                valid_artifacts.clone(),
+                second_setter,
+                0,
+                &original_code[first_setter..first_setter + 6],
+            );
+            assert_rejected(
+                "extra-setter-call",
+                duplicate_setter,
+                "cross-class invocation",
+            );
+
+            let extra_allocation = splice_factory_code(
+                valid_artifacts.clone(),
+                alias_copy,
+                0,
+                &[0xbb, 0x00, 0x0c, 0x59, 0x1c, 0xb7, 0x00, 0x0f, 0x57],
+            );
+            assert_rejected(
+                "extra-counter-allocation",
+                extra_allocation,
+                "cross-class invocation",
+            );
+
+            let wrong_pair_load = splice_factory_code(
+                valid_artifacts.clone(),
+                pair_constructor + 4,
+                1,
+                &[0x19, 0x05], // final Pair first argument is alias, not original local
+            );
+            assert_rejected(
+                "final-pair-load-alias",
+                wrong_pair_load,
+                "cross-class invocation",
+            );
+
+            let wrong_pair_second_load =
+                mutate_factory_code(valid_artifacts.clone(), &|bytes, start| {
+                    bytes[start + pair_constructor + 6] = 0x05; // alias instead of second local
+                });
+            assert_rejected(
+                "final-pair-second-load-alias",
+                wrong_pair_second_load,
+                "cross-class invocation",
+            );
+
+            let extra_pair_load = splice_factory_code(
+                valid_artifacts.clone(),
+                pair_constructor,
+                0,
+                &[0x2d, 0x57], // extra live first-local read before Pair construction
+            );
+            assert_rejected(
+                "extra-final-pair-load",
+                extra_pair_load,
+                "cross-class invocation",
+            );
+
+            let factory_sidecar = valid_artifacts
+                .sidecars
+                .iter()
+                .find(|sidecar| sidecar.tasty_path == "example/PairFactory.tasty")
+                .unwrap();
+            let original_tasty =
+                TastyFile::parse_and_validate_scala_3_9(&factory_sidecar.tasty_bytes)
+                    .expect("emitted factory sidecar decodes");
+            let address_index = original_tasty.ast_address_index().unwrap();
+            let local_address = |wanted: &str| {
+                address_index
+                    .iter_nodes_with_tag(dotty_tasty::ast::VALDEF_TAG)
+                    .find_map(|node| {
+                        let raw = address_index.get(node.offset as u32)?;
+                        let DefinitionBody::ValDef { name, .. } =
+                            raw.decode_definition_body().ok()?
+                        else {
+                            return None;
+                        };
+                        (original_tasty.names().render(name).ok()?.as_str() == wanted)
+                            .then_some(node.offset as u32)
+                    })
+                    .unwrap_or_else(|| panic!("TASTy contains the local VALDEF {wanted}"))
+            };
+            let first_local = local_address("first");
+            let second_local = local_address("second");
+            let alias_local = local_address("alias");
+            let alias_raw = address_index.get(alias_local).unwrap();
+            let DefinitionBody::ValDef { rhs: Some(rhs), .. } =
+                alias_raw.decode_definition_body().unwrap()
+            else {
+                panic!("alias VALDEF has a TERMREF initializer");
+            };
+            assert_eq!(
+                rhs.ast_ref(),
+                Some(dotty_tasty::term::AstRef {
+                    kind: AstRefKind::TermRefDirect,
+                    address: first_local,
+                }),
+                "the alias initializer directly targets the original first local"
+            );
+            let tasty_nat = |mut value: u32| {
+                let mut groups = Vec::new();
+                loop {
+                    groups.push((value & 0x7f) as u8);
+                    value >>= 7;
+                    if value == 0 {
+                        break;
+                    }
+                }
+                groups.reverse();
+                let last = groups.len() - 1;
+                for (index, group) in groups.iter_mut().enumerate() {
+                    if index == last {
+                        *group |= 0x80;
+                    }
+                }
+                groups
+            };
+            let first_ref = [
+                vec![dotty_tasty::ast::TERMREFDIRECT_TAG],
+                tasty_nat(first_local),
+            ]
+            .concat();
+            let second_ref = tasty_nat(second_local);
+            assert_eq!(
+                first_ref.len() - 1,
+                second_ref.len(),
+                "local references use equal-width TASTy addresses"
+            );
+            let asts_section = original_tasty
+                .section(dotty_tasty::section::StandardSection::Asts)
+                .unwrap();
+            let occurrences = asts_section
+                .payload
+                .windows(first_ref.len())
+                .enumerate()
+                .filter_map(|(offset, bytes)| (bytes == first_ref).then_some(offset))
+                .collect::<Vec<_>>();
+            let mut changed_tasty = None;
+            for occurrence in occurrences {
+                let mut bytes = factory_sidecar.tasty_bytes.clone();
+                let address_start = asts_section.offset + occurrence + 1;
+                bytes[address_start..address_start + second_ref.len()].copy_from_slice(&second_ref);
+                let parsed = TastyFile::parse_and_validate_scala_3_9(&bytes)
+                    .expect("TERMREF target change preserves valid TASTy structure");
+                assert_eq!(parsed.header().uuid, original_tasty.header().uuid);
+                let changed_index = parsed.ast_address_index().unwrap();
+                let changed_alias = changed_index.get(alias_local).unwrap();
+                let DefinitionBody::ValDef {
+                    rhs: Some(changed_rhs),
+                    ..
+                } = changed_alias.decode_definition_body().unwrap()
+                else {
+                    panic!("mutated alias VALDEF retains its initializer");
+                };
+                if changed_rhs
+                    .ast_ref()
+                    .is_some_and(|reference| reference.address == second_local)
+                {
+                    changed_tasty = Some(bytes);
+                    break;
+                }
+            }
+            let wrong_alias_termref = changed_tasty.unwrap_or_else(|| {
+                panic!("one factory AST TERMREF targets the alias's first local")
+            });
+            let mut wrong_tasty_artifacts = valid_artifacts.clone();
+            wrong_tasty_artifacts
+                .sidecars
+                .iter_mut()
+                .find(|sidecar| sidecar.tasty_path == "example/PairFactory.tasty")
+                .unwrap()
+                .tasty_bytes = wrong_alias_termref;
+            let linked_file =
+                ClassFile::decode(&mut Reader::new(&factory_original.classfile_bytes)).unwrap();
+            let factory_tasty = wrong_tasty_artifacts
+                .sidecars
+                .iter()
+                .find(|sidecar| sidecar.tasty_path == "example/PairFactory.tasty")
+                .unwrap();
+            assert!(
+                validate_classfile_tasty_link(&linked_file, &factory_tasty.tasty_bytes).is_ok(),
+                "semantic TERMREF mutation retains the original valid UUID linkage"
+            );
+            assert_rejected(
+                "alias-tasty-termref-wrong-local",
+                wrong_tasty_artifacts,
+                "TASTy plan identity",
+            );
+
+            Ok::<_, JvmTastyContractError>(())
+        },
+    )
+    .unwrap()
+    .unwrap();
 }
 
 #[test]

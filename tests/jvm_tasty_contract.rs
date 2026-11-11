@@ -261,7 +261,7 @@ fn two_immutable_reference_locals_variations_record_first_observed_rejection() {
             label: "third local",
             source: third_local,
             phase: "cross-class constructor-call identity proof",
-            reason_prefix: "SourceShape(\"factory body must be a direct Apply or a one- or two-local Block\")",
+            reason_prefix: "SourceShape(\"factory body must be a direct Apply or a bounded local Pair block\")",
             class_and_declaration: None,
         },
         ExpectedFailure {
@@ -317,7 +317,7 @@ fn two_immutable_reference_locals_variations_record_first_observed_rejection() {
             label: "helper initializer",
             source: helper_initializer,
             phase: "cross-class constructor-call identity proof",
-            reason_prefix: "SourceShape(\"factory body must be a direct Apply or a one- or two-local Block\")",
+            reason_prefix: "SourceShape(\"factory body must be a direct Apply or a bounded local Pair block\")",
             class_and_declaration: None,
         },
         ExpectedFailure {
