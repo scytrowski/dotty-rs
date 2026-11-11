@@ -1,8 +1,9 @@
 use dotty::jvm_tasty_artifacts::emit_paired_jvm_tasty_batch;
+use dotty::jvm_tasty_plan::with_paired_jvm_tasty_batch_plan;
 use dotty_classfile::attribute::Attribute;
 use dotty_classfile::classfile::{ClassFile, Reader};
 use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
-use dotty_core::SourceId;
+use dotty_core::{Definitions, SemanticStore, SourceId};
 use dotty_tasty::tasty::TastyFile;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -10,6 +11,40 @@ use std::process::Command;
 const SOURCE: &str = include_str!("fixtures/jvm_tasty_local_receiver_call/LocalReceiverCall.scala");
 const TWO_CALL_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_ordered_local_unit_calls/OrderedLocalUnitCalls.scala");
+const ALIAS_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_local_reference_alias/LocalReferenceAlias.scala");
+const RENAMED_ALIAS_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_local_reference_alias/controls/RenamedLocalAlias.scala");
+const REVERSED_ALIAS_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_local_reference_alias/controls/ReversedDeclarations.scala");
+const ALIAS_RUNTIME_PROBE: &str =
+    include_str!("fixtures/jvm_tasty_local_reference_alias/RustRuntimeProbe.java");
+const ORIGINAL_ALIAS_ARTIFACT_HASHES: [(&str, &str); 6] = [
+    (
+        "example/Counter.class",
+        "68d6a0af84c82311ce06b38b1e98ea69493643c5c99acde2cc4b377d31913634",
+    ),
+    (
+        "example/Counter.tasty",
+        "ff7a6a332352b38dd2022f9a5c5b5de3a40d336eef1b2859bc226d43383dcc6e",
+    ),
+    (
+        "example/Pair.class",
+        "4ff943e4a8310b37c7010a3901b5d75979823524d240902cc25a67347953a9b0",
+    ),
+    (
+        "example/Pair.tasty",
+        "5d9083ae32ee7aec20702d6220c7f7fc3c6be3dca2019a93963ae33c1323f770",
+    ),
+    (
+        "example/PairFactory.class",
+        "4458dadc7c09d16e3868872e135b80233597a7d567fbc28964cf9468b96b5d7b",
+    ),
+    (
+        "example/PairFactory.tasty",
+        "8b1468fb6948a583210407f30a664a7dba2cf574e0bb8b114a04eb153fefd5bb",
+    ),
+];
 const TWO_CALL_HARNESS: &str =
     include_str!("fixtures/jvm_tasty_ordered_local_unit_calls/RuntimeProbe2192.java");
 const HARNESS: &str = r#"package example;
@@ -1314,6 +1349,616 @@ fn ordered_two_local_unit_calls_execute_under_strict_jdk21() {
     assert_runtime_artifacts_unchanged(&primary_runtime, &originals, &original_hashes);
 }
 
+#[test]
+fn aliased_counter_identity_and_ordered_calls_execute_under_strict_jdk21() {
+    if !require_jdk_21() {
+        return;
+    }
+    let scratch = TestDirectory::new("alias-runtime");
+    let root = scratch.path();
+    let harness_src = root.join("harness-src");
+    let harness_classes = root.join("harness-classes");
+    std::fs::create_dir_all(&harness_src).unwrap();
+    std::fs::create_dir_all(&harness_classes).unwrap();
+    let harness = harness_src.join("RustRuntimeProbe.java");
+    std::fs::write(&harness, ALIAS_RUNTIME_PROBE).unwrap();
+
+    let batch = emit_paired_jvm_tasty_batch(
+        ALIAS_SOURCE,
+        "LocalReferenceAlias.scala",
+        SourceId::from_index(22430),
+    )
+    .expect("frozen alias source produces six linked Rust artifacts");
+    let originals = artifacts(&batch);
+    assert_eq!(
+        originals
+            .iter()
+            .map(|(path, bytes)| (path.as_str(), sha256_bytes(bytes)))
+            .collect::<Vec<_>>(),
+        ORIGINAL_ALIAS_ARTIFACT_HASHES.map(|(path, hash)| (path, hash.to_owned())),
+        "the source session reproduces the six original #2240 Rust artifacts"
+    );
+    let original_hashes = originals
+        .iter()
+        .map(|(path, bytes)| (path.clone(), sha256_bytes(bytes)))
+        .collect::<Vec<_>>();
+    let original_uuid_links = batch
+        .classes()
+        .iter()
+        .map(|artifact| {
+            (
+                artifact.classfile_path().to_owned(),
+                artifact.tasty_link_id(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(originals.len(), 6);
+    for artifact in batch.classes() {
+        eprintln!(
+            "rust-alias-artifact class={} sha256_class={} sha256_tasty={} tasty_uuid={}",
+            artifact.classfile_path(),
+            sha256_bytes(artifact.classfile_bytes()),
+            sha256_bytes(artifact.tasty_bytes()),
+            artifact
+                .tasty_link_id()
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+    }
+
+    let factory_index = originals
+        .iter()
+        .position(|(path, _)| path == "example/PairFactory.class")
+        .expect("PairFactory.class is present");
+    let factory = &originals[factory_index].1;
+    let class = ClassFile::decode(&mut Reader::new(factory)).expect("decode PairFactory");
+    let (code, max_stack, max_locals) = method_code(&class, "create");
+    assert_eq!((max_stack, max_locals), (4, 6));
+    let code_start = code.as_ptr() as usize - factory.as_ptr() as usize;
+    let code_len = code.len();
+    let instructions = decode(code);
+    let allocations = instructions
+        .iter()
+        .filter(|instruction| instruction.opcode == 0xbb)
+        .collect::<Vec<_>>();
+    let counter_allocations = allocations
+        .iter()
+        .filter(|instruction| {
+            class_name(&class, ConstantPoolIndex(instruction.cp.unwrap())) == "example/Counter"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        counter_allocations.len(),
+        2,
+        "exactly two Counter allocations"
+    );
+    assert_eq!(allocations.len(), 3, "the only other allocation is Pair");
+    assert_eq!(
+        allocations
+            .iter()
+            .map(|instruction| class_name(&class, ConstantPoolIndex(instruction.cp.unwrap())))
+            .collect::<Vec<_>>(),
+        ["example/Counter", "example/Counter", "example/Pair"]
+    );
+
+    let invocations = instructions
+        .iter()
+        .filter(|instruction| matches!(instruction.opcode, 0xb7 | 0xb6))
+        .collect::<Vec<_>>();
+    assert_eq!(invocations.len(), 5, "two constructors, two setters, Pair");
+    for constructor in &invocations[..2] {
+        assert_eq!(constructor.opcode, 0xb7);
+        assert_eq!(
+            method_ref(&class, ConstantPoolIndex(constructor.cp.unwrap())),
+            ("example/Counter", "<init>", "(I)V")
+        );
+    }
+    let expected_slots = alias_plan_slots(ALIAS_SOURCE, 22430);
+    let first_slot = expected_slots.first;
+    let second_slot = expected_slots.second;
+    let alias_slot = expected_slots.alias;
+    for (constructor, (expected_seed, expected_local)) in invocations[..2].iter().zip([
+        (expected_slots.first_seed, first_slot),
+        (expected_slots.second_seed, second_slot),
+    ]) {
+        let seed_load = instructions
+            .iter()
+            .find(|instruction| instruction.pc + instruction.len == constructor.pc)
+            .expect("Counter constructor receives a seed local");
+        assert_eq!(
+            iload_slot(seed_load),
+            Some(expected_seed),
+            "constructor seed load follows the formal SymbolId slot"
+        );
+        let store = instructions
+            .iter()
+            .find(|instruction| instruction.pc == constructor.pc + constructor.len)
+            .expect("initialized Counter is stored immediately");
+        assert_eq!(
+            astore_slot(store),
+            Some(expected_local),
+            "constructor store follows the initialized local's canonical SymbolId slot"
+        );
+    }
+    assert_ne!(first_slot, second_slot);
+    let first_setter = invocations[2];
+    let second_setter = invocations[3];
+    for setter in [first_setter, second_setter] {
+        assert_eq!(setter.opcode, 0xb6, "Unit setter uses invokevirtual");
+        assert_eq!(
+            method_ref(&class, ConstantPoolIndex(setter.cp.unwrap())),
+            ("example/Counter", "set", "(I)V")
+        );
+    }
+    let previous = |insn: &Insn| {
+        instructions
+            .iter()
+            .find(|candidate| candidate.pc + candidate.len == insn.pc)
+            .copied()
+            .expect("previous bytecode instruction")
+    };
+    let alias_argument = previous(first_setter);
+    let alias_load = previous(&alias_argument);
+    let alias_store = instructions
+        .iter()
+        .rfind(|instruction| {
+            instruction.pc > invocations[1].pc
+                && instruction.pc < first_setter.pc
+                && astore_slot(instruction).is_some()
+        })
+        .copied()
+        .expect("alias local store follows both initialized Counter locals");
+    assert_eq!(
+        astore_slot(&alias_store),
+        Some(alias_slot),
+        "alias copy stores to the canonical alias SymbolId slot"
+    );
+    assert_ne!(alias_slot, first_slot);
+    assert_ne!(alias_slot, second_slot);
+    let alias_source_load = previous(&alias_store);
+    assert_eq!(aload_slot(&alias_source_load), Some(first_slot));
+    assert_eq!(aload_slot(&alias_load), Some(alias_slot));
+    assert_eq!(
+        iload_slot(&alias_argument),
+        Some(expected_slots.second_seed)
+    );
+
+    let second_argument = previous(second_setter);
+    let second_receiver = previous(&second_argument);
+    assert_eq!(aload_slot(&second_receiver), Some(second_slot));
+    assert_eq!(
+        iload_slot(&second_argument),
+        Some(expected_slots.first_seed)
+    );
+    assert!(invocations[1].pc < alias_store.pc && alias_store.pc < first_setter.pc);
+    assert!(first_setter.pc < second_setter.pc);
+    assert_eq!(
+        method_ref(&class, ConstantPoolIndex(invocations[4].cp.unwrap())),
+        (
+            "example/Pair",
+            "<init>",
+            "(Lexample/Counter;Lexample/Counter;)V"
+        )
+    );
+    let pair_new = allocations[2];
+    let pair_loads = instructions
+        .iter()
+        .filter(|instruction| instruction.pc > pair_new.pc && instruction.pc < invocations[4].pc)
+        .filter_map(aload_slot)
+        .collect::<Vec<_>>();
+    assert_eq!(pair_loads, [first_slot, second_slot]);
+    assert_eq!(require_exactly_two_setter_sites(factory), Ok(()));
+
+    let runtime = root.join("runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    write_runtime(&runtime, &originals);
+    let javap = java_tool("javap", root)
+        .args(["-v", "-c", "-p", "-classpath"])
+        .arg(&runtime)
+        .arg("example.PairFactory")
+        .output()
+        .expect("javap Rust PairFactory");
+    assert!(
+        javap.status.success(),
+        "javap failed: {}",
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let dump = String::from_utf8_lossy(&javap.stdout);
+    assert!(dump.contains("descriptor: (II)Lexample/Pair;"));
+    assert!(dump.contains("major version: 65"));
+    assert!(dump.contains("stack=4, locals=6"));
+    assert_eq!(
+        dump.lines()
+            .filter(|line| line.contains("invokevirtual") && line.contains("Counter.set:(I)V"))
+            .count(),
+        2,
+        "javap displays exactly two Counter.set(I)V calls"
+    );
+
+    let javac = java_tool("javac", root)
+        .args(["--release", "21", "-classpath"])
+        .arg(&runtime)
+        .arg("-d")
+        .arg(&harness_classes)
+        .arg(&harness)
+        .output()
+        .expect("javac independent Rust artifact consumer");
+    assert!(
+        javac.status.success(),
+        "javac: {}{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = run_alias_runtime(&harness_classes, &runtime);
+    assert!(
+        java.status.success(),
+        "java -Xverify:all: {}{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "alias-runtime=3/7,42/-9,7/7;identity=distinct;mutations=independent;repeat=fresh"
+    );
+    assert_runtime_artifacts_unchanged(&runtime, &originals, &original_hashes);
+    assert_eq!(
+        batch
+            .classes()
+            .iter()
+            .map(|artifact| (
+                artifact.classfile_path().to_owned(),
+                artifact.tasty_link_id()
+            ))
+            .collect::<Vec<_>>(),
+        original_uuid_links,
+        "javac, javap, and java preserve all six original UUID links"
+    );
+
+    let factory_prefix = ALIAS_SOURCE
+        .split("class PairFactory:")
+        .next()
+        .expect("base source has PairFactory");
+    for (label, control, source_id) in [
+        ("renamed", RENAMED_ALIAS_SOURCE, 22431),
+        ("reversed", REVERSED_ALIAS_SOURCE, 22432),
+    ] {
+        let control_factory = control
+            .split_once("\n\nclass PairFactory:")
+            .map(|(_, factory)| factory)
+            .expect("control fixture has its PairFactory declaration");
+        let source = format!("{factory_prefix}class PairFactory:\n{control_factory}");
+        let slots = alias_plan_slots(&source, source_id);
+        let control_batch = emit_paired_jvm_tasty_batch(
+            &source,
+            "LocalReferenceAlias.scala",
+            SourceId::from_index(source_id),
+        )
+        .unwrap_or_else(|error| panic!("{label} alias control plans: {error:?}"));
+        let control_artifacts = artifacts(&control_batch);
+        assert_eq!(control_artifacts.len(), 6);
+        let control_links = control_batch
+            .classes()
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.classfile_path().to_owned(),
+                    artifact.tasty_link_id(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let control_dir = root.join(format!("runtime-{label}"));
+        std::fs::create_dir_all(&control_dir).unwrap();
+        write_runtime(&control_dir, &control_artifacts);
+        let control_factory = control_artifacts
+            .iter()
+            .find(|(path, _)| path == "example/PairFactory.class")
+            .expect("control PairFactory class")
+            .1
+            .as_slice();
+        let mut control_reader = Reader::new(control_factory);
+        let control_class = ClassFile::decode(&mut control_reader).expect("decode control class");
+        let (control_code, control_stack, control_locals) = method_code(&control_class, "create");
+        assert_eq!((control_stack, control_locals), (4, 6));
+        let control_instructions = decode(control_code);
+        let control_calls = control_instructions
+            .iter()
+            .filter(|instruction| matches!(instruction.opcode, 0xb7 | 0xb6))
+            .collect::<Vec<_>>();
+        assert_eq!(control_calls.len(), 5);
+        for (constructor, (formal_slot, local_slot)) in
+            control_calls[..2].iter().zip(slots.constructor_order)
+        {
+            let seed = control_instructions
+                .iter()
+                .find(|instruction| instruction.pc + instruction.len == constructor.pc)
+                .expect("control constructor seed load");
+            assert_eq!(iload_slot(seed), Some(formal_slot));
+            let store = control_instructions
+                .iter()
+                .find(|instruction| instruction.pc == constructor.pc + constructor.len)
+                .expect("control constructor local store");
+            assert_eq!(astore_slot(store), Some(local_slot));
+        }
+        let control_first_setter = control_calls[2];
+        let control_second_setter = control_calls[3];
+        let previous_control = |instruction: &Insn| {
+            control_instructions
+                .iter()
+                .find(|candidate| candidate.pc + candidate.len == instruction.pc)
+                .copied()
+                .expect("adjacent control instruction")
+        };
+        let alias_argument = previous_control(control_first_setter);
+        let alias_receiver = previous_control(&alias_argument);
+        assert_eq!(aload_slot(&alias_receiver), Some(slots.alias));
+        assert_eq!(iload_slot(&alias_argument), Some(slots.second_seed));
+        let second_argument = previous_control(control_second_setter);
+        let second_receiver = previous_control(&second_argument);
+        assert_eq!(aload_slot(&second_receiver), Some(slots.second));
+        assert_eq!(iload_slot(&second_argument), Some(slots.first_seed));
+        let pair_new = control_instructions
+            .iter()
+            .find(|instruction| {
+                instruction.opcode == 0xbb
+                    && class_name(&control_class, ConstantPoolIndex(instruction.cp.unwrap()))
+                        == "example/Pair"
+            })
+            .expect("Pair allocation in alias control");
+        let pair_loads = control_instructions
+            .iter()
+            .filter(|instruction| {
+                instruction.pc > pair_new.pc && instruction.pc < control_calls[4].pc
+            })
+            .filter_map(aload_slot)
+            .collect::<Vec<_>>();
+        assert_eq!(pair_loads, [slots.first, slots.second]);
+        assert_eq!(require_exactly_two_setter_sites(control_factory), Ok(()));
+        let control_java = run_alias_runtime(&harness_classes, &control_dir);
+        assert!(
+            control_java.status.success(),
+            "{label} alias control fails strict JDK 21 -Xverify:all: {}{}",
+            String::from_utf8_lossy(&control_java.stdout),
+            String::from_utf8_lossy(&control_java.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&control_java.stdout).trim(),
+            "alias-runtime=3/7,42/-9,7/7;identity=distinct;mutations=independent;repeat=fresh"
+        );
+        assert_eq!(control_links.len(), 3);
+        assert_eq!(control_artifacts.len(), 6);
+    }
+
+    let run_corrupted = |name: &str, edit: &dyn Fn(&mut Vec<u8>)| {
+        let mut corrupted = originals.clone();
+        edit(&mut corrupted[factory_index].1);
+        let directory = root.join(format!("negative-{name}"));
+        std::fs::create_dir_all(&directory).unwrap();
+        write_runtime(&directory, &corrupted);
+        run_alias_runtime(&harness_classes, &directory)
+    };
+    let wrong_alias_target = run_corrupted("wrong-alias-target", &|bytes| {
+        replace_code_range(
+            bytes,
+            code_start,
+            code_len,
+            alias_source_load.pc,
+            alias_source_load.pc + alias_source_load.len,
+            &aload(second_slot),
+        );
+    });
+    assert_failure_at(
+        &wrong_alias_target,
+        "JVM-valid wrong alias target runtime assertion",
+        "unexpected pair for seeds 7/3",
+    );
+
+    let alias_used_before_store = run_corrupted("alias-before-store", &|bytes| {
+        let mut early = aload(alias_slot);
+        early.extend(aload_slot(&alias_argument).map(iload_opcode));
+        early.push(0xb6);
+        early.extend_from_slice(&first_setter.cp.unwrap().to_be_bytes());
+        replace_code_range(
+            bytes,
+            code_start,
+            code_len,
+            alias_store.pc,
+            alias_store.pc,
+            &early,
+        );
+    });
+    assert_failure_at(
+        &alias_used_before_store,
+        "alias verifier control",
+        "VerifyError",
+    );
+
+    let omitted_setter = run_corrupted("omitted-alias-setter", &|bytes| {
+        replace_code_range(
+            bytes,
+            code_start,
+            code_len,
+            alias_load.pc,
+            first_setter.pc + first_setter.len,
+            &vec![0; first_setter.pc + first_setter.len - alias_load.pc],
+        );
+    });
+    assert_failure_at(
+        &omitted_setter,
+        "omitted setter runtime assertion",
+        "unexpected pair for seeds 7/3",
+    );
+
+    let mut duplicated = originals.clone();
+    let mut duplicate_call = Vec::new();
+    duplicate_call.extend_from_slice(&code[alias_load.pc..first_setter.pc + first_setter.len]);
+    replace_code_range(
+        &mut duplicated[factory_index].1,
+        code_start,
+        code_len,
+        pair_new.pc,
+        pair_new.pc,
+        &duplicate_call,
+    );
+    assert_eq!(
+        exact_setter_invocation_count(&duplicated[factory_index].1),
+        3,
+        "the observed bytecode contract catches a duplicated setter"
+    );
+
+    let pair_class_index = (1..256u16)
+        .map(ConstantPoolIndex)
+        .find(|index| {
+            matches!(
+                class.constant_pool.get(*index),
+                Some(ConstantPoolEntry::Class { name_index })
+                    if class.constant_pool.utf8(*name_index) == Ok("example/Pair")
+            )
+        })
+        .expect("Pair class constant");
+    let bad_owner = run_corrupted("wrong-setter-owner", &|bytes| {
+        let offset = constant_pool_entry_offset(bytes, first_setter.cp.unwrap());
+        bytes[offset + 1..offset + 3].copy_from_slice(&pair_class_index.0.to_be_bytes());
+    });
+    assert_failure_at(&bad_owner, "wrong setter owner verifier", "VerifyError");
+
+    let ConstantPoolEntry::Methodref {
+        name_and_type_index,
+        ..
+    } = class
+        .constant_pool
+        .get(ConstantPoolIndex(first_setter.cp.unwrap()))
+        .expect("setter Methodref")
+    else {
+        panic!("setter must use Methodref")
+    };
+    let ConstantPoolEntry::NameAndType { name_index, .. } = class
+        .constant_pool
+        .get(*name_and_type_index)
+        .expect("setter NameAndType")
+    else {
+        panic!("setter must have NameAndType")
+    };
+    let bad_descriptor = run_corrupted("wrong-setter-descriptor", &|bytes| {
+        let count = u16::from_be_bytes(bytes[8..10].try_into().unwrap());
+        let descriptor_index = count;
+        let nat_index = count + 1;
+        let cp_end = constant_pool_end(bytes);
+        let mut additions = vec![0x01, 0x00, 0x03, b'(', b')', b'V', 0x0c];
+        additions.extend_from_slice(&name_index.0.to_be_bytes());
+        additions.extend_from_slice(&descriptor_index.to_be_bytes());
+        bytes.splice(cp_end..cp_end, additions);
+        bytes[8..10].copy_from_slice(&(count + 2).to_be_bytes());
+        let offset = constant_pool_entry_offset(bytes, first_setter.cp.unwrap());
+        bytes[offset + 3..offset + 5].copy_from_slice(&nat_index.to_be_bytes());
+    });
+    assert_failure_at(
+        &bad_descriptor,
+        "wrong setter descriptor verifier",
+        "VerifyError",
+    );
+
+    let bad_stack = run_corrupted("bad-stack-bound", &|bytes| {
+        bytes[code_start - 8..code_start - 6].copy_from_slice(&1u16.to_be_bytes());
+    });
+    assert_failure_at(&bad_stack, "invalid max_stack verifier", "VerifyError");
+    let bad_locals = run_corrupted("bad-local-bound", &|bytes| {
+        bytes[code_start - 6..code_start - 4].copy_from_slice(&(alias_slot as u16).to_be_bytes());
+    });
+    assert_failure_at(&bad_locals, "invalid max_locals verifier", "VerifyError");
+
+    let missing_counter = root.join("negative-missing-counter");
+    std::fs::create_dir_all(&missing_counter).unwrap();
+    write_runtime(
+        &missing_counter,
+        &originals
+            .iter()
+            .filter(|(path, _)| path != "example/Counter.class")
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
+    let missing_counter_java = run_alias_runtime(&harness_classes, &missing_counter);
+    assert_failure_at(
+        &missing_counter_java,
+        "missing Counter linkage",
+        "NoClassDefFoundError",
+    );
+
+    let pair_argument_loads = instructions
+        .iter()
+        .filter(|instruction| instruction.pc > pair_new.pc && instruction.pc < invocations[4].pc)
+        .filter_map(|instruction| aload_slot(instruction).map(|slot| (instruction, slot)))
+        .collect::<Vec<_>>();
+    assert_eq!(pair_argument_loads.len(), 2);
+    let swapped_pair_order = run_corrupted("wrong-pair-local-order", &|bytes| {
+        let mut replacement = aload(second_slot);
+        replacement.extend(aload(first_slot));
+        replace_code_range(
+            bytes,
+            code_start,
+            code_len,
+            pair_argument_loads[0].0.pc,
+            pair_argument_loads[1].0.pc + pair_argument_loads[1].0.len,
+            &replacement,
+        );
+    });
+    assert_failure_at(
+        &swapped_pair_order,
+        "wrong Pair local order runtime assertion",
+        "unexpected pair for seeds 7/3",
+    );
+
+    let mut extra_allocation = originals.clone();
+    let mut unused_counter = vec![0xbb];
+    unused_counter.extend_from_slice(&counter_allocations[0].cp.unwrap().to_be_bytes());
+    unused_counter.push(0x59);
+    unused_counter.push(iload_opcode(1));
+    unused_counter.push(0xb7);
+    unused_counter.extend_from_slice(&invocations[0].cp.unwrap().to_be_bytes());
+    unused_counter.extend_from_slice(&[0x3a, 6]);
+    replace_code_range(
+        &mut extra_allocation[factory_index].1,
+        code_start,
+        code_len,
+        pair_new.pc,
+        pair_new.pc,
+        &unused_counter,
+    );
+    extra_allocation[factory_index].1[code_start - 6..code_start - 4]
+        .copy_from_slice(&7u16.to_be_bytes());
+    let mut extra_reader = Reader::new(&extra_allocation[factory_index].1);
+    let extra_class = ClassFile::decode(&mut extra_reader).expect("decode extra allocation");
+    let (extra_code, _, _) = method_code(&extra_class, "create");
+    assert_eq!(
+        decode(extra_code)
+            .iter()
+            .filter(|instruction| {
+                instruction.opcode == 0xbb
+                    && class_name(&extra_class, ConstantPoolIndex(instruction.cp.unwrap()))
+                        == "example/Counter"
+            })
+            .count(),
+        3,
+        "the observed allocation contract catches an extra Counter"
+    );
+
+    assert_runtime_artifacts_unchanged(&runtime, &originals, &original_hashes);
+}
+
+fn run_alias_runtime(
+    harness_classes: &std::path::Path,
+    runtime: &std::path::Path,
+) -> std::process::Output {
+    let classpath = std::env::join_paths([harness_classes, runtime]).unwrap();
+    java_tool("java", runtime)
+        .args(["-Xverify:all", "-ea", "-classpath"])
+        .arg(classpath)
+        .arg("example.RustRuntimeProbe")
+        .output()
+        .expect("run strict JDK 21 alias runtime probe")
+}
+
 fn sha256_bytes(bytes: &[u8]) -> String {
     use std::io::Write;
     let mut output = Command::new("sha256sum")
@@ -1382,6 +2027,157 @@ fn constant_pool_entry_offset(bytes: &[u8], wanted: u16) -> usize {
         index += if matches!(tag, 5 | 6) { 2 } else { 1 };
     }
     panic!("constant pool index {wanted} is missing (count={count})");
+}
+
+#[derive(Clone, Copy)]
+struct AliasPlanSlots {
+    first: u8,
+    second: u8,
+    alias: u8,
+    first_seed: u8,
+    second_seed: u8,
+    constructor_order: [(u8, u8); 2],
+}
+
+fn alias_plan_slots(source: &str, source_id: u32) -> AliasPlanSlots {
+    with_paired_jvm_tasty_batch_plan(
+        source,
+        "LocalReferenceAlias.scala",
+        SourceId::from_index(source_id),
+        |batch| {
+            let factory = batch
+                .jvm_unit
+                .classes
+                .iter()
+                .find(|class| {
+                    batch
+                        .jvm_unit
+                        .store
+                        .names
+                        .resolve(batch.jvm_unit.store.symbols.get(class.class).name.text())
+                        == "PairFactory"
+                })
+                .expect("canonical PairFactory plan");
+            let method = factory
+                .methods
+                .iter()
+                .find(|method| {
+                    batch
+                        .jvm_unit
+                        .store
+                        .names
+                        .resolve(batch.jvm_unit.store.symbols.get(method.method).name.text())
+                        == "create"
+                })
+                .expect("canonical create plan");
+            assert_eq!(method.parameters.len(), 2);
+            assert_eq!(method.locals.len(), 3, "first, second, and alias symbols");
+            let tasty_plan = batch
+                .classes
+                .iter()
+                .find(|class| class.class == factory.class)
+                .expect("paired TASTy plan for the canonical factory")
+                .tasty_plan
+                .plan();
+            let alias = tasty_plan
+                .typed_bindings
+                .local_reference_alias(batch.source_id, method.method)
+                .expect("canonical source proof for the local reference alias");
+            let initializers = tasty_plan
+                .typed_bindings
+                .local_counter_initializers(batch.source_id, method.method);
+            assert_eq!(
+                initializers.len(),
+                2,
+                "two authenticated local constructors"
+            );
+            let first_initializer = initializers
+                .iter()
+                .find(|initializer| initializer.argument_formal == method.parameters[0])
+                .expect("first local constructor is bound to firstSeed");
+            let second_initializer = initializers
+                .iter()
+                .find(|initializer| initializer.argument_formal == method.parameters[1])
+                .expect("second local constructor is bound to secondSeed");
+            assert_eq!(alias.target, first_initializer.local);
+            assert_ne!(alias.local, alias.target);
+
+            // The plan callback intentionally exposes the same immutable semantic store but
+            // not its bootstrap Definitions value. Bootstrap a witness with deterministic
+            // canonical IDs, then prove it aligns with the unit's formal symbols and metadata.
+            let mut witness_store = SemanticStore::new();
+            let definitions = Definitions::bootstrap(&mut witness_store);
+            let metadata = batch
+                .jvm_unit
+                .metadata(&definitions)
+                .expect("canonical JVM metadata validates against bootstrap definitions");
+            let factory_metadata = metadata
+                .iter()
+                .find(|class| class.identity().symbol() == factory.class)
+                .expect("metadata for canonical PairFactory symbol");
+            let method_metadata = factory_metadata
+                .methods()
+                .iter()
+                .find(|candidate| candidate.symbol() == method.method)
+                .expect("metadata for canonical create symbol");
+            assert_eq!(
+                method_metadata
+                    .parameters()
+                    .iter()
+                    .map(|formal| formal.symbol())
+                    .collect::<Vec<_>>(),
+                method.parameters,
+                "formal metadata preserves the exact JVM method-plan symbols"
+            );
+            let layout = batch
+                .jvm_unit
+                .local_layout(factory.class, method.method, &definitions)
+                .expect("canonical symbol-derived method local layout");
+            let local_slot = |symbol| {
+                layout
+                    .local(symbol)
+                    .expect("canonical local symbol is in layout")
+                    .slot() as u8
+            };
+            let formal_slots = method
+                .parameters
+                .iter()
+                .map(|symbol| {
+                    method_metadata
+                        .parameters()
+                        .iter()
+                        .find(|formal| formal.symbol() == *symbol)
+                        .expect("proof formal has canonical JVM metadata")
+                        .slot() as u8
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(formal_slots.len(), 2);
+            let constructor_order = method
+                .locals
+                .iter()
+                .filter_map(|local| {
+                    let initializer = initializers
+                        .iter()
+                        .find(|initializer| initializer.local == local.symbol)?;
+                    let formal = method_metadata
+                        .parameters()
+                        .iter()
+                        .find(|formal| formal.symbol() == initializer.argument_formal)?;
+                    Some((formal.slot() as u8, local_slot(local.symbol)))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(constructor_order.len(), 2);
+            AliasPlanSlots {
+                first: local_slot(first_initializer.local),
+                second: local_slot(second_initializer.local),
+                alias: local_slot(alias.local),
+                first_seed: formal_slots[0],
+                second_seed: formal_slots[1],
+                constructor_order: [constructor_order[0], constructor_order[1]],
+            }
+        },
+    )
+    .expect("canonical source batch plan and proof")
 }
 
 fn set_u32(bytes: &mut [u8], at: usize, value: u32) {
