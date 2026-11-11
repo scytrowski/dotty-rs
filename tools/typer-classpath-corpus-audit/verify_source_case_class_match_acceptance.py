@@ -106,6 +106,9 @@ NAMER_TESTS = {
     "class_pattern_bindings_follow_nested_bind_typed_and_unapply_patterns",
     "explicit_companion_unapply_is_preserved_without_generated_identity_collisions",
     "generated_unapply_is_independent_of_case_class_companion_declaration_order",
+    "generic_product1_case_classes_publish_only_canonical_unapply_identity",
+    "generic_unapply_identity_rejects_shapes_outside_the_bounded_product1_rule",
+    "incomparable_generic_companion_unapply_fails_without_publishing_a_candidate",
     "ordinary_class_companion_does_not_receive_generated_unapply",
     "unknown_explicit_unapply_parameter_identity_defers_generation_for_alias_contexts",
 }

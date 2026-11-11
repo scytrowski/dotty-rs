@@ -1,0 +1,10 @@
+schema=1
+pinned_scala_revision=777528f19a58e794c9954a42f433373472ec57f8
+selected=1
+attempted=1
+typed=0
+blocked=1
+excluded=0
+not_attempted=0
+method	owner_path	method_name	line	range	modifiers	expected_result	actual_result	complexity	status	source_tree	typed_tree
+library/src/scala/util/Either.scala#tree=84	scala.util.Either	swap	252	8241..8341	[]	Either[B, A]	not_available	18	blocked::MalformedMethodClause { method: SymbolId(112), method_tree_index: 521, clause_index: 0 }	84	

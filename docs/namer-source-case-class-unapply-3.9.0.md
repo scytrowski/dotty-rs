@@ -89,6 +89,40 @@ explicit companion candidate whose input identity cannot be compared still
 fails atomically under the existing Namer rule; no generated candidate
 survives that failure.
 
+The real Scala 3.9.0 library source was also compiled with the pinned compiler
+and JDK, and a separate source unit matched `Either[A, B]` against both
+`Left(item)` and `Right(item)`. The typer output contains
+`scala.util.Left.unapply[A, B]` and `scala.util.Right.unapply[A, B]`, proving
+both generic extractors are available to pattern matching. The repeatable
+oracle is `tools/typer-classpath-corpus-audit/either-companion-oracle/run`; it
+verifies all eight pinned compiler artifacts and the Scala checkout revision
+before compiling `library/src/scala/util/Either.scala` and the pattern source.
+
+For the source Namer's matching declaration shapes, the regression asserts a
+canonical class identity for each `Left` and `Right`, with the generated
+`Unapply` role reverse-mapped to that class. Each synthetic method is owned by
+its companion module class and derives from the canonical class source tree;
+the class type parameters keep source order and derived-tree provenance.
+`Left`'s field refers to the first parameter (`A`) and `Right`'s field to the
+second (`B`). The synthetic method info remains `Missing` and no `_1` selector
+is entered, so this receipt establishes identity discovery without completing
+the extractor signature or projection.
+
+The pinned ordinary audit was rerun for the original
+`library/src/scala/util/Either.scala#tree=84` (`scala.util.Either.swap`). Its
+after-state is `blocked::MalformedMethodClause { method: SymbolId(112),
+method_tree_index: 521, clause_index: 0 }` (source tree 84, typed tree absent),
+instead of the earlier `ExtractorUnapplyNotFound`. This is a distinct later
+typing blocker; the current root does not complete `swap` or claim successful
+pattern typing. The full after-state TSV is recorded in
+[`typer-either-swap-after-2238.tsv`](typer-either-swap-after-2238.tsv) and is
+emitted by the regular ordinary audit runner with a one-root manifest for
+`Either.scala#tree=84`.
+
+The protected #2233 success manifest remains unchanged (SHA-256
+`2a31b0b10cac7fe86d3c30f2d4e632ac93f2037e9a392efaf6e6b548e5284c4d`); the
+Acceptance V verifier retains its exact protected-root and result-shape checks.
+
 ## Reproduce
 
 With the pinned Scala checkout and JDK paths described by the adjacent
@@ -99,3 +133,10 @@ crates/dotty-typer/tests/fixtures/source-case-class-match-3.9.0/run
 cargo test -p dotty-typer --test source_case_class_match_baseline --locked
 cargo test -p dotty-core -p dotty-namer --locked
 ```
+
+To reproduce the original `Either.swap` after-state receipt, create a
+one-line manifest containing `library/src/scala/util/Either.scala#tree=84`
+and run the ordinary audit runner with that manifest. Set `SCALA39_ROOT`,
+`JAVA_HOME`, `SCALA39_JDK_RELEASE`, `COURSIER_MAVEN_ROOT`, and all temporary
+directory variables to the pinned checkout, JDK, verified artifact cache, and
+scratch directory as required by the audit runner.
