@@ -4795,7 +4795,7 @@ fn diagnostic_aware_naming_accepts_a_shared_synthetic_package_owner() {
 }
 
 #[test]
-fn generic_product1_case_classes_publish_canonical_selector_and_unapply_identities() {
+fn generic_product1_case_classes_publish_only_canonical_unapply_identity() {
     let cases = [
         (
             "package scala.util\nsealed trait Either[+A, +B]\nfinal case class Left[+A, +B](value: A) extends Either[A, B]\nfinal case class Right[+A, +B](value: B) extends Either[A, B]",
@@ -4989,7 +4989,7 @@ fn generic_product1_case_classes_publish_canonical_selector_and_unapply_identiti
 }
 
 #[test]
-fn generic_product1_selector_rejects_shapes_outside_the_bounded_rule() {
+fn generic_unapply_identity_rejects_shapes_outside_the_bounded_product1_rule() {
     let sources = [
         "case class Unrelated[X, Y](value: String)",
         "case class WrongArity[X](value: X)",
