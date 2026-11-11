@@ -24,9 +24,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[path = "support/scala39_toolchain.rs"]
+mod scala39_toolchain;
+
 const REQUIRE: &str = "DOTTY_REQUIRE_SCALA_TASTY_TWO_IMMUTABLE_REFERENCE_LOCALS_CONSUMER";
 const REQUIRE_COUNTER_SET: &str = "DOTTY_REQUIRE_SCALA_TASTY_TWO_LOCAL_COUNTER_SET_CONSUMER";
-const SCALA_REVISION: &str = "777528f19a58e794c9954a42f433373472ec57f8";
 const SOURCES: [&str; 2] = [
     include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactory.scala"),
     include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactoryReversed.scala"),
@@ -47,6 +49,10 @@ const TWO_COUNTER_SET_CLIENT: &str =
     include_str!("fixtures/jvm_tasty_two_local_counter_set/TwoCallConsumer.scala");
 const TWO_COUNTER_SET_SAME_RECEIVER_CLIENT: &str =
     include_str!("fixtures/jvm_tasty_two_local_counter_set/TwoCallSameReceiverConsumer.scala");
+const TWO_COUNTER_SET_ALIAS_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_two_local_counter_set/AliasTwoCalls.scala");
+const TWO_COUNTER_SET_ALIAS_CLIENT: &str =
+    include_str!("fixtures/jvm_tasty_two_local_counter_set/AliasConsumer.scala");
 const TWO_LOCAL_REVERSED_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocalsReversed.scala");
 const TWO_LOCAL_ALIAS_SOURCE: &str =
@@ -193,127 +199,34 @@ struct Scala {
 
 impl Scala {
     fn required() -> Self {
-        let root = PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT required"));
         let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME required"));
         let temp = PathBuf::from(std::env::var_os("TMPDIR").expect("TMPDIR required"));
         let java_options = format!("-XX:-UsePerfData -Djava.io.tmpdir={}", temp.display());
-        let maven = PathBuf::from(
-            std::env::var_os("COURSIER_MAVEN_ROOT").expect("COURSIER_MAVEN_ROOT required"),
-        );
-        let libraries = [
-            (
-                "org/scala-lang/scala3-library_3/3.9.0/scala3-library_3-3.9.0.jar",
-                "9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba",
-            ),
-            (
-                "org/scala-lang/scala-library/3.9.0/scala-library-3.9.0.jar",
-                "b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd",
-            ),
-        ]
-        .map(|(relative, expected)| {
-            let path = maven.join(relative);
-            assert!(
-                path.is_file(),
-                "approved Scala runtime exists: {}",
-                path.display()
-            );
-            assert_eq!(
-                hash(&path),
-                expected,
-                "approved runtime hash {}",
-                path.display()
-            );
-            path
-        });
-        let revision = output(
-            Command::new("git")
-                .arg("-C")
-                .arg(&root)
-                .args(["rev-parse", "HEAD"]),
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&revision.stdout).trim(),
-            SCALA_REVISION
-        );
-        let compiler = root.join("dist/target/universal/stage/bin/scalac");
-        let compiler_jar = root.join("dist/target/universal/stage/lib/with_compiler.jar");
-        assert!(
-            compiler_jar.is_file(),
-            "pinned staged Scala compiler jar exists: {}",
-            compiler_jar.display()
-        );
-        let version = output(
-            Command::new(&compiler)
+        let pinned = scala39_toolchain::from_environment(output, |command| {
+            command
                 .env("JAVA_HOME", &java_home)
-                .env("JAVA_TOOL_OPTIONS", &java_options)
-                .arg("-version"),
-        );
-        assert!(
-            format!(
-                "{}{}",
-                String::from_utf8_lossy(&version.stdout),
-                String::from_utf8_lossy(&version.stderr)
-            )
-            .contains("3.9.0-bin-SNAPSHOT-git-777528f")
-        );
-        let java = java_home.join("bin/java");
-        let jdk = output(
-            Command::new(&java)
-                .env("JAVA_TOOL_OPTIONS", &java_options)
-                .arg("-version"),
-        );
-        assert!(
-            format!(
-                "{}{}",
-                String::from_utf8_lossy(&jdk.stdout),
-                String::from_utf8_lossy(&jdk.stderr)
-            )
-            .contains("21.0.13")
-        );
-        assert_eq!(
-            hash(&java),
-            "9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155"
-        );
+                .env("JAVA_TOOL_OPTIONS", &java_options);
+        });
         eprintln!(
-            "SCALA_PROVENANCE revision={SCALA_REVISION} compiler={} compiler_sha256={} (receipt only; not pinned) java={} java_sha256={}",
-            version
-                .stdout
-                .iter()
-                .chain(version.stderr.iter())
-                .copied()
-                .map(char::from)
-                .collect::<String>()
-                .trim(),
-            hash(&compiler_jar),
-            java.display(),
-            hash(&java)
+            "SCALA_PROVENANCE revision={} compiler={} java={}",
+            scala39_toolchain::SCALA_REVISION,
+            pinned.scalac.display(),
+            pinned.java.display()
         );
         Self {
-            compiler,
-            java,
-            java_home,
-            libraries: libraries
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join(":"),
+            compiler: pinned.scalac,
+            java: pinned.java,
+            java_home: pinned.java_home,
+            libraries: pinned.libraries,
         }
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(&self.compiler);
-        let tmp = std::env::var_os("TMPDIR").unwrap();
-        command
-            .env("JAVA_HOME", &self.java_home)
-            .env("TMPDIR", &tmp)
-            .env(
-                "JAVA_TOOL_OPTIONS",
-                format!(
-                    "-XX:-UsePerfData -Djava.io.tmpdir={}",
-                    PathBuf::from(tmp).display()
-                ),
-            );
-        command
+        scala39_toolchain::scalac(
+            &self.java_home,
+            &self.compiler,
+            PathBuf::from(std::env::var_os("TMPDIR").unwrap()),
+        )
     }
 
     fn compile(&self, cp: &str, out: &Path, source: &Path) {
@@ -1403,6 +1316,456 @@ fn inspect_two_counter_set_tasty(
     );
 }
 
+fn direct_reference_target(tasty: &TastyFile<'_>, node: AstTreeNode) -> u32 {
+    let asts = tasty.section(StandardSection::Asts).unwrap();
+    let mut reader =
+        TastyReader::with_range(asts.payload, node.offset, asts.payload.len()).unwrap();
+    match RawTree::decode(&mut reader).unwrap() {
+        RawTree::Leaf(term) if term.tag == TERMREFDIRECT_TAG => {
+            let TermValue::AstRef(address) = term.value else {
+                panic!("TERMREFdirect carries an AST address")
+            };
+            address
+        }
+        other => panic!("expected TERMREFdirect, found {other:?}"),
+    }
+}
+
+fn alias_local_graph_named(
+    tasty_bytes: &[u8],
+    expected_names: [&str; 3],
+) -> (u32, [u32; 3], [u32; 2], [u32; 2]) {
+    let tasty = TastyFile::parse_and_validate_scala_3_9(tasty_bytes)
+        .expect("alias PairFactory TASTy is valid Scala 3.9");
+    let index = tasty.ast_address_index().unwrap();
+    let method = index
+        .iter_nodes_with_tag(DEFDEF_TAG)
+        .find(|node| {
+            index
+                .get(node.offset as u32)
+                .and_then(|node| node.decode_defdef_body().ok())
+                .and_then(|body| tasty.names().render(body.name).ok())
+                .is_some_and(|name| name == "create")
+        })
+        .expect("PairFactory.create TASTy declaration");
+    let method_address = method.offset as u32;
+    let body = index
+        .get(method_address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    assert_eq!(body.parameters.len(), 2, "create retains both Int formals");
+    let block = index
+        .iter_nodes_with_tag(BLOCK_TAG)
+        .find(|node| {
+            std::iter::successors(Some(*node), |current| {
+                index.parent_of(current.offset as u32)
+            })
+            .any(|parent| parent.offset as u32 == method_address)
+        })
+        .expect("create owns its local BLOCK");
+    let block_address = block.offset as u32;
+    let locals = index
+        .iter_nodes_with_tag(VALDEF_TAG)
+        .filter(|node| {
+            index
+                .parent_of(node.offset as u32)
+                .is_some_and(|parent| parent.offset as u32 == block_address)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        locals.len(),
+        3,
+        "BLOCK owns first, second, and alias VALDEFs"
+    );
+    let local_names = locals
+        .iter()
+        .map(|node| {
+            match index
+                .get(node.offset as u32)
+                .unwrap()
+                .decode_definition_body()
+                .unwrap()
+            {
+                dotty_tasty::ast::DefinitionBody::ValDef { name, rhs, .. } => {
+                    assert!(rhs.is_some(), "each immutable local has an initializer");
+                    tasty.names().render(name).unwrap().to_owned()
+                }
+                other => panic!("BLOCK local is a VALDEF: {other:?}"),
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(local_names, expected_names);
+    let addresses: [u32; 3] = locals
+        .iter()
+        .map(|node| node.offset as u32)
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
+    let alias_rhs = index
+        .iter_nodes_with_tag(TERMREFDIRECT_TAG)
+        .filter(|node| {
+            std::iter::successors(Some(*node), |current| {
+                index.parent_of(current.offset as u32)
+            })
+            .any(|parent| parent.offset as u32 == addresses[2])
+        })
+        .map(|node| direct_reference_target(&tasty, node))
+        .collect::<Vec<_>>();
+    let first_address = addresses[expected_names
+        .iter()
+        .position(|name| *name == "first")
+        .unwrap()];
+    let second_address = addresses[expected_names
+        .iter()
+        .position(|name| *name == "second")
+        .unwrap()];
+    assert_eq!(
+        alias_rhs,
+        [first_address],
+        "alias RHS targets original first VALDEF"
+    );
+
+    let formals =
+        named_method_parameter_addresses(tasty_bytes, "create", ["firstSeed", "secondSeed"]);
+    let block_applies = index
+        .iter_nodes_with_tag(APPLY_TAG)
+        .filter(|node| {
+            index
+                .parent_of(node.offset as u32)
+                .is_some_and(|parent| parent.offset as u32 == block_address)
+        })
+        .collect::<Vec<_>>();
+    let mut calls = Vec::new();
+    let mut pair_arguments = Vec::new();
+    for apply in block_applies {
+        let selected = index.iter_nodes_with_tag(SELECTIN_TAG).find(|node| {
+            index
+                .parent_of(node.offset as u32)
+                .is_some_and(|parent| parent.offset == apply.offset)
+        });
+        if let Some(selected) = selected {
+            let selection = index
+                .get(selected.offset as u32)
+                .unwrap()
+                .decode_select_in()
+                .unwrap();
+            let selected_name = tasty.names().render_signed_name(selection.name).unwrap();
+            let is_set = matches!(
+                selected_name,
+                Some(dotty_tasty::RenderedSignedName::Signed { original, .. })
+                    if original == "set"
+            );
+            if is_set {
+                let receiver = index
+                    .iter_nodes_with_tag(TERMREFDIRECT_TAG)
+                    .find(|node| {
+                        index
+                            .parent_of(node.offset as u32)
+                            .is_some_and(|parent| parent.offset == selected.offset)
+                    })
+                    .expect("set SELECTin has a direct receiver TERMREF");
+                let argument = index
+                    .iter_nodes_with_tag(TERMREFDIRECT_TAG)
+                    .find(|node| {
+                        index
+                            .parent_of(node.offset as u32)
+                            .is_some_and(|parent| parent.offset == apply.offset)
+                    })
+                    .expect("set APPLY has its direct parameter TERMREF");
+                let receiver = direct_reference_target(&tasty, receiver);
+                let argument = direct_reference_target(&tasty, argument);
+                let parameter = formals
+                    .iter()
+                    .position(|address| *address == argument)
+                    .expect("set argument references a create formal");
+                calls.push((receiver, parameter));
+            } else {
+                pair_arguments.extend(
+                    index
+                        .iter_nodes_with_tag(TERMREFDIRECT_TAG)
+                        .filter(|node| {
+                            index
+                                .parent_of(node.offset as u32)
+                                .is_some_and(|parent| parent.offset == apply.offset)
+                        })
+                        .map(|node| direct_reference_target(&tasty, node)),
+                );
+            }
+        } else {
+            let args = index
+                .iter_nodes_with_tag(TERMREFDIRECT_TAG)
+                .filter(|node| {
+                    index
+                        .parent_of(node.offset as u32)
+                        .is_some_and(|parent| parent.offset == apply.offset)
+                })
+                .map(|node| direct_reference_target(&tasty, node))
+                .collect::<Vec<_>>();
+            pair_arguments.extend(args);
+        }
+    }
+    assert_eq!(calls, [(addresses[2], 1), (second_address, 0)]);
+    assert_eq!(pair_arguments, [first_address, second_address]);
+    (
+        block_address,
+        addresses,
+        [formals[0], formals[1]],
+        [pair_arguments[0], pair_arguments[1]],
+    )
+}
+
+fn alias_local_graph(tasty_bytes: &[u8]) -> (u32, [u32; 3], [u32; 2], [u32; 2]) {
+    alias_local_graph_named(tasty_bytes, ["first", "second", "alias"])
+}
+
+fn change_alias_initializer_target(tasty_bytes: &[u8], target: usize) -> Vec<u8> {
+    let tasty = TastyFile::parse_and_validate_scala_3_9(tasty_bytes).unwrap();
+    let index = tasty.ast_address_index().unwrap();
+    let asts = tasty.section(StandardSection::Asts).unwrap();
+    let (_, locals, _, _) = alias_local_graph(tasty_bytes);
+    let references = index
+        .iter_nodes_with_tag(TERMREFDIRECT_TAG)
+        .filter(|node| {
+            std::iter::successors(Some(*node), |current| {
+                index.parent_of(current.offset as u32)
+            })
+            .any(|parent| parent.offset as u32 == locals[2])
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        references.len(),
+        1,
+        "alias initializer has one direct term reference"
+    );
+    let mut writer = Writer::default();
+    writer.write_nat(locals[target]);
+    let replacement = writer.into_inner();
+    let mut original = Writer::default();
+    original.write_nat(locals[0]);
+    let original = original.into_inner();
+    assert_eq!(
+        replacement.len(),
+        original.len(),
+        "alias corruption preserves TASTy width"
+    );
+    let mut changed = tasty_bytes.to_vec();
+    let start = asts.offset + references[0].offset + 1;
+    changed[start..start + replacement.len()].copy_from_slice(&replacement);
+    TastyFile::parse_and_validate_scala_3_9(&changed)
+        .expect("mutated alias remains structurally valid");
+    changed
+}
+
+fn forge_alias_setter_name(tasty_bytes: &[u8]) -> Vec<u8> {
+    let tasty = TastyFile::parse_and_validate_scala_3_9(tasty_bytes).unwrap();
+    let index = tasty.ast_address_index().unwrap();
+    let asts = tasty.section(StandardSection::Asts).unwrap();
+    let (block, _, _, _) = alias_local_graph(tasty_bytes);
+    let selected = index
+        .iter_nodes_with_tag(SELECTIN_TAG)
+        .find(|node| {
+            index
+                .parent_of(node.offset as u32)
+                .and_then(|parent| index.parent_of(parent.offset as u32))
+                .is_some_and(|parent| parent.offset as u32 == block)
+                && tasty
+                    .names()
+                    .render_signed_name(
+                        index
+                            .get(node.offset as u32)
+                            .unwrap()
+                            .decode_select_in()
+                            .unwrap()
+                            .name,
+                    )
+                    .is_ok_and(|name| {
+                        matches!(
+                            name,
+                            Some(dotty_tasty::RenderedSignedName::Signed { original, .. })
+                                if original == "set"
+                        )
+                    })
+        })
+        .expect("first setter SELECTin exists");
+    let (_, locals, _, _) = alias_local_graph(tasty_bytes);
+    let constructor_name = index
+        .iter_nodes_with_tag(SELECTIN_TAG)
+        .find(|node| {
+            std::iter::successors(Some(*node), |current| {
+                index.parent_of(current.offset as u32)
+            })
+            .any(|parent| parent.offset as u32 == locals[0])
+        })
+        .and_then(|node| {
+            index
+                .get(node.offset as u32)
+                .unwrap()
+                .decode_select_in()
+                .ok()
+        })
+        .expect("first local initializer has its signed Counter constructor")
+        .name;
+    let mut replacement = Writer::default();
+    replacement.write_nat(constructor_name);
+    let replacement = replacement.into_inner();
+    let raw = index.get(selected.offset as u32).unwrap();
+    let mut original = Writer::default();
+    original.write_nat(raw.decode_select_in().unwrap().name);
+    let original = original.into_inner();
+    assert_eq!(
+        replacement.len(),
+        original.len(),
+        "forged signed name preserves encoding width"
+    );
+    let payload_offset = raw.payload.as_ptr() as usize - asts.payload.as_ptr() as usize;
+    let mut changed = tasty_bytes.to_vec();
+    let start = asts.offset + payload_offset;
+    changed[start..start + replacement.len()].copy_from_slice(&replacement);
+    TastyFile::parse_and_validate_scala_3_9(&changed)
+        .expect("forged selector remains structurally valid");
+    changed
+}
+
+fn inspect_alias_tasty(scala: &Scala, producer: &Path, expected_names: [&str; 3]) {
+    let mut originals = Vec::new();
+    for class_name in ["Counter", "Pair", "PairFactory"] {
+        let class_path = producer.join(format!("example/{class_name}.class"));
+        let tasty_path = producer.join(format!("example/{class_name}.tasty"));
+        let class_bytes = fs::read(&class_path).unwrap();
+        let tasty_bytes = fs::read(&tasty_path).unwrap();
+        let class = decode_class(&class_bytes);
+        let tasty = TastyFile::parse_and_validate_scala_3_9(&tasty_bytes).unwrap();
+        assert_eq!(class.version.major, 65, "{class_name} is Java 21 classfile");
+        assert_eq!(
+            class.tasty_link_id().unwrap().unwrap().as_bytes(),
+            &tasty.header().uuid
+        );
+        originals.push((class_path, hash_bytes(&class_bytes)));
+        originals.push((tasty_path.clone(), hash_bytes(&tasty_bytes)));
+        let printed = plain(&String::from_utf8_lossy(
+            &output(scala.command().arg("-print-tasty").arg(&tasty_path)).stdout,
+        ));
+        let decompiled = plain(&String::from_utf8_lossy(
+            &output(scala.command().arg("-decompile").arg(&tasty_path)).stdout,
+        ));
+        assert!(
+            printed.contains("version: 28.9.0"),
+            "{class_name}: {printed}"
+        );
+        if class_name == "PairFactory" {
+            let expected = [
+                format!("val {}: example.Counter = first", expected_names[2]),
+                format!("{}.set(secondSeed)", expected_names[2]),
+                "second.set(firstSeed)".to_owned(),
+                "new example.Pair(first, second)".to_owned(),
+            ];
+            for token in expected {
+                assert!(decompiled.contains(&token), "missing {token}: {decompiled}");
+            }
+            let set = "set[Signed Signature(List(scala.Int),scala.Unit) @set]";
+            assert_eq!(
+                printed.matches(set).count(),
+                3,
+                "the setter definition and both calls retain owner/parameter/result: {printed}"
+            );
+            let bytes = fs::read(&tasty_path).unwrap();
+            let (block, locals, formals, pair_args) =
+                alias_local_graph_named(&bytes, expected_names);
+            let first = locals[expected_names
+                .iter()
+                .position(|name| *name == "first")
+                .unwrap()];
+            let second = locals[expected_names
+                .iter()
+                .position(|name| *name == "second")
+                .unwrap()];
+            assert_eq!(pair_args, [first, second]);
+            eprintln!(
+                "RUST_ALIAS_TASTY_GRAPH block={block} locals={locals:?} formals={formals:?} final_pair={pair_args:?}"
+            );
+        }
+    }
+    let reconstructed = producer
+        .parent()
+        .unwrap()
+        .join("from-tasty-alias-inspection-only");
+    fs::create_dir_all(&reconstructed).unwrap();
+    let sidecars = ["Counter", "Pair", "PairFactory"]
+        .map(|class| producer.join(format!("example/{class}.tasty")));
+    output(
+        scala
+            .command()
+            .args(["-release", "21", "-from-tasty", "-classpath"])
+            .arg(format!("{}:{}", producer.display(), scala.libraries))
+            .arg("-d")
+            .arg(&reconstructed)
+            .args(&sidecars),
+    );
+    for class in ["Counter", "Pair", "PairFactory"] {
+        assert!(
+            reconstructed
+                .join(format!("example/{class}.class"))
+                .is_file()
+        );
+    }
+    for (path, expected) in originals {
+        assert_eq!(
+            hash(&path),
+            expected,
+            "Scala reader leaves Rust artifact unchanged: {}",
+            path.display()
+        );
+    }
+}
+
+fn compile_alias_negative(
+    scala: &Scala,
+    root: &Path,
+    batch: &PairedJvmTastyBatchArtifacts,
+    client_source: &str,
+    label: &str,
+    factory_tasty: Option<&[u8]>,
+    remove_class: Option<&str>,
+) -> Output {
+    let case = root.join(format!("negative-alias-{label}"));
+    let classes = case.join("classes");
+    let out = case.join("out");
+    fs::create_dir_all(&classes).unwrap();
+    fs::create_dir_all(&out).unwrap();
+    write_batch(&classes, batch);
+    if let Some(bytes) = factory_tasty {
+        fs::write(classes.join("example/PairFactory.tasty"), bytes).unwrap();
+    }
+    if let Some(class) = remove_class {
+        fs::remove_file(classes.join(format!("example/{class}.class"))).unwrap();
+        fs::remove_file(classes.join(format!("example/{class}.tasty"))).unwrap();
+    }
+    let source = case.join("AliasConsumer.scala");
+    fs::write(&source, client_source).unwrap();
+    let result = scala.compile_result(
+        &format!("{}:{}", classes.display(), scala.libraries),
+        &out,
+        &source,
+    );
+    let diagnostic = plain(&String::from_utf8_lossy(&result.stderr));
+    if result.status.success() {
+        eprintln!("SCALA_ALIAS_MODIFIED_INPUT_ACCEPTED {label}");
+    } else {
+        let first = diagnostic
+            .lines()
+            .find(|line| {
+                !line.contains("Picked up JAVA_TOOL_OPTIONS")
+                    && (line.contains("-- [E")
+                        || line.contains("error")
+                        || line.contains("Exception"))
+            })
+            .unwrap_or(&diagnostic);
+        eprintln!("SCALA_ALIAS_NEGATIVE_FIRST_FAILURE {label}: {first}");
+    }
+    result
+}
+
 fn compile_and_run(
     scala: &Scala,
     root: &Path,
@@ -1865,6 +2228,140 @@ fn sidecar_negative_probes(
             );
         }
     }
+}
+
+fn alias_factory_sidecar_negative_probes(
+    scala: &Scala,
+    root: &Path,
+    batch: &PairedJvmTastyBatchArtifacts,
+    client_source: &str,
+) {
+    for corruption in ["missing", "misplaced", "corrupt", "mismatched-uuid"] {
+        let label = format!("PairFactory-{corruption}");
+        let case = root.join(format!("negative-alias-{label}"));
+        let classes = case.join("classes");
+        let out = case.join("out");
+        fs::create_dir_all(&classes).unwrap();
+        fs::create_dir_all(&out).unwrap();
+        write_batch(&classes, batch);
+        let class_path = classes.join("example/PairFactory.class");
+        let tasty_path = classes.join("example/PairFactory.tasty");
+        match corruption {
+            "missing" => fs::remove_file(&tasty_path).unwrap(),
+            "misplaced" => {
+                fs::rename(&tasty_path, tasty_path.with_extension("tasty.moved")).unwrap()
+            }
+            "corrupt" => {
+                let mut bytes = fs::read(&tasty_path).unwrap();
+                bytes.truncate(bytes.len().saturating_sub(3));
+                fs::write(&tasty_path, bytes).unwrap();
+            }
+            "mismatched-uuid" => {
+                let uuid = TastyFile::parse_and_validate_scala_3_9(&fs::read(&tasty_path).unwrap())
+                    .unwrap()
+                    .header()
+                    .uuid;
+                let mut bytes = fs::read(&class_path).unwrap();
+                let offset = bytes
+                    .windows(uuid.len())
+                    .position(|window| window == uuid)
+                    .expect("PairFactory classfile links its TASTy UUID");
+                bytes[offset] ^= 0x80;
+                fs::write(&class_path, bytes).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let source = case.join("AliasConsumer.scala");
+        fs::write(&source, client_source).unwrap();
+        let result = scala.compile_result(
+            &format!("{}:{}", classes.display(), scala.libraries),
+            &out,
+            &source,
+        );
+        assert!(!result.status.success(), "Scala accepted {label}");
+        let stderr = plain(&String::from_utf8_lossy(&result.stderr));
+        let expected = match corruption {
+            "missing" | "misplaced" => ".tasty` file is missing",
+            "corrupt" => "is broken",
+            "mismatched-uuid" => "out of sync with its TASTy file",
+            _ => unreachable!(),
+        };
+        assert!(
+            stderr.contains(expected),
+            "wrong first Scala failure for {label}: {stderr}"
+        );
+        eprintln!(
+            "SCALA_ALIAS_SIDECAR_FIRST_FAILURE {label}: {}",
+            stderr
+                .lines()
+                .find(|line| line.contains(expected))
+                .unwrap_or(&stderr)
+        );
+    }
+}
+
+fn alias_classfile_only_lookup_probe(
+    scala: &Scala,
+    root: &Path,
+    batch: &PairedJvmTastyBatchArtifacts,
+) {
+    let case = root.join("alias-classfile-only-factory-lookup");
+    let with_tasty = case.join("tasty-backed");
+    let class_only = case.join("classfile-only");
+    let accepted = case.join("accepted");
+    let rejected = case.join("rejected");
+    for directory in [&with_tasty, &class_only, &accepted, &rejected] {
+        fs::create_dir_all(directory).unwrap();
+    }
+    write_batch(&with_tasty, batch);
+    write_batch(&class_only, batch);
+    let factory = with_tasty.join("example/PairFactory.class");
+    fs::write(
+        &factory,
+        without_method(&fs::read(&factory).unwrap(), "create", "(II)Lexample/Pair;"),
+    )
+    .unwrap();
+    let factory = class_only.join("example/PairFactory.class");
+    let masked = without_method(&fs::read(&factory).unwrap(), "create", "(II)Lexample/Pair;");
+    fs::write(&factory, without_tasty_marker(&masked)).unwrap();
+    fs::remove_file(class_only.join("example/PairFactory.tasty")).unwrap();
+    let source = case.join("AliasLookup.scala");
+    fs::write(
+        &source,
+        "package example\nobject AliasLookup { val selected = new PairFactory().create(7, 3) }\n",
+    )
+    .unwrap();
+    let accepted_result = scala.compile_result(
+        &format!("{}:{}", with_tasty.display(), scala.libraries),
+        &accepted,
+        &source,
+    );
+    assert!(
+        accepted_result.status.success(),
+        "TASTy-backed paired lookup failed: {}",
+        String::from_utf8_lossy(&accepted_result.stderr)
+    );
+    let rejected_result = scala.compile_result(
+        &format!("{}:{}", class_only.display(), scala.libraries),
+        &rejected,
+        &source,
+    );
+    assert!(
+        !rejected_result.status.success(),
+        "classfile-only lookup resolved create"
+    );
+    let stderr = plain(&String::from_utf8_lossy(&rejected_result.stderr));
+    assert!(
+        stderr.contains("[E008]"),
+        "unexpected classfile-only first error: {stderr}"
+    );
+    eprintln!(
+        "TASTY_ALIAS_LOOKUP_ACCEPTED; CLASSFILE_ONLY_FIRST_REJECTION {}",
+        stderr
+            .lines()
+            .find(|line| line.contains("[E008]"))
+            .unwrap_or(&stderr)
+    );
 }
 
 fn malformed_local_reference_probe(
@@ -2881,6 +3378,205 @@ object CounterSetConsumer:
         source_id,
     );
     eprintln!("SCALA39_LOCAL_RECEIVER_UNIT_CALL_CONSUMER source_id={source_id}");
+}
+
+fn run_alias_counter_set_consumer(scala: &Scala, root: &Path) {
+    let alias_source_id = 22440;
+    let alias_batch = emit_paired_jvm_tasty_batch(
+        TWO_COUNTER_SET_ALIAS_SOURCE,
+        "PairFactory.scala",
+        SourceId::from_index(alias_source_id),
+    )
+    .expect("Rust emits the reviewed three-local alias and two-call batch");
+    assert_eq!(
+        alias_batch.classes().len(),
+        3,
+        "alias batch is the original three classes/six files"
+    );
+    source_contract_result(TWO_COUNTER_SET_ALIAS_SOURCE, &alias_batch, None)
+        .expect("paired source contract authenticates the exact alias batch");
+    compile_and_run(
+        scala,
+        root,
+        &alias_batch,
+        TWO_COUNTER_SET_ALIAS_SOURCE,
+        TWO_COUNTER_SET_ALIAS_CLIENT,
+        "client.AliasConsumer",
+        alias_source_id,
+    );
+    let alias_producer = root.join(format!("original-{alias_source_id}"));
+    inspect_alias_tasty(scala, &alias_producer, ["first", "second", "alias"]);
+    alias_factory_sidecar_negative_probes(scala, root, &alias_batch, TWO_COUNTER_SET_ALIAS_CLIENT);
+    alias_classfile_only_lookup_probe(scala, root, &alias_batch);
+
+    let factory_tasty = fs::read(alias_producer.join("example/PairFactory.tasty")).unwrap();
+    let wrong_alias_target = change_alias_initializer_target(&factory_tasty, 1);
+    let contract_error = source_contract_result(
+        TWO_COUNTER_SET_ALIAS_SOURCE,
+        &alias_batch,
+        Some(("example/PairFactory.tasty", &wrong_alias_target)),
+    )
+    .expect_err("source-bound plan rejects an alias RHS redirected to second");
+    assert!(
+        contract_error.contains("TASTy plan identity")
+            && contract_error.contains("decoded sidecar bytes differ"),
+        "wrong alias target fails source authentication: {contract_error}"
+    );
+    let alias_target_result = compile_alias_negative(
+        scala,
+        root,
+        &alias_batch,
+        TWO_COUNTER_SET_ALIAS_CLIENT,
+        "corrupt-alias-termref",
+        Some(&wrong_alias_target),
+        None,
+    );
+    assert!(
+        alias_target_result.status.success(),
+        "pinned Scala 3.9 accepts this isolated corrupted alias TERMREF; Rust rejects it: {contract_error}; stderr: {}",
+        plain(&String::from_utf8_lossy(&alias_target_result.stderr))
+    );
+    eprintln!(
+        "SCALA_ACCEPTED_CORRUPTED_ALIAS_TERMREF source-bound Rust rejection: {contract_error}"
+    );
+
+    let forged_setter = forge_alias_setter_name(&factory_tasty);
+    let forged_contract_error = source_contract_result(
+        TWO_COUNTER_SET_ALIAS_SOURCE,
+        &alias_batch,
+        Some(("example/PairFactory.tasty", &forged_setter)),
+    )
+    .expect_err("source-bound plan rejects forged setter selection name");
+    assert!(
+        forged_contract_error.contains("TASTy plan identity")
+            && forged_contract_error.contains("decoded sidecar bytes differ"),
+        "forged signed setter fails source authentication: {forged_contract_error}"
+    );
+    let forged_result = compile_alias_negative(
+        scala,
+        root,
+        &alias_batch,
+        TWO_COUNTER_SET_ALIAS_CLIENT,
+        "forged-signed-setter",
+        Some(&forged_setter),
+        None,
+    );
+    assert!(
+        forged_result.status.success(),
+        "pinned Scala 3.9 accepts this isolated forged signed setter; Rust rejects it: {forged_contract_error}; stderr: {}",
+        plain(&String::from_utf8_lossy(&forged_result.stderr))
+    );
+    eprintln!(
+        "SCALA_ACCEPTED_FORGED_SIGNED_SETTER source-bound Rust rejection: {forged_contract_error}"
+    );
+
+    let missing_pair = compile_alias_negative(
+        scala,
+        root,
+        &alias_batch,
+        TWO_COUNTER_SET_ALIAS_CLIENT,
+        "missing-declared-pair-class-and-sidecar",
+        None,
+        Some("Pair"),
+    );
+    assert!(
+        !missing_pair.status.success(),
+        "Scala rejects absent declared Pair class"
+    );
+    let missing_pair_stderr = plain(&String::from_utf8_lossy(&missing_pair.stderr));
+    let diagnostic_lines = missing_pair_stderr.lines().collect::<Vec<_>>();
+    let first_start = diagnostic_lines
+        .iter()
+        .position(|line| line.contains("-- [E"))
+        .expect("missing Pair has an official Scala diagnostic");
+    let first_end = diagnostic_lines[first_start + 1..]
+        .iter()
+        .position(|line| line.contains("-- [E"))
+        .map_or(diagnostic_lines.len(), |offset| first_start + 1 + offset);
+    let first_pair_diagnostic = diagnostic_lines[first_start..first_end].join("\n");
+    assert!(
+        first_pair_diagnostic.contains("[E008] Not Found Error")
+            && first_pair_diagnostic.contains("value Pair is not a member of example"),
+        "missing Pair must fail first with the pinned Scala E008 lookup diagnostic, got: {first_pair_diagnostic}"
+    );
+
+    let missing_second_source =
+        TWO_COUNTER_SET_ALIAS_SOURCE.replace("    second.set(firstSeed)\n", "");
+    assert_ne!(missing_second_source, TWO_COUNTER_SET_ALIAS_SOURCE);
+    let missing_second_error = emit_paired_jvm_tasty_batch(
+        &missing_second_source,
+        "PairFactory.scala",
+        SourceId::from_index(alias_source_id + 1),
+    )
+    .expect_err("the alias producer rejects omission of the second setter before publication");
+    let missing_second_error = format!("{missing_second_error:?}");
+    assert!(
+        missing_second_error.contains("cross-class constructor-call identity proof")
+            && missing_second_error
+                .contains("factory body must be a direct Apply or a bounded local Pair block"),
+        "missing second APPLY must fail at the observed first proof stage: {missing_second_error}"
+    );
+    eprintln!("RUST_REJECTED_MISSING_SECOND_APPLY before publication: {missing_second_error}");
+
+    let renamed_alias = TWO_COUNTER_SET_ALIAS_SOURCE
+        .replace("val alias: Counter", "val firstAlias: Counter")
+        .replace("alias.set(secondSeed)", "firstAlias.set(secondSeed)");
+    let reversed_alias_locals = TWO_COUNTER_SET_ALIAS_SOURCE.replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
+        "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
+    );
+    for (index, (label, source)) in [
+        ("renamed-alias", renamed_alias.as_str()),
+        ("reversed-initial-locals", reversed_alias_locals.as_str()),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let source_id = alias_source_id + 10 + index as u32;
+        let batch = emit_paired_jvm_tasty_batch(
+            source,
+            "PairFactory.scala",
+            SourceId::from_index(source_id),
+        )
+        .unwrap_or_else(|error| panic!("Rust emits supported {label} alias source: {error:?}"));
+        compile_and_run(
+            scala,
+            root,
+            &batch,
+            source,
+            TWO_COUNTER_SET_ALIAS_CLIENT,
+            "client.AliasConsumer",
+            source_id,
+        );
+        let producer = root.join(format!("original-{source_id}"));
+        inspect_alias_tasty(
+            scala,
+            &producer,
+            if label == "renamed-alias" {
+                ["first", "second", "firstAlias"]
+            } else {
+                ["second", "first", "alias"]
+            },
+        );
+        eprintln!("SCALA39_ALIAS_VARIANT label={label} source_id={source_id}");
+    }
+}
+
+#[test]
+fn official_scala_consumes_original_rust_alias_counter_set_batch() {
+    if !is_counter_set_target() {
+        return;
+    }
+    match std::env::var(REQUIRE_COUNTER_SET).as_deref() {
+        Ok("1") => {}
+        Ok(value) => panic!("{REQUIRE_COUNTER_SET} must equal 1 when set, got {value:?}"),
+        Err(std::env::VarError::NotPresent) => return,
+        Err(error) => panic!("read {REQUIRE_COUNTER_SET}: {error}"),
+    }
+    let scala = Scala::required();
+    let root = task_dir();
+    fs::create_dir_all(&root).unwrap();
+    run_alias_counter_set_consumer(&scala, &root);
 }
 
 #[test]
