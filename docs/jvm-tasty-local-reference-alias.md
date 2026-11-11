@@ -239,3 +239,70 @@ with SHA-256 and outcome in `oracle.json`. To reproduce the Rust audit, run
 `cargo +1.98.1 test -p dotty --test jvm_tasty_local_receiver_call
 local_reference_alias_audit_authenticates_frontend_identities_and_first_paired_failure
 --locked -- --nocapture --test-threads=1`.
+
+## Integrated Java and Scala consumer provenance (#2246 checkpoint)
+
+The final-gate consumers now emit the same canonical source through the paired
+producer. Both `LocalReferenceAlias.scala` and
+`jvm_tasty_two_local_counter_set/AliasTwoCalls.scala` have SHA-256
+`b1b200af5108685cf58b769b3ed0654c189d2fb28fa1c8eaaba5f02580d2b79f` and
+contain identical bytes. Both consumer tests pass the producer label
+`PairFactory.scala`; they share the expected artifact table in
+[`tests/support/immutable_alias_artifacts.rs`](../tests/support/immutable_alias_artifacts.rs).
+The earlier Java receipt used `LocalReferenceAlias.scala`, so its former
+hashes and UUIDs remain a separate historical receipt and are not combined
+with this canonical batch.
+
+The seven prerequisite PRs are merged in dependency order into integration
+base `b7ad6d2599183864166f1e72ebe9ab50893c79cf`. Each row records its
+reviewed head, published READY_FOR_MERGE review, merge commit, and successful
+PR-head Rust/JDK and strict Scala workflow runs:
+
+| Issue / PR | Reviewed PR head | Review | Merge commit | Rust/JDK checks | Strict Scala shards / aggregate |
+| --- | --- | --- | --- | --- | --- |
+| #2232 / [#2251](https://github.com/scytrowski/dotty-rs/pull/2251) | `0c57b66b639823ba06f16542e21f57c0d1d7a9a2` | [review](https://github.com/scytrowski/dotty-rs/pull/2251#pullrequestreview-5841472980) | `55b3e1a776da32ddcd0afd970779d1887708135a` | [run](https://github.com/scytrowski/dotty-rs/actions/runs/42811783778) | [run](https://github.com/scytrowski/dotty-rs/actions/runs/42811783764) |
+| #2235 / [#2252](https://github.com/scytrowski/dotty-rs/pull/2252) | `82858a0bf3aecebb0d2c8979e60345c246830462` | [review](https://github.com/scytrowski/dotty-rs/pull/2252#pullrequestreview-5842598495) | `36bcd961ad00ad9af82f518baa32885c0df253d6` | [run](https://github.com/scytrowski/dotty-rs/actions/runs/42823834695) | [run](https://github.com/scytrowski/dotty-rs/actions/runs/42823834758) |
+| #2236 / [#2254](https://github.com/scytrowski/dotty-rs/pull/2254) | `94769b1e24d785605987f254a1784dd5b899518e` | [review](https://github.com/scytrowski/dotty-rs/pull/2254#pullrequestreview-5844055843) | `3aa9f719b7f79d80ebe46e47a1b390afdde9f15e` | [run](https://github.com/scytrowski/dotty-rs/actions/runs/42839522026) | [run](https://github.com/scytrowski/dotty-rs/actions/runs/42839521991) |
+| #2239 / [#2255](https://github.com/scytrowski/dotty-rs/pull/2255) | `7254558f46394dd0b7c53640b0c1c72eb47c5950` | [review](https://github.com/scytrowski/dotty-rs/pull/2255#pullrequestreview-5846046962) | `0238061ccf674c0e15b8f055c971ed1cb6db5f51` | [run](https://github.com/scytrowski/dotty-rs/actions/runs/42860587954) | [run](https://github.com/scytrowski/dotty-rs/actions/runs/42860587879) |
+| #2240 / [#2257](https://github.com/scytrowski/dotty-rs/pull/2257) | `c9b4ea2e3083dc71c302e43f1116a6a721aed2cd` | [review](https://github.com/scytrowski/dotty-rs/pull/2257#pullrequestreview-5850555866) | `f200b6fb6b86438886c6d4f6447ca1077da94b7b` | [run](https://github.com/scytrowski/dotty-rs/actions/runs/42915032747) | [run](https://github.com/scytrowski/dotty-rs/actions/runs/42915032757) |
+| #2243 / [#2259](https://github.com/scytrowski/dotty-rs/pull/2259) | `19f2b7880c78ac7fe6e66ee773156286ba2d3258` | [review](https://github.com/scytrowski/dotty-rs/pull/2259#pullrequestreview-5855686149) | `333ae382e04884850b88090f15e1efe557cb3b60` | [run](https://github.com/scytrowski/dotty-rs/actions/runs/42984305118) | [run](https://github.com/scytrowski/dotty-rs/actions/runs/42984305306) |
+| #2244 / [#2261](https://github.com/scytrowski/dotty-rs/pull/2261) | `3ae605c8771bfa13b2e3bb355e18eb7b7615e580` | [review](https://github.com/scytrowski/dotty-rs/pull/2261#pullrequestreview-5857261839) | `b7ad6d2599183864166f1e72ebe9ab50893c79cf` | [run](https://github.com/scytrowski/dotty-rs/actions/runs/43002287174) | [run](https://github.com/scytrowski/dotty-rs/actions/runs/43002287257) |
+
+The integration-base push checks also passed: [Rust checks](https://github.com/scytrowski/dotty-rs/actions/runs/43042366536/job/130597261524)
+and [the mandatory classfile/JVM gate](https://github.com/scytrowski/dotty-rs/actions/runs/43042366536/job/130597260951).
+The final-gate PR still needs its own final-head hosted checks; predecessor
+results are provenance, not a substitute for those checks.
+
+The canonical six Rust artifacts are:
+
+| Artifact path | SHA-256 | TASTy UUID |
+| --- | --- | --- |
+| `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | `008071c3-c009-68ac-0000-000000008193` |
+| `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | same |
+| `example/Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` | `000b7d8d-7441-c7f0-0000-000000008198` |
+| `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | same |
+| `example/PairFactory.class` | `68027bf87468fd724f034cc4fd67d4e57220e389fb4130f9e3a33bcd2cea98e1` | `00c9bae5-ea1a-54c2-0000-00000000819e` |
+| `example/PairFactory.tasty` | `e56be0c7ff675f7d05a34914cb924c13fac030a54e72e06612de03b286a570ed` | same |
+
+The independent Java runtime probe fixture is SHA-256
+`fd9b6bbd2b2d4ea1c02c8568341414a75e501a310e17a8d688adf8f87e2e5946`;
+the independent Scala client fixture is SHA-256
+`50857d2606e3d90296ea6a2fe4b766bca0c9ecd0574a44014f53523c9372e7af`.
+The Java strict-JDK test passed with Temurin 21.0.13 using
+`DOTTY_CLASSFILE_REQUIRE_JDK=1`. The Scala alias consumer passed using Rust
+1.98.1, official Scala source revision
+`777528f19a58e794c9954a42f433373472ec57f8` and Temurin 21.0.13 with
+`DOTTY_REQUIRE_SCALA_TASTY_TWO_LOCAL_COUNTER_SET_CONSUMER=1`. Its output
+reports the same six hashes and UUID links, the unchanged original artifacts
+after Scala compilation/execution and the original, renamed-alias and
+reversed-local variants. The Scala client runs against the producer's original
+Rust artifacts; `-print-tasty`, `-decompile` and `-from-tasty` outputs remain
+inspection-only.
+
+These local focused runs authenticate the common input and both consumer
+paths. They do not complete the final release gate: the strict four-shard
+workflow, its aggregate, mandatory JDK workflow and standard locked workspace
+checks must still pass on the final PR head, and their exact hosted run/job
+links must be added after that head is fixed. The checked-in strict manifest
+currently validates 25 targets across four shards; this receipt does not claim
+hosted checks or final acceptance.
