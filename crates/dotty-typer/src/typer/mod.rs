@@ -4991,6 +4991,14 @@ mod tests {
             };
             let input = typer.index.derived_symbol_at(method, source, tree).unwrap();
             assert_eq!(typer.store().symbols.get(input).owner, Some(method));
+            assert!(
+                typer
+                    .store()
+                    .symbols
+                    .get(input)
+                    .flags
+                    .contains(SymbolFlags::SYNTHETIC)
+            );
             let Type::Poly(poly) = typer.store().types.get(signature) else {
                 panic!("generic unapply must have a fresh polymorphic binder");
             };
@@ -5023,7 +5031,7 @@ mod tests {
             let Type::Applied { tycon, args } = typer.store().types.get(method_type.result) else {
                 panic!("unapply result must be Option of its field type");
             };
-            assert_ne!(type_symbol(typer.store(), *tycon), class);
+            assert_eq!(type_symbol(typer.store(), *tycon), option);
             assert_eq!(args.len(), 1);
             assert!(matches!(
                 typer.store().types.get(args[0]),

@@ -40,6 +40,8 @@ one of those parameters; it does not project Product selectors or type match
 patterns.
 
 Oracle provenance: source fetched from the pinned `scala/scala3` revision;
+`Either.scala` SHA-256 is
+`7991d19a22ce0eb3d63b41ac61e7feabdeb97ed2f95555073cb3757224be8caa`;
 compiler/JDK artifacts are the SHA-256-pinned Scala 3.9.0/JDK 21 set in
 `tools/typer-classpath-corpus-audit/either-companion-oracle`. The exact typer
 output is retained in the implementation's registered scratch run.
@@ -52,6 +54,13 @@ and can be retried without partial signature state. The preexisting monomorphic
 `Box` result behavior remains unchanged.
 
 ## Remaining whole-method blocker
+
+Replaying the unchanged original `Either.scala#tree=84` after this increment
+completes the canonical `Left.unapply` signature and stops at
+`ExtractorUnapplyPolymorphic` on pattern tree 69 (source span `[8288, 8295)`).
+The second `Right` extractor has not been reached. This is the existing pattern
+typing boundary; this increment does not add polymorphic extractor-pattern
+support or claim that `Either.swap` types as a whole.
 
 The frozen `unwrap` and `classify` method roots now pass generated-method
 completion and ordinary unapply resolution. They stop at
