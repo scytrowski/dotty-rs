@@ -32,7 +32,7 @@ both declarations:
 ```scala
 package probe
 case class Before[A, B](value: A)
-import scala.language.`2.13`
+import scala.language.{`2.13`, implicitConversions}
 case class After[A, B](value: B)
 
 // generated declarations
@@ -55,7 +55,8 @@ separate `Box` fixture.
 
 The Rust typer completes these canonical generated methods on demand as a
 fresh two-parameter `PolyType` around a plain one-argument `MethodType`. The
-presence of a valid ``scala.language.`2.13` `` import in the source unit
+presence of a valid ``scala.language.`2.13` `` feature import in the source
+unit, including when selected alongside other named imports,
 selects the compatibility result for supported generic case classes in that
 unit, including declarations before the import: `Before[A, B]` returns
 `Option[A]`, and `After[A, B]` returns `Option[B]`. Ordinary Scala 3 generic

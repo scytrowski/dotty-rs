@@ -4913,8 +4913,8 @@ mod tests {
 
     #[test]
     fn generated_generic_unapply_uses_unit_scala_2_13_mode_and_preserves_parameter_order() {
-        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "package scala; trait Product; class Option[+X]; package scala.nested; class Option[X]; package probe; class Option[X]; case class Before[+A, +B](value: A); import scala.language.`2.13`; case class After[+A, +B](value: B); object Probe { def before = Before.unapply; def after = After.unapply }",
+        let (parsed, mut store, mut packages, definitions, index, source) = parse_and_name(
+            "package scala\ntrait Product\nclass Option[+X]\nobject nested { class Option[X] }\ncase class Before[+A, +B](value: A)\nimport scala.language.{`2.13`, implicitConversions}\ncase class After[+A, +B](value: B)\nobject Probe { def before = Before.unapply; def after = After.unapply }",
         );
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -5053,24 +5053,29 @@ mod tests {
         }
         drop(typer);
 
-        let (
-            ordinary_parsed,
-            mut ordinary_store,
-            ordinary_packages,
-            ordinary_definitions,
-            ordinary_index,
-            ordinary_source,
-        ) = parse_and_name(
+        let ordinary_source = SourceId::from_index(12);
+        let (ordinary_parsed, ordinary_index) = parse_and_name_unit(
             "package ordinary { class Option[X]; case class Carrier[A, B](value: B); object Probe { def carrier = Carrier.unapply } }",
+            ordinary_source,
+            &mut store,
+            &mut packages,
         );
         let mut ordinary_typer = SourceTyper::new(
             &ordinary_parsed.ast,
             ordinary_source,
             &ordinary_index,
-            &mut ordinary_store,
-            ordinary_definitions,
-            &ordinary_packages,
+            &mut store,
+            definitions,
+            &packages,
         );
+        let local_option = class_symbol(
+            &ordinary_parsed,
+            ordinary_typer.store(),
+            &ordinary_index,
+            ordinary_source,
+            "Option",
+        );
+        assert_ne!(local_option, option);
         let carrier = class_symbol(
             &ordinary_parsed,
             ordinary_typer.store(),

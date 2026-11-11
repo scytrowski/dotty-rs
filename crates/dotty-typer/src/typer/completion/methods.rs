@@ -38,10 +38,11 @@ impl SourceTyper<'_> {
             let selected_feature_import = path
                 .as_deref()
                 .is_some_and(|path| path.iter().map(String::as_str).eq(["scala", "language"]))
-                && matches!(import.selectors.as_slice(), [selector]
-                if self.store.names.resolve(selector.imported.text()) == "2.13"
-                    && selector.renamed.is_none()
-                    && selector.bound.is_none());
+                && import.selectors.iter().any(|selector| {
+                    self.store.names.resolve(selector.imported.text()) == "2.13"
+                        && selector.renamed.is_none()
+                        && selector.bound.is_none()
+                });
             whole_feature_import || selected_feature_import
         });
         self.scala_2_13_source_mode = Some(enabled);
