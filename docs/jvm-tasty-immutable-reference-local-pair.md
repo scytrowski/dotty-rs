@@ -762,7 +762,10 @@ source declares `first`, `second`, and `alias = first`, then calls
 `alias.set(secondSeed)` followed by `second.set(firstSeed)` before constructing
 `Pair(first, second)`. Its pinned Scala client checks `(7, 3) -> (3, 7)` and
 `(-9, 42) -> (42, -9)`, distinct Pair fields and fresh results, then mutates
-each returned object independently. Fixture SHA-256 values are
+each returned object independently. It also calls `create(11, 11)`, asserts the
+equal-valued fields hold distinct Counter references, and mutates the left
+Counter while the right remains `11`. The same client runs against original,
+renamed-alias, and reversed-local producers. Fixture SHA-256 values are
 `b1b200af5108685cf58b769b3ed0654c189d2fb28fa1c8eaaba5f02580d2b79f`
 (producer) and
 `da97e28cb22f2405872ada8ab38922444144038bcfb5253012293c334905ca4f`
@@ -795,17 +798,20 @@ than relying on allocation order. Runtime prints
 
 First-failure controls cover a missing, misplaced, truncated, or UUID-mismatched
 PairFactory sidecar; classfile-only factory lookup; a missing declared Pair
-class and sidecar; and omission of the second setter call. Scala reports the
-missing-sidecar loader error, broken TASTy reader error, UUID out-of-sync error,
-`[E008]` for classfile-only lookup and missing Pair, respectively. The Rust
-producer rejects omission of the second call at its cross-class constructor
-call identity proof before publication. Scala 3.9 accepts a corrupted alias
-TERMREF and a forged signed setter in isolated modified TASTy copies; the
-source-bound Rust contract rejects those exact modified artifacts at TASTy
-plan identity because the sidecar bytes differ from the validated plan output.
-These are recorded as observed consumer behavior, not Scala rejection claims.
-The producer and consumer assertions use isolated copies for all mutations;
-the six positive artifacts remain unchanged.
+class and sidecar; and omission of the second setter call. The missing Pair
+control asserts Scala's first diagnostic is `[E008] Not Found Error` with
+`value Pair is not a member of example`. Missing/misplaced sidecars assert the
+missing-sidecar loader message, truncation asserts the broken-reader message,
+and UUID corruption asserts the out-of-sync message. The missing-second-call
+producer control asserts the first Rust failure is at `cross-class
+constructor-call identity proof` with the unsupported bounded local block
+shape. Scala 3.9 accepts both the corrupted alias TERMREF and forged signed
+setter in isolated modified TASTy copies; the tests assert successful Scala
+compilation for each while the source-bound Rust contract rejects those exact
+modified artifacts at TASTy plan identity because their sidecar bytes differ
+from the validated plan output. The producer and consumer assertions use
+isolated copies for all mutations; the six positive artifacts remain
+unchanged.
 
 The test runs under the existing
 `DOTTY_REQUIRE_SCALA_TASTY_TWO_LOCAL_COUNTER_SET_CONSUMER=1` flag, manifest

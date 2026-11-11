@@ -3431,17 +3431,14 @@ fn run_alias_counter_set_consumer(scala: &Scala, root: &Path) {
         Some(&wrong_alias_target),
         None,
     );
-    if alias_target_result.status.success() {
-        eprintln!(
-            "SCALA_ACCEPTED_CORRUPTED_ALIAS_TERMREF source-bound Rust rejection: {contract_error}"
-        );
-    } else {
-        let stderr = plain(&String::from_utf8_lossy(&alias_target_result.stderr));
-        assert!(
-            !stderr.trim().is_empty(),
-            "Scala reports the first alias-link failure"
-        );
-    }
+    assert!(
+        alias_target_result.status.success(),
+        "pinned Scala 3.9 accepts this isolated corrupted alias TERMREF; Rust rejects it: {contract_error}; stderr: {}",
+        plain(&String::from_utf8_lossy(&alias_target_result.stderr))
+    );
+    eprintln!(
+        "SCALA_ACCEPTED_CORRUPTED_ALIAS_TERMREF source-bound Rust rejection: {contract_error}"
+    );
 
     let forged_setter = forge_alias_setter_name(&factory_tasty);
     let forged_contract_error = source_contract_result(
@@ -3464,17 +3461,14 @@ fn run_alias_counter_set_consumer(scala: &Scala, root: &Path) {
         Some(&forged_setter),
         None,
     );
-    if forged_result.status.success() {
-        eprintln!(
-            "SCALA_ACCEPTED_FORGED_SIGNED_SETTER source-bound Rust rejection: {forged_contract_error}"
-        );
-    } else {
-        let stderr = plain(&String::from_utf8_lossy(&forged_result.stderr));
-        assert!(
-            !stderr.trim().is_empty(),
-            "Scala reports the forged setter first failure"
-        );
-    }
+    assert!(
+        forged_result.status.success(),
+        "pinned Scala 3.9 accepts this isolated forged signed setter; Rust rejects it: {forged_contract_error}; stderr: {}",
+        plain(&String::from_utf8_lossy(&forged_result.stderr))
+    );
+    eprintln!(
+        "SCALA_ACCEPTED_FORGED_SIGNED_SETTER source-bound Rust rejection: {forged_contract_error}"
+    );
 
     let missing_pair = compile_alias_negative(
         scala,
@@ -3489,45 +3483,40 @@ fn run_alias_counter_set_consumer(scala: &Scala, root: &Path) {
         !missing_pair.status.success(),
         "Scala rejects absent declared Pair class"
     );
+    let missing_pair_stderr = plain(&String::from_utf8_lossy(&missing_pair.stderr));
+    let diagnostic_lines = missing_pair_stderr.lines().collect::<Vec<_>>();
+    let first_start = diagnostic_lines
+        .iter()
+        .position(|line| line.contains("-- [E"))
+        .expect("missing Pair has an official Scala diagnostic");
+    let first_end = diagnostic_lines[first_start + 1..]
+        .iter()
+        .position(|line| line.contains("-- [E"))
+        .map_or(diagnostic_lines.len(), |offset| first_start + 1 + offset);
+    let first_pair_diagnostic = diagnostic_lines[first_start..first_end].join("\n");
+    assert!(
+        first_pair_diagnostic.contains("[E008] Not Found Error")
+            && first_pair_diagnostic.contains("value Pair is not a member of example"),
+        "missing Pair must fail first with the pinned Scala E008 lookup diagnostic, got: {first_pair_diagnostic}"
+    );
 
     let missing_second_source =
         TWO_COUNTER_SET_ALIAS_SOURCE.replace("    second.set(firstSeed)\n", "");
     assert_ne!(missing_second_source, TWO_COUNTER_SET_ALIAS_SOURCE);
-    match emit_paired_jvm_tasty_batch(
+    let missing_second_error = emit_paired_jvm_tasty_batch(
         &missing_second_source,
         "PairFactory.scala",
         SourceId::from_index(alias_source_id + 1),
-    ) {
-        Ok(missing_second_batch) => {
-            let missing_second_contract =
-                source_contract_result(TWO_COUNTER_SET_ALIAS_SOURCE, &missing_second_batch, None)
-                    .expect_err("original alias source rejects artifact missing its second APPLY");
-            assert!(
-                missing_second_contract.contains("decoded sidecar bytes differ"),
-                "missing APPLY fails source-bound artifact validation: {missing_second_contract}"
-            );
-            let missing_second_dir = root.join("negative-alias-missing-second-apply");
-            fs::create_dir_all(&missing_second_dir).unwrap();
-            write_batch(&missing_second_dir, &missing_second_batch);
-            let decompiled = output(
-                scala
-                    .command()
-                    .arg("-decompile")
-                    .arg(missing_second_dir.join("example/PairFactory.tasty")),
-            );
-            let text = plain(&String::from_utf8_lossy(&decompiled.stdout));
-            assert!(
-                !text.contains("second.set(firstSeed)"),
-                "modified Scala TASTy omits second APPLY: {text}"
-            );
-            eprintln!(
-                "SCALA_ACCEPTED_MISSING_SECOND_APPLY source-bound Rust rejection: {missing_second_contract}"
-            );
-        }
-        Err(error) => {
-            eprintln!("RUST_REJECTED_MISSING_SECOND_APPLY before publication: {error:?}");
-        }
-    }
+    )
+    .expect_err("the alias producer rejects omission of the second setter before publication");
+    let missing_second_error = format!("{missing_second_error:?}");
+    assert!(
+        missing_second_error.contains("cross-class constructor-call identity proof")
+            && missing_second_error
+                .contains("factory body must be a direct Apply or a bounded local Pair block"),
+        "missing second APPLY must fail at the observed first proof stage: {missing_second_error}"
+    );
+    eprintln!("RUST_REJECTED_MISSING_SECOND_APPLY before publication: {missing_second_error}");
 
     let renamed_alias = TWO_COUNTER_SET_ALIAS_SOURCE
         .replace("val alias: Counter", "val firstAlias: Counter")

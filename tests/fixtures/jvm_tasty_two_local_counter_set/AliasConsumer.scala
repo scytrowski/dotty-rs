@@ -39,4 +39,10 @@ object AliasConsumer:
     assert((fresh ne first) && (fresh ne second))
     assert((freshLeft ne firstLeft) && (freshLeft ne secondLeft))
     assert((freshRight ne firstRight) && (freshRight ne secondRight))
+
+    val equalSeeds = factory.create(11, 11)
+    val (equalLeft, equalRight) = check(equalSeeds, 11, 11)
+    assert(equalLeft ne equalRight)
+    equalLeft.set(12)
+    assert(equalSeeds.leftValue() == 12 && equalSeeds.rightValue() == 11)
     println("scala39-immutable-reference-local-pair; rust-alias-two-call-consumer passed")
