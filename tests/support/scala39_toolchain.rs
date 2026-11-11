@@ -56,7 +56,16 @@ pub(crate) fn from_environment(
         SCALA_REVISION
     );
 
-    let scalac = root.join("dist/target/universal/stage/bin/scalac");
+    let stage = [
+        root.join("dist/target/universal/stage"),
+        root.join("dist/linux-x86_64/target/universal/stage"),
+    ]
+    .into_iter()
+    .find(|stage| {
+        stage.join("bin/scalac").is_file() && stage.join("lib/with_compiler.jar").is_file()
+    })
+    .expect("pinned staged Scala compiler and with_compiler.jar exist");
+    let scalac = stage.join("bin/scalac");
     let mut version = Command::new(&scalac);
     version.arg("-version");
     configure_version(&mut version);
@@ -71,7 +80,7 @@ pub(crate) fn from_environment(
         "{version_text}"
     );
 
-    let compiler_jar = root.join("dist/target/universal/stage/lib/with_compiler.jar");
+    let compiler_jar = stage.join("lib/with_compiler.jar");
     assert!(
         compiler_jar.is_file(),
         "staged pinned compiler jar exists: {}",
