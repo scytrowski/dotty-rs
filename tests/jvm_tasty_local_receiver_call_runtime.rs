@@ -1455,7 +1455,7 @@ fn aliased_counter_identity_and_ordered_calls_execute_under_strict_jdk21() {
             ("example/Counter", "<init>", "(I)V")
         );
     }
-    let expected_slots = alias_plan_slots(ALIAS_SOURCE, 22430, 0);
+    let expected_slots = alias_plan_slots(ALIAS_SOURCE, 22430);
     let first_slot = expected_slots.first;
     let second_slot = expected_slots.second;
     let alias_slot = expected_slots.alias;
@@ -1620,16 +1620,16 @@ fn aliased_counter_identity_and_ordered_calls_execute_under_strict_jdk21() {
         .split("class PairFactory:")
         .next()
         .expect("base source has PairFactory");
-    for (label, control, source_id, first_local_index) in [
-        ("renamed", RENAMED_ALIAS_SOURCE, 22431, 0usize),
-        ("reversed", REVERSED_ALIAS_SOURCE, 22432, 1usize),
+    for (label, control, source_id) in [
+        ("renamed", RENAMED_ALIAS_SOURCE, 22431),
+        ("reversed", REVERSED_ALIAS_SOURCE, 22432),
     ] {
         let control_factory = control
             .split_once("\n\nclass PairFactory:")
             .map(|(_, factory)| factory)
             .expect("control fixture has its PairFactory declaration");
         let source = format!("{factory_prefix}class PairFactory:\n{control_factory}");
-        let slots = alias_plan_slots(&source, source_id, first_local_index);
+        let slots = alias_plan_slots(&source, source_id);
         let control_batch = emit_paired_jvm_tasty_batch(
             &source,
             "LocalReferenceAlias.scala",
@@ -1667,19 +1667,8 @@ fn aliased_counter_identity_and_ordered_calls_execute_under_strict_jdk21() {
             .filter(|instruction| matches!(instruction.opcode, 0xb7 | 0xb6))
             .collect::<Vec<_>>();
         assert_eq!(control_calls.len(), 5);
-        let expected_constructor_slots = if first_local_index == 0 {
-            [
-                (slots.first_seed, slots.first),
-                (slots.second_seed, slots.second),
-            ]
-        } else {
-            [
-                (slots.second_seed, slots.second),
-                (slots.first_seed, slots.first),
-            ]
-        };
         for (constructor, (formal_slot, local_slot)) in
-            control_calls[..2].iter().zip(expected_constructor_slots)
+            control_calls[..2].iter().zip(slots.constructor_order)
         {
             let seed = control_instructions
                 .iter()
@@ -2047,9 +2036,10 @@ struct AliasPlanSlots {
     alias: u8,
     first_seed: u8,
     second_seed: u8,
+    constructor_order: [(u8, u8); 2],
 }
 
-fn alias_plan_slots(source: &str, source_id: u32, first_local_index: usize) -> AliasPlanSlots {
+fn alias_plan_slots(source: &str, source_id: u32) -> AliasPlanSlots {
     with_paired_jvm_tasty_batch_plan(
         source,
         "LocalReferenceAlias.scala",
@@ -2082,6 +2072,35 @@ fn alias_plan_slots(source: &str, source_id: u32, first_local_index: usize) -> A
                 .expect("canonical create plan");
             assert_eq!(method.parameters.len(), 2);
             assert_eq!(method.locals.len(), 3, "first, second, and alias symbols");
+            let tasty_plan = batch
+                .classes
+                .iter()
+                .find(|class| class.class == factory.class)
+                .expect("paired TASTy plan for the canonical factory")
+                .tasty_plan
+                .plan();
+            let alias = tasty_plan
+                .typed_bindings
+                .local_reference_alias(batch.source_id, method.method)
+                .expect("canonical source proof for the local reference alias");
+            let initializers = tasty_plan
+                .typed_bindings
+                .local_counter_initializers(batch.source_id, method.method);
+            assert_eq!(
+                initializers.len(),
+                2,
+                "two authenticated local constructors"
+            );
+            let first_initializer = initializers
+                .iter()
+                .find(|initializer| initializer.argument_formal == method.parameters[0])
+                .expect("first local constructor is bound to firstSeed");
+            let second_initializer = initializers
+                .iter()
+                .find(|initializer| initializer.argument_formal == method.parameters[1])
+                .expect("second local constructor is bound to secondSeed");
+            assert_eq!(alias.target, first_initializer.local);
+            assert_ne!(alias.local, alias.target);
 
             // The plan callback intentionally exposes the same immutable semantic store but
             // not its bootstrap Definitions value. Bootstrap a witness with deterministic
@@ -2114,16 +2133,12 @@ fn alias_plan_slots(source: &str, source_id: u32, first_local_index: usize) -> A
                 .jvm_unit
                 .local_layout(factory.class, method.method, &definitions)
                 .expect("canonical symbol-derived method local layout");
-            let local_slots = method
-                .locals
-                .iter()
-                .map(|local| {
-                    layout
-                        .local(local.symbol)
-                        .expect("local symbol is in layout")
-                        .slot() as u8
-                })
-                .collect::<Vec<_>>();
+            let local_slot = |symbol| {
+                layout
+                    .local(symbol)
+                    .expect("canonical local symbol is in layout")
+                    .slot() as u8
+            };
             let formal_slots = method
                 .parameters
                 .iter()
@@ -2137,13 +2152,28 @@ fn alias_plan_slots(source: &str, source_id: u32, first_local_index: usize) -> A
                 })
                 .collect::<Vec<_>>();
             assert_eq!(formal_slots.len(), 2);
-            assert!(first_local_index < 2);
+            let constructor_order = method
+                .locals
+                .iter()
+                .filter_map(|local| {
+                    let initializer = initializers
+                        .iter()
+                        .find(|initializer| initializer.local == local.symbol)?;
+                    let formal = method_metadata
+                        .parameters()
+                        .iter()
+                        .find(|formal| formal.symbol() == initializer.argument_formal)?;
+                    Some((formal.slot() as u8, local_slot(local.symbol)))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(constructor_order.len(), 2);
             AliasPlanSlots {
-                first: local_slots[first_local_index],
-                second: local_slots[1 - first_local_index],
-                alias: local_slots[2],
+                first: local_slot(first_initializer.local),
+                second: local_slot(second_initializer.local),
+                alias: local_slot(alias.local),
                 first_seed: formal_slots[0],
                 second_seed: formal_slots[1],
+                constructor_order: [constructor_order[0], constructor_order[1]],
             }
         },
     )
