@@ -17,37 +17,35 @@ impl SourceTyper<'_> {
         }
     }
 
-    fn uses_scala_2_13_case_class_unapply(&self, context: SourceContextId) -> bool {
-        let mut current = Some(context);
-        while let Some(context_id) = current {
-            let Some(source_context) = self.index.try_source_context(context_id) else {
+    // Scala records this feature import on the whole compilation unit, so
+    // declarations before the import use the same mode. This arena contains
+    // one source unit; declaration-context ancestry is intentionally ignored.
+    fn source_uses_scala_2_13_case_class_unapply(&mut self) -> bool {
+        if let Some(enabled) = self.scala_2_13_source_mode {
+            return enabled;
+        }
+        let enabled = self.arena.iter().any(|(_, tree)| {
+            let TreeKind::Import(import) = &tree.kind else {
                 return false;
             };
-            if let Some(import_tree) = source_context.import
-                && let Some(TreeKind::Import(import)) =
-                    self.arena.try_get(import_tree).map(|tree| &tree.kind)
-            {
-                let path = self.tree_qualified_name(import.expr);
-                let whole_feature_import = import.selectors.is_empty()
-                    && path.as_deref().is_some_and(|path| {
-                        path.iter()
-                            .map(String::as_str)
-                            .eq(["scala", "language", "2.13"])
-                    });
-                let selected_feature_import = path
-                    .as_deref()
-                    .is_some_and(|path| path.iter().map(String::as_str).eq(["scala", "language"]))
-                    && matches!(import.selectors.as_slice(), [selector]
-                    if self.store.names.resolve(selector.imported.text()) == "2.13"
-                        && selector.renamed.is_none()
-                        && selector.bound.is_none());
-                if whole_feature_import || selected_feature_import {
-                    return true;
-                }
-            }
-            current = source_context.parent;
-        }
-        false
+            let path = self.tree_qualified_name(import.expr);
+            let whole_feature_import = import.selectors.is_empty()
+                && path.as_deref().is_some_and(|path| {
+                    path.iter()
+                        .map(String::as_str)
+                        .eq(["scala", "language", "2.13"])
+                });
+            let selected_feature_import = path
+                .as_deref()
+                .is_some_and(|path| path.iter().map(String::as_str).eq(["scala", "language"]))
+                && matches!(import.selectors.as_slice(), [selector]
+                if self.store.names.resolve(selector.imported.text()) == "2.13"
+                    && selector.renamed.is_none()
+                    && selector.bound.is_none());
+            whole_feature_import || selected_feature_import
+        });
+        self.scala_2_13_source_mode = Some(enabled);
+        enabled
     }
 
     fn canonical_scala_option(&mut self, tree_index: u32) -> Result<Option<SymbolId>, TyperError> {
@@ -597,11 +595,7 @@ impl SourceTyper<'_> {
         };
         let parameter_name = dotty_core::TermName::new(input_name.text());
         let compatibility_field_parameter = if let Some(field_parameter) = generic_field_parameter {
-            let context = self
-                .index
-                .declaration_context_of(class)
-                .ok_or(TyperError::DeclarationContextMissing { symbol: class })?;
-            self.uses_scala_2_13_case_class_unapply(context)
+            self.source_uses_scala_2_13_case_class_unapply()
                 .then_some(field_parameter)
         } else {
             None
