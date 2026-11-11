@@ -752,3 +752,62 @@ DOTTY_REQUIRE_SCALA_TASTY_TWO_LOCAL_COUNTER_SET_CONSUMER=1 \
   cargo test -p dotty --test jvm_tasty_two_local_counter_set_scala_consumer \
   --locked -- --nocapture
 ```
+
+## Issue #2244: aliased local with two ordered setters
+
+The strict target `jvm_tasty_two_local_counter_set_scala_consumer` reuses the
+existing two-local Scala producer gate and adds one alias-bearing producer in
+`tests/fixtures/jvm_tasty_two_local_counter_set/AliasTwoCalls.scala`. The
+source declares `first`, `second`, and `alias = first`, then calls
+`alias.set(secondSeed)` followed by `second.set(firstSeed)` before constructing
+`Pair(first, second)`. Its pinned Scala client checks `(7, 3) -> (3, 7)` and
+`(-9, 42) -> (42, -9)`, distinct Pair fields and fresh results, then mutates
+each returned object independently. Fixture SHA-256 values are
+`b1b200af5108685cf58b769b3ed0654c189d2fb28fa1c8eaaba5f02580d2b79f`
+(producer) and
+`da97e28cb22f2405872ada8ab38922444144038bcfb5253012293c334905ca4f`
+(client).
+
+The strict run uses Scala 3.9.0 at revision
+`777528f19a58e794c9954a42f433373472ec57f8`, JDK 21.0.13, and Rust 1.98.1.
+The Rust-authored producer batch has exactly the six files below. The original
+and Scala-consumed copies were hash-checked, and each classfile TASTy link was
+checked against its sidecar UUID.
+
+| Artifact | SHA-256 | Classfile TASTy UUID |
+| --- | --- | --- |
+| `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | `008071c3-c009-68ac-0000-000000008193` |
+| `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | — |
+| `example/Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` | `000b7d8d-7441-c7f0-0000-000000008198` |
+| `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | — |
+| `example/PairFactory.class` | `68027bf87468fd724f034cc4fd67d4e57220e389fb4130f9e3a33bcd2cea98e1` | `00c9bae5-ea1a-54c2-0000-00000000819e` |
+| `example/PairFactory.tasty` | `e56be0c7ff675f7d05a34914cb924c13fac030a54e72e06612de03b286a570ed` | — |
+
+The Rust structural reader and Scala `-print-tasty`, `-decompile`, and
+`-from-tasty` inspect the same batch. The decoded method has a BLOCK, three
+local VALDEFs, two ordered setter applications, and a final Pair application.
+`alias` is a direct `TERMREFdirect` to `first`; the setter receivers resolve to
+`alias` then `second`, and constructor arguments resolve to `first` then
+`second`. The test also repeats the positive client with a renamed alias and
+reversed initial local declarations, asserting semantic links by names rather
+than relying on allocation order. Runtime prints
+`rust-alias-two-call-consumer passed` and runs with `java -Xverify:all -ea`.
+
+First-failure controls cover a missing, misplaced, truncated, or UUID-mismatched
+PairFactory sidecar; classfile-only factory lookup; a missing declared Pair
+class and sidecar; and omission of the second setter call. Scala reports the
+missing-sidecar loader error, broken TASTy reader error, UUID out-of-sync error,
+`[E008]` for classfile-only lookup and missing Pair, respectively. The Rust
+producer rejects omission of the second call at its cross-class constructor
+call identity proof before publication. Scala 3.9 accepts a corrupted alias
+TERMREF and a forged signed setter in isolated modified TASTy copies; the
+source-bound Rust contract rejects those exact modified artifacts at TASTy
+plan identity because the sidecar bytes differ from the validated plan output.
+These are recorded as observed consumer behavior, not Scala rejection claims.
+The producer and consumer assertions use isolated copies for all mutations;
+the six positive artifacts remain unchanged.
+
+The test runs under the existing
+`DOTTY_REQUIRE_SCALA_TASTY_TWO_LOCAL_COUNTER_SET_CONSUMER=1` flag, manifest
+entry, and strict Scala consumer workflow shard 1/4. No new workflow, target,
+manifest entry, or production code is introduced for this increment.
