@@ -4795,7 +4795,7 @@ fn diagnostic_aware_naming_accepts_a_shared_synthetic_package_owner() {
 }
 
 #[test]
-fn generic_product1_case_classes_publish_only_canonical_unapply_identity() {
+fn generic_product1_case_classes_publish_canonical_selector_and_unapply_identities() {
     let cases = [
         (
             "package scala.util\nsealed trait Either[+A, +B]\nfinal case class Left[+A, +B](value: A) extends Either[A, B]\nfinal case class Right[+A, +B](value: B) extends Either[A, B]",
@@ -4927,13 +4927,58 @@ fn generic_product1_case_classes_publish_only_canonical_unapply_identity() {
                 })
             );
             assert!(
-                named
+                !named
                     .store
                     .scopes
                     .get(named.index.scope_of(class).unwrap())
                     .lookup_all(TermName::new(named.store.names.intern("_1")).as_name())
                     .is_empty(),
-                "generic unapply identity must not synthesize Product1 selectors"
+                "eligible generic Product1 shape publishes its selector identity"
+            );
+            let parameter_tree = constructor.value_param_clauses[0][0];
+            let field = named.index.symbol_at(named.source, parameter_tree).unwrap();
+            let selector = named
+                .index
+                .derived_symbol_at(class, named.source, parameter_tree)
+                .expect("selector binding must derive from the exact constructor field tree");
+            let constructor_symbol = named
+                .index
+                .symbol_at(named.source, template.constructor)
+                .unwrap();
+            let selector_symbol = named.store.symbols.get(selector);
+            assert_eq!(selector_symbol.kind, SymbolKind::Method);
+            assert_eq!(selector_symbol.owner, Some(class));
+            assert!(selector_symbol.flags.contains(SymbolFlags::SYNTHETIC));
+            assert_eq!(selector_symbol.visibility, Visibility::Public);
+            assert_eq!(selector_symbol.info, dotty_core::SymbolInfo::Missing);
+            assert_eq!(
+                selector_symbol.origin,
+                dotty_core::SymbolOrigin::Source(named.source)
+            );
+            assert_eq!(named.store.names.resolve(selector_symbol.name.text()), "_1");
+            assert_eq!(
+                named.index.definition_of(selector),
+                Some(SourceDefinition::Derived {
+                    source: named.source,
+                    tree: parameter_tree,
+                })
+            );
+            assert_eq!(
+                named
+                    .store
+                    .scopes
+                    .get(named.index.scope_of(class).unwrap())
+                    .lookup_all(TermName::new(named.store.names.intern("_1")).as_name()),
+                [selector]
+            );
+            assert_ne!(selector, field);
+            assert_ne!(selector, constructor_symbol);
+            assert_ne!(selector, apply);
+            assert_ne!(selector, unapply);
+            assert_eq!(
+                named.store.symbols.get(field).owner,
+                Some(class),
+                "field remains canonical and class-owned"
             );
         }
         assert_eq!(found.len(), expected_classes.len());
@@ -4944,20 +4989,22 @@ fn generic_product1_case_classes_publish_only_canonical_unapply_identity() {
 }
 
 #[test]
-fn generic_unapply_identity_rejects_shapes_outside_the_bounded_product1_rule() {
+fn generic_product1_selector_rejects_shapes_outside_the_bounded_rule() {
     let sources = [
         "case class Unrelated[X, Y](value: String)",
         "case class WrongArity[X](value: X)",
         "case class TooMany[X, Y, Z](value: X)",
         "case class Bounded[X <: Any, Y](value: X)",
+        "case class HigherKinded[F[_], Y](value: F[Y])",
         "case class TwoFields[X, Y](first: X, second: Y)",
         "case class Curried[X, Y](value: X)(other: Y)",
         "case class Defaulted[X, Y](value: X = ???)",
+        "case class Mutable[X, Y](var value: X)",
         "case class Repeated[X, Y](value: X*)",
         "case class Contextual[X, Y](using value: X)",
     ];
     for (source_index, source_text) in sources.into_iter().enumerate() {
-        let named = named_source(source_text, 22_390 + source_index as u32);
+        let mut named = named_source(source_text, 22_390 + source_index as u32);
         let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
             panic!("source should have a package root");
         };
@@ -4974,7 +5021,55 @@ fn generic_unapply_identity_rejects_shapes_outside_the_bounded_product1_rule() {
             None,
             "unsupported shape must not receive generated identity: {source_text}"
         );
+        let selector_named = named
+            .store
+            .scopes
+            .get(named.index.scope_of(class).unwrap())
+            .lookup_all(TermName::new(named.store.names.intern("_1")).as_name());
+        assert!(
+            selector_named.iter().all(|symbol| !named
+                .store
+                .symbols
+                .get(*symbol)
+                .flags
+                .contains(SymbolFlags::SYNTHETIC)),
+            "unsupported generic shape must not publish a synthetic selector: {source_text}"
+        );
     }
+}
+
+#[test]
+fn generic_product1_selector_collision_preserves_only_the_explicit_member() {
+    let mut named = named_source(
+        "case class ExplicitSelector[X, Y](value: X) { def _1: X = value }",
+        22_401,
+    );
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("source should have a package root");
+    };
+    let class_tree = package.stats[0];
+    let class = named.index.symbol_at(named.source, class_tree).unwrap();
+    let selectors = named
+        .store
+        .scopes
+        .get(named.index.scope_of(class).unwrap())
+        .lookup_all(TermName::new(named.store.names.intern("_1")).as_name());
+    assert_eq!(selectors.len(), 1);
+    assert!(
+        !named
+            .store
+            .symbols
+            .get(selectors[0])
+            .flags
+            .contains(SymbolFlags::SYNTHETIC)
+    );
+    assert!(
+        named
+            .index
+            .generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply)
+            .is_some(),
+        "an explicit selector does not suppress the generated extractor identity"
+    );
 }
 
 #[test]
@@ -5029,6 +5124,23 @@ fn incomparable_generic_companion_unapply_fails_without_publishing_a_candidate()
         index
             .generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply)
             .is_some()
+    );
+    let TreeKind::TypeDef(class_definition) = &retry.ast.get(package.stats[0]).kind else {
+        unreachable!()
+    };
+    let TreeKind::Template(template) = &retry.ast.get(class_definition.rhs).kind else {
+        unreachable!()
+    };
+    let TreeKind::DefDef(constructor) = &retry.ast.get(template.constructor).kind else {
+        unreachable!()
+    };
+    let field_tree = constructor.value_param_clauses[0][0];
+    let selector = index
+        .derived_symbol_at(class, retry_source, field_tree)
+        .expect("transactional retry publishes the selector identity");
+    assert_eq!(
+        store.symbols.get(selector).info,
+        dotty_core::SymbolInfo::Missing
     );
 }
 
