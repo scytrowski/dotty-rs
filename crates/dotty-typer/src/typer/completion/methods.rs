@@ -3,6 +3,121 @@
 use super::*;
 
 impl SourceTyper<'_> {
+    fn tree_qualified_name(&self, tree: TreeId<Untyped>) -> Option<Vec<String>> {
+        match &self.arena.try_get(tree)?.kind {
+            TreeKind::Ident(ident) => {
+                Some(vec![self.store.names.resolve(ident.name.text()).to_owned()])
+            }
+            TreeKind::Select(select) => {
+                let mut path = self.tree_qualified_name(select.qualifier)?;
+                path.push(self.store.names.resolve(select.name.text()).to_owned());
+                Some(path)
+            }
+            _ => None,
+        }
+    }
+
+    fn uses_scala_2_13_case_class_unapply(&self, context: SourceContextId) -> bool {
+        let mut current = Some(context);
+        while let Some(context_id) = current {
+            let Some(source_context) = self.index.try_source_context(context_id) else {
+                return false;
+            };
+            if let Some(import_tree) = source_context.import
+                && let Some(TreeKind::Import(import)) =
+                    self.arena.try_get(import_tree).map(|tree| &tree.kind)
+            {
+                let path = self.tree_qualified_name(import.expr);
+                let whole_feature_import = import.selectors.is_empty()
+                    && path.as_deref().is_some_and(|path| {
+                        path.iter()
+                            .map(String::as_str)
+                            .eq(["scala", "language", "2.13"])
+                    });
+                let selected_feature_import = path
+                    .as_deref()
+                    .is_some_and(|path| path.iter().map(String::as_str).eq(["scala", "language"]))
+                    && matches!(import.selectors.as_slice(), [selector]
+                    if self.store.names.resolve(selector.imported.text()) == "2.13"
+                        && selector.renamed.is_none()
+                        && selector.bound.is_none());
+                if whole_feature_import || selected_feature_import {
+                    return true;
+                }
+            }
+            current = source_context.parent;
+        }
+        false
+    }
+
+    fn canonical_scala_option(&mut self, tree_index: u32) -> Result<Option<SymbolId>, TyperError> {
+        let scala = match self.packages.symbol(&["scala"]) {
+            Some(scala) => Some(scala),
+            None => self.resolve_external_package(&["scala".to_owned()], tree_index)?,
+        };
+        let Some(scala) = scala else {
+            return Ok(None);
+        };
+        if self.package_path(scala) != ["scala"] {
+            return Err(TyperError::SymbolResolution {
+                source: self.source,
+                tree_index,
+                error: dotty_core::ResolutionError::Malformed {
+                    reason: "scala package resolution returned a non-canonical package".to_owned(),
+                },
+            });
+        }
+        let name = Name::new(
+            self.store.names.intern("Option"),
+            dotty_core::Namespace::Type,
+        );
+        let scoped = match self.packages.scope_of(scala) {
+            Some(scope) => {
+                let candidates = self
+                    .store
+                    .scopes
+                    .get(scope)
+                    .lookup_all(&name)
+                    .iter()
+                    .copied()
+                    .filter(|symbol| self.store.symbols.get(*symbol).kind == SymbolKind::Class)
+                    .collect::<Vec<_>>();
+                match candidates.as_slice() {
+                    [option] => Some(*option),
+                    [] => None,
+                    _ => {
+                        return Err(TyperError::SymbolResolution {
+                            source: self.source,
+                            tree_index,
+                            error: dotty_core::ResolutionError::Ambiguous {
+                                candidates: candidates.len(),
+                            },
+                        });
+                    }
+                }
+            }
+            None => None,
+        };
+        let option = if let Some(option) = scoped {
+            Some(option)
+        } else {
+            let request = dotty_core::MemberRequest {
+                prefix: self.package_type_prefix(scala),
+                name,
+                selector: dotty_core::MemberSelector::Unique,
+                space: dotty_core::MemberSpace::Prefix,
+            };
+            self.resolver
+                .resolve_member(self.store, &request)
+                .map_err(|error| TyperError::SymbolResolution {
+                    source: self.source,
+                    tree_index,
+                    error,
+                })?
+        };
+        Ok(option)
+    }
+
     pub(in crate::typer) fn is_deferred_case_class_companion_apply(
         &self,
         name: Name,
@@ -481,34 +596,31 @@ impl SourceTyper<'_> {
             })
         };
         let parameter_name = dotty_core::TermName::new(input_name.text());
-        let result_type = if let Some(field_parameter) = generic_field_parameter {
+        let compatibility_field_parameter = if let Some(field_parameter) = generic_field_parameter {
             let context = self
                 .index
                 .declaration_context_of(class)
                 .ok_or(TyperError::DeclarationContextMissing { symbol: class })?;
-            let option_name = dotty_core::Name::new(
-                self.store.names.intern("Option"),
-                dotty_core::Namespace::Type,
-            );
-            let option = self
-                .lookup_type_symbol(option_name, context, class_tree.index(), None)?
-                .ok_or(TyperError::TypeNameNotFound {
+            self.uses_scala_2_13_case_class_unapply(context)
+                .then_some(field_parameter)
+        } else {
+            None
+        };
+        let result_type = if let Some(field_parameter) = compatibility_field_parameter {
+            let option = self.canonical_scala_option(class_tree.index())?.ok_or(
+                TyperError::TypeNameNotFound {
                     source,
                     tree_index: class_tree.index(),
-                    name: option_name,
+                    name: Name::new(
+                        self.store.names.intern("Option"),
+                        dotty_core::Namespace::Type,
+                    ),
                     position: None,
-                })?;
+                },
+            )?;
             if !self.store.symbols.contains(option)
                 || self.store.symbols.get(option).kind != SymbolKind::Class
-                || self.store.symbols.get(option).owner.is_none_or(|owner| {
-                    !self.store.symbols.contains(owner)
-                        || self.store.symbols.get(owner).kind != SymbolKind::Package
-                        || self
-                            .store
-                            .names
-                            .resolve(self.store.symbols.get(owner).name.text())
-                            != "scala"
-                })
+                || self.store.symbols.get(option).owner != self.packages.symbol(&["scala"])
             {
                 return Err(TyperError::MalformedMethodClause {
                     method,

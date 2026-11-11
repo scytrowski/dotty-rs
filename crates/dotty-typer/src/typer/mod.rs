@@ -4912,7 +4912,7 @@ mod tests {
     #[test]
     fn generated_generic_left_right_unapply_signatures_preserve_ordered_class_parameters() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "package scala { trait Product; class Option[+X] }; package matching { case class Left[+A, +B](value: A); case class Right[+A, +B](value: B); case class Carrier[A, B](value: B); object Probe { def left = Left.unapply; def right = Right.unapply; def carrier = Carrier.unapply } }",
+            "package scala { trait Product; class Option[+X] }; package scala.nested { class Option[X] }; package matching { class Option[X]; import scala.language.`2.13`; case class CompatLeft[+A, +B](value: A); case class CompatRight[+A, +B](value: B); object Probe { def compatLeft = CompatLeft.unapply; def compatRight = CompatRight.unapply } }; package ordinary { class Option[X]; case class Carrier[A, B](value: B); object Probe { def carrier = Carrier.unapply } }",
         );
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -4922,7 +4922,7 @@ mod tests {
             definitions,
             &packages,
         );
-        let left_class = class_symbol(&parsed, typer.store(), &index, source, "Left");
+        let left_class = class_symbol(&parsed, typer.store(), &index, source, "CompatLeft");
         let left_method = typer
             .index
             .generated_case_class_method(
@@ -4957,7 +4957,11 @@ mod tests {
             .scopes
             .get_mut(scala_scope)
             .enter(option_name, option);
-        for (class_name, expected_position) in [("Left", 0), ("Right", 1), ("Carrier", 1)] {
+        for (class_name, expected_position, expect_option) in [
+            ("CompatLeft", 0, true),
+            ("CompatRight", 1, true),
+            ("Carrier", 1, false),
+        ] {
             let class = class_symbol(&parsed, typer.store(), &index, source, class_name);
             let method = typer
                 .index
@@ -4966,9 +4970,14 @@ mod tests {
                     dotty_core::GeneratedCaseClassMethodRole::Unapply,
                 )
                 .expect("canonical generic unapply");
-            let selected_name = class_name.to_lowercase();
+            let selected_name = match class_name {
+                "CompatLeft" => "compatLeft",
+                "CompatRight" => "compatRight",
+                "Carrier" => "carrier",
+                _ => unreachable!(),
+            };
             let (selected_method, selected_rhs) =
-                method_definition_and_rhs(&parsed, typer.store(), &index, source, &selected_name);
+                method_definition_and_rhs(&parsed, typer.store(), &index, source, selected_name);
             let context = ExpressionContext {
                 lexical: index.declaration_context_of(selected_method).unwrap(),
                 owner: selected_method,
@@ -5029,15 +5038,27 @@ mod tests {
                 ));
             }
             let Type::Applied { tycon, args } = typer.store().types.get(method_type.result) else {
-                panic!("unapply result must be Option of its field type");
+                panic!("generic unapply result must preserve the class type arguments");
             };
-            assert_eq!(type_symbol(typer.store(), *tycon), option);
-            assert_eq!(args.len(), 1);
-            assert!(matches!(
-                typer.store().types.get(args[0]),
-                Type::ParamRef { binder, index }
-                    if *binder == signature && *index == expected_position as u32
-            ));
+            if expect_option {
+                assert_eq!(type_symbol(typer.store(), *tycon), option);
+                assert_eq!(args.len(), 1);
+                assert!(matches!(
+                    typer.store().types.get(args[0]),
+                    Type::ParamRef { binder, index }
+                        if *binder == signature && *index == expected_position as u32
+                ));
+            } else {
+                assert_eq!(type_symbol(typer.store(), *tycon), class);
+                assert_eq!(args.len(), 2);
+                for (position, argument) in args.iter().enumerate() {
+                    assert!(matches!(
+                        typer.store().types.get(*argument),
+                        Type::ParamRef { binder, index }
+                            if *binder == signature && *index == position as u32
+                    ));
+                }
+            }
             let Type::Applied { args, .. } = typer.store().types.get(method_type.params[0].ty)
             else {
                 unreachable!();
