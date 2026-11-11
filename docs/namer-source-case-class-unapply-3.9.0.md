@@ -117,7 +117,10 @@ typing blocker; the current root does not complete `swap` or claim successful
 pattern typing. The full after-state TSV is recorded in
 [`typer-either-swap-after-2238.tsv`](typer-either-swap-after-2238.tsv) and is
 emitted by the regular ordinary audit runner with a one-root manifest for
-`Either.scala#tree=84`.
+`Either.scala#tree=84`. The frozen historical 25+25 receipt retains its
+original blocker; the live verifier allows this one exact main-cohort status
+transition and still requires identical roots, order, source trees, result
+shapes, and all other receipt fields.
 
 The protected #2233 success manifest remains unchanged (SHA-256
 `2a31b0b10cac7fe86d3c30f2d4e632ac93f2037e9a392efaf6e6b548e5284c4d`); the

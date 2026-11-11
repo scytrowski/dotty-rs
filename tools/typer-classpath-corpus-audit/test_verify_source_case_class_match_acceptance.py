@@ -309,6 +309,50 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
             gate.validate_cohorts(repository, reports, output, baseline)
             self.assertEqual(gate.read_tsv(output), gate.read_tsv(baseline))
 
+    def test_live_cohort_receipt_accepts_only_measured_either_swap_blocker_movement(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        baseline = repository / "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv"
+        baseline_bytes = baseline.read_bytes()
+        receipt_rows = gate.read_tsv(baseline)[1]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reports = self.cohort_reports(
+                receipt_rows,
+                root,
+                {gate.EITHER_SWAP_IDENTITY: (gate.EITHER_SWAP_LIVE_BLOCKER, "not_available")},
+            )
+            output = root / "live.tsv"
+            gate.validate_cohorts(repository, reports, output, baseline)
+            live_rows = gate.read_tsv(output)[1]
+            live = next(row for row in live_rows if row["identity"] == gate.EITHER_SWAP_IDENTITY)
+            self.assertEqual(live["first_status"], gate.EITHER_SWAP_LIVE_BLOCKER)
+            self.assertEqual(live["second_status"], gate.EITHER_SWAP_LIVE_BLOCKER)
+            self.assertEqual(live["actual_result"], "not_available")
+            self.assertEqual(baseline.read_bytes(), baseline_bytes)
+
+    def test_live_cohort_receipt_rejects_other_either_swap_blocker_drift(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        baseline = repository / "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv"
+        receipt_rows = gate.read_tsv(baseline)[1]
+        invalid_overrides = (
+            ("blocked::DifferentFailure", "not_available"),
+            (gate.EITHER_SWAP_LIVE_BLOCKER, "scala.util.Either[typeparam#0,typeparam#1]"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index, override in enumerate(invalid_overrides):
+                reports = self.cohort_reports(
+                    receipt_rows,
+                    root,
+                    {gate.EITHER_SWAP_IDENTITY: override},
+                )
+                with self.subTest(override=override), self.assertRaisesRegex(
+                    gate.ReceiptError, gate.EITHER_SWAP_IDENTITY
+                ):
+                    gate.validate_cohorts(
+                        repository, reports, root / f"live-{index}.tsv", baseline
+                    )
+
     def test_live_cohort_receipt_reports_unexpected_per_root_drift(self) -> None:
         repository = Path(__file__).resolve().parents[2]
         baseline = repository / "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv"

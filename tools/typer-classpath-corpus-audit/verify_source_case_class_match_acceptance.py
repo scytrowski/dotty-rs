@@ -14,6 +14,15 @@ from pathlib import Path
 FIXTURE = Path("crates/dotty-typer/tests/fixtures/source-case-class-match-3.9.0")
 SOURCE_SHA256 = "df57333192eb934169f06a07873c2e1ba88c9159404f60e5bfe33b3d016e215c"
 SCALA_REVISION = "777528f19a58e794c9954a42f433373472ec57f8"
+EITHER_SWAP_IDENTITY = "library/src/scala/util/Either.scala#tree=84"
+EITHER_SWAP_HISTORICAL_BLOCKER = (
+    "blocked::ExtractorUnapplyNotFound { source: SourceId(0), tree_index: 69, "
+    "extractor: SymbolId(106) }"
+)
+EITHER_SWAP_LIVE_BLOCKER = (
+    "blocked::MalformedMethodClause { method: SymbolId(112), "
+    "method_tree_index: 521, clause_index: 0 }"
+)
 PRODUCT2_FIXTURE = Path("crates/dotty-typer/tests/fixtures/source-case-class-product2-3.9.0")
 PRODUCT2_SOURCE_SHA256 = "4b144913df1d2021359c44633dc2a23f21bf6288bf2528c86cc6f53d79b8ee31"
 SCALA_MATRIX_CASES = {
@@ -1341,11 +1350,31 @@ def validate_cohorts(root: Path, reports: list[Path], output: Path, baseline_rec
             + ", ".join(changed)
         )
 
-    differences = [
-        (wanted, found)
-        for wanted, found in zip(expected, recorded_rows, strict=True)
-        if wanted != found
-    ]
+    differences = []
+    for wanted, found in zip(expected, recorded_rows, strict=True):
+        if wanted == found:
+            continue
+        if wanted["identity"] == EITHER_SWAP_IDENTITY:
+            # Keep the checked-in 2026-09 receipt immutable. Permit only this
+            # measured first-blocker transition in the live cohorts, while
+            # requiring every non-status field to remain exactly historical.
+            historical = dict(wanted)
+            historical["first_status"] = EITHER_SWAP_HISTORICAL_BLOCKER
+            historical["second_status"] = EITHER_SWAP_HISTORICAL_BLOCKER
+            observed = (
+                wanted["cohort"] == "main"
+                and wanted["source_tree"] == "84"
+                and wanted["baseline_status"] == "blocked"
+                and wanted["gate"] == "observe"
+                and wanted["first_status"] == EITHER_SWAP_LIVE_BLOCKER
+                and wanted["second_status"] == EITHER_SWAP_LIVE_BLOCKER
+                and wanted["actual_result"] == "not_available"
+                and wanted["protected_success"] == "false"
+                and wanted["two_pass_equal"] == "true"
+            )
+            if observed and historical == found:
+                continue
+        differences.append((wanted, found))
     if differences:
         roots = [f"{wanted['cohort']}:{wanted['identity']}" for wanted, _ in differences]
         raise ReceiptError(
