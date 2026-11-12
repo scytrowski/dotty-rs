@@ -11,7 +11,9 @@ formal, local symbols, and declared Counter type.
 
 Validation requires the condition to resolve to the original Boolean formal;
 both arms to resolve to distinct symbols from the two initialized locals; the
-IF and selected declaration type to be the canonical Counter class; the
+both initialized ValDef types, the IF and selected declaration type to be the
+canonical Counter class; the typed Block result must retain the exact final
+Pair expression TypeId; the
 selected binding to be immutable and method-owned in the same block scope; and
 the later setter and Pair construction to retain their original typed roots.
 It does not infer identity from local names, source order, or JVM slots. A

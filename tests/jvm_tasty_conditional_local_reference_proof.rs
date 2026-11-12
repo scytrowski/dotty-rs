@@ -54,6 +54,9 @@ enum IndexMutation {
     ConditionKindIf,
     ThenBranchKindIf,
     ElseBranchKindIf,
+    FirstLocalValDefInt,
+    SecondLocalValDefInt,
+    BlockTypeInt,
 }
 
 #[derive(Debug)]
@@ -263,6 +266,17 @@ fn authenticate(
             let selected_typed = source_typed_index.get(source_id, block.stats[2]).unwrap();
             typed_ast.get_mut(selected_typed).ty = definitions.int;
         }
+        IndexMutation::FirstLocalValDefInt | IndexMutation::SecondLocalValDefInt => {
+            let local_index = usize::from(matches!(mutation, IndexMutation::SecondLocalValDefInt));
+            let local_typed = source_typed_index
+                .get(source_id, block.stats[local_index])
+                .unwrap();
+            typed_ast.get_mut(local_typed).ty = definitions.int;
+        }
+        IndexMutation::BlockTypeInt => {
+            let typed_block = source_typed_index.get(source_id, rhs).unwrap();
+            typed_ast.get_mut(typed_block).ty = definitions.int;
+        }
         IndexMutation::SetterReceiverKindIf
         | IndexMutation::SetterArgumentKindIf
         | IndexMutation::PairFirstArgumentKindIf
@@ -298,6 +312,9 @@ fn authenticate(
                 IndexMutation::ConditionKindIf => if_node.cond,
                 IndexMutation::ThenBranchKindIf => if_node.then_branch,
                 IndexMutation::ElseBranchKindIf => if_node.else_branch,
+                IndexMutation::FirstLocalValDefInt
+                | IndexMutation::SecondLocalValDefInt
+                | IndexMutation::BlockTypeInt => unreachable!(),
                 _ => unreachable!(),
             };
             let target_typed = source_typed_index.get(source_id, target_source).unwrap();
@@ -430,6 +447,9 @@ fn missing_or_forged_source_typed_if_edges_reject_at_the_typed_binding_stage() {
         IndexMutation::ConditionKindIf,
         IndexMutation::ThenBranchKindIf,
         IndexMutation::ElseBranchKindIf,
+        IndexMutation::FirstLocalValDefInt,
+        IndexMutation::SecondLocalValDefInt,
+        IndexMutation::BlockTypeInt,
     ] {
         assert!(
             matches!(

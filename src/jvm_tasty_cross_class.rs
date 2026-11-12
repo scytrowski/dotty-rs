@@ -906,6 +906,14 @@ fn validate_immutable_local_declaration_core(
     {
         return Err(typed_error("typed ValDef declared-type identity mismatch"));
     }
+    if typed_ast
+        .try_get(typed_declaration)
+        .is_none_or(|tree| tree.ty != local_type)
+    {
+        return Err(typed_error(
+            "typed local ValDef must retain its canonical Counter TypeId",
+        ));
+    }
     Ok(ImmutableLocalDeclarationCore {
         declaration,
         typed_declaration,

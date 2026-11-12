@@ -1007,6 +1007,19 @@ pub fn validate_immutable_local_conditional_reference_selection_proof<'session>(
         .owner
         .ok_or_else(|| sem("Pair constructor has no class owner"))?;
     if !store.symbols.contains(pair_constructor) || store.symbols.get(pair_constructor).kind != SymbolKind::Constructor || !store.symbols.contains(pair_class) || store.symbols.get(pair_class).kind != SymbolKind::Class || store.types.try_get(typed_ast.try_get(typed_pair_result).ok_or_else(|| typed("typed Pair result is stale"))?.ty).is_none_or(|ty| !matches!(ty, Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == pair_class)) { return Err(typed("final result must remain an application of the canonical Pair constructor")); }
+    if typed_ast
+        .try_get(typed_block)
+        .ok_or_else(|| typed("typed Block is stale"))?
+        .ty
+        != typed_ast
+            .try_get(typed_pair_result)
+            .ok_or_else(|| typed("typed Pair result is stale"))?
+            .ty
+    {
+        return Err(typed(
+            "typed Block must retain the canonical final Pair expression TypeId",
+        ));
+    }
     if store.symbols.get(pair_constructor).visibility != dotty_core::Visibility::Public
         || !has_source_origin(store, pair_constructor, source_id)
         || store.symbols.get(pair_class).visibility != dotty_core::Visibility::Public
