@@ -41,4 +41,8 @@ original source tree IDs and mappings while replacing each body with its own
 binder reference. It checks the applied `Left[A, B]`/`Right[A, B]` prototypes,
 canonical generated `unapply` identities, `Option[A]`/`Option[B]` result
 arguments, and exact selector-parameter binder identities. Two fresh sessions
-produce the same normalized receipt.
+type the original `this` selector through the expression path, confirm its
+receiver view uses `Either`'s canonical `A, B` parameters, and produce the same
+normalized receipt from observed source-to-typed mappings. A separate concrete
+`Either[Int, String]` regression confirms the variant parameters remain
+positionally distinct for non-generic arguments.

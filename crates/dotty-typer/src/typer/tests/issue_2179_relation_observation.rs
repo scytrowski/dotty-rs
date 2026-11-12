@@ -86,17 +86,13 @@ fn replay_original_either_swap_patterns() -> Vec<String> {
     let TreeKind::DefDef(definition) = &parsed.ast.get(method_tree).kind else {
         unreachable!()
     };
-    let selector_tpt = definition.tpt;
     let TreeKind::Match(matched) = &parsed.ast.get(definition.rhs.unwrap()).kind else {
         unreachable!()
     };
+    let selector_tree = matched.selector;
     let original_cases = matched.cases.clone();
     let mut isolated_cases = Vec::new();
-    for (ordinal, (case_tree, expected_variant)) in original_cases
-        .into_iter()
-        .zip(["Left", "Right"])
-        .enumerate()
-    {
+    for case_tree in original_cases {
         let TreeKind::CaseDef(original_case) = parsed.ast.get(case_tree).kind else {
             unreachable!()
         };
@@ -120,13 +116,7 @@ fn replay_original_either_swap_patterns() -> Vec<String> {
             position: case_position,
             ty: (),
         });
-        isolated_cases.push((
-            ordinal,
-            expected_variant,
-            original_case.pattern,
-            binder_tree,
-            isolated_case,
-        ));
+        isolated_cases.push((case_tree, original_case.pattern, binder_tree, isolated_case));
     }
     let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
     let release = std::env::var("SCALA39_JDK_RELEASE")
@@ -158,23 +148,58 @@ fn replay_original_either_swap_patterns() -> Vec<String> {
     )
     .with_resolver(Box::new(resolver));
     let context = typer.expression_context_for(method).unwrap();
-    let selector_context = typer.expression_type_context(context).unwrap();
+    let typed_selector = typer
+        .run_expression_transaction(|typer, journal, mappings| {
+            typer.type_value_expression_inner(selector_tree, context, journal, mappings)
+        })
+        .unwrap();
+    let selector_value_type = typer.typed_arena.get(typed_selector).ty;
+    let selector_receiver_type = typer.this_type_receiver_view(selector_value_type).unwrap();
     let selector_type = typer
-        .type_of_tpt_inner_journaled(selector_tpt, selector_context, &mut Vec::new())
+        .pattern_selector_type(selector_receiver_type, &mut Vec::new())
         .unwrap();
     let selector_parameters = match typer.store.types.get(selector_type) {
         Type::Applied { args, .. } => args.clone(),
-        other => panic!("original selector is applied Either: {other:?}"),
+        other => panic!("pattern selector is applied Either: {other:?}"),
     };
+    let either_class = index
+        .definition_of(method)
+        .and_then(|definition| match definition {
+            SourceDefinition::Canonical { .. } => typer.store.symbols.get(method).owner,
+            _ => None,
+        })
+        .expect("canonical Either source class");
+    assert!(
+        matches!(
+            typer.store.types.get(selector_value_type),
+            Type::ThisType { class } if *class == either_class
+        ),
+        "the independently typed selector is the original this: Either[A, B]"
+    );
+    let either_parameters = typer.source_class_type_parameters(either_class).unwrap();
+    let selector_parameter_symbols = selector_parameters
+        .iter()
+        .map(|ty| match typer.store.types.get(*ty) {
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            } => *symbol,
+            other => panic!("selector preserves canonical Either parameter: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(selector_parameter_symbols, either_parameters);
     let mut normalized = Vec::new();
-    for (ordinal, expected_variant, original_pattern, binder_tree, isolated_case) in isolated_cases
-    {
+    let mut canonical_binders = Vec::new();
+    for (case_tree, original_pattern, binder_tree, isolated_case) in isolated_cases {
         let typed_case = typer
             .run_expression_transaction(|typer, journal, mappings| {
                 typer.type_case_def(isolated_case, selector_type, context, journal, mappings)
             })
             .unwrap_or_else(|error| {
-                panic!("isolated original {expected_variant} pattern types: {error:?}")
+                panic!(
+                    "isolated original pattern in case tree {} types: {error:?}",
+                    case_tree.index()
+                )
             });
         let TreeKind::CaseDef(typed_case_node) = &typer.typed_arena.get(typed_case).kind else {
             unreachable!()
@@ -203,13 +228,6 @@ fn replay_original_either_swap_patterns() -> Vec<String> {
         else {
             panic!("canonical variant type reference")
         };
-        assert_eq!(
-            typer
-                .store
-                .names
-                .resolve(typer.store.symbols.get(*variant).name.text()),
-            expected_variant
-        );
         assert_eq!(args, &selector_parameters);
         let Type::Method(instantiated_unapply) = typer
             .store
@@ -224,15 +242,84 @@ fn replay_original_either_swap_patterns() -> Vec<String> {
         else {
             panic!("compatibility-mode unapply returns Option[A] or Option[B]")
         };
-        assert_eq!(option_args, &[selector_parameters[ordinal]]);
         let binder = typer
             .pattern_binding_symbol_at(source, binder_tree)
             .expect("original source binder has case-local identity");
+        canonical_binders.push(binder);
         let binder_type = match typer.store.symbols.info(binder) {
             SymbolInfo::Complete(ty) => *ty,
             other => panic!("original binder type is complete: {other:?}"),
         };
-        assert_eq!(binder_type, selector_parameters[ordinal]);
+        let Type::TypeRef {
+            target: TypeRefTarget::Symbol(parameter),
+            ..
+        } = typer.store.types.get(binder_type)
+        else {
+            panic!("original binder has a canonical Either parameter type")
+        };
+        let parameter_ordinal = selector_parameter_symbols
+            .iter()
+            .position(|candidate| candidate == parameter)
+            .expect("binder type is one of Either's source parameters");
+        assert_eq!(binder_type, selector_parameters[parameter_ordinal]);
+        assert_eq!(option_args, &[selector_parameters[parameter_ordinal]]);
+        let parameter_name = typer
+            .store
+            .names
+            .resolve(typer.store.symbols.get(*parameter).name.text())
+            .to_owned();
+        let TreeKind::Apply(source_application) = &parsed.ast.get(original_pattern).kind else {
+            unreachable!()
+        };
+        let TreeKind::Ident(source_variant) = &parsed.ast.get(source_application.function).kind
+        else {
+            panic!("original source extractor has a canonical identifier")
+        };
+        let source_variant_name = typer
+            .store
+            .names
+            .resolve(source_variant.name.text())
+            .to_owned();
+        let source_variant_class = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if typer.store.names.resolve(definition.name.as_name().text())
+                        == source_variant_name =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("original source identifier resolves to its canonical class declaration");
+        assert_eq!(source_variant_class, *variant);
+        let binder_name = typer
+            .store
+            .names
+            .resolve(typer.store.symbols.get(binder).name.text())
+            .to_owned();
+        match binder_name.as_str() {
+            "a" => {
+                assert_eq!(source_variant_name, "Left");
+                assert_eq!(parameter_name, "A");
+                assert_eq!(parameter_ordinal, 0);
+            }
+            "b" => {
+                assert_eq!(source_variant_name, "Right");
+                assert_eq!(parameter_name, "B");
+                assert_eq!(parameter_ordinal, 1);
+            }
+            other => panic!("original Either binder is a or b: {other}"),
+        }
+        let TreeKind::CaseDef(typed_case_def) = &typer.typed_arena.get(typed_case).kind else {
+            unreachable!()
+        };
+        let body_type = typer.typed_arena.get(typed_case_def.body).ty;
+        assert!(matches!(
+            typer.store.types.get(body_type),
+            Type::TermRef { target: TermRefTarget::Symbol(body_symbol), .. } if *body_symbol == binder
+        ));
         assert!(matches!(
             &typer.typed_arena.get(unapply.function).kind,
             TreeKind::TypeApply(_)
@@ -243,6 +330,21 @@ fn replay_original_either_swap_patterns() -> Vec<String> {
                 dotty_core::source_semantics::GeneratedCaseClassMethodRole::Unapply,
             )
             .expect("canonical generated unapply for the matched source class");
+        let TreeKind::TypeApply(type_apply) = &typer.typed_arena.get(unapply.function).kind else {
+            panic!("generic unapply call retains its source type application")
+        };
+        let referenced_unapply = match typer
+            .store
+            .types
+            .get(typer.typed_arena.get(type_apply.function).ty)
+        {
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } => *symbol,
+            other => panic!("typed TypeApply references a canonical unapply symbol: {other:?}"),
+        };
+        assert_eq!(referenced_unapply, unapply_symbol);
         assert!(matches!(
             index.generated_case_class_method_identity(unapply_symbol),
             Some(dotty_core::source_semantics::GeneratedCaseClassMethod {
@@ -250,10 +352,51 @@ fn replay_original_either_swap_patterns() -> Vec<String> {
                 ..
             })
         ));
+        let field_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if index.symbol_at(source, tree) == Some(*variant) =>
+                {
+                    let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind else {
+                        return None;
+                    };
+                    let TreeKind::DefDef(constructor) = &parsed.ast.get(template.constructor).kind
+                    else {
+                        return None;
+                    };
+                    constructor.value_param_clauses.first()?.first().copied()
+                }
+                _ => None,
+            })
+            .expect("canonical source case-class value field");
+        let field_symbol = index
+            .symbol_at(source, field_tree)
+            .expect("source case-class field has canonical semantic identity");
+        assert_eq!(typer.store.symbols.get(field_symbol).owner, Some(*variant));
+        let field_name = typer
+            .store
+            .names
+            .resolve(typer.store.symbols.get(field_symbol).name.text())
+            .to_owned();
+        assert_eq!(field_name, "value");
         normalized.push(format!(
-            "{expected_variant}:selector-param-{ordinal}:canonical-unapply"
+            "case:{}:pattern:{}:binder:{}:{}:source-class:{}:typed-class:{}:field:{}:unapply:{}:Either-param-{}:{}",
+            case_tree.index(),
+            original_pattern.index(),
+            binder_tree.index(),
+            binder_name,
+            observed_symbol_path(typer.store, source_variant_class),
+            observed_symbol_path(typer.store, *variant),
+            observed_symbol_path(typer.store, field_symbol),
+            observed_symbol_path(typer.store, unapply_symbol),
+            parameter_ordinal,
+            parameter_name
         ));
     }
+    assert_eq!(canonical_binders.len(), 2);
+    assert_ne!(canonical_binders[0], canonical_binders[1]);
     normalized
 }
 
@@ -1639,13 +1782,7 @@ fn original_either_swap_option_patterns_type_in_isolated_case_scopes() {
         first, second,
         "fresh-session pattern evidence normalizes deterministically"
     );
-    assert_eq!(
-        first,
-        [
-            "Left:selector-param-0:canonical-unapply",
-            "Right:selector-param-1:canonical-unapply"
-        ]
-    );
+    assert_eq!(first.len(), 2);
 }
 
 #[test]

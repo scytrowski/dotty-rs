@@ -2663,7 +2663,7 @@ impl SourceTyper<'_> {
 
     /// Computes the selector prototype used by patterns, preserving literal
     /// singleton types and widening other expression types as usual.
-    pub(super) fn pattern_selector_type(
+    pub(in crate::typer) fn pattern_selector_type(
         &mut self,
         selector_type: TypeId,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
@@ -4254,6 +4254,125 @@ package scala.util {
             typer.pattern_binding_symbol_at(source, first_binder_tree),
             Some(binders[0].0)
         );
+    }
+
+    #[test]
+    fn concrete_either_int_string_selector_disambiguates_variant_parameters() {
+        let source_text = r#"
+package scala { trait Product; class String }
+package scala.util {
+  sealed abstract class Either[+A, +B] extends Product
+  final case class Left[+X, +Y](value: X) extends Either[X, Y]
+  final case class Right[+X, +Y](value: Y) extends Either[X, Y]
+  def choose(value: Either[Int, String]): Int = value match {
+    case Left(a) => 1
+    case Right(b) => 2
+  }
+}
+"#;
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+        let method = method_symbol(&parsed, &store, &index, source);
+        let cases = parsed
+            .ast
+            .iter()
+            .filter_map(|(tree, node)| matches!(node.kind, TreeKind::CaseDef(_)).then_some(tree))
+            .collect::<Vec<_>>();
+        assert_eq!(cases.len(), 2);
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let value_tpt = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition) if index.symbol_at(source, tree) == Some(method) => {
+                    let TreeKind::ValDef(parameter) =
+                        &parsed.ast.get(definition.value_param_clauses[0][0]).kind
+                    else {
+                        panic!("value parameter")
+                    };
+                    Some(parameter.tpt)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let selector_context = typer.expression_type_context(context).unwrap();
+        let selector_type = typer
+            .type_of_tpt_inner_journaled(value_tpt, selector_context, &mut Vec::new())
+            .unwrap();
+        let expected_parameters = match typer.store.types.get(selector_type) {
+            Type::Applied { args, .. } => args.clone(),
+            other => panic!("concrete selector remains applied: {other:?}"),
+        };
+        assert_eq!(expected_parameters.len(), 2);
+        let expected_names = ["Int", "String"];
+        let mut binders = Vec::new();
+        for (ordinal, case_tree) in cases.iter().copied().enumerate() {
+            let typed_case = typer
+                .run_expression_transaction(|typer, journal, mappings| {
+                    typer.type_case_def(case_tree, selector_type, context, journal, mappings)
+                })
+                .expect("concrete Either variant pattern types");
+            let TreeKind::CaseDef(case_def) = &typer.typed_arena.get(typed_case).kind else {
+                unreachable!()
+            };
+            let TreeKind::UnApply(unapply) = &typer.typed_arena.get(case_def.pattern).kind else {
+                panic!("concrete case pattern is an UnApply")
+            };
+            let Type::Applied { args, .. } = typer
+                .store
+                .types
+                .get(typer.typed_arena.get(case_def.pattern).ty)
+            else {
+                panic!("concrete case prototype is applied")
+            };
+            assert_eq!(args, &expected_parameters);
+            assert_eq!(unapply.patterns.len(), 1);
+            let binder_tree = match &parsed.ast.get(case_tree).kind {
+                TreeKind::CaseDef(original) => match &parsed.ast.get(original.pattern).kind {
+                    TreeKind::Apply(application) => application.args[0],
+                    _ => unreachable!(),
+                },
+                _ => unreachable!(),
+            };
+            let TreeKind::Ident(source_binder) = &parsed.ast.get(binder_tree).kind else {
+                unreachable!()
+            };
+            let binder = typer
+                .pattern_binding_symbol_at(source, binder_tree)
+                .unwrap();
+            let binder_type = match typer.store.symbols.info(binder) {
+                SymbolInfo::Complete(ty) => *ty,
+                other => panic!("complete concrete binder: {other:?}"),
+            };
+            assert_eq!(binder_type, expected_parameters[ordinal]);
+            let Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            } = typer.store.types.get(binder_type)
+            else {
+                panic!("concrete binder has a named type")
+            };
+            assert_eq!(
+                typer
+                    .store
+                    .names
+                    .resolve(typer.store.symbols.get(*symbol).name.text()),
+                expected_names[ordinal]
+            );
+            assert_eq!(
+                typer.store.names.resolve(source_binder.name.text()),
+                if ordinal == 0 { "a" } else { "b" }
+            );
+            binders.push(binder);
+        }
+        assert_ne!(binders[0], binders[1]);
     }
 
     #[test]
