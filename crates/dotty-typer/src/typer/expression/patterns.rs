@@ -11,8 +11,8 @@ use crate::typer::{
 use dotty_core::ast::{TreeKind, TypedAstBuilder, UntypedNode};
 use dotty_core::types::{MethodKind, MethodType, Type};
 use dotty_core::{
-    Name, Namespace, SemanticStore, SourceId, SymbolFlags, SymbolId, SymbolInfo, SymbolKind,
-    SymbolOrigin, TermRefTarget, TreeId, TypeId, TypeRefTarget, Typed, Untyped,
+    Name, Namespace, SemanticStore, SourceDefinition, SourceId, SymbolFlags, SymbolId, SymbolInfo,
+    SymbolKind, SymbolOrigin, TermRefTarget, TreeId, TypeId, TypeRefTarget, Typed, Untyped,
 };
 
 const MAX_REIFIABLE_TYPE_PREFIX_DEPTH: usize = 64;
@@ -1274,16 +1274,38 @@ impl SourceTyper<'_> {
         };
         let unapply = candidate.symbol;
         let callable = candidate.callable;
-        let method = match self.store.types.try_get(callable) {
+        let mut unapply_arguments = None;
+        let (method, instantiated_callable) = match self.store.types.try_get(callable).cloned() {
             Some(Type::Poly(_)) => {
-                return Err(TyperError::ExtractorUnapplyPolymorphic {
-                    source: self.source,
-                    tree_index: pattern.index(),
-                    unapply,
-                    callable,
-                });
+                let Some((arguments, instantiated)) = self
+                    .instantiate_source_case_class_either_unapply(
+                        unapply,
+                        callable,
+                        selector_type,
+                        pattern.index(),
+                        info_journal,
+                    )?
+                else {
+                    return Err(TyperError::ExtractorUnapplyPolymorphic {
+                        source: self.source,
+                        tree_index: pattern.index(),
+                        unapply,
+                        callable,
+                    });
+                };
+                unapply_arguments = Some(arguments);
+                let Some(Type::Method(method)) = self.store.types.try_get(instantiated) else {
+                    return Err(TyperError::ExtractorUnapplyShapeUnsupported {
+                        source: self.source,
+                        tree_index: pattern.index(),
+                        unapply,
+                        callable: instantiated,
+                        issue: ExtractorMethodShapeIssue::NotMethod,
+                    });
+                };
+                (method.clone(), instantiated)
             }
-            Some(Type::Method(method)) => method.clone(),
+            Some(Type::Method(method)) => (method, callable),
             _ => {
                 return Err(TyperError::ExtractorUnapplyShapeUnsupported {
                     source: self.source,
@@ -1299,7 +1321,7 @@ impl SourceTyper<'_> {
                 source: self.source,
                 tree_index: pattern.index(),
                 unapply,
-                callable,
+                callable: instantiated_callable,
                 issue,
             });
         }
@@ -1316,8 +1338,13 @@ impl SourceTyper<'_> {
                 result: result_type,
             });
         }
-        let conforms =
-            self.extractor_selector_conforms_to_input(selector_type, input_type, info_journal);
+        let conforms = if unapply_arguments.is_some() {
+            // The generic case-class helper authenticated the exact applied
+            // Either parent after substituting its ordered class parameters.
+            Ok(true)
+        } else {
+            self.extractor_selector_conforms_to_input(selector_type, input_type, info_journal)
+        };
         let unapply_type = match conforms {
             Ok(true) if selector_type == self.definitions.nothing_type => input_type,
             Ok(true) => selector_type,
@@ -1366,6 +1393,23 @@ impl SourceTyper<'_> {
             function_type,
             function_tree.position,
         );
+        let function = if let Some(arguments) = unapply_arguments {
+            let type_arguments = arguments
+                .iter()
+                .map(|argument| {
+                    TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                        .type_tree(*argument, function_tree.position)
+                })
+                .collect();
+            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).type_apply(
+                function,
+                type_arguments,
+                instantiated_callable,
+                function_tree.position,
+            )
+        } else {
+            function
+        };
         Ok(ExtractorPlan {
             function,
             symbol: unapply,
@@ -1374,6 +1418,152 @@ impl SourceTyper<'_> {
             unapply_type,
             source_patterns: application.args.clone(),
         })
+    }
+
+    /// Instantiate only an authenticated source case-class `unapply` whose
+    /// class declares a canonical, two-parameter `Either` parent. The parent
+    /// arguments determine the positional class arguments; names are never
+    /// used to identify `Left` or `Right`.
+    fn instantiate_source_case_class_either_unapply(
+        &mut self,
+        unapply: SymbolId,
+        callable: TypeId,
+        selector_type: TypeId,
+        pattern_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Option<(Vec<TypeId>, TypeId)>, TyperError> {
+        let selector_type = self.this_type_receiver_view(selector_type)?;
+        let Some(identity) = self.index.generated_case_class_method_identity(unapply) else {
+            return Ok(None);
+        };
+        if identity.role != dotty_core::GeneratedCaseClassMethodRole::Unapply {
+            return Ok(None);
+        }
+        let Some(Type::Poly(poly)) = self.store.types.try_get(callable).cloned() else {
+            return Ok(None);
+        };
+        let Some(SourceDefinition::Canonical { source, tree }) =
+            self.index.definition_of(identity.class)
+        else {
+            return Ok(None);
+        };
+        if source != self.source
+            || self.index.symbol_at(source, tree) != Some(identity.class)
+            || self.generated_case_class_for_unapply(unapply, source, tree) != Some(identity.class)
+        {
+            return Ok(None);
+        }
+        let class_parameters = self.source_class_type_parameter_metadata(identity.class)?;
+        if class_parameters.len() != 2
+            || poly.params.len() != 2
+            || class_parameters
+                .iter()
+                .any(|parameter| parameter.variance != Some(dotty_core::Variance::Covariant))
+        {
+            return Ok(None);
+        }
+        let Some(Type::Applied {
+            tycon: selector_tycon,
+            args: selector_args,
+        }) = self.store.types.try_get(selector_type).cloned()
+        else {
+            return Ok(None);
+        };
+        let parent_tree = {
+            let Some(TreeKind::TypeDef(definition)) =
+                self.arena.try_get(tree).map(|node| &node.kind)
+            else {
+                return Ok(None);
+            };
+            let Some(TreeKind::Template(template)) =
+                self.arena.try_get(definition.rhs).map(|node| &node.kind)
+            else {
+                return Ok(None);
+            };
+            let [parent_tree] = template.parents.as_slice() else {
+                return Ok(None);
+            };
+            *parent_tree
+        };
+        let Some(context) = self.index.declaration_context_of(identity.class) else {
+            return Ok(None);
+        };
+        let parent_type = self.project_parent_type(parent_tree, context, 0, info_journal)?;
+        let Some(Type::Applied {
+            tycon: parent_tycon,
+            args: parent_args,
+        }) = self.store.types.try_get(parent_type).cloned()
+        else {
+            return Ok(None);
+        };
+        let symbol_of = |store: &SemanticStore, ty: TypeId| match store.types.try_get(ty) {
+            Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            }) => Some(*symbol),
+            _ => None,
+        };
+        let (Some(parent_symbol), Some(selector_symbol)) = (
+            symbol_of(self.store, parent_tycon),
+            symbol_of(self.store, selector_tycon),
+        ) else {
+            return Ok(None);
+        };
+        if parent_symbol != selector_symbol
+            || selector_args.len() != 2
+            || parent_args.len() != 2
+            || self.source_case_class_either_parent(identity.class, parent_type, info_journal)?
+                != Some(parent_symbol)
+        {
+            return Ok(None);
+        }
+        let parent_parameters = self.source_class_type_parameter_metadata(parent_symbol)?;
+        if parent_parameters.len() != 2
+            || parent_parameters
+                .iter()
+                .any(|parameter| parameter.variance != Some(dotty_core::Variance::Covariant))
+        {
+            return Ok(None);
+        }
+        let mut class_arguments = vec![None; 2];
+        for (parent_argument, selector_argument) in parent_args.iter().zip(selector_args) {
+            let Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(parameter),
+                ..
+            }) = self.store.types.try_get(*parent_argument)
+            else {
+                return Ok(None);
+            };
+            let Some(index) = class_parameters
+                .iter()
+                .position(|candidate| candidate.symbol == *parameter)
+            else {
+                return Ok(None);
+            };
+            if class_arguments[index].replace(selector_argument).is_some() {
+                return Ok(None);
+            }
+        }
+        let Some(arguments) = class_arguments.into_iter().collect::<Option<Vec<_>>>() else {
+            return Ok(None);
+        };
+        let instantiated = dotty_core::types::instantiate_poly(self.store, callable, &arguments)
+            .map_err(TyperError::TypeSubstitution)?;
+        for (index, (argument, bounds)) in arguments
+            .iter()
+            .copied()
+            .zip(instantiated.bounds)
+            .enumerate()
+        {
+            self.check_explicit_type_argument_bounds(
+                argument,
+                bounds,
+                index,
+                pattern_index,
+                info_journal,
+            )?;
+        }
+        Ok(Some((arguments, instantiated.result)))
     }
 
     /// Allows the bounded reverse relation needed by nominal extractor patterns
@@ -3844,6 +4034,179 @@ mod tests {
             typer.store.checkpoint() == checkpoint,
             typer.typed_arena.iter().next().is_none() && typer.typed_index.is_empty(),
         )
+    }
+
+    #[test]
+    fn generic_either_case_extractors_instantiate_in_parent_parameter_order() {
+        let source_text = r#"
+package scala { trait Product }
+package scala.util {
+  sealed abstract class Either[+A, +B] extends Product
+  final case class Left[+X, +Y](value: X) extends Either[X, Y]
+  final case class Right[+X, +Y](value: Y) extends Either[X, Y]
+  final case class Reversed[+X, +Y](value: X) extends Either[Y, X]
+  final case class Unrelated[+X, +Y](value: X) extends Product
+  def choose[A, B](value: Either[A, B]): Int = value match {
+    case Left(a) => 1
+    case Right(b) => 2
+    case Reversed(x) => 3
+    case Unrelated(y) => 4
+    case Left(a, b) => 5
+  }
+}
+"#;
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+        let method = method_symbol(&parsed, &store, &index, source);
+        let method_type_parameters = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition) if index.symbol_at(source, tree) == Some(method) => {
+                    Some(
+                        definition
+                            .type_params
+                            .iter()
+                            .map(|parameter| index.symbol_at(source, *parameter).unwrap())
+                            .collect::<Vec<_>>(),
+                    )
+                }
+                _ => None,
+            })
+            .unwrap();
+        let cases = parsed
+            .ast
+            .iter()
+            .filter_map(|(tree, node)| matches!(node.kind, TreeKind::CaseDef(_)).then_some(tree))
+            .collect::<Vec<_>>();
+        assert_eq!(cases.len(), 5);
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let value_tpt = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition) if index.symbol_at(source, tree) == Some(method) => {
+                    let TreeKind::ValDef(parameter) =
+                        &parsed.ast.get(definition.value_param_clauses[0][0]).kind
+                    else {
+                        panic!("method parameter")
+                    };
+                    Some(parameter.tpt)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let selector_context = typer.expression_type_context(context).unwrap();
+        let selector_type = typer
+            .type_of_tpt_inner_journaled(value_tpt, selector_context, &mut Vec::new())
+            .unwrap();
+        let mut binders = Vec::new();
+        for case_tree in cases.iter().copied().take(2) {
+            let typed_case = typer
+                .run_expression_transaction(|typer, journal, mappings| {
+                    typer.type_case_def(case_tree, selector_type, context, journal, mappings)
+                })
+                .expect("the generic extractor case types");
+            let TreeKind::CaseDef(case_def) = &typer.typed_arena.get(typed_case).kind else {
+                panic!("typed CaseDef")
+            };
+            let TreeKind::UnApply(unapply) = &typer.typed_arena.get(case_def.pattern).kind else {
+                panic!("typed UnApply")
+            };
+            assert_eq!(unapply.patterns.len(), 1);
+            let binder_tree = match &parsed
+                .ast
+                .get(match &parsed.ast.get(case_tree).kind {
+                    TreeKind::CaseDef(def) => def.pattern,
+                    _ => unreachable!(),
+                })
+                .kind
+            {
+                TreeKind::Apply(application) => application.args[0],
+                _ => unreachable!(),
+            };
+            let symbol = typer
+                .pattern_binding_symbol_at(source, binder_tree)
+                .expect("case-local binder");
+            let info = *typer.store.symbols.info(symbol);
+            binders.push((symbol, info));
+            assert!(matches!(
+                typer
+                    .store
+                    .types
+                    .get(typer.typed_arena.get(unapply.function).ty),
+                Type::Method(_)
+            ));
+        }
+        assert_ne!(binders[0].0, binders[1].0);
+        let (SymbolInfo::Complete(left_ty), SymbolInfo::Complete(right_ty)) =
+            (binders[0].1, binders[1].1)
+        else {
+            panic!("complete binder types")
+        };
+        let left_parameter = match typer.store.types.get(left_ty) {
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            } => *symbol,
+            other => panic!("Left(a) should retain A, got {other:?}"),
+        };
+        let right_parameter = match typer.store.types.get(right_ty) {
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            } => *symbol,
+            other => panic!("Right(b) should retain B, got {other:?}"),
+        };
+        assert_ne!(left_parameter, right_parameter);
+        assert_eq!(left_parameter, method_type_parameters[0]);
+        assert_eq!(right_parameter, method_type_parameters[1]);
+
+        for (negative_index, case_tree) in cases.iter().copied().enumerate().skip(2) {
+            let store_checkpoint = typer.store.checkpoint();
+            let typed_checkpoint = typer.typed_arena.iter().count();
+            let error = typer
+                .run_expression_transaction(|typer, journal, mappings| {
+                    typer.type_case_def(case_tree, selector_type, context, journal, mappings)
+                })
+                .expect_err("reversed and unrelated parents are not inferred from spelling");
+            if negative_index == 4 {
+                assert!(
+                    matches!(
+                        &error,
+                        TyperError::ExtractorPatternArityUnsupported { .. }
+                            | TyperError::ExtractorProductSelectorCountMismatch { .. }
+                    ),
+                    "wrong arity rejection: {error:?}"
+                );
+            }
+            let _typed_rejection = error;
+            assert_eq!(typer.store.checkpoint(), store_checkpoint);
+            assert_eq!(typer.typed_arena.iter().count(), typed_checkpoint);
+        }
+        typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_case_def(cases[0], selector_type, context, journal, mappings)
+            })
+            .expect("a valid same-session retry succeeds after negative rollback");
+        let first_binder_tree = match &parsed.ast.get(cases[0]).kind {
+            TreeKind::CaseDef(case_def) => match &parsed.ast.get(case_def.pattern).kind {
+                TreeKind::Apply(application) => application.args[0],
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            typer.pattern_binding_symbol_at(source, first_binder_tree),
+            Some(binders[0].0)
+        );
     }
 
     #[test]

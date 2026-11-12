@@ -89,14 +89,21 @@ unsupported arity, bounds, field or owner shapes leave the method incomplete
 and can be retried without partial signature state. The preexisting monomorphic
 `Box` result behavior remains unchanged.
 
-## Remaining whole-method blocker
+## Follow-up generic extractor-pattern increment
 
-Replaying the unchanged original `Either.scala#tree=84` after this increment
-completes the canonical `Left.unapply` signature and stops at
-`ExtractorUnapplyPolymorphic` on pattern tree 69 (source span `[8288, 8295)`).
-The second `Right` extractor has not been reached. This is the existing pattern
-typing boundary; this increment does not add polymorphic extractor-pattern
-support or claim that `Either.swap` types as a whole.
+Issue #2245 extends the pattern-typing boundary described above. With its
+authenticated generic unapply instantiation, replaying the unchanged original
+`Either.scala#tree=84` now passes the first `Left(a)` pattern and stops at the
+next in-scope boundary: `UnconstrainedTypeParameter` at source tree 72, span
+`[8300, 8308)`, the `Right(a)` constructor application in the first branch
+body. The second `Right(b)` source pattern is at tree 77, span
+`[8318, 8326)`; it is present in the unchanged original AST and in the pinned
+Scala 3.9.0 typed-tree evidence, but the whole-method replay does not reach it
+because branch constructor applications are outside #2245's scope. The
+separate issue-2245 source fixture types both generic extractor patterns and
+checks `a` against the first method parameter and `b` against the second.
+
+This does not claim full `Either.swap` acceptance.
 
 The frozen `unwrap` and `classify` method roots now pass generated-method
 completion and ordinary unapply resolution. They stop at

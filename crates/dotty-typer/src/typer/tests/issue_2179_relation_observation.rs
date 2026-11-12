@@ -1320,7 +1320,7 @@ fn captures_acceptance_v_either_swap_failure_before_transaction_rollback() {
             ),
         ];
         for (source_tree, node) in parsed_ast.iter() {
-            if !(65..=75).contains(&source_tree.index()) {
+            if !(65..=85).contains(&source_tree.index()) {
                 continue;
             }
             lines.push(format!(
@@ -1392,13 +1392,24 @@ fn captures_acceptance_v_either_swap_failure_before_transaction_rollback() {
         *capture.borrow_mut() = Some(lines.join("\n"));
     }));
     let result = typer.type_method_definition(tree);
+    let Err(error) = &result else {
+        panic!("the unchanged whole method should still stop at a later issue boundary")
+    };
+    assert!(
+        !matches!(
+            error,
+            TyperError::ExtractorUnapplyPolymorphic { tree_index: 69, .. }
+        ),
+        "generic Left unapply should now instantiate; next result: {error:?}"
+    );
     assert!(matches!(
-        result,
-        Err(TyperError::ExtractorUnapplyPolymorphic {
+        error,
+        TyperError::UnconstrainedTypeParameter {
             source: error_source,
-            tree_index: 69,
+            tree_index: 72,
+            parameter_index: 0,
             ..
-        }) if error_source == source
+        } if *error_source == source
     ));
     let receipt = observed
         .borrow()
@@ -1407,7 +1418,7 @@ fn captures_acceptance_v_either_swap_failure_before_transaction_rollback() {
     assert!(receipt.contains("root=library/src/scala/util/Either.scala#tree=84"));
     assert!(receipt.contains("canonical_source_method="));
     assert!(receipt.contains("original_pattern_tree=69 span="));
-    assert!(receipt.contains("original_pattern_tree=72 span="));
+    assert!(receipt.contains("original_pattern_tree=77 span="));
     println!(
         "ACCEPTANCE_V_EITHER_SWAP_OBSERVATION_BEGIN\n{receipt}\nACCEPTANCE_V_EITHER_SWAP_OBSERVATION_END"
     );

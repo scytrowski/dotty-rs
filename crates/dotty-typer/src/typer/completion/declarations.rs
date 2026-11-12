@@ -538,7 +538,7 @@ impl SourceTyper<'_> {
     /// Authenticates the bounded generic parent shape used by Scala's
     /// `scala.util.Left` and `Right`: a canonical source `Either[A, B]` class
     /// whose arguments are the class's own parameters in declaration order.
-    pub(super) fn source_case_class_either_parent(
+    pub(in crate::typer) fn source_case_class_either_parent(
         &mut self,
         class: SymbolId,
         parent_type: TypeId,
