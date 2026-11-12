@@ -245,7 +245,7 @@ impl SourceTyper<'_> {
         Some(class)
     }
 
-    pub(super) fn generated_case_class_for_unapply(
+    pub(in crate::typer) fn generated_case_class_for_unapply(
         &self,
         method: SymbolId,
         source: SourceId,
