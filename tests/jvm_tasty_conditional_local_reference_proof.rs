@@ -344,21 +344,6 @@ fn verify_rust_candidate_with_pinned_scala(candidate: &[u8]) {
         "Scala print-tasty output includes shared branch references:\n{printed}"
     );
 
-    let mut decompile =
-        scala39_toolchain::scalac(&pinned.java_home, &pinned.scalac, scratch.clone());
-    let decompiled = successful_scala(
-        decompile
-            .args(["-color:never", "-decompile"])
-            .arg(&candidate_path),
-    );
-    let decompiled = String::from_utf8_lossy(&decompiled.stdout);
-    assert!(
-        decompiled.contains("val selected: example.Counter = if (chooseFirst) first else second"),
-        "Scala decompiles the Rust candidate selection:\n{decompiled}"
-    );
-    assert!(decompiled.contains("selected.set(nextValue)"));
-    assert!(decompiled.contains("new example.Pair(first, second)"));
-
     let mut from_tasty =
         scala39_toolchain::scalac(&pinned.java_home, &pinned.scalac, scratch.clone());
     successful_scala(
@@ -371,6 +356,25 @@ fn verify_rust_candidate_with_pinned_scala(candidate: &[u8]) {
     );
     assert!(reconstructed.join("example/PairFactory.class").is_file());
     assert!(reconstructed.join("example/PairFactory.tasty").is_file());
+
+    let decompile_classpath = format!("{}:{classpath}", reconstructed.display());
+    let mut decompile =
+        scala39_toolchain::scalac(&pinned.java_home, &pinned.scalac, scratch.clone());
+    let decompiled = successful_scala(
+        decompile
+            .args(["-color:never", "-classpath"])
+            .arg(&decompile_classpath)
+            .arg("-decompile")
+            .arg(&candidate_path),
+    );
+    let decompiled = String::from_utf8_lossy(&decompiled.stdout);
+    assert!(
+        decompiled.contains("val selected: example.Counter = if (chooseFirst) first else second"),
+        "Scala decompiles the Rust candidate selection:\n{decompiled}"
+    );
+    assert!(decompiled.contains("selected.set(nextValue)"));
+    assert!(decompiled.contains("new example.Pair(first, second)"));
+
     assert_eq!(
         fs::read(&candidate_path).expect("candidate remains present"),
         candidate,
