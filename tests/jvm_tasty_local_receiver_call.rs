@@ -1924,6 +1924,33 @@ fn local_receiver_call_controls_record_each_real_paired_path_result() {
 }
 
 #[test]
+fn same_count_three_local_one_call_shape_retains_its_first_proof_failure() {
+    let collision = LOCAL_REFERENCE_ALIAS_TARGET.replace("    second.set(firstSeed)\n", "");
+    assert_ne!(collision, LOCAL_REFERENCE_ALIAS_TARGET);
+
+    let result = paired_result(collision.as_str(), 22660);
+    assert!(
+        matches!(
+            result,
+            Err(PairedPlanError::BatchUnit {
+                phase: "cross-class constructor-call identity proof",
+                ref reason,
+            }) if reason.contains("SourceShape")
+                && reason.contains("bounded local Pair block")
+        ),
+        "a three-ValDef/one-call Block colliding with four statements must retain the original proof failure: {result:?}"
+    );
+    assert!(
+        emit_paired_jvm_tasty_batch(
+            collision.as_str(),
+            "ThreeLocalOneCall.scala",
+            SourceId::from_index(22660)
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn local_receiver_slot_tracks_the_authenticated_symbol_after_declaration_reversal() {
     let reversed = TARGET.replace(
         "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",

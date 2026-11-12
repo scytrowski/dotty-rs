@@ -15,7 +15,7 @@ use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::PoolRefError;
 use dotty_classfile::reader::Reader as ClassFileReader;
 use dotty_classfile::tasty_link::{TastyLinkError, TastyLinkId};
-use dotty_core::ast::{AstArena, TreeKind, Untyped};
+use dotty_core::ast::{AstArena, AstPhase, TreeKind, Untyped};
 use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind, SymbolOrigin, Visibility};
 use dotty_core::types::{MethodKind, MethodType, TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{Definitions, SemanticStore, SourceDefinition, SourceId, SymbolId, TreeId, Typed};
@@ -1738,6 +1738,97 @@ struct LocalCounterInitializerRef {
     result_local_slot: u16,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PairedBlockShape {
+    TwoLocals,
+    TwoLocalsOneCall,
+    TwoLocalsTwoCalls,
+    TwoLocalsAliasTwoCalls,
+    /// A same-count collision introduced by a third local and only one call.
+    /// Keep this separate from the accepted two-local/two-call shape so the
+    /// existing proof-cardinality failure remains the first reported failure.
+    ThreeLocalsOneCall,
+    ReceiptMismatch,
+    Unclassified,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PairedStatementKind {
+    ValDef,
+    Apply,
+    Other,
+}
+
+fn paired_statement_kinds<P: AstPhase>(
+    stats: &[TreeId<P>],
+    ast: &AstArena<P>,
+) -> Option<Vec<PairedStatementKind>> {
+    stats
+        .iter()
+        .map(|tree| {
+            ast.try_get(*tree).map(|tree| match tree.kind {
+                TreeKind::ValDef(_) => PairedStatementKind::ValDef,
+                TreeKind::Apply(_) => PairedStatementKind::Apply,
+                _ => PairedStatementKind::Other,
+            })
+        })
+        .collect()
+}
+
+fn classify_paired_block_shape(
+    source_kinds: &[PairedStatementKind],
+    typed_kinds: &[PairedStatementKind],
+    has_one_call_receipt: bool,
+    has_two_call_receipt: bool,
+    has_alias_receipt: bool,
+) -> PairedBlockShape {
+    if source_kinds.len() != typed_kinds.len() {
+        return PairedBlockShape::ReceiptMismatch;
+    }
+
+    let has_expected_receipts = match source_kinds.len() {
+        2 => !has_one_call_receipt && !has_two_call_receipt,
+        3 => has_one_call_receipt && !has_two_call_receipt,
+        4 => !has_one_call_receipt && has_two_call_receipt,
+        5 => !has_one_call_receipt && has_two_call_receipt && has_alias_receipt,
+        _ => false,
+    };
+    if !has_expected_receipts {
+        return PairedBlockShape::ReceiptMismatch;
+    }
+
+    let matches_shape = |prefix: usize, call_count: usize| {
+        source_kinds
+            .iter()
+            .zip(typed_kinds)
+            .enumerate()
+            .all(|(index, (source, typed))| {
+                let expected_call = index >= prefix && index < prefix + call_count;
+                let expected_kind = if expected_call {
+                    PairedStatementKind::Apply
+                } else {
+                    PairedStatementKind::ValDef
+                };
+                *source == expected_kind && *typed == expected_kind
+            })
+    };
+
+    match source_kinds.len() {
+        2 if matches_shape(2, 0) && !has_alias_receipt => PairedBlockShape::TwoLocals,
+        3 if matches_shape(2, 1) && !has_alias_receipt => PairedBlockShape::TwoLocalsOneCall,
+        4 if matches_shape(2, 2) && !has_alias_receipt => PairedBlockShape::TwoLocalsTwoCalls,
+        4 if matches_shape(3, 1) => PairedBlockShape::ThreeLocalsOneCall,
+        5 if matches_shape(3, 2)
+            && !has_one_call_receipt
+            && has_two_call_receipt
+            && has_alias_receipt =>
+        {
+            PairedBlockShape::TwoLocalsAliasTwoCalls
+        }
+        _ => PairedBlockShape::Unclassified,
+    }
+}
+
 fn validate_two_local_constructor_pair(
     proof: &ValidatedJvmTastyClass<'_, '_, '_, '_>,
     caller: SymbolId,
@@ -1784,19 +1875,22 @@ fn validate_two_local_constructor_pair(
     let local_reference_alias = tasty
         .typed_bindings
         .local_reference_alias(source_id, caller);
-    if source_block.stats.len() != typed_block.stats.len()
-        || match source_block.stats.len() {
-            2 => local_receiver_call.is_some() || local_receiver_call_pair.is_some(),
-            3 => local_receiver_call.is_none() || local_receiver_call_pair.is_some(),
-            4 => local_receiver_call.is_some() || local_receiver_call_pair.is_none(),
-            5 => {
-                local_receiver_call.is_some()
-                    || local_receiver_call_pair.is_none()
-                    || local_reference_alias.is_none()
-            }
-            _ => true,
-        }
-    {
+    let source_statement_kinds = paired_statement_kinds(&source_block.stats, tasty.source_ast);
+    let typed_statement_kinds = paired_statement_kinds(&typed_block.stats, tasty.typed_ast);
+    let block_shape = match (
+        source_statement_kinds.as_deref(),
+        typed_statement_kinds.as_deref(),
+    ) {
+        (Some(source_kinds), Some(typed_kinds)) => classify_paired_block_shape(
+            source_kinds,
+            typed_kinds,
+            local_receiver_call.is_some(),
+            local_receiver_call_pair.is_some(),
+            local_reference_alias.is_some(),
+        ),
+        _ => PairedBlockShape::Unclassified,
+    };
+    if matches!(block_shape, PairedBlockShape::ReceiptMismatch) {
         return Err(
             "two-local Block must contain exactly zero, one, or two Counter.set stats".into(),
         );
@@ -1819,7 +1913,13 @@ fn validate_two_local_constructor_pair(
     else {
         return Err("two-local typed Block result is not the original Pair Apply".into());
     };
-    let has_alias = source_block.stats.len() == 5;
+    // Keep validating malformed five-stat alias candidates through the same
+    // detailed checks as before; the final shape gate below prevents this
+    // diagnostic-only fallback from authorizing a new shape.
+    let has_alias = matches!(block_shape, PairedBlockShape::TwoLocalsAliasTwoCalls)
+        || (matches!(block_shape, PairedBlockShape::Unclassified)
+            && source_block.stats.len() == 5
+            && local_reference_alias.is_some());
     if initializers.len() != 2
         || locals.len() != if has_alias { 3 } else { 2 }
         || tasty.typed_bindings.typed_at(source_id, source_rhs) != Some(typed_rhs)
@@ -2363,6 +2463,17 @@ fn validate_two_local_constructor_pair(
         return Err(
             "two-local source method and selected Pair constructor do not match the original ABI"
                 .into(),
+        );
+    }
+    if !matches!(
+        block_shape,
+        PairedBlockShape::TwoLocals
+            | PairedBlockShape::TwoLocalsOneCall
+            | PairedBlockShape::TwoLocalsTwoCalls
+            | PairedBlockShape::TwoLocalsAliasTwoCalls
+    ) {
+        return Err(
+            "two-local proof does not retain an accepted ordered statement/proof shape".into(),
         );
     }
     Ok(MixedConstructorPairRef {
@@ -6313,4 +6424,123 @@ fn source_constructor_descriptor(
 
 fn is_unit_type(definitions: &Definitions, ty: dotty_core::TypeId) -> bool {
     ty == definitions.unit
+}
+
+#[cfg(test)]
+mod paired_block_shape_tests {
+    use super::{PairedBlockShape, PairedStatementKind, classify_paired_block_shape as classify};
+
+    use PairedStatementKind::{Apply, Other, ValDef};
+
+    #[test]
+    fn recognizes_only_the_ordered_legacy_statement_and_receipt_shapes() {
+        assert_eq!(
+            classify(&[ValDef, ValDef], &[ValDef, ValDef], false, false, false),
+            PairedBlockShape::TwoLocals
+        );
+        assert_eq!(
+            classify(
+                &[ValDef, ValDef, Apply],
+                &[ValDef, ValDef, Apply],
+                true,
+                false,
+                false
+            ),
+            PairedBlockShape::TwoLocalsOneCall
+        );
+        assert_eq!(
+            classify(
+                &[ValDef, ValDef, Apply, Apply],
+                &[ValDef, ValDef, Apply, Apply],
+                false,
+                true,
+                false
+            ),
+            PairedBlockShape::TwoLocalsTwoCalls
+        );
+        assert_eq!(
+            classify(
+                &[ValDef, ValDef, ValDef, Apply, Apply],
+                &[ValDef, ValDef, ValDef, Apply, Apply],
+                false,
+                true,
+                true
+            ),
+            PairedBlockShape::TwoLocalsAliasTwoCalls
+        );
+    }
+
+    #[test]
+    fn rejects_same_count_collisions_wrong_order_and_missing_proofs() {
+        assert_eq!(
+            classify(
+                &[ValDef, ValDef, ValDef, Apply],
+                &[ValDef, ValDef, ValDef, Apply],
+                false,
+                true,
+                false
+            ),
+            PairedBlockShape::ThreeLocalsOneCall
+        );
+        assert_eq!(
+            classify(
+                &[ValDef, Apply, ValDef, Apply],
+                &[ValDef, Apply, ValDef, Apply],
+                false,
+                true,
+                false
+            ),
+            PairedBlockShape::Unclassified
+        );
+        assert_eq!(
+            classify(
+                &[ValDef, ValDef, ValDef, Apply, Apply],
+                &[ValDef, ValDef, ValDef, Apply, Apply],
+                false,
+                true,
+                false
+            ),
+            PairedBlockShape::ReceiptMismatch
+        );
+        assert_eq!(
+            classify(
+                &[ValDef, ValDef, Other, Apply],
+                &[ValDef, ValDef, Apply, Apply],
+                false,
+                true,
+                false
+            ),
+            PairedBlockShape::Unclassified
+        );
+        assert_eq!(
+            classify(
+                &[ValDef, ValDef, Apply, Apply],
+                &[ValDef, ValDef, ValDef, Apply],
+                false,
+                true,
+                false
+            ),
+            PairedBlockShape::Unclassified
+        );
+        assert_eq!(
+            classify(
+                &[ValDef, ValDef, Apply],
+                &[ValDef, ValDef, Apply],
+                false,
+                false,
+                false
+            ),
+            PairedBlockShape::ReceiptMismatch
+        );
+        assert_eq!(
+            classify(
+                &[ValDef, ValDef, Apply, Apply],
+                &[ValDef, ValDef, Apply, Apply],
+                false,
+                false,
+                false
+            ),
+            PairedBlockShape::ReceiptMismatch
+        );
+    }
 }
