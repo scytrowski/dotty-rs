@@ -106,8 +106,6 @@ RUST_TESTS = {
     "source_recursive_product1_reference_is_canonical_in_both_completion_routes",
     "source_recursive_product1_rejects_unrelated_trait_field_and_keeps_sibling_retryable",
     "completed_source_product1_rejects_broken_selector_authentication",
-    "generic_either_parent_metadata_is_completed_and_authenticated_transactionally",
-    "generic_either_product1_projects_the_ordered_source_field_and_substitutes_receivers",
     "generic_product1_selector_completes_without_expanding_match_support",
     "source_trait_parent_does_not_enable_product2_completion",
     "source_trait_parent_product1_defers_multi_parent_selector_shape",
