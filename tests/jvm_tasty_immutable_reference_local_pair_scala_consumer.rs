@@ -24,6 +24,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[path = "support/immutable_alias_artifacts.rs"]
+mod immutable_alias_artifacts;
+
 #[path = "support/scala39_toolchain.rs"]
 mod scala39_toolchain;
 
@@ -3382,9 +3385,17 @@ object CounterSetConsumer:
 
 fn run_alias_counter_set_consumer(scala: &Scala, root: &Path) {
     let alias_source_id = 22440;
+    assert_eq!(
+        hash_bytes(TWO_COUNTER_SET_ALIAS_SOURCE.as_bytes()),
+        immutable_alias_artifacts::PRODUCER_SOURCE_SHA256
+    );
+    assert_eq!(
+        hash_bytes(TWO_COUNTER_SET_ALIAS_CLIENT.as_bytes()),
+        immutable_alias_artifacts::SCALA_CLIENT_SHA256
+    );
     let alias_batch = emit_paired_jvm_tasty_batch(
         TWO_COUNTER_SET_ALIAS_SOURCE,
-        "PairFactory.scala",
+        immutable_alias_artifacts::PRODUCER_SOURCE_NAME,
         SourceId::from_index(alias_source_id),
     )
     .expect("Rust emits the reviewed three-local alias and two-call batch");
@@ -3392,6 +3403,24 @@ fn run_alias_counter_set_consumer(scala: &Scala, root: &Path) {
         alias_batch.classes().len(),
         3,
         "alias batch is the original three classes/six files"
+    );
+    let alias_hashes = alias_batch
+        .classes()
+        .iter()
+        .flat_map(|artifact| {
+            [
+                (
+                    artifact.classfile_path(),
+                    hash_bytes(artifact.classfile_bytes()),
+                ),
+                (artifact.tasty_path(), hash_bytes(artifact.tasty_bytes())),
+            ]
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        alias_hashes,
+        immutable_alias_artifacts::ARTIFACT_SHA256.map(|(path, hash)| (path, hash.to_owned())),
+        "the Scala consumer uses the same canonical six Rust artifacts as Java"
     );
     source_contract_result(TWO_COUNTER_SET_ALIAS_SOURCE, &alias_batch, None)
         .expect("paired source contract authenticates the exact alias batch");

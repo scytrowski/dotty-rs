@@ -239,3 +239,149 @@ with SHA-256 and outcome in `oracle.json`. To reproduce the Rust audit, run
 `cargo +1.98.1 test -p dotty --test jvm_tasty_local_receiver_call
 local_reference_alias_audit_authenticates_frontend_identities_and_first_paired_failure
 --locked -- --nocapture --test-threads=1`.
+
+## Integrated Java and Scala consumer provenance (#2246 checkpoint)
+
+The final-gate consumers now emit the same canonical source through the paired
+producer. Both `LocalReferenceAlias.scala` and
+`jvm_tasty_two_local_counter_set/AliasTwoCalls.scala` have SHA-256
+`b1b200af5108685cf58b769b3ed0654c189d2fb28fa1c8eaaba5f02580d2b79f` and
+contain identical bytes. Both consumer tests pass the producer label
+`PairFactory.scala`; they share the expected artifact table in
+[`tests/support/immutable_alias_artifacts.rs`](../tests/support/immutable_alias_artifacts.rs).
+The earlier Java receipt used `LocalReferenceAlias.scala`, so its former
+hashes and UUIDs remain a separate historical receipt and are not combined
+with this canonical batch.
+
+The seven prerequisite PRs are merged in dependency order into integration
+base `b7ad6d2599183864166f1e72ebe9ab50893c79cf`. Each row records its
+reviewed head, published READY_FOR_MERGE review, merge commit, and successful
+PR-head Rust/JDK and strict Scala workflow runs:
+
+| Issue / PR | Reviewed PR head | Review | Merge commit | Rust/JDK checks | Strict Scala shards / aggregate |
+| --- | --- | --- | --- | --- | --- |
+| #2232 / [#2251](https://github.com/scytrowski/dotty-rs/pull/2251) | `0c57b66b639823ba06f16542e21f57c0d1d7a9a2` | [review](https://github.com/scytrowski/dotty-rs/pull/2251#pullrequestreview-5841472980) | `55b3e1a776da32ddcd0afd970779d1887708135a` | [run](https://github.com/scytrowski/dotty-rs/actions/runs/42811783778) | [run](https://github.com/scytrowski/dotty-rs/actions/runs/42811783764) |
+| #2235 / [#2252](https://github.com/scytrowski/dotty-rs/pull/2252) | `82858a0bf3aecebb0d2c8979e60345c246830462` | [review](https://github.com/scytrowski/dotty-rs/pull/2252#pullrequestreview-5842598495) | `36bcd961ad00ad9af82f518baa32885c0df253d6` | [run](https://github.com/scytrowski/dotty-rs/actions/runs/42823834695) | [run](https://github.com/scytrowski/dotty-rs/actions/runs/42823834758) |
+| #2236 / [#2254](https://github.com/scytrowski/dotty-rs/pull/2254) | `94769b1e24d785605987f254a1784dd5b899518e` | [review](https://github.com/scytrowski/dotty-rs/pull/2254#pullrequestreview-5844055843) | `3aa9f719b7f79d80ebe46e47a1b390afdde9f15e` | [run](https://github.com/scytrowski/dotty-rs/actions/runs/42839522026) | [run](https://github.com/scytrowski/dotty-rs/actions/runs/42839521991) |
+| #2239 / [#2255](https://github.com/scytrowski/dotty-rs/pull/2255) | `7254558f46394dd0b7c53640b0c1c72eb47c5950` | [review](https://github.com/scytrowski/dotty-rs/pull/2255#pullrequestreview-5846046962) | `0238061ccf674c0e15b8f055c971ed1cb6db5f51` | [run](https://github.com/scytrowski/dotty-rs/actions/runs/42860587954) | [run](https://github.com/scytrowski/dotty-rs/actions/runs/42860587879) |
+| #2240 / [#2257](https://github.com/scytrowski/dotty-rs/pull/2257) | `c9b4ea2e3083dc71c302e43f1116a6a721aed2cd` | [review](https://github.com/scytrowski/dotty-rs/pull/2257#pullrequestreview-5850555866) | `f200b6fb6b86438886c6d4f6447ca1077da94b7b` | [run](https://github.com/scytrowski/dotty-rs/actions/runs/42915032747) | [run](https://github.com/scytrowski/dotty-rs/actions/runs/42915032757) |
+| #2243 / [#2259](https://github.com/scytrowski/dotty-rs/pull/2259) | `19f2b7880c78ac7fe6e66ee773156286ba2d3258` | [review](https://github.com/scytrowski/dotty-rs/pull/2259#pullrequestreview-5855686149) | `333ae382e04884850b88090f15e1efe557cb3b60` | [run](https://github.com/scytrowski/dotty-rs/actions/runs/42984305118) | [run](https://github.com/scytrowski/dotty-rs/actions/runs/42984305306) |
+| #2244 / [#2261](https://github.com/scytrowski/dotty-rs/pull/2261) | `3ae605c8771bfa13b2e3bb355e18eb7b7615e580` | [review](https://github.com/scytrowski/dotty-rs/pull/2261#pullrequestreview-5857261839) | `b7ad6d2599183864166f1e72ebe9ab50893c79cf` | [run](https://github.com/scytrowski/dotty-rs/actions/runs/43002287174) | [run](https://github.com/scytrowski/dotty-rs/actions/runs/43002287257) |
+
+The integration-base push checks also passed: [Rust checks](https://github.com/scytrowski/dotty-rs/actions/runs/43042366536/job/130597261524)
+and [the mandatory classfile/JVM gate](https://github.com/scytrowski/dotty-rs/actions/runs/43042366536/job/130597260951).
+The final-gate PR still needs its own final-head hosted checks; predecessor
+results are provenance, not a substitute for those checks.
+
+The canonical six Rust artifacts are:
+
+| Artifact path | SHA-256 | TASTy UUID |
+| --- | --- | --- |
+| `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | `008071c3-c009-68ac-0000-000000008193` |
+| `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | same |
+| `example/Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` | `000b7d8d-7441-c7f0-0000-000000008198` |
+| `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | same |
+| `example/PairFactory.class` | `68027bf87468fd724f034cc4fd67d4e57220e389fb4130f9e3a33bcd2cea98e1` | `00c9bae5-ea1a-54c2-0000-00000000819e` |
+| `example/PairFactory.tasty` | `e56be0c7ff675f7d05a34914cb924c13fac030a54e72e06612de03b286a570ed` | same |
+
+The independent Java runtime probe fixture is SHA-256
+`fd9b6bbd2b2d4ea1c02c8568341414a75e501a310e17a8d688adf8f87e2e5946`;
+the independent Scala client fixture is SHA-256
+`50857d2606e3d90296ea6a2fe4b766bca0c9ecd0574a44014f53523c9372e7af`.
+The focused Scala run used Rust `1.98.1 (48a229cea 2026-09-01)`, compiler
+`3.9.0-bin-SNAPSHOT-git-777528f` at source revision
+`777528f19a58e794c9954a42f433373472ec57f8`, and the checked compiler artifact
+SHA-256 `7585c7677f91787a283b7c37ea4f7b4bddca9c0943a04030b16f79abba91d9fc`.
+It verified Scala 3.9.0 runtime JARs `scala3-library_3` and `scala-library`
+with SHA-256 `9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba`
+and `b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd`.
+Temurin JDK `21.0.13+9` executable hashes were `java`
+`9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155`,
+`javac` `2cc288a26beebc50ca7cd924847dffbfb38ef3314e105bba6d4ebce03a0bcb6b`,
+and `javap` `b2146e8dcfe5662c04d14f3fad68756a1a597d01461ca475a2cdbeb44c84a678`.
+The Java strict-JDK test passed with Temurin 21.0.13 using
+`DOTTY_CLASSFILE_REQUIRE_JDK=1`. The Scala alias consumer passed using Rust
+1.98.1, official Scala source revision
+`777528f19a58e794c9954a42f433373472ec57f8` and Temurin 21.0.13 with
+`DOTTY_REQUIRE_SCALA_TASTY_TWO_LOCAL_COUNTER_SET_CONSUMER=1`. Its output
+reports the same six hashes and UUID links, the unchanged original artifacts
+after Scala compilation/execution and the original, renamed-alias and
+reversed-local variants. The Scala client runs against the producer's original
+Rust artifacts; `-print-tasty`, `-decompile` and `-from-tasty` outputs remain
+inspection-only.
+
+### Acceptance and first-failure matrix
+
+The executable implementation head is
+`5a258460a352516b9201a991e7fe09a69ec19bad`; later evidence/path-filter commits
+are receipt-only successors. The source identity row below is the real
+Lexer→Parser→Namer→SourceTyper session recorded by
+`local_reference_alias_audit_authenticates_frontend_identities_and_first_paired_failure`.
+The runtime and Scala rows use independently authored clients over the six
+canonical artifacts above.
+
+| Acceptance claim | Verified evidence | Bounded first-failure controls |
+| --- | --- | --- |
+| Frozen input and frontend identity | Source SHA above; source ID 22320, create `SymbolId(60)`, locals 63/64/65 in `ScopeId(18)`, alias RHS targets original `first` (63), call receivers are alias then original `second` (65, 64), Pair arguments are the original locals (63, 64); source-to-typed tree bindings are asserted. | Forward alias initialization: Scala E039 / source typer `TermNameNotFound`; wrong alias type: Scala E007/E008 / `LocalValueTypeMismatch`. |
+| TASTy graph and paired links | Original factory `BLOCK` has ordered local `VALDEF`s for first/second/alias, alias RHS `TERMREF` to first, two selected `Counter.set(Int): Unit` `APPLY` stats, and final Pair `APPLY` with first/second references. The six files have three matching classfile/sidecar UUID pairs. | Rust source-bound alias-target mutation fails at `TASTy plan identity`; Scala 3.9 accepts that isolated corrupted alias `TERMREF`. Missing/misplaced sidecar fails Scala binary loading, truncated sidecar fails the reader, UUID mismatch fails class/sidecar synchronization. |
+| JVM lowering and verifier/runtime | `create(II)Lexample/Pair;`, classfile major 65, stack 4, locals 6; exactly two Counter allocations, alias slot copies first, two ordered virtual setters use alias/second receivers, Pair loads original first/second. Java `-Xverify:all -ea` observes `3/7`, `42/-9`, equal-seed distinct identities, fresh calls and independent mutation. | Wrong same-typed alias slot, omitted setter or swapped Pair argument reaches the Java identity/value assertion; use-before-store and wrong setter owner/descriptor fail verification; absent Counter fails linkage. Duplicate setter and third Counter allocation fail the structural/runtime contract. |
+| Independent Scala consumer | Pinned official Scala 3.9 consumer compiles and runs against the original Rust batch, checks equal-seed identity and mutation independence, inspects TASTy, and preserves all six original bytes. Original, renamed alias and reversed declaration batches pass. | Missing declared Pair produces the first E008 lookup error. Omitted second APPLY is rejected by the Rust constructor-call identity proof before publication; Scala `-decompile` accepts the isolated modified TASTy. |
+| Determinism, publication and supported boundary | Two fresh producer sessions compare all six paths/bytes/UUIDs. Existing no-alias 0/1/2-call fixtures remain covered. Existing publisher tests cover six staged-write failures, promotion failures and sentinel preservation. | Deferred: alias-to-second, mutable alias, alias chains, additional independent Counter allocations/statements and other source shapes fail the bounded identity/source-shape proof; no production defect is repaired in this gate. |
+
+### Reproduction commands
+
+Run in the repository with task-local managed `TMPDIR`, `TMP` and `TEMP`; set
+`CARGO_TARGET_DIR` to a worktree-local target. The Scala command also needs
+`JAVA_HOME`, `SCALA39_ROOT` at the pinned revision, and
+`COURSIER_MAVEN_ROOT` containing the checksum-verified 3.9.0 libraries.
+
+```sh
+cargo +1.98.1 test -p dotty --test jvm_tasty_local_receiver_call \
+  --locked -- --nocapture --test-threads=1
+DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo +1.98.1 test -p dotty \
+  --test jvm_tasty_local_receiver_call_runtime \
+  aliased_counter_identity_and_ordered_calls_execute_under_strict_jdk21 \
+  --locked -- --nocapture --test-threads=1
+DOTTY_REQUIRE_SCALA_TASTY_TWO_IMMUTABLE_REFERENCE_LOCALS_CONSUMER=1 \
+DOTTY_REQUIRE_SCALA_TASTY_TWO_LOCAL_COUNTER_SET_CONSUMER=1 \
+cargo +1.98.1 test -p dotty \
+  --test jvm_tasty_two_local_counter_set_scala_consumer \
+  official_scala_consumes_original_rust_alias_counter_set_batch \
+  --locked -- --nocapture --test-threads=1
+python3 tools/ci/validate_strict_tasty_targets.py
+```
+
+The checked-in strict manifest validates 25 targets across four shards. The
+existing `JVM TASTy factory Scala consumer` workflow runs all four strict shard
+jobs and its required aggregate. This alias evidence document is now included
+in that workflow's existing `pull_request.paths` filter so a receipt-only
+successor also runs the strict gate; no workflow or gate was added or weakened.
+
+At executable PR head `5a258460a352516b9201a991e7fe09a69ec19bad`, all
+hosted gates completed successfully:
+
+| Check | Result and exact run/job |
+| --- | --- |
+| Locked Rust quality/workspace checks | success — [Rust checks](https://github.com/scytrowski/dotty-rs/actions/runs/43047552583/job/130615447681) |
+| Mandatory JDK 21 gate | success — [Classfile JVM encoder gate](https://github.com/scytrowski/dotty-rs/actions/runs/43047552583/job/130615448128) |
+| Strict Scala 3.9 shard 1/4 | success — [job](https://github.com/scytrowski/dotty-rs/actions/runs/43047552324/job/130615447111) |
+| Strict Scala 3.9 shard 2/4 | success — [job](https://github.com/scytrowski/dotty-rs/actions/runs/43047552324/job/130615446373) |
+| Strict Scala 3.9 shard 3/4 | success — [job](https://github.com/scytrowski/dotty-rs/actions/runs/43047552324/job/130615447045) |
+| Strict Scala 3.9 shard 4/4, including constructor alias, Scala reader and mandatory JVM publisher gates | success — [job](https://github.com/scytrowski/dotty-rs/actions/runs/43047552324/job/130615447184) |
+| Strict Scala shard aggregate and required follow-ups | success — [aggregate](https://github.com/scytrowski/dotty-rs/actions/runs/43047552324/job/130628919484) |
+
+The complete [Scala workflow run](https://github.com/scytrowski/dotty-rs/actions/runs/43047552324)
+and [Rust/JDK workflow run](https://github.com/scytrowski/dotty-rs/actions/runs/43047552583)
+are pinned to the executable SHA above. The Rust job ran the full locked
+workspace tests plus fmt, frontend-boundary, Clippy, rustdoc and diff checks;
+the JDK job ran its required Java verifier/runtime suite. The strict workflow
+ran all four manifest-driven shards and aggregate with the pinned Scala
+revision and no required external-test skips. The full local workspace command
+did not yield a completion result and is not counted as passed.
+
+This committed matrix is followed only by evidence and a one-line path-filter
+addition so this document triggers the existing strict workflow. Those changes
+do not change executable tests or compiler behavior. The final documentation
+successor must itself pass the same Rust, JDK, four-shard and aggregate gates;
+its exact SHA and links are checked against the PR head before #2246 is declared
+complete.
