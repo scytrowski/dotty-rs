@@ -106,22 +106,317 @@
     }
   },
   "artifacts": [
-    {"path": "scala39/Counter.class", "sha256": "bea0cb1f5fbe5fc8bb7cc7b0b4d0acdac174da68c48b39ec1c9d3933afc5c1b3", "classfile_major": 65, "tasty_uuid": "00a4302d-ec31-f3e8-00cc-915f9bbabd1b"},
-    {"path": "scala39/Counter.tasty", "sha256": "052d7c028b8ac70129e9449e24ad6136672f8f137a7740a4c522d7e8516e7f40", "tasty_version": "28.9.0", "tasty_uuid": "00a4302d-ec31-f3e8-00cc-915f9bbabd1b"},
-    {"path": "scala39/Pair.class", "sha256": "5b7ca86b83f6a6553341c26757eb0ccc5e08afdda2ef0358e71d1863376e057b", "classfile_major": 65, "tasty_uuid": "00f4f2ec-5b40-fed3-00a9-2310d67a7d5b"},
-    {"path": "scala39/Pair.tasty", "sha256": "1b2749f9031b3dd82c38aab309e12dc2a5b482248ce606d26329fc62a1a3fa76", "tasty_version": "28.9.0", "tasty_uuid": "00f4f2ec-5b40-fed3-00a9-2310d67a7d5b"},
-    {"path": "scala39/PairFactory.class", "sha256": "7b15634a204c6f5fefb5f24c1aea1c77db42f4fec084a08c72e5090f561586eb", "classfile_major": 65, "tasty_uuid": "00a1b939-4f12-b0da-0050-ba415261bf29"},
-    {"path": "scala39/PairFactory.tasty", "sha256": "a34f1455e13b369de4bd2c8235d44e9cd832a86bda6aed0dab4d3040a9e485ad", "tasty_version": "28.9.0", "tasty_uuid": "00a1b939-4f12-b0da-0050-ba415261bf29"}
+    {
+      "path": "scala39/Counter.class",
+      "sha256": "bea0cb1f5fbe5fc8bb7cc7b0b4d0acdac174da68c48b39ec1c9d3933afc5c1b3",
+      "classfile_major": 65,
+      "tasty_uuid": "00a4302d-ec31-f3e8-00cc-915f9bbabd1b"
+    },
+    {
+      "path": "scala39/Counter.tasty",
+      "sha256": "052d7c028b8ac70129e9449e24ad6136672f8f137a7740a4c522d7e8516e7f40",
+      "tasty_version": "28.9.0",
+      "tasty_uuid": "00a4302d-ec31-f3e8-00cc-915f9bbabd1b"
+    },
+    {
+      "path": "scala39/Pair.class",
+      "sha256": "5b7ca86b83f6a6553341c26757eb0ccc5e08afdda2ef0358e71d1863376e057b",
+      "classfile_major": 65,
+      "tasty_uuid": "00f4f2ec-5b40-fed3-00a9-2310d67a7d5b"
+    },
+    {
+      "path": "scala39/Pair.tasty",
+      "sha256": "1b2749f9031b3dd82c38aab309e12dc2a5b482248ce606d26329fc62a1a3fa76",
+      "tasty_version": "28.9.0",
+      "tasty_uuid": "00f4f2ec-5b40-fed3-00a9-2310d67a7d5b"
+    },
+    {
+      "path": "scala39/PairFactory.class",
+      "sha256": "7b15634a204c6f5fefb5f24c1aea1c77db42f4fec084a08c72e5090f561586eb",
+      "classfile_major": 65,
+      "tasty_uuid": "00a1b939-4f12-b0da-0050-ba415261bf29"
+    },
+    {
+      "path": "scala39/PairFactory.tasty",
+      "sha256": "a34f1455e13b369de4bd2c8235d44e9cd832a86bda6aed0dab4d3040a9e485ad",
+      "tasty_version": "28.9.0",
+      "tasty_uuid": "00a1b939-4f12-b0da-0050-ba415261bf29"
+    }
   ],
   "snapshots": {
-    "javap": {"path": "oracle/PairFactory.javap.txt", "sha256": "a08627a4624c93c1ca4acdbe0a02771e938f108dd65faf5a07482012193acc81", "workspace_path_header_normalized": true},
-    "print_tasty": {"path": "oracle/PairFactory.print-tasty.txt", "sha256": "2f790bc7a6bc675d818d18a250db99b7eef15adce4df5f2cb33ba67ff383cbd6"},
-    "decompile": {"path": "oracle/PairFactory.decompile.txt", "sha256": "7a29cf4e55c46a03eb85f0202554e28710857aacb5da34371b0d4456013c0354", "workspace_path_header_normalized": true},
-    "typed_tree": {"path": "oracle/typer.txt", "sha256": "0b1dda2c999cef572e69c60199ff04b6b9b77f2723e31bdff246553a5400b737", "workspace_path_header_normalized": true}
+    "javap": {
+      "path": "oracle/PairFactory.javap.txt",
+      "sha256": "5524c10f7e2efd16d364a0c8ddd453f169f27cbbc996d305083073c9c32d235b",
+      "workspace_path_header_normalized": true
+    },
+    "print_tasty": {
+      "path": "oracle/PairFactory.print-tasty.txt",
+      "sha256": "2f790bc7a6bc675d818d18a250db99b7eef15adce4df5f2cb33ba67ff383cbd6"
+    },
+    "decompile": {
+      "path": "oracle/PairFactory.decompile.txt",
+      "sha256": "7a29cf4e55c46a03eb85f0202554e28710857aacb5da34371b0d4456013c0354",
+      "workspace_path_header_normalized": true
+    },
+    "typed_tree": {
+      "path": "oracle/typer.txt",
+      "sha256": "e7d1f4134b216e19c9fa6ab5911f4eef6a189dbf3b47f065564005ba2e3bd9ab",
+      "workspace_path_header_normalized": true
+    }
   },
   "from_tasty": {
     "result": "passed; PairFactory.class and PairFactory.tasty emitted",
     "class_sha256": "aa35beee122dcf62e3a251489535594c130bf846b8501921e18e3ecddaaa27f2",
     "byte_identical_to_primary_compile": false
+  },
+  "control_matrix": [
+    {
+      "path": "controls/SwappedBranches.scala",
+      "sha256": "61ae3929d0e7daaa11433caf58d742aa5eaa0b5e5f046227829af428046a5064",
+      "scala": "valid",
+      "rust_classification": "Swapped runtime: true -> 7/42; false -> 42/3",
+      "rust_first_failure": {
+        "phase": "cross-class constructor-call identity proof",
+        "error": "SourceShape(\"candidate method must have one plain formal clause and a concrete public body\")"
+      }
+    },
+    {
+      "path": "controls/RenamedLocals.scala",
+      "sha256": "10098c13b90184e05ef22d6551e99c02c65d8c1d66b1c8551c174b3ccad2ba15",
+      "scala": "valid",
+      "rust_classification": "valid but outside the measured Rust acceptance",
+      "rust_first_failure": {
+        "phase": "cross-class constructor-call identity proof",
+        "error": "SourceShape(\"candidate method must have one plain formal clause and a concrete public body\")"
+      }
+    },
+    {
+      "path": "controls/ReversedDeclarations.scala",
+      "sha256": "53f5111a7f348781bb0dc447cc921e45eac78c0ab2e2651f9a84bd6612cf9805",
+      "scala": "valid",
+      "rust_classification": "valid; both references remain correctly bound",
+      "rust_first_failure": {
+        "phase": "cross-class constructor-call identity proof",
+        "error": "SourceShape(\"candidate method must have one plain formal clause and a concrete public body\")"
+      }
+    },
+    {
+      "path": "controls/NonBooleanCondition.scala",
+      "sha256": "3f8be463dbcc848f877ffd8c74df5faa718c4c4ceda0472afc7f7928d96e312b",
+      "scala": "invalid: E007 type mismatch; Int condition requires Boolean",
+      "rust_classification": "invalid at method body typing",
+      "rust_first_failure": "IfConditionTypeMismatch { source: SourceId(22663), tree_index: 71, actual: TypeId(5), expected: TypeId(8) }"
+    },
+    {
+      "path": "controls/WrongBranchType.scala",
+      "sha256": "7dd1ab12e229968fc177c664cecc1d184fa7a25a0c282898fd13fafe9f75f49a",
+      "scala": "invalid: E007 type mismatch; Int branch requires example.Counter",
+      "rust_classification": "invalid at method body typing",
+      "rust_first_failure": "LocalValueTypeMismatch { source: SourceId(22664), tree_index: 72, actual: TypeId(105), expected: TypeId(101) }"
+    },
+    {
+      "path": "controls/MissingLocal.scala",
+      "sha256": "d00effbbc52c6d0caa457488b3917c183065aaca7109b672988c5e6ed976f19e",
+      "scala": "invalid: E006 Not Found; absentLocal",
+      "rust_classification": "invalid at method body typing",
+      "rust_first_failure": "TermNameNotFound { source: SourceId(22665), tree_index: 70, name: Name { text: NameId(72), namespace: Term }, position: Some(SourceSpan { source: SourceId(22665), span: Span { range: TextRange { start: 621, end: 632 }, point: None } }) }"
+    },
+    {
+      "path": "controls/UninitializedReference.scala",
+      "sha256": "526f8ca871cb805acf5402a4ff0a03bf38366fa5d9a03c5a22c3f42cf62cac29",
+      "scala": "invalid: E039 forward reference to later",
+      "rust_classification": "invalid at method body typing",
+      "rust_first_failure": "TermNameNotFound { source: SourceId(22666), tree_index: 63, name: Name { text: NameId(72), namespace: Term }, position: Some(SourceSpan { source: SourceId(22666), span: Span { range: TextRange { start: 571, end: 576 }, point: None } }) }"
+    },
+    {
+      "path": "controls/MutableSelected.scala",
+      "sha256": "3b90ba87e27925934b9dc54b31279dd3949b144f4e9e66ec24e26b199c249740",
+      "scala": "valid",
+      "rust_classification": "valid but mutable selection is deferred",
+      "rust_first_failure": {
+        "phase": "cross-class constructor-call identity proof",
+        "error": "SourceShape(\"candidate method must have one plain formal clause and a concrete public body\")"
+      }
+    },
+    {
+      "path": "controls/NestedIf.scala",
+      "sha256": "2b688d45bc547d75d568227f4eec38128f3266619b2cbb58149cbf811a2f5640",
+      "scala": "valid",
+      "rust_classification": "valid but nested conditional is deferred",
+      "rust_first_failure": {
+        "phase": "cross-class constructor-call identity proof",
+        "error": "SourceShape(\"candidate method must have one plain formal clause and a concrete public body\")"
+      }
+    },
+    {
+      "path": "controls/AllocationInBranch.scala",
+      "sha256": "6348c270f8d2d0ddc01fd991763c5b716f3ba2f61be2df9a07729c68573da53c",
+      "scala": "valid",
+      "rust_classification": "valid but a branch allocation is deferred",
+      "rust_first_failure": {
+        "phase": "cross-class constructor-call identity proof",
+        "error": "SourceShape(\"candidate method must have one plain formal clause and a concrete public body\")"
+      }
+    },
+    {
+      "path": "controls/SecondSetter.scala",
+      "sha256": "95464377eee157c89dc92d2fcccf4a64dc83240d8f8f2c04425ed5889b654df4",
+      "scala": "valid",
+      "rust_classification": "valid but the additional setter is deferred",
+      "rust_first_failure": {
+        "phase": "cross-class constructor-call identity proof",
+        "error": "SourceShape(\"candidate method must have one plain formal clause and a concrete public body\")"
+      }
+    }
+  ],
+  "current_rust_first_failure": {
+    "session": {
+      "source_id": 22650,
+      "factory_symbol": 42,
+      "create_symbol": 60,
+      "formals": [
+        {
+          "name": "firstSeed",
+          "symbol": 61
+        },
+        {
+          "name": "secondSeed",
+          "symbol": 62
+        },
+        {
+          "name": "chooseFirst",
+          "symbol": 63
+        },
+        {
+          "name": "nextValue",
+          "symbol": 64
+        }
+      ],
+      "locals": [
+        {
+          "name": "first",
+          "symbol": 65,
+          "scope": 18,
+          "source_tree": 59,
+          "typed_declaration": 35
+        },
+        {
+          "name": "second",
+          "symbol": 66,
+          "scope": 18,
+          "source_tree": 66,
+          "typed_declaration": 42
+        },
+        {
+          "name": "selected",
+          "symbol": 67,
+          "scope": 18,
+          "source_tree": 72,
+          "typed_declaration": 48
+        }
+      ],
+      "source_to_typed_statements": [
+        [
+          59,
+          35
+        ],
+        [
+          66,
+          42
+        ],
+        [
+          72,
+          48
+        ],
+        [
+          76,
+          52
+        ]
+      ],
+      "selected_if": {
+        "source_if_tree": 71,
+        "typed_if_tree": 46,
+        "source_condition": 68,
+        "typed_condition": 43,
+        "source_then": 69,
+        "typed_then": 44,
+        "source_else": 70,
+        "typed_else": 45,
+        "condition_symbol": 63,
+        "then_symbol": 65,
+        "else_symbol": 66
+      },
+      "original_counter_initializers": {
+        "first_argument_symbol": 61,
+        "second_argument_symbol": 62
+      },
+      "selected_setter": {
+        "source_tree": 76,
+        "typed_tree": 52,
+        "receiver_symbol": 67,
+        "argument_symbol": 64
+      },
+      "final_pair_expression": {
+        "source_tree": 82,
+        "typed_tree": 58,
+        "argument_symbols": [
+          65,
+          66
+        ]
+      }
+    },
+    "phase": "cross-class constructor-call identity proof",
+    "error": "SourceShape(\"candidate method must have one plain formal clause and a concrete public body\")",
+    "callback_reached": false,
+    "paired_batch_returned": false,
+    "partial_artifacts": 0
+  },
+  "preserved_regressions": [
+    {
+      "path": "../jvm_tasty_local_reference_alias/LocalReferenceAlias.scala",
+      "sha256": "b1b200af5108685cf58b769b3ed0654c189d2fb28fa1c8eaaba5f02580d2b79f",
+      "scala": "valid and compiles",
+      "rust": "existing alias identity audit and paired producer remain accepted"
+    },
+    {
+      "path": "../jvm_tasty_two_immutable_reference_locals/TwoLocals.scala",
+      "sha256": "e2411637c892feb474d6d70526d471b524cd7de49a3db2565923cd69736f73c3",
+      "calls": 0,
+      "scala": "compiles",
+      "rust": "existing paired path accepted"
+    },
+    {
+      "path": "../jvm_tasty_local_receiver_call/LocalReceiverCall.scala",
+      "sha256": "d00efdafda78682532599fbd9017a2037d1579241fa388c744f8f58d13b42eb8",
+      "calls": 1,
+      "scala": "compiles",
+      "rust": "existing paired path accepted"
+    },
+    {
+      "path": "../jvm_tasty_ordered_local_unit_calls/OrderedLocalUnitCalls.scala",
+      "sha256": "2e60a40b35587559589b431c9cc191f5d752ea3b4219aa2fc71b99edd2da3b8b",
+      "calls": 2,
+      "scala": "compiles",
+      "rust": "existing paired path accepted"
+    }
+  ],
+  "validation": {
+    "official_scala": "target, Java probe, all controls, and zero/one/two-call plus pre-sprint alias baselines compiled on the pinned compiler; true/false and swapped runtimes passed with -Xverify:all",
+    "rust_tests": [
+      "cargo test -p dotty --test jvm_tasty_conditional_reference_selection --locked",
+      "cargo test -p dotty --test jvm_tasty_local_receiver_call conditional_reference_selection --locked -- --nocapture --test-threads=1",
+      "cargo test -p dotty --test jvm_tasty_local_receiver_call local_reference_alias_audit_authenticates_frontend_identities_and_first_paired_failure --locked -- --nocapture --test-threads=1",
+      "cargo test --workspace --all-targets --locked (Temurin JDK 21.0.13+9 on PATH)"
+    ],
+    "quality_checks": [
+      "cargo fmt --all -- --check",
+      "python3 tools/check-frontend-boundaries.py",
+      "cargo clippy --workspace --all-targets --locked -- -D warnings",
+      "RUSTDOCFLAGS=\"-D warnings\" cargo doc --workspace --no-deps --locked",
+      "cargo test --workspace --all-targets --locked (Temurin JDK 21.0.13+9 on PATH)",
+      "git diff --check"
+    ],
+    "rust_toolchain": "Rust 1.98.1",
+    "workspace_test_result": "passed with Temurin JDK 21.0.13+9 on PATH; the initial invocation without java on PATH failed one JDK-dependent test and was rerun successfully with JAVA_HOME/PATH set"
   }
 }

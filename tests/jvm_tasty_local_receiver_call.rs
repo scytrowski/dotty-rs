@@ -1113,7 +1113,7 @@ fn conditional_reference_selection_authenticates_frontend_and_current_first_fail
     assert_eq!(pair_arguments, [first.symbol(), second.symbol()]);
 
     println!(
-        "conditional source_id={source_id:?}; factory={factory:?}; create={create:?}; formals={formals:?}; locals=[{:?}@{:?}, {:?}@{:?}, {:?}@{:?}]; source_to_typed={:?}; if_source=({:?}, {:?}, {:?}); if_typed=({:?}, {:?}, {:?}); set=({:?}, {:?}) receiver={:?} arg={:?}; pair=({source_pair:?}, {typed_pair:?}) args={pair_arguments:?}",
+        "conditional source_id={source_id:?}; factory={factory:?}; create={create:?}; formals={formals:?}; locals=[{:?}@{:?}, {:?}@{:?}, {:?}@{:?}]; source_to_typed={:?}; if_root=({source_selected_rhs:?}, {selected_rhs:?}); if_source=({:?}, {:?}, {:?}); if_typed=({:?}, {:?}, {:?}); set=({:?}, {:?}) receiver={:?} arg={:?}; pair=({source_pair:?}, {typed_pair:?}) args={pair_arguments:?}",
         first.symbol(),
         first.scope(),
         second.symbol(),
