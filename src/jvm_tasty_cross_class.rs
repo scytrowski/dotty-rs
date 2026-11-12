@@ -700,6 +700,14 @@ fn validate_immutable_local_declaration_core(
     let typed_type_tree = source_typed_index
         .get(source_id, local_def.tpt)
         .ok_or_else(|| typed_error("explicit source type tree has no typed mapping"))?;
+    if !matches!(
+        typed_ast.try_get(typed_type_tree).map(|tree| &tree.kind),
+        Some(TreeKind::TypeTree(_))
+    ) {
+        return Err(typed_error(
+            "typed local annotation must retain its original TypeTree kind",
+        ));
+    }
     let typed_initializer = source_typed_index
         .get(source_id, initializer)
         .ok_or_else(|| typed_error("original initializer has no typed mapping"))?;
@@ -768,6 +776,16 @@ fn validate_immutable_local_declaration_core(
     let typed_new_type_tree = source_typed_index
         .get(source_id, source_new_tree.tpt)
         .ok_or_else(|| typed_error("initializer type tree has no typed mapping"))?;
+    if !matches!(
+        typed_ast
+            .try_get(typed_new_type_tree)
+            .map(|tree| &tree.kind),
+        Some(TreeKind::TypeTree(_))
+    ) {
+        return Err(typed_error(
+            "typed Counter New type must retain its original TypeTree kind",
+        ));
+    }
     let typed_argument = source_typed_index
         .get(source_id, source_argument)
         .ok_or_else(|| typed_error("initializer seed has no typed mapping"))?;

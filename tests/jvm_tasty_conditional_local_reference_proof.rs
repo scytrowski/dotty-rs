@@ -57,6 +57,12 @@ enum IndexMutation {
     FirstLocalValDefInt,
     SecondLocalValDefInt,
     BlockTypeInt,
+    FirstLocalAnnotationKindIf,
+    SecondLocalAnnotationKindIf,
+    FirstCounterNewTypeKindIf,
+    SecondCounterNewTypeKindIf,
+    SelectedAnnotationKindIf,
+    PairNewTypeKindIf,
 }
 
 #[derive(Debug)]
@@ -283,7 +289,13 @@ fn authenticate(
         | IndexMutation::PairSecondArgumentKindIf
         | IndexMutation::ConditionKindIf
         | IndexMutation::ThenBranchKindIf
-        | IndexMutation::ElseBranchKindIf => {
+        | IndexMutation::ElseBranchKindIf
+        | IndexMutation::FirstLocalAnnotationKindIf
+        | IndexMutation::SecondLocalAnnotationKindIf
+        | IndexMutation::FirstCounterNewTypeKindIf
+        | IndexMutation::SecondCounterNewTypeKindIf
+        | IndexMutation::SelectedAnnotationKindIf
+        | IndexMutation::PairNewTypeKindIf => {
             let replacement = typed_ast.get(typed_if).kind.clone();
             let target_source = match mutation {
                 IndexMutation::SetterReceiverKindIf => {
@@ -312,6 +324,56 @@ fn authenticate(
                 IndexMutation::ConditionKindIf => if_node.cond,
                 IndexMutation::ThenBranchKindIf => if_node.then_branch,
                 IndexMutation::ElseBranchKindIf => if_node.else_branch,
+                IndexMutation::FirstLocalAnnotationKindIf
+                | IndexMutation::SecondLocalAnnotationKindIf => {
+                    let index = usize::from(matches!(
+                        mutation,
+                        IndexMutation::SecondLocalAnnotationKindIf
+                    ));
+                    let TreeKind::ValDef(definition) = &parsed.ast.get(block.stats[index]).kind
+                    else {
+                        unreachable!()
+                    };
+                    definition.tpt
+                }
+                IndexMutation::FirstCounterNewTypeKindIf
+                | IndexMutation::SecondCounterNewTypeKindIf => {
+                    let index = usize::from(matches!(
+                        mutation,
+                        IndexMutation::SecondCounterNewTypeKindIf
+                    ));
+                    let TreeKind::ValDef(definition) = &parsed.ast.get(block.stats[index]).kind
+                    else {
+                        unreachable!()
+                    };
+                    let TreeKind::Apply(application) =
+                        &parsed.ast.get(definition.rhs.unwrap()).kind
+                    else {
+                        unreachable!()
+                    };
+                    let TreeKind::Select(selection) = &parsed.ast.get(application.function).kind
+                    else {
+                        unreachable!()
+                    };
+                    let TreeKind::New(new) = &parsed.ast.get(selection.qualifier).kind else {
+                        unreachable!()
+                    };
+                    new.tpt
+                }
+                IndexMutation::SelectedAnnotationKindIf => selected_def.tpt,
+                IndexMutation::PairNewTypeKindIf => {
+                    let TreeKind::Apply(application) = &parsed.ast.get(block.expr).kind else {
+                        unreachable!()
+                    };
+                    let TreeKind::Select(selection) = &parsed.ast.get(application.function).kind
+                    else {
+                        unreachable!()
+                    };
+                    let TreeKind::New(new) = &parsed.ast.get(selection.qualifier).kind else {
+                        unreachable!()
+                    };
+                    new.tpt
+                }
                 IndexMutation::FirstLocalValDefInt
                 | IndexMutation::SecondLocalValDefInt
                 | IndexMutation::BlockTypeInt => unreachable!(),
@@ -450,6 +512,12 @@ fn missing_or_forged_source_typed_if_edges_reject_at_the_typed_binding_stage() {
         IndexMutation::FirstLocalValDefInt,
         IndexMutation::SecondLocalValDefInt,
         IndexMutation::BlockTypeInt,
+        IndexMutation::FirstLocalAnnotationKindIf,
+        IndexMutation::SecondLocalAnnotationKindIf,
+        IndexMutation::FirstCounterNewTypeKindIf,
+        IndexMutation::SecondCounterNewTypeKindIf,
+        IndexMutation::SelectedAnnotationKindIf,
+        IndexMutation::PairNewTypeKindIf,
     ] {
         assert!(
             matches!(

@@ -730,6 +730,16 @@ pub fn validate_immutable_local_conditional_reference_selection_proof<'session>(
         TreeKind::ValDef(def) => def,
         _ => return Err(typed("selected declaration must remain typed ValDef")),
     };
+    if !matches!(
+        typed_ast
+            .try_get(selected_typed_def.tpt)
+            .map(|tree| &tree.kind),
+        Some(TreeKind::TypeTree(_))
+    ) {
+        return Err(typed(
+            "selected typed annotation must retain its original TypeTree kind",
+        ));
+    }
     if selected_typed_declaration.ty != selected_type
         || selected_typed_def.rhs != Some(source_if_ty)
         || selected_typed_def.tpt
@@ -967,6 +977,16 @@ pub fn validate_immutable_local_conditional_reference_selection_proof<'session>(
     {
         return Err(typed(
             "Pair constructor New must retain its exact type mapping",
+        ));
+    }
+    if !matches!(
+        typed_ast
+            .try_get(typed_pair_new_node.tpt)
+            .map(|tree| &tree.kind),
+        Some(TreeKind::TypeTree(_))
+    ) {
+        return Err(typed(
+            "typed Pair New type must retain its original TypeTree kind",
         ));
     }
     match &source_ast

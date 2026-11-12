@@ -9,13 +9,14 @@ local declarations and initializers, IF, condition, both ordered arms, setter
 receiver/argument, final Pair result/arguments, the method owner, local scope,
 formal, local symbols, and declared Counter type.
 
-Validation requires the condition to resolve to the original Boolean formal;
-both arms to resolve to distinct symbols from the two initialized locals; the
-both initialized ValDef types, the IF and selected declaration type to be the
-canonical Counter class; the typed Block result must retain the exact final
-Pair expression TypeId; the
-selected binding to be immutable and method-owned in the same block scope; and
-the later setter and Pair construction to retain their original typed roots.
+Validation requires the condition to resolve to the original Boolean formal
+and both arms to resolve to distinct symbols from the two initialized locals.
+Both initialized ValDef types, the IF result and the selected declaration
+must have canonical Counter type; the typed Block must retain the final Pair
+expression's exact TypeId. Mapped local annotations and Counter/Pair
+constructor type roots must remain typed `TypeTree` nodes. The selected
+binding must be immutable and method-owned in the same block scope, and the
+later setter and Pair construction must retain their original typed roots.
 It does not infer identity from local names, source order, or JVM slots. A
 valid source may reverse the declarations or swap the two IF branches; the
 receipt records the resolved branch symbols in branch order. Nested IFs,
