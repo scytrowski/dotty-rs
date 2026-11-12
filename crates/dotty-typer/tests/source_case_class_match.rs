@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 38710)
-Total output lines: 3313
-
 use std::path::PathBuf;
 
 use dotty_classloader::classloader::{
@@ -1373,7 +1370,731 @@ fn sealed_adt_positive_session(source: SourceId) -> Vec<(String, String)> {
             assert_eq!(method_type.params.len(), 1);
             assert!(matches!(
                 typer.store().types.try_get(method_type.params[0].ty),
-                Som…8710 tokens truncated…ated).links.companion = Some(deleted_companion);
+                Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }) if *symbol == event
+            ));
+            assert_eq!(method_type.result, definitions.int);
+            assert_mapping(typer.source_typed_index(), source, source_def.tpt);
+            assert_eq!(typer.source_typed_index().get(source, source_def.tpt), Some(typed_def.tpt));
+            assert_eq!(typer.typed_ast().get(typed_def.tpt).ty, definitions.int);
+            let source_rhs = source_def.rhs.unwrap();
+            let typed_rhs = typed_def.rhs.expect("complete typed method body");
+            assert_mapping(typer.source_typed_index(), source, source_rhs);
+            assert_eq!(typer.source_typed_index().get(source, source_rhs), Some(typed_rhs));
+            assert_eq!(typer.typed_ast().get(typed_rhs).ty, definitions.int);
+            let (selector, source_cases) = match &parsed.ast.get(source_rhs).kind {
+                TreeKind::Match(matched) => (matched.selector, matched.cases.clone()),
+                other => panic!("{name} source body is not a Match: {other:?}"),
+            };
+            let rhs_range = parsed.ast.get(source_rhs).position.unwrap().span().range();
+            for (tree, node) in parsed.ast.iter() {
+                let Some(position) = node.position else { continue };
+                let range = position.span().range();
+                if range.start() >= rhs_range.start() && range.end() <= rhs_range.end() {
+                    assert_mapping(typer.source_typed_index(), source, tree);
+                }
+            }
+            let TreeKind::Match(typed_match) = &typer.typed_ast().get(typed_rhs).kind else {
+                panic!("{name} typed body is not a Match")
+            };
+            assert_eq!(source_cases.len(), if name == "extract" { 2 } else { 3 });
+            assert_eq!(typed_match.cases.len(), source_cases.len());
+            assert_mapping(typer.source_typed_index(), source, selector);
+            let typed_selector = typed_match.selector;
+            assert_eq!(
+                typer.source_typed_index().get(source, selector),
+                Some(typed_selector),
+                "the returned Match selector is the mapped source selector"
+            );
+            assert_eq!(typed_symbol(typer.typed_ast(), typer.store(), typed_selector), selector_parameter);
+            assert!(matches!(
+                typer.store().types.try_get(typer.typed_ast().get(typed_selector).ty),
+                Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == selector_parameter
+            ));
+            let SymbolInfo::Complete(selector_type) = *typer.store().symbols.info(selector_parameter) else {
+                panic!("{name} selector parameter type is complete")
+            };
+            assert!(matches!(
+                typer.store().types.try_get(selector_type),
+                Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }) if *symbol == event
+            ));
+
+            let mut case_receipts = Vec::new();
+            for (case_index, (source_case, typed_case)) in source_cases.iter().zip(&typed_match.cases).enumerate() {
+                assert_mapping(typer.source_typed_index(), source, *source_case);
+                assert_eq!(typer.source_typed_index().get(source, *source_case), Some(*typed_case));
+                let TreeKind::CaseDef(source_case_node) = &parsed.ast.get(*source_case).kind else {
+                    panic!("source branch is not a CaseDef")
+                };
+                let TreeKind::CaseDef(typed_case_node) = &typer.typed_ast().get(*typed_case).kind else {
+                    panic!("typed branch is not a CaseDef")
+                };
+                assert_mapping(typer.source_typed_index(), source, source_case_node.pattern);
+                assert_eq!(typer.source_typed_index().get(source, source_case_node.pattern), Some(typed_case_node.pattern));
+                assert_mapping(typer.source_typed_index(), source, source_case_node.body);
+                let mapped_body = typer.source_typed_index().get(source, source_case_node.body).unwrap();
+                assert_eq!(
+                    typed_case_node.body,
+                    mapped_body,
+                    "the returned CaseDef body is the mapped source body"
+                );
+                let typed_body = typed_case_node.body;
+                let (variant, expected_binder) = match (name, case_index) {
+                    ("extract", 0) | ("classify", 0 | 1) => (created, "id"),
+                    ("extract", 1) => (deleted, "code"),
+                    ("classify", 2) => (deleted, "_"),
+                    _ => panic!("unexpected source case {name}[{case_index}]"),
+                };
+                let TreeKind::UnApply(unapply_node) = &typer.typed_ast().get(typed_case_node.pattern).kind else {
+                    panic!("{name} case must retain an UnApply")
+                };
+                assert_mapping(typer.source_typed_index(), source, source_case_node.pattern);
+                let TreeKind::Apply(source_extractor) = &parsed.ast.get(source_case_node.pattern).kind else {
+                    panic!("frozen source extractor pattern remains an Apply")
+                };
+                assert_eq!(source_extractor.args.len(), 1);
+                let expected_unapply = index.generated_case_class_method(variant, GeneratedCaseClassMethodRole::Unapply).unwrap();
+                assert_eq!(
+                    typer.source_typed_index().get(source, source_extractor.function),
+                    Some(match &typer.typed_ast().get(unapply_node.function).kind {
+                        TreeKind::Select(selection) => selection.qualifier,
+                        other => panic!("typed extractor function is not selected: {other:?}"),
+                    }),
+                    "each source extractor name maps to its authentic companion qualifier"
+                );
+                assert_eq!(typed_symbol(typer.typed_ast(), typer.store(), unapply_node.function), expected_unapply);
+                assert_eq!(index.generated_case_class_method_identity(expected_unapply), Some(dotty_core::GeneratedCaseClassMethod { class: variant, role: GeneratedCaseClassMethodRole::Unapply }));
+                let unapply_owner = typer.store().symbols.get(expected_unapply).owner.unwrap();
+                assert_eq!(typer.store().symbols.get(unapply_owner).kind, SymbolKind::ModuleClass);
+                assert_eq!(typer.store().names.resolve(typer.store().symbols.get(unapply_owner).name.text()), if variant == created { "Created$" } else { "Deleted$" });
+                let TreeKind::Select(selected) = &typer.typed_ast().get(unapply_node.function).kind else {
+                    panic!("UnApply function must be the authentic selected extractor")
+                };
+                let companion = typer.store().symbols.get(variant).links.companion.unwrap();
+                assert!(matches!(
+                    typer.store().types.try_get(typer.typed_ast().get(selected.qualifier).ty),
+                    Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == companion
+                ));
+                assert_eq!(unapply_node.patterns.len(), 1);
+                let nested = unapply_node.patterns[0];
+                assert_eq!(typer.source_typed_index().get(source, source_extractor.args[0]), Some(nested));
+                assert!(matches!(
+                    typer.store().types.try_get(typer.typed_ast().get(typed_case_node.pattern).ty),
+                    Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }) if *symbol == variant
+                ), "the pattern prototype is narrowed to its authentic source variant");
+                if expected_binder == "_" {
+                    let TreeKind::Ident(wildcard) = &typer.typed_ast().get(nested).kind else {
+                        panic!("wildcard remains an identifier-shaped pattern")
+                    };
+                    assert_eq!(typer.store().names.resolve(wildcard.name.text()), "_");
+                    assert_eq!(typer.typed_ast().get(nested).ty, definitions.int);
+                    assert!(matches!(
+                        typer.store().types.try_get(typer.typed_ast().get(typed_case_node.body).ty),
+                        Some(Type::Constant(Constant::Int(0)))
+                    ));
+                    case_receipts.push("Deleted(_)");
+                } else if name == "classify" && case_index == 0 {
+                    assert!(matches!(typer.typed_ast().get(nested).kind, TreeKind::Literal(_)));
+                    assert!(matches!(
+                        typer.store().types.try_get(typer.typed_ast().get(nested).ty),
+                        Some(Type::Constant(Constant::Int(0)))
+                    ));
+                    assert!(matches!(
+                        typer.store().types.try_get(typer.typed_ast().get(typed_case_node.body).ty),
+                        Some(Type::Constant(Constant::Int(0)))
+                    ));
+                    case_receipts.push("Created(0)");
+                } else {
+                    let TreeKind::Bind(binding) = &typer.typed_ast().get(nested).kind else {
+                        panic!("nested extractor argument must be a binder")
+                    };
+                    let binder = typed_symbol(typer.typed_ast(), typer.store(), nested);
+                    assert_eq!(typer.store().symbols.get(binder).kind, SymbolKind::Local);
+                    assert_eq!(typer.store().symbols.get(binder).owner, Some(method_symbol));
+                    assert_eq!(typer.store().symbols.get(binder).origin, SymbolOrigin::Source(source));
+                    assert_eq!(typer.store().names.resolve(binding.name.text()), expected_binder);
+                    assert_eq!(*typer.store().symbols.info(binder), SymbolInfo::Complete(definitions.int));
+                    assert!(matches!(typer.typed_ast().get(binding.body).kind, TreeKind::Ident(_)));
+                    assert_eq!(typed_symbol(typer.typed_ast(), typer.store(), typed_body), binder);
+                    assert_ne!(binder, selector_parameter);
+                    binders.push(binder);
+                    case_receipts.push(if variant == created { "Created(id)" } else { "Deleted(code)" });
+                }
+            }
+            assert_eq!(
+                case_receipts,
+                if name == "extract" { vec!["Created(id)", "Deleted(code)"] } else { vec!["Created(0)", "Created(id)", "Deleted(_)"] }
+            );
+            let (extractors, binders) = if name == "extract" {
+                ("Created$.unapply,Deleted$.unapply", "Created:id:Int,Deleted:code:Int")
+            } else {
+                ("Created$.unapply,Created$.unapply,Deleted$.unapply", "Created:id:Int")
+            };
+            receipts.push((name.to_owned(), format!(
+                "Event.scala#tree{}|{}:{}|signature=(Event):Int|owner=Matcher$|selector=Event|cases={}|extractors={extractors}|binders={binders}|typed=complete DefDef+Match|mappings=all source RHS trees",
+                method.index(), method_range.start(), method_range.end(), case_receipts.join(",")
+            )));
+        }
+        assert_eq!(binders.len(), 3);
+        for (index, binder) in binders.iter().enumerate() {
+            assert!(!binders[..index].contains(binder), "each case receives a distinct binder symbol");
+        }
+        for (source_root, typed_root) in typed_roots {
+            assert_eq!(typer.source_typed_index().get(source, source_root), Some(typed_root));
+            assert!(matches!(typer.typed_ast().get(typed_root).kind, TreeKind::DefDef(_)));
+        }
+        receipts
+    })
+}
+
+fn run_sealed_event_case_local_negative_matrix() {
+    let unrelated_extractor = SOURCE_TRAIT_PRODUCT1
+        .replace(
+            "object Matcher:",
+            "object Text:\n  def unapply(value: String): Option[String] = None\n\nobject Matcher:",
+        )
+        .replace(
+            "      case Created(id)   => id",
+            "      case Text(name)   => 0\n      case Created(id)   => id",
+        );
+    let unrelated_same_spelling = SOURCE_TRAIT_PRODUCT1
+        .replace(
+            "object Matcher:",
+            "object Foreign:\n  final case class Created(id: Int)\n\nobject Matcher:",
+        )
+        .replace(
+            "      case Created(id)   => id",
+            "      case Foreign.Created(id)   => id",
+        );
+    let non_event_variant = SOURCE_TRAIT_PRODUCT1
+        .replace("sealed trait Event", "sealed trait Event\ntrait Other")
+        .replace("final case class Deleted(code: Int) extends Event", "final case class Deleted(code: Int) extends Other")
+        .replace(
+            "      case Deleted(_)  => 0",
+            "      case Deleted(_)  => 0\n\n  def valid(event: Event): Int =\n    event match\n      case Created(_) => 1\n      case _ => 0",
+        );
+    let cases = [
+        (
+            "created_bool_literal",
+            SOURCE_TRAIT_PRODUCT1.replace("case Created(0)", "case Created(true)"),
+            "classify",
+            "PatternTypeMismatch",
+            "rejected",
+        ),
+        (
+            "deleted_bool_literal",
+            SOURCE_TRAIT_PRODUCT1.replace("case Deleted(_)  => 0", "case Deleted(true)  => 0"),
+            "classify",
+            "PatternTypeMismatch",
+            "rejected",
+        ),
+        (
+            "created_zero_arity",
+            SOURCE_TRAIT_PRODUCT1.replace("case Created(id)   => id", "case Created()   => 0"),
+            "extract",
+            "ExtractorPatternArityUnsupported",
+            "rejected",
+        ),
+        (
+            "deleted_two_arity",
+            SOURCE_TRAIT_PRODUCT1.replace(
+                "case Deleted(code) => code",
+                "case Deleted(left, right) => left",
+            ),
+            "extract",
+            "ExtractorProductSelectorCountMismatch",
+            "rejected",
+        ),
+        (
+            "wrong_declared_result_after_cases",
+            SOURCE_TRAIT_PRODUCT1.replace(
+                "def extract(event: Event): Int",
+                "def extract(event: Event): Boolean",
+            ),
+            "extract",
+            "ExpectedExpressionTypeMismatch",
+            "rejected",
+        ),
+        (
+            "cross_case_binder_escape",
+            SOURCE_TRAIT_PRODUCT1.replace("case Deleted(code) => code", "case Deleted(code) => id"),
+            "extract",
+            "TermNameNotFound",
+            "rejected",
+        ),
+        (
+            "unrelated_string_extractor",
+            unrelated_extractor,
+            "extract",
+            "ExtractorPatternConstraintDeferred",
+            "rejected",
+        ),
+        (
+            "same_spelling_wrong_unapply_input",
+            unrelated_same_spelling,
+            "extract",
+            "ExtractorUnapplyNotFound",
+            "rejected",
+        ),
+        (
+            "non_event_variant",
+            non_event_variant,
+            "extract",
+            "ExtractorPatternConstraintDeferred",
+            "rejected",
+        ),
+    ];
+
+    let mut matrix_receipts = Vec::new();
+    for (offset, (label, source_text, method_name, expected_error, scala_status)) in
+        cases.into_iter().enumerate()
+    {
+        assert_ne!(
+            source_text, SOURCE_TRAIT_PRODUCT1,
+            "{label} mutation must apply"
+        );
+        // Keep the malformed source unit intact for its failure diagnostics,
+        // and append an isolated copy of the canonical fixture. These two
+        // untouched positive roots must still be typed for the first time in
+        // this live SourceTyper after the failure and retry.
+        let mut source_text = source_text;
+        let original_source_len = source_text.len() as u32;
+        let canonical_fixture = SOURCE_TRAIT_PRODUCT1
+            .strip_prefix("package adt\n")
+            .expect("canonical fixture package header");
+        source_text.push_str(&format!(
+            "\npackage canonical {{\n{canonical_fixture}\n}}\n"
+        ));
+        let source = SourceId::from_index(19_990 + offset as u32);
+        let mut session = Session::new(&source_text, source);
+        let failed_method = session.method_named(method_name);
+        let prior_method = session.method_named(if label == "non_event_variant" {
+            "valid"
+        } else if method_name == "extract" {
+            "classify"
+        } else {
+            "extract"
+        });
+        let canonical_extract = session.method_named_after("extract", original_source_len);
+        let canonical_classify = session.method_named_after("classify", original_source_len);
+        let rhs = match &session.parsed.ast.get(failed_method).kind {
+            TreeKind::DefDef(definition) => definition.rhs.unwrap(),
+            _ => panic!("failed root is not a DefDef"),
+        };
+        let match_tree = session
+            .parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                (tree == rhs && matches!(node.kind, TreeKind::Match(_))).then_some(tree)
+            })
+            .expect("frozen root body is one Match");
+        let root_range = session
+            .parsed
+            .ast
+            .get(failed_method)
+            .position
+            .unwrap()
+            .span()
+            .range();
+        let match_range = session
+            .parsed
+            .ast
+            .get(match_tree)
+            .position
+            .unwrap()
+            .span()
+            .range();
+        session.with_typer(|source, parsed, index, _definitions, typer| {
+            let prior_typed = typer
+                .type_method_definition(prior_method)
+                .expect("the other frozen method remains a valid whole-method root");
+            let before = event_method_failure_projection(typer, source, parsed, index);
+            let first = typer
+                .type_method_definition(failed_method)
+                .expect_err("the malformed whole method is rejected");
+            let diagnostic = format!("{first:?}");
+            assert!(diagnostic.starts_with(expected_error), "{label}: {diagnostic}");
+            let diagnostic_tree = diagnostic
+                .split_once("tree_index: ")
+                .and_then(|(_, suffix)| suffix.split_once([',', '}']))
+                .and_then(|(index, _)| index.parse::<u32>().ok())
+                .expect("typer diagnostic includes its source tree index");
+            let diagnostic_range = parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| {
+                    (tree.index() == diagnostic_tree)
+                        .then(|| node.position.map(|position| position.span().range()))
+                        .flatten()
+                })
+                .expect("first diagnostic source tree has a span");
+            let after_first = event_method_failure_projection(typer, source, parsed, index);
+            let changed = event_method_failure_projection_changes(&before, &after_first);
+            assert!(changed.is_empty(), "{label}: changed {changed:?} after failure rollback");
+            assert_eq!(typer.source_typed_index().get(source, failed_method), None);
+            assert_eq!(
+                typer.source_typed_index().get(source, prior_method),
+                Some(prior_typed),
+                "{label}: a previously successful sibling remains published"
+            );
+            let retry = typer
+                .type_method_definition(failed_method)
+                .expect_err("retry remains rejected");
+            assert_eq!(format!("{retry:?}"), diagnostic, "{label}: retry is stable");
+            let after_retry = event_method_failure_projection(typer, source, parsed, index);
+            let changed = event_method_failure_projection_changes(&before, &after_retry);
+            assert!(changed.is_empty(), "{label}: changed {changed:?} before retry rollback");
+            assert!(typer.source_typed_index().get(source, canonical_extract).is_none());
+            assert!(typer.source_typed_index().get(source, canonical_classify).is_none());
+            let same_session_identity = [canonical_extract, canonical_classify]
+                .map(|root| {
+                    typer
+                        .type_method_definition(root)
+                        .expect("canonical positive root types after failure and retry");
+                    event_recovery_identity(typer, source, parsed, index, root)
+                });
+            assert_eq!(
+                typer.source_typed_index().get(source, prior_method),
+                Some(prior_typed),
+                "the earlier successful root remains published alongside both new roots"
+            );
+
+            let fresh_source = SourceId::from_index(29_990 + offset as u32);
+            let mut fresh = Session::new(&source_text, fresh_source);
+            let fresh_failed_method = fresh.method_named(method_name);
+            let fresh_extract = fresh.method_named_after("extract", original_source_len);
+            let fresh_classify = fresh.method_named_after("classify", original_source_len);
+            fresh.with_typer(|fresh_source, fresh_parsed, fresh_index, _, fresh_typer| {
+                let fresh_error = fresh_typer
+                    .type_method_definition(fresh_failed_method)
+                    .expect_err("fresh session rejects the same whole method");
+                let fresh_diagnostic = format!("{fresh_error:?}");
+                assert!(
+                    fresh_diagnostic.starts_with(expected_error),
+                    "{label}: fresh-session diagnostic {fresh_diagnostic}"
+                );
+                let fresh_tree = fresh_diagnostic
+                    .split_once("tree_index: ")
+                    .and_then(|(_, suffix)| suffix.split_once([',', '}']))
+                    .and_then(|(tree, _)| tree.parse::<u32>().ok())
+                    .expect("fresh-session diagnostic has source tree index");
+                assert_eq!(fresh_tree, diagnostic_tree, "{label}: normalized error tree");
+                let fresh_range = fresh_parsed
+                    .ast
+                    .iter()
+                    .find_map(|(tree, node)| {
+                        (tree.index() == fresh_tree)
+                            .then(|| node.position.map(|position| position.span().range()))
+                            .flatten()
+                    })
+                    .expect("fresh-session diagnostic source tree has span");
+                assert_eq!(fresh_range, diagnostic_range, "{label}: normalized diagnostic span");
+                let fresh_identity = [fresh_extract, fresh_classify].map(|root| {
+                    fresh_typer
+                        .type_method_definition(root)
+                        .expect("fresh session can type canonical roots after failure");
+                    event_recovery_identity(
+                        fresh_typer,
+                        fresh_source,
+                        fresh_parsed,
+                        fresh_index,
+                        root,
+                    )
+                });
+                assert_eq!(fresh_identity, same_session_identity,
+                    "{label}: both canonical roots have fresh-session semantic parity");
+            });
+            matrix_receipts.push(format!(
+                "{label}\tEvent.scala#tree{}@{}..{}\tMatch#tree{}@{}..{}\tErrorTree#tree{diagnostic_tree}@{}..{}\t{expected_error}\tScala:{scala_status}\t{diagnostic}",
+                failed_method.index(),
+                root_range.start(),
+                root_range.end(),
+                match_tree.index(),
+                match_range.start(),
+                match_range.end(),
+                diagnostic_range.start(),
+                diagnostic_range.end(),
+            ));
+        });
+    }
+    // The diagnostic snapshot contains arena IDs. Canonical scala.Boolean
+    // TASTy lowering now reuses Definitions.boolean rather than allocating
+    // an equivalent TypeRef, shifting later TypeIds without changing these
+    // negative cases or their rejection classes.
+    assert_eq!(
+        format!(
+            "case\tmethod root\tMatch\tfirst error tree\tTyper diagnostic\tScala\tTyper detail\n{}\n",
+            matrix_receipts.join("\n")
+        ),
+        include_str!("fixtures/source-sealed-adt-match-3.9.0/rust-failure-matrix.tsv")
+    );
+}
+
+fn event_recovery_identity(
+    typer: &SourceTyper<'_>,
+    source: SourceId,
+    parsed: &dotty_parser::ParseResult,
+    index: &dotty_core::SourceSemanticIndex,
+    method: TreeId<Untyped>,
+) -> String {
+    let typed_root = typer
+        .source_typed_index()
+        .get(source, method)
+        .expect("recovered method root is published");
+    let method_symbol = index.symbol_at(source, method).expect("method symbol");
+    let signature = match *typer.store().symbols.info(method_symbol) {
+        SymbolInfo::Complete(signature) => signature,
+        other => panic!("recovered method has complete signature: {other:?}"),
+    };
+    let Type::Method(signature) = typer.store().types.get(signature) else {
+        panic!("recovered method has MethodType signature")
+    };
+    let source_definition = match &parsed.ast.get(method).kind {
+        TreeKind::DefDef(definition) => definition,
+        _ => panic!("recovered source root is DefDef"),
+    };
+    let typed_definition = match &typer.typed_ast().get(typed_root).kind {
+        TreeKind::DefDef(definition) => definition,
+        _ => panic!("recovered typed root is DefDef"),
+    };
+    let source_rhs = source_definition.rhs.expect("recovered method has RHS");
+    let typed_rhs = typed_definition.rhs.expect("typed method has RHS");
+    let (TreeKind::Match(source_match), TreeKind::Match(typed_match)) = (
+        &parsed.ast.get(source_rhs).kind,
+        &typer.typed_ast().get(typed_rhs).kind,
+    ) else {
+        panic!("recovered method body is Match")
+    };
+    let mut cases = Vec::new();
+    for (source_case, typed_case) in source_match.cases.iter().zip(&typed_match.cases) {
+        let TreeKind::CaseDef(source_case) = &parsed.ast.get(*source_case).kind else {
+            panic!("recovered source branch is CaseDef")
+        };
+        let TreeKind::CaseDef(typed_case) = &typer.typed_ast().get(*typed_case).kind else {
+            panic!("recovered typed branch is CaseDef")
+        };
+        match &typer.typed_ast().get(typed_case.pattern).kind {
+            TreeKind::UnApply(unapply) => {
+                let extractor = typed_symbol(typer.typed_ast(), typer.store(), unapply.function);
+                let extractor_owner = typer.store().symbols.get(extractor).owner.unwrap();
+                let extractor_owner_name = typer
+                    .store()
+                    .names
+                    .resolve(typer.store().symbols.get(extractor_owner).name.text());
+                let binders = unapply
+                    .patterns
+                    .iter()
+                    .filter_map(|pattern| match &typer.typed_ast().get(*pattern).kind {
+                        TreeKind::Bind(binding) => {
+                            let symbol = typed_symbol(typer.typed_ast(), typer.store(), *pattern);
+                            let ty = match *typer.store().symbols.info(symbol) {
+                                SymbolInfo::Complete(ty) => type_display_name(typer, ty),
+                                other => panic!("case binder has complete type: {other:?}"),
+                            };
+                            Some(format!(
+                                "{}:{ty}",
+                                typer.store().names.resolve(binding.name.text())
+                            ))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                cases.push(format!("{extractor_owner_name}({})", binders.join(",")));
+            }
+            TreeKind::Ident(ident) => {
+                cases.push(typer.store().names.resolve(ident.name.text()).to_owned())
+            }
+            other => panic!("recovered pattern is supported UnApply or Ident: {other:?}"),
+        }
+        assert!(
+            typer
+                .source_typed_index()
+                .get(source, source_case.pattern)
+                .is_some()
+        );
+    }
+    let param_types = signature
+        .params
+        .iter()
+        .map(|parameter| type_display_name(typer, parameter.ty))
+        .collect::<Vec<_>>();
+    format!(
+        "owner={};params={param_types:?};result={};cases={cases:?};mapped={}",
+        typer.store().names.resolve(
+            typer
+                .store()
+                .symbols
+                .get(typer.store().symbols.get(method_symbol).owner.unwrap())
+                .name
+                .text()
+        ),
+        type_display_name(typer, signature.result),
+        source_match.cases.len(),
+    )
+}
+
+fn type_display_name(typer: &SourceTyper<'_>, ty: dotty_core::TypeId) -> String {
+    match typer.store().types.try_get(ty) {
+        Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        }) => typer
+            .store()
+            .names
+            .resolve(typer.store().symbols.get(*symbol).name.text())
+            .to_owned(),
+        Some(other) => format!("{:?}", std::mem::discriminant(other)),
+        None => "missing".to_owned(),
+    }
+}
+
+fn event_method_failure_projection(
+    typer: &SourceTyper<'_>,
+    source: SourceId,
+    parsed: &dotty_parser::ParseResult,
+    index: &dotty_core::SourceSemanticIndex,
+) -> Vec<(&'static str, String)> {
+    let mappings = parsed
+        .ast
+        .iter()
+        .map(|(tree, _)| (tree.index(), typer.source_typed_index().get(source, tree)))
+        .collect::<Vec<_>>();
+    let binders = parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, node)| {
+            matches!(node.kind, TreeKind::Bind(_))
+                .then_some((tree.index(), typer.pattern_binding_symbol_at(source, tree)))
+        })
+        .collect::<Vec<_>>();
+    let typed_nodes = typer
+        .typed_ast()
+        .iter()
+        .map(|(tree, node)| (tree.index(), node.clone()))
+        .collect::<Vec<_>>();
+    let mut scopes = parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, _)| index.symbol_at(source, tree))
+        .filter_map(|symbol| index.scope_of(symbol).map(|scope| (symbol, scope)))
+        .map(|(symbol, scope)| {
+            let mut members = typer
+                .store()
+                .scopes
+                .get(scope)
+                .entered_symbols()
+                .map(|member| member.index())
+                .collect::<Vec<_>>();
+            members.sort_unstable();
+            format!(
+                "symbol={};scope={};members={members:?}",
+                symbol.index(),
+                scope.index()
+            )
+        })
+        .collect::<Vec<_>>();
+    scopes.sort();
+    scopes.dedup();
+    vec![
+        ("store", format!("{:?}", typer.store().checkpoint())),
+        ("symbols", format!("{:?}", typer.store().symbols)),
+        ("types", format!("{:?}", typer.store().types)),
+        ("source scopes", format!("{scopes:?}")),
+        (
+            "typed checkpoint",
+            format!("{:?}", typer.typed_ast().checkpoint()),
+        ),
+        ("typed nodes", format!("{typed_nodes:?}")),
+        (
+            "source typed index length",
+            format!("{}", typer.source_typed_index().len()),
+        ),
+        ("source typed mappings", format!("{mappings:?}")),
+        ("case-local binders", format!("{binders:?}")),
+    ]
+}
+
+fn event_method_failure_projection_changes(
+    before: &[(&'static str, String)],
+    after: &[(&'static str, String)],
+) -> Vec<&'static str> {
+    before
+        .iter()
+        .zip(after)
+        .filter_map(|((name, before), (_, after))| (before != after).then_some(*name))
+        .collect()
+}
+
+#[test]
+fn sealed_event_rejects_variant_extractor_with_a_foreign_owner() {
+    let mut session = Session::new(SOURCE_TRAIT_PRODUCT1, SourceId::from_index(3998));
+    let created = session.source_type_symbol("Created");
+    let deleted = session.source_type_symbol("Deleted");
+    let method = session.method_named("extract");
+    let created_unapply = session
+        .index
+        .generated_case_class_method(created, GeneratedCaseClassMethodRole::Unapply)
+        .unwrap();
+    let deleted_unapply = session
+        .index
+        .generated_case_class_method(deleted, GeneratedCaseClassMethodRole::Unapply)
+        .unwrap();
+    let foreign_owner = session.store.symbols.get(deleted_unapply).owner.unwrap();
+    session.store.symbols.get_mut(created_unapply).owner = Some(foreign_owner);
+    let source = session.source;
+    session.with_typer(|_, _, _, _, typer| {
+        let error = typer
+            .type_method_definition(method)
+            .expect_err("a Created extractor cannot be authenticated by Deleted$ ownership");
+        assert!(matches!(
+            error,
+            TyperError::SymbolSourceKindMismatch {
+                tree_index: 11,
+                symbol,
+                kind: SymbolKind::Method,
+                ..
+            } if symbol == created_unapply
+        ));
+        assert!(typer.source_typed_index().get(source, method).is_none());
+        assert!(
+            typer.typed_ast().iter().next().is_none(),
+            "failed source method publishes no typed trees"
+        );
+    });
+    run_sealed_event_rejects_forged_companion_and_selector_ownership();
+}
+
+fn run_sealed_event_rejects_forged_companion_and_selector_ownership() {
+    for (offset, corruption) in ["forged companion link", "foreign _1 owner"]
+        .into_iter()
+        .enumerate()
+    {
+        let mut session = Session::new(
+            SOURCE_TRAIT_PRODUCT1,
+            SourceId::from_index(4_000 + offset as u32),
+        );
+        let source = session.source;
+        let created = session.source_type_symbol("Created");
+        let deleted = session.source_type_symbol("Deleted");
+        let method = session.method_named("extract");
+        let created_unapply = session
+            .index
+            .generated_case_class_method(created, GeneratedCaseClassMethodRole::Unapply)
+            .unwrap();
+        let deleted_companion = session.store.symbols.get(deleted).links.companion.unwrap();
+        let created_links = session.store.symbols.get(created).links;
+        let class_scope = session.index.scope_of(created).unwrap();
+        let selector_name = Name::new(session.store.names.intern("_1"), Namespace::Term);
+        let selector = session
+            .store
+            .scopes
+            .get(class_scope)
+            .lookup(&selector_name)
+            .unwrap();
+        let selector_owner = session.store.symbols.get(selector).owner;
+        match corruption {
+            "forged companion link" => {
+                session.store.symbols.get_mut(created).links.companion = Some(deleted_companion);
             }
             "foreign _1 owner" => {
                 session.store.symbols.get_mut(selector).owner = Some(deleted);
