@@ -35,4 +35,10 @@ branch's `Right(a)` constructor application. The original `Right(b)` pattern
 is tree 77, span `[8318, 8326)`, and remains outside this whole-method replay
 because the earlier branch body fails first. This increment does not type
 branch constructor applications or claim whole-method `Either.swap`
-acceptance.
+acceptance. A separate pinned-source regression replays the unchanged tree 69
+and tree 77 pattern subtrees in isolated `CaseDef` scopes, retaining their
+original source tree IDs and mappings while replacing each body with its own
+binder reference. It checks the applied `Left[A, B]`/`Right[A, B]` prototypes,
+canonical generated `unapply` identities, `Option[A]`/`Option[B]` result
+arguments, and exact selector-parameter binder identities. Two fresh sessions
+produce the same normalized receipt.

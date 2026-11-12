@@ -6,7 +6,7 @@ use dotty_core::{SourceId, SymbolId, SymbolInfo, TreeId, TypeId, Typed, Untyped}
 
 impl SourceTyper<'_> {
     /// Types one supported match case without opening a nested transaction.
-    pub(super) fn type_case_def(
+    pub(in crate::typer) fn type_case_def(
         &mut self,
         case_tree: TreeId<Untyped>,
         selector_type: TypeId,

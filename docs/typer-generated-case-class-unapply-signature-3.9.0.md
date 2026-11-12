@@ -115,10 +115,12 @@ selectors or claim successful typing of either whole method.
 
 The focused 25+25 method-cohort verifier keeps its checked-in historical
 receipt unchanged. Its live comparison permits only the measured transition
-for `Either.scala#tree=84` from the historical missing extractor to
-`ExtractorUnapplyPolymorphic` at pattern tree 69; all other receipt fields and
-roots must still match exactly. This records the issue's generated-signature
-progress without extending the acceptance scope to whole-method typing.
+for `Either.scala#tree=84` from the historical missing extractor through the
+`Left(a)` pattern to `UnconstrainedTypeParameter` at tree 72, the first
+`Right(a)` constructor application. The historical receipt, cohort membership,
+and all other receipt fields and roots remain unchanged. This records the
+issue's generic extractor-pattern progress without claiming whole-method
+typing.
 
 The checked-in typed-tree oracle is
 `crates/dotty-typer/tests/fixtures/source-case-class-match-3.9.0/Positive.scala39-typed-tree.txt`.

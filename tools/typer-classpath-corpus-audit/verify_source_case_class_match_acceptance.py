@@ -23,9 +23,13 @@ EITHER_SWAP_PREVIOUS_LIVE_BLOCKER = (
     "blocked::MalformedMethodClause { method: SymbolId(112), "
     "method_tree_index: 521, clause_index: 0 }"
 )
-EITHER_SWAP_LIVE_BLOCKER = (
+EITHER_SWAP_POLYMORPHIC_BLOCKER = (
     "blocked::ExtractorUnapplyPolymorphic { source: SourceId(0), tree_index: 69, "
     "unapply: SymbolId(112), callable: TypeId(552) }"
+)
+EITHER_SWAP_LIVE_BLOCKER = (
+    "blocked::UnconstrainedTypeParameter { source: SourceId(0), tree_index: 72, "
+    "binder: TypeId(491), parameter_index: 0 }"
 )
 PRODUCT2_FIXTURE = Path("crates/dotty-typer/tests/fixtures/source-case-class-product2-3.9.0")
 PRODUCT2_SOURCE_SHA256 = "4b144913df1d2021359c44633dc2a23f21bf6288bf2528c86cc6f53d79b8ee31"
@@ -1362,9 +1366,9 @@ def validate_cohorts(root: Path, reports: list[Path], output: Path, baseline_rec
             continue
         if wanted["identity"] == EITHER_SWAP_IDENTITY:
             # Keep the checked-in 2026-09 receipt immutable. Permit only the
-            # measured #2241 progression to the existing polymorphic extractor
-            # boundary in live cohorts, while requiring every non-status field
-            # to remain exactly historical.
+            # measured #2245 progression through the original Left extractor
+            # to the Right(a) constructor boundary, while requiring every
+            # non-status field to remain exactly historical.
             historical = dict(wanted)
             historical["first_status"] = EITHER_SWAP_HISTORICAL_BLOCKER
             historical["second_status"] = EITHER_SWAP_HISTORICAL_BLOCKER

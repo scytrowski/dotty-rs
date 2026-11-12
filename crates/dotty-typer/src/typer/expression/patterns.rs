@@ -1338,7 +1338,8 @@ impl SourceTyper<'_> {
                 result: result_type,
             });
         }
-        let conforms = if unapply_arguments.is_some() {
+        let generic_reverse_applicability = unapply_arguments.is_some();
+        let conforms = if generic_reverse_applicability {
             // The generic case-class helper authenticated the exact applied
             // Either parent after substituting its ordered class parameters.
             Ok(true)
@@ -1346,6 +1347,7 @@ impl SourceTyper<'_> {
             self.extractor_selector_conforms_to_input(selector_type, input_type, info_journal)
         };
         let unapply_type = match conforms {
+            Ok(true) if generic_reverse_applicability => input_type,
             Ok(true) if selector_type == self.definitions.nothing_type => input_type,
             Ok(true) => selector_type,
             Ok(false) => {
@@ -4108,7 +4110,23 @@ package scala.util {
             .type_of_tpt_inner_journaled(value_tpt, selector_context, &mut Vec::new())
             .unwrap();
         let mut binders = Vec::new();
-        for case_tree in cases.iter().copied().take(2) {
+        let source_class = |name: &str| {
+            parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::TypeDef(definition)
+                        if typer.store.names.resolve(definition.name.as_name().text()) == name =>
+                    {
+                        index.symbol_at(source, tree)
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let left_class = source_class("Left");
+        let right_class = source_class("Right");
+        for (case_index, case_tree) in cases.iter().copied().take(2).enumerate() {
             let typed_case = typer
                 .run_expression_transaction(|typer, journal, mappings| {
                     typer.type_case_def(case_tree, selector_type, context, journal, mappings)
@@ -4120,6 +4138,35 @@ package scala.util {
             let TreeKind::UnApply(unapply) = &typer.typed_arena.get(case_def.pattern).kind else {
                 panic!("typed UnApply")
             };
+            let prototype = typer.typed_arena.get(case_def.pattern).ty;
+            let Type::Applied { tycon, args } = typer.store.types.get(prototype) else {
+                panic!(
+                    "generic extractor prototype remains applied: {:?}",
+                    typer.store.types.get(prototype)
+                )
+            };
+            let Type::TypeRef {
+                target: TypeRefTarget::Symbol(prototype_class),
+                ..
+            } = typer.store.types.get(*tycon)
+            else {
+                panic!("applied prototype has canonical class tycon")
+            };
+            assert_eq!(
+                *prototype_class,
+                if case_index == 0 {
+                    left_class
+                } else {
+                    right_class
+                }
+            );
+            assert_eq!(
+                args,
+                &match typer.store.types.get(selector_type) {
+                    Type::Applied { args, .. } => args.clone(),
+                    other => panic!("generic Either selector: {other:?}"),
+                }
+            );
             assert_eq!(unapply.patterns.len(), 1);
             let binder_tree = match &parsed
                 .ast
