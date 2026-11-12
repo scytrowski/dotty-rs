@@ -16,3 +16,22 @@ synthetic entry for that name. This increment publishes identities only: it
 does not complete selector signatures, add Product ancestry, or change
 extractor typing. The compact identity summary is in
 `namer-source-case-class-product2-selectors-3.9.0.tsv`.
+
+## Generic Product1 identity
+
+For a source case class with exactly two unbounded first-order type parameters
+and one ordinary immutable constructor field directly typed as either
+parameter, Namer also publishes one class-owned synthetic public `_1` method
+identity. Its derived source binding points to the original constructor field
+tree, while its `SymbolInfo` remains missing. This includes renamed
+isomorphic declarations; eligibility does not depend on class names. Other
+generic shapes remain unsupported, and this identity does not provide result
+typing, receiver substitution, or Product ancestry.
+
+The pinned Scala 3.9.0 source revision
+`777528f19a58e794c9954a42f433373472ec57f8` declares
+`Left[+A, +B](value: A)` and `Right[+A, +B](value: B)` in
+`library/src/scala/util/Either.scala` (lines 555 and 577). Those declarations
+are the source evidence for the two supported parameter ordinals; Rust Namer
+records the selector identity and exact field provenance without claiming
+Scala Typer completion.

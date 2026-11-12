@@ -1993,18 +1993,18 @@ impl Namer<'_> {
                     template.constructor,
                     value_parameters,
                 ));
-        let synthesize_unapply = synthesize_product_selectors
-            || (top_level
-                && case_class_shape_supported
-                && constructor.value_param_clauses.len() == 1
-                && self.is_generic_product1_source_shape(
-                    tree,
-                    class_symbol,
-                    template.constructor,
-                    &constructor.type_params,
-                    value_parameters,
-                ));
-        if synthesize_product_selectors {
+        let generic_product1_source_shape = top_level
+            && case_class_shape_supported
+            && constructor.value_param_clauses.len() == 1
+            && self.is_generic_product1_source_shape(
+                tree,
+                class_symbol,
+                template.constructor,
+                &constructor.type_params,
+                value_parameters,
+            );
+        let synthesize_unapply = synthesize_product_selectors || generic_product1_source_shape;
+        if synthesize_product_selectors || generic_product1_source_shape {
             self.enter_case_class_product_selectors(tree, class_symbol, value_parameters)?;
         }
         if synthesize_unapply {
