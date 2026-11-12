@@ -30,6 +30,38 @@ const TWO_CALL_TARGET: &str =
     include_str!("fixtures/jvm_tasty_ordered_local_unit_calls/OrderedLocalUnitCalls.scala");
 const LOCAL_REFERENCE_ALIAS_TARGET: &str =
     include_str!("fixtures/jvm_tasty_local_reference_alias/LocalReferenceAlias.scala");
+const CONDITIONAL_REFERENCE_SELECTION_TARGET: &str = include_str!(
+    "fixtures/jvm_tasty_conditional_reference_selection/ConditionalReferenceSelection.scala"
+);
+const CONDITIONAL_CONTROL_SWAPPED: &str = include_str!(
+    "fixtures/jvm_tasty_conditional_reference_selection/controls/SwappedBranches.scala"
+);
+const CONDITIONAL_CONTROL_RENAMED: &str =
+    include_str!("fixtures/jvm_tasty_conditional_reference_selection/controls/RenamedLocals.scala");
+const CONDITIONAL_CONTROL_REVERSED: &str = include_str!(
+    "fixtures/jvm_tasty_conditional_reference_selection/controls/ReversedDeclarations.scala"
+);
+const CONDITIONAL_CONTROL_NON_BOOLEAN: &str = include_str!(
+    "fixtures/jvm_tasty_conditional_reference_selection/controls/NonBooleanCondition.scala"
+);
+const CONDITIONAL_CONTROL_WRONG_BRANCH: &str = include_str!(
+    "fixtures/jvm_tasty_conditional_reference_selection/controls/WrongBranchType.scala"
+);
+const CONDITIONAL_CONTROL_MISSING_LOCAL: &str =
+    include_str!("fixtures/jvm_tasty_conditional_reference_selection/controls/MissingLocal.scala");
+const CONDITIONAL_CONTROL_UNINITIALIZED: &str = include_str!(
+    "fixtures/jvm_tasty_conditional_reference_selection/controls/UninitializedReference.scala"
+);
+const CONDITIONAL_CONTROL_MUTABLE: &str = include_str!(
+    "fixtures/jvm_tasty_conditional_reference_selection/controls/MutableSelected.scala"
+);
+const CONDITIONAL_CONTROL_NESTED_IF: &str =
+    include_str!("fixtures/jvm_tasty_conditional_reference_selection/controls/NestedIf.scala");
+const CONDITIONAL_CONTROL_BRANCH_ALLOCATION: &str = include_str!(
+    "fixtures/jvm_tasty_conditional_reference_selection/controls/AllocationInBranch.scala"
+);
+const CONDITIONAL_CONTROL_SECOND_SETTER: &str =
+    include_str!("fixtures/jvm_tasty_conditional_reference_selection/controls/SecondSetter.scala");
 const ALIAS_CONTROL_RENAMED: &str =
     include_str!("fixtures/jvm_tasty_local_reference_alias/controls/RenamedLocalAlias.scala");
 const ALIAS_CONTROL_REVERSED: &str =
@@ -824,6 +856,439 @@ fn local_reference_alias_audit_authenticates_frontend_identities_and_first_paire
                     assert!(reason.contains(", expected: TypeId("));
                 }
                 other => panic!("invalid alias-type control fails during typing: {other:?}"),
+            },
+        }
+    }
+}
+
+#[test]
+fn conditional_reference_selection_authenticates_frontend_and_current_first_failure() {
+    let source_prefix = CONDITIONAL_REFERENCE_SELECTION_TARGET
+        .split_once("class PairFactory:")
+        .map(|(prefix, _)| prefix)
+        .expect("conditional target has the original declarations");
+    let alias_prefix = LOCAL_REFERENCE_ALIAS_TARGET
+        .split_once("class PairFactory:")
+        .map(|(prefix, _)| prefix)
+        .expect("alias donor has the original declarations");
+    assert_eq!(source_prefix, alias_prefix);
+
+    let source_id = SourceId::from_index(22650);
+    let source_text = SourceText::new(CONDITIONAL_REFERENCE_SELECTION_TARGET).unwrap();
+    let scanner = ContextualScanner::new(CONDITIONAL_REFERENCE_SELECTION_TARGET).unwrap();
+    assert!(scanner.diagnostics().is_empty());
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let parsed = parse_compilation_unit(source_text, source_id, scanner, &mut store.names);
+    assert!(parsed.diagnostics.is_empty());
+    let mut packages = Packages::new();
+    let source_index = match name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source_id,
+        "ConditionalReferenceSelection.scala",
+        SourceParseStatus::Clean,
+        &mut store,
+        &mut packages,
+    )
+    .unwrap()
+    {
+        NamingOutcome::Named { index, diagnostics } if diagnostics.is_empty() => index,
+        outcome => panic!("conditional target names cleanly: {outcome:?}"),
+    };
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("target package root");
+    };
+    assert_eq!(package.stats.len(), 3);
+    let factory_tree = *package.stats.last().unwrap();
+    let factory = source_index.symbol_at(source_id, factory_tree).unwrap();
+    let TreeKind::TypeDef(factory_def) = &parsed.ast.get(factory_tree).kind else {
+        panic!("PairFactory is a class");
+    };
+    let TreeKind::Template(factory_template) = &parsed.ast.get(factory_def.rhs).kind else {
+        panic!("PairFactory has a template");
+    };
+    let create_tree = *factory_template
+        .body
+        .iter()
+        .find(|tree| {
+            matches!(
+                &parsed.ast.get(**tree).kind,
+                TreeKind::DefDef(def) if def.rhs.is_some()
+            )
+        })
+        .unwrap();
+    let create = source_index.symbol_at(source_id, create_tree).unwrap();
+    let TreeKind::DefDef(create_def) = &parsed.ast.get(create_tree).kind else {
+        panic!("create is a method");
+    };
+    let formals = create_def.value_param_clauses[0]
+        .iter()
+        .map(|tree| source_index.symbol_at(source_id, *tree).unwrap())
+        .collect::<Vec<SymbolId>>();
+    let [first_seed, second_seed, choose_first, next_value] = formals.as_slice() else {
+        panic!("create retains its four source formals");
+    };
+    assert_eq!(store.symbols.get(*first_seed).owner, Some(create));
+    assert_eq!(store.symbols.get(*second_seed).owner, Some(create));
+    let body_tree = create_def.rhs.expect("create has a body");
+    let TreeKind::Block(block) = &parsed.ast.get(body_tree).kind else {
+        panic!("create body is a source block");
+    };
+    assert_eq!(block.stats.len(), 4);
+    assert!(
+        block.stats[..3]
+            .iter()
+            .all(|tree| matches!(&parsed.ast.get(*tree).kind, TreeKind::ValDef(_)))
+    );
+    assert!(matches!(
+        &parsed.ast.get(block.stats[3]).kind,
+        TreeKind::Apply(_)
+    ));
+
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source_id,
+        &source_index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for class_tree in package.stats.iter().copied() {
+        let class = source_index.symbol_at(source_id, class_tree).unwrap();
+        typer.complete_symbol(class).unwrap();
+        let TreeKind::TypeDef(def) = &parsed.ast.get(class_tree).kind else {
+            unreachable!();
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(def.rhs).kind else {
+            unreachable!();
+        };
+        typer
+            .complete_symbol(
+                source_index
+                    .symbol_at(source_id, template.constructor)
+                    .unwrap(),
+            )
+            .unwrap();
+        for member in template.body.iter().copied() {
+            if matches!(&parsed.ast.get(member).kind, TreeKind::DefDef(_)) {
+                typer.type_method_definition(member).unwrap();
+            }
+        }
+    }
+
+    let bindings = block.stats[..3]
+        .iter()
+        .map(|tree| typer.typed_local_binding_at(source_id, *tree).unwrap())
+        .collect::<Vec<_>>();
+    let [first, second, selected] = bindings.as_slice() else {
+        panic!("target has exactly two allocated Counter locals and one selection local");
+    };
+    for binding in bindings.iter() {
+        assert_eq!(
+            typer.store().symbols.get(binding.symbol()).owner,
+            Some(create)
+        );
+        assert_eq!(
+            typer.store().scopes.get(binding.scope()).owner,
+            Some(create)
+        );
+    }
+    assert_ne!(first.symbol(), second.symbol());
+    assert_ne!(selected.symbol(), first.symbol());
+    assert_ne!(selected.symbol(), second.symbol());
+
+    let typed_stats = block
+        .stats
+        .iter()
+        .map(|tree| {
+            typer
+                .source_typed_index()
+                .get(source_id, *tree)
+                .expect("every source statement has a typed identity")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        typed_stats[..3],
+        [
+            first.declaration(),
+            second.declaration(),
+            selected.declaration()
+        ]
+    );
+    let typed_body = typer
+        .source_typed_index()
+        .get(source_id, body_tree)
+        .expect("source method block maps to typed block");
+    let TreeKind::Block(typed_block) = &typer.typed_ast().get(typed_body).kind else {
+        panic!("create keeps a typed block");
+    };
+    assert_eq!(typed_block.stats, typed_stats);
+
+    let typed_ast = typer.typed_ast();
+    let TreeKind::ValDef(selected_val) = &typed_ast.get(selected.declaration()).kind else {
+        panic!("selected binding points to its typed ValDef");
+    };
+    let selected_rhs = selected_val.rhs.expect("selected has an initializer");
+    let TreeKind::If(typed_if) = &typed_ast.get(selected_rhs).kind else {
+        panic!("selected initializer remains a typed If");
+    };
+    let source_selected_rhs = match &parsed.ast.get(block.stats[2]).kind {
+        TreeKind::ValDef(val) => val.rhs.expect("selected has a source initializer"),
+        _ => unreachable!(),
+    };
+    let TreeKind::If(source_if) = &parsed.ast.get(source_selected_rhs).kind else {
+        panic!("selected initializer is a source If");
+    };
+    assert_eq!(
+        typer
+            .source_typed_index()
+            .get(source_id, source_selected_rhs),
+        Some(selected_rhs)
+    );
+    assert_eq!(
+        typer.source_typed_index().get(source_id, source_if.cond),
+        Some(typed_if.cond)
+    );
+    assert_eq!(
+        typer
+            .source_typed_index()
+            .get(source_id, source_if.then_branch),
+        Some(typed_if.then_branch)
+    );
+    assert_eq!(
+        typer
+            .source_typed_index()
+            .get(source_id, source_if.else_branch),
+        Some(typed_if.else_branch)
+    );
+    let term_symbol = |tree| match typer.store().types.get(typed_ast.get(tree).ty) {
+        Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        } => *symbol,
+        other => panic!("tree retains a canonical local reference: {other:?}"),
+    };
+    for (binding, formal) in [(first, *first_seed), (second, *second_seed)] {
+        let TreeKind::ValDef(local) = &typed_ast.get(binding.declaration()).kind else {
+            panic!("each original Counter local is a typed ValDef");
+        };
+        let TreeKind::Apply(construction) = &typed_ast.get(local.rhs.unwrap()).kind else {
+            panic!("each original Counter local is constructed by an application");
+        };
+        assert_eq!(construction.args.len(), 1);
+        assert_eq!(term_symbol(construction.args[0]), formal);
+    }
+    assert_eq!(term_symbol(typed_if.cond), *choose_first);
+    assert_eq!(term_symbol(typed_if.then_branch), first.symbol());
+    assert_eq!(term_symbol(typed_if.else_branch), second.symbol());
+
+    let typed_set = typed_stats[3];
+    let TreeKind::Apply(set_call) = &typed_ast.get(typed_set).kind else {
+        panic!("selected.set remains an application");
+    };
+    let TreeKind::Select(set_selection) = &typed_ast.get(set_call.function).kind else {
+        panic!("selected.set has a selected receiver");
+    };
+    assert_eq!(term_symbol(set_selection.qualifier), selected.symbol());
+    assert_eq!(term_symbol(set_call.args[0]), *next_value);
+    assert_eq!(
+        typer.source_typed_index().get(source_id, block.stats[3]),
+        Some(typed_set)
+    );
+
+    let source_pair = block.expr;
+    let typed_pair = typer
+        .source_typed_index()
+        .get(source_id, source_pair)
+        .expect("final Pair expression has a typed identity");
+    let TreeKind::Apply(pair_call) = &typed_ast.get(typed_pair).kind else {
+        panic!("create result is a Pair constructor application");
+    };
+    let pair_arguments = pair_call
+        .args
+        .iter()
+        .map(|argument| term_symbol(*argument))
+        .collect::<Vec<_>>();
+    assert_eq!(pair_arguments, [first.symbol(), second.symbol()]);
+
+    println!(
+        "conditional source_id={source_id:?}; factory={factory:?}; create={create:?}; formals={formals:?}; locals=[{:?}@{:?}, {:?}@{:?}, {:?}@{:?}]; source_to_typed={:?}; if_source=({:?}, {:?}, {:?}); if_typed=({:?}, {:?}, {:?}); set=({:?}, {:?}) receiver={:?} arg={:?}; pair=({source_pair:?}, {typed_pair:?}) args={pair_arguments:?}",
+        first.symbol(),
+        first.scope(),
+        second.symbol(),
+        second.scope(),
+        selected.symbol(),
+        selected.scope(),
+        block
+            .stats
+            .iter()
+            .copied()
+            .zip(typed_stats.iter().copied())
+            .collect::<Vec<_>>(),
+        source_if.cond,
+        source_if.then_branch,
+        source_if.else_branch,
+        typed_if.cond,
+        typed_if.then_branch,
+        typed_if.else_branch,
+        block.stats[3],
+        typed_set,
+        selected.symbol(),
+        term_symbol(set_call.args[0]),
+    );
+
+    let mut callback_reached = false;
+    let result = with_paired_jvm_tasty_batch_plan(
+        CONDITIONAL_REFERENCE_SELECTION_TARGET,
+        "ConditionalReferenceSelection.scala",
+        SourceId::from_index(22651),
+        |_| callback_reached = true,
+    );
+    println!("conditional target current paired producer result: {result:?}");
+    assert!(
+        !callback_reached,
+        "a rejected target does not publish a batch plan"
+    );
+    match &result {
+        Err(PairedPlanError::BatchUnit { phase, reason }) => {
+            assert_eq!(*phase, "cross-class constructor-call identity proof");
+            assert_eq!(
+                reason,
+                "SourceShape(\"candidate method must have one plain formal clause and a concrete public body\")"
+            );
+        }
+        other => panic!("unexpected current first conditional producer result: {other:?}"),
+    }
+    assert!(
+        emit_paired_jvm_tasty_batch(
+            CONDITIONAL_REFERENCE_SELECTION_TARGET,
+            "ConditionalReferenceSelection.scala",
+            SourceId::from_index(22652),
+        )
+        .is_err(),
+        "a rejected target returns no accepted artifact batch"
+    );
+}
+
+#[test]
+fn conditional_reference_selection_controls_record_scala_and_rust_outcomes() {
+    let source_prefix = CONDITIONAL_REFERENCE_SELECTION_TARGET
+        .split_once("class PairFactory:")
+        .map(|(prefix, _)| prefix)
+        .expect("target has the shared Counter and Pair declarations");
+    enum ControlExpectation {
+        ValidButDeferred,
+        Invalid(String),
+    }
+    let invalid_reason = |source_id, tree_index, kind: &str| match kind {
+        "non-Boolean-condition" => format!(
+            "IfConditionTypeMismatch {{ source: SourceId({source_id}), tree_index: {tree_index}, actual: TypeId(5), expected: TypeId(8) }}"
+        ),
+        "wrong-branch-type" => format!(
+            "LocalValueTypeMismatch {{ source: SourceId({source_id}), tree_index: {tree_index}, actual: TypeId(105), expected: TypeId(101) }}"
+        ),
+        "missing-local" => format!(
+            "TermNameNotFound {{ source: SourceId({source_id}), tree_index: {tree_index}, name: Name {{ text: NameId(72), namespace: Term }}, position: Some(SourceSpan {{ source: SourceId({source_id}), span: Span {{ range: TextRange {{ start: 621, end: 632 }}, point: None }} }}) }}"
+        ),
+        "uninitialized-reference" => format!(
+            "TermNameNotFound {{ source: SourceId({source_id}), tree_index: {tree_index}, name: Name {{ text: NameId(72), namespace: Term }}, position: Some(SourceSpan {{ source: SourceId({source_id}), span: Span {{ range: TextRange {{ start: 571, end: 576 }}, point: None }} }}) }}"
+        ),
+        _ => unreachable!(),
+    };
+    for (name, control, source_id, expectation) in [
+        (
+            "swapped-branches",
+            CONDITIONAL_CONTROL_SWAPPED,
+            22660,
+            ControlExpectation::ValidButDeferred,
+        ),
+        (
+            "renamed-locals",
+            CONDITIONAL_CONTROL_RENAMED,
+            22661,
+            ControlExpectation::ValidButDeferred,
+        ),
+        (
+            "reversed-declarations",
+            CONDITIONAL_CONTROL_REVERSED,
+            22662,
+            ControlExpectation::ValidButDeferred,
+        ),
+        (
+            "non-Boolean-condition",
+            CONDITIONAL_CONTROL_NON_BOOLEAN,
+            22663,
+            ControlExpectation::Invalid(invalid_reason(22663, 71, "non-Boolean-condition")),
+        ),
+        (
+            "wrong-branch-type",
+            CONDITIONAL_CONTROL_WRONG_BRANCH,
+            22664,
+            ControlExpectation::Invalid(invalid_reason(22664, 72, "wrong-branch-type")),
+        ),
+        (
+            "missing-local",
+            CONDITIONAL_CONTROL_MISSING_LOCAL,
+            22665,
+            ControlExpectation::Invalid(invalid_reason(22665, 70, "missing-local")),
+        ),
+        (
+            "uninitialized-reference",
+            CONDITIONAL_CONTROL_UNINITIALIZED,
+            22666,
+            ControlExpectation::Invalid(invalid_reason(22666, 63, "uninitialized-reference")),
+        ),
+        (
+            "mutable-selected",
+            CONDITIONAL_CONTROL_MUTABLE,
+            22667,
+            ControlExpectation::ValidButDeferred,
+        ),
+        (
+            "nested-if",
+            CONDITIONAL_CONTROL_NESTED_IF,
+            22668,
+            ControlExpectation::ValidButDeferred,
+        ),
+        (
+            "allocation-in-branch",
+            CONDITIONAL_CONTROL_BRANCH_ALLOCATION,
+            22669,
+            ControlExpectation::ValidButDeferred,
+        ),
+        (
+            "second-independent-setter",
+            CONDITIONAL_CONTROL_SECOND_SETTER,
+            22670,
+            ControlExpectation::ValidButDeferred,
+        ),
+    ] {
+        let factory_source = control
+            .strip_prefix("package example\n\n")
+            .expect("independent control carries its package declaration");
+        let source = format!("{source_prefix}{factory_source}");
+        let result = paired_result(&source, source_id);
+        println!("conditional control {name}: {result:?}");
+        match expectation {
+            ControlExpectation::ValidButDeferred => match result {
+                Err(PairedPlanError::BatchUnit { phase, reason }) => {
+                    assert_eq!(phase, "cross-class constructor-call identity proof");
+                    assert_eq!(
+                        reason,
+                        "SourceShape(\"candidate method must have one plain formal clause and a concrete public body\")"
+                    );
+                }
+                other => panic!("valid-but-deferred control {name}: {other:?}"),
+            },
+            ControlExpectation::Invalid(expected_reason) => match result {
+                Err(PairedPlanError::BatchClass {
+                    class_index: 2,
+                    declaration_index: 0,
+                    phase: "method body typing",
+                    reason,
+                }) => assert_eq!(reason, expected_reason),
+                other => panic!("Scala-invalid control {name} fails at typing: {other:?}"),
             },
         }
     }
