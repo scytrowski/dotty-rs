@@ -331,9 +331,7 @@ fn verify_rust_candidate_with_pinned_scala(candidate: &[u8]) {
         scala39_toolchain::scalac(&pinned.java_home, &pinned.scalac, scratch.clone());
     let printed = successful_scala(
         print_tasty
-            .args(["-color:never", "-classpath"])
-            .arg(&classpath)
-            .arg("-print-tasty")
+            .args(["-color:never", "-print-tasty"])
             .arg(&candidate_path),
     );
     let printed = String::from_utf8_lossy(&printed.stdout);
@@ -350,9 +348,7 @@ fn verify_rust_candidate_with_pinned_scala(candidate: &[u8]) {
         scala39_toolchain::scalac(&pinned.java_home, &pinned.scalac, scratch.clone());
     let decompiled = successful_scala(
         decompile
-            .args(["-color:never", "-classpath"])
-            .arg(&classpath)
-            .arg("-decompile")
+            .args(["-color:never", "-decompile"])
             .arg(&candidate_path),
     );
     let decompiled = String::from_utf8_lossy(&decompiled.stdout);
