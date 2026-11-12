@@ -146,9 +146,9 @@ fn source_recursive_product1_rejects_unrelated_trait_field_and_keeps_sibling_ret
 }
 
 #[test]
-fn generic_product1_selector_identity_remains_explicitly_deferred() {
+fn generic_product1_selector_completes_without_expanding_match_support() {
     let source = SourceId::from_index(22620);
-    let text = "package scala.util\nsealed trait Either[+A, +B]\nfinal case class Left[+A, +B](value: A) extends Either[A, B]\nfinal case class Right[+A, +B](value: B) extends Either[A, B]\n";
+    let text = "package scala { trait Product }\npackage scala.util { sealed abstract class Either[+A, +B] extends Product; final case class Left[+A, +B](value: A) extends Either[A, B]; final case class Right[+A, +B](value: B) extends Either[A, B] }";
     let mut session = Session::new(text, source);
     for (class_name, field_parameter) in [("Left", "A"), ("Right", "B")] {
         let class = session.source_type_symbol(class_name);
@@ -191,71 +191,63 @@ fn generic_product1_selector_identity_remains_explicitly_deferred() {
         );
 
         session.with_typer(|_, _, _, _, typer| {
-            let store_before = typer.store().checkpoint();
-            let typed_before = typer.typed_ast().checkpoint();
-            let typed_mappings_before = typer.source_typed_index().len();
             let result = typer.complete_symbol(selector);
+            assert!(result.is_ok(), "selector-first projection completes: {result:?}");
             assert!(matches!(
-                &result,
-                Err(TyperError::DeclarationContextMissing { symbol }) if *symbol == selector
-            ), "selector-first completion must remain explicitly deferred: {result:?}");
-            assert_eq!(typer.store().checkpoint(), store_before);
-            assert_eq!(typer.typed_ast().checkpoint(), typed_before);
-            assert_eq!(typer.source_typed_index().len(), typed_mappings_before);
-            assert_eq!(*typer.store().symbols.info(class), SymbolInfo::Missing);
-            assert_eq!(*typer.store().symbols.info(selector), SymbolInfo::Missing);
-            assert_eq!(
-                typer
-                    .source_type_index()
-                    .type_at(source, field_tpt),
-                None,
-                "rejected selector completion must not cache a projected field type"
-            );
+                *typer.store().symbols.info(selector),
+                SymbolInfo::Complete(_)
+            ));
+            assert!(typer
+                .source_type_index()
+                .type_at(source, field_tpt)
+                .is_some());
 
             let class_info = typer
                 .complete_symbol(class)
-                .expect("generic class declarations remain completable");
+                .expect("generic class completion is stable after selector-first completion");
             assert!(matches!(typer.store().types.get(class_info), Type::ClassInfo(_)));
-            assert_eq!(*typer.store().symbols.info(selector), SymbolInfo::Missing);
+            assert!(matches!(
+                *typer.store().symbols.info(selector),
+                SymbolInfo::Complete(_)
+            ));
             let Type::ClassInfo(class_info) = typer.store().types.get(class_info) else {
                 unreachable!()
             };
-            for parent in &class_info.parents {
-                let tycon = match typer.store().types.get(*parent) {
+            let product_parent_count = class_info
+                .parents
+                .iter()
+                .filter(|parent| {
+                let tycon = match typer.store().types.get(**parent) {
                     Type::Applied { tycon, .. } => *tycon,
-                    _ => *parent,
+                    _ => **parent,
                 };
-                let is_product = matches!(
+                matches!(
                     typer.store().types.get(tycon),
                     Type::TypeRef {
                         target: TypeRefTarget::Symbol(product),
                         ..
                     } if typer.store().names.resolve(typer.store().symbols.get(*product).name.text()) == "Product"
-                );
-                assert!(!is_product, "generic class-first completion must not add Product");
-            }
+                )
+                })
+                .count();
+            assert_eq!(
+                product_parent_count, 1,
+                "generic Product1 completion adds exactly one direct scala.Product edge"
+            );
 
             let store_before = typer.store().checkpoint();
             let typed_before = typer.typed_ast().checkpoint();
             let typed_mappings_before = typer.source_typed_index().len();
             let result = typer.complete_symbol(selector);
-            assert!(matches!(
-                &result,
-                Err(TyperError::DeclarationContextMissing { symbol }) if *symbol == selector
-            ), "class-first completion must leave selector semantics deferred: {result:?}");
+            assert!(result.is_ok(), "class-first projection remains complete: {result:?}");
             assert_eq!(typer.store().checkpoint(), store_before);
             assert_eq!(typer.typed_ast().checkpoint(), typed_before);
             assert_eq!(typer.source_typed_index().len(), typed_mappings_before);
-            assert_eq!(
+            assert!(matches!(
                 *typer.store().symbols.info(selector),
-                SymbolInfo::Missing
-            );
-            assert_eq!(
-                typer
-                    .source_type_index()
-                    .type_at(source, field_tpt),
-                None
-            );
+                SymbolInfo::Complete(_)
+            ));
+            assert!(typer.source_type_index().type_at(source, field_tpt).is_some());
         });
     }
 }

@@ -1040,6 +1040,8 @@ mod tests {
     mod issue_2179_relation_observation;
     #[path = "issue_2234_source_owner_preparation.rs"]
     mod issue_2234_source_owner_preparation;
+    #[path = "issue_2242_generic_product1.rs"]
+    mod issue_2242_generic_product1;
     use dotty_classloader::classloader::{
         ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError, ClassResource,
     };

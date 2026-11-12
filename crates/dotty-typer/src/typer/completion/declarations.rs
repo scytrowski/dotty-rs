@@ -246,6 +246,14 @@ impl SourceTyper<'_> {
                         parents[0],
                         info_journal,
                     )?,
+                (Some(selectors), 1)
+                    if selectors.len() == 1
+                        && self
+                            .source_class_type_parameters(symbol)
+                            .is_ok_and(|parameters| parameters.len() == 2) =>
+                {
+                    None
+                }
                 (Some(_), 1) => Some(self.validate_source_case_class_trait_parent(
                     symbol,
                     template.parents[0],
@@ -295,7 +303,26 @@ impl SourceTyper<'_> {
                 let field_type = selector_results[0].1;
                 let supported_reference = source_case_class_trait_parent
                     .is_some_and(|parent| self.is_canonical_source_trait_ref(field_type, parent));
-                if field_type != self.definitions.int && !supported_reference {
+                let supported_generic = self
+                    .source_case_class_either_parent(symbol, parents[0], info_journal)?
+                    .is_some()
+                    && matches!(
+                        self.store.types.try_get(field_type),
+                        Some(Type::TypeRef {
+                            target: TypeRefTarget::Symbol(parameter),
+                            ..
+                        }) if self.source_class_type_parameters(symbol)
+                            .is_ok_and(|parameters| parameters.contains(parameter))
+                                && self.store.symbols.get(*parameter).owner == Some(symbol)
+                    );
+                let generic_class = self
+                    .source_class_type_parameters(symbol)
+                    .is_ok_and(|parameters| parameters.len() == 2);
+                if (generic_class && !supported_generic)
+                    || (!generic_class
+                        && field_type != self.definitions.int
+                        && !supported_reference)
+                {
                     return Err(TyperError::UnsupportedProduct1FieldType {
                         class: symbol,
                         tree_index: template.constructor.index(),
@@ -421,6 +448,12 @@ impl SourceTyper<'_> {
         constructor: &dotty_core::ast::DefDef<Untyped>,
     ) -> Option<Vec<(TreeId<Untyped>, SymbolId)>> {
         let class_symbol = self.store.symbols.get(class);
+        let class_type_parameters = self.source_class_type_parameters(class).ok()?;
+        let constructor_field_count = constructor.value_param_clauses.first()?.len();
+        let generic_product1_shape = class_type_parameters.len() == 2
+            && template.parents.len() == 1
+            && constructor.value_param_clauses.len() == 1
+            && constructor_field_count == 1;
         if kind != SymbolKind::Class
             || class_symbol.kind != SymbolKind::Class
             || class_symbol.origin != SymbolOrigin::Source(self.source)
@@ -430,7 +463,7 @@ impl SourceTyper<'_> {
                     if source == self.source && self.index.symbol_at(source, tree) == Some(class)
             )
             || !class_symbol.flags.contains(SymbolFlags::CASE)
-            || !self.source_class_type_parameters(class).ok()?.is_empty()
+            || !(class_type_parameters.is_empty() || generic_product1_shape)
             || template.parents.len() > 1
             || constructor.value_param_clauses.len() != 1
             || !matches!(constructor.value_param_clauses[0].len(), 1 | 2)
@@ -500,6 +533,88 @@ impl SourceTyper<'_> {
             projection.push((*parameter_tree, selector));
         }
         Some(projection)
+    }
+
+    /// Authenticates the bounded generic parent shape used by Scala's
+    /// `scala.util.Left` and `Right`: a canonical source `Either[A, B]` class
+    /// whose arguments are the class's own parameters in declaration order.
+    pub(super) fn source_case_class_either_parent(
+        &mut self,
+        class: SymbolId,
+        parent_type: TypeId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Option<SymbolId>, TyperError> {
+        let Ok(class_parameters) = self.source_class_type_parameters(class) else {
+            return Ok(None);
+        };
+        if class_parameters.len() != 2 {
+            return Ok(None);
+        }
+        let Some(Type::Applied { tycon, args }) = self.store.types.try_get(parent_type) else {
+            return Ok(None);
+        };
+        let Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(parent),
+            ..
+        }) = self.store.types.try_get(*tycon)
+        else {
+            return Ok(None);
+        };
+        let parent = *parent;
+        if !self.store.symbols.contains(parent) {
+            return Ok(None);
+        }
+        let parent_symbol = self.store.symbols.get(parent);
+        if args.len() != 2
+            || parent_symbol.kind != SymbolKind::Class
+            || !parent_symbol.flags.contains(SymbolFlags::ABSTRACT)
+            || parent_symbol.origin != SymbolOrigin::Source(self.source)
+            || parent_symbol.name.namespace() != dotty_core::Namespace::Type
+            || self.store.names.resolve(parent_symbol.name.text()) != "Either"
+            || !self
+                .store
+                .symbols
+                .get(parent)
+                .owner
+                .is_some_and(|owner| self.package_path(owner) == ["scala", "util"])
+            || !matches!(
+                self.index.definition_of(parent),
+                Some(SourceDefinition::Canonical { source, tree })
+                    if source == self.source && self.index.symbol_at(source, tree) == Some(parent)
+            )
+        {
+            return Ok(None);
+        }
+        let Ok(parent_parameters) = self.source_class_type_parameters(parent) else {
+            return Ok(None);
+        };
+        if parent_parameters.len() != 2
+            || args
+                .iter()
+                .zip(class_parameters)
+                .any(|(argument, parameter)| {
+                    !matches!(
+                        self.store.types.try_get(*argument),
+                        Some(Type::TypeRef {
+                            target: TypeRefTarget::Symbol(actual),
+                            ..
+                        }) if *actual == parameter
+                    )
+                })
+        {
+            return Ok(None);
+        }
+        let parent_info = match *self.store.symbols.info(parent) {
+            SymbolInfo::Complete(info) => info,
+            SymbolInfo::Missing => self.complete_symbol_inner(parent, info_journal)?,
+            SymbolInfo::Deferred(_) => {
+                return Err(TyperError::DeferredSymbolCompletion { symbol: parent });
+            }
+            SymbolInfo::Error => return Err(TyperError::SymbolAlreadyErrored { symbol: parent }),
+        };
+        self.validate_existing_class_info(parent, parent_info)?;
+        self.validate_source_parent_graph(parent, parent_info, info_journal)?;
+        Ok(Some(parent))
     }
 
     pub(super) fn validate_source_case_class_trait_parent(
@@ -602,7 +717,7 @@ impl SourceTyper<'_> {
                 .contains(SymbolFlags::CASE)
             || !self
                 .source_class_type_parameters(class)
-                .is_ok_and(|parameters| parameters.is_empty())
+                .is_ok_and(|parameters| parameters.is_empty() || parameters.len() == 2)
             || constructor.value_param_clauses.len() != 1
             || !matches!(constructor.value_param_clauses[0].len(), 1 | 2)
         {
@@ -660,6 +775,10 @@ impl SourceTyper<'_> {
         } else {
             (None, None)
         };
+        let authenticated_generic_parent = match source_parent_type {
+            Some(parent) => self.source_case_class_either_parent(class, parent, info_journal)?,
+            None => None,
+        };
         let mut field_types = Vec::with_capacity(projection.len());
         for (field_tree, _) in &projection {
             let Some(TreeKind::ValDef(field)) =
@@ -674,14 +793,29 @@ impl SourceTyper<'_> {
                 field_types[0] == self.definitions.int
                     || self.is_canonical_source_trait_ref(field_types[0], parent)
             }
-            (1, None) => field_types[0] == self.definitions.int,
+            (1, None) => {
+                self.source_class_type_parameters(class)
+                    .is_ok_and(|parameters| parameters.is_empty())
+                    && field_types[0] == self.definitions.int
+            }
             (2, Some((parent, _))) => field_types
                 .iter()
                 .all(|field_type| self.is_canonical_source_trait_ref(*field_type, parent)),
             (2, None) => false,
             _ => false,
         };
-        if !supported_projection {
+        let supported_generic_projection = projection.len() == 1
+            && authenticated_generic_parent.is_some()
+            && matches!(
+                self.store.types.try_get(field_types[0]),
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(parameter),
+                    ..
+                }) if self.source_class_type_parameters(class)
+                    .is_ok_and(|parameters| parameters.contains(parameter))
+                        && self.store.symbols.get(*parameter).owner == Some(class)
+            );
+        if !supported_projection && !supported_generic_projection {
             if product_type.is_none()
                 && projection.len() == 2
                 && template.parents.len() == 1
@@ -709,8 +843,12 @@ impl SourceTyper<'_> {
         let Some(product_type) = product_type else {
             return Err(malformed());
         };
-        let (_, parent_type) = authenticated_parent.ok_or_else(malformed)?;
-        let expected_parents = [self.definitions.object_type, parent_type, product_type];
+        let parent_type = source_parent_type.ok_or_else(malformed)?;
+        let mut expected_parents = vec![parent_type];
+        if self.parent_is_trait(parent_type, template.parents[0].index(), info_journal)? {
+            expected_parents.insert(0, self.definitions.object_type);
+        }
+        expected_parents.push(product_type);
         if class_info.parents.len() != expected_parents.len()
             || !class_info
                 .parents
@@ -883,6 +1021,9 @@ impl SourceTyper<'_> {
                         })
             }
             (Some(Type::NoPrefix), Some(Type::NoPrefix)) => true,
+            (Some(Type::ThisType { class: actual }), Some(Type::ThisType { class: expected })) => {
+                actual == expected
+            }
             _ => false,
         }
     }
