@@ -1,0 +1,12 @@
+/** Decompiled from scala39/PairFactory.tasty */
+package example {
+  @scala.annotation.internal.SourceFile("tests/fixtures/jvm_tasty_conditional_reference_selection/ConditionalReferenceSelection.scala") class PairFactory() {
+    def create(firstSeed: scala.Int, secondSeed: scala.Int, chooseFirst: scala.Boolean, nextValue: scala.Int): example.Pair = {
+      val first: example.Counter = new example.Counter(firstSeed)
+      val second: example.Counter = new example.Counter(secondSeed)
+      val selected: example.Counter = if (chooseFirst) first else second
+      selected.set(nextValue)
+      new example.Pair(first, second)
+    }
+  }
+}
