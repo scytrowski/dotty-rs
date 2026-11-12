@@ -4,8 +4,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use dotty::jvm_tasty_cross_class::{
-    CrossClassConstructorCallProofInput, ImmutableLocalInitializationProofInput,
-    validate_cross_class_constructor_call_proofs, validate_immutable_local_initialization_proof,
+    CrossClassConstructorCallProofInput, ImmutableLocalConditionalReferenceSelectionProofInput,
+    ImmutableLocalInitializationProofInput, ImmutableLocalInitializerPairProofInput,
+    validate_cross_class_constructor_call_proofs,
+    validate_immutable_local_conditional_reference_selection_proof,
+    validate_immutable_local_initialization_proof,
 };
 use dotty_classfile::access_flags::{ACC_PRIVATE, ACC_PUBLIC};
 use dotty_classfile::attribute::Attribute;
@@ -55,6 +58,8 @@ const IMMUTABLE_REFERENCE_LOCAL_PAIR_REVERSED_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactoryReversed.scala");
 const TWO_IMMUTABLE_REFERENCE_LOCALS_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
+const CONDITIONAL_REFERENCE_SELECTION_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_conditional_reference_selection/PairFactory.scala");
 const MULTI_ARGUMENT_FACTORY_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_multi_argument_constructor_calls/PairFactory.scala");
 const MIXED_ORIGIN_WRAP_AND_CREATE_SOURCE: &str = include_str!(
@@ -26512,6 +26517,424 @@ public final class TwoLocalRustArtifactsHarness {
     assert_eq!(
         String::from_utf8_lossy(&java.stdout).trim(),
         "Rust two-local artifacts verified"
+    );
+}
+
+#[test]
+fn authenticated_conditional_counter_selection_lowers_through_the_normal_jvm_plan() {
+    let output = TestOutputDirectory::new("conditional-reference-selection-authenticated");
+    let source_id = SourceId::from_index(22680);
+    let bindings = RefCell::new(None);
+    let selected_slots = RefCell::new(None);
+    let mut observe_typer = |ast: &AstArena<Untyped>,
+                             _root: TreeId<Untyped>,
+                             index: &SourceSemanticIndex,
+                             typer: &mut SourceTyper<'_>,
+                             _definitions: &Definitions| {
+        let (method_tree, method) = ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(method)
+                    if typer.store().names.resolve(method.name.as_name().text()) == "create" =>
+                {
+                    Some((tree, method))
+                }
+                _ => None,
+            })
+            .expect("the frozen PairFactory.create method exists");
+        let method_symbol = index.symbol_at(source_id, method_tree).unwrap();
+        let TreeKind::Block(block) = &ast.get(method.rhs.unwrap()).kind else {
+            panic!("create retains its original ordered Block")
+        };
+        assert_eq!(block.stats.len(), 4);
+        let local_bindings = [0, 1, 2].map(|position| {
+            let binding = typer
+                .typed_local_binding_at(source_id, block.stats[position])
+                .expect("each original Counter ValDef has a canonical typed binding");
+            assert_eq!(
+                typer.store().symbols.get(binding.symbol()).owner,
+                Some(method_symbol)
+            );
+            binding
+        });
+        assert_ne!(local_bindings[0].symbol(), local_bindings[1].symbol());
+        assert_ne!(local_bindings[1].symbol(), local_bindings[2].symbol());
+        *bindings.borrow_mut() = Some((method_tree, local_bindings));
+    };
+    let mut observe_source = |ast: &AstArena<Untyped>,
+                              _root: TreeId<Untyped>,
+                              index: &SourceSemanticIndex,
+                              typed_index: &SourceTypedIndex,
+                              unit: &mut JvmCompilationUnit<'_>,
+                              definitions: &Definitions| {
+        let (method_tree, local_bindings) = bindings
+            .borrow()
+            .expect("the proof uses the same original frontend session");
+        let method = index.symbol_at(source_id, method_tree).unwrap();
+        let owner = unit.store.symbols.get(method).owner.unwrap();
+        let proof = validate_immutable_local_conditional_reference_selection_proof(
+            ImmutableLocalConditionalReferenceSelectionProofInput {
+                initializers: ImmutableLocalInitializerPairProofInput {
+                    source_id,
+                    method_tree,
+                    store: unit.store,
+                    definitions,
+                    source_ast: ast,
+                    typed_ast: unit.typed_ast,
+                    source_index: index,
+                    source_typed_index: typed_index,
+                    local_bindings: [Some(local_bindings[0]), Some(local_bindings[1])],
+                    jvm_unit: unit,
+                },
+                selected_binding: Some(local_bindings[2]),
+            },
+        )
+        .expect("the #2267 receipt authenticates the original conditional local");
+        assert_eq!(proof.method(), method);
+        assert_eq!(proof.owner(), owner);
+        assert_eq!(
+            proof.targets(),
+            [local_bindings[0].symbol(), local_bindings[1].symbol()]
+        );
+        assert_eq!(proof.selected(), local_bindings[2].symbol());
+
+        let method_plan = unit
+            .classes
+            .iter()
+            .find(|class| class.class == owner)
+            .and_then(|class| class.methods.iter().find(|plan| plan.method == method))
+            .expect("the authenticated method is in the ordinary JVM plan");
+        assert_eq!(method_plan.locals.len(), 3);
+        assert_eq!(method_plan.locals[0].symbol, proof.targets()[0]);
+        assert_eq!(method_plan.locals[1].symbol, proof.targets()[1]);
+        assert_eq!(method_plan.locals[2].symbol, proof.selected());
+
+        let metadata = unit.metadata(definitions).unwrap();
+        let method_metadata = metadata
+            .iter()
+            .find(|class| class.identity().symbol() == owner)
+            .and_then(|class| {
+                class
+                    .methods()
+                    .iter()
+                    .find(|candidate| candidate.symbol() == method)
+            })
+            .unwrap();
+        assert_eq!(
+            method_metadata.descriptor().as_str(),
+            "(IIZI)Lexample/Pair;"
+        );
+        let parameter_slots = method_metadata
+            .parameters()
+            .iter()
+            .map(|p| p.slot())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            parameter_slots,
+            [1, 2, 3, 4],
+            "receiver and descriptor widths determine formal offsets"
+        );
+        let layout = unit.local_layout(owner, method, definitions).unwrap();
+        let first_slot = layout.local(proof.targets()[0]).unwrap().slot();
+        let second_slot = layout.local(proof.targets()[1]).unwrap().slot();
+        let selected_slot = layout.local(proof.selected()).unwrap().slot();
+        assert_eq!((first_slot, second_slot, selected_slot), (5, 6, 7));
+        assert_eq!(layout.max_locals(), 8);
+        *selected_slots.borrow_mut() = Some((first_slot, second_slot, selected_slot));
+    };
+
+    let artifacts = compile_source_batch_with_typer_and_source_observer(
+        CONDITIONAL_REFERENCE_SELECTION_SOURCE,
+        "PairFactory.scala",
+        output.path(),
+        source_id,
+        SourceUnitCardinality::AtLeastTwo,
+        &mut observe_typer,
+        &mut observe_source,
+    )
+    .expect("the normal JVM source plan emits the authenticated conditional selection");
+    let factory = decode_emitted_class_named(&artifacts, "example/PairFactory");
+    assert_eq!(factory.version.major, JVM_CLASSFILE_MAJOR_VERSION);
+    let create = factory
+        .methods
+        .iter()
+        .find(|method| factory.constant_pool.utf8(method.name_index) == Ok("create"))
+        .expect("PairFactory.create is emitted");
+    assert_eq!(
+        factory.constant_pool.utf8(create.descriptor_index),
+        Ok("(IIZI)Lexample/Pair;")
+    );
+    let [Attribute::Code(code)] = create.attributes.as_slice() else {
+        panic!("create has one Code attribute")
+    };
+    assert_eq!(
+        code.max_locals, 8,
+        "classfile local bounds match canonical parameters and locals"
+    );
+    let instructions = decode_subset_instructions(code.code);
+    let allocations = instructions
+        .iter()
+        .filter(|(_, opcode)| *opcode == 0xbb)
+        .map(|(offset, _)| {
+            let index = u16::from_be_bytes([code.code[offset + 1], code.code[offset + 2]]);
+            factory
+                .constant_pool
+                .class_name(ConstantPoolIndex(index))
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        allocations,
+        ["example/Counter", "example/Counter", "example/Pair"],
+        "the method allocates exactly the two original Counters and final Pair"
+    );
+    assert!(
+        instructions.iter().any(|(_, opcode)| *opcode == 0x99),
+        "Boolean IF branches to the else arm"
+    );
+    let branches = decode_branch_targets(code.code);
+    assert_eq!(
+        branches.len(),
+        2,
+        "the IF has a conditional edge and one merge jump"
+    );
+    let (first_slot, second_slot, selected_slot) = selected_slots
+        .borrow()
+        .expect("the source receipt mapped each canonical local through JvmLocalLayout");
+    let if_position = instructions
+        .iter()
+        .position(|(_, opcode)| *opcode == 0x99)
+        .unwrap();
+    let then_load = instructions[if_position + 1];
+    assert_eq!(
+        then_load.1, 0x19,
+        "then arm loads an indexed reference local"
+    );
+    assert_eq!(
+        u16::from(code.code[then_load.0 + 1]),
+        first_slot,
+        "then branch resolves to the receipt's first target SymbolId slot"
+    );
+    let (_, _, else_target) = branches[0];
+    let else_position = instructions
+        .iter()
+        .position(|(offset, _)| *offset == else_target)
+        .unwrap();
+    let else_load = instructions[else_position];
+    assert_eq!(
+        else_load.1, 0x19,
+        "else arm loads an indexed reference local"
+    );
+    assert_eq!(
+        u16::from(code.code[else_load.0 + 1]),
+        second_slot,
+        "else branch resolves to the receipt's second target SymbolId slot"
+    );
+    let (_, _, merge_target) = branches[1];
+    let merge_position = instructions
+        .iter()
+        .position(|(offset, _)| *offset == merge_target)
+        .unwrap();
+    assert_eq!(
+        instructions[merge_position].1, 0x3a,
+        "both initialized branch values converge at one local store"
+    );
+    assert_eq!(
+        u16::from(code.code[instructions[merge_position].0 + 1]),
+        selected_slot,
+        "the converged result stores into the authenticated selected SymbolId slot"
+    );
+    let frame_pcs = stack_map_frame_pcs(&factory, "create");
+    assert!(
+        branches
+            .iter()
+            .all(|(_, _, target)| frame_pcs.contains(target)),
+        "the analyzer emits a StackMapTable frame for each branch target"
+    );
+    assert_invocation_sequence(
+        &factory,
+        code.code,
+        &[
+            (0xb7, "example/Counter", "<init>", "(I)V"),
+            (0xb7, "example/Counter", "<init>", "(I)V"),
+            (0xb6, "example/Counter", "set", "(I)V"),
+            (
+                0xb7,
+                "example/Pair",
+                "<init>",
+                "(Lexample/Counter;Lexample/Counter;)V",
+            ),
+        ],
+    );
+    let setter_calls = instructions
+        .iter()
+        .filter(|(_, opcode)| *opcode == 0xb6)
+        .count();
+    assert_eq!(
+        setter_calls, 1,
+        "both paths converge before one selected.set call"
+    );
+    let local_index = |offset: usize, opcode: u8| -> Option<u16> {
+        match opcode {
+            0x2a..=0x2d => Some(u16::from(opcode - 0x2a)),
+            0x4b..=0x4e => Some(u16::from(opcode - 0x4b)),
+            0x15..=0x19 | 0x36..=0x3a => Some(u16::from(code.code[offset + 1])),
+            _ => None,
+        }
+    };
+    let reference_loads = instructions
+        .iter()
+        .filter(|(_, opcode)| matches!(*opcode, 0x19 | 0x2a..=0x2d))
+        .map(|(offset, opcode)| local_index(*offset, *opcode).unwrap())
+        .collect::<Vec<_>>();
+    let reference_stores = instructions
+        .iter()
+        .filter(|(_, opcode)| matches!(*opcode, 0x3a | 0x4b..=0x4e))
+        .map(|(offset, opcode)| local_index(*offset, *opcode).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reference_stores.iter().filter(|slot| **slot == 7).count(),
+        1,
+        "the IF result is stored once in selected's canonical slot"
+    );
+    assert_eq!(
+        reference_loads.iter().filter(|slot| **slot == 7).count(),
+        1,
+        "the one setter receiver load comes from selected's canonical slot"
+    );
+    assert!(
+        reference_loads.contains(&5) && reference_loads.contains(&6),
+        "both IF arms and the Pair constructor use the original local slots"
+    );
+    assert!(
+        instructions.iter().any(|(_, opcode)| *opcode == 0x1d),
+        "the IF condition loads chooseFirst from its descriptor-derived slot 3"
+    );
+    assert!(
+        instructions
+            .iter()
+            .any(|(offset, opcode)| *opcode == 0x15 && code.code[offset + 1] == 4),
+        "the setter argument comes from nextValue's descriptor-derived slot"
+    );
+
+    let second_output = TestOutputDirectory::new("conditional-reference-selection-fresh-session");
+    let second = compile_source_batch(
+        CONDITIONAL_REFERENCE_SELECTION_SOURCE,
+        "PairFactory.scala",
+        second_output.path(),
+        SourceId::from_index(22681),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect("a fresh source session emits the same method deterministically");
+    let first_bytes = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "example/PairFactory")
+        .unwrap()
+        .class
+        .bytes();
+    let second_bytes = second
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "example/PairFactory")
+        .unwrap()
+        .class
+        .bytes();
+    assert_eq!(first_bytes, second_bytes);
+
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let classpath = output
+        .path()
+        .to_str()
+        .expect("UTF-8 generated class directory");
+    let harness = output
+        .path()
+        .join("ConditionalReferenceSelectionHarness.java");
+    fs::write(&harness, r#"import example.Counter;
+import example.Pair;
+import example.PairFactory;
+import java.lang.reflect.Field;
+
+public final class ConditionalReferenceSelectionHarness {
+  private static Counter counter(Pair pair, String name) throws Exception {
+    Field field = Pair.class.getDeclaredField(name);
+    field.setAccessible(true);
+    return (Counter) field.get(pair);
+  }
+  private static void check(boolean chooseFirst, int left, int right) throws Exception {
+    Pair pair = new PairFactory().create(7, 3, chooseFirst, 42);
+    Counter first = counter(pair, "left");
+    Counter second = counter(pair, "right");
+    if (first == second) throw new AssertionError("the original locals remain distinct");
+    if (pair.leftValue() != left || pair.rightValue() != right)
+      throw new AssertionError("wrong selected Counter mutated: " + pair.leftValue() + "/" + pair.rightValue());
+  }
+  public static void main(String[] args) throws Exception {
+    check(true, 42, 3);
+    check(false, 7, 42);
+    System.out.println("conditional Counter selection verified");
+  }
+}
+"#).expect("write strict JDK harness");
+    let java_tmp = std::env::temp_dir();
+    let javac = Command::new("javac")
+        .arg(format!("-J-Djava.io.tmpdir={}", java_tmp.display()))
+        .args(["--release", "21", "-classpath", classpath, "-d", classpath])
+        .arg(&harness)
+        .output()
+        .expect("start javac for conditional selection harness");
+    assert!(
+        javac.status.success(),
+        "javac rejected harness: {}",
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .arg(format!("-Djava.io.tmpdir={}", java_tmp.display()))
+        .args([
+            "-Xverify:all",
+            "-ea",
+            "-classpath",
+            classpath,
+            "ConditionalReferenceSelectionHarness",
+        ])
+        .output()
+        .expect("start strict JDK verification and execution");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all failed: {}",
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "conditional Counter selection verified"
+    );
+    let javap = Command::new("javap")
+        .args([
+            "-p",
+            "-c",
+            "-v",
+            "-classpath",
+            classpath,
+            "example.PairFactory",
+        ])
+        .output()
+        .expect("start javap for generated conditional-selection class");
+    assert!(
+        javap.status.success(),
+        "javap failed: {}",
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let disassembly = String::from_utf8_lossy(&javap.stdout);
+    assert!(disassembly.contains("major version: 65"));
+    assert!(disassembly.contains("(int, int, boolean, int)"));
+    assert_eq!(
+        disassembly.matches("invokevirtual").count(),
+        1,
+        "javap confirms one selected Counter.set invocation"
+    );
+    assert!(
+        disassembly.contains("StackMapTable"),
+        "javap displays the analyzed branch frames"
     );
 }
 
