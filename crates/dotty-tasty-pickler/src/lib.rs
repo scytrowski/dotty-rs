@@ -52,7 +52,8 @@ pub use error::{
     Builtin, LimitKind, PickleError, ReferenceError, SourceRole, TypeRole, UnsupportedFeature,
 };
 pub use plan::{
-    ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan, DefaultConstructorPlan,
+    ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan,
+    ConditionalLocalReferenceSelectionBinding, DefaultConstructorPlan,
     DirectFormalConstructorCallPairBinding, DistinctReferenceMethodParameter,
     DistinctReferenceMethodSignature, FormalLocalConstructorCallArgumentBinding,
     FormalLocalConstructorCallArgumentOrigin, FormalLocalConstructorCallPairBinding,

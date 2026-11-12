@@ -145,6 +145,17 @@ pub trait SourceTypedBindings {
         None
     }
 
+    /// Borrowed identity receipt for an immutable local selected between two
+    /// existing references by one Boolean IF. This proof carries no producer
+    /// authorization; implementations must preserve the same source session.
+    fn conditional_local_reference_selection(
+        &self,
+        _source: SourceId,
+        _method: SymbolId,
+    ) -> Option<ConditionalLocalReferenceSelectionBinding> {
+        None
+    }
+
     /// Exact ordered direct-formal/local pair receipt from the source proof.
     fn formal_local_constructor_call_pair(
         &self,
@@ -314,6 +325,30 @@ pub struct LocalReferenceAliasBinding {
     pub local: SymbolId,
     pub target: SymbolId,
     pub scope: dotty_core::ScopeId,
+    pub local_type: TypeId,
+}
+
+/// Exact source/typed identities for one immutable local reference selection.
+/// The binding is provenance only and never authorizes serialization.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConditionalLocalReferenceSelectionBinding {
+    pub source_id: SourceId,
+    pub owner: SymbolId,
+    pub method: SymbolId,
+    pub scope: dotty_core::ScopeId,
+    pub source_block: TreeId<Untyped>,
+    pub typed_block: TreeId<Typed>,
+    pub source_declaration: TreeId<Untyped>,
+    pub typed_declaration: TreeId<Typed>,
+    pub source_if: TreeId<Untyped>,
+    pub typed_if: TreeId<Typed>,
+    pub source_condition: TreeId<Untyped>,
+    pub typed_condition: TreeId<Typed>,
+    pub source_arms: [TreeId<Untyped>; 2],
+    pub typed_arms: [TreeId<Typed>; 2],
+    pub condition_formal: SymbolId,
+    pub targets: [SymbolId; 2],
+    pub selected: SymbolId,
     pub local_type: TypeId,
 }
 

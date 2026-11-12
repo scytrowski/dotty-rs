@@ -16,7 +16,13 @@ use dotty_jvm::{JvmClassPlan, JvmCompilationUnit};
 use dotty_tasty_pickler::LocalReferenceAliasBinding;
 use dotty_typer::{SourceTyper, TypedLocalBinding};
 
+mod conditional_local_reference;
 mod local_receiver_call;
+pub use conditional_local_reference::{
+    ImmutableLocalConditionalReferenceSelectionProofInput,
+    ValidatedImmutableLocalConditionalReferenceSelectionProof,
+    validate_immutable_local_conditional_reference_selection_proof,
+};
 pub use local_receiver_call::{
     ValidatedImmutableLocalCounterSetCallProof,
     ValidatedImmutableLocalCounterSetCallsAfterAliasProof,
