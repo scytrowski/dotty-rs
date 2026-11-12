@@ -27,6 +27,28 @@ use dotty_tasty_pickler::{
     PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings,
 };
 use dotty_typer::{SourceTyper, TypedLocalBinding};
+use std::fs;
+use std::path::PathBuf;
+use std::process::{Command, Output};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[path = "support/scala39_toolchain.rs"]
+mod scala39_toolchain;
+
+const REQUIRE_SCALA: &str = "DOTTY_REQUIRE_SCALA_TASTY_CONDITIONAL_LOCAL_REFERENCE_CONSUMER";
+const SCALA_SUPPORT_SOURCE: &str = r#"package example
+
+class Counter(start: Int):
+  private var current: Int = start
+  def get(): Int = current
+  def set(value: Int): Unit = current = value
+
+class Pair(first: Counter, second: Counter):
+  private val left: Counter = first
+  private val right: Counter = second
+  def leftValue(): Int = left.get()
+  def rightValue(): Int = right.get()
+"#;
 
 const SOURCE: &str = r#"package example
 
@@ -206,6 +228,158 @@ fn raw_tag(tree: &RawTree<'_>) -> u8 {
         RawTree::Ast { tag, .. } | RawTree::NatAst { tag, .. } => *tag,
         RawTree::LengthNode(node) => node.tag,
     }
+}
+
+fn process_output(command: &mut Command) -> Output {
+    let rendered = format!("{command:?}");
+    command
+        .output()
+        .unwrap_or_else(|error| panic!("run {rendered}: {error}"))
+}
+
+fn successful_scala(command: &mut Command) -> Output {
+    let rendered = format!("{command:?}");
+    let output = process_output(command);
+    assert!(
+        output.status.success(),
+        "command failed: {rendered}\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
+fn verify_rust_candidate_with_pinned_scala(candidate: &[u8]) {
+    match std::env::var(REQUIRE_SCALA).as_deref() {
+        Ok("1") => {}
+        Ok(value) => panic!("{REQUIRE_SCALA} must equal 1 when set, got {value:?}"),
+        Err(std::env::VarError::NotPresent) => {
+            eprintln!("skipping pinned Scala reader; set {REQUIRE_SCALA}=1 to require it");
+            return;
+        }
+        Err(error) => panic!("read {REQUIRE_SCALA}: {error}"),
+    }
+
+    let scratch = std::env::temp_dir();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after Unix epoch")
+        .as_nanos();
+    let root = scratch.join(format!(
+        "dotty-conditional-reference-reader-{}-{nonce}",
+        std::process::id()
+    ));
+    let support_source_dir = root.join("support-source");
+    let dependencies = root.join("dependencies");
+    let candidate_dir = root.join("rust-candidate");
+    let reconstructed = root.join("from-tasty-output");
+    for directory in [
+        &support_source_dir,
+        &dependencies,
+        &candidate_dir,
+        &reconstructed,
+    ] {
+        fs::create_dir_all(directory).expect("create a fresh Scala reader directory");
+        assert_eq!(
+            fs::read_dir(directory)
+                .expect("read fresh directory")
+                .count(),
+            0,
+            "Scala reader output directory starts empty: {}",
+            directory.display()
+        );
+    }
+    let support_source = support_source_dir.join("CounterPair.scala");
+    fs::write(&support_source, SCALA_SUPPORT_SOURCE).expect("write Scala dependency source");
+    let candidate_path = candidate_dir.join("PairFactory.tasty");
+    fs::write(&candidate_path, candidate).expect("write actual Rust-produced candidate TASTy");
+
+    let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME is required"));
+    let temporary_java_options = format!("-XX:-UsePerfData -Djava.io.tmpdir={}", scratch.display());
+    let pinned = scala39_toolchain::from_environment(process_output, |command| {
+        command
+            .env("JAVA_HOME", &java_home)
+            .env("JAVA_TOOL_OPTIONS", &temporary_java_options);
+    });
+    eprintln!(
+        "CONDITIONAL_REFERENCE_SCALA_GATE revision={} java={}",
+        scala39_toolchain::SCALA_REVISION,
+        pinned.java.display()
+    );
+    let mut compile_support =
+        scala39_toolchain::scalac(&pinned.java_home, &pinned.scalac, scratch.clone());
+    successful_scala(
+        compile_support
+            .args(["-Werror", "-release", "21", "-d"])
+            .arg(&dependencies)
+            .arg(&support_source),
+    );
+
+    assert!(!dependencies.join("example/PairFactory.class").exists());
+    assert!(!dependencies.join("example/PairFactory.tasty").exists());
+    assert_eq!(
+        fs::read_dir(&candidate_dir)
+            .expect("inspect candidate inputs")
+            .map(|entry| entry.expect("read candidate entry").file_name())
+            .collect::<Vec<_>>(),
+        [std::ffi::OsString::from("PairFactory.tasty")],
+        "Scala reader consumes the Rust candidate as its only PairFactory input"
+    );
+
+    let classpath = format!("{}:{}", dependencies.display(), pinned.libraries);
+    let mut print_tasty =
+        scala39_toolchain::scalac(&pinned.java_home, &pinned.scalac, scratch.clone());
+    let printed = successful_scala(
+        print_tasty
+            .args(["-color:never", "-classpath"])
+            .arg(&classpath)
+            .arg("-print-tasty")
+            .arg(&candidate_path),
+    );
+    let printed = String::from_utf8_lossy(&printed.stdout);
+    assert!(
+        printed.contains("IF"),
+        "Scala reads the Rust candidate IF:\n{printed}"
+    );
+    assert!(
+        printed.contains("SHAREDtype"),
+        "Scala print-tasty output includes shared branch references:\n{printed}"
+    );
+
+    let mut decompile =
+        scala39_toolchain::scalac(&pinned.java_home, &pinned.scalac, scratch.clone());
+    let decompiled = successful_scala(
+        decompile
+            .args(["-color:never", "-classpath"])
+            .arg(&classpath)
+            .arg("-decompile")
+            .arg(&candidate_path),
+    );
+    let decompiled = String::from_utf8_lossy(&decompiled.stdout);
+    assert!(
+        decompiled.contains("val selected: example.Counter = if (chooseFirst) first else second"),
+        "Scala decompiles the Rust candidate selection:\n{decompiled}"
+    );
+    assert!(decompiled.contains("selected.set(nextValue)"));
+    assert!(decompiled.contains("new example.Pair(first, second)"));
+
+    let mut from_tasty =
+        scala39_toolchain::scalac(&pinned.java_home, &pinned.scalac, scratch.clone());
+    successful_scala(
+        from_tasty
+            .args(["-release", "21", "-from-tasty", "-classpath"])
+            .arg(&classpath)
+            .arg("-d")
+            .arg(&reconstructed)
+            .arg(&candidate_path),
+    );
+    assert!(reconstructed.join("example/PairFactory.class").is_file());
+    assert!(reconstructed.join("example/PairFactory.tasty").is_file());
+    assert_eq!(
+        fs::read(&candidate_path).expect("candidate remains present"),
+        candidate,
+        "Scala reader did not replace the Rust-produced candidate"
+    );
 }
 
 fn authenticate(
@@ -829,6 +1003,7 @@ fn authentic_conditional_local_receipt_preserves_session_identities_for_source_c
     let original = authenticate(SOURCE, 22_650, IndexMutation::None).unwrap();
     assert!(!original.tasty.is_empty());
     assert_rust_candidate_if_shape(&original.tasty);
+    verify_rust_candidate_with_pinned_scala(&original.tasty);
     let repeated = authenticate(SOURCE, 22_650, IndexMutation::None).unwrap();
     assert_eq!(
         original.tasty, repeated.tasty,
