@@ -4,7 +4,7 @@ use dotty::jvm_tasty_cross_class::{
     validate_immutable_local_conditional_reference_selection_proof,
 };
 use dotty::jvm_tasty_plan::{PairedPlanError, with_paired_jvm_tasty_batch_plan};
-use dotty_core::ast::TreeKind;
+use dotty_core::ast::{AstArena, TreeKind, Typed};
 use dotty_core::{Definitions, Packages, SemanticStore, SourceId, SourceText};
 use dotty_jvm::JvmCompilationUnit;
 use dotty_lexer::ContextualScanner;
@@ -35,7 +35,7 @@ class PairFactory:
     new Pair(first, second)
 "#;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum IndexMutation {
     None,
     MissingCondition,
@@ -45,6 +45,15 @@ enum IndexMutation {
     WrongSetterReceiver,
     WrongPairArgument,
     WrongSelectedBinding,
+    SwapTypedBranchTypes,
+    SelectedTypedValDefInt,
+    SetterReceiverKindIf,
+    SetterArgumentKindIf,
+    PairFirstArgumentKindIf,
+    PairSecondArgumentKindIf,
+    ConditionKindIf,
+    ThenBranchKindIf,
+    ElseBranchKindIf,
 }
 
 #[derive(Debug)]
@@ -160,12 +169,19 @@ fn authenticate(
         );
     }
     let mut source_typed_index = typer.source_typed_index().clone();
+    let mut typed_ast = AstArena::<Typed>::new();
+    for (_, node) in typer.typed_ast().iter() {
+        typed_ast.alloc(node.clone());
+    }
     let TreeKind::ValDef(selected_def) = &parsed.ast.get(block.stats[2]).kind else {
         panic!("selected declaration")
     };
     let TreeKind::If(if_node) = &parsed.ast.get(selected_def.rhs.unwrap()).kind else {
         panic!("selection IF")
     };
+    let typed_if = source_typed_index
+        .get(source_id, selected_def.rhs.unwrap())
+        .unwrap();
     match mutation {
         IndexMutation::None => {}
         IndexMutation::MissingCondition => {
@@ -231,11 +247,66 @@ fn authenticate(
                 .unwrap();
         }
         IndexMutation::WrongSelectedBinding => {}
+        IndexMutation::SwapTypedBranchTypes => {
+            let typed_then = source_typed_index
+                .get(source_id, if_node.then_branch)
+                .unwrap();
+            let typed_else = source_typed_index
+                .get(source_id, if_node.else_branch)
+                .unwrap();
+            let then_ty = typed_ast.get(typed_then).ty;
+            let else_ty = typed_ast.get(typed_else).ty;
+            typed_ast.get_mut(typed_then).ty = else_ty;
+            typed_ast.get_mut(typed_else).ty = then_ty;
+        }
+        IndexMutation::SelectedTypedValDefInt => {
+            let selected_typed = source_typed_index.get(source_id, block.stats[2]).unwrap();
+            typed_ast.get_mut(selected_typed).ty = definitions.int;
+        }
+        IndexMutation::SetterReceiverKindIf
+        | IndexMutation::SetterArgumentKindIf
+        | IndexMutation::PairFirstArgumentKindIf
+        | IndexMutation::PairSecondArgumentKindIf
+        | IndexMutation::ConditionKindIf
+        | IndexMutation::ThenBranchKindIf
+        | IndexMutation::ElseBranchKindIf => {
+            let replacement = typed_ast.get(typed_if).kind.clone();
+            let target_source = match mutation {
+                IndexMutation::SetterReceiverKindIf => {
+                    let TreeKind::Apply(setter) = &parsed.ast.get(block.stats[3]).kind else {
+                        unreachable!()
+                    };
+                    let TreeKind::Select(select) = &parsed.ast.get(setter.function).kind else {
+                        unreachable!()
+                    };
+                    select.qualifier
+                }
+                IndexMutation::SetterArgumentKindIf => {
+                    let TreeKind::Apply(setter) = &parsed.ast.get(block.stats[3]).kind else {
+                        unreachable!()
+                    };
+                    setter.args[0]
+                }
+                IndexMutation::PairFirstArgumentKindIf
+                | IndexMutation::PairSecondArgumentKindIf => {
+                    let TreeKind::Apply(pair) = &parsed.ast.get(block.expr).kind else {
+                        unreachable!()
+                    };
+                    pair.args
+                        [usize::from(matches!(mutation, IndexMutation::PairSecondArgumentKindIf))]
+                }
+                IndexMutation::ConditionKindIf => if_node.cond,
+                IndexMutation::ThenBranchKindIf => if_node.then_branch,
+                IndexMutation::ElseBranchKindIf => if_node.else_branch,
+                _ => unreachable!(),
+            };
+            let target_typed = source_typed_index.get(source_id, target_source).unwrap();
+            typed_ast.get_mut(target_typed).kind = replacement;
+        }
     }
-    let typed_ast = typer.typed_ast();
     let jvm_unit = JvmCompilationUnit {
         store: typer.store(),
-        typed_ast,
+        typed_ast: &typed_ast,
         classes: Vec::new(),
     };
     let proof_result = validate_immutable_local_conditional_reference_selection_proof(
@@ -246,7 +317,7 @@ fn authenticate(
                 store: typer.store(),
                 definitions: &definitions,
                 source_ast: &parsed.ast,
-                typed_ast,
+                typed_ast: &typed_ast,
                 source_index: &source_index,
                 source_typed_index: &source_typed_index,
                 local_bindings: [Some(local_bindings[0]), Some(local_bindings[1])],
@@ -349,6 +420,25 @@ fn missing_or_forged_source_typed_if_edges_reject_at_the_typed_binding_stage() {
         authenticate(SOURCE, 22_680, IndexMutation::WrongSelectedBinding),
         Err(CrossClassConstructorCallProofError::SourceIdentity(_))
     ));
+    for mutation in [
+        IndexMutation::SwapTypedBranchTypes,
+        IndexMutation::SelectedTypedValDefInt,
+        IndexMutation::SetterReceiverKindIf,
+        IndexMutation::SetterArgumentKindIf,
+        IndexMutation::PairFirstArgumentKindIf,
+        IndexMutation::PairSecondArgumentKindIf,
+        IndexMutation::ConditionKindIf,
+        IndexMutation::ThenBranchKindIf,
+        IndexMutation::ElseBranchKindIf,
+    ] {
+        assert!(
+            matches!(
+                authenticate(SOURCE, 22_698, mutation),
+                Err(CrossClassConstructorCallProofError::TypedBinding(_))
+            ),
+            "forged typed arena mutation must fail closed: {mutation:?}"
+        );
+    }
 }
 
 #[test]

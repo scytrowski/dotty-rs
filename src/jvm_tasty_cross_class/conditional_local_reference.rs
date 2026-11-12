@@ -603,7 +603,7 @@ pub fn validate_immutable_local_conditional_reference_selection_proof<'session>(
     }
     let source_if_condition = source_if_node.cond;
     let source_arms = [source_if_node.then_branch, source_if_node.else_branch];
-    let TreeKind::Ident(_) = &source_ast
+    let TreeKind::Ident(source_condition_ident) = &source_ast
         .try_get(source_if_condition)
         .ok_or_else(|| src("IF condition is stale"))?
         .kind
@@ -644,7 +644,11 @@ pub fn validate_immutable_local_conditional_reference_selection_proof<'session>(
     let typed_condition_node = typed_ast
         .try_get(typed_condition)
         .ok_or_else(|| typed("typed condition is stale"))?;
-    if !matches!(typed_condition_node.kind, TreeKind::Ident(_))
+    let TreeKind::Ident(typed_condition_ident) = &typed_condition_node.kind else {
+        return Err(typed("typed IF condition must remain Ident"));
+    };
+    if source_condition_ident.name != typed_condition_ident.name
+        || source_condition_ident.name != store.symbols.get(formals[2]).name
         || !matches!(store.types.try_get(typed_condition_node.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(s), .. }) if *s == formals[2])
     {
         return Err(typed(
@@ -657,7 +661,7 @@ pub fn validate_immutable_local_conditional_reference_selection_proof<'session>(
     ];
     let mut targets = [initialized_targets[0]; 2];
     for (index, (source_arm, typed_arm)) in source_arms.into_iter().zip(typed_arms).enumerate() {
-        let TreeKind::Ident(_) = &source_ast
+        let TreeKind::Ident(source_arm_ident) = &source_ast
             .try_get(source_arm)
             .ok_or_else(|| src("IF branch tree is stale"))?
             .kind
@@ -669,6 +673,9 @@ pub fn validate_immutable_local_conditional_reference_selection_proof<'session>(
         let typed_arm_node = typed_ast
             .try_get(typed_arm)
             .ok_or_else(|| typed("typed branch is stale"))?;
+        let TreeKind::Ident(typed_arm_ident) = &typed_arm_node.kind else {
+            return Err(typed("typed IF branch must remain Ident"));
+        };
         let branch_symbol = match store.types.try_get(typed_arm_node.ty) {
             Some(Type::TermRef {
                 target: TermRefTarget::Symbol(symbol),
@@ -676,8 +683,10 @@ pub fn validate_immutable_local_conditional_reference_selection_proof<'session>(
             }) => *symbol,
             _ => return Err(typed("typed IF branch must retain a local TermRef")),
         };
-        if !matches!(typed_arm_node.kind, TreeKind::Ident(_))
+        if !store.symbols.contains(branch_symbol)
             || !initialized_targets.contains(&branch_symbol)
+            || source_arm_ident.name != typed_arm_ident.name
+            || source_arm_ident.name != store.symbols.get(branch_symbol).name
         {
             return Err(typed(
                 "typed IF branch must resolve to one of the exact initialized locals",
@@ -714,15 +723,15 @@ pub fn validate_immutable_local_conditional_reference_selection_proof<'session>(
         initializer_receipts[1].initializer,
         source_if,
     ];
-    let selected_typed_def = match &typed_ast
+    let selected_typed_declaration = typed_ast
         .try_get(typed_declarations[2])
-        .ok_or_else(|| typed("selected ValDef is stale"))?
-        .kind
-    {
+        .ok_or_else(|| typed("selected ValDef is stale"))?;
+    let selected_typed_def = match &selected_typed_declaration.kind {
         TreeKind::ValDef(def) => def,
         _ => return Err(typed("selected declaration must remain typed ValDef")),
     };
-    if selected_typed_def.rhs != Some(source_if_ty)
+    if selected_typed_declaration.ty != selected_type
+        || selected_typed_def.rhs != Some(source_if_ty)
         || selected_typed_def.tpt
             != source_typed_index
                 .get(source_id, selected_def.tpt)
@@ -757,14 +766,14 @@ pub fn validate_immutable_local_conditional_reference_selection_proof<'session>(
         }
         (select.qualifier, setter_apply.args[0])
     };
-    let TreeKind::Ident(_) = &source_ast
+    let TreeKind::Ident(source_setter_receiver_ident) = &source_ast
         .try_get(source_setter_receiver)
         .ok_or_else(|| src("setter receiver is stale"))?
         .kind
     else {
         return Err(src("setter receiver must reference selected"));
     };
-    let TreeKind::Ident(_) = &source_ast
+    let TreeKind::Ident(source_setter_argument_ident) = &source_ast
         .try_get(source_setter_argument)
         .ok_or_else(|| src("setter argument is stale"))?
         .kind
@@ -777,6 +786,18 @@ pub fn validate_immutable_local_conditional_reference_selection_proof<'session>(
     let typed_setter_argument = source_typed_index
         .get(source_id, source_setter_argument)
         .ok_or_else(|| typed("setter argument has no typed mapping"))?;
+    let typed_setter_receiver_node = typed_ast
+        .try_get(typed_setter_receiver)
+        .ok_or_else(|| typed("typed receiver is stale"))?;
+    let typed_setter_argument_node = typed_ast
+        .try_get(typed_setter_argument)
+        .ok_or_else(|| typed("typed argument is stale"))?;
+    let TreeKind::Ident(typed_setter_receiver_ident) = &typed_setter_receiver_node.kind else {
+        return Err(typed("typed setter receiver must remain Ident"));
+    };
+    let TreeKind::Ident(typed_setter_argument_ident) = &typed_setter_argument_node.kind else {
+        return Err(typed("typed setter argument must remain Ident"));
+    };
     let TreeKind::Apply(typed_setter_node) = &typed_ast
         .try_get(typed_setter)
         .ok_or_else(|| typed("typed setter is stale"))?
@@ -797,8 +818,12 @@ pub fn validate_immutable_local_conditional_reference_selection_proof<'session>(
             .ok_or_else(|| typed("setter Select has no mapping"))?
         || typed_setter_node.args != [typed_setter_argument]
         || typed_setter_select.qualifier != typed_setter_receiver
-        || !matches!(store.types.try_get(typed_ast.try_get(typed_setter_receiver).ok_or_else(|| typed("typed receiver is stale"))?.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(s), .. }) if *s == selected)
-        || !matches!(store.types.try_get(typed_ast.try_get(typed_setter_argument).ok_or_else(|| typed("typed argument is stale"))?.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(s), .. }) if *s == formals[3])
+        || source_setter_receiver_ident.name != typed_setter_receiver_ident.name
+        || source_setter_receiver_ident.name != store.symbols.get(selected).name
+        || source_setter_argument_ident.name != typed_setter_argument_ident.name
+        || source_setter_argument_ident.name != store.symbols.get(formals[3]).name
+        || !matches!(store.types.try_get(typed_setter_receiver_node.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(s), .. }) if *s == selected)
+        || !matches!(store.types.try_get(typed_setter_argument_node.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(s), .. }) if *s == formals[3])
         || typed_ast
             .try_get(typed_setter)
             .ok_or_else(|| typed("typed setter is stale"))?
@@ -993,26 +1018,31 @@ pub fn validate_immutable_local_conditional_reference_selection_proof<'session>(
     }
     let mut pair_targets = [initialized_targets[0]; 2];
     for (index, argument) in source_pair_arguments.iter().enumerate() {
-        let TreeKind::Ident(_) = &source_ast
+        let TreeKind::Ident(source_pair_ident) = &source_ast
             .try_get(*argument)
             .ok_or_else(|| src("Pair argument is stale"))?
             .kind
         else {
             return Err(src("Pair arguments must be the original local references"));
         };
-        let pair_symbol = match store.types.try_get(
-            typed_ast
-                .try_get(typed_pair_arguments[index])
-                .ok_or_else(|| typed("typed Pair argument is stale"))?
-                .ty,
-        ) {
+        let typed_pair_argument = typed_ast
+            .try_get(typed_pair_arguments[index])
+            .ok_or_else(|| typed("typed Pair argument is stale"))?;
+        let TreeKind::Ident(typed_pair_ident) = &typed_pair_argument.kind else {
+            return Err(typed("typed Pair argument must remain Ident"));
+        };
+        let pair_symbol = match store.types.try_get(typed_pair_argument.ty) {
             Some(Type::TermRef {
                 target: TermRefTarget::Symbol(symbol),
                 ..
             }) => *symbol,
             _ => return Err(typed("typed Pair argument must retain a local TermRef")),
         };
-        if !initialized_targets.contains(&pair_symbol) {
+        if !store.symbols.contains(pair_symbol)
+            || !initialized_targets.contains(&pair_symbol)
+            || source_pair_ident.name != typed_pair_ident.name
+            || source_pair_ident.name != store.symbols.get(pair_symbol).name
+        {
             return Err(typed(
                 "typed Pair arguments must reference the two initialized locals",
             ));
