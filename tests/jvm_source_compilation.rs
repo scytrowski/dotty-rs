@@ -27258,18 +27258,14 @@ fn authenticated_conditional_selection_is_independent_of_local_names_order_and_a
         assert!(instructions.iter().any(|(offset, opcode)| {
             *opcode == 0x19 && u16::from(code.code[*offset + 1]) == slots.1
         }));
-        generated.push((
-            output.path().to_path_buf(),
-            variant.when_true,
-            variant.when_false,
-            variant.name,
-        ));
+        generated.push((output, variant.when_true, variant.when_false, variant.name));
     }
 
     if !require_jdk_or_skip() {
         return;
     }
-    for (classpath_path, when_true, when_false, name) in generated {
+    for (output, when_true, when_false, name) in generated {
+        let classpath_path = output.path();
         let classpath = classpath_path.to_str().expect("UTF-8 class directory");
         let harness = classpath_path.join("ConditionalVariantHarness.java");
         fs::write(
