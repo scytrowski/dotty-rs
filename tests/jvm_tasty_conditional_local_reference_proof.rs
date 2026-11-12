@@ -117,18 +117,22 @@ impl SourceTypedBindings for ConditionalPicklerBindings<'_> {
         &self.methods
     }
     fn local_value_bindings(&self, source: SourceId, method: SymbolId) -> Vec<LocalValueBinding> {
-        (source == self.source && method == self.method)
-            .then(|| self.locals.clone())
-            .unwrap_or_default()
+        if source == self.source && method == self.method {
+            self.locals.clone()
+        } else {
+            Vec::new()
+        }
     }
     fn local_counter_initializers(
         &self,
         source: SourceId,
         method: SymbolId,
     ) -> Vec<LocalCounterInitializerBinding> {
-        (source == self.source && method == self.method)
-            .then(|| self.initializers.clone())
-            .unwrap_or_default()
+        if source == self.source && method == self.method {
+            self.initializers.clone()
+        } else {
+            Vec::new()
+        }
     }
     fn conditional_local_reference_selection(
         &self,

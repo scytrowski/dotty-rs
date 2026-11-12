@@ -308,13 +308,7 @@ impl<'a> EncodingContext<'a> {
                 .typed_bindings
                 .conditional_local_reference_selection(p.source.id, method.symbol)
             {
-                if context
-                    .conditional_selection_ifs
-                    .insert((method.symbol, selection.typed_if), selection.targets)
-                    .is_some()
-                {
-                    return Err(reference(method.symbol, ReferenceError::Metadata));
-                }
+                context.register_conditional_local_reference_selection(method.symbol, selection)?;
             }
         }
         let mut registered_classes = Vec::new();
