@@ -4,7 +4,7 @@ use dotty::jvm_tasty_cross_class::{
     validate_immutable_local_conditional_reference_selection_proof,
 };
 use dotty::jvm_tasty_plan::{PairedPlanError, with_paired_jvm_tasty_batch_plan};
-use dotty_core::ast::{AstArena, TreeKind, Typed};
+use dotty_core::ast::{AstArena, If, TreeKind, Typed};
 use dotty_core::{
     Definitions, Packages, SemanticStore, SourceId, SourceText, SourceTypedIndex, SymbolId,
     SymbolInfo, TermRefTarget, TreeId, Type, TypeRefTarget, Untyped,
@@ -14,17 +14,20 @@ use dotty_lexer::ContextualScanner;
 use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty_parser::parse_compilation_unit;
 use dotty_tasty::ast::{
-    APPLY_TAG, BLOCK_TAG, DEFDEF_TAG, DefinitionBody, IF_TAG, SHAREDTYPE_TAG, TERMREFDIRECT_TAG,
-    VALDEF_TAG,
+    APPLY_TAG, BLOCK_TAG, DEFDEF_TAG, DefinitionBody, IF_TAG, PARAM_TAG, SELECTIN_TAG,
+    SHAREDTYPE_TAG, TERMREFDIRECT_TAG, TERMREFPKG_TAG, TYPEREF_TAG, VALDEF_TAG,
 };
 use dotty_tasty::file::TastyFile;
-use dotty_tasty::term::RawTree;
+use dotty_tasty::reader::Reader as TastyReader;
+use dotty_tasty::tasty::{RenderedParamSig, RenderedSignedName};
+use dotty_tasty::term::{AstRefKind, RawTree, TermValue};
+use dotty_tasty::writer::Writer as TastyWriter;
 use dotty_tasty_pickler::{
     ClassMemberPicklePlan, ClassStatePicklePlan, ConditionalLocalReferenceSelectionBinding,
     FormalLocalConstructorCallArgumentBinding, FormalLocalConstructorCallArgumentOrigin,
-    FormalLocalConstructorCallPairBinding, LocalCounterInitializerBinding,
-    LocalReceiverUnitCallBinding, LocalValueBinding, NestedConstructorCallBinding,
-    PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings,
+    FormalLocalConstructorCallPairBinding, LimitKind, LocalCounterInitializerBinding,
+    LocalReceiverUnitCallBinding, LocalValueBinding, NestedConstructorCallBinding, PickleError,
+    PickleLimits, PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings,
 };
 use dotty_typer::{SourceTyper, TypedLocalBinding};
 use std::fs;
@@ -109,6 +112,7 @@ enum IndexMutation {
     SecondCounterNewTypeKindIf,
     SelectedAnnotationKindIf,
     PairNewTypeKindIf,
+    PostReceiptConditionKindIf,
 }
 
 #[derive(Debug)]
@@ -187,39 +191,228 @@ impl SourceTypedBindings for ConditionalPicklerBindings<'_> {
     }
 }
 
-fn assert_rust_candidate_if_shape(bytes: &[u8]) {
+fn raw_tree_at<'a>(asts: &'a [u8], address: u32) -> RawTree<'a> {
+    let mut reader = TastyReader::with_range(asts, address as usize, asts.len()).unwrap();
+    RawTree::decode(&mut reader).unwrap()
+}
+
+fn single_ast_reference(tree: &RawTree<'_>, expected_kind: AstRefKind) -> u32 {
+    let references = tree.ast_refs();
+    let [reference] = references.as_slice() else {
+        panic!("tree contains exactly one AST reference: {references:?}")
+    };
+    assert_eq!(reference.kind, expected_kind);
+    reference.address
+}
+
+fn assert_counter_type_tree(tree: &RawTree<'_>, tasty: &TastyFile<'_>) {
+    fn inspect(
+        tree: &RawTree<'_>,
+        tasty: &TastyFile<'_>,
+        counter_type: &mut bool,
+        example_package: &mut bool,
+    ) {
+        match tree {
+            RawTree::Leaf(term) if term.tag == TERMREFPKG_TAG => {
+                let TermValue::NameRef(name) = term.value else {
+                    panic!("TERMREFpkg carries a name reference")
+                };
+                *example_package |= tasty.names().render(name).unwrap() == "example";
+            }
+            RawTree::Ast { child, .. } => inspect(child, tasty, counter_type, example_package),
+            RawTree::NatAst {
+                tag, value, child, ..
+            } => {
+                if *tag == TYPEREF_TAG {
+                    *counter_type |= tasty.names().render(*value).unwrap() == "Counter";
+                }
+                inspect(child, tasty, counter_type, example_package);
+            }
+            RawTree::Leaf(_) | RawTree::LengthNode(_) => {}
+        }
+    }
+
+    let (mut counter_type, mut example_package) = (false, false);
+    inspect(tree, tasty, &mut counter_type, &mut example_package);
+    assert!(
+        counter_type,
+        "declaration type resolves to Counter: {tree:?}"
+    );
+    assert!(
+        example_package,
+        "declaration type is qualified by example: {tree:?}"
+    );
+}
+
+fn assert_signed_select(
+    tasty: &TastyFile<'_>,
+    selection: &dotty_tasty::ast::SelectInNode<'_>,
+    original: &str,
+    parameters: &[&str],
+    result: &str,
+) {
+    let rendered = tasty
+        .names()
+        .render_signed_name(selection.name)
+        .unwrap()
+        .expect("method selection has a signed name");
+    let RenderedSignedName::Signed {
+        original: actual_original,
+        signature,
+    } = rendered
+    else {
+        panic!("method selection is a plain SIGNED name")
+    };
+    assert_eq!(actual_original, original);
+    assert_eq!(signature.result, result);
+    assert_eq!(
+        signature.parameters,
+        parameters
+            .iter()
+            .map(|name| RenderedParamSig::TermParameter((*name).to_owned()))
+            .collect::<Vec<_>>()
+    );
+}
+
+fn assert_rust_candidate_if_shape(
+    bytes: &[u8],
+    local_names: [&str; 2],
+    selected_name: &str,
+    branch_names: [&str; 2],
+    pair_argument_names: [&str; 2],
+) {
     let tasty = TastyFile::parse_and_validate_scala_3_9(bytes).unwrap();
     let index = tasty.ast_address_index().unwrap();
-    let create = index
+    let (create_address, create) = index
         .iter_nodes_with_tag(DEFDEF_TAG)
         .find_map(|node| {
-            let body = index.get(node.offset as u32)?.decode_defdef_body().ok()?;
-            (tasty.names().render(body.name).ok()? == "create").then_some(body)
+            let address = node.offset as u32;
+            let body = index.get(address)?.decode_defdef_body().ok()?;
+            (tasty.names().render(body.name).ok()? == "create").then_some((address, body))
         })
         .expect("Rust candidate contains PairFactory.create");
-    let RawTree::LengthNode(block) = create.rhs.unwrap() else {
+    let class = index
+        .iter_nodes_with_tag(dotty_tasty::ast::TYPEDEF_TAG)
+        .find(|node| {
+            index
+                .get(node.offset as u32)
+                .and_then(|raw| raw.decode_definition().ok())
+                .is_some_and(|definition| {
+                    tasty.names().render(definition.name()).ok().as_deref() == Some("PairFactory")
+                })
+        })
+        .expect("candidate class definition is PairFactory");
+    assert!(
+        std::iter::successors(Some(index.get_node(create_address).unwrap()), |node| {
+            index.parent_of(node.offset as u32)
+        })
+        .any(|owner| owner.offset == class.offset),
+        "create method belongs to PairFactory"
+    );
+    let RawTree::LengthNode(_) = create.rhs.unwrap() else {
         panic!("create body is BLOCK")
     };
-    assert_eq!(block.tag, BLOCK_TAG);
-    let block = block.decode_block().unwrap();
-    assert_eq!(block.stats.len(), 4);
-    assert_eq!(
-        block.stats.iter().map(raw_tag).collect::<Vec<_>>(),
-        [VALDEF_TAG, VALDEF_TAG, VALDEF_TAG, APPLY_TAG]
-    );
-    let selected = index
-        .iter_nodes_with_tag(VALDEF_TAG)
-        .find_map(|node| {
-            let DefinitionBody::ValDef { name, rhs, .. } = index
-                .get(node.offset as u32)?
-                .decode_definition_body()
-                .ok()?
-            else {
-                return None;
-            };
-            (tasty.names().render(name).ok()? == "selected").then_some(rhs?)
+    let block_address = index
+        .iter_nodes_with_tag(BLOCK_TAG)
+        .find(|node| {
+            std::iter::successors(Some(*node), |current| {
+                index.parent_of(current.offset as u32)
+            })
+            .any(|parent| parent.offset as u32 == create_address)
         })
-        .expect("selected VALDEF has an initializer");
+        .expect("create body contains BLOCK")
+        .offset as u32;
+    let block = index.get(block_address).unwrap().decode_block().unwrap();
+    assert_eq!(block.stats.len(), 4);
+    let direct_children = index.children_of(block_address).collect::<Vec<_>>();
+    assert_eq!(
+        direct_children
+            .iter()
+            .filter(|node| node.tag == VALDEF_TAG)
+            .count(),
+        3,
+        "the source BLOCK owns all three local declarations"
+    );
+    let local_addresses = direct_children
+        .iter()
+        .filter(|node| node.tag == VALDEF_TAG)
+        .map(|node| node.offset as u32)
+        .collect::<Vec<_>>();
+    let local_address_by_name = local_addresses
+        .iter()
+        .zip(local_names)
+        .map(|(address, name)| (name, *address))
+        .collect::<std::collections::HashMap<_, _>>();
+    let local_definitions = local_addresses
+        .iter()
+        .map(|address| {
+            let DefinitionBody::ValDef {
+                name,
+                type_tree,
+                rhs,
+                ..
+            } = index
+                .get(*address)
+                .unwrap()
+                .decode_definition_body()
+                .unwrap()
+            else {
+                panic!("BLOCK declaration is a VALDEF")
+            };
+            (
+                tasty.names().render(name).unwrap().to_owned(),
+                type_tree,
+                rhs,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        local_definitions
+            .iter()
+            .map(|(name, _, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        [local_names[0], local_names[1], selected_name],
+        "TASTy retains source declaration order and renamed identities"
+    );
+    for (address, (_, type_tree, _)) in local_addresses.iter().zip(&local_definitions) {
+        assert_counter_type_tree(type_tree, &tasty);
+        assert_eq!(
+            index.parent_of(*address).unwrap().offset as u32,
+            block_address,
+            "local declaration is owned by the create BLOCK"
+        );
+    }
+
+    let parameters = index
+        .children_of(create_address)
+        .filter(|node| node.tag == PARAM_TAG)
+        .filter_map(|node| {
+            let parameter = index.get(node.offset as u32)?.decode_parameter().ok()?;
+            Some((
+                tasty.names().render(parameter.name()).ok()?.to_owned(),
+                node.offset as u32,
+            ))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let condition_formal = *parameters
+        .get("chooseFirst")
+        .unwrap_or_else(|| panic!("Boolean formal exists in {parameters:?}"));
+    let next_value_formal = *parameters
+        .get("nextValue")
+        .unwrap_or_else(|| panic!("setter formal exists in {parameters:?}"));
+    let selected_address = local_addresses[2];
+    let selected = index
+        .get(selected_address)
+        .unwrap()
+        .decode_definition_body()
+        .unwrap();
+    let DefinitionBody::ValDef {
+        rhs: Some(selected),
+        ..
+    } = selected
+    else {
+        panic!("selected local has an IF initializer")
+    };
     let RawTree::LengthNode(if_node) = selected else {
         panic!("selected initializer is bare IF, without TYPED")
     };
@@ -228,6 +421,168 @@ fn assert_rust_candidate_if_shape(bytes: &[u8]) {
     assert_eq!(raw_tag(&if_node.condition), TERMREFDIRECT_TAG);
     assert_eq!(raw_tag(&if_node.then_branch), SHAREDTYPE_TAG);
     assert_eq!(raw_tag(&if_node.else_branch), SHAREDTYPE_TAG);
+    assert_eq!(
+        single_ast_reference(&if_node.condition, AstRefKind::TermRefDirect),
+        condition_formal,
+        "IF condition points to the canonical Boolean formal"
+    );
+    let first_branch_target = single_ast_reference(&if_node.then_branch, AstRefKind::SharedType);
+    let second_branch_target = single_ast_reference(&if_node.else_branch, AstRefKind::SharedType);
+    let asts = tasty
+        .section(dotty_tasty::section::StandardSection::Asts)
+        .unwrap();
+    for (branch_target, local_name, label) in [
+        (first_branch_target, branch_names[0], "then"),
+        (second_branch_target, branch_names[1], "else"),
+    ] {
+        let expected_local = local_address_by_name[local_name];
+        let direct = raw_tree_at(asts.payload, branch_target);
+        assert_eq!(
+            raw_tag(&direct),
+            TERMREFDIRECT_TAG,
+            "{label} SHAREDtype resolves to TERMREFdirect"
+        );
+        assert_eq!(
+            single_ast_reference(&direct, AstRefKind::TermRefDirect),
+            expected_local,
+            "{label} branch references its original local VALDEF"
+        );
+    }
+
+    let apply_addresses = direct_children
+        .iter()
+        .filter(|node| node.tag == APPLY_TAG)
+        .map(|node| node.offset as u32)
+        .collect::<Vec<_>>();
+    let mut setter = None;
+    let mut pair_constructor = None;
+    for address in apply_addresses {
+        let apply = index.get(address).unwrap().decode_apply().unwrap();
+        let RawTree::LengthNode(selection_node) = &apply.function else {
+            continue;
+        };
+        if selection_node.tag != SELECTIN_TAG {
+            continue;
+        }
+        let selection = selection_node.decode_select_in().unwrap();
+        let signed = tasty.names().render_signed_name(selection.name).unwrap();
+        match signed {
+            Some(RenderedSignedName::Signed { original, .. }) if original == "set" => {
+                setter = Some((selection, apply));
+            }
+            Some(RenderedSignedName::Signed { original, .. }) if original == "<init>" => {
+                pair_constructor = Some((selection, apply));
+            }
+            _ => {}
+        }
+    }
+    let (setter_selection, setter_apply) = setter.expect("BLOCK contains selected.set call");
+    assert_signed_select(
+        &tasty,
+        &setter_selection,
+        "set",
+        &["scala.Int"],
+        "scala.Unit",
+    );
+    assert_eq!(
+        single_ast_reference(&setter_selection.qualifier, AstRefKind::TermRefDirect),
+        selected_address,
+        "setter receiver is the selected VALDEF"
+    );
+    assert_eq!(setter_apply.arguments.len(), 1);
+    assert_eq!(
+        single_ast_reference(&setter_apply.arguments[0], AstRefKind::TermRefDirect),
+        next_value_formal,
+        "setter receives the original nextValue formal"
+    );
+    let (pair_selection, pair_apply) =
+        pair_constructor.expect("BLOCK result calls Pair constructor");
+    assert_signed_select(
+        &tasty,
+        &pair_selection,
+        "<init>",
+        &["example.Counter", "example.Counter"],
+        "example.Pair",
+    );
+    assert_eq!(pair_apply.arguments.len(), 2);
+    for (argument, local_name) in pair_apply.arguments.iter().zip(pair_argument_names) {
+        assert_eq!(
+            single_ast_reference(argument, AstRefKind::TermRefDirect),
+            local_address_by_name[local_name],
+            "final Pair argument preserves source order for {local_name}"
+        );
+    }
+}
+
+fn corrupt_shared_branch_address(bytes: &[u8]) -> Vec<u8> {
+    let tasty = TastyFile::parse_and_validate_scala_3_9(bytes).unwrap();
+    let index = tasty.ast_address_index().unwrap();
+    let asts = tasty
+        .section(dotty_tasty::section::StandardSection::Asts)
+        .unwrap();
+    let selected = index
+        .iter_nodes_with_tag(VALDEF_TAG)
+        .find(|node| {
+            index
+                .get(node.offset as u32)
+                .and_then(|raw| raw.decode_definition_body().ok())
+                .is_some_and(|body| {
+                    matches!(body, DefinitionBody::ValDef { name, .. } if tasty.names().render(name).ok().as_deref() == Some("selected"))
+                })
+        })
+        .expect("selected VALDEF exists")
+        .offset as u32;
+    let if_node = index
+        .children_of(selected)
+        .find(|node| node.tag == IF_TAG)
+        .expect("selected VALDEF owns IF");
+    let raw_if = index.get(if_node.offset as u32).unwrap();
+    let selected_if = raw_if.decode_if().unwrap();
+    let reference_tree = &selected_if.then_branch;
+    assert_eq!(raw_tag(reference_tree), SHAREDTYPE_TAG);
+    let old_address = single_ast_reference(reference_tree, AstRefKind::SharedType);
+    let invalid_address = old_address + 1;
+    assert!(
+        index.get_node(invalid_address).is_none(),
+        "adjacent payload byte is not a visible AST node"
+    );
+
+    let mut old_nat = TastyWriter::default();
+    old_nat.write_nat(old_address);
+    let mut invalid_nat = TastyWriter::default();
+    invalid_nat.write_nat(invalid_address);
+    assert_eq!(
+        old_nat.as_slice().len(),
+        invalid_nat.as_slice().len(),
+        "corrupt target retains its encoded width"
+    );
+    let reference_offset = reference_tree.nodes()[0].offset;
+    let if_payload_offset = raw_if.payload.as_ptr() as usize - asts.payload.as_ptr() as usize;
+    let asts_file_offset = asts.payload.as_ptr() as usize - bytes.as_ptr() as usize;
+    assert_eq!(asts_file_offset, asts.offset);
+    let tasty_offset = asts_file_offset + if_payload_offset + reference_offset + 1;
+    assert_eq!(bytes[tasty_offset - 1], SHAREDTYPE_TAG);
+    let mut corrupted = bytes.to_vec();
+    corrupted[tasty_offset..tasty_offset + invalid_nat.as_slice().len()]
+        .copy_from_slice(invalid_nat.as_slice());
+    let corrupted_file = TastyFile::parse_and_validate_scala_3_9(&corrupted)
+        .expect("shared-address mutation preserves the TASTy wire tree");
+    let corrupted_index = corrupted_file.ast_address_index().unwrap();
+    let corrupted_if = corrupted_index
+        .get(if_node.offset as u32)
+        .unwrap()
+        .decode_if()
+        .unwrap();
+    assert_eq!(
+        single_ast_reference(&corrupted_if.then_branch, AstRefKind::SharedType),
+        invalid_address,
+        "decoded nested IF exposes the corrupted SHAREDtype address"
+    );
+    assert!(
+        corrupted_index.get_node(invalid_address).is_none(),
+        "corrupted SHAREDtype no longer resolves to a visible node start"
+    );
+    corrupted
 }
 
 fn raw_tag(tree: &RawTree<'_>) -> u8 {
@@ -257,7 +612,7 @@ fn successful_command(command: &mut Command) -> Output {
     output
 }
 
-fn verify_rust_candidate_with_pinned_scala(candidate: &[u8]) {
+fn verify_rust_candidate_with_pinned_scala(candidate: &[u8], selected_name: &str) {
     match std::env::var(REQUIRE_SCALA).as_deref() {
         Ok("1") => {}
         Ok(value) => panic!("{REQUIRE_SCALA} must equal 1 when set, got {value:?}"),
@@ -369,7 +724,7 @@ fn verify_rust_candidate_with_pinned_scala(candidate: &[u8]) {
     );
     let printed = String::from_utf8_lossy(&printed.stdout);
     assert!(
-        printed.contains("[selected]"),
+        printed.contains(&format!("[{selected_name}]")),
         "Scala reads the selected local declaration from the Rust candidate:\n{printed}"
     );
     let lines = printed.lines().collect::<Vec<_>>();
@@ -729,41 +1084,89 @@ fn authenticate(
             let target_typed = source_typed_index.get(source_id, target_source).unwrap();
             typed_ast.get_mut(target_typed).kind = replacement;
         }
+        IndexMutation::PostReceiptConditionKindIf => {}
     }
-    let jvm_unit = JvmCompilationUnit {
-        store: typer.store(),
-        typed_ast: &typed_ast,
-        classes: Vec::new(),
-    };
-    let proof_result = validate_immutable_local_conditional_reference_selection_proof(
-        ImmutableLocalConditionalReferenceSelectionProofInput {
-            initializers: ImmutableLocalInitializerPairProofInput {
-                source_id,
-                method_tree,
-                store: typer.store(),
-                definitions: &definitions,
-                source_ast: &parsed.ast,
-                typed_ast: &typed_ast,
-                source_index: &source_index,
-                source_typed_index: &source_typed_index,
-                local_bindings: [Some(local_bindings[0]), Some(local_bindings[1])],
-                jvm_unit: &jvm_unit,
+    let (
+        binding,
+        proof_source,
+        proof_method,
+        proof_condition_formal,
+        proof_targets,
+        proof_selected,
+        proof_scope,
+        proof_source_setter,
+        proof_typed_setter,
+        proof_source_setter_receiver,
+        proof_typed_setter_receiver,
+        proof_source_setter_argument,
+        proof_typed_setter_argument,
+        proof_setter_method,
+    ) = {
+        let jvm_unit = JvmCompilationUnit {
+            store: typer.store(),
+            typed_ast: &typed_ast,
+            classes: Vec::new(),
+        };
+        let proof = validate_immutable_local_conditional_reference_selection_proof(
+            ImmutableLocalConditionalReferenceSelectionProofInput {
+                initializers: ImmutableLocalInitializerPairProofInput {
+                    source_id,
+                    method_tree,
+                    store: typer.store(),
+                    definitions: &definitions,
+                    source_ast: &parsed.ast,
+                    typed_ast: &typed_ast,
+                    source_index: &source_index,
+                    source_typed_index: &source_typed_index,
+                    local_bindings: [Some(local_bindings[0]), Some(local_bindings[1])],
+                    jvm_unit: &jvm_unit,
+                },
+                selected_binding: Some(
+                    if matches!(mutation, IndexMutation::WrongSelectedBinding) {
+                        local_bindings[0]
+                    } else {
+                        local_bindings[2]
+                    },
+                ),
             },
-            selected_binding: Some(if matches!(mutation, IndexMutation::WrongSelectedBinding) {
-                local_bindings[0]
-            } else {
-                local_bindings[2]
-            }),
-        },
-    );
-    let proof = proof_result?;
-    let binding = proof.binding();
+        )?;
+        (
+            proof.binding(),
+            proof.source_id(),
+            proof.method(),
+            proof.condition_formal(),
+            proof.targets(),
+            proof.selected(),
+            proof.scope(),
+            proof.source_setter(),
+            proof.typed_setter(),
+            proof.source_setter_receiver(),
+            proof.typed_setter_receiver(),
+            proof.source_setter_argument(),
+            proof.typed_setter_argument(),
+            proof.setter_method(),
+        )
+    };
     assert_eq!(binding.source_id, source_id);
     assert_eq!(binding.method, method);
-    assert_eq!(binding.selected, proof.selected());
+    assert_eq!(binding.selected, proof_selected);
     assert_eq!(binding.scope, local_bindings[2].scope());
     assert_eq!(binding.condition_formal, formals[2]);
     assert_ne!(binding.local_type, definitions.boolean);
+    if matches!(mutation, IndexMutation::PostReceiptConditionKindIf) {
+        let typed_if_kind = typed_ast.get(binding.typed_if).kind.clone();
+        let TreeKind::If(nested_if) = typed_if_kind else {
+            panic!("receipt-selected typed IF retains its source shape")
+        };
+        let nested_condition = typed_ast.alloc(typed_ast.get(nested_if.cond).clone());
+        let nested_then = typed_ast.alloc(typed_ast.get(nested_if.then_branch).clone());
+        let nested_else = typed_ast.alloc(typed_ast.get(nested_if.else_branch).clone());
+        typed_ast.get_mut(binding.typed_condition).kind = TreeKind::If(If {
+            cond: nested_condition,
+            then_branch: nested_then,
+            else_branch: nested_else,
+        });
+    }
     let factory_tree = match &parsed.ast.get(parsed.root).kind {
         TreeKind::PackageDef(package) => *package
             .stats
@@ -967,23 +1370,23 @@ fn authenticate(
         initializers,
         selection: binding,
         setter: LocalReceiverUnitCallBinding {
-            source_apply: proof.source_setter(),
-            typed_apply: proof.typed_setter(),
-            source_select: match &parsed.ast.get(proof.source_setter()).kind {
+            source_apply: proof_source_setter,
+            typed_apply: proof_typed_setter,
+            source_select: match &parsed.ast.get(proof_source_setter).kind {
                 TreeKind::Apply(apply) => apply.function,
                 _ => unreachable!(),
             },
-            typed_select: match &typed_ast.get(proof.typed_setter()).kind {
+            typed_select: match &typed_ast.get(proof_typed_setter).kind {
                 TreeKind::Apply(apply) => apply.function,
                 _ => unreachable!(),
             },
-            source_receiver: proof.source_setter_receiver(),
-            typed_receiver: proof.typed_setter_receiver(),
-            source_argument: proof.source_setter_argument(),
-            typed_argument: proof.typed_setter_argument(),
-            receiver: proof.selected(),
-            receiver_scope: proof.scope(),
-            method: proof.setter_method(),
+            source_receiver: proof_source_setter_receiver,
+            typed_receiver: proof_typed_setter_receiver,
+            source_argument: proof_source_setter_argument,
+            typed_argument: proof_typed_setter_argument,
+            receiver: proof_selected,
+            receiver_scope: proof_scope,
+            method: proof_setter_method,
             argument_formal: formals[3],
         },
         pair,
@@ -1019,21 +1422,66 @@ fn authenticate(
     let validated = class_plan
         .validate()
         .expect("semantic-only PairFactory plan accepts the authenticated receipt");
+    if matches!(mutation, IndexMutation::PostReceiptConditionKindIf) {
+        let condition_type = typed_ast.get(binding.typed_condition).ty;
+        let expected = PickleError::BodyType {
+            tree: binding.typed_condition,
+            ty: condition_type,
+        };
+        assert_eq!(
+            validated.validate_method_bodies(),
+            Err(expected.clone()),
+            "post-receipt nested IF fails at the typed condition-kind check"
+        );
+        match validated.pickle() {
+            Err(error) => assert_eq!(
+                error, expected,
+                "pickle rejects the corrupted typed condition before producing output"
+            ),
+            Ok(completed) => panic!(
+                "corrupted typed condition escaped as {} bytes of completed PickledTasty",
+                completed.bytes().len()
+            ),
+        }
+        return Ok(ReceiptIds {
+            source: proof_source,
+            method: proof_method,
+            condition_formal: proof_condition_formal,
+            targets: proof_targets,
+            selected: proof_selected,
+            scope: proof_scope,
+            tasty: Vec::new(),
+        });
+    }
     validated
         .validate_method_bodies()
         .expect("conditional body validates");
+    let limited = validated.pickle_with_limits(PickleLimits {
+        max_file_bytes: 1,
+        ..PickleLimits::default()
+    });
+    assert!(
+        matches!(
+            limited,
+            Err(PickleError::LimitExceeded {
+                kind: LimitKind::FileBytes,
+                limit: 1,
+            })
+        ),
+        "file-size limit returns no completed PickledTasty: {limited:?}"
+    );
     let tasty = validated
         .pickle()
         .expect("conditional body serializes")
         .bytes()
         .to_vec();
     Ok(ReceiptIds {
-        source: proof.source_id(),
-        method: proof.method(),
-        condition_formal: proof.condition_formal(),
-        targets: proof.targets(),
-        selected: proof.selected(),
-        scope: proof.scope(),
+        source: proof_source,
+        method: proof_method,
+        condition_formal: proof_condition_formal,
+        targets: proof_targets,
+        selected: proof_selected,
+        scope: proof_scope,
         tasty,
     })
 }
@@ -1042,8 +1490,15 @@ fn authenticate(
 fn authentic_conditional_local_receipt_preserves_session_identities_for_source_controls() {
     let original = authenticate(SOURCE, 22_650, IndexMutation::None).unwrap();
     assert!(!original.tasty.is_empty());
-    assert_rust_candidate_if_shape(&original.tasty);
-    verify_rust_candidate_with_pinned_scala(&original.tasty);
+    assert_rust_candidate_if_shape(
+        &original.tasty,
+        ["first", "second"],
+        "selected",
+        ["first", "second"],
+        ["first", "second"],
+    );
+    let _corrupted = corrupt_shared_branch_address(&original.tasty);
+    verify_rust_candidate_with_pinned_scala(&original.tasty, "selected");
     let repeated = authenticate(SOURCE, 22_650, IndexMutation::None).unwrap();
     assert_eq!(
         original.tasty, repeated.tasty,
@@ -1069,6 +1524,14 @@ fn authentic_conditional_local_receipt_preserves_session_identities_for_source_c
     assert_eq!(renamed_receipt.source, SourceId::from_index(22_671));
     assert_ne!(renamed_receipt.targets[0], renamed_receipt.targets[1]);
     assert!(!renamed_receipt.targets.contains(&renamed_receipt.selected));
+    assert_rust_candidate_if_shape(
+        &renamed_receipt.tasty,
+        ["leftLocal", "rightLocal"],
+        "chosen",
+        ["leftLocal", "rightLocal"],
+        ["leftLocal", "rightLocal"],
+    );
+    verify_rust_candidate_with_pinned_scala(&renamed_receipt.tasty, "chosen");
 
     let reversed = SOURCE.replace(
         "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
@@ -1079,9 +1542,24 @@ fn authentic_conditional_local_receipt_preserves_session_identities_for_source_c
         reversed_receipt.targets,
         [original.targets[1], original.targets[0]]
     );
+    assert_rust_candidate_if_shape(
+        &reversed_receipt.tasty,
+        ["second", "first"],
+        "selected",
+        ["first", "second"],
+        ["first", "second"],
+    );
+    verify_rust_candidate_with_pinned_scala(&reversed_receipt.tasty, "selected");
 
     let swapped = SOURCE.replace("then first else second", "then second else first");
     authenticate(&swapped, 22_673, IndexMutation::None).unwrap();
+}
+
+#[test]
+fn post_receipt_typed_condition_corruption_rejects_without_completed_tasty() {
+    let corrupted = authenticate(SOURCE, 22_679, IndexMutation::PostReceiptConditionKindIf)
+        .expect("test helper asserts the first typed error and output absence");
+    assert!(corrupted.tasty.is_empty());
 }
 
 #[test]

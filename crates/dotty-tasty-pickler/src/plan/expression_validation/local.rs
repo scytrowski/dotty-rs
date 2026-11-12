@@ -516,6 +516,7 @@ impl Validator<'_, '_> {
                     tree: binding.typed_condition,
                 })?;
         if !matches!(&condition_source.kind, TreeKind::Ident(ident) if ident.name == boolean_formal.name)
+            || !matches!(&condition_typed.kind, TreeKind::Ident(ident) if ident.name == boolean_formal.name)
             || !matches!(self.ty(condition_typed.ty)?, Type::TermRef { prefix, target: TermRefTarget::Symbol(symbol) } if *prefix == p.definitions.no_prefix && *symbol == binding.condition_formal)
         {
             return Err(PickleError::BodyType {
