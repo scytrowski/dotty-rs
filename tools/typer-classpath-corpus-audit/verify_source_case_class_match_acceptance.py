@@ -31,6 +31,10 @@ EITHER_SWAP_LIVE_BLOCKER = (
     "blocked::UnconstrainedTypeParameter { source: SourceId(0), tree_index: 72, "
     "binder: TypeId(491), parameter_index: 0 }"
 )
+EITHER_SWAP_LIVE_BLOCKER_PATTERN = re.compile(
+    r"blocked::UnconstrainedTypeParameter \{ source: SourceId\(0\), "
+    r"tree_index: 72, binder: TypeId\([0-9]+\), parameter_index: 0 \}"
+)
 PRODUCT2_FIXTURE = Path("crates/dotty-typer/tests/fixtures/source-case-class-product2-3.9.0")
 PRODUCT2_SOURCE_SHA256 = "4b144913df1d2021359c44633dc2a23f21bf6288bf2528c86cc6f53d79b8ee31"
 SCALA_MATRIX_CASES = {
@@ -1377,8 +1381,9 @@ def validate_cohorts(root: Path, reports: list[Path], output: Path, baseline_rec
                 and wanted["source_tree"] == "84"
                 and wanted["baseline_status"] == "blocked"
                 and wanted["gate"] == "observe"
-                and wanted["first_status"] == EITHER_SWAP_LIVE_BLOCKER
-                and wanted["second_status"] == EITHER_SWAP_LIVE_BLOCKER
+                and EITHER_SWAP_LIVE_BLOCKER_PATTERN.fullmatch(wanted["first_status"]) is not None
+                and EITHER_SWAP_LIVE_BLOCKER_PATTERN.fullmatch(wanted["second_status"]) is not None
+                and wanted["first_status"] == wanted["second_status"]
                 and wanted["actual_result"] == "not_available"
                 and wanted["protected_success"] == "false"
                 and wanted["two_pass_equal"] == "true"
