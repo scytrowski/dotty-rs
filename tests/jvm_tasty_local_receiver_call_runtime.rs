@@ -13,38 +13,14 @@ const TWO_CALL_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_ordered_local_unit_calls/OrderedLocalUnitCalls.scala");
 const ALIAS_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_local_reference_alias/LocalReferenceAlias.scala");
+#[path = "support/immutable_alias_artifacts.rs"]
+mod immutable_alias_artifacts;
 const RENAMED_ALIAS_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_local_reference_alias/controls/RenamedLocalAlias.scala");
 const REVERSED_ALIAS_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_local_reference_alias/controls/ReversedDeclarations.scala");
 const ALIAS_RUNTIME_PROBE: &str =
     include_str!("fixtures/jvm_tasty_local_reference_alias/RustRuntimeProbe.java");
-const ORIGINAL_ALIAS_ARTIFACT_HASHES: [(&str, &str); 6] = [
-    (
-        "example/Counter.class",
-        "68d6a0af84c82311ce06b38b1e98ea69493643c5c99acde2cc4b377d31913634",
-    ),
-    (
-        "example/Counter.tasty",
-        "ff7a6a332352b38dd2022f9a5c5b5de3a40d336eef1b2859bc226d43383dcc6e",
-    ),
-    (
-        "example/Pair.class",
-        "4ff943e4a8310b37c7010a3901b5d75979823524d240902cc25a67347953a9b0",
-    ),
-    (
-        "example/Pair.tasty",
-        "5d9083ae32ee7aec20702d6220c7f7fc3c6be3dca2019a93963ae33c1323f770",
-    ),
-    (
-        "example/PairFactory.class",
-        "4458dadc7c09d16e3868872e135b80233597a7d567fbc28964cf9468b96b5d7b",
-    ),
-    (
-        "example/PairFactory.tasty",
-        "8b1468fb6948a583210407f30a664a7dba2cf574e0bb8b114a04eb153fefd5bb",
-    ),
-];
 const TWO_CALL_HARNESS: &str =
     include_str!("fixtures/jvm_tasty_ordered_local_unit_calls/RuntimeProbe2192.java");
 const HARNESS: &str = r#"package example;
@@ -1354,6 +1330,14 @@ fn aliased_counter_identity_and_ordered_calls_execute_under_strict_jdk21() {
     if !require_jdk_21() {
         return;
     }
+    assert_eq!(
+        sha256_bytes(ALIAS_SOURCE.as_bytes()),
+        immutable_alias_artifacts::PRODUCER_SOURCE_SHA256
+    );
+    assert_eq!(
+        sha256_bytes(ALIAS_RUNTIME_PROBE.as_bytes()),
+        immutable_alias_artifacts::JAVA_CLIENT_SHA256
+    );
     let scratch = TestDirectory::new("alias-runtime");
     let root = scratch.path();
     let harness_src = root.join("harness-src");
@@ -1365,7 +1349,7 @@ fn aliased_counter_identity_and_ordered_calls_execute_under_strict_jdk21() {
 
     let batch = emit_paired_jvm_tasty_batch(
         ALIAS_SOURCE,
-        "LocalReferenceAlias.scala",
+        immutable_alias_artifacts::PRODUCER_SOURCE_NAME,
         SourceId::from_index(22430),
     )
     .expect("frozen alias source produces six linked Rust artifacts");
@@ -1375,8 +1359,8 @@ fn aliased_counter_identity_and_ordered_calls_execute_under_strict_jdk21() {
             .iter()
             .map(|(path, bytes)| (path.as_str(), sha256_bytes(bytes)))
             .collect::<Vec<_>>(),
-        ORIGINAL_ALIAS_ARTIFACT_HASHES.map(|(path, hash)| (path, hash.to_owned())),
-        "the source session reproduces the six original #2240 Rust artifacts"
+        immutable_alias_artifacts::ARTIFACT_SHA256.map(|(path, hash)| (path, hash.to_owned())),
+        "the Java consumer uses the canonical six Rust artifacts"
     );
     let original_hashes = originals
         .iter()
