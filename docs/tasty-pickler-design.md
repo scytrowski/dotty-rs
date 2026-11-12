@@ -327,6 +327,19 @@ source blocks remain unsupported. The pinned oracle fixture confirms that Scala
 3.9 flattens its nested source-block example, so the producer does not guess at
 that normalization.
 
+One further complete producer shape accepts a method-local immutable reference
+`val` initialized by a Boolean conditional selecting between two earlier
+immutable locals of the same supported class type. A borrowed, source-session
+receipt authenticates the exact `IF`, Boolean formal, branch reference symbols,
+declaration order, selected local, and scope. The body validator does not infer
+identity from names or matching types. In Scala 3.9 TASTy, the initializer is a
+bare `IF`; each branch is a `SHAREDtype` reference to the earlier
+`TERMREFdirect` occurrence for that local. The selected declaration remains
+independently encoded. This does not admit conditionals that allocate in either
+branch, mutable or nested selections, other result joins, or arbitrary
+reference-valued `IF` expressions. The pinned oracle fixture and its negative
+controls define this boundary.
+
 The crate's only normal dependencies are `dotty-core` and `dotty-tasty`. A test-only
 closure implements the binding port with `SourceTyper::source_typed_index().get`;
 the production crate neither imports nor depends on Typer, Namer, Parser or JVM.

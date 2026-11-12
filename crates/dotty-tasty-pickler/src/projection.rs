@@ -90,6 +90,8 @@ pub struct EncodingContext<'a> {
     local_receiver_unit_call_pairs: HashMap<SymbolId, [crate::LocalReceiverUnitCallBinding; 2]>,
     local_values_by_typed_declaration: HashMap<TreeId<Typed>, SymbolId>,
     local_value_symbols: HashSet<SymbolId>,
+    local_reference_targets: HashMap<(SymbolId, Option<TypeId>), AstLabel>,
+    conditional_selection_ifs: HashMap<(SymbolId, TreeId<Typed>), [SymbolId; 2]>,
     external: HashMap<SymbolId, (NameRef, NameRef)>,
     same_source_external: HashSet<SymbolId>,
     types: HashMap<TypeId, AstLabel>,
@@ -220,6 +222,8 @@ impl<'a> EncodingContext<'a> {
             local_receiver_unit_call_pairs: HashMap::new(),
             local_values_by_typed_declaration: HashMap::new(),
             local_value_symbols: HashSet::new(),
+            local_reference_targets: HashMap::new(),
+            conditional_selection_ifs: HashMap::new(),
             external: HashMap::new(),
             same_source_external: HashSet::new(),
             types: HashMap::new(),
@@ -299,6 +303,18 @@ impl<'a> EncodingContext<'a> {
             context.reserve_declaration(method.symbol)?;
             for parameter in method.parameter_clauses.iter().flatten() {
                 context.reserve_declaration(*parameter)?;
+            }
+            if let Some(selection) = p
+                .typed_bindings
+                .conditional_local_reference_selection(p.source.id, method.symbol)
+            {
+                if context
+                    .conditional_selection_ifs
+                    .insert((method.symbol, selection.typed_if), selection.targets)
+                    .is_some()
+                {
+                    return Err(reference(method.symbol, ReferenceError::Metadata));
+                }
             }
         }
         let mut registered_classes = Vec::new();
@@ -989,7 +1005,8 @@ impl<'a> EncodingContext<'a> {
                 })
                 .map_err(construction)
         } else {
-            self.wire
+            let reference = self
+                .wire
                 .push(AstNode::Reference {
                     tag: if is_type {
                         TYPEREFDIRECT_TAG
@@ -998,7 +1015,13 @@ impl<'a> EncodingContext<'a> {
                     },
                     target: label,
                 })
-                .map_err(construction)
+                .map_err(construction)?;
+            if !is_type {
+                self.local_reference_targets
+                    .entry((symbol, None))
+                    .or_insert(reference);
+            }
+            Ok(reference)
         }
     }
     /// References a reserved local declaration, directly or with its checked prefix.
@@ -1008,6 +1031,54 @@ impl<'a> EncodingContext<'a> {
         prefix: Option<TypeId>,
     ) -> Result<AstLabel, PickleError> {
         self.run(|c| c.local_inner(symbol, prefix, 0))
+    }
+
+    /// Reuses the original source occurrence of one selected local reference.
+    /// This is only used by a receipt-authenticated conditional initializer.
+    pub(crate) fn shared_selected_local_reference(
+        &mut self,
+        symbol: SymbolId,
+    ) -> Result<AstLabel, PickleError> {
+        self.run(|context| {
+            context.charge(1)?;
+            let target = context
+                .local_reference_targets
+                .get(&(symbol, None))
+                .copied()
+                .ok_or(reference(symbol, ReferenceError::NotRegistered))?;
+            context
+                .wire
+                .push(AstNode::Reference {
+                    tag: SHAREDTYPE_TAG,
+                    target,
+                })
+                .map_err(construction)
+        })
+    }
+
+    pub(crate) fn conditional_selection_targets(
+        &self,
+        method: SymbolId,
+        if_tree: TreeId<Typed>,
+    ) -> Option<[SymbolId; 2]> {
+        self.conditional_selection_ifs
+            .get(&(method, if_tree))
+            .copied()
+    }
+
+    pub(crate) fn register_conditional_local_reference_selection(
+        &mut self,
+        method: SymbolId,
+        selection: crate::ConditionalLocalReferenceSelectionBinding,
+    ) -> Result<(), PickleError> {
+        if self
+            .conditional_selection_ifs
+            .insert((method, selection.typed_if), selection.targets)
+            .is_some()
+        {
+            return Err(reference(method, ReferenceError::Metadata));
+        }
+        Ok(())
     }
 
     /// Lowers the frozen Scala 3.9 wire form for an unqualified same-class

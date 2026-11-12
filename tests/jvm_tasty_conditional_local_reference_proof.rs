@@ -5,11 +5,27 @@ use dotty::jvm_tasty_cross_class::{
 };
 use dotty::jvm_tasty_plan::{PairedPlanError, with_paired_jvm_tasty_batch_plan};
 use dotty_core::ast::{AstArena, TreeKind, Typed};
-use dotty_core::{Definitions, Packages, SemanticStore, SourceId, SourceText};
+use dotty_core::{
+    Definitions, Packages, SemanticStore, SourceId, SourceText, SourceTypedIndex, SymbolId,
+    SymbolInfo, TermRefTarget, TreeId, Type, TypeRefTarget, Untyped,
+};
 use dotty_jvm::JvmCompilationUnit;
 use dotty_lexer::ContextualScanner;
 use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty_parser::parse_compilation_unit;
+use dotty_tasty::ast::{
+    APPLY_TAG, BLOCK_TAG, DEFDEF_TAG, DefinitionBody, IF_TAG, SHAREDTYPE_TAG, TERMREFDIRECT_TAG,
+    VALDEF_TAG,
+};
+use dotty_tasty::file::TastyFile;
+use dotty_tasty::term::RawTree;
+use dotty_tasty_pickler::{
+    ClassMemberPicklePlan, ClassStatePicklePlan, ConditionalLocalReferenceSelectionBinding,
+    FormalLocalConstructorCallArgumentBinding, FormalLocalConstructorCallArgumentOrigin,
+    FormalLocalConstructorCallPairBinding, LocalCounterInitializerBinding,
+    LocalReceiverUnitCallBinding, LocalValueBinding, NestedConstructorCallBinding,
+    PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings,
+};
 use dotty_typer::{SourceTyper, TypedLocalBinding};
 
 const SOURCE: &str = r#"package example
@@ -73,6 +89,119 @@ struct ReceiptIds {
     targets: [dotty_core::SymbolId; 2],
     selected: dotty_core::SymbolId,
     scope: dotty_core::ScopeId,
+    tasty: Vec<u8>,
+}
+
+struct ConditionalPicklerBindings<'a> {
+    index: &'a SourceTypedIndex,
+    source: SourceId,
+    method: SymbolId,
+    classes: Vec<SymbolId>,
+    methods: Vec<SymbolId>,
+    locals: Vec<LocalValueBinding>,
+    initializers: Vec<LocalCounterInitializerBinding>,
+    selection: ConditionalLocalReferenceSelectionBinding,
+    setter: LocalReceiverUnitCallBinding,
+    pair: FormalLocalConstructorCallPairBinding,
+}
+
+impl SourceTypedBindings for ConditionalPicklerBindings<'_> {
+    fn typed_at(&self, source: SourceId, tree: TreeId<Untyped>) -> Option<TreeId<Typed>> {
+        self.index.get(source, tree)
+    }
+
+    fn planned_class_symbols(&self) -> &[SymbolId] {
+        &self.classes
+    }
+    fn planned_method_symbols(&self) -> &[SymbolId] {
+        &self.methods
+    }
+    fn local_value_bindings(&self, source: SourceId, method: SymbolId) -> Vec<LocalValueBinding> {
+        (source == self.source && method == self.method)
+            .then(|| self.locals.clone())
+            .unwrap_or_default()
+    }
+    fn local_counter_initializers(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Vec<LocalCounterInitializerBinding> {
+        (source == self.source && method == self.method)
+            .then(|| self.initializers.clone())
+            .unwrap_or_default()
+    }
+    fn conditional_local_reference_selection(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<ConditionalLocalReferenceSelectionBinding> {
+        (source == self.source && method == self.method).then_some(self.selection)
+    }
+    fn local_receiver_unit_call(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<LocalReceiverUnitCallBinding> {
+        (source == self.source && method == self.method).then_some(self.setter)
+    }
+    fn formal_local_constructor_call_pair(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<FormalLocalConstructorCallPairBinding> {
+        (source == self.source && method == self.method).then_some(self.pair)
+    }
+}
+
+fn assert_rust_candidate_if_shape(bytes: &[u8]) {
+    let tasty = TastyFile::parse_and_validate_scala_3_9(bytes).unwrap();
+    let index = tasty.ast_address_index().unwrap();
+    let create = index
+        .iter_nodes_with_tag(DEFDEF_TAG)
+        .find_map(|node| {
+            let body = index.get(node.offset as u32)?.decode_defdef_body().ok()?;
+            (tasty.names().render(body.name).ok()? == "create").then_some(body)
+        })
+        .expect("Rust candidate contains PairFactory.create");
+    let RawTree::LengthNode(block) = create.rhs.unwrap() else {
+        panic!("create body is BLOCK")
+    };
+    assert_eq!(block.tag, BLOCK_TAG);
+    let block = block.decode_block().unwrap();
+    assert_eq!(block.stats.len(), 4);
+    assert_eq!(
+        block.stats.iter().map(raw_tag).collect::<Vec<_>>(),
+        [VALDEF_TAG, VALDEF_TAG, VALDEF_TAG, APPLY_TAG]
+    );
+    let selected = index
+        .iter_nodes_with_tag(VALDEF_TAG)
+        .find_map(|node| {
+            let DefinitionBody::ValDef { name, rhs, .. } = index
+                .get(node.offset as u32)?
+                .decode_definition_body()
+                .ok()?
+            else {
+                return None;
+            };
+            (tasty.names().render(name).ok()? == "selected").then_some(rhs?)
+        })
+        .expect("selected VALDEF has an initializer");
+    let RawTree::LengthNode(if_node) = selected else {
+        panic!("selected initializer is bare IF, without TYPED")
+    };
+    assert_eq!(if_node.tag, IF_TAG);
+    let if_node = if_node.decode_if().unwrap();
+    assert_eq!(raw_tag(&if_node.condition), TERMREFDIRECT_TAG);
+    assert_eq!(raw_tag(&if_node.then_branch), SHAREDTYPE_TAG);
+    assert_eq!(raw_tag(&if_node.else_branch), SHAREDTYPE_TAG);
+}
+
+fn raw_tag(tree: &RawTree<'_>) -> u8 {
+    match tree {
+        RawTree::Leaf(term) => term.tag,
+        RawTree::Ast { tag, .. } | RawTree::NatAst { tag, .. } => *tag,
+        RawTree::LengthNode(node) => node.tag,
+    }
 }
 
 fn authenticate(
@@ -417,6 +546,269 @@ fn authenticate(
     assert_eq!(binding.scope, local_bindings[2].scope());
     assert_eq!(binding.condition_formal, formals[2]);
     assert_ne!(binding.local_type, definitions.boolean);
+    let factory_tree = match &parsed.ast.get(parsed.root).kind {
+        TreeKind::PackageDef(package) => *package
+            .stats
+            .iter()
+            .find(|tree| {
+                source_index
+                    .symbol_at(source_id, **tree)
+                    .is_some_and(|symbol| {
+                        typer
+                            .store()
+                            .names
+                            .resolve(typer.store().symbols.get(symbol).name.text())
+                            == "PairFactory"
+                    })
+            })
+            .unwrap(),
+        _ => unreachable!(),
+    };
+    let factory = source_index.symbol_at(source_id, factory_tree).unwrap();
+    let TreeKind::TypeDef(factory_definition) = &parsed.ast.get(factory_tree).kind else {
+        unreachable!()
+    };
+    let TreeKind::Template(factory_template) = &parsed.ast.get(factory_definition.rhs).kind else {
+        unreachable!()
+    };
+    let mut planned_classes = Vec::new();
+    let mut planned_methods = Vec::new();
+    if let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind {
+        for &class_tree in &package.stats {
+            let class = source_index.symbol_at(source_id, class_tree).unwrap();
+            planned_classes.push(class);
+            let TreeKind::TypeDef(class_definition) = &parsed.ast.get(class_tree).kind else {
+                unreachable!()
+            };
+            let TreeKind::Template(template) = &parsed.ast.get(class_definition.rhs).kind else {
+                unreachable!()
+            };
+            planned_methods.push(
+                source_index
+                    .symbol_at(source_id, template.constructor)
+                    .unwrap(),
+            );
+            for &member in &template.body {
+                if matches!(parsed.ast.get(member).kind, TreeKind::DefDef(_)) {
+                    planned_methods.push(source_index.symbol_at(source_id, member).unwrap());
+                }
+            }
+        }
+    }
+    let mut initializers = Vec::new();
+    for (index, local_binding) in local_bindings[..2].iter().enumerate() {
+        let source_declaration = block.stats[index];
+        let TreeKind::ValDef(definition) = &parsed.ast.get(source_declaration).kind else {
+            unreachable!()
+        };
+        let source_initializer = definition.rhs.unwrap();
+        let TreeKind::Apply(source_apply) = &parsed.ast.get(source_initializer).kind else {
+            unreachable!()
+        };
+        let source_select = source_apply.function;
+        let TreeKind::Select(selection) = &parsed.ast.get(source_select).kind else {
+            unreachable!()
+        };
+        let source_new = selection.qualifier;
+        let source_argument = source_apply.args[0];
+        let typed_declaration = local_binding.declaration();
+        let typed_initializer = source_typed_index
+            .get(source_id, source_initializer)
+            .unwrap();
+        let TreeKind::Apply(typed_apply) = &typed_ast.get(typed_initializer).kind else {
+            unreachable!()
+        };
+        let typed_select = typed_apply.function;
+        let typed_new = source_typed_index.get(source_id, source_new).unwrap();
+        let typed_argument = typed_apply.args[0];
+        let class = match typer.store().types.get(binding.local_type) {
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(class),
+                ..
+            } => *class,
+            _ => unreachable!(),
+        };
+        let argument_formal = match typer.store().types.get(typed_ast.get(typed_argument).ty) {
+            Type::TermRef {
+                target: TermRefTarget::Symbol(formal),
+                ..
+            } => *formal,
+            _ => unreachable!(),
+        };
+        let ctor_source_tree = match source_index.definition_of(class).unwrap() {
+            dotty_core::SourceDefinition::Canonical { tree, .. } => tree,
+            _ => unreachable!(),
+        };
+        let TreeKind::TypeDef(counter_definition) = &parsed.ast.get(ctor_source_tree).kind else {
+            unreachable!()
+        };
+        let TreeKind::Template(counter_template) = &parsed.ast.get(counter_definition.rhs).kind
+        else {
+            unreachable!()
+        };
+        let ctor = source_index
+            .symbol_at(source_id, counter_template.constructor)
+            .unwrap();
+        let TreeKind::DefDef(ctor_definition) = &parsed.ast.get(counter_template.constructor).kind
+        else {
+            unreachable!()
+        };
+        let ctor_formal_tree = ctor_definition.value_param_clauses[0][0];
+        let ctor_formal = source_index
+            .derived_symbol_at(ctor, source_id, ctor_formal_tree)
+            .unwrap();
+        let formal_type = match typer.store().symbols.get(ctor_formal).info {
+            SymbolInfo::Complete(ty) => ty,
+            _ => unreachable!(),
+        };
+        let local_type = match typer.store().symbols.get(local_binding.symbol()).info {
+            SymbolInfo::Complete(ty) => ty,
+            _ => unreachable!(),
+        };
+        initializers.push(LocalCounterInitializerBinding {
+            source_block: rhs,
+            typed_block: source_typed_index.get(source_id, rhs).unwrap(),
+            source_declaration,
+            typed_declaration,
+            source_initializer,
+            typed_initializer,
+            source_type_tree: definition.tpt,
+            typed_type_tree: source_typed_index.get(source_id, definition.tpt).unwrap(),
+            local: local_binding.symbol(),
+            scope: local_binding.scope(),
+            local_type,
+            argument_formal,
+            call: NestedConstructorCallBinding {
+                source_apply: source_initializer,
+                typed_apply: typed_initializer,
+                source_select,
+                source_new,
+                source_argument,
+                typed_select,
+                typed_new,
+                typed_argument,
+                class,
+                constructor: ctor,
+                formal: ctor_formal,
+                formal_type,
+                result_type: typed_ast.get(typed_initializer).ty,
+            },
+        });
+    }
+    let source_formals: [dotty_core::TreeId<Untyped>; 2] =
+        method_def.value_param_clauses[0][..2].try_into().unwrap();
+    let pair = match &typed_ast
+        .get(source_typed_index.get(source_id, block.expr).unwrap())
+        .kind
+    {
+        TreeKind::Apply(application) => FormalLocalConstructorCallPairBinding {
+            source_method_formals: source_formals,
+            method_formals: [formals[0], formals[1]],
+            arguments: std::array::from_fn(|index| {
+                let source_argument = match &parsed.ast.get(block.expr).kind {
+                    TreeKind::Apply(apply) => apply.args[index],
+                    _ => unreachable!(),
+                };
+                let typed_argument = application.args[index];
+                let ty = typed_ast.get(typed_argument).ty;
+                let symbol = match typer.store().types.get(ty) {
+                    Type::TermRef {
+                        target: TermRefTarget::Symbol(symbol),
+                        ..
+                    } => *symbol,
+                    _ => unreachable!(),
+                };
+                FormalLocalConstructorCallArgumentBinding {
+                    source_argument,
+                    typed_argument,
+                    origin: FormalLocalConstructorCallArgumentOrigin::LocalValue {
+                        symbol,
+                        result_type: ty,
+                    },
+                }
+            }),
+        },
+        _ => unreachable!(),
+    };
+    let bindings = ConditionalPicklerBindings {
+        index: &source_typed_index,
+        source: source_id,
+        method,
+        classes: planned_classes,
+        methods: planned_methods,
+        locals: local_bindings
+            .iter()
+            .enumerate()
+            .map(|(index, local)| LocalValueBinding {
+                source_tree: block.stats[index],
+                symbol: local.symbol(),
+                typed_declaration: local.declaration(),
+                scope: local.scope(),
+            })
+            .collect(),
+        initializers,
+        selection: binding,
+        setter: LocalReceiverUnitCallBinding {
+            source_apply: proof.source_setter(),
+            typed_apply: proof.typed_setter(),
+            source_select: match &parsed.ast.get(proof.source_setter()).kind {
+                TreeKind::Apply(apply) => apply.function,
+                _ => unreachable!(),
+            },
+            typed_select: match &typed_ast.get(proof.typed_setter()).kind {
+                TreeKind::Apply(apply) => apply.function,
+                _ => unreachable!(),
+            },
+            source_receiver: proof.source_setter_receiver(),
+            typed_receiver: proof.typed_setter_receiver(),
+            source_argument: proof.source_setter_argument(),
+            typed_argument: proof.typed_setter_argument(),
+            receiver: proof.selected(),
+            receiver_scope: proof.scope(),
+            method: proof.setter_method(),
+            argument_formal: formals[3],
+        },
+        pair,
+    };
+    let constructor = source_index
+        .symbol_at(source_id, factory_template.constructor)
+        .unwrap();
+    let factory_constructor = PrimaryConstructorInputPlan {
+        symbol: constructor,
+        source_tree: factory_template.constructor,
+        parameter_clauses: vec![],
+    };
+    let member = [ClassMemberPicklePlan::Method {
+        symbol: method,
+        source_tree: method_tree,
+    }];
+    let class_plan = ClassStatePicklePlan {
+        store: typer.store(),
+        definitions: &definitions,
+        source_ast: &parsed.ast,
+        typed_ast: &typed_ast,
+        source_index: &source_index,
+        typed_bindings: &bindings,
+        source: SourceMetadata {
+            id: source_id,
+            name: "conditional-reference-selection.scala".into(),
+        },
+        class: factory,
+        class_tree: factory_tree,
+        constructor: factory_constructor,
+        members: &member,
+    };
+    let validated = class_plan
+        .validate()
+        .expect("semantic-only PairFactory plan accepts the authenticated receipt");
+    validated
+        .validate_method_bodies()
+        .expect("conditional body validates");
+    let tasty = validated
+        .pickle()
+        .expect("conditional body serializes")
+        .bytes()
+        .to_vec();
     Ok(ReceiptIds {
         source: proof.source_id(),
         method: proof.method(),
@@ -424,12 +816,20 @@ fn authenticate(
         targets: proof.targets(),
         selected: proof.selected(),
         scope: proof.scope(),
+        tasty,
     })
 }
 
 #[test]
 fn authentic_conditional_local_receipt_preserves_session_identities_for_source_controls() {
     let original = authenticate(SOURCE, 22_650, IndexMutation::None).unwrap();
+    assert!(!original.tasty.is_empty());
+    assert_rust_candidate_if_shape(&original.tasty);
+    let repeated = authenticate(SOURCE, 22_650, IndexMutation::None).unwrap();
+    assert_eq!(
+        original.tasty, repeated.tasty,
+        "one session emits deterministic candidate bytes"
+    );
     assert_eq!(original.source, SourceId::from_index(22_650));
     assert_eq!(original.method.index(), 60);
     assert_eq!(original.condition_formal.index(), 63);
