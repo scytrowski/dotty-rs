@@ -22,10 +22,11 @@ use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_d
 use dotty_parser::parse_compilation_unit;
 use dotty_tasty_pickler::{
     ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan,
-    DirectFormalConstructorCallPairBinding, FormalLocalConstructorCallArgumentBinding,
-    FormalLocalConstructorCallArgumentOrigin, FormalLocalConstructorCallPairBinding,
-    LocalCounterInitializerBinding, LocalReceiverUnitCallBinding, LocalReferenceAliasBinding,
-    LocalValueBinding, NestedConstructorCallBinding, NestedConstructorCallPairBinding,
+    ConditionalLocalReferenceSelectionBinding, DirectFormalConstructorCallPairBinding,
+    FormalLocalConstructorCallArgumentBinding, FormalLocalConstructorCallArgumentOrigin,
+    FormalLocalConstructorCallPairBinding, LocalCounterInitializerBinding,
+    LocalReceiverUnitCallBinding, LocalReferenceAliasBinding, LocalValueBinding,
+    NestedConstructorCallBinding, NestedConstructorCallPairBinding,
     OrderedConstructorCallArgumentBinding, OrderedConstructorCallArgumentOrigin,
     OrderedConstructorCallArgumentPairBinding, PickleError, PlannedCallBinding,
     PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings, ValidatedClassStatePlan,
@@ -33,8 +34,10 @@ use dotty_tasty_pickler::{
 use dotty_typer::{SourceTyper, TyperError};
 
 use crate::jvm_tasty_cross_class::{
-    CrossClassConstructorCallProofInput, ValidatedCrossClassConstructorCallProof,
+    CrossClassConstructorCallProofInput, ImmutableLocalConditionalReferenceSelectionProofInput,
+    ImmutableLocalInitializerPairProofInput, ValidatedCrossClassConstructorCallProof,
     validate_cross_class_constructor_call_proofs_with_typer,
+    validate_immutable_local_conditional_reference_selection_proof,
 };
 
 /// Errors are tagged by the frontend or producer stage that rejected the
@@ -159,6 +162,11 @@ struct BatchSourceTypedBindings<'a> {
     local_values: Vec<(SourceId, SymbolId, LocalValueBinding)>,
     local_counter_initializers: Vec<(SourceId, SymbolId, LocalCounterInitializerBinding)>,
     local_reference_aliases: Vec<(SourceId, SymbolId, LocalReferenceAliasBinding)>,
+    conditional_local_reference_selections: Vec<(
+        SourceId,
+        SymbolId,
+        ConditionalLocalReferenceSelectionBinding,
+    )>,
     local_receiver_unit_calls: Vec<(SourceId, SymbolId, LocalReceiverUnitCallBinding)>,
     local_receiver_unit_call_pairs: Vec<(SourceId, SymbolId, [LocalReceiverUnitCallBinding; 2])>,
     formal_local_constructor_call_pairs:
@@ -306,6 +314,18 @@ impl SourceTypedBindings for BatchSourceTypedBindings<'_> {
             .find_map(|(proof_source, proof_method, binding)| {
                 (*proof_source == source && *proof_method == method).then_some(*binding)
             })
+    }
+
+    fn conditional_local_reference_selection(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<ConditionalLocalReferenceSelectionBinding> {
+        self.conditional_local_reference_selections.iter().find_map(
+            |(proof_source, proof_method, binding)| {
+                (*proof_source == source && *proof_method == method).then_some(*binding)
+            },
+        )
     }
 
     fn local_receiver_unit_call_pair(
@@ -1401,6 +1421,68 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                 })?;
         }
     }
+    // Collect the proof-only conditional selection receipt independently of
+    // the historical paired candidate-method validator. It can travel through
+    // the same borrowed typed-binding carrier when a later producer contract
+    // admits the body. In this increment the four-formal candidate remains
+    // rejected below, before any batch callback or artifact is returned.
+    let mut conditional_local_reference_selections = Vec::new();
+    for draft in &drafts {
+        let TreeKind::TypeDef(class_definition) = &parsed.ast.get(draft.source.tree).kind else {
+            continue;
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(class_definition.rhs).kind else {
+            continue;
+        };
+        for &method_tree in &template.body {
+            let TreeKind::DefDef(method_definition) = &parsed.ast.get(method_tree).kind else {
+                continue;
+            };
+            let Some(rhs) = method_definition.rhs else {
+                continue;
+            };
+            let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+                continue;
+            };
+            if block.stats.len() != 4
+                || !block.stats[..3].iter().all(|stat| {
+                    matches!(
+                        parsed.ast.try_get(*stat).map(|node| &node.kind),
+                        Some(TreeKind::ValDef(_))
+                    )
+                })
+            {
+                continue;
+            }
+            let Some(method) = index.symbol_at(source_id, method_tree) else {
+                continue;
+            };
+            let receipt = validate_immutable_local_conditional_reference_selection_proof(
+                ImmutableLocalConditionalReferenceSelectionProofInput {
+                    initializers: ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store: typer.store(),
+                        definitions: &definitions,
+                        source_ast: &parsed.ast,
+                        typed_ast: typer.typed_ast(),
+                        source_index: &index,
+                        source_typed_index: typer.source_typed_index(),
+                        local_bindings: [
+                            typer.typed_local_binding_at(source_id, block.stats[0]),
+                            typer.typed_local_binding_at(source_id, block.stats[1]),
+                        ],
+                        jvm_unit: &jvm_unit,
+                    },
+                    selected_binding: typer.typed_local_binding_at(source_id, block.stats[2]),
+                },
+            );
+            if let Ok(receipt) = receipt {
+                let binding = receipt.binding();
+                conditional_local_reference_selections.push((source_id, method, binding));
+            }
+        }
+    }
     let constructor_call_proofs = validate_cross_class_constructor_call_proofs_with_typer(
         CrossClassConstructorCallProofInput {
             source_id,
@@ -1746,6 +1828,7 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                 })
             })
             .collect(),
+        conditional_local_reference_selections,
         local_receiver_unit_calls: constructor_call_proofs
             .iter()
             .filter_map(|proof| {
