@@ -18,6 +18,12 @@ identities remain owned by each class's canonical module class and retain
 `(Int): Created` / `(Created): Created` and `(Int): Deleted` / `(Deleted):
 Deleted` signatures.
 
+The bounded generic exception is documented separately in
+[`typer-source-case-class-generic-product1-3.9.0.md`](typer-source-case-class-generic-product1-3.9.0.md).
+It accepts only the pinned `scala.util.Left` and `Right` field-to-parameter
+shapes with their canonical source `Either[A, B]` parent; it does not generalize
+this recursive source-trait rule to arbitrary generic parents.
+
 Both class-first and selector-first completion use the same transactional path.
 The tests compare normalized source-owner receipts across two fresh sessions,
 exercise the forward `Created/Deleted <: Event` relation through bounded
