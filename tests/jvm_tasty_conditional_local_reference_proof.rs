@@ -49,6 +49,14 @@ class Pair(first: Counter, second: Counter):
   def leftValue(): Int = left.get()
   def rightValue(): Int = right.get()
 "#;
+const JAVA_SYMBOL_STUB: &str = r#"package example;
+
+public final class PairFactory {
+  public Pair create(int firstSeed, int secondSeed, boolean chooseFirst, int nextValue) {
+    return null;
+  }
+}
+"#;
 
 const SOURCE: &str = r#"package example
 
@@ -237,7 +245,7 @@ fn process_output(command: &mut Command) -> Output {
         .unwrap_or_else(|error| panic!("run {rendered}: {error}"))
 }
 
-fn successful_scala(command: &mut Command) -> Output {
+fn successful_command(command: &mut Command) -> Output {
     let rendered = format!("{command:?}");
     let output = process_output(command);
     assert!(
@@ -271,11 +279,13 @@ fn verify_rust_candidate_with_pinned_scala(candidate: &[u8]) {
     ));
     let support_source_dir = root.join("support-source");
     let dependencies = root.join("dependencies");
+    let classfile_support = root.join("classfile-support");
     let candidate_dir = root.join("rust-candidate");
     let reconstructed = root.join("from-tasty-output");
     for directory in [
         &support_source_dir,
         &dependencies,
+        &classfile_support,
         &candidate_dir,
         &reconstructed,
     ] {
@@ -308,15 +318,33 @@ fn verify_rust_candidate_with_pinned_scala(candidate: &[u8]) {
     );
     let mut compile_support =
         scala39_toolchain::scalac(&pinned.java_home, &pinned.scalac, scratch.clone());
-    successful_scala(
+    successful_command(
         compile_support
             .args(["-Werror", "-release", "21", "-d"])
             .arg(&dependencies)
             .arg(&support_source),
     );
 
+    let java_stub_source = support_source_dir.join("PairFactory.java");
+    fs::write(&java_stub_source, JAVA_SYMBOL_STUB).expect("write Java-only class symbol stub");
+    let mut compile_symbol_stub = Command::new(java_home.join("bin/javac"));
+    successful_command(
+        compile_symbol_stub
+            .args(["--release", "21", "-classpath"])
+            .arg(&dependencies)
+            .arg("-d")
+            .arg(&classfile_support)
+            .arg(&java_stub_source),
+    );
+
     assert!(!dependencies.join("example/PairFactory.class").exists());
     assert!(!dependencies.join("example/PairFactory.tasty").exists());
+    assert!(
+        classfile_support
+            .join("example/PairFactory.class")
+            .is_file()
+    );
+    assert!(!classfile_support.join("example/PairFactory.tasty").exists());
     assert_eq!(
         fs::read_dir(&candidate_dir)
             .expect("inspect candidate inputs")
@@ -326,10 +354,15 @@ fn verify_rust_candidate_with_pinned_scala(candidate: &[u8]) {
         "Scala reader consumes the Rust candidate as its only PairFactory input"
     );
 
-    let classpath = format!("{}:{}", dependencies.display(), pinned.libraries);
+    let classpath = format!(
+        "{}:{}:{}",
+        classfile_support.display(),
+        dependencies.display(),
+        pinned.libraries
+    );
     let mut print_tasty =
         scala39_toolchain::scalac(&pinned.java_home, &pinned.scalac, scratch.clone());
-    let printed = successful_scala(
+    let printed = successful_command(
         print_tasty
             .args(["-color:never", "-print-tasty"])
             .arg(&candidate_path),
@@ -346,7 +379,7 @@ fn verify_rust_candidate_with_pinned_scala(candidate: &[u8]) {
 
     let mut from_tasty =
         scala39_toolchain::scalac(&pinned.java_home, &pinned.scalac, scratch.clone());
-    successful_scala(
+    successful_command(
         from_tasty
             .args(["-release", "21", "-from-tasty", "-classpath"])
             .arg(&classpath)
@@ -360,7 +393,7 @@ fn verify_rust_candidate_with_pinned_scala(candidate: &[u8]) {
     let decompile_classpath = format!("{}:{classpath}", reconstructed.display());
     let mut decompile =
         scala39_toolchain::scalac(&pinned.java_home, &pinned.scalac, scratch.clone());
-    let decompiled = successful_scala(
+    let decompiled = successful_command(
         decompile
             .args(["-color:never", "-classpath"])
             .arg(&decompile_classpath)
