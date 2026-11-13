@@ -1,8 +1,8 @@
-# Conditional local reference selection: Scala 3.9 audit
+# Conditional local reference selection: Scala 3.9 paired producer contract
 
 This report freezes the one-source `Counter` / `Pair` / `PairFactory` input
-from issue #2265 and records the pinned Scala 3.9.0/JDK 21 oracle and current
-Rust first failure. The Scala `.class` and `.tasty` files in
+from issue #2265 and records the pinned Scala 3.9.0/JDK 21 oracle and the
+paired producer contract implemented for issue #2270. The Scala `.class` and `.tasty` files in
 [`tests/fixtures/jvm_tasty_conditional_reference_selection/scala39`](../tests/fixtures/jvm_tasty_conditional_reference_selection/scala39)
 are official Scala compiler outputs. They are not Rust-produced artifacts.
 Source, Java consumer, binary, snapshot, control, and tool hashes are in the
@@ -60,75 +60,63 @@ The swapped-branch Scala control is valid. Its separate Java run observed
 reversed declaration order also compile. The four-argument target, control
 sources, and probe are independently hashed in the manifest.
 
-## Current Rust first failure
+## Rust producer contract
 
 One real lexer → parser → namer → source typer session authenticates the
-source-to-typed identities. With source `SourceId(22650)`, `create` is
-`SymbolId(60)` and its formals are `61`–`64`. The two allocated local
-bindings are `SymbolId(65)` and `SymbolId(66)` in `ScopeId(18)`; `selected`
-is `SymbolId(67)` in the same method-owned scope. The source-to-typed receipt
-records both Counter declarations, selected declaration, setter, IF condition
-and branches, and final Pair application. The IF branches retain symbols 65
-and 66, the setter receiver is 67, and the Pair arguments remain 65 and 66.
-These identities are read from the shared session indexes and typed
-references, not inferred from local names.
+source-to-typed identities. The candidate is accepted only when its four
+ordered formals have the `(Int, Int, Boolean, Int)` ABI, its first two locals
+are the original `Counter(seed)` allocations, its third immutable local is
+the exact `if` selecting those two identities, and its only setter mutates
+that selected local with the final `Int` formal. The final Pair constructor
+still receives the first two locals in source order. The proof carries source
+and typed tree roots, canonical symbols, scope, and JVM local slots; spelling
+is not used to recover identity.
 
-The current paired producer's first failure is **before the body shape is
-examined**:
-
-```text
-phase: cross-class constructor-call identity proof
-SourceShape("candidate method must have one plain formal clause and a concrete public body")
-```
-
-The failure is caused by the current candidate-method contract rejecting this
-four-formal method shape. It does not measure a later paired proof for a
-conditional local join. The callback is not reached, `emit_paired_jvm_tasty_batch`
-returns an error, and no accepted artifact batch or partial artifacts are
-returned. No compiler support claim for the conditional body follows from this
-earlier rejection.
+The paired emitter returns exactly three class files and three TASTy sidecars.
+The regression verifies class-file major version 65, TASTy 28.9, matching
+class/sidecar UUIDs, the four-parameter descriptor, local limits, and
+byte-for-byte determinism across fresh sessions. The unchanged Counter and
+Pair outputs are byte-equal to the established local-reference-alias route.
+The contract also checks encoded conditional branch targets and the selected
+receiver slot, rejecting verifier-valid mutations that load another Counter
+local.
 
 ## Controls and preserved paths
 
-Scala validity and Rust first failure are recorded separately; valid deferred
-inputs are not treated as invalid Scala. The focused Rust regression asserts
-the exact Rust diagnostic for each measured case.
+Scala validity and producer support are recorded separately. Valid cases
+outside this receipt shape remain rejected with the exact Rust diagnostic.
 
-| Control | Scala 3.9 result | Current Rust first result |
+| Control | Scala 3.9 result | Rust producer result |
 | --- | --- | --- |
-| Swap IF branch targets | Valid; reversed runtime values | Candidate-method shape `SourceShape` |
-| Rename locals | Valid | Candidate-method shape `SourceShape` |
-| Reverse the two original Counter declarations | Valid | Candidate-method shape `SourceShape` |
+| Swap IF branch targets | Valid; reversed runtime values | Accepted with exact branch-to-local mapping |
+| Rename locals | Valid | Accepted; canonical symbols retain identity |
+| Reverse the two original Counter declarations | Valid | Accepted; Pair arguments preserve source order |
 | Non-Boolean IF condition | Invalid, E007 | `IfConditionTypeMismatch` during method body typing |
 | Counter/Int branch mismatch | Invalid, E007 | `LocalValueTypeMismatch` during method body typing |
 | Missing local reference | Invalid, E006 | `TermNameNotFound` during method body typing |
 | Reference before initialization | Invalid, E039 | `TermNameNotFound` during method body typing |
-| Mutable selected local | Valid, deferred | Candidate-method shape `SourceShape` |
-| Nested IF | Valid, deferred | Candidate-method shape `SourceShape` |
-| Counter allocation inside one branch | Valid, deferred | Candidate-method shape `SourceShape` |
-| Additional independent setter | Valid, deferred | Candidate-method shape `SourceShape` |
+| Mutable selected local | Valid, outside this receipt | Rejected at local identity validation |
+| Nested IF | Valid, outside this receipt | Rejected because branches are not direct local references |
+| Counter allocation inside one branch | Valid, outside this receipt | Rejected because branches are not direct local references |
+| Additional independent setter | Valid, outside this receipt | Rejected by the exact block-shape gate |
 
-The existing pre-sprint immutable alias fixture and zero-, one-, and two-call
-no-alias fixtures still pass their focused Rust producer regression. Their
-Scala sources also compile with the same pinned compiler. This audit changes
-no accepted language shape or producer behavior.
+The existing immutable alias fixture and zero-, one-, and two-call no-alias
+fixtures remain covered by focused producer regressions. Their Scala sources
+also compile with the same pinned compiler.
 
 ## Ownership boundary
 
 - `dotty-core` source/typed indexes and the source typer own canonical
-  declaration, branch, and receiver identity. The audit authenticates those
-  bindings without changing frontend semantics.
+  declaration, branch, and receiver identity. The paired proof preserves
+  those bindings without changing frontend semantics.
 - `dotty-jvm` owns lowering already typed reference joins to JVM branch frames.
-  Its standalone backend capability does not establish a paired
-  JVM/TASTy producer contract.
+  The paired contract authenticates emitted branch targets against the same
+  canonical local slots.
 - `dotty-tasty-pickler` owns semantic TASTy plan validation and serialization.
-  This audit records the official IF/VALDEF wire shape and does not change the
-  pickler's accepted forms.
+  It serializes the original IF and local references from the validated
+  session plan.
 - The cross-class proof and paired producer own the source-to-artifact
-  acceptance contract. Their current early method-shape rejection is the
-  measured result; any future expansion belongs in a separately scoped
-  paired-contract/proof increment with its own producer and publication
-  regressions.
+  acceptance contract, including conditional selection and encoded linkage.
 
 ## Reproduction
 
@@ -150,14 +138,7 @@ cargo +1.98.1 test -p dotty --test jvm_tasty_conditional_reference_selection --l
 cargo +1.98.1 test -p dotty --test jvm_tasty_local_receiver_call conditional_reference_selection --locked -- --nocapture --test-threads=1
 ```
 
-On the final implementation branch, the following local checks also passed
-with Rust 1.98.1 and the JDK 21 toolchain on `PATH`:
-
-```text
-cargo fmt --all -- --check
-python3 tools/check-frontend-boundaries.py
-cargo clippy --workspace --all-targets --locked -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
-cargo test --workspace --all-targets --locked
-git diff --check
-```
+The implementation-specific producer and proof regressions are in
+`jvm_tasty_local_receiver_call` and
+`jvm_tasty_conditional_local_reference_proof`. The repository's required
+workspace and JDK checks remain the final validation gates for this change.
