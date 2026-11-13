@@ -27,6 +27,7 @@ on:
       - 'docs/jvm-tasty-mixed-origin-constructor-arguments.md'
       - 'docs/jvm-tasty-immutable-reference-local-pair.md'
       - 'docs/jvm-tasty-local-reference-alias.md'
+      - "docs/jvm-tasty-conditional-reference-selection.md"
       - 'docs/jvm-tasty-local-receiver-call.md'
       - 'docs/jvm-tasty-ordered-local-unit-calls.md'
       - 'tests/fixtures/jvm_tasty_immutable_reference_local_pair/**'

@@ -254,3 +254,105 @@ COURSIER_MAVEN_ROOT=/path/to/repo1.maven.org/maven2 \
 cargo +1.98.1 test --test jvm_tasty_conditional_reference_scala_consumer \
   --locked -- --nocapture
 ```
+
+## Integrated acceptance ledger (#2273)
+
+This final receipt freezes the reviewed prerequisites at integration base
+`ed65fc4d5fdad078afcee4d15a2d25337636e9b7`. Each row records the reviewed PR
+head, its merge commit in that integration base, and the published ready review
+and required CI runs. All eight merge commits are ancestors of the integration
+base. Review links identify the exact reviewed heads; the Rust run includes the
+workspace checks and mandatory JDK gate, while the Scala run includes all four
+strict shards and the required pinned-consumer aggregate.
+
+| Issue / PR | Reviewed PR head | Merge commit | Review | Rust + JDK run | Strict Scala run |
+| --- | --- | --- | --- | --- | --- |
+| #2265 / [#2275](https://github.com/scytrowski/dotty-rs/pull/2275) | `b2fd6bb09765d041fdf11d9b209179dc218a9127` | `96c26b9b9a968b12851b04ef5ecde16092e93016` | [ready](https://github.com/scytrowski/dotty-rs/pull/2275#pullrequestreview-5872725313) | [success](https://github.com/scytrowski/dotty-rs/actions/runs/43198423955) | [success](https://github.com/scytrowski/dotty-rs/actions/runs/43198424052) |
+| #2266 / [#2277](https://github.com/scytrowski/dotty-rs/pull/2277) | `c46749aebcbbde6f09d1867dfa16d8622a281735` | `0ad5b6e39f927c49ef2784530765f82b040678d0` | [ready](https://github.com/scytrowski/dotty-rs/pull/2277#pullrequestreview-5874070129) | [success](https://github.com/scytrowski/dotty-rs/actions/runs/43212843498) | [success](https://github.com/scytrowski/dotty-rs/actions/runs/43212843474) |
+| #2267 / [#2279](https://github.com/scytrowski/dotty-rs/pull/2279) | `7d5a7243e1c3f9322397dbc6f5c49b0e71b19dc4` | `e19a7dac62b90920d1c59c5e7f78ae184ce5974c` | [ready](https://github.com/scytrowski/dotty-rs/pull/2279#pullrequestreview-5877546727) | [success](https://github.com/scytrowski/dotty-rs/actions/runs/43251545383) | [success](https://github.com/scytrowski/dotty-rs/actions/runs/43251545332) |
+| #2268 / [#2281](https://github.com/scytrowski/dotty-rs/pull/2281) | `a6f5e747cf98167f01e9b985ed6e7dc710cf00fb` | `88152ded31393cb08252305014c6d22ee49a07d1` | [ready](https://github.com/scytrowski/dotty-rs/pull/2281#pullrequestreview-5879711882) | [success](https://github.com/scytrowski/dotty-rs/actions/runs/43277196605) | [success](https://github.com/scytrowski/dotty-rs/actions/runs/43277196602) |
+| #2269 / [#2283](https://github.com/scytrowski/dotty-rs/pull/2283) | `9f3848822a9dd11e7d7cec0ca3cba31abbd6ca31` | `b566b84eb5e3df5c23fd1f345a9273d967ee4274` | [ready](https://github.com/scytrowski/dotty-rs/pull/2283#pullrequestreview-5882810230) | [success](https://github.com/scytrowski/dotty-rs/actions/runs/43315676365) | [success](https://github.com/scytrowski/dotty-rs/actions/runs/43315676326) |
+| #2270 / [#2285](https://github.com/scytrowski/dotty-rs/pull/2285) | `643b8f115a3ffdd42ad281f621362aa2214cabf5` | `75c4b94a38e8dfedfdae5580d26d66024dc758bc` | [ready](https://github.com/scytrowski/dotty-rs/pull/2285#pullrequestreview-5892495344) | [success](https://github.com/scytrowski/dotty-rs/actions/runs/43439850564) | [success](https://github.com/scytrowski/dotty-rs/actions/runs/43439850596) |
+| #2271 / [#2286](https://github.com/scytrowski/dotty-rs/pull/2286) | `ab4d3909d651d310ae49da14671b73fd7b2c2fbb` | `58e355f2b390bc9da19fb78458026a5c89e2467b` | [ready](https://github.com/scytrowski/dotty-rs/pull/2286#pullrequestreview-5894644253) | [success](https://github.com/scytrowski/dotty-rs/actions/runs/43463232221) | [success](https://github.com/scytrowski/dotty-rs/actions/runs/43463233399) |
+| #2272 / [#2293](https://github.com/scytrowski/dotty-rs/pull/2293) | `24c46dd8906e4c43cfaabe3d219db6a28ca80be2` | `ed65fc4d5fdad078afcee4d15a2d25337636e9b7` | [ready](https://github.com/scytrowski/dotty-rs/pull/2293#pullrequestreview-5897947648) | [success](https://github.com/scytrowski/dotty-rs/actions/runs/43502387361) | [success](https://github.com/scytrowski/dotty-rs/actions/runs/43502387292) |
+
+The frozen producer is the unchanged `PairFactory.scala` source
+(`c77b2b3e00bf602b86be30b29ceaa2300398feb34e80d2f76c37f391bb4d654f`). The
+integrated strict test emits that source through the ordinary paired producer
+into one canonical directory, then runs `javac --release 21`, `javap -v -c
+-p`, and the Java 21 runtime probe before the separately authored Scala client.
+Both classpaths point to that same directory; all six original hashes are
+checked before each consumer and again after each run. The existing frontend
+identity proof and producer-plan regression assert the original `SourceId`,
+source/typed `TreeId`s, symbols, scope, Boolean formal, IF arms, selected local,
+setter receiver, and final Pair arguments. The paired producer validates those
+borrowed session bindings before returning its JVM/TASTy artifacts.
+
+The integrated test additionally decodes each emitted class and sidecar,
+requires class-file major 65 and TASTy 28.9, verifies all three class/TASTy UUID
+pairs, and compares paths, complete bytes, hashes, and UUIDs across fresh Rust
+sessions. `javap` observes descriptor `(IIZI)Lexample/Pair;`, two Counter
+allocations, the conditional branch and merge, one `Counter.set(I)V` call, and
+the two original Pair argument loads. The exact Rust output hashes and UUIDs
+remain the six-entry table above. The Java output is
+`conditional-rust-runtime=true:42/3,false:7/42,negative:0/42,-9/0,equal:42/7,identity=original-distinct,fresh=true`;
+the official Scala client prints
+`scala39-rust-conditional-reference-consumer=ok`. Both ran with
+`-Xverify:all -ea` / the official pinned compiler against the same immutable
+batch. The TASTy reader's IF/VALDEF/TERMREF and `-from-tasty` evidence is the
+official output recorded above.
+
+### Negative and failure-stage ledger
+
+| Control | First rejecting stage / observed result | Regression |
+| --- | --- | --- |
+| Missing or forged source/typed IF edges, stale mappings, wrong local/receiver/argument identity | Source-to-typed binding validation; no completed TASTy/batch | `missing_or_forged_source_typed_if_edges_reject_at_the_typed_binding_stage`; `conditional_shape_reaches_the_authenticated_paired_producer_plan` |
+| Non-Boolean condition, incompatible branch/result types, missing or uninitialized local | Source typing; exact typed diagnostics (`IfConditionTypeMismatch`, `LocalValueTypeMismatch`, or `TermNameNotFound`) | `frontend_invalid_condition_branch_and_result_inputs_fail_during_typing` |
+| Mutable, nested, allocation-in-arm or extra-setter shape | Bounded source-shape proof or exact paired BLOCK contract; rejected before publication | `mutable_or_nested_selections_are_outside_the_receipt_contract`; `conditional_reference_selection_controls_record_scala_and_rust_outcomes` |
+| Reversed or forged proof receipts, owner/slot mismatch, verifier-valid wrong branch or selected receiver | Paired artifact contract rejects; no accepted artifact batch | `conditional_reference_selection_controls_record_scala_and_rust_outcomes`; `independent_java21_client_consumes_the_original_conditional_rust_batch` |
+| Invalid branch target / malformed or incompatible frame | Class-file decoder/verifier or `java -Xverify:all` rejects before runtime | `independent_java21_client_consumes_the_original_conditional_rust_batch` |
+| Missing sidecar / wrong UUID | Scala classpath loading reports missing TASTy / classfile and sidecar “out of sync” | `scala39_compiles_and_runs_against_the_original_rust_conditional_batch` |
+| Stale IF arm / invalid selected VALDEF reference | Official Scala `-decompile` rejects the TASTy body as unpicklable | `scala39_compiles_and_runs_against_the_original_rust_conditional_batch` |
+| Changed JVM method descriptor with original TASTy | Scala client compiles from TASTy; JVM linkage fails first with `NoSuchMethodError` | `scala39_compiles_and_runs_against_the_original_rust_conditional_batch` |
+| Failure during any of six writes or directory promotion | Publisher returns the injected stage error; prior sentinel state remains and no partial batch is accepted | `conditional_six_artifact_publication_is_atomic_under_staging_and_promotion_failures` |
+
+The canonical batch passed two-session byte equality and legacy alias/no-alias
+regressions unchanged. The earlier alias receipt remains intact in
+[`jvm-tasty-local-reference-alias.md`](jvm-tasty-local-reference-alias.md),
+including the independent receipt-only #2246 successor at integration base
+`b7ad6d2599183864166f1e72ebe9ab50893c79cf`. Its reviewed executable head was
+`5a258460a352516b9201a991e7fe09a69ec19bad`; its final receipt head was
+`7a3ce14e6328331c5d4f0da7da80fee914a45f12`. Review
+[#2263](https://github.com/scytrowski/dotty-rs/pull/2263#pullrequestreview-5861720409)
+records successful exact-head Rust checks, mandatory JDK, four strict Scala
+shards and aggregate, with run/job links; no earlier alias receipt was
+rewritten here.
+
+This evidence is pinned to Rust `1.98.1`, Scala 3.9.0 source revision
+`777528f19a58e794c9954a42f433373472ec57f8`, official TASTy `28.9`, and Eclipse
+Temurin JDK `21.0.13+9`. The staged compiler reported
+`3.9.0-bin-SNAPSHOT-git-777528f`; `with_compiler.jar` SHA-256 is
+`e3e5db272736ffeb22a444c494bd44982fb6836da816cac61844721d639760d8`, and the
+Java launcher SHA-256 is
+`9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155`. Source,
+Java client, Scala client, and artifact digests are asserted from the fixtures
+and support receipt. The current strict TASTy inventory contains 27 targets in
+four shards; its validator and shard assignment are checked by
+`tools/ci/validate_strict_tasty_targets.py`. The evidence document path is now
+in the existing strict workflow filter, so a receipt-only edit invokes the
+same four shards and aggregate without enabling the hosted full Scala corpus or
+changing a gate.
+
+The only behavior added by this final increment is test orchestration: Java
+and Scala now prove independent use of the same physical Rust batch. No
+production compiler, pickler, encoder, paired contract, or publisher code is
+changed. The required final-head hosted run/job URLs are recorded in the PR's
+final verification receipt after the final content head is fixed.
+
+The accepted source shape remains the exact four-formal method with two
+initialized immutable Counter locals, one immutable local whose IF directly
+references those locals, one selected setter call, and the final ordered Pair
+construction. Renamed locals, reversed original declarations, and swapped IF
+arms are accepted through canonical symbol bindings. Mutable selected locals,
+nested IFs, allocations or side effects inside an arm, unrelated branch types,
+and additional statements or setter calls remain deferred and fail closed.
