@@ -324,7 +324,7 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
             gate.validate_cohorts(repository, reports, output, baseline)
             self.assertEqual(gate.read_tsv(output), gate.read_tsv(baseline))
 
-    def test_live_cohort_receipt_accepts_only_measured_either_swap_blocker_movement(self) -> None:
+    def test_live_cohort_receipt_accepts_only_measured_either_swap_completion(self) -> None:
         repository = Path(__file__).resolve().parents[2]
         baseline = repository / "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv"
         baseline_bytes = baseline.read_bytes()
@@ -334,15 +334,15 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
             reports = self.cohort_reports(
                 receipt_rows,
                 root,
-                {gate.EITHER_SWAP_IDENTITY: (gate.EITHER_SWAP_LIVE_BLOCKER.replace("491", "630"), "not_available")},
+                {gate.EITHER_SWAP_IDENTITY: ("typed", gate.EITHER_SWAP_LIVE_RESULT)},
             )
             output = root / "live.tsv"
             gate.validate_cohorts(repository, reports, output, baseline)
             live_rows = gate.read_tsv(output)[1]
             live = next(row for row in live_rows if row["identity"] == gate.EITHER_SWAP_IDENTITY)
-            self.assertEqual(live["first_status"], gate.EITHER_SWAP_LIVE_BLOCKER.replace("491", "630"))
-            self.assertEqual(live["second_status"], gate.EITHER_SWAP_LIVE_BLOCKER.replace("491", "630"))
-            self.assertEqual(live["actual_result"], "not_available")
+            self.assertEqual(live["first_status"], "typed")
+            self.assertEqual(live["second_status"], "typed")
+            self.assertEqual(live["actual_result"], gate.EITHER_SWAP_LIVE_RESULT)
             self.assertEqual(baseline.read_bytes(), baseline_bytes)
 
     def test_live_cohort_receipt_rejects_other_either_swap_blocker_drift(self) -> None:
@@ -353,13 +353,8 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
             ("blocked::DifferentFailure", "not_available"),
             (gate.EITHER_SWAP_PREVIOUS_LIVE_BLOCKER, "not_available"),
             (gate.EITHER_SWAP_POLYMORPHIC_BLOCKER, "not_available"),
-            (gate.EITHER_SWAP_LIVE_BLOCKER, "scala.util.Either[typeparam#0,typeparam#1]"),
-            (gate.EITHER_SWAP_LIVE_BLOCKER.replace("SourceId(0)", "SourceId(1)"), "not_available"),
-            (gate.EITHER_SWAP_LIVE_BLOCKER.replace("tree_index: 72", "tree_index: 73"), "not_available"),
-            (gate.EITHER_SWAP_LIVE_BLOCKER.replace("parameter_index: 0", "parameter_index: 1"), "not_available"),
-            (gate.EITHER_SWAP_LIVE_BLOCKER.replace("UnconstrainedTypeParameter", "OtherError"), "not_available"),
-            (gate.EITHER_SWAP_LIVE_BLOCKER.replace("TypeId(491)", "TypeId(binder)"), "not_available"),
-            (gate.EITHER_SWAP_LIVE_BLOCKER.replace("parameter_index: 0", "parameter_index: 0, extra: true"), "not_available"),
+            ("typed", "scala.util.Either[typeparam#0,typeparam#1]"),
+            ("typed", "scala.util.Either[scala.util.Either.A,scala.util.Either.B]"),
         )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -385,11 +380,11 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
             reports = self.cohort_reports(
                 receipt_rows,
                 root,
-                {gate.EITHER_SWAP_IDENTITY: (gate.EITHER_SWAP_LIVE_BLOCKER, "not_available")},
+                {gate.EITHER_SWAP_IDENTITY: ("typed", gate.EITHER_SWAP_LIVE_RESULT)},
             )
             self.set_report_cell(
                 reports, 1, gate.EITHER_SWAP_IDENTITY, "status",
-                gate.EITHER_SWAP_LIVE_BLOCKER.replace("TypeId(491)", "TypeId(630)"),
+                "blocked::DifferentFailure",
             )
             with self.assertRaisesRegex(gate.ReceiptError, "two deterministic passes disagree"):
                 gate.validate_cohorts(repository, reports, root / "pass-drift.tsv", baseline)
@@ -397,7 +392,7 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
             reports = self.cohort_reports(
                 receipt_rows,
                 root,
-                {gate.EITHER_SWAP_IDENTITY: (gate.EITHER_SWAP_LIVE_BLOCKER, "not_available")},
+                {gate.EITHER_SWAP_IDENTITY: ("typed", gate.EITHER_SWAP_LIVE_RESULT)},
             )
             self.set_report_cell(reports, 0, gate.EITHER_SWAP_IDENTITY, "source_tree", "83")
             with self.assertRaisesRegex(gate.ReceiptError, "two deterministic passes disagree"):
@@ -406,7 +401,7 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
             reports = self.cohort_reports(
                 receipt_rows,
                 root,
-                {"library/src/scala/Option.scala#tree=118": (gate.EITHER_SWAP_LIVE_BLOCKER, "not_available")},
+                {"library/src/scala/Option.scala#tree=118": ("blocked::DifferentFailure", "not_available")},
             )
             with self.assertRaisesRegex(gate.ReceiptError, "protected main root lost typed acceptance"):
                 gate.validate_cohorts(repository, reports, root / "wrong-root.tsv", baseline)
@@ -416,12 +411,13 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
         baseline = repository / "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv"
         receipt_rows = gate.read_tsv(baseline)[1]
         changes = {
-            "actual_result": "scala.util.Either[typeparam#0,typeparam#1]",
             "protected_success": "true",
             "two_pass_equal": "false",
             "baseline_status": "typed",
             "gate": "required_typed",
-            "first_status": gate.EITHER_SWAP_LIVE_BLOCKER,
+            "first_status": "typed",
+            "second_status": "typed",
+            "actual_result": gate.EITHER_SWAP_LIVE_RESULT,
             "source_tree": "83",
         }
         with tempfile.TemporaryDirectory() as directory:
@@ -429,7 +425,7 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
             reports = self.cohort_reports(
                 receipt_rows,
                 root,
-                {gate.EITHER_SWAP_IDENTITY: (gate.EITHER_SWAP_LIVE_BLOCKER.replace("491", "630"), "not_available")},
+                {gate.EITHER_SWAP_IDENTITY: ("typed", gate.EITHER_SWAP_LIVE_RESULT)},
             )
             for field, value in changes.items():
                 rows = [dict(row) for row in receipt_rows]
