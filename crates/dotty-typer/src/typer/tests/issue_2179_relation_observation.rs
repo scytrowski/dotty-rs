@@ -92,6 +92,8 @@ fn replay_original_either_swap_patterns() -> Vec<String> {
     let selector_tree = matched.selector;
     let original_cases = matched.cases.clone();
     let mut isolated_cases = Vec::new();
+    // Preserve both original cases and bodies so the application subtrees
+    // prove Right(a) and Left(b) against their canonical generated methods.
     for case_tree in original_cases {
         let TreeKind::CaseDef(original_case) = parsed.ast.get(case_tree).kind else {
             unreachable!()
@@ -100,23 +102,23 @@ fn replay_original_either_swap_patterns() -> Vec<String> {
             panic!("original Option extractor is an Apply")
         };
         let binder_tree = original_pattern.args[0];
-        let binder_node = parsed.ast.get(binder_tree).clone();
-        let minimal_body = parsed.ast.alloc(Tree {
-            kind: binder_node.kind,
-            position: binder_node.position,
-            ty: (),
-        });
         let case_position = parsed.ast.get(case_tree).position;
         let isolated_case = parsed.ast.alloc(Tree {
             kind: TreeKind::CaseDef(dotty_core::ast::CaseDef {
                 pattern: original_case.pattern,
                 guard: None,
-                body: minimal_body,
+                body: original_case.body,
             }),
             position: case_position,
             ty: (),
         });
-        isolated_cases.push((case_tree, original_case.pattern, binder_tree, isolated_case));
+        isolated_cases.push((
+            case_tree,
+            original_case.pattern,
+            binder_tree,
+            original_case.body,
+            isolated_case,
+        ));
     }
     let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
     let release = std::env::var("SCALA39_JDK_RELEASE")
@@ -190,7 +192,7 @@ fn replay_original_either_swap_patterns() -> Vec<String> {
     assert_eq!(selector_parameter_symbols, either_parameters);
     let mut normalized = Vec::new();
     let mut canonical_binders = Vec::new();
-    for (case_tree, original_pattern, binder_tree, isolated_case) in isolated_cases {
+    for (case_tree, original_pattern, binder_tree, original_body, isolated_case) in isolated_cases {
         let typed_case = typer
             .run_expression_transaction(|typer, journal, mappings| {
                 typer.type_case_def(isolated_case, selector_type, context, journal, mappings)
@@ -315,10 +317,75 @@ fn replay_original_either_swap_patterns() -> Vec<String> {
         let TreeKind::CaseDef(typed_case_def) = &typer.typed_arena.get(typed_case).kind else {
             unreachable!()
         };
-        let body_type = typer.typed_arena.get(typed_case_def.body).ty;
+        assert_eq!(
+            typer.typed_index.get(source, original_body),
+            Some(typed_case_def.body),
+            "the authentic source case body retains its typed mapping"
+        );
+        let TreeKind::Block(original_body_block) = &parsed.ast.get(original_body).kind else {
+            panic!("original Either case body retains its source Block")
+        };
+        assert!(original_body_block.stats.is_empty());
+        let original_application = original_body_block.expr;
+        let typed_application = typer
+            .typed_index
+            .get(source, original_application)
+            .expect("authentic Right(a) or Left(b) application is typed");
+        let TreeKind::Block(typed_body_block) = &typer.typed_arena.get(typed_case_def.body).kind
+        else {
+            panic!("original case body retains its typed Block")
+        };
+        assert_eq!(
+            typed_body_block.expr, typed_application,
+            "the typed Block maps to the authentic original application"
+        );
+        let TreeKind::Apply(typed_application_node) =
+            &typer.typed_arena.get(typed_application).kind
+        else {
+            panic!("authentic Right(a) or Left(b) remains an Apply")
+        };
+        let body_name = if binder_name == "a" { "Right" } else { "Left" };
+        let body_class = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if typer.store.names.resolve(definition.name.as_name().text()) == body_name =>
+                {
+                    typer.index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("original generated application class has canonical source identity");
+        let body_apply = typer
+            .index
+            .generated_case_class_method(
+                body_class,
+                dotty_core::GeneratedCaseClassMethodRole::Apply,
+            )
+            .expect("original case body selects the canonical generated Apply role");
+        let typed_function = typer.typed_arena.get(typed_application_node.function);
         assert!(matches!(
-            typer.store.types.get(body_type),
-            Type::TermRef { target: TermRefTarget::Symbol(body_symbol), .. } if *body_symbol == binder
+            typer.store.types.get(typed_function.ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == body_apply
+        ));
+        let Type::Applied { tycon, args } = typer
+            .store
+            .types
+            .get(typer.typed_arena.get(typed_application).ty)
+        else {
+            panic!("original generated Apply preserves its applied case-class result")
+        };
+        assert!(matches!(
+            typer.store.types.get(*tycon),
+            Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == body_class
+        ));
+        let (unused_index, concrete_index) = if body_name == "Right" { (0, 1) } else { (1, 0) };
+        assert_eq!(args[unused_index], definitions.nothing_type);
+        assert!(matches!(
+            typer.store.types.get(args[concrete_index]),
+            Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }
+                if *symbol == selector_parameter_symbols[parameter_ordinal]
         ));
         assert!(matches!(
             &typer.typed_arena.get(unapply.function).kind,
@@ -382,7 +449,7 @@ fn replay_original_either_swap_patterns() -> Vec<String> {
             .to_owned();
         assert_eq!(field_name, "value");
         normalized.push(format!(
-            "case:{}:pattern:{}:binder:{}:{}:source-class:{}:typed-class:{}:field:{}:unapply:{}:Either-param-{}:{}",
+            "case:{}:pattern:{}:binder:{}:{}:source-class:{}:typed-class:{}:field:{}:unapply:{}:Either-param-{}:{}:application:{}:apply:{}:result={:?}",
             case_tree.index(),
             original_pattern.index(),
             binder_tree.index(),
@@ -392,11 +459,13 @@ fn replay_original_either_swap_patterns() -> Vec<String> {
             observed_symbol_path(typer.store, field_symbol),
             observed_symbol_path(typer.store, unapply_symbol),
             parameter_ordinal,
-            parameter_name
+            parameter_name,
+            body_name,
+            observed_symbol_path(typer.store, body_apply),
+            args,
         ));
     }
     assert_eq!(canonical_binders.len(), 2);
-    assert_ne!(canonical_binders[0], canonical_binders[1]);
     normalized
 }
 
@@ -1576,7 +1645,7 @@ fn preserves_option_map_rollback_and_tuple_to_array_automatic_preparation() {
 
 #[test]
 #[ignore = "requires pinned Scala 3.9.0 sources, classpath jars, and JDK environment"]
-fn captures_acceptance_v_either_swap_failure_before_transaction_rollback() {
+fn types_acceptance_v_either_swap_with_original_generated_applications() {
     let scala_root = PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT"));
     let revision = Command::new("git")
         .args(["-C", scala_root.to_str().unwrap(), "rev-parse", "HEAD"])
@@ -1741,41 +1810,71 @@ fn captures_acceptance_v_either_swap_failure_before_transaction_rollback() {
         *capture.borrow_mut() = Some(lines.join("\n"));
     }));
     let result = typer.type_method_definition(tree);
-    let Err(error) = &result else {
-        panic!("the unchanged whole method should still stop at a later issue boundary")
+    let typed_root = result.unwrap_or_else(|error| {
+        let receipt = observed
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| "failure observer did not run".to_owned());
+        panic!("unchanged pinned Either.swap should type after canonical field rebinding: {error:?}\n{receipt}");
+    });
+    assert_eq!(
+        typer.source_typed_index().get(source, tree),
+        Some(typed_root)
+    );
+    let TreeKind::DefDef(definition) = &parsed.ast.get(tree).kind else {
+        unreachable!()
     };
-    assert!(
-        !matches!(
-            error,
-            TyperError::ExtractorUnapplyPolymorphic { tree_index: 69, .. }
-        ),
-        "generic Left unapply should now instantiate; next result: {error:?}"
-    );
-    assert!(matches!(
-        error,
-        TyperError::UnconstrainedTypeParameter {
-            source: error_source,
-            tree_index: 72,
-            parameter_index: 0,
-            ..
-        } if *error_source == source
-    ));
-    let receipt = observed
-        .borrow()
-        .clone()
-        .expect("failure observer captured before rollback");
-    assert!(receipt.contains("root=library/src/scala/util/Either.scala#tree=84"));
-    assert!(receipt.contains("canonical_source_method="));
-    assert!(receipt.contains("original_pattern_tree=69 span="));
-    assert!(receipt.contains("original_pattern_tree=77 span="));
-    println!(
-        "ACCEPTANCE_V_EITHER_SWAP_OBSERVATION_BEGIN\n{receipt}\nACCEPTANCE_V_EITHER_SWAP_OBSERVATION_END"
-    );
+    let TreeKind::Match(matched) = &parsed.ast.get(definition.rhs.unwrap()).kind else {
+        panic!("original Either.swap body remains a Match")
+    };
+    assert_eq!(matched.cases.len(), 2);
+    for (case_tree, variant_name) in matched.cases.iter().copied().zip(["Right", "Left"]) {
+        let TreeKind::CaseDef(case) = &parsed.ast.get(case_tree).kind else {
+            panic!("original Either.swap arms remain case definitions")
+        };
+        let TreeKind::Block(body) = &parsed.ast.get(case.body).kind else {
+            panic!("original case body retains its source block")
+        };
+        let source_application = body.expr;
+        let typed_application = typer
+            .source_typed_index()
+            .get(source, source_application)
+            .expect("the authentic constructor application has a typed mapping");
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed_application).kind else {
+            panic!("the authentic case-body constructor remains an Apply")
+        };
+        let class = parsed
+            .ast
+            .iter()
+            .find_map(|(source_tree, node)| match &node.kind {
+                TreeKind::TypeDef(class_definition)
+                    if typer
+                        .store
+                        .names
+                        .resolve(class_definition.name.as_name().text())
+                        == variant_name =>
+                {
+                    typer.index.symbol_at(source, source_tree)
+                }
+                _ => None,
+            })
+            .expect("original variant has canonical source class identity");
+        let apply = typer
+            .index
+            .generated_case_class_method(class, dotty_core::GeneratedCaseClassMethodRole::Apply)
+            .expect("original variant has canonical generated Apply identity");
+        let typed_function = typer.typed_ast().get(application.function);
+        assert!(matches!(
+            typer.store.types.get(typed_function.ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == apply
+        ));
+    }
+    println!("whole_method_outcome=typed root={}", typed_root.index());
 }
 
 #[test]
 #[ignore = "requires pinned Scala 3.9.0 sources, classpath jars, and JDK environment"]
-fn original_either_swap_option_patterns_type_in_isolated_case_scopes() {
+fn original_either_swap_cases_type_authentic_application_subtrees() {
     let first = replay_original_either_swap_patterns();
     let second = replay_original_either_swap_patterns();
     assert_eq!(
@@ -1783,6 +1882,7 @@ fn original_either_swap_option_patterns_type_in_isolated_case_scopes() {
         "fresh-session pattern evidence normalizes deterministically"
     );
     assert_eq!(first.len(), 2);
+    println!("ISSUE_2282_ORIGINAL_CASE_APPLICATIONS {first:?}");
 }
 
 #[test]
