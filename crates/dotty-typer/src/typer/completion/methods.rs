@@ -985,17 +985,34 @@ impl SourceTyper<'_> {
                 error,
             })?;
             let previous = *self.store.symbols.info(symbol);
-            if !matches!(previous, SymbolInfo::Missing) {
-                return Err(TyperError::MalformedMethodClause {
-                    method,
-                    method_tree_index: class_tree.index(),
-                    clause_index: 0,
-                });
+            match previous {
+                SymbolInfo::Missing => {
+                    info_journal.push((symbol, SymbolInfo::Missing));
+                    self.store
+                        .symbols
+                        .set_info(symbol, SymbolInfo::Complete(completed_parameter_type));
+                }
+                SymbolInfo::Complete(existing)
+                    if existing == completed_parameter_type
+                        || (matches!(
+                            self.is_subtype(existing, completed_parameter_type),
+                            Ok(true)
+                        ) && matches!(
+                            self.is_subtype(completed_parameter_type, existing),
+                            Ok(true)
+                        )) =>
+                {
+                    // An explicit parameter-first completion is reusable once its
+                    // type is confirmed equal to the authenticated class projection.
+                }
+                _ => {
+                    return Err(TyperError::MalformedMethodClause {
+                        method,
+                        method_tree_index: class_tree.index(),
+                        clause_index: 0,
+                    });
+                }
             }
-            info_journal.push((symbol, previous));
-            self.store
-                .symbols
-                .set_info(symbol, SymbolInfo::Complete(completed_parameter_type));
             let ty = if repeated_parameter {
                 match self.store.types.try_get(completed_parameter_type) {
                     Some(Type::Repeated { element }) => *element,

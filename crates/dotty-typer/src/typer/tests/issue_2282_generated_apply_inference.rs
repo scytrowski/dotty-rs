@@ -280,6 +280,86 @@ fn generated_apply_signature_keeps_field_cache_class_owned_in_both_completion_or
 }
 
 #[test]
+fn generated_apply_parameter_first_completion_reuses_canonical_projection() {
+    let source_text = concat!(
+        "package scala { trait Product }; package sample { ",
+        "case class Generic[+A, +B](value: B); ",
+        "case class Concrete[+A](value: Int) }",
+    );
+    for (class_name, field_type_parameter) in [("Generic", Some(1usize)), ("Concrete", None)] {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let class = class_symbol(&parsed, &store, &index, source, class_name);
+        let apply = index
+            .generated_case_class_method(class, dotty_core::GeneratedCaseClassMethodRole::Apply)
+            .expect("generated Apply has canonical role identity");
+        let SourceDefinition::Canonical {
+            tree: class_tree, ..
+        } = index.definition_of(class).unwrap()
+        else {
+            panic!("case class has canonical source tree")
+        };
+        let TreeKind::TypeDef(class_definition) = &parsed.ast.get(class_tree).kind else {
+            panic!("canonical class tree is a TypeDef")
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(class_definition.rhs).kind else {
+            panic!("class has a template")
+        };
+        let TreeKind::DefDef(constructor) = &parsed.ast.get(template.constructor).kind else {
+            panic!("case class has a constructor")
+        };
+        let field_tree = constructor.value_param_clauses[0][0];
+        let field_parameter = index
+            .derived_symbol_at(apply, source, field_tree)
+            .expect("generated Apply parameter has derived source identity");
+        let class_parameters = constructor
+            .type_params
+            .iter()
+            .map(|tree| index.symbol_at(source, *tree).unwrap())
+            .collect::<Vec<_>>();
+        let field_tpt = match &parsed.ast.get(field_tree).kind {
+            TreeKind::ValDef(definition) => definition.tpt,
+            _ => panic!("constructor parameter tree is a ValDef"),
+        };
+
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        typer
+            .complete_symbol(field_parameter)
+            .expect("generated Apply parameter can complete before its method");
+        typer
+            .complete_symbol(apply)
+            .expect("method completion reuses its completed generated parameter");
+
+        let cached_field_type = typer
+            .source_type_index()
+            .type_at(source, field_tpt)
+            .expect("canonical constructor field type is cached");
+        match field_type_parameter {
+            Some(index) => assert!(matches!(
+                typer.store.types.get(cached_field_type),
+                Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }
+                    if *symbol == class_parameters[index]
+            )),
+            None => assert_eq!(cached_field_type, definitions.int),
+        }
+        assert!(matches!(
+            *typer.store.symbols.info(field_parameter),
+            SymbolInfo::Complete(_)
+        ));
+        assert!(matches!(
+            *typer.store.symbols.info(apply),
+            SymbolInfo::Complete(_)
+        ));
+    }
+}
+
+#[test]
 fn generated_apply_requires_matching_forward_and_reverse_role_metadata() {
     let source_text = concat!(
         "package scala { trait Product }; package sample { ",

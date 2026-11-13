@@ -54,6 +54,13 @@ impl SourceTyper<'_> {
         symbol: SymbolId,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
+        if let Some(method) = self.generated_case_class_apply_owner_for_parameter(symbol) {
+            self.complete_symbol_inner(method, info_journal)?;
+            if let SymbolInfo::Complete(info) = *self.store.symbols.info(symbol) {
+                return Ok(info);
+            }
+            return Err(TyperError::DeclarationContextMissing { symbol });
+        }
         if let Some(owner) = self.source_case_class_product_selector_owner(symbol) {
             self.complete_symbol_inner(owner, info_journal)?;
             if let SymbolInfo::Complete(info) = *self.store.symbols.info(symbol) {
@@ -122,6 +129,40 @@ impl SourceTyper<'_> {
             });
         }
         self.complete_symbol_inner_body(symbol, info_journal)
+    }
+
+    fn generated_case_class_apply_owner_for_parameter(&self, symbol: SymbolId) -> Option<SymbolId> {
+        let parameter = self.store.symbols.get(symbol);
+        if parameter.kind != SymbolKind::Parameter {
+            return None;
+        }
+        let method = parameter.owner?;
+        let (source, parameter_tree) = self.source_tree_for_symbol(symbol)?;
+        let (method_source, class_tree) = self.source_tree_for_symbol(method)?;
+        if source != self.source
+            || method_source != source
+            || self
+                .generated_case_class_for_apply(method, source, class_tree)
+                .is_none()
+            || self.index.derived_symbol_at(method, source, parameter_tree) != Some(symbol)
+        {
+            return None;
+        }
+        let TreeKind::TypeDef(class_definition) = &self.arena.try_get(class_tree)?.kind else {
+            return None;
+        };
+        let TreeKind::Template(template) = &self.arena.try_get(class_definition.rhs)?.kind else {
+            return None;
+        };
+        let TreeKind::DefDef(constructor) = &self.arena.try_get(template.constructor)?.kind else {
+            return None;
+        };
+        constructor
+            .value_param_clauses
+            .iter()
+            .flatten()
+            .any(|tree| *tree == parameter_tree)
+            .then_some(method)
     }
 
     fn complete_inferred_field_type(
