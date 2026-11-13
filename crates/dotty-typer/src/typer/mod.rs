@@ -39407,7 +39407,7 @@ mod tests {
         );
     }
 
-    fn issue_1999_late_failure_projection(
+    pub(super) fn issue_1999_late_failure_projection(
         typer: &SourceTyper<'_>,
         parsed: &dotty_parser::ParseResult,
     ) -> Vec<(&'static str, String)> {
@@ -39605,7 +39605,7 @@ mod tests {
         ]
     }
 
-    fn assert_issue_1999_projection_unchanged(
+    pub(super) fn assert_issue_1999_projection_unchanged(
         before: &[(&'static str, String)],
         after: &[(&'static str, String)],
         message: &str,
