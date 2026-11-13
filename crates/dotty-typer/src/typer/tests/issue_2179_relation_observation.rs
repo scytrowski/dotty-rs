@@ -1716,6 +1716,79 @@ fn assert_original_either_swap_typed_tree(
         let TreeKind::UnApply(unapply) = &typer.typed_ast().get(typed_case.pattern).kind else {
             panic!("connected source extractor lowers to UnApply")
         };
+        let TreeKind::Apply(source_extractor) = &parsed.ast.get(*source_pattern).kind else {
+            panic!("original source extractor is an Apply")
+        };
+        let TreeKind::Ident(source_extractor_name) =
+            &parsed.ast.get(source_extractor.function).kind
+        else {
+            panic!("original Either extractor has a canonical source identifier")
+        };
+        let variant_name = typer
+            .store()
+            .names
+            .resolve(source_extractor_name.name.text());
+        let variant_class = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if typer
+                        .store()
+                        .names
+                        .resolve(definition.name.as_name().text())
+                        == variant_name =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("source extractor names its canonical Either variant class");
+        let expected_unapply = index
+            .generated_case_class_method(
+                variant_class,
+                dotty_core::source_semantics::GeneratedCaseClassMethodRole::Unapply,
+            )
+            .expect("the source variant has its canonical generated unapply method");
+        let TreeKind::TypeApply(unapply_type_apply) = &typer.typed_ast().get(unapply.function).kind
+        else {
+            panic!("connected generic extractor keeps its type application")
+        };
+        let TreeKind::Select(typed_extractor_select) =
+            &typer.typed_ast().get(unapply_type_apply.function).kind
+        else {
+            panic!("typed generic extractor is selected from its original source identifier")
+        };
+        assert_eq!(
+            typed_extractor_select.qualifier,
+            get(source_extractor.function),
+            "the extractor selection retains the source identifier mapping"
+        );
+        let applied_unapply = match typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(unapply_type_apply.function).ty)
+        {
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } => *symbol,
+            other => panic!("typed extractor function references a canonical method: {other:?}"),
+        };
+        assert_eq!(
+            applied_unapply, expected_unapply,
+            "connected UnApply calls the canonical generated variant method"
+        );
+        assert_eq!(unapply_type_apply.args.len(), params.len());
+        for (argument, parameter) in unapply_type_apply.args.iter().zip(&params) {
+            assert!(
+                matches!(
+                    typer.store().types.get(typer.typed_ast().get(*argument).ty),
+                    Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if symbol == parameter
+                ),
+                "generated unapply instantiation preserves the original [A, B] parameter order"
+            );
+        }
         assert_eq!(unapply.patterns.len(), 1);
         assert_eq!(unapply.patterns[0], get(*source_binder));
         let TreeKind::Bind(bind) = &typer.typed_ast().get(unapply.patterns[0]).kind else {
