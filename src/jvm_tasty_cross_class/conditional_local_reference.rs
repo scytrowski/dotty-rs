@@ -22,6 +22,7 @@ pub struct ValidatedImmutableLocalConditionalReferenceSelectionProof<'session> {
     _source_index: &'session SourceSemanticIndex,
     _source_typed_index: &'session SourceTypedIndex,
     _jvm_unit: &'session JvmCompilationUnit<'session>,
+    initializer_pair: ValidatedImmutableLocalInitializerPairProof<'session>,
     source_id: SourceId,
     owner: SymbolId,
     method: SymbolId,
@@ -57,6 +58,9 @@ pub struct ValidatedImmutableLocalConditionalReferenceSelectionProof<'session> {
 }
 
 impl ValidatedImmutableLocalConditionalReferenceSelectionProof<'_> {
+    pub const fn initializer_pair(&self) -> &ValidatedImmutableLocalInitializerPairProof<'_> {
+        &self.initializer_pair
+    }
     pub fn binding(&self) -> dotty_tasty_pickler::ConditionalLocalReferenceSelectionBinding {
         dotty_tasty_pickler::ConditionalLocalReferenceSelectionBinding {
             source_id: self.source_id,
@@ -713,6 +717,81 @@ pub fn validate_immutable_local_conditional_reference_selection_proof<'session>(
             "IF result must retain the selected local's exact Counter type",
         ));
     }
+    let counter_tree = match source_index.definition_of(counter) {
+        Some(SourceDefinition::Canonical { source, tree }) if source == source_id => tree,
+        _ => return Err(sid("Counter class has no canonical source definition")),
+    };
+    let TreeKind::TypeDef(counter_def) = &source_ast
+        .try_get(counter_tree)
+        .ok_or_else(|| sid("Counter source tree is stale"))?
+        .kind
+    else {
+        return Err(sid("Counter source definition must remain TypeDef"));
+    };
+    let TreeKind::Template(counter_template) = &source_ast
+        .try_get(counter_def.rhs)
+        .ok_or_else(|| sid("Counter template is stale"))?
+        .kind
+    else {
+        return Err(sid("Counter source definition must retain its Template"));
+    };
+    let counter_constructor = source_index
+        .symbol_at(source_id, counter_template.constructor)
+        .ok_or_else(|| sid("Counter constructor has no canonical source symbol"))?;
+    if counter_constructor != initializer_receipts[0].constructor
+        || counter_constructor != initializer_receipts[1].constructor
+    {
+        return Err(sid(
+            "both locals must use the same original Counter constructor",
+        ));
+    }
+    let TreeKind::DefDef(counter_constructor_def) = &source_ast
+        .try_get(counter_template.constructor)
+        .ok_or_else(|| sid("Counter constructor source tree is stale"))?
+        .kind
+    else {
+        return Err(sid("Counter primary constructor must remain DefDef"));
+    };
+    let counter_constructor_formal_tree = *counter_constructor_def
+        .value_param_clauses
+        .first()
+        .and_then(|clause| clause.first())
+        .ok_or_else(|| src("Counter constructor must retain its original formal"))?;
+    let counter_constructor_formal = source_index
+        .derived_symbol_at(
+            counter_constructor,
+            source_id,
+            counter_constructor_formal_tree,
+        )
+        .ok_or_else(|| sid("Counter constructor formal is not canonically derived"))?;
+    let initializer_result_types = [
+        typed_ast
+            .try_get(initializer_receipts[0].typed_initializer)
+            .ok_or_else(|| typed("first typed initializer became stale"))?
+            .ty,
+        typed_ast
+            .try_get(initializer_receipts[1].typed_initializer)
+            .ok_or_else(|| typed("second typed initializer became stale"))?
+            .ty,
+    ];
+    let initializer_pair_receipts = [
+        ImmutableLocalInitializerReceipt {
+            declaration: initializer_receipts[0],
+            seed_formal: seed_formals[0],
+            seed_formal_type: definitions.int,
+            initializer_result_type: initializer_result_types[0],
+            constructor_formal: counter_constructor_formal,
+            constructor_formal_type: definitions.int,
+        },
+        ImmutableLocalInitializerReceipt {
+            declaration: initializer_receipts[1],
+            seed_formal: seed_formals[1],
+            seed_formal_type: definitions.int,
+            initializer_result_type: initializer_result_types[1],
+            constructor_formal: counter_constructor_formal,
+            constructor_formal_type: definitions.int,
+        },
+    ];
     let typed_initializers = [
         initializer_receipts[0].typed_initializer,
         initializer_receipts[1].typed_initializer,
@@ -1127,6 +1206,23 @@ pub fn validate_immutable_local_conditional_reference_selection_proof<'session>(
         _source_index: source_index,
         _source_typed_index: source_typed_index,
         _jvm_unit: jvm_unit,
+        initializer_pair: ValidatedImmutableLocalInitializerPairProof {
+            _store: store,
+            _definitions: definitions,
+            _source_ast: source_ast,
+            _typed_ast: typed_ast,
+            _source_index: source_index,
+            _source_typed_index: source_typed_index,
+            _jvm_unit: jvm_unit,
+            source_id,
+            method,
+            counter,
+            source_block: rhs,
+            typed_block,
+            source_final_expression: source_pair_result,
+            typed_final_expression: typed_pair_result,
+            initializers: initializer_pair_receipts,
+        },
         source_id,
         owner,
         method,

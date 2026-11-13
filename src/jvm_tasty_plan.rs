@@ -1176,7 +1176,7 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                     // Project only original immutable ValDefs in bounded
                     // constructor-result Blocks. The cross-class contract
                     // authenticates the ordered Counter.set statements and
-                    // both local initializer receipts before acceptance.
+                    // local initializer receipts before acceptance.
                     let locals = match &parsed.ast.get(rhs).kind {
                         TreeKind::Block(block)
                             if (1..=2).contains(&block.stats.len())
@@ -1199,6 +1199,17 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                                             Some(TreeKind::Apply(_))
                                         )
                                     }))
+                                || (block.stats.len() == 4
+                                    && block.stats[..3].iter().all(|declaration| {
+                                        matches!(
+                                            parsed.ast.try_get(*declaration).map(|node| &node.kind),
+                                            Some(TreeKind::ValDef(_))
+                                        )
+                                    })
+                                    && matches!(
+                                        parsed.ast.try_get(block.stats[3]).map(|node| &node.kind),
+                                        Some(TreeKind::Apply(_))
+                                    ))
                                 || (block.stats.len() == 5
                                     && block.stats[..3].iter().all(|declaration| {
                                         matches!(
@@ -1225,17 +1236,31 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                             if !final_constructor_uses_local {
                                 Vec::new()
                             } else {
-                                let local_count = if block.stats.len() == 5
-                                    && matches!(
-                                        parsed.ast.try_get(block.stats[2]).map(|node| &node.kind),
-                                        Some(TreeKind::ValDef(_))
-                                    )
-                                    && block.stats[3..].iter().all(|stat| {
+                                let local_count = if (block.stats.len() == 4
+                                    && block.stats[..3].iter().all(|stat| {
                                         matches!(
                                             parsed.ast.try_get(*stat).map(|node| &node.kind),
-                                            Some(TreeKind::Apply(_))
+                                            Some(TreeKind::ValDef(_))
                                         )
-                                    }) {
+                                    })
+                                    && matches!(
+                                        parsed.ast.try_get(block.stats[3]).map(|node| &node.kind),
+                                        Some(TreeKind::Apply(_))
+                                    ))
+                                    || (block.stats.len() == 5
+                                        && matches!(
+                                            parsed
+                                                .ast
+                                                .try_get(block.stats[2])
+                                                .map(|node| &node.kind),
+                                            Some(TreeKind::ValDef(_))
+                                        )
+                                        && block.stats[3..].iter().all(|stat| {
+                                            matches!(
+                                                parsed.ast.try_get(*stat).map(|node| &node.kind),
+                                                Some(TreeKind::Apply(_))
+                                            )
+                                        })) {
                                     3
                                 } else if block.stats.len() >= 3 {
                                     2
@@ -1725,6 +1750,14 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                         alias.local,
                         alias.typed_declaration,
                         alias.scope,
+                    ));
+                }
+                if let Some(selection) = proof.conditional_local_reference_selection() {
+                    locals.push((
+                        selection.source_declaration,
+                        selection.selected,
+                        selection.typed_declaration,
+                        selection.scope,
                     ));
                 }
                 locals.into_iter().map(|local| {

@@ -1713,8 +1713,17 @@ struct MixedConstructorPairRef {
     local_alias_copy: Option<LocalReferenceAliasCopyRef>,
     local_receiver_call: Option<LocalReceiverUnitCallRef>,
     local_receiver_call_pair: Option<[LocalReceiverUnitCallRef; 2]>,
+    conditional_selection: Option<ConditionalSelectionRef>,
     max_stack: u16,
     max_locals: u16,
+}
+
+#[derive(Clone, Copy)]
+struct ConditionalSelectionRef {
+    condition_local_slot: u16,
+    first_target_local_slot: u16,
+    second_target_local_slot: u16,
+    selected_local_slot: u16,
 }
 
 #[derive(Clone, Copy)]
@@ -1748,6 +1757,7 @@ enum PairedBlockShape {
     /// Keep this separate from the accepted two-local/two-call shape so the
     /// existing proof-cardinality failure remains the first reported failure.
     ThreeLocalsOneCall,
+    ThreeLocalsConditionalSelection,
     ReceiptMismatch,
     Unclassified,
 }
@@ -1789,20 +1799,22 @@ fn classify_paired_block_shape(
 
     let has_expected_receipts = match source_kinds.len() {
         2 => !has_one_call_receipt && !has_two_call_receipt && !has_conditional_selection_receipt,
-        3 => has_one_call_receipt
-            && !has_two_call_receipt
-            && !has_conditional_selection_receipt,
-        4 => (has_one_call_receipt
-            && !has_two_call_receipt
-            && !has_alias_receipt
-            && has_conditional_selection_receipt)
-            || (!has_one_call_receipt
+        3 => has_one_call_receipt && !has_two_call_receipt && !has_conditional_selection_receipt,
+        4 => {
+            (has_one_call_receipt
+                && !has_two_call_receipt
+                && !has_alias_receipt
+                && has_conditional_selection_receipt)
+                || (!has_one_call_receipt
+                    && has_two_call_receipt
+                    && !has_conditional_selection_receipt)
+        }
+        5 => {
+            !has_one_call_receipt
                 && has_two_call_receipt
-                && !has_conditional_selection_receipt),
-        5 => !has_one_call_receipt
-            && has_two_call_receipt
-            && has_alias_receipt
-            && !has_conditional_selection_receipt,
+                && has_alias_receipt
+                && !has_conditional_selection_receipt
+        }
         _ => false,
     };
     if !has_expected_receipts {
@@ -1831,7 +1843,12 @@ fn classify_paired_block_shape(
         4 if matches_shape(2, 2) && !has_alias_receipt && !has_conditional_selection_receipt => {
             PairedBlockShape::TwoLocalsTwoCalls
         }
-        4 if matches_shape(3, 1) && !has_alias_receipt => PairedBlockShape::ThreeLocalsOneCall,
+        4 if matches_shape(3, 1) && !has_alias_receipt && !has_conditional_selection_receipt => {
+            PairedBlockShape::ThreeLocalsOneCall
+        }
+        4 if matches_shape(3, 1) && !has_alias_receipt && has_conditional_selection_receipt => {
+            PairedBlockShape::ThreeLocalsConditionalSelection
+        }
         5 if matches_shape(3, 2)
             && !has_one_call_receipt
             && has_two_call_receipt
@@ -1934,12 +1951,24 @@ fn validate_two_local_constructor_pair(
     // Keep validating malformed five-stat alias candidates through the same
     // detailed checks as before; the final shape gate below prevents this
     // diagnostic-only fallback from authorizing a new shape.
+    let conditional_selection = tasty
+        .typed_bindings
+        .conditional_local_reference_selection(source_id, caller);
+    let has_conditional_selection = matches!(
+        block_shape,
+        PairedBlockShape::ThreeLocalsConditionalSelection
+    );
     let has_alias = matches!(block_shape, PairedBlockShape::TwoLocalsAliasTwoCalls)
         || (matches!(block_shape, PairedBlockShape::Unclassified)
             && source_block.stats.len() == 5
             && local_reference_alias.is_some());
     if initializers.len() != 2
-        || locals.len() != if has_alias { 3 } else { 2 }
+        || locals.len()
+            != if has_alias || has_conditional_selection {
+                3
+            } else {
+                2
+            }
         || tasty.typed_bindings.typed_at(source_id, source_rhs) != Some(typed_rhs)
         || source_outer.kind != dotty_core::ast::ApplyKind::Regular
         || typed_outer.kind != dotty_core::ast::ApplyKind::Regular
@@ -1948,6 +1977,12 @@ fn validate_two_local_constructor_pair(
         || tasty.typed_bindings.typed_at(source_id, source_block.expr) != Some(typed_block.expr)
     {
         return Err("two-local proof does not retain exactly two original declarations and initializer receipts".into());
+    }
+    if has_conditional_selection != conditional_selection.is_some() {
+        return Err(
+            "three-local conditional selection receipt does not match its exact source shape"
+                .into(),
+        );
     }
     if let Some(alias) = local_reference_alias {
         let source_declaration = *source_block
@@ -2023,7 +2058,215 @@ fn validate_two_local_constructor_pair(
         .iter()
         .find(|method| method.symbol() == caller)
         .ok_or_else(|| "two-local caller is absent from JVM metadata".to_owned())?;
-    if method.parameters().len() != 2
+    let caller_plan = proof
+        .jvm_unit
+        .classes
+        .iter()
+        .find(|class| class.class == tasty.class)
+        .and_then(|class| class.methods.iter().find(|method| method.method == caller))
+        .ok_or_else(|| "two-local caller has no JVM method plan".to_owned())?;
+    let conditional_selection_ref = if has_conditional_selection {
+        let selection = conditional_selection
+            .ok_or_else(|| "conditional selection proof is absent".to_owned())?;
+        let source_declaration = source_block.stats[2];
+        let typed_declaration = typed_block.stats[2];
+        let selected_local = locals[2];
+        let Some(TreeKind::ValDef(source_value)) = tasty
+            .source_ast
+            .try_get(source_declaration)
+            .map(|tree| &tree.kind)
+        else {
+            return Err(
+                "conditional selected declaration is not the original source ValDef".into(),
+            );
+        };
+        let Some(TreeKind::ValDef(typed_value)) = tasty
+            .typed_ast
+            .try_get(typed_declaration)
+            .map(|tree| &tree.kind)
+        else {
+            return Err("conditional selected declaration is not the original typed ValDef".into());
+        };
+        let Some(TreeKind::If(source_if)) = tasty
+            .source_ast
+            .try_get(selection.source_if)
+            .map(|tree| &tree.kind)
+        else {
+            return Err("conditional selection source root is not its original If".into());
+        };
+        let Some(TreeKind::If(typed_if)) = tasty
+            .typed_ast
+            .try_get(selection.typed_if)
+            .map(|tree| &tree.kind)
+        else {
+            return Err("conditional selection typed root is not its original If".into());
+        };
+        if !tasty.store.symbols.contains(selection.condition_formal)
+            || !tasty.store.symbols.contains(selection.selected)
+        {
+            return Err(
+                "conditional selection refers to a stale condition or selected-local symbol".into(),
+            );
+        }
+        let condition_type = tasty.store.symbols.get(selection.condition_formal).info;
+        let bool_type = tasty.definitions.boolean;
+        let first_target = initializers[0].local;
+        let second_target = initializers[1].local;
+        let targets_match = selection.targets == [first_target, second_target]
+            || selection.targets == [second_target, first_target];
+        let typed_arms_match = selection.typed_arms.iter().zip(selection.targets).all(
+            |(arm, target)| {
+                matches!(
+                    tasty.typed_ast.try_get(*arm).and_then(|tree| tasty.store.types.try_get(tree.ty)),
+                    Some(Type::TermRef { prefix, target: TermRefTarget::Symbol(symbol) })
+                        if *prefix == tasty.definitions.no_prefix && *symbol == target
+                )
+            },
+        );
+        let source_arms_match = selection
+            .source_arms
+            .iter()
+            .zip(selection.typed_arms)
+            .zip(selection.targets)
+            .all(|((arm, typed_arm), target)| {
+                let Some(TreeKind::Ident(source_ident)) =
+                    tasty.source_ast.try_get(*arm).map(|tree| &tree.kind)
+                else {
+                    return false;
+                };
+                let Some(TreeKind::Ident(typed_ident)) =
+                    tasty.typed_ast.try_get(typed_arm).map(|tree| &tree.kind)
+                else {
+                    return false;
+                };
+                source_ident.name == tasty.store.symbols.get(target).name
+                    && typed_ident.name == source_ident.name
+                    && tasty.typed_bindings.typed_at(source_id, *arm) == Some(typed_arm)
+            });
+        let typed_condition_matches = matches!(
+            tasty
+                .typed_ast
+                .try_get(selection.typed_condition)
+                .and_then(|tree| tasty.store.types.try_get(tree.ty)),
+            Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. })
+                if *symbol == selection.condition_formal
+        );
+        if selection.source_id != source_id
+            || selection.owner != tasty.class
+            || selection.method != caller
+            || selection.scope != selected_local.scope
+            || selection.source_block != source_rhs
+            || selection.typed_block != typed_rhs
+            || selection.source_declaration != source_declaration
+            || selection.typed_declaration != typed_declaration
+            || source_value.rhs != Some(selection.source_if)
+            || typed_value.rhs != Some(selection.typed_if)
+            || selection.selected != selected_local.symbol
+            || selected_local.source_tree != source_declaration
+            || selected_local.typed_declaration != typed_declaration
+            || selected_local.scope != locals[0].scope
+            || !matches!(tasty.store.symbols.get(selection.selected).info, SymbolInfo::Complete(ty) if ty == selection.local_type)
+            || !matches!(tasty.store.types.try_get(selection.local_type), Some(Type::TypeRef { target: TypeRefTarget::Symbol(class), .. }) if *class == initializers[0].call.class)
+            || !targets_match
+            || source_if.cond != selection.source_condition
+            || typed_if.cond != selection.typed_condition
+            || [source_if.then_branch, source_if.else_branch] != selection.source_arms
+            || [typed_if.then_branch, typed_if.else_branch] != selection.typed_arms
+            || tasty
+                .typed_bindings
+                .typed_at(source_id, selection.source_if)
+                != Some(selection.typed_if)
+            || tasty
+                .typed_bindings
+                .typed_at(source_id, selection.source_condition)
+                != Some(selection.typed_condition)
+            || !typed_arms_match
+            || !source_arms_match
+            || !typed_condition_matches
+            || !matches!(condition_type, SymbolInfo::Complete(ty) if ty == bool_type)
+            || !tasty.store.symbols.contains(selection.condition_formal)
+        {
+            return Err("conditional selection receipt differs from the canonical original If and local bindings".into());
+        }
+        let condition_slot = method
+            .parameters()
+            .iter()
+            .find(|parameter| parameter.symbol() == selection.condition_formal)
+            .ok_or_else(|| {
+                "conditional condition formal is absent from the factory method".to_owned()
+            })?
+            .slot();
+        let conditional_layout = proof
+            .jvm_unit
+            .local_layout_for(method, &caller_plan.locals, tasty.definitions)
+            .map_err(|error| format!("cannot derive conditional JVM layout: {error:?}"))?;
+        let first_slot = conditional_layout
+            .local(selection.targets[0])
+            .map_err(|error| format!("first conditional branch target has no JVM slot: {error:?}"))?
+            .slot();
+        let second_slot = conditional_layout
+            .local(selection.targets[1])
+            .map_err(|error| {
+                format!("second conditional branch target has no JVM slot: {error:?}")
+            })?
+            .slot();
+        let selected_slot = conditional_layout
+            .local(selected_local.symbol)
+            .map_err(|error| format!("selected conditional local has no JVM slot: {error:?}"))?;
+        if selected_slot.declaration() != typed_declaration
+            || selected_slot.is_mutable()
+            || selected_slot.ty() != dotty_jvm::JvmType::Reference(initializers[0].call.class)
+        {
+            return Err(
+                "selected conditional local differs from its canonical immutable JVM slot".into(),
+            );
+        }
+        Some(ConditionalSelectionRef {
+            condition_local_slot: condition_slot,
+            first_target_local_slot: first_slot,
+            second_target_local_slot: second_slot,
+            selected_local_slot: selected_slot.slot(),
+        })
+    } else {
+        None
+    };
+
+    let conditional_formals_match = if let Some(selection) = conditional_selection {
+        method.parameters().len() == 4
+            && method.parameters()[2].symbol() == selection.condition_formal
+            && method.parameters()[2].ty() == dotty_jvm::JvmType::Boolean
+            && method.parameters()[2].slot() == 3
+            && method.parameters()[3].ty() == dotty_jvm::JvmType::Int
+            && method.parameters()[3].slot() == 4
+            && tasty.store.symbols.contains(selection.condition_formal)
+            && tasty.store.symbols.get(selection.condition_formal).kind == SymbolKind::Parameter
+            && tasty.store.symbols.get(selection.condition_formal).owner == Some(caller)
+            && tasty.store.symbols.get(selection.condition_formal).origin
+                == SymbolOrigin::Source(source_id)
+            && matches!(tasty.store.symbols.get(selection.condition_formal).info, SymbolInfo::Complete(ty) if ty == tasty.definitions.boolean)
+            && tasty
+                .store
+                .symbols
+                .get(method.parameters()[3].symbol())
+                .kind
+                == SymbolKind::Parameter
+            && tasty
+                .store
+                .symbols
+                .get(method.parameters()[3].symbol())
+                .owner
+                == Some(caller)
+            && tasty
+                .store
+                .symbols
+                .get(method.parameters()[3].symbol())
+                .origin
+                == SymbolOrigin::Source(source_id)
+            && matches!(tasty.store.symbols.get(method.parameters()[3].symbol()).info, SymbolInfo::Complete(ty) if ty == tasty.definitions.int)
+    } else {
+        method.parameters().len() == 2
+    };
+    if !conditional_formals_match
         || method.parameters()[0].symbol() != pair.method_formals[0]
         || method.parameters()[1].symbol() != pair.method_formals[1]
         || method.parameters()[0].slot() != 1
@@ -2041,13 +2284,6 @@ fn validate_two_local_constructor_pair(
     if initializers[0].argument_formal == initializers[1].argument_formal {
         return Err("two-local initializers must use distinct authorized seed formals".into());
     }
-    let caller_plan = proof
-        .jvm_unit
-        .classes
-        .iter()
-        .find(|class| class.class == tasty.class)
-        .and_then(|class| class.methods.iter().find(|method| method.method == caller))
-        .ok_or_else(|| "two-local caller has no JVM method plan".to_owned())?;
     let layout = proof
         .jvm_unit
         .local_layout_for(method, &caller_plan.locals, tasty.definitions)
@@ -2222,6 +2458,7 @@ fn validate_two_local_constructor_pair(
     }
 
     let local_symbols = [initializers[0].local, initializers[1].local];
+    let conditional_selected = conditional_selection.map(|selection| selection.selected);
     let counter_class =
         local_class.ok_or_else(|| "two-local Counter class is absent".to_owned())?;
     let local_alias_copy = local_reference_alias
@@ -2253,7 +2490,7 @@ fn validate_two_local_constructor_pair(
             })
         })
         .transpose()?;
-    let expected_receiver = match pair.arguments[0].origin {
+    let pair_first_receiver = match pair.arguments[0].origin {
         FormalLocalConstructorCallArgumentOrigin::LocalValue { symbol, .. } => symbol,
         _ => return Err("first Pair argument is not an authenticated local value".into()),
     };
@@ -2262,7 +2499,11 @@ fn validate_two_local_constructor_pair(
                                   required_receiver: Option<SymbolId>,
                                   required_formal: Option<SymbolId>|
      -> Result<LocalReceiverUnitCallRef, String> {
-        let call_prefix = if has_alias { 3 } else { 2 };
+        let call_prefix = if has_alias || has_conditional_selection {
+            3
+        } else {
+            2
+        };
         let source_call_tree = *source_block
             .stats
             .get(call_index + call_prefix)
@@ -2310,8 +2551,8 @@ fn validate_two_local_constructor_pair(
                 != Some(binding.typed_argument)
             || !matches!(tasty.source_ast.try_get(binding.source_select).map(|tree| &tree.kind), Some(TreeKind::Select(select)) if select.qualifier == binding.source_receiver)
             || !matches!(tasty.typed_ast.try_get(binding.typed_select).map(|tree| &tree.kind), Some(TreeKind::Select(select)) if select.qualifier == binding.typed_receiver)
-            || !matches!(tasty.store.types.try_get(tasty.typed_ast.get(binding.typed_receiver).ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == binding.receiver && (local_symbols.contains(symbol) || local_reference_alias.is_some_and(|alias| alias.local == *symbol)) && required_receiver.is_none_or(|expected| expected == *symbol))
-            || !matches!(tasty.store.types.try_get(tasty.typed_ast.get(binding.typed_argument).ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == binding.argument_formal && pair.method_formals.contains(symbol) && required_formal.is_none_or(|expected| expected == *symbol))
+            || !matches!(tasty.store.types.try_get(tasty.typed_ast.get(binding.typed_receiver).ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == binding.receiver && (local_symbols.contains(symbol) || local_reference_alias.is_some_and(|alias| alias.local == *symbol) || conditional_selected == Some(*symbol)) && required_receiver.is_none_or(|expected| expected == *symbol))
+            || !matches!(tasty.store.types.try_get(tasty.typed_ast.get(binding.typed_argument).ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == binding.argument_formal && method.parameters().iter().any(|parameter| parameter.symbol() == *symbol) && required_formal.is_none_or(|expected| expected == *symbol))
             || !matches!(tasty.store.types.try_get(tasty.typed_ast.get(binding.typed_select).ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == binding.method)
             || tasty.typed_ast.get(binding.typed_apply).ty != tasty.definitions.unit
         {
@@ -2345,6 +2586,12 @@ fn validate_two_local_constructor_pair(
                     .find(|initializer| initializer.local == binding.receiver)
                     .map(|initializer| initializer.scope)
             })
+            .or_else(|| {
+                conditional_selected
+                    .filter(|symbol| *symbol == binding.receiver)
+                    .and_then(|symbol| locals.iter().find(|local| local.symbol == symbol))
+                    .map(|local| local.scope)
+            })
             .ok_or_else(|| "Counter.set receiver has no authenticated local binding".to_owned())?;
         if binding.receiver_scope != receiver_scope {
             return Err("Counter.set receiver scope differs from its initialized local".into());
@@ -2364,6 +2611,12 @@ fn validate_two_local_constructor_pair(
                 );
             }
             slot.slot()
+        } else if conditional_selected == Some(binding.receiver) {
+            conditional_selection_ref
+                .ok_or_else(|| {
+                    "conditional receiver has no authenticated selected slot".to_owned()
+                })?
+                .selected_local_slot
         } else {
             let receiver_index = local_symbols
                 .iter()
@@ -2394,8 +2647,12 @@ fn validate_two_local_constructor_pair(
             validate_receiver_call(
                 binding,
                 0,
-                Some(expected_receiver),
-                Some(pair.method_formals[1]),
+                Some(conditional_selected.unwrap_or(pair_first_receiver)),
+                Some(if has_conditional_selection {
+                    method.parameters()[3].symbol()
+                } else {
+                    pair.method_formals[1]
+                }),
             )
         })
         .transpose()?;
@@ -2475,7 +2732,11 @@ fn validate_two_local_constructor_pair(
         .internal_name();
     if outer_constructor.descriptor().as_str() != format!("(L{counter_name};L{counter_name};)V")
         || method.descriptor().as_str()
-            != format!("(II)L{};", outer_metadata.identity().internal_name())
+            != if has_conditional_selection {
+                format!("(IIZI)L{};", outer_metadata.identity().internal_name())
+            } else {
+                format!("(II)L{};", outer_metadata.identity().internal_name())
+            }
         || !matches!(tasty.typed_ast.try_get(typed_rhs).and_then(|tree| tasty.store.types.try_get(tree.ty)), Some(Type::TypeRef { target: TypeRefTarget::Symbol(class), .. }) if *class == outer_metadata.identity().symbol())
     {
         return Err(
@@ -2489,6 +2750,7 @@ fn validate_two_local_constructor_pair(
             | PairedBlockShape::TwoLocalsOneCall
             | PairedBlockShape::TwoLocalsTwoCalls
             | PairedBlockShape::TwoLocalsAliasTwoCalls
+            | PairedBlockShape::ThreeLocalsConditionalSelection
     ) {
         return Err(
             "two-local proof does not retain an accepted ordered statement/proof shape".into(),
@@ -2502,6 +2764,7 @@ fn validate_two_local_constructor_pair(
         local_alias_copy,
         local_receiver_call,
         local_receiver_call_pair,
+        conditional_selection: conditional_selection_ref,
         max_stack: 4,
         max_locals: layout.max_locals(),
     })
@@ -2996,6 +3259,7 @@ fn validate_formal_local_constructor_pair(
         local_alias_copy: None,
         local_receiver_call: None,
         local_receiver_call_pair: None,
+        conditional_selection: None,
         max_stack: 4,
         max_locals: layout.max_locals(),
     })
@@ -3487,6 +3751,7 @@ fn validate_mixed_constructor_pair(
         local_alias_copy: None,
         local_receiver_call: None,
         local_receiver_call_pair: None,
+        conditional_selection: None,
         max_stack,
         max_locals: 3,
     })
@@ -5179,6 +5444,31 @@ fn validate_cross_class_call_code(
                 take_factory_local(code.code, &mut pc, false, alias.source_local_slot)?;
                 take_factory_local(code.code, &mut pc, true, alias.alias_local_slot)?;
             }
+            if let Some(selection) = mixed_pair.conditional_selection {
+                take_int_local(code.code, &mut pc, selection.condition_local_slot)?;
+                let ifeq_pc = pc;
+                take_factory_call_opcode(code.code, &mut pc, 0x99, "ifeq")?;
+                let else_target = take_factory_branch_target(code.code, &mut pc, ifeq_pc)?;
+                take_factory_local(code.code, &mut pc, false, selection.first_target_local_slot)?;
+                let goto_pc = pc;
+                take_factory_call_opcode(code.code, &mut pc, 0xa7, "goto")?;
+                let join_target = take_factory_branch_target(code.code, &mut pc, goto_pc)?;
+                if else_target != pc {
+                    return Err("conditional branch does not target the original else arm".into());
+                }
+                take_factory_local(
+                    code.code,
+                    &mut pc,
+                    false,
+                    selection.second_target_local_slot,
+                )?;
+                if join_target != pc {
+                    return Err(
+                        "conditional branch join does not follow the original else arm".into(),
+                    );
+                }
+                take_factory_local(code.code, &mut pc, true, selection.selected_local_slot)?;
+            }
             let local_receiver_calls = if let Some(calls) = &mixed_pair.local_receiver_call_pair {
                 calls.iter().collect::<Vec<_>>()
             } else {
@@ -5789,6 +6079,22 @@ fn take_int_local(code: &[u8], pc: &mut usize, slot: u16) -> Result<(), String> 
     }
     *pc += 1;
     Ok(())
+}
+
+fn take_factory_branch_target(
+    code: &[u8],
+    pc: &mut usize,
+    branch_pc: usize,
+) -> Result<usize, String> {
+    let bytes = code
+        .get(*pc..*pc + 2)
+        .ok_or_else(|| "truncated bounded conditional branch offset".to_owned())?;
+    let offset = i16::from_be_bytes([bytes[0], bytes[1]]);
+    *pc += 2;
+    let target = i64::try_from(branch_pc)
+        .map_err(|_| "conditional branch offset exceeds address range".to_owned())?
+        + i64::from(offset);
+    usize::try_from(target).map_err(|_| "conditional branch target is outside code".to_owned())
 }
 
 fn take_factory_call_operand(
@@ -6519,7 +6825,7 @@ mod paired_block_shape_tests {
                 false,
                 true,
             ),
-            PairedBlockShape::ThreeLocalsOneCall
+            PairedBlockShape::ThreeLocalsConditionalSelection
         );
         assert_eq!(
             classify_paired_block_shape(
