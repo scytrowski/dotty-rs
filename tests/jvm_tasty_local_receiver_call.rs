@@ -1299,6 +1299,37 @@ fn conditional_reference_selection_authenticates_frontend_and_current_first_fail
             assert_eq!(&code.code[24..27], &[0x19, 0x05, 0xa7]);
             assert_eq!(&code.code[33..38], &[0x19, 0x07, 0x15, 0x04, 0xb6]);
             let code_offset = code.code.as_ptr() as usize - factory_bytes.as_ptr() as usize;
+            let stack_map = code
+                .attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    Attribute::Other(raw)
+                        if class.constant_pool.utf8(raw.name_index).unwrap() == "StackMapTable" =>
+                    {
+                        Some(raw.bytes)
+                    }
+                    _ => None,
+                })
+                .expect("conditional factory method carries analyzed stack-map frames");
+            assert_eq!(stack_map.first(), Some(&0));
+            assert_eq!(stack_map.get(1), Some(&2));
+            assert_eq!(stack_map.get(2), Some(&255));
+            assert_eq!(&stack_map[3..5], &[0, 29]);
+            let stack_map_offset = stack_map.as_ptr() as usize - factory_bytes.as_ptr() as usize;
+            let mut corrupted = encoded.clone();
+            corrupted.classfiles[2].classfile_bytes[stack_map_offset + 4] = 30;
+            let error = validate_jvm_tasty_batch_artifacts(&validated, corrupted).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    JvmTastyContractError::BatchArtifact {
+                        class_index: 2,
+                        phase: "StackMapTable",
+                        ..
+                    }
+                ),
+                "a first-frame offset_delta changed from 29 to 30 must fail before publication: {error:?}"
+            );
             for (label, offset, value) in [
                 ("wrong conditional branch local", 25, 0x06),
                 ("verifier-valid wrong selected receiver", 34, 0x05),
