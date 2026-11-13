@@ -770,14 +770,14 @@ pub fn validate_jvm_tasty_batch_artifacts(
                 "decoded sidecar bytes differ from the exact validated class plan output".into(),
             ));
         }
+        validate_decoded_class_abi(&class_file, &expected.proof)
+            .map_err(|reason| artifact_error("member ABI", reason.into()))?;
         validate_stack_map_tables_against_canonical_emission(
             &class_file,
             expected,
             TastyLinkId::from_bytes(tasty.header().uuid),
         )
         .map_err(|reason| artifact_error("StackMapTable", reason))?;
-        validate_decoded_class_abi(&class_file, &expected.proof)
-            .map_err(|reason| artifact_error("member ABI", reason.into()))?;
         validate_reference_field_constructor_code(&class_file, &expected.proof)
             .map_err(|reason| artifact_error("reference-field initializer", reason))?;
         validate_cross_class_call_code(&class_file, &expected.proof)
