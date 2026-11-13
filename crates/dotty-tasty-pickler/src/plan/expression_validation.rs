@@ -2529,8 +2529,19 @@ impl Validator<'_, '_> {
             });
         }
 
+        let conditional_selection = p
+            .typed_bindings
+            .conditional_local_reference_selection(p.source.id, method.symbol);
+        let conditional_pair_shape = argument_count == 2
+            && method.parameter_clauses.len() == 1
+            && method.parameter_clauses[0].len() == 4
+            && conditional_selection.is_some_and(|selection| {
+                selection.method == method.symbol
+                    && selection.owner == p.class
+                    && method.parameter_clauses[0][2] == selection.condition_formal
+            });
         if method.parameter_clauses.len() != 1
-            || method.parameter_clauses[0].len() != argument_count
+            || (method.parameter_clauses[0].len() != argument_count && !conditional_pair_shape)
         {
             return Err(self.unsupported(UnsupportedFeature::ParameterClauses, Some(method.symbol)));
         }
@@ -2993,8 +3004,25 @@ impl Validator<'_, '_> {
             || binding.method_formals[0] == binding.method_formals[1]
             || binding.arguments[0].source_argument == binding.arguments[1].source_argument
             || binding.arguments[0].typed_argument == binding.arguments[1].typed_argument
-            || method.parameter_clauses.as_slice() != [binding.method_formals.as_slice()]
         {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        }
+        let conditional_selection = p
+            .typed_bindings
+            .conditional_local_reference_selection(p.source.id, method.symbol);
+        let formal_clause_matches =
+            match (method.parameter_clauses.as_slice(), conditional_selection) {
+                ([formals], None) => formals.as_slice() == binding.method_formals,
+                ([formals], Some(selection)) => {
+                    formals.len() == 4
+                        && formals[..2] == binding.method_formals
+                        && formals[2] == selection.condition_formal
+                        && selection.method == method.symbol
+                        && selection.owner == p.class
+                }
+                _ => false,
+            };
+        if !formal_clause_matches {
             return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
         }
         let Some(TreeKind::DefDef(source_method)) = p
@@ -3007,9 +3035,20 @@ impl Validator<'_, '_> {
                 expected: SourceRole::Method,
             });
         };
-        if source_method.value_param_clauses.as_slice()
-            != [binding.source_method_formals.as_slice()]
-        {
+        let source_clause_matches = match (
+            source_method.value_param_clauses.as_slice(),
+            conditional_selection,
+        ) {
+            ([formals], None) => formals.as_slice() == binding.source_method_formals,
+            ([formals], Some(selection)) => {
+                formals.len() == 4
+                    && formals[..2] == binding.source_method_formals
+                    && p.source_index.symbol_at(p.source.id, formals[2])
+                        == Some(selection.condition_formal)
+            }
+            _ => false,
+        };
+        if !source_clause_matches {
             return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
         }
         let method_signature_type = self.complete(method.symbol)?;
@@ -3019,7 +3058,19 @@ impl Validator<'_, '_> {
                 role: TypeRole::Body,
             });
         };
-        if method_signature.params.len() != 2 {
+        if method_signature.params.len()
+            != if conditional_selection.is_some() {
+                4
+            } else {
+                2
+            }
+            || conditional_selection.is_some_and(|_| {
+                method_signature.params[0].ty != p.definitions.int
+                    || method_signature.params[1].ty != p.definitions.int
+                    || method_signature.params[2].ty != p.definitions.boolean
+                    || method_signature.params[3].ty != p.definitions.int
+            })
+        {
             return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
         }
         for (index, (formal_tree, formal_symbol)) in binding

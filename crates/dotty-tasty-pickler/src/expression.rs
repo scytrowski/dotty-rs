@@ -68,6 +68,27 @@ fn child_expression_depth(ast: &TypedAst, tree: TreeId<Typed>, depth: usize) -> 
     }
 }
 
+fn lower_selected_local_reference(
+    store: &SemanticStore,
+    ast: &TypedAst,
+    tree: TreeId<Typed>,
+    target: SymbolId,
+    depth: usize,
+    budget: &mut ExpressionBudget,
+    context: &mut EncodingContext<'_>,
+) -> Result<AstLabel, PickleError> {
+    budget.visit(tree, depth)?;
+    let node = ast
+        .try_get(tree)
+        .ok_or(PickleError::InvalidTypedTree { tree })?;
+    if !matches!(node.kind, TreeKind::Ident(_))
+        || !matches!(store.types.try_get(node.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == target)
+    {
+        return Err(PickleError::BodyType { tree, ty: node.ty });
+    }
+    context.shared_selected_local_reference(target)
+}
+
 pub(crate) fn lower_expression(
     store: &SemanticStore,
     ast: &TypedAst,
@@ -295,6 +316,7 @@ fn lower_expression_inner(
         });
     }
     if let TreeKind::If(if_expr) = tree.kind {
+        let selected_targets = context.conditional_selection_targets(method, root);
         let condition = lower_expression_inner(
             store,
             ast,
@@ -312,18 +334,30 @@ fn lower_expression_inner(
         } else {
             depth
         };
-        let then_branch = lower_expression_inner(
-            store,
-            ast,
-            if_expr.then_branch,
-            method,
-            parameters,
-            ExpressionState {
-                depth: then_depth,
+        let then_branch = if let Some([target, _]) = selected_targets {
+            lower_selected_local_reference(
+                store,
+                ast,
+                if_expr.then_branch,
+                target,
+                then_depth,
                 budget,
-            },
-            context,
-        )?;
+                context,
+            )?
+        } else {
+            lower_expression_inner(
+                store,
+                ast,
+                if_expr.then_branch,
+                method,
+                parameters,
+                ExpressionState {
+                    depth: then_depth,
+                    budget,
+                },
+                context,
+            )?
+        };
         let else_depth = if matches!(
             ast.try_get(if_expr.else_branch).map(|tree| &tree.kind),
             Some(TreeKind::If(_) | TreeKind::Block(_))
@@ -332,18 +366,30 @@ fn lower_expression_inner(
         } else {
             depth
         };
-        let else_branch = lower_expression_inner(
-            store,
-            ast,
-            if_expr.else_branch,
-            method,
-            parameters,
-            ExpressionState {
-                depth: else_depth,
+        let else_branch = if let Some([_, target]) = selected_targets {
+            lower_selected_local_reference(
+                store,
+                ast,
+                if_expr.else_branch,
+                target,
+                else_depth,
                 budget,
-            },
-            context,
-        )?;
+                context,
+            )?
+        } else {
+            lower_expression_inner(
+                store,
+                ast,
+                if_expr.else_branch,
+                method,
+                parameters,
+                ExpressionState {
+                    depth: else_depth,
+                    budget,
+                },
+                context,
+            )?
+        };
         return context.wire_node(AstNode::Length {
             tag: IF_TAG,
             fields: vec![
