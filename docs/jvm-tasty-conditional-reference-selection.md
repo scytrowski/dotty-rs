@@ -185,3 +185,72 @@ initialization fail JVM verification. Corruptions remain in isolated runtime
 copies, and the six canonical originals remain unchanged. The strict Java and
 Scala consumer checks are part of the CI JDK target and the pinned Scala
 conditional proof target, respectively; both must run on the final PR head.
+
+## Independent Scala 3.9 consumer of the Rust batch (#2272)
+
+[`ScalaConsumer.scala`](../tests/fixtures/jvm_tasty_conditional_reference_selection/ScalaConsumer.scala)
+is separately authored and has SHA-256
+`d4668a27c5c660debd71d94a7ce117edec82b14c070dbae70c9edeb764df15c1`.
+The Rust test emits the unchanged `PairFactory.scala` source (SHA-256
+`c77b2b3e00bf602b86be30b29ceaa2300398feb34e80d2f76c37f391bb4d654f`) into a
+fresh six-artifact batch, verifies its original hashes and UUIDs, and compiles
+the client with the batch plus only the two pinned Scala runtime jars on its
+classpath. The output directory is separate and contains no fallback
+`Counter`, `Pair`, or `PairFactory` class. The client names and resolves all
+three classes directly, calls `PairFactory.create` with both Boolean values,
+negative seeds, and equal seeds, then mutates directly constructed Counter
+instances to check Pair's original field references.
+
+The test used Scala source revision
+`777528f19a58e794c9954a42f433373472ec57f8`, whose staged compiler reported
+`3.9.0-bin-SNAPSHOT-git-777528f`; the observed `with_compiler.jar` SHA-256 was
+`e3e5db272736ffeb22a444c494bd44982fb6836da816cac61844721d639760d8`. It used
+Eclipse Temurin JDK `21.0.13+9`, with `java` SHA-256
+`9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155`. The
+published Scala 3.9 runtime jars are checked against their hashes in
+[`scala39_toolchain.rs`](../tests/support/scala39_toolchain.rs). Runtime output
+was `scala39-rust-conditional-reference-consumer=ok` under
+`java -Xverify:all -ea`.
+
+| Original Rust artifact | SHA-256 | Linked TASTy UUID |
+| --- | --- | --- |
+| `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | `008071c3c00968ac0000000000008193` |
+| `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | `008071c3c00968ac0000000000008193` |
+| `example/Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` | `000b7d8d7441c7f00000000000008198` |
+| `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | `000b7d8d7441c7f00000000000008198` |
+| `example/PairFactory.class` | `351d311b48edb38d5b86b2621cb49568df508c944929633e4bdef35ea03d159c` | `00d07c03e8e3c6dc00000000000081a1` |
+| `example/PairFactory.tasty` | `327e42e222d13f21fe8fbe7f7b8ddc769abf31a85c1d97d9b6115ed5d39efe5e` | `00d07c03e8e3c6dc00000000000081a1` |
+
+On the original `PairFactory.tasty`, official `-print-tasty` reported
+`chooseFirst: Boolean` at AST address 52; `first`, `second`, and `selected`
+VALDEFs at 92, 117, and 140; and the selected IF at 149. Its condition
+referenced formal 52, and its THEN/ELSE shared references resolved through
+addresses 88/90 to the original first/second VALDEFs at 92/117. The signed
+`set(Int): Unit` selection used selected address 140 as receiver and formal 61
+as argument. The final signed Pair constructor used the original 92/117 locals
+in order. Scala `-decompile` rendered the same body, and `-from-tasty` accepted
+and reconstructed all three original sidecars into a separate directory. The
+JVM descriptor was independently decoded as `(IIZI)Lexample/Pair;`.
+
+| Isolated negative control | First observed failure |
+| --- | --- |
+| Missing `PairFactory.tasty` | Scala source compilation rejects the classfile because its TASTy sidecar is missing. |
+| Wrong sidecar UUID | Scala source compilation reports the classfile and sidecar are out of sync. |
+| Changed JVM descriptor with original TASTy | Scala compilation follows the TASTy signature; JVM execution first fails with `NoSuchMethodError`. |
+| Stale IF arm reference | Scala `-decompile` cannot unpickle the factory body. |
+| Selected local receiver reference changed to a non-node address | Scala `-decompile` cannot unpickle the factory body. |
+| Forged source-bound setter receiver | The existing `jvm_tasty_conditional_local_reference_proof` test rejects it at the typed-binding stage. |
+
+All corruptions use isolated copies; the original six artifact hashes are
+checked again after consumer and control execution. The focused strict target
+is `jvm_tasty_conditional_reference_scala_consumer`; it is assigned to shard 4
+while the previous forged-receiver proof remains required. Reproduce the Scala
+consumer and controls with the pinned source checkout, JDK, and runtime cache:
+
+```sh
+DOTTY_REQUIRE_SCALA_TASTY_CONDITIONAL_REFERENCE_SCALA_CONSUMER=1 \
+SCALA39_ROOT=/path/to/scala39-source \
+COURSIER_MAVEN_ROOT=/path/to/repo1.maven.org/maven2 \
+cargo +1.98.1 test --test jvm_tasty_conditional_reference_scala_consumer \
+  --locked -- --nocapture
+```
