@@ -205,7 +205,7 @@ impl Validator<'_, '_> {
             depth
         };
         if let Some(reference_type) = reference_local_type {
-            if reference_type != local_type {
+            if !self.same_reference_type(reference_type, local_type)? {
                 return Err(
                     self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
                 );
@@ -218,7 +218,18 @@ impl Validator<'_, '_> {
                 .plan
                 .typed_bindings
                 .local_reference_alias(self.plan.source.id, method.symbol);
-            if let Some(alias) = alias.filter(|alias| alias.source_declaration == source_id) {
+            let selection = self
+                .plan
+                .typed_bindings
+                .conditional_local_reference_selection(self.plan.source.id, method.symbol);
+            if let Some(selection) =
+                selection.filter(|selection| selection.source_declaration == source_id)
+            {
+                self.validate_conditional_local_reference_initializer(
+                    selection, binding, local_type, method, depth, visited,
+                )?;
+            } else if let Some(alias) = alias.filter(|alias| alias.source_declaration == source_id)
+            {
                 self.validate_local_reference_alias_initializer(
                     alias, binding, local_type, method, visited,
                 )?;
@@ -253,7 +264,7 @@ impl Validator<'_, '_> {
                     || initializer.typed_type_tree != typed_val.tpt
                     || initializer.local != binding.symbol
                     || initializer.scope != binding.scope
-                    || initializer.local_type != local_type
+                    || !self.same_reference_type(initializer.local_type, local_type)?
                     || !paired_local
                 {
                     return Err(
@@ -325,6 +336,254 @@ impl Validator<'_, '_> {
         }
         self.visible_locals.insert(binding.symbol);
         Ok(())
+    }
+
+    fn validate_conditional_local_reference_initializer(
+        &mut self,
+        binding: crate::ConditionalLocalReferenceSelectionBinding,
+        local: LocalValueBinding,
+        local_type: TypeId,
+        method: &MethodPicklePlan,
+        depth: usize,
+        visited: &mut HashSet<TreeId<Typed>>,
+    ) -> Result<(), PickleError> {
+        let p = self.plan;
+        if depth > self.limits.expression_depth_limit() {
+            return Err(PickleError::LimitExceeded {
+                kind: LimitKind::ExpressionDepth,
+                limit: self.limits.expression_depth_limit(),
+            });
+        }
+        let source_block = self.source_tree(binding.source_block)?;
+        let typed_block =
+            p.typed_ast
+                .try_get(binding.typed_block)
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: binding.typed_block,
+                })?;
+        let source_declaration = self.source_tree(binding.source_declaration)?;
+        let typed_declaration = p.typed_ast.try_get(binding.typed_declaration).ok_or(
+            PickleError::InvalidTypedTree {
+                tree: binding.typed_declaration,
+            },
+        )?;
+        let source_if = self.source_tree(binding.source_if)?;
+        let typed_if =
+            p.typed_ast
+                .try_get(binding.typed_if)
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: binding.typed_if,
+                })?;
+        let typed_if_type = typed_if.ty;
+        let (TreeKind::Block(source_block), TreeKind::Block(typed_block)) =
+            (&source_block.kind, &typed_block.kind)
+        else {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        };
+        let (TreeKind::ValDef(source_declaration), TreeKind::ValDef(typed_declaration)) =
+            (&source_declaration.kind, &typed_declaration.kind)
+        else {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        };
+        let (TreeKind::If(source_if), TreeKind::If(typed_if)) = (&source_if.kind, &typed_if.kind)
+        else {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        };
+        let actual_type = self.complete(binding.selected)?;
+        let boolean_formal = self.symbol(binding.condition_formal)?;
+        let initializer_pair = p
+            .typed_bindings
+            .local_counter_initializers(p.source.id, method.symbol);
+        if binding.source_id != p.source.id
+            || binding.method != method.symbol
+            || binding.owner != p.class
+            || binding.scope != local.scope
+            || binding.source_declaration != local.source_tree
+            || binding.typed_declaration != local.typed_declaration
+            || binding.selected != local.symbol
+            || binding.local_type != local_type
+            || actual_type != local_type
+            || source_block.stats.get(2) != Some(&binding.source_declaration)
+            || typed_block.stats.get(2) != Some(&binding.typed_declaration)
+            || source_declaration.rhs != Some(binding.source_if)
+            || typed_declaration.rhs != Some(binding.typed_if)
+            || binding.source_if != source_declaration.rhs.unwrap_or(binding.source_if)
+            || binding.typed_if != typed_declaration.rhs.unwrap_or(binding.typed_if)
+            || source_if.cond != binding.source_condition
+            || typed_if.cond != binding.typed_condition
+            || [source_if.then_branch, source_if.else_branch] != binding.source_arms
+            || [typed_if.then_branch, typed_if.else_branch] != binding.typed_arms
+            || boolean_formal.kind != SymbolKind::Parameter
+            || boolean_formal.owner != Some(method.symbol)
+            || self.complete(binding.condition_formal)? != p.definitions.boolean
+            || !method
+                .parameter_clauses
+                .iter()
+                .flatten()
+                .any(|formal| *formal == binding.condition_formal)
+            || initializer_pair.len() != 2
+            || initializer_pair
+                .iter()
+                .any(|initializer| initializer.scope != binding.scope)
+            || binding.targets[0] == binding.targets[1]
+            || binding.targets.contains(&binding.selected)
+            || !self.visible_locals.contains(&binding.targets[0])
+            || !self.visible_locals.contains(&binding.targets[1])
+        {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        }
+        let Type::TypeRef {
+            target: TypeRefTarget::Symbol(class),
+            ..
+        } = self.ty(local_type)?
+        else {
+            return Err(PickleError::UnsupportedTypeReference { ty: local_type });
+        };
+        if !self.same_reference_type(typed_if_type, local_type)? {
+            return Err(PickleError::BodyType {
+                tree: binding.typed_if,
+                ty: typed_if_type,
+            });
+        }
+        for (source_arm, typed_arm, target) in [
+            (
+                binding.source_arms[0],
+                binding.typed_arms[0],
+                binding.targets[0],
+            ),
+            (
+                binding.source_arms[1],
+                binding.typed_arms[1],
+                binding.targets[1],
+            ),
+        ] {
+            let source = self.source_tree(source_arm)?;
+            let typed = p
+                .typed_ast
+                .try_get(typed_arm)
+                .ok_or(PickleError::InvalidTypedTree { tree: typed_arm })?;
+            let (TreeKind::Ident(source_ident), TreeKind::Ident(typed_ident)) =
+                (&source.kind, &typed.kind)
+            else {
+                return Err(
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                );
+            };
+            if source_ident.name != self.symbol(target)?.name
+                || typed_ident.name != source_ident.name
+                || self.symbol(target)?.kind != SymbolKind::Local
+                || self.symbol(target)?.owner != Some(method.symbol)
+                || !self.same_reference_type(self.complete(target)?, local_type)?
+                || !initializer_pair.iter().any(|initializer| {
+                    initializer.local == target
+                        && self
+                            .same_reference_type(initializer.local_type, local_type)
+                            .unwrap_or(false)
+                        && initializer.call.class == *class
+                })
+                || !matches!(self.ty(typed.ty)?, Type::TermRef { prefix, target: TermRefTarget::Symbol(symbol) } if *prefix == p.definitions.no_prefix && *symbol == target)
+            {
+                return Err(PickleError::BodyType {
+                    tree: typed_arm,
+                    ty: typed.ty,
+                });
+            }
+            self.source_typed_binding(source_arm, typed_arm)?;
+            self.paired_source_typed_span(source.position, typed.position, typed_arm)?;
+        }
+        let condition_source = self.source_tree(binding.source_condition)?;
+        let condition_typed_id = p
+            .typed_bindings
+            .typed_at(p.source.id, binding.source_condition)
+            .ok_or(PickleError::BodyBinding {
+                source: p.source.id,
+                tree: binding.source_condition,
+                expected: binding.typed_condition,
+                actual: None,
+            })?;
+        if condition_typed_id != binding.typed_condition {
+            return Err(PickleError::BodyBinding {
+                source: p.source.id,
+                tree: binding.source_condition,
+                expected: binding.typed_condition,
+                actual: Some(condition_typed_id),
+            });
+        }
+        let condition_typed =
+            p.typed_ast
+                .try_get(binding.typed_condition)
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: binding.typed_condition,
+                })?;
+        if !matches!(&condition_source.kind, TreeKind::Ident(ident) if ident.name == boolean_formal.name)
+            || !matches!(&condition_typed.kind, TreeKind::Ident(ident) if ident.name == boolean_formal.name)
+            || !matches!(self.ty(condition_typed.ty)?, Type::TermRef { prefix, target: TermRefTarget::Symbol(symbol) } if *prefix == p.definitions.no_prefix && *symbol == binding.condition_formal)
+        {
+            return Err(PickleError::BodyType {
+                tree: binding.typed_condition,
+                ty: condition_typed.ty,
+            });
+        }
+        for (source_id, typed_id) in [
+            (binding.source_if, binding.typed_if),
+            (binding.source_condition, binding.typed_condition),
+        ] {
+            self.source_typed_binding(source_id, typed_id)?;
+            let source = self.source_tree(source_id)?;
+            let typed = p
+                .typed_ast
+                .try_get(typed_id)
+                .ok_or(PickleError::InvalidTypedTree { tree: typed_id })?;
+            self.paired_source_typed_span(source.position, typed.position, typed_id)?;
+        }
+        if !visited.insert(binding.typed_if)
+            || !visited.insert(binding.typed_condition)
+            || binding
+                .typed_arms
+                .into_iter()
+                .any(|arm| !visited.insert(arm))
+        {
+            return Err(PickleError::RepeatedExpression {
+                tree: binding.typed_if,
+            });
+        }
+        Ok(())
+    }
+
+    fn same_reference_type(&self, left: TypeId, right: TypeId) -> Result<bool, PickleError> {
+        let (
+            Type::TypeRef {
+                prefix: left_prefix,
+                target: TypeRefTarget::Symbol(left_class),
+            },
+            Type::TypeRef {
+                prefix: right_prefix,
+                target: TypeRefTarget::Symbol(right_class),
+            },
+        ) = (self.ty(left)?, self.ty(right)?)
+        else {
+            return Ok(false);
+        };
+        Ok(left_class == right_class && self.same_reference_prefix(*left_prefix, *right_prefix)?)
+    }
+
+    fn same_reference_prefix(&self, left: TypeId, right: TypeId) -> Result<bool, PickleError> {
+        match (self.ty(left)?, self.ty(right)?) {
+            (Type::NoPrefix, Type::NoPrefix) => Ok(true),
+            (
+                Type::TypeRef {
+                    prefix: left_prefix,
+                    target: TypeRefTarget::Symbol(left_owner),
+                },
+                Type::TypeRef {
+                    prefix: right_prefix,
+                    target: TypeRefTarget::Symbol(right_owner),
+                },
+            ) => Ok(left_owner == right_owner
+                && matches!(self.ty(*left_prefix)?, Type::NoPrefix)
+                && matches!(self.ty(*right_prefix)?, Type::NoPrefix)),
+            _ => Ok(false),
+        }
     }
 
     fn validate_local_reference_alias_initializer(

@@ -195,6 +195,7 @@ jobs:
           DOTTY_REQUIRE_SCALA_TASTY_MULTI_ARGUMENT_CONSTRUCTOR_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_LOCAL_RECEIVER_UNIT_CALL: '1'
           DOTTY_REQUIRE_SCALA_TASTY_TWO_LOCAL_COUNTER_SET_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_CONDITIONAL_LOCAL_REFERENCE_CONSUMER: '1'
           DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE: '1'
           DOTTY_TASTY_PICKLER_ORACLE_TMP: ${{ github.workspace }}/target/scala-reader-oracle
           DOTTY_ISSUE_1960_ORACLE_DIR: ${{ github.workspace }}/target/issue-1960-oracle
@@ -390,6 +391,7 @@ jobs:
           DOTTY_REQUIRE_SCALA_TASTY_MULTI_ARGUMENT_CONSTRUCTOR_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_LOCAL_RECEIVER_UNIT_CALL: '1'
           DOTTY_REQUIRE_SCALA_TASTY_TWO_LOCAL_COUNTER_SET_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_CONDITIONAL_LOCAL_REFERENCE_CONSUMER: '1'
           DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE: '1'
           DOTTY_TASTY_PICKLER_ORACLE_TMP: ${{ github.workspace }}/target/scala-reader-oracle
           DOTTY_ISSUE_1960_ORACLE_DIR: ${{ github.workspace }}/target/issue-1960-oracle
@@ -566,6 +568,7 @@ jobs:
           DOTTY_REQUIRE_SCALA_TASTY_MULTI_ARGUMENT_CONSTRUCTOR_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_LOCAL_RECEIVER_UNIT_CALL: '1'
           DOTTY_REQUIRE_SCALA_TASTY_TWO_LOCAL_COUNTER_SET_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_CONDITIONAL_LOCAL_REFERENCE_CONSUMER: '1'
           DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE: '1'
           DOTTY_TASTY_PICKLER_ORACLE_TMP: ${{ github.workspace }}/target/scala-reader-oracle
           DOTTY_ISSUE_1960_ORACLE_DIR: ${{ github.workspace }}/target/issue-1960-oracle
@@ -752,6 +755,7 @@ jobs:
           DOTTY_REQUIRE_SCALA_TASTY_MULTI_ARGUMENT_CONSTRUCTOR_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_LOCAL_RECEIVER_UNIT_CALL: '1'
           DOTTY_REQUIRE_SCALA_TASTY_TWO_LOCAL_COUNTER_SET_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_CONDITIONAL_LOCAL_REFERENCE_CONSUMER: '1'
           DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE: '1'
           DOTTY_TASTY_PICKLER_ORACLE_TMP: ${{ github.workspace }}/target/scala-reader-oracle
           DOTTY_ISSUE_1960_ORACLE_DIR: ${{ github.workspace }}/target/issue-1960-oracle
@@ -865,7 +869,7 @@ jobs:
         jvm_tasty_mixed_origin_constructor_scala_consumer jvm_tasty_immutable_reference_local_pair_scala_consumer
         jvm_tasty_two_local_counter_set_scala_consumer jvm_tasty_direct_formal_constructor_pair jvm_tasty_dual_reference_scala_consumer
         jvm_tasty_dual_reference_rust_consumer jvm_tasty_cross_class_factories
-        jvm_tasty_factory_result_arguments tasty_source_pickling
+        jvm_tasty_factory_result_arguments tasty_source_pickling jvm_tasty_conditional_local_reference_proof
       STRICT_SUPPORT_TARGETS: jvm_tasty_plan jvm_tasty_artifacts classfile_jvm_encoder jvm_source_compilation jvm_stateful_class_contract jvm_tasty_local_receiver_call_runtime
       STRICT_REQUIRED_ENVS: >-
         DOTTY_REQUIRE_SCALA_TASTY_CONSUMER DOTTY_REQUIRE_SCALA_TASTY_MULTICLASS_CONSUMER
@@ -882,6 +886,7 @@ jobs:
         DOTTY_REQUIRE_SCALA_TASTY_LOCAL_RECEIVER_UNIT_CALL
         DOTTY_REQUIRE_SCALA_TASTY_TWO_IMMUTABLE_REFERENCE_LOCALS_CONSUMER
         DOTTY_REQUIRE_SCALA_TASTY_TWO_LOCAL_COUNTER_SET_CONSUMER
+        DOTTY_REQUIRE_SCALA_TASTY_CONDITIONAL_LOCAL_REFERENCE_CONSUMER
       STRICT_TASTY_SHARD_1_JOB: ${{ needs.strict_shard_1.result }}
       STRICT_TASTY_SHARD_1_TESTS: ${{ needs.strict_shard_1.outputs.strict_tests || 'missing' }}
       STRICT_TASTY_SHARD_2_JOB: ${{ needs.strict_shard_2.result }}

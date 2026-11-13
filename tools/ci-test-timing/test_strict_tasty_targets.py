@@ -276,13 +276,13 @@ STRICT_REQUIRED_ENVS: DOTTY_REQUIRE_FIRST
                 with self.assertRaisesRegex(ManifestError, "workflow must select each fixed shard once in order"):
                     validate_manifest(manifest, self.root)
 
-    def test_real_inventory_supports_four_fixed_shards_and_preserves_25_targets(
+    def test_real_inventory_requires_conditional_reference_scala_reader_in_strict_shard(
         self,
     ):
         repository = Path(__file__).parents[2]
         manifest_path = repository / "tools/ci/strict_tasty_targets.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        self.assertEqual(manifest["baseline"]["inventory_count"], 25)
+        self.assertEqual(manifest["baseline"]["inventory_count"], 26)
         target_names = [target["name"] for target in manifest["targets"]]
         self.assertIn(
             "jvm_tasty_immutable_reference_local_pair_scala_consumer",
@@ -291,6 +291,25 @@ STRICT_REQUIRED_ENVS: DOTTY_REQUIRE_FIRST
         self.assertIn(
             "jvm_tasty_two_local_counter_set_scala_consumer",
             target_names,
+        )
+        candidate_target = "jvm_tasty_conditional_local_reference_proof"
+        candidate_environment = "DOTTY_REQUIRE_SCALA_TASTY_CONDITIONAL_LOCAL_REFERENCE_CONSUMER"
+        self.assertIn(candidate_target, target_names)
+        self.assertIn(
+            candidate_target,
+            manifest["sharding"]["shards"][3]["targets"],
+        )
+        workflow = (repository / manifest["source"]["workflow"]).read_text(encoding="utf-8")
+        environment_declaration = re.search(
+            r"(?ms)^\s*STRICT_REQUIRED_ENVS:\s*>-\s*\n(.*?)(?=^\s*STRICT_TASTY_SHARD_[0-9]+_JOB:)",
+            workflow,
+        )
+        self.assertIsNotNone(environment_declaration)
+        self.assertIn(candidate_environment, environment_declaration.group(1))
+        self.assertEqual(
+            len(re.findall(rf"^\s*{candidate_environment}:\s*'1'\s*$", workflow, re.MULTILINE)),
+            4,
+            "all fixed shard invocations carry the required candidate-reader gate",
         )
         self.assertEqual(
             [shard["id"] for shard in manifest["sharding"]["shards"]],
