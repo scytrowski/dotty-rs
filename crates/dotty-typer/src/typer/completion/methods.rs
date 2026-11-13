@@ -194,7 +194,7 @@ impl SourceTyper<'_> {
         .then_some(class)
     }
 
-    pub(super) fn generated_case_class_for_apply(
+    pub(in crate::typer) fn generated_case_class_for_apply(
         &self,
         method: SymbolId,
         source: SourceId,

@@ -1311,6 +1311,7 @@ impl SourceTyper<'_> {
                 arguments,
                 tree_index,
                 application_kind,
+                candidates.len() == 1,
                 info_journal,
             )?;
             self.choose_overload_candidate(candidates, arguments, tree_index, application_kind)
@@ -1340,6 +1341,7 @@ impl SourceTyper<'_> {
             arguments,
             tree_index,
             application_kind,
+            original_candidates.len() == 1,
             info_journal,
         )?;
         Ok(candidates[selected_index])
@@ -1365,6 +1367,7 @@ impl SourceTyper<'_> {
                 arguments,
                 tree_index,
                 application_kind,
+                false,
                 info_journal,
             )?;
             self.choose_overload_candidate_with_policy(
@@ -1400,6 +1403,7 @@ impl SourceTyper<'_> {
             arguments,
             tree_index,
             application_kind,
+            false,
             info_journal,
         )?;
         Ok(candidates[selected_index])
@@ -1411,9 +1415,11 @@ impl SourceTyper<'_> {
         arguments: &[TypedArgument],
         tree_index: u32,
         application_kind: ApplyKind,
+        allow_unique_generated_apply: bool,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<(), TyperError> {
-        for candidate in candidates {
+        let allow_unique_generated_apply = allow_unique_generated_apply && candidates.len() == 1;
+        for candidate in candidates.iter_mut() {
             let Some(Type::Poly(poly)) = self.store.types.try_get(candidate.callable).cloned()
             else {
                 continue;
@@ -1432,12 +1438,25 @@ impl SourceTyper<'_> {
                 continue;
             }
 
+            let unused_covariant_parameter = if allow_unique_generated_apply {
+                self.unused_covariant_generated_apply_parameter(
+                    candidate.symbol,
+                    candidate.callable,
+                    &poly,
+                    arguments,
+                )
+            } else {
+                None
+            };
             let type_arguments = match self.infer_poly_application_arguments(
-                candidate.callable,
-                &poly,
-                arguments,
-                application_kind,
-                tree_index,
+                PolyApplicationInference {
+                    binder: candidate.callable,
+                    poly: &poly,
+                    arguments,
+                    application_kind,
+                    tree_index,
+                    unused_covariant_parameter,
+                },
                 info_journal,
             ) {
                 Ok(type_arguments) => type_arguments,

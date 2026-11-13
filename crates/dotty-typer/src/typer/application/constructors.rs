@@ -1173,11 +1173,14 @@ impl SourceTyper<'_> {
             tree_index,
         } = request;
         self.infer_poly_application_arguments(
-            binder,
-            poly,
-            arguments,
-            application_kind,
-            tree_index,
+            PolyApplicationInference {
+                binder,
+                poly,
+                arguments,
+                application_kind,
+                tree_index,
+                unused_covariant_parameter: None,
+            },
             info_journal,
         )
         .map_err(|error| match error {

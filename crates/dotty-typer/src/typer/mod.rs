@@ -36,7 +36,7 @@ mod type_projection;
 
 use application::{
     ApplicationCandidate, ApplicationRequest, InferenceLocation, InfixApplicationRequest,
-    ResolvedApplicationFunction, TypedArgument,
+    PolyApplicationInference, ResolvedApplicationFunction, TypedArgument,
 };
 pub use context::{ExpressionContext, ExpressionScopeId};
 use context::{ExpressionScopeFrame, next_expression_scope_owner};
@@ -9754,6 +9754,7 @@ mod tests {
 
     mod compose_conformance;
     mod enclosing_this_capture;
+    mod issue_2282_generated_apply_inference;
     mod lexical_closure_contract;
     mod lexical_closure_rollback;
     mod local_value_capture;

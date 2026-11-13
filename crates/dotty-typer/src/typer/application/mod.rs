@@ -8,7 +8,7 @@ pub(super) mod constructors;
 pub use constructors::ConstructorCandidate;
 mod inference;
 pub(in crate::typer) mod overload;
-pub(in crate::typer) use inference::InferenceLocation;
+pub(in crate::typer) use inference::{InferenceLocation, PolyApplicationInference};
 
 #[derive(Clone, Copy)]
 pub(in crate::typer) struct ApplicationCandidate {
@@ -855,12 +855,28 @@ impl SourceTyper<'_> {
                 }
                 arguments
             };
+            let unused_covariant_parameter = if is_constructor_application {
+                None
+            } else {
+                match self.store.types.try_get(self.typed_arena.get(function).ty) {
+                    Some(Type::TermRef {
+                        target: TermRefTarget::Symbol(symbol),
+                        ..
+                    }) => self.unused_covariant_generated_apply_parameter(
+                        *symbol, callable, &poly, &arguments,
+                    ),
+                    _ => None,
+                }
+            };
             let type_arguments = self.infer_poly_application_arguments(
-                callable,
-                &poly,
-                &arguments,
-                application_kind,
-                tree_index,
+                PolyApplicationInference {
+                    binder: callable,
+                    poly: &poly,
+                    arguments: &arguments,
+                    application_kind,
+                    tree_index,
+                    unused_covariant_parameter,
+                },
                 info_journal,
             )?;
             let instantiated =
