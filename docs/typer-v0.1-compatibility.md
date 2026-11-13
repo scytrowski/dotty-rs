@@ -1524,6 +1524,28 @@ matching, inference through unions/intersections, relation solving for those
 types, wildcard capture, match-type reduction, type-lambda unification,
 implicit search, and numeric weak conformance remain deferred.
 
+There is one narrower exception for a uniquely selected, authenticated
+current-source generated case-class `apply` ([#2282](https://github.com/scytrowski/dotty-rs/issues/2282)).
+It requires exactly two first-order covariant class parameters with canonical
+`Nothing..Any` bounds, one plain value parameter whose entire type is one
+current Poly `ParamRef`, and the authenticated case class applied to both
+current Poly parameters in declaration order as the immediate result. After
+ordinary argument inference establishes the field-bearing slot, only the
+proved absent slot is minimized to canonical `Nothing`; normal Poly
+instantiation, bound checks, and argument conformance still apply. The
+generated method's Poly parameters remain ordinary method parameters; class
+covariance comes from the canonical ordered source-class metadata and the
+shared constructor type-parameter source trees establish the positional
+mapping. This does not apply to user-defined or binary factories, overloaded
+factory competition, constructors, invariant/contravariant parameters,
+noncanonical or dependent bounds, unsupported field shapes, or any other
+unconstrained generic call. The typed application retains its original
+generated method identity and produces `Right[Nothing, A]` or
+`Left[B, Nothing]`; it does not rewrite the result from an expected type or
+create a synthetic source `TypeApply`. These application proofs do not imply
+that the complete `Either.swap` method is accepted; that remains a separate
+whole-method gate.
+
 Source and TASTy snapshots intentionally normalize adapter-specific identity
 and provenance. TASTy's package prefixes on the built-in Scala and
 `java.lang.Object` references normalize to the source Typer's canonical

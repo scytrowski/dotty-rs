@@ -27,14 +27,7 @@ EITHER_SWAP_POLYMORPHIC_BLOCKER = (
     "blocked::ExtractorUnapplyPolymorphic { source: SourceId(0), tree_index: 69, "
     "unapply: SymbolId(112), callable: TypeId(552) }"
 )
-EITHER_SWAP_LIVE_BLOCKER = (
-    "blocked::UnconstrainedTypeParameter { source: SourceId(0), tree_index: 72, "
-    "binder: TypeId(491), parameter_index: 0 }"
-)
-EITHER_SWAP_LIVE_BLOCKER_PATTERN = re.compile(
-    r"blocked::UnconstrainedTypeParameter \{ source: SourceId\(0\), "
-    r"tree_index: 72, binder: TypeId\([0-9]+\), parameter_index: 0 \}"
-)
+EITHER_SWAP_LIVE_RESULT = "scala.util.Either[scala.util.Either.B,scala.util.Either.A]"
 PRODUCT2_FIXTURE = Path("crates/dotty-typer/tests/fixtures/source-case-class-product2-3.9.0")
 PRODUCT2_SOURCE_SHA256 = "4b144913df1d2021359c44633dc2a23f21bf6288bf2528c86cc6f53d79b8ee31"
 SCALA_MATRIX_CASES = {
@@ -1370,25 +1363,25 @@ def validate_cohorts(root: Path, reports: list[Path], output: Path, baseline_rec
             continue
         if wanted["identity"] == EITHER_SWAP_IDENTITY:
             # Keep the checked-in 2026-09 receipt immutable. Permit only the
-            # measured #2245 progression through the original Left extractor
-            # to the Right(a) constructor boundary, while requiring every
-            # non-status field to remain exactly historical.
+            # measured pinned Either.swap completion, while requiring every
+            # frozen root and non-result receipt field to remain historical.
             historical = dict(wanted)
             historical["first_status"] = EITHER_SWAP_HISTORICAL_BLOCKER
             historical["second_status"] = EITHER_SWAP_HISTORICAL_BLOCKER
-            observed = (
+            historical["actual_result"] = "not_available"
+            completed = (
                 wanted["cohort"] == "main"
                 and wanted["source_tree"] == "84"
                 and wanted["baseline_status"] == "blocked"
                 and wanted["gate"] == "observe"
-                and EITHER_SWAP_LIVE_BLOCKER_PATTERN.fullmatch(wanted["first_status"]) is not None
-                and EITHER_SWAP_LIVE_BLOCKER_PATTERN.fullmatch(wanted["second_status"]) is not None
+                and wanted["first_status"] == "typed"
+                and wanted["second_status"] == "typed"
                 and wanted["first_status"] == wanted["second_status"]
-                and wanted["actual_result"] == "not_available"
+                and wanted["actual_result"] == EITHER_SWAP_LIVE_RESULT
                 and wanted["protected_success"] == "false"
                 and wanted["two_pass_equal"] == "true"
             )
-            if observed and historical == found:
+            if completed and historical == found:
                 continue
         differences.append((wanted, found))
     if differences:

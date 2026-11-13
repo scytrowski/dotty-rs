@@ -9,7 +9,174 @@ pub(in crate::typer) struct InferenceLocation {
     pub(in crate::typer) depth: usize,
 }
 
+pub(in crate::typer) struct PolyApplicationInference<'a> {
+    pub(in crate::typer) binder: TypeId,
+    pub(in crate::typer) poly: &'a PolyType,
+    pub(in crate::typer) arguments: &'a [TypedArgument],
+    pub(in crate::typer) application_kind: ApplyKind,
+    pub(in crate::typer) tree_index: u32,
+    pub(in crate::typer) unused_covariant_parameter: Option<usize>,
+}
+
+fn canonical_nothing_any_bounds(
+    types: &dotty_core::TypeArena,
+    bounds: TypeId,
+    nothing: TypeId,
+    any: TypeId,
+) -> bool {
+    matches!(types.try_get(bounds), Some(Type::Bounds { low, high }) if *low == nothing && *high == any)
+}
+
 impl SourceTyper<'_> {
+    /// Returns the one class parameter that may be minimized to `Nothing` for
+    /// an authenticated, uniquely selected current-source generated case-class
+    /// `apply`. Callers must separately prove that no competing factory was
+    /// considered; the ordinary inference path remains conservative.
+    pub(in crate::typer) fn unused_covariant_generated_apply_parameter(
+        &self,
+        method_symbol: SymbolId,
+        callable: TypeId,
+        poly: &PolyType,
+        arguments: &[TypedArgument],
+    ) -> Option<usize> {
+        let (source, class_tree) = self.source_tree_for_symbol(method_symbol)?;
+        if source != self.source {
+            return None;
+        }
+        let class = self.generated_case_class_for_apply(method_symbol, source, class_tree)?;
+        let parameters = self.source_class_type_parameter_metadata(class).ok()?;
+        if parameters.len() != 2
+            || parameters[0].symbol == parameters[1].symbol
+            || poly.params.len() != 2
+            || arguments.len() != 1
+            || parameters.iter().any(|parameter| {
+                parameter.variance != Some(dotty_core::Variance::Covariant)
+                    || !self.store.symbols.contains(parameter.symbol)
+                    || self.store.symbols.get(parameter.symbol).kind != SymbolKind::TypeParameter
+                    || self.store.symbols.get(parameter.symbol).owner != Some(class)
+            })
+            || poly.params.iter().any(|parameter| {
+                parameter.declared_variance.is_some()
+                    || !canonical_nothing_any_bounds(
+                        &self.store.types,
+                        parameter.bounds,
+                        self.definitions.nothing_type,
+                        self.definitions.any_type,
+                    )
+            })
+        {
+            return None;
+        }
+
+        // The class parameter and generated method parameter derive from the
+        // same canonical constructor TypeDef tree. That shared source identity
+        // authenticates the positional mapping; parameter spellings do not.
+        let Some(TreeKind::TypeDef(class_definition)) =
+            self.arena.try_get(class_tree).map(|node| &node.kind)
+        else {
+            return None;
+        };
+        let Some(TreeKind::Template(template)) = self
+            .arena
+            .try_get(class_definition.rhs)
+            .map(|node| &node.kind)
+        else {
+            return None;
+        };
+        let Some(TreeKind::DefDef(constructor)) = self
+            .arena
+            .try_get(template.constructor)
+            .map(|node| &node.kind)
+        else {
+            return None;
+        };
+        if constructor.type_params.len() != 2 {
+            return None;
+        }
+        let mut method_parameters = Vec::with_capacity(2);
+        for (index, parameter_tree) in constructor.type_params.iter().copied().enumerate() {
+            let Some(TreeKind::TypeDef(parameter_definition)) =
+                self.arena.try_get(parameter_tree).map(|node| &node.kind)
+            else {
+                return None;
+            };
+            if self.index.symbol_at(source, parameter_tree) != Some(parameters[index].symbol) {
+                return None;
+            }
+            let method_parameter =
+                self.index
+                    .derived_symbol_at(method_symbol, source, parameter_tree)?;
+            if method_parameters.contains(&method_parameter)
+                || !self.store.symbols.contains(method_parameter)
+            {
+                return None;
+            }
+            method_parameters.push(method_parameter);
+            let method_parameter_symbol = self.store.symbols.get(method_parameter);
+            if method_parameter_symbol.kind != SymbolKind::TypeParameter
+                || method_parameter_symbol.owner != Some(method_symbol)
+                || method_parameter_symbol.name.text() != parameter_definition.name.as_name().text()
+                || poly.params[index].name.as_name().text()
+                    != parameter_definition.name.as_name().text()
+                || self.index.definition_of(method_parameter)
+                    != Some(SourceDefinition::Derived {
+                        source,
+                        tree: parameter_tree,
+                    })
+            {
+                return None;
+            }
+        }
+
+        let Some(Type::Method(method)) = self.store.types.try_get(poly.result) else {
+            return None;
+        };
+        if method.kind != MethodKind::Plain || method.params.len() != 1 {
+            return None;
+        }
+        let formal = method.params[0];
+        if formal.erased || formal.varargs {
+            return None;
+        }
+        let Some(Type::ParamRef { binder, index }) = self.store.types.try_get(formal.ty) else {
+            return None;
+        };
+        if *binder != callable || *index > 1 {
+            return None;
+        }
+        let field_index = *index as usize;
+
+        // The generated method's result is the exact ordered application of
+        // its authenticated case class to the current Poly binder's two
+        // parameters. This ties each class parameter position to one binder
+        // slot without consulting source spellings.
+        let Some(Type::Applied { tycon, args }) = self.store.types.try_get(method.result) else {
+            return None;
+        };
+        if args.len() != 2
+            || !matches!(
+                self.store.types.try_get(*tycon),
+                Some(Type::TypeRef { target: TypeRefTarget::Symbol(result_class), .. })
+                    if *result_class == class
+            )
+            || args.iter().enumerate().any(|(index, argument)| {
+                !matches!(
+                    self.store.types.try_get(*argument),
+                    Some(Type::ParamRef { binder: result_binder, index: result_index })
+                        if *result_binder == callable && *result_index as usize == index
+                )
+            })
+        {
+            return None;
+        }
+
+        let unused_index = 1 - field_index;
+        // Since the entire sole formal is exactly the field-bearing binder
+        // slot, the other slot is absent from the complete value-parameter
+        // type (not merely absent from a shallow traversal).
+        Some(unused_index)
+    }
+
     pub(in crate::typer) fn check_explicit_type_argument_bounds(
         &mut self,
         argument: TypeId,
@@ -78,13 +245,17 @@ impl SourceTyper<'_> {
 
     pub(in crate::typer) fn infer_poly_application_arguments(
         &mut self,
-        binder: TypeId,
-        poly: &PolyType,
-        arguments: &[TypedArgument],
-        application_kind: ApplyKind,
-        tree_index: u32,
+        request: PolyApplicationInference<'_>,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Vec<TypeId>, TyperError> {
+        let PolyApplicationInference {
+            binder,
+            poly,
+            arguments,
+            application_kind,
+            tree_index,
+            unused_covariant_parameter,
+        } = request;
         let Some(Type::Method(method)) = self.store.types.try_get(poly.result).cloned() else {
             return Err(TyperError::UnsupportedPolymorphicApplicationShape {
                 source: self.source,
@@ -138,6 +309,10 @@ impl SourceTyper<'_> {
         let mut type_arguments = Vec::with_capacity(poly.params.len());
         for (parameter_index, inferred_type) in inferred.into_iter().enumerate() {
             let Some(inferred_type) = inferred_type else {
+                if unused_covariant_parameter == Some(parameter_index) {
+                    type_arguments.push(self.definitions.nothing_type);
+                    continue;
+                }
                 return Err(TyperError::UnconstrainedTypeParameter {
                     source: self.source,
                     tree_index,

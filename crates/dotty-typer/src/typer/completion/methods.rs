@@ -194,7 +194,7 @@ impl SourceTyper<'_> {
         .then_some(class)
     }
 
-    pub(super) fn generated_case_class_for_apply(
+    pub(in crate::typer) fn generated_case_class_for_apply(
         &self,
         method: SymbolId,
         source: SourceId,
@@ -202,6 +202,7 @@ impl SourceTyper<'_> {
     ) -> Option<SymbolId> {
         let method_symbol = self.store.symbols.get(method);
         let owner = method_symbol.owner?;
+        let identity = self.index.generated_case_class_method_identity(method)?;
         if source != self.source
             || method_symbol.kind != SymbolKind::Method
             || !method_symbol.flags.contains(SymbolFlags::SYNTHETIC)
@@ -215,7 +216,14 @@ impl SourceTyper<'_> {
             return None;
         }
         let class = self.index.symbol_at(source, tree)?;
-        if self.index.definition_of(class) != Some(SourceDefinition::Canonical { source, tree }) {
+        if identity.class != class
+            || identity.role != dotty_core::GeneratedCaseClassMethodRole::Apply
+            || self
+                .index
+                .generated_case_class_method(class, dotty_core::GeneratedCaseClassMethodRole::Apply)
+                != Some(method)
+            || self.index.definition_of(class) != Some(SourceDefinition::Canonical { source, tree })
+        {
             return None;
         }
         let class_symbol = self.store.symbols.get(class);
@@ -758,12 +766,68 @@ impl SourceTyper<'_> {
             class_tree.index(),
             0,
         )?;
-        let (value_parameters, kind) = self.method_parameter_specs(
+        let class_context = self
+            .index
+            .declaration_context_of(class)
+            .ok_or(TyperError::DeclarationContextMissing { symbol: class })?;
+        let mut field_context = class_context;
+        let mut substitutions = Vec::with_capacity(constructor.type_params.len());
+        let mut class_parameters = Vec::with_capacity(constructor.type_params.len());
+        for (index, parameter_tree) in constructor.type_params.iter().copied().enumerate() {
+            let class_parameter = self.index.symbol_at(source, parameter_tree).ok_or(
+                TyperError::MethodParameterSymbolMissing {
+                    method: class,
+                    parameter_tree_index: parameter_tree.index(),
+                },
+            )?;
+            let apply_parameter = self
+                .index
+                .derived_symbol_at(method, source, parameter_tree)
+                .ok_or(TyperError::MethodParameterSymbolMissing {
+                    method,
+                    parameter_tree_index: parameter_tree.index(),
+                })?;
+            if class_parameters.contains(&class_parameter)
+                || class_parameter == apply_parameter
+                || self.store.symbols.get(class_parameter).kind != SymbolKind::TypeParameter
+                || self.store.symbols.get(class_parameter).owner != Some(class)
+                || self.store.symbols.get(apply_parameter).kind != SymbolKind::TypeParameter
+                || self.store.symbols.get(apply_parameter).owner != Some(method)
+                || type_parameters.get(index).map(|parameter| parameter.symbol)
+                    != Some(apply_parameter)
+                || self.index.definition_of(class_parameter)
+                    != Some(SourceDefinition::Canonical {
+                        source,
+                        tree: parameter_tree,
+                    })
+                || self.index.definition_of(apply_parameter)
+                    != Some(SourceDefinition::Derived {
+                        source,
+                        tree: parameter_tree,
+                    })
+            {
+                return Err(TyperError::MalformedMethodClause {
+                    method,
+                    method_tree_index: class_tree.index(),
+                    clause_index: 0,
+                });
+            }
+            if let Some(context) = self.index.declaration_context_of(class_parameter) {
+                field_context = context;
+            }
+            class_parameters.push(class_parameter);
+            let replacement = self.store.types.alloc(Type::TypeRef {
+                prefix: self.definitions.no_prefix,
+                target: TypeRefTarget::Symbol(apply_parameter),
+            });
+            substitutions.push((class_parameter, replacement));
+        }
+        let (value_parameters, kind) = self.generated_case_class_apply_parameter_specs(
             method,
+            class_tree,
             &constructor.value_param_clauses[0],
-            true,
-            class_tree.index(),
-            usize::from(!type_parameters.is_empty()),
+            field_context,
+            &substitutions,
             info_journal,
         )?;
         if kind != MethodKind::Plain {
@@ -822,6 +886,156 @@ impl SourceTyper<'_> {
                 }
             })
         }
+    }
+
+    fn generated_case_class_apply_parameter_specs(
+        &mut self,
+        method: SymbolId,
+        class_tree: TreeId<Untyped>,
+        trees: &[TreeId<Untyped>],
+        field_context: SourceContextId,
+        substitutions: &[(SymbolId, TypeId)],
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<(Vec<MethodParamSpec>, MethodKind), TyperError> {
+        let source = self.source;
+        let mut parameters = Vec::with_capacity(trees.len());
+        let mut clause_kind = None;
+        for (parameter_index, tree) in trees.iter().copied().enumerate() {
+            let Some(node) = self.arena.try_get(tree) else {
+                return Err(TyperError::TreeOutsideArena {
+                    source,
+                    tree_index: tree.index(),
+                });
+            };
+            let TreeKind::ValDef(definition) = &node.kind else {
+                return Err(TyperError::MalformedMethodClause {
+                    method,
+                    method_tree_index: class_tree.index(),
+                    clause_index: 0,
+                });
+            };
+            let symbol = self.method_parameter_symbol(method, tree, true)?;
+            if self.store.symbols.get(symbol).kind != SymbolKind::Parameter {
+                return Err(TyperError::MalformedMethodClause {
+                    method,
+                    method_tree_index: class_tree.index(),
+                    clause_index: 0,
+                });
+            }
+            let flags = self.store.symbols.get(symbol).flags;
+            let given = flags.contains(SymbolFlags::GIVEN);
+            let implicit = flags.contains(SymbolFlags::IMPLICIT);
+            if given && implicit {
+                return Err(TyperError::MalformedMethodClause {
+                    method,
+                    method_tree_index: class_tree.index(),
+                    clause_index: 0,
+                });
+            }
+            let parameter_kind = if given {
+                MethodKind::Contextual
+            } else if implicit {
+                MethodKind::Implicit
+            } else {
+                MethodKind::Plain
+            };
+            if clause_kind.is_some_and(|kind| kind != parameter_kind) {
+                return Err(TyperError::MalformedMethodClause {
+                    method,
+                    method_tree_index: class_tree.index(),
+                    clause_index: 0,
+                });
+            }
+            clause_kind = Some(parameter_kind);
+            let repeated_parameter = matches!(
+                self.arena.try_get(definition.tpt).map(|node| &node.kind),
+                Some(TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)))
+                    if self.store.names.resolve(postfix.op.text()) == "*"
+            );
+            if repeated_parameter && parameter_kind != MethodKind::Plain {
+                return Err(TyperError::RepeatedParameterClauseUnsupported {
+                    method,
+                    method_tree_index: class_tree.index(),
+                    clause_index: 0,
+                    parameter_index,
+                    kind: parameter_kind,
+                });
+            }
+            if repeated_parameter && parameter_index + 1 != trees.len() {
+                return Err(TyperError::RepeatedParameterNotFinal {
+                    method,
+                    method_tree_index: class_tree.index(),
+                    clause_index: 0,
+                    parameter_index,
+                });
+            }
+            let class_owned_type = self.type_of_parameter_tpt_inner_journaled(
+                definition.tpt,
+                field_context,
+                info_journal,
+            )?;
+            let completed_parameter_type = dotty_core::types::substitute_type_symbols(
+                self.store,
+                class_owned_type,
+                substitutions,
+            )
+            .map_err(|error| TyperError::TypeRebinding {
+                source,
+                tree_index: definition.tpt.index(),
+                error,
+            })?;
+            let previous = *self.store.symbols.info(symbol);
+            match previous {
+                SymbolInfo::Missing => {
+                    info_journal.push((symbol, SymbolInfo::Missing));
+                    self.store
+                        .symbols
+                        .set_info(symbol, SymbolInfo::Complete(completed_parameter_type));
+                }
+                SymbolInfo::Complete(existing)
+                    if existing == completed_parameter_type
+                        || (matches!(
+                            self.is_subtype(existing, completed_parameter_type),
+                            Ok(true)
+                        ) && matches!(
+                            self.is_subtype(completed_parameter_type, existing),
+                            Ok(true)
+                        )) =>
+                {
+                    // An explicit parameter-first completion is reusable once its
+                    // type is confirmed equal to the authenticated class projection.
+                }
+                _ => {
+                    return Err(TyperError::MalformedMethodClause {
+                        method,
+                        method_tree_index: class_tree.index(),
+                        clause_index: 0,
+                    });
+                }
+            }
+            let ty = if repeated_parameter {
+                match self.store.types.try_get(completed_parameter_type) {
+                    Some(Type::Repeated { element }) => *element,
+                    _ => {
+                        return Err(TyperError::MalformedMethodClause {
+                            method,
+                            method_tree_index: class_tree.index(),
+                            clause_index: 0,
+                        });
+                    }
+                }
+            } else {
+                completed_parameter_type
+            };
+            parameters.push(MethodParamSpec {
+                symbol,
+                name: definition.name,
+                ty,
+                erased: flags.contains(SymbolFlags::ERASED),
+                varargs: repeated_parameter,
+            });
+        }
+        Ok((parameters, clause_kind.unwrap_or(MethodKind::Plain)))
     }
 
     pub(super) fn complete_method_signature(
