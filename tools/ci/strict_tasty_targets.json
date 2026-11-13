@@ -5,14 +5,14 @@
     "step": "Run strict linked Scala and TASTy oracle release gates",
     "evidence_run": "https://github.com/scytrowski/dotty-rs/actions/runs/41819990007",
     "sample_sha": "b02e1c781bc9120cbd314525322e9e899c75a865",
-    "timing_method": "PR #2115 successful pinned serial run; Cargo/libtest final per-binary result lines"
+    "timing_method": "PR #2115 successful pinned serial run; issue #2272 target measured locally with pinned Scala/JDK; Cargo/libtest final per-binary result lines"
   },
   "baseline": {
-    "inventory_count": 26,
-    "accounted_test_seconds": 1421.9,
+    "inventory_count": 27,
+    "accounted_test_seconds": 1431.21,
     "cargo_build_seconds": 76,
-    "strict_step_seconds": 1498,
-    "full_job_seconds": 1950
+    "strict_step_seconds": 1507.21,
+    "full_job_seconds": 1959.31
   },
   "targets": [
     {
@@ -118,13 +118,17 @@
     {
       "name": "jvm_tasty_conditional_local_reference_proof",
       "measured_seconds": 0.0
+    },
+    {
+      "name": "jvm_tasty_conditional_reference_scala_consumer",
+      "measured_seconds": 9.31
     }
   ],
   "sharding": {
     "strategy": "longest-processing-time-first; ties by target name, next shard by lowest accumulated time then ordinal",
     "shard_count": 4,
-    "estimated_runner_minutes": 26.81,
-    "estimated_critical_path_minutes": 10.44,
+    "estimated_runner_minutes": 26.97,
+    "estimated_critical_path_minutes": 10.60,
     "shards": [
       {
         "id": "shard-1",
@@ -164,7 +168,7 @@
       },
       {
         "id": "shard-4",
-        "estimated_test_seconds": 358.04,
+        "estimated_test_seconds": 367.35,
         "targets": [
           "jvm_tasty_multi_argument_constructor_scala_consumer",
           "jvm_tasty_dual_reference_rust_consumer",
@@ -173,7 +177,8 @@
           "jvm_tasty_cross_class_factories",
           "jvm_tasty_dual_reference_signature",
           "jvm_tasty_dual_reference_artifacts",
-          "jvm_tasty_conditional_local_reference_proof"
+          "jvm_tasty_conditional_local_reference_proof",
+          "jvm_tasty_conditional_reference_scala_consumer"
         ]
       }
     ]
