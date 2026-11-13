@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 12229)
+Total output lines: 914
+
 name: JVM TASTy factory Scala consumer
 
 on:
@@ -27,6 +30,7 @@ on:
       - 'docs/jvm-tasty-mixed-origin-constructor-arguments.md'
       - 'docs/jvm-tasty-immutable-reference-local-pair.md'
       - 'docs/jvm-tasty-local-reference-alias.md'
+      - 'docs/jvm-tasty-conditional-reference-selection.md'
       - 'docs/jvm-tasty-local-receiver-call.md'
       - 'docs/jvm-tasty-ordered-local-unit-calls.md'
       - 'tests/fixtures/jvm_tasty_immutable_reference_local_pair/**'
@@ -474,29 +478,7 @@ jobs:
             .cache/coursier
             target/debug
             target/.rustc_info.json
-          key: ${{ runner.os }}-jvm-tasty-factory-1.98.1-${{ hashFiles('**/Cargo.lock') }}-scala-${{ env.SCALA39_SOURCE_SHA }}-${{ hashFiles('scala39-source/build.sbt', 'scala39-source/project/build.properties', 'scala39-source/project/*.sbt', 'scala39-source/project/*.scala', 'scala39-source/project/**/*.sbt', 'scala39-source/project/**/*.scala') }}
-          restore-keys: |
-            ${{ runner.os }}-jvm-tasty-factory-1.98.1-${{ hashFiles('**/Cargo.lock') }}-
-
-      - name: Verify pinned source and JDK
-        run: |
-          set -euo pipefail
-          test "$(git -C "$SCALA39_ROOT" rev-parse HEAD)" = "$SCALA39_SOURCE_SHA"
-          grep -q '^JAVA_VERSION="21.0.13"$' "$JAVA_HOME/release"
-          test -d "$JAVA_HOME/jmods"
-          mkdir -p "$COURSIER_MAVEN_ROOT"
-
-      - name: Install sbt runner
-        uses: sbt/setup-sbt@v1
-
-      - name: Restore exact pinned Scala build outputs
-        id: scala-build-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            scala39-source/target
-            scala39-source/**/target
-          key: ${{ runner.os }}-${{ runner.arch }}-scala39-targets-${{ env.SCALA39_SOURCE_SHA }}-jdk21.0.13-${{ hashFiles('scala39-source/build.sbt', 'scala39-source/project/build.properties', 'scala39-source/project/*.sbt', 'scala39-source/project/*.scala', 'scala39-source/project/**/*.sbt', 'scala39-source/project/**/*.scala') }}
+          key: ${{ runner.os }}-jvm-tasty-factory-1.98.1-${{ hashFiles('**/Cargo.lock') }}-scala-${{ env.SCALA39_SOURCE_SHA }}-${{ hashFiles('scala39-source/build.sbt', 'scala39-source/project/build.properties', 'scala39-source/project/*.sbt', 'scala…229 tokens truncated…_SHA }}-jdk21.0.13-${{ hashFiles('scala39-source/build.sbt', 'scala39-source/project/build.properties', 'scala39-source/project/*.sbt', 'scala39-source/project/*.scala', 'scala39-source/project/**/*.sbt', 'scala39-source/project/**/*.scala') }}
 
       - name: Stage the pinned Scala source compiler
         run: cd "$SCALA39_ROOT" && sbt "dist/universal:stage"

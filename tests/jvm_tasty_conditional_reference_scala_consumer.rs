@@ -22,6 +22,9 @@ const SOURCE: &str =
 const CLIENT: &str =
     include_str!("fixtures/jvm_tasty_conditional_reference_selection/ScalaConsumer.scala");
 const CLIENT_SHA256: &str = "d4668a27c5c660debd71d94a7ce117edec82b14c070dbae70c9edeb764df15c1";
+const JAVA_CLIENT: &str =
+    include_str!("fixtures/jvm_tasty_conditional_reference_selection/RustRuntimeProbe.java");
+const JAVA_CLIENT_SHA256: &str = "97cfe2c30ff7cb0b07627ce83dd2392aaee898c4690bc70b40206200a37d4a1b";
 const PATHS: [&str; 6] = [
     "example/Counter.class",
     "example/Counter.tasty",
@@ -50,6 +53,16 @@ fn attempt(command: &mut Command) -> Output {
     command
         .output()
         .unwrap_or_else(|error| panic!("run {rendered}: {error}"))
+}
+
+fn configure_jdk_command(command: &mut Command, java_home: &Path) {
+    let tmpdir = std::env::var_os("TMPDIR").expect("TMPDIR must be task-local");
+    command
+        .env("JAVA_HOME", java_home)
+        .env(
+            "JAVA_TOOL_OPTIONS",
+            format!("-XX:-UsePerfData -Djava.io.tmpdir={}", Path::new(&tmpdir).display()),
+        );
 }
 
 fn first_diagnostic(output: &Output) -> String {
@@ -264,6 +277,13 @@ fn scala39_compiles_and_runs_against_the_original_rust_conditional_batch() {
         CLIENT_SHA256,
         "independently authored Scala client source"
     );
+    assert_eq!(
+        sha256(Path::new(
+            "tests/fixtures/jvm_tasty_conditional_reference_selection/RustRuntimeProbe.java"
+        )),
+        JAVA_CLIENT_SHA256,
+        "independently authored Java client source"
+    );
 
     let batch = emit_paired_jvm_tasty_batch(
         SOURCE,
@@ -271,7 +291,14 @@ fn scala39_compiles_and_runs_against_the_original_rust_conditional_batch() {
         SourceId::from_index(22_710),
     )
     .expect("canonical conditional Rust source emits its frozen paired batch");
+    let repeated_batch = emit_paired_jvm_tasty_batch(
+        SOURCE,
+        receipt::PRODUCER_SOURCE_NAME,
+        SourceId::from_index(22_710),
+    )
+    .expect("a fresh canonical source session emits a second paired batch");
     let mut files = Vec::with_capacity(6);
+    let mut repeated_files = Vec::with_capacity(6);
     let mut uuid_links = Vec::with_capacity(3);
     for class in batch.classes() {
         let class_bytes = class.classfile_bytes().to_vec();
@@ -303,6 +330,13 @@ fn scala39_compiles_and_runs_against_the_original_rust_conditional_batch() {
         files.push((class.classfile_path().to_owned(), class_bytes));
         files.push((class.tasty_path().to_owned(), tasty_bytes));
     }
+    for class in repeated_batch.classes() {
+        repeated_files.push((
+            class.classfile_path().to_owned(),
+            class.classfile_bytes().to_vec(),
+        ));
+        repeated_files.push((class.tasty_path().to_owned(), class.tasty_bytes().to_vec()));
+    }
     assert_eq!(
         files
             .iter()
@@ -310,6 +344,10 @@ fn scala39_compiles_and_runs_against_the_original_rust_conditional_batch() {
             .collect::<Vec<_>>(),
         PATHS,
         "canonical six-file batch order"
+    );
+    assert_eq!(
+        repeated_files, files,
+        "two fresh source sessions produce identical ordered artifact paths and complete bytes"
     );
     assert_eq!(
         uuid_links,
@@ -359,6 +397,13 @@ fn scala39_compiles_and_runs_against_the_original_rust_conditional_batch() {
     let classes = root.join("consumer-classes");
     fs::create_dir_all(&classes).unwrap();
     write_batch(&artifacts, &files);
+    for (path, expected) in receipt::ARTIFACT_SHA256 {
+        assert_eq!(
+            sha256(&artifacts.join(path)),
+            expected,
+            "original batch verified before either consumer: {path}"
+        );
+    }
     let pinned = scala39_toolchain::from_environment(output, |command| {
         command.env(
             "JAVA_HOME",
@@ -379,6 +424,90 @@ fn scala39_compiles_and_runs_against_the_original_rust_conditional_batch() {
             "tests/fixtures/jvm_tasty_conditional_reference_selection/ScalaConsumer.scala"
         ))
     );
+
+    // Both independent clients below consume this single physical directory. Keep
+    // the frozen original hashes around each client so a client cannot silently
+    // replace or regenerate one of the six Rust artifacts for the other.
+    let java_source = root.join("RustRuntimeProbe.java");
+    let java_classes = root.join("java-consumer-classes");
+    fs::create_dir_all(&java_classes).unwrap();
+    fs::write(&java_source, JAVA_CLIENT).unwrap();
+    let mut javac = Command::new(pinned.java_home.join("bin/javac"));
+    javac
+        .args(["--release", "21", "-classpath"])
+        .arg(&artifacts)
+        .arg("-d")
+        .arg(&java_classes)
+        .arg(&java_source);
+    configure_jdk_command(&mut javac, &pinned.java_home);
+    output(&mut javac);
+    let mut javap = Command::new(pinned.java_home.join("bin/javap"));
+    javap
+        .args(["-v", "-c", "-p", "-classpath"])
+        .arg(&artifacts)
+        .arg("example.PairFactory");
+    configure_jdk_command(&mut javap, &pinned.java_home);
+    let javap = output(&mut javap);
+    let javap = String::from_utf8_lossy(&javap.stdout);
+    for evidence in [
+        "major version: 65",
+        "descriptor: (IIZI)Lexample/Pair;",
+        "stack=4, locals=8, args_size=5",
+        "ifeq          29",
+        "goto          31",
+        "example/Counter.set:(I)V",
+        "StackMapTable: number_of_entries = 2",
+        "frame_type = 255 /* full_frame */",
+        "offset_delta = 29",
+        "stack = [ class example/Counter ]",
+        "44: aload         5",
+        "46: aload         6",
+    ] {
+        assert!(
+            javap.contains(evidence),
+            "javap lacks {evidence:?}:\n{javap}"
+        );
+    }
+    assert_eq!(
+        javap
+            .lines()
+            .filter(|line| line.contains("new           ") && line.contains("class example/Counter"))
+            .count(),
+        2,
+        "javap sees exactly two Counter allocations"
+    );
+    assert_eq!(
+        javap
+            .lines()
+            .filter(
+                |line| line.contains("invokevirtual") && line.contains("example/Counter.set:(I)V")
+            )
+            .count(),
+        1,
+        "javap sees exactly one setter call"
+    );
+    let mut java = Command::new(&pinned.java);
+    java.args(["-Xverify:all", "-ea", "-cp"])
+        .arg(format!(
+            "{}:{}",
+            java_classes.display(),
+            artifacts.display()
+        ))
+        .arg("example.RustRuntimeProbe");
+    configure_jdk_command(&mut java, &pinned.java_home);
+    let java_run = output(&mut java);
+    assert_eq!(
+        String::from_utf8_lossy(&java_run.stdout).trim(),
+        "conditional-rust-runtime=true:42/3,false:7/42,negative:0/42,-9/0,equal:42/7,identity=original-distinct,fresh=true"
+    );
+    for (path, expected) in receipt::ARTIFACT_SHA256 {
+        assert_eq!(
+            sha256(&artifacts.join(path)),
+            expected,
+            "Java leaves {path} unchanged"
+        );
+    }
+
     let client = root.join("ScalaConsumer.scala");
     fs::write(&client, CLIENT).unwrap();
     let classpath = format!("{}:{}", artifacts.display(), pinned.libraries);
@@ -419,6 +548,13 @@ fn scala39_compiles_and_runs_against_the_original_rust_conditional_batch() {
         String::from_utf8_lossy(&run.stdout).trim(),
         "scala39-rust-conditional-reference-consumer=ok"
     );
+    for (path, expected) in receipt::ARTIFACT_SHA256 {
+        assert_eq!(
+            sha256(&artifacts.join(path)),
+            expected,
+            "Scala leaves {path} unchanged"
+        );
+    }
 
     let factory_tasty = artifacts.join("example/PairFactory.tasty");
     let printed = output(
