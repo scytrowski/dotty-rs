@@ -1684,6 +1684,22 @@ fn types_acceptance_v_either_swap_with_original_generated_applications() {
         .iter()
         .find(|(tree, node)| tree.index() == 84 && matches!(node.kind, TreeKind::DefDef(_)))
         .expect("selected original Either.swap DefDef");
+    let method_symbol = index
+        .symbol_at(source, tree)
+        .expect("canonical source identity for the original Either.swap");
+    let owner = store.symbols.get(method_symbol).owner.unwrap();
+    assert_eq!(
+        observed_symbol_path(&store, owner),
+        ".scala.util.Either",
+        "the original swap method remains owned by scala.util.Either"
+    );
+    assert!(matches!(
+        index.definition_of(method_symbol),
+        Some(SourceDefinition::Canonical {
+            source: definition_source,
+            tree: definition_tree
+        }) if definition_source == source && definition_tree == tree
+    ));
     let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
     let release = std::env::var("SCALA39_JDK_RELEASE")
         .expect("SCALA39_JDK_RELEASE")
@@ -1809,14 +1825,30 @@ fn types_acceptance_v_either_swap_with_original_generated_applications() {
         }
         *capture.borrow_mut() = Some(lines.join("\n"));
     }));
-    let result = typer.type_method_definition(tree);
-    let typed_root = result.unwrap_or_else(|error| {
-        let receipt = observed
-            .borrow()
-            .clone()
-            .unwrap_or_else(|| "failure observer did not run".to_owned());
-        panic!("unchanged pinned Either.swap should type after canonical field rebinding: {error:?}\n{receipt}");
-    });
+    let owner_info_before = *typer.store().symbols.info(owner);
+    typer.inject_failure_after_outermost_success = true;
+    let failed = typer
+        .type_method_definition(tree)
+        .expect_err("the injected late failure follows complete Either.swap typing");
+    assert!(matches!(
+        failed,
+        TyperError::SymbolResolution {
+            source: failed_source,
+            error: ResolutionError::Malformed { ref reason },
+            ..
+        } if failed_source == source
+            && reason == "test-injected failure after successful source typing"
+    ));
+    assert_eq!(
+        typer.store().symbols.info(owner),
+        &owner_info_before,
+        "late failure rolls semantic publication back"
+    );
+    assert_eq!(typer.source_typed_index().get(source, tree), None);
+    assert!(!typer.inject_failure_after_outermost_success);
+    let typed_root = typer
+        .type_method_definition(tree)
+        .expect("the unchanged original method retries in the same session");
     assert_eq!(
         typer.source_typed_index().get(source, tree),
         Some(typed_root)
@@ -1828,6 +1860,114 @@ fn types_acceptance_v_either_swap_with_original_generated_applications() {
         panic!("original Either.swap body remains a Match")
     };
     assert_eq!(matched.cases.len(), 2);
+    let mut declared_result = match typer.store().symbols.info(method_symbol) {
+        SymbolInfo::Complete(signature) => *signature,
+        other => panic!("original method signature is complete: {other:?}"),
+    };
+    loop {
+        declared_result = match typer.store().types.get(declared_result) {
+            Type::Poly(poly) => poly.result,
+            Type::Method(method) => method.result,
+            _ => break,
+        };
+    }
+    let (either_tycon, declared_arguments) = match typer.store().types.get(declared_result) {
+        Type::Applied { tycon, args } => (*tycon, args.clone()),
+        other => panic!("declared Either.swap result is applied Either[B,A]: {other:?}"),
+    };
+    let declared_argument_symbols = declared_arguments
+        .iter()
+        .map(|argument| match typer.store().types.get(*argument) {
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            } => *symbol,
+            other => panic!("declared result preserves generic parameter identity: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    let owner_parameters = typer.source_class_type_parameters(owner).unwrap();
+    assert_eq!(
+        declared_argument_symbols,
+        [owner_parameters[1], owner_parameters[0]],
+        "declared result retains the original reversed generic order"
+    );
+    assert!(matches!(
+        typer.store().types.get(either_tycon),
+        Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == owner
+    ));
+    let typed_match = typer
+        .source_typed_index()
+        .get(source, definition.rhs.unwrap())
+        .unwrap();
+    let match_type = typer.typed_ast().get(typed_match).ty;
+    assert!(matches!(
+        typer.store().types.get(match_type),
+        Type::Or { .. }
+    ));
+    let match_conformance = typer.conforms(match_type, declared_result);
+    assert!(
+        matches!(match_conformance, Ok(true)),
+        "Match {:?}, declared {:?}, conformance {:?}",
+        typer.store().types.get(match_type),
+        typer.store().types.get(declared_result),
+        match_conformance
+    );
+    let wrong_order = typer.store.types.alloc(Type::Applied {
+        tycon: either_tycon,
+        args: vec![declared_arguments[1], declared_arguments[0]],
+    });
+    let wrong_order_control = typer.conforms(match_type, wrong_order);
+    assert!(!matches!(wrong_order_control, Ok(true)));
+    let incompatible_control = typer.conforms(match_type, typer.definitions.boolean);
+    assert!(!matches!(incompatible_control, Ok(true)));
+    let match_type_label = match typer.store().types.get(match_type) {
+        Type::Or { left, right } => [*left, *right]
+            .into_iter()
+            .map(|branch| match typer.store().types.get(branch) {
+                Type::Applied { tycon, args } => {
+                    let Type::TypeRef {
+                        target: TypeRefTarget::Symbol(constructor),
+                        ..
+                    } = typer.store().types.get(*tycon)
+                    else {
+                        panic!("branch constructor is canonical")
+                    };
+                    let parameters = args
+                        .iter()
+                        .map(|argument| match typer.store().types.get(*argument) {
+                            Type::TypeRef {
+                                target: TypeRefTarget::Symbol(parameter),
+                                ..
+                            } => typer
+                                .store()
+                                .names
+                                .resolve(typer.store().symbols.get(*parameter).name.text()),
+                            other => panic!("branch argument is a type reference: {other:?}"),
+                        })
+                        .collect::<Vec<_>>();
+                    format!(
+                        "{}[{}]",
+                        observed_symbol_path(typer.store(), *constructor),
+                        parameters.join(",")
+                    )
+                }
+                other => panic!("branch type is applied: {other:?}"),
+            })
+            .collect::<Vec<_>>(),
+        other => panic!("expected canonical union match result: {other:?}"),
+    };
+    assert_eq!(
+        match_type_label,
+        [
+            ".scala.util.Right[Nothing,A]".to_owned(),
+            ".scala.util.Left[B,Nothing]".to_owned(),
+        ],
+        "the Match retains the two original Scala branch result types"
+    );
+    println!(
+        "EITHER_SWAP_CONFORMANCE match={} declared=Either[B,A] correct=accepted wrong_order=rejected incompatible_boolean=rejected",
+        match_type_label.join(" | ")
+    );
     for (case_tree, variant_name) in matched.cases.iter().copied().zip(["Right", "Left"]) {
         let TreeKind::CaseDef(case) = &parsed.ast.get(case_tree).kind else {
             panic!("original Either.swap arms remain case definitions")
@@ -1840,9 +1980,20 @@ fn types_acceptance_v_either_swap_with_original_generated_applications() {
             .source_typed_index()
             .get(source, source_application)
             .expect("the authentic constructor application has a typed mapping");
-        let TreeKind::Apply(application) = &typer.typed_ast().get(typed_application).kind else {
-            panic!("the authentic case-body constructor remains an Apply")
+        let application = match &typer.typed_ast().get(typed_application).kind {
+            TreeKind::Apply(application) => application.clone(),
+            _ => panic!("the authentic case-body constructor remains an Apply"),
         };
+        let branch_type = typer.typed_ast().get(typed_application).ty;
+        assert!(typer.conforms(branch_type, declared_result).unwrap());
+        assert!(!matches!(
+            typer.conforms(branch_type, wrong_order),
+            Ok(true)
+        ));
+        assert!(!matches!(
+            typer.conforms(branch_type, typer.definitions.boolean),
+            Ok(true)
+        ));
         let class = parsed
             .ast
             .iter()
@@ -1869,6 +2020,63 @@ fn types_acceptance_v_either_swap_with_original_generated_applications() {
             Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == apply
         ));
     }
+    let method_span = parsed.ast.get(tree).position.unwrap();
+    assert_eq!(method_span.span().range().start(), 8241);
+    assert_eq!(method_span.span().range().end(), 8341);
+    let mut source_mappings = parsed
+        .ast
+        .iter()
+        .filter_map(|(source_tree, source_node)| {
+            let source_span = source_node.position?;
+            let range = source_span.span().range();
+            if range.start() < method_span.span().range().start()
+                || range.end() > method_span.span().range().end()
+            {
+                return None;
+            }
+            let typed_tree = typer.source_typed_index().get(source, source_tree)?;
+            let typed_span = typer.typed_ast().get(typed_tree).position?;
+            assert_eq!(source_span.source(), typed_span.source());
+            assert_eq!(range, typed_span.span().range());
+            Some(format!(
+                "{}@{}..{}",
+                source_tree.index(),
+                range.start(),
+                range.end()
+            ))
+        })
+        .collect::<Vec<_>>();
+    source_mappings.sort();
+    assert_eq!(
+        source_mappings,
+        [
+            "65@8251..8263",
+            "66@8266..8270",
+            "67@8288..8292",
+            "68@8293..8294",
+            "69@8288..8295",
+            "70@8300..8305",
+            "71@8306..8307",
+            "72@8300..8308",
+            "73@8297..8308",
+            "74@8283..8308",
+            "75@8318..8323",
+            "76@8324..8325",
+            "77@8318..8326",
+            "78@8330..8334",
+            "79@8335..8336",
+            "80@8330..8337",
+            "81@8327..8337",
+            "82@8313..8337",
+            "83@8266..8341",
+            "84@8241..8341",
+        ],
+        "the original method's complete source mapping set remains exact"
+    );
+    println!(
+        "EITHER_SWAP_RUST_TREE root=84@8241..8341 match=83@8266..8341 method_result=Either[B,A] source_mappings={}",
+        source_mappings.join(",")
+    );
     println!("whole_method_outcome=typed root={}", typed_root.index());
 }
 
