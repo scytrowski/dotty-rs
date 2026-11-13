@@ -1627,7 +1627,7 @@ fn missing_or_forged_source_typed_if_edges_reject_at_the_typed_binding_stage() {
 }
 
 #[test]
-fn conditional_shape_keeps_the_original_four_formal_producer_rejection_before_callback() {
+fn conditional_shape_reaches_the_authenticated_paired_producer_plan() {
     let mut callback_reached = false;
     let result = with_paired_jvm_tasty_batch_plan(
         SOURCE,
@@ -1635,21 +1635,8 @@ fn conditional_shape_keeps_the_original_four_formal_producer_rejection_before_ca
         SourceId::from_index(22_681),
         |_| callback_reached = true,
     );
-    assert!(
-        matches!(
-            result,
-            Err(PairedPlanError::BatchUnit {
-                phase: "cross-class constructor-call identity proof",
-                ref reason,
-            }) if reason.contains("SourceShape")
-                && reason.contains("candidate method must have one plain formal clause")
-        ),
-        "unexpected producer failure: {result:?}"
-    );
-    assert!(
-        !callback_reached,
-        "the rejected source must return no callback plan"
-    );
+    result.expect("authenticated conditional source reaches producer planning");
+    assert!(callback_reached, "accepted source exposes its paired plan");
 }
 
 #[test]

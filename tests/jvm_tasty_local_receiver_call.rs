@@ -15,9 +15,13 @@ use dotty_jvm_tasty_contract::{
 use dotty_lexer::ContextualScanner;
 use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty_parser::parse_compilation_unit;
-use dotty_tasty::ast::{APPLY_TAG, BLOCK_TAG, DEFDEF_TAG, VALDEF_TAG};
+use dotty_tasty::ast::{
+    APPLY_TAG, BLOCK_TAG, DEFDEF_TAG, DefinitionBody, IF_TAG, SHAREDTYPE_TAG, VALDEF_TAG,
+};
 use dotty_tasty::file::TastyFile;
-use dotty_tasty::term::RawTree;
+use dotty_tasty::section::StandardSection;
+use dotty_tasty::term::{AstRefKind, RawTree};
+use dotty_tasty::writer::Writer as TastyWriter;
 use dotty_typer::SourceTyper;
 use std::process::Command;
 
@@ -115,6 +119,60 @@ fn decode_class(bytes: &[u8]) -> ClassFile<'_> {
     let class = ClassFile::decode(&mut reader).unwrap();
     assert!(reader.is_at_end());
     class
+}
+
+fn corrupt_conditional_tasty_branch_address(bytes: &[u8]) -> Vec<u8> {
+    let tasty = TastyFile::parse_and_validate_scala_3_9(bytes).unwrap();
+    let index = tasty.ast_address_index().unwrap();
+    let asts = tasty.section(StandardSection::Asts).unwrap();
+    let selected = index
+        .iter_nodes_with_tag(VALDEF_TAG)
+        .find(|node| {
+            index
+                .get(node.offset as u32)
+                .and_then(|raw| raw.decode_definition_body().ok())
+                .is_some_and(|body| {
+                    matches!(body, DefinitionBody::ValDef { name, .. } if tasty.names().render(name).ok().as_deref() == Some("selected"))
+                })
+        })
+        .expect("selected local VALDEF exists")
+        .offset as u32;
+    let if_node = index
+        .children_of(selected)
+        .find(|node| node.tag == IF_TAG)
+        .expect("selected local owns the conditional IF");
+    let raw_if = index.get(if_node.offset as u32).unwrap();
+    let selected_if = raw_if.decode_if().unwrap();
+    assert_eq!(raw_tag(&selected_if.then_branch), SHAREDTYPE_TAG);
+    let references = selected_if.then_branch.ast_refs();
+    let [reference] = references.as_slice() else {
+        panic!("selected IF branch has exactly one AST reference");
+    };
+    assert_eq!(reference.kind, AstRefKind::SharedType);
+    let invalid_address = reference.address + 1;
+    assert!(index.get_node(invalid_address).is_none());
+    let mut old_nat = TastyWriter::default();
+    old_nat.write_nat(reference.address);
+    let mut invalid_nat = TastyWriter::default();
+    invalid_nat.write_nat(invalid_address);
+    assert_eq!(old_nat.as_slice().len(), invalid_nat.as_slice().len());
+    let reference_offset = selected_if.then_branch.nodes()[0].offset;
+    let if_payload_offset = raw_if.payload.as_ptr() as usize - asts.payload.as_ptr() as usize;
+    let asts_file_offset = asts.payload.as_ptr() as usize - bytes.as_ptr() as usize;
+    assert_eq!(asts_file_offset, asts.offset);
+    let target_offset = asts_file_offset + if_payload_offset + reference_offset + 1;
+    let mut corrupted = bytes.to_vec();
+    corrupted[target_offset..target_offset + invalid_nat.as_slice().len()]
+        .copy_from_slice(invalid_nat.as_slice());
+    let decoded = TastyFile::parse_and_validate_scala_3_9(&corrupted).unwrap();
+    assert!(
+        decoded
+            .ast_address_index()
+            .unwrap()
+            .get_node(invalid_address)
+            .is_none()
+    );
+    corrupted
 }
 
 fn raw_tag(tree: &RawTree<'_>) -> u8 {
@@ -919,6 +977,7 @@ fn conditional_reference_selection_authenticates_frontend_and_current_first_fail
         })
         .unwrap();
     let create = source_index.symbol_at(source_id, create_tree).unwrap();
+    assert_eq!(store.symbols.get(create).owner, Some(factory));
     let TreeKind::DefDef(create_def) = &parsed.ast.get(create_tree).kind else {
         panic!("create is a method");
     };
@@ -1112,63 +1171,373 @@ fn conditional_reference_selection_authenticates_frontend_and_current_first_fail
         .collect::<Vec<_>>();
     assert_eq!(pair_arguments, [first.symbol(), second.symbol()]);
 
-    println!(
-        "conditional source_id={source_id:?}; factory={factory:?}; create={create:?}; formals={formals:?}; locals=[{:?}@{:?}, {:?}@{:?}, {:?}@{:?}]; source_to_typed={:?}; if_root=({source_selected_rhs:?}, {selected_rhs:?}); if_source=({:?}, {:?}, {:?}); if_typed=({:?}, {:?}, {:?}); set=({:?}, {:?}) receiver={:?} arg={:?}; pair=({source_pair:?}, {typed_pair:?}) args={pair_arguments:?}",
-        first.symbol(),
-        first.scope(),
-        second.symbol(),
-        second.scope(),
-        selected.symbol(),
-        selected.scope(),
-        block
-            .stats
-            .iter()
-            .copied()
-            .zip(typed_stats.iter().copied())
-            .collect::<Vec<_>>(),
-        source_if.cond,
-        source_if.then_branch,
-        source_if.else_branch,
-        typed_if.cond,
-        typed_if.then_branch,
-        typed_if.else_branch,
-        block.stats[3],
-        typed_set,
-        selected.symbol(),
-        term_symbol(set_call.args[0]),
-    );
+    assert_eq!(term_symbol(set_call.args[0]), *next_value);
+    assert_eq!(pair_arguments, [first.symbol(), second.symbol()]);
 
     let mut callback_reached = false;
     let result = with_paired_jvm_tasty_batch_plan(
         CONDITIONAL_REFERENCE_SELECTION_TARGET,
         "ConditionalReferenceSelection.scala",
         SourceId::from_index(22651),
-        |_| callback_reached = true,
+        |plan| {
+            callback_reached = true;
+            assert_eq!(plan.jvm_unit.classes.len(), 3);
+        },
     );
-    println!("conditional target current paired producer result: {result:?}");
     assert!(
-        !callback_reached,
-        "a rejected target does not publish a batch plan"
+        callback_reached,
+        "the authenticated target reaches batch planning"
     );
-    match &result {
-        Err(PairedPlanError::BatchUnit { phase, reason }) => {
-            assert_eq!(*phase, "cross-class constructor-call identity proof");
-            assert_eq!(
-                reason,
-                "SourceShape(\"candidate method must have one plain formal clause and a concrete public body\")"
-            );
-        }
-        other => panic!("unexpected current first conditional producer result: {other:?}"),
+    result.expect("conditional target passes paired batch planning");
+    let batch = emit_paired_jvm_tasty_batch(
+        CONDITIONAL_REFERENCE_SELECTION_TARGET,
+        "ConditionalReferenceSelection.scala",
+        SourceId::from_index(22652),
+    )
+    .expect("conditional target emits paired JVM and TASTy artifacts");
+    let repeated = emit_paired_jvm_tasty_batch(
+        CONDITIONAL_REFERENCE_SELECTION_TARGET,
+        "ConditionalReferenceSelection.scala",
+        SourceId::from_index(22652),
+    )
+    .expect("an independent source session emits the complete paired batch");
+    assert_eq!(batch.classes(), repeated.classes());
+    assert_eq!(batch.classes().len(), 3);
+    let legacy = emit_paired_jvm_tasty_batch(
+        LOCAL_REFERENCE_ALIAS_TARGET,
+        "ConditionalReferenceSelection.scala",
+        SourceId::from_index(22652),
+    )
+    .expect("the existing Counter and Pair source shapes remain supported");
+    for index in 0..2 {
+        assert_eq!(
+            batch.classes()[index].classfile_bytes(),
+            legacy.classes()[index].classfile_bytes()
+        );
+        assert_eq!(
+            batch.classes()[index].tasty_bytes(),
+            legacy.classes()[index].tasty_bytes()
+        );
     }
-    assert!(
-        emit_paired_jvm_tasty_batch(
-            CONDITIONAL_REFERENCE_SELECTION_TARGET,
-            "ConditionalReferenceSelection.scala",
-            SourceId::from_index(22652),
+    for (index, (class_path, tasty_path)) in [
+        ("example/Counter.class", "example/Counter.tasty"),
+        ("example/Pair.class", "example/Pair.tasty"),
+        ("example/PairFactory.class", "example/PairFactory.tasty"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let artifacts = &batch.classes()[index];
+        assert_eq!(artifacts.classfile_path(), class_path);
+        assert_eq!(artifacts.tasty_path(), tasty_path);
+        let class = decode_class(artifacts.classfile_bytes());
+        let tasty = TastyFile::parse_and_validate_scala_3_9(artifacts.tasty_bytes()).unwrap();
+        assert_eq!(class.version.major, 65);
+        assert_eq!(
+            (tasty.header().major_version, tasty.header().minor_version),
+            (28, 9)
+        );
+        assert_eq!(
+            class.tasty_link_id().unwrap().unwrap().as_bytes(),
+            &tasty.header().uuid
+        );
+        if index == 2 {
+            let method = class
+                .methods
+                .iter()
+                .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "create")
+                .unwrap();
+            assert_eq!(
+                class.constant_pool.utf8(method.descriptor_index).unwrap(),
+                "(IIZI)Lexample/Pair;"
+            );
+            let [Attribute::Code(code)] = method.attributes.as_slice() else {
+                panic!("create has one Code attribute");
+            };
+            assert_eq!((code.max_stack, code.max_locals), (4, 8));
+        }
+    }
+    let encoded = JvmTastyBatchArtifacts {
+        classfiles: batch
+            .classes()
+            .iter()
+            .map(|artifact| JvmTastyClassFileArtifact {
+                classfile_path: artifact.classfile_path().to_owned(),
+                classfile_bytes: artifact.classfile_bytes().to_vec(),
+            })
+            .collect(),
+        sidecars: batch
+            .classes()
+            .iter()
+            .map(|artifact| JvmTastySidecarArtifact {
+                tasty_path: artifact.tasty_path().to_owned(),
+                tasty_bytes: artifact.tasty_bytes().to_vec(),
+            })
+            .collect(),
+    };
+    with_paired_jvm_tasty_batch_plan(
+        CONDITIONAL_REFERENCE_SELECTION_TARGET,
+        "ConditionalReferenceSelection.scala",
+        SourceId::from_index(22652),
+        |plan| {
+            let tasty_plans = plan
+                .classes
+                .iter()
+                .map(|class| class.tasty_plan)
+                .collect::<Vec<_>>();
+            let validated = validate_jvm_tasty_batch(plan.jvm_unit, &tasty_plans).unwrap();
+            let factory_bytes = &encoded.classfiles[2].classfile_bytes;
+            let class = decode_class(factory_bytes);
+            let method = class
+                .methods
+                .iter()
+                .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "create")
+                .unwrap();
+            let [Attribute::Code(code)] = method.attributes.as_slice() else {
+                panic!("create has one Code attribute");
+            };
+            assert_eq!(&code.code[24..27], &[0x19, 0x05, 0xa7]);
+            assert_eq!(&code.code[33..38], &[0x19, 0x07, 0x15, 0x04, 0xb6]);
+            let code_offset = code.code.as_ptr() as usize - factory_bytes.as_ptr() as usize;
+            let stack_map = code
+                .attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    Attribute::Other(raw)
+                        if class.constant_pool.utf8(raw.name_index).unwrap() == "StackMapTable" =>
+                    {
+                        Some(raw.bytes)
+                    }
+                    _ => None,
+                })
+                .expect("conditional factory method carries analyzed stack-map frames");
+            assert_eq!(stack_map.first(), Some(&0));
+            assert_eq!(stack_map.get(1), Some(&2));
+            assert_eq!(stack_map.get(2), Some(&255));
+            assert_eq!(&stack_map[3..5], &[0, 29]);
+            let stack_map_offset = stack_map.as_ptr() as usize - factory_bytes.as_ptr() as usize;
+            let mut corrupted = encoded.clone();
+            corrupted.classfiles[2].classfile_bytes[stack_map_offset + 4] = 30;
+            let error = validate_jvm_tasty_batch_artifacts(&validated, corrupted).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    JvmTastyContractError::BatchArtifact {
+                        class_index: 2,
+                        phase: "StackMapTable",
+                        ..
+                    }
+                ),
+                "a first-frame offset_delta changed from 29 to 30 must fail before publication: {error:?}"
+            );
+            for (label, offset, value) in [
+                ("wrong conditional branch local", 25, 0x06),
+                ("verifier-valid wrong selected receiver", 34, 0x05),
+            ] {
+                let mut corrupted = encoded.clone();
+                corrupted.classfiles[2].classfile_bytes[code_offset + offset] = value;
+                let error = validate_jvm_tasty_batch_artifacts(&validated, corrupted).unwrap_err();
+                assert!(
+                    matches!(
+                        error,
+                        JvmTastyContractError::BatchArtifact {
+                            class_index: 2,
+                            phase: "cross-class invocation",
+                            ..
+                        }
+                    ),
+                    "{label} must fail the authenticated bytecode target check: {error:?}"
+                );
+            }
+            let mut bad_tasty = encoded.clone();
+            bad_tasty.sidecars[2].tasty_bytes =
+                corrupt_conditional_tasty_branch_address(&bad_tasty.sidecars[2].tasty_bytes);
+            let error = validate_jvm_tasty_batch_artifacts(&validated, bad_tasty).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    JvmTastyContractError::BatchArtifact { class_index: 2, .. }
+                ),
+                "a structurally decodable but stale direct branch address must reject: {error:?}"
+            );
+        },
+    )
+    .expect("conditional bytecode mutations are checked against the same typed proof");
+}
+
+#[test]
+fn conditional_six_artifact_publication_is_atomic_under_staging_and_promotion_failures() {
+    let batch = emit_paired_jvm_tasty_batch(
+        CONDITIONAL_REFERENCE_SELECTION_TARGET,
+        "ConditionalReferenceSelection.scala",
+        SourceId::from_index(22680),
+    )
+    .expect("the conditional target emits a complete batch before publication");
+    let stage = std::env::temp_dir().join(format!(
+        "dotty-rs-conditional-publisher-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&stage).unwrap();
+    let destination = stage.join("published");
+    let published = batch_publisher::publish_paired_batch(&destination, &batch, None)
+        .expect("all six conditional artifacts publish together");
+    assert_eq!(published.len(), 6);
+    let javac_available = Command::new("javac")
+        .arg("-version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if javac_available {
+        let consumer = stage.join("ConditionalSelectionProbe.java");
+        std::fs::write(
+            &consumer,
+            r#"import example.Pair;
+import example.PairFactory;
+import java.lang.reflect.Field;
+
+public final class ConditionalSelectionProbe {
+  private static void check(Pair pair, int left, int right) throws Exception {
+    if (pair.leftValue() != left || pair.rightValue() != right) {
+      throw new AssertionError("unexpected pair values");
+    }
+    Field leftField = Pair.class.getDeclaredField("left");
+    Field rightField = Pair.class.getDeclaredField("right");
+    leftField.setAccessible(true);
+    rightField.setAccessible(true);
+    if (leftField.get(pair) == rightField.get(pair)) {
+      throw new AssertionError("Pair fields must retain distinct Counter objects");
+    }
+  }
+
+  public static void main(String[] args) throws Exception {
+    PairFactory factory = new PairFactory();
+    check(factory.create(7, 3, true, 42), 42, 3);
+    check(factory.create(7, 3, false, 42), 7, 42);
+    System.out.println("true=42/3,false=7/42,distinct=true");
+  }
+}
+"#,
         )
-        .is_err(),
-        "a rejected target returns no accepted artifact batch"
+        .unwrap();
+        let compile = Command::new("javac")
+            .args(["--release", "21", "-Xlint:all", "-Werror", "-classpath"])
+            .arg(&destination)
+            .args(["-d"])
+            .arg(&stage)
+            .arg(&consumer)
+            .env(
+                "JAVA_TOOL_OPTIONS",
+                format!("-Djava.io.tmpdir={}", std::env::temp_dir().display()),
+            )
+            .output()
+            .expect("run JDK 21 consumer compilation");
+        assert!(
+            compile.status.success(),
+            "javac rejected published files:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let runtime = Command::new("java")
+            .args(["-Xverify:all", "-ea", "-classpath"])
+            .arg(format!("{}:{}", stage.display(), destination.display()))
+            .arg("ConditionalSelectionProbe")
+            .env(
+                "JAVA_TOOL_OPTIONS",
+                format!("-Djava.io.tmpdir={}", std::env::temp_dir().display()),
+            )
+            .output()
+            .expect("run verified conditional target in JDK 21");
+        assert!(
+            runtime.status.success(),
+            "JDK rejected generated conditional artifacts:\n{}",
+            String::from_utf8_lossy(&runtime.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&runtime.stdout).trim(),
+            "true=42/3,false=7/42,distinct=true"
+        );
+
+        let factory_bytes = batch.classes()[2].classfile_bytes();
+        let class = decode_class(factory_bytes);
+        let create = class
+            .methods
+            .iter()
+            .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "create")
+            .unwrap();
+        let [Attribute::Code(code)] = create.attributes.as_slice() else {
+            panic!("create has one Code attribute");
+        };
+        let setter_load = code
+            .code
+            .windows(5)
+            .position(|window| window == [0x19, 0x07, 0x15, 0x04, 0xb6])
+            .expect("setter loads the selected slot before its argument and invokevirtual");
+        let code_offset = code.code.as_ptr() as usize - factory_bytes.as_ptr() as usize;
+        let mut wrong_factory = factory_bytes.to_vec();
+        wrong_factory[code_offset + setter_load + 1] = 0x05;
+        let wrong_root = stage.join("wrong-target");
+        let wrong_package = wrong_root.join("example");
+        std::fs::create_dir_all(&wrong_package).unwrap();
+        for name in ["Counter.class", "Pair.class"] {
+            std::fs::copy(
+                destination.join("example").join(name),
+                wrong_package.join(name),
+            )
+            .unwrap();
+        }
+        std::fs::write(wrong_package.join("PairFactory.class"), wrong_factory).unwrap();
+        let wrong_runtime = Command::new("java")
+            .args(["-Xverify:all", "-ea", "-classpath"])
+            .arg(format!("{}:{}", stage.display(), wrong_root.display()))
+            .arg("ConditionalSelectionProbe")
+            .env(
+                "JAVA_TOOL_OPTIONS",
+                format!("-Djava.io.tmpdir={}", std::env::temp_dir().display()),
+            )
+            .output()
+            .expect("verify a same-type but incorrectly targeted setter receiver");
+        let wrong_output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&wrong_runtime.stdout),
+            String::from_utf8_lossy(&wrong_runtime.stderr)
+        );
+        assert!(
+            !wrong_runtime.status.success()
+                && wrong_output.contains("AssertionError: unexpected pair values"),
+            "the wrong receiver remains verifier-valid but fails semantic behavior:\n{wrong_output}"
+        );
+    } else if std::env::var_os("DOTTY_CLASSFILE_REQUIRE_JDK").is_some() {
+        panic!("the required JDK integration gate could not find javac");
+    }
+    for (index, fault) in (1..=6)
+        .map(batch_publisher::BatchPublishFault::AfterStagedFiles)
+        .chain([
+            batch_publisher::BatchPublishFault::BeforePromotion,
+            batch_publisher::BatchPublishFault::AfterPromotion,
+        ])
+        .enumerate()
+    {
+        let failed_destination = stage.join(format!("failed-{index}"));
+        assert!(
+            batch_publisher::publish_paired_batch(&failed_destination, &batch, Some(fault))
+                .is_err()
+        );
+        assert!(
+            !failed_destination.exists(),
+            "failed publication {index} leaves no destination"
+        );
+    }
+    let sentinel = stage.join("sentinel");
+    std::fs::create_dir(&sentinel).unwrap();
+    std::fs::write(sentinel.join("sentinel.txt"), b"preserve existing output").unwrap();
+    assert!(batch_publisher::publish_paired_batch(&sentinel, &batch, None).is_err());
+    assert_eq!(
+        std::fs::read(sentinel.join("sentinel.txt")).unwrap(),
+        b"preserve existing output"
     );
+    std::fs::remove_dir_all(stage).unwrap();
 }
 
 #[test]
@@ -1178,7 +1547,8 @@ fn conditional_reference_selection_controls_record_scala_and_rust_outcomes() {
         .map(|(prefix, _)| prefix)
         .expect("target has the shared Counter and Pair declarations");
     enum ControlExpectation {
-        ValidButDeferred,
+        Accepted,
+        ValidButDeferred(&'static str),
         Invalid(String),
     }
     let invalid_reason = |source_id, tree_index, kind: &str| match kind {
@@ -1201,19 +1571,19 @@ fn conditional_reference_selection_controls_record_scala_and_rust_outcomes() {
             "swapped-branches",
             CONDITIONAL_CONTROL_SWAPPED,
             22660,
-            ControlExpectation::ValidButDeferred,
+            ControlExpectation::Accepted,
         ),
         (
             "renamed-locals",
             CONDITIONAL_CONTROL_RENAMED,
             22661,
-            ControlExpectation::ValidButDeferred,
+            ControlExpectation::Accepted,
         ),
         (
             "reversed-declarations",
             CONDITIONAL_CONTROL_REVERSED,
             22662,
-            ControlExpectation::ValidButDeferred,
+            ControlExpectation::Accepted,
         ),
         (
             "non-Boolean-condition",
@@ -1243,25 +1613,33 @@ fn conditional_reference_selection_controls_record_scala_and_rust_outcomes() {
             "mutable-selected",
             CONDITIONAL_CONTROL_MUTABLE,
             22667,
-            ControlExpectation::ValidButDeferred,
+            ControlExpectation::ValidButDeferred(
+                "SourceIdentity(\"selected must be an immutable original Counter local in the same method-owned scope\")",
+            ),
         ),
         (
             "nested-if",
             CONDITIONAL_CONTROL_NESTED_IF,
             22668,
-            ControlExpectation::ValidButDeferred,
+            ControlExpectation::ValidButDeferred(
+                "SourceShape(\"IF branches must be direct references to existing locals\")",
+            ),
         ),
         (
             "allocation-in-branch",
             CONDITIONAL_CONTROL_BRANCH_ALLOCATION,
             22669,
-            ControlExpectation::ValidButDeferred,
+            ControlExpectation::ValidButDeferred(
+                "SourceShape(\"IF branches must be direct references to existing locals\")",
+            ),
         ),
         (
             "second-independent-setter",
             CONDITIONAL_CONTROL_SECOND_SETTER,
             22670,
-            ControlExpectation::ValidButDeferred,
+            ControlExpectation::ValidButDeferred(
+                "SourceShape(\"four-formal candidate requires two initialized locals, selected IF, one setter, then Pair\")",
+            ),
         ),
     ] {
         let factory_source = control
@@ -1271,13 +1649,20 @@ fn conditional_reference_selection_controls_record_scala_and_rust_outcomes() {
         let result = paired_result(&source, source_id);
         println!("conditional control {name}: {result:?}");
         match expectation {
-            ControlExpectation::ValidButDeferred => match result {
+            ControlExpectation::Accepted => {
+                result.expect("Scala-valid renamed, swapped, and reordered controls are accepted");
+                let artifacts = emit_paired_jvm_tasty_batch(
+                    &source,
+                    "ConditionalControl.scala",
+                    SourceId::from_index(source_id),
+                )
+                .expect("accepted control publishes a complete six-artifact batch");
+                assert_eq!(artifacts.classes().len(), 3);
+            }
+            ControlExpectation::ValidButDeferred(expected_reason) => match result {
                 Err(PairedPlanError::BatchUnit { phase, reason }) => {
                     assert_eq!(phase, "cross-class constructor-call identity proof");
-                    assert_eq!(
-                        reason,
-                        "SourceShape(\"candidate method must have one plain formal clause and a concrete public body\")"
-                    );
+                    assert_eq!(reason, expected_reason);
                 }
                 other => panic!("valid-but-deferred control {name}: {other:?}"),
             },

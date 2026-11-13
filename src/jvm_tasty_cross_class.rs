@@ -13,7 +13,7 @@ use dotty_core::{
     TypeId, TypeRefTarget,
 };
 use dotty_jvm::{JvmClassPlan, JvmCompilationUnit};
-use dotty_tasty_pickler::LocalReferenceAliasBinding;
+use dotty_tasty_pickler::{ConditionalLocalReferenceSelectionBinding, LocalReferenceAliasBinding};
 use dotty_typer::{SourceTyper, TypedLocalBinding};
 
 mod conditional_local_reference;
@@ -107,6 +107,7 @@ pub struct ValidatedCrossClassConstructorCallProof<'session> {
     local_receiver_unit_call: Option<LocalReceiverUnitCallReceipt>,
     local_receiver_unit_calls: Option<LocalReceiverUnitCallsReceipt>,
     local_reference_alias: Option<LocalReferenceAliasBinding>,
+    conditional_local_reference_selection: Option<ConditionalLocalReferenceSelectionBinding>,
     formal_type: TypeId,
     constructor_formal_type: TypeId,
     result_type: TypeId,
@@ -1737,6 +1738,13 @@ impl ValidatedCrossClassConstructorCallProof<'_> {
     pub const fn local_reference_alias(&self) -> Option<LocalReferenceAliasBinding> {
         self.local_reference_alias
     }
+    /// Exact borrowed IF-selection receipt, present only on the authenticated
+    /// four-formal Counter factory route.
+    pub const fn conditional_local_reference_selection(
+        &self,
+    ) -> Option<ConditionalLocalReferenceSelectionBinding> {
+        self.conditional_local_reference_selection
+    }
     /// Canonical semantic type of the method formal and constructor argument.
     pub const fn formal_type(&self) -> TypeId {
         self.formal_type
@@ -1943,7 +1951,7 @@ fn validate_cross_class_constructor_call_proofs_inner<'session>(
                 ));
             }
             let proof = if method_def.value_param_clauses.len() == 1
-                && method_def.value_param_clauses[0].len() == 2
+                && matches!(method_def.value_param_clauses[0].len(), 2 | 4)
             {
                 validate_two_argument_constructor_call_candidate(
                     source_id,
@@ -2094,7 +2102,7 @@ fn validate_two_argument_constructor_call_candidate<'session>(
         || method_def.metadata.visibility.is_some()
         || !method_def.type_params.is_empty()
         || method_def.value_param_clauses.len() != 1
-        || method_def.value_param_clauses[0].len() != 2
+        || !matches!(method_def.value_param_clauses[0].len(), 2 | 4)
     {
         return Err(source_error(
             "two-argument candidate must have one plain two-formal clause and a concrete public body",
@@ -2107,10 +2115,63 @@ fn validate_two_argument_constructor_call_candidate<'session>(
         "factory method declaration has a foreign source position",
     )?;
 
+    let is_conditional_candidate = method_def.value_param_clauses[0].len() == 4;
     let method_formal_trees = [
         method_def.value_param_clauses[0][0],
         method_def.value_param_clauses[0][1],
     ];
+    let all_method_formal_trees = &method_def.value_param_clauses[0];
+    let conditional_selection_proof = if is_conditional_candidate {
+        let typer = typer.ok_or_else(|| {
+            typed_error("conditional factory requires the original Typer binding resolver")
+        })?;
+        let Some(TreeKind::Block(block)) = source_ast.try_get(source_rhs).map(|node| &node.kind)
+        else {
+            return Err(source_error(
+                "conditional factory body must be its original Block",
+            ));
+        };
+        if block.stats.len() != 4
+            || block.stats[..3].iter().any(|tree| {
+                !matches!(
+                    source_ast.try_get(*tree).map(|node| &node.kind),
+                    Some(TreeKind::ValDef(_))
+                )
+            })
+            || !matches!(
+                source_ast.try_get(block.stats[3]).map(|node| &node.kind),
+                Some(TreeKind::Apply(_))
+            )
+        {
+            return Err(source_error(
+                "four-formal candidate requires two initialized locals, selected IF, one setter, then Pair",
+            ));
+        }
+        Some(
+            validate_immutable_local_conditional_reference_selection_proof(
+                ImmutableLocalConditionalReferenceSelectionProofInput {
+                    initializers: ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast,
+                        source_index,
+                        source_typed_index,
+                        local_bindings: [
+                            typer.typed_local_binding_at(source_id, block.stats[0]),
+                            typer.typed_local_binding_at(source_id, block.stats[1]),
+                        ],
+                        jvm_unit,
+                    },
+                    selected_binding: typer.typed_local_binding_at(source_id, block.stats[2]),
+                },
+            )?,
+        )
+    } else {
+        None
+    };
     let mut method_formals = [method; 2];
     let mut method_formal_types = [definitions.int; 2];
     let mut method_formal_classes = [None; 2];
@@ -2170,7 +2231,11 @@ fn validate_two_argument_constructor_call_candidate<'session>(
                     definitions.no_prefix,
                 )
         });
-        if formal_type != definitions.int && !reference_formal_is_supported {
+        if (is_conditional_candidate && formal_type != definitions.int)
+            || (!is_conditional_candidate
+                && formal_type != definitions.int
+                && !reference_formal_is_supported)
+        {
             return Err(semantic_error(
                 "factory formals must have canonical Int or planned same-package class types",
             ));
@@ -2191,8 +2256,16 @@ fn validate_two_argument_constructor_call_candidate<'session>(
             "factory method source scope has a noncanonical owner",
         ));
     }
-    if method_scope.entered_symbols().count() != method_formals.len()
-        || method_formals.iter().any(|formal| {
+    let all_method_formals = all_method_formal_trees
+        .iter()
+        .map(|tree| {
+            source_index
+                .symbol_at(source_id, *tree)
+                .ok_or_else(|| identity_error("factory formal has no canonical source symbol"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if method_scope.entered_symbols().count() != all_method_formals.len()
+        || all_method_formals.iter().any(|formal| {
             let name = &store.symbols.get(*formal).name;
             method_scope.lookup_all(name) != [*formal]
         })
@@ -2210,9 +2283,14 @@ fn validate_two_argument_constructor_call_candidate<'session>(
         ));
     };
     if method_signature.kind != dotty_core::MethodKind::Plain
-        || method_signature.params.len() != 2
+        || method_signature.params.len() != all_method_formals.len()
         || method_signature.params[0].ty != method_formal_types[0]
         || method_signature.params[1].ty != method_formal_types[1]
+        || (is_conditional_candidate
+            && (method_signature.params[0].ty != definitions.int
+                || method_signature.params[1].ty != definitions.int
+                || method_signature.params[2].ty != definitions.boolean
+                || method_signature.params[3].ty != definitions.int))
     {
         return Err(semantic_error(
             "factory signature must retain its two ordered reference formals",
@@ -2242,6 +2320,22 @@ fn validate_two_argument_constructor_call_candidate<'session>(
                                 Some(TreeKind::Apply(_))
                             )
                         })) =>
+            {
+                (block.expr, Some(block))
+            }
+            Some(TreeKind::Block(block))
+                if is_conditional_candidate
+                    && block.stats.len() == 4
+                    && block.stats[..3].iter().all(|stat| {
+                        matches!(
+                            source_ast.try_get(*stat).map(|node| &node.kind),
+                            Some(TreeKind::ValDef(_))
+                        )
+                    })
+                    && matches!(
+                        source_ast.try_get(block.stats[3]).map(|node| &node.kind),
+                        Some(TreeKind::Apply(_))
+                    ) =>
             {
                 (block.expr, Some(block))
             }
@@ -2290,6 +2384,7 @@ fn validate_two_argument_constructor_call_candidate<'session>(
     let mut local_receiver_unit_call = None;
     let mut local_receiver_unit_calls = None;
     let mut local_reference_alias = None;
+    let mut conditional_local_reference_selection = None;
     let immutable_local_pair = if let Some(block) =
         source_block.filter(|block| matches!(block.stats.len(), 2..=5))
     {
@@ -2333,7 +2428,61 @@ fn validate_two_argument_constructor_call_candidate<'session>(
             ],
             jvm_unit,
         };
-        if block.stats.len() == 5 {
+        if let Some(proof) = conditional_selection_proof.as_ref() {
+            let binding = proof.binding();
+            let source_setter = source_ast
+                .try_get(proof.source_setter())
+                .ok_or_else(|| source_error("conditional setter source tree is stale"))?;
+            let TreeKind::Apply(source_apply) = &source_setter.kind else {
+                return Err(source_error("conditional setter must remain an Apply"));
+            };
+            let source_select = source_apply.function;
+            let typed_setter = typed_ast
+                .try_get(proof.typed_setter())
+                .ok_or_else(|| typed_error("conditional typed setter is stale"))?;
+            let TreeKind::Apply(typed_apply) = &typed_setter.kind else {
+                return Err(typed_error("conditional typed setter must remain an Apply"));
+            };
+            let typed_select = typed_apply.function;
+            let typed_argument = proof.typed_setter_argument();
+            let argument_formal = match store.types.try_get(
+                typed_ast
+                    .try_get(typed_argument)
+                    .ok_or_else(|| typed_error("conditional setter argument is stale"))?
+                    .ty,
+            ) {
+                Some(Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                }) => *symbol,
+                _ => {
+                    return Err(typed_error(
+                        "conditional setter argument must retain its canonical formal TermRef",
+                    ));
+                }
+            };
+            conditional_local_reference_selection = Some(binding);
+            local_receiver_unit_call = Some(LocalReceiverUnitCallReceipt {
+                source_apply: proof.source_setter(),
+                typed_apply: proof.typed_setter(),
+                source_select,
+                typed_select,
+                source_receiver: proof.source_setter_receiver(),
+                typed_receiver: proof.typed_setter_receiver(),
+                source_argument: proof.source_setter_argument(),
+                typed_argument,
+                receiver: binding.selected,
+                method: proof.setter_method(),
+                argument_formal,
+                receiver_scope: binding.scope,
+                argument_type: typed_ast
+                    .try_get(typed_argument)
+                    .ok_or_else(|| typed_error("conditional setter argument is stale"))?
+                    .ty,
+                result_type: typed_setter.ty,
+            });
+            Some(*proof.initializer_pair())
+        } else if block.stats.len() == 5 {
             let calls = validate_immutable_local_counter_set_calls_after_alias_proof(
                 ImmutableLocalReferenceAliasProofInput {
                     initializers: input,
@@ -2533,7 +2682,7 @@ fn validate_two_argument_constructor_call_candidate<'session>(
         .filter(|plan| plan.method == method)
         .collect::<Vec<_>>();
     if method_plan.len() != 1
-        || method_plan[0].parameters != method_formals
+        || method_plan[0].parameters != all_method_formals
         || method_plan[0].body != Some(typed_rhs)
     {
         return Err(Error::JvmPlan(
@@ -2881,7 +3030,7 @@ fn validate_two_argument_constructor_call_candidate<'session>(
     let legacy_pair_signature = method_formal_classes[0] == method_formal_classes[1];
     let formal_nested_signature = method_formal_classes[0] == Some(counter_class)
         && method_formal_types[1] == definitions.int;
-    if !legacy_pair_signature && !formal_nested_signature {
+    if !legacy_pair_signature && !formal_nested_signature && !is_conditional_candidate {
         return Err(semantic_error(
             "factory formals must retain a supported ordered pair signature",
         ));
@@ -2949,7 +3098,7 @@ fn validate_two_argument_constructor_call_candidate<'session>(
         .iter()
         .map(|parameter| parameter.symbol())
         .collect::<Vec<_>>()
-        != method_formals
+        != all_method_formals
         || !method_metadata
             .access_flags()
             .contains(dotty_classfile::access_flags::ACC_PUBLIC)
@@ -3910,6 +4059,7 @@ fn validate_two_argument_constructor_call_candidate<'session>(
         local_receiver_unit_call,
         local_receiver_unit_calls,
         local_reference_alias,
+        conditional_local_reference_selection,
         formal_type: method_formal_types[0],
         constructor_formal_type,
         result_type,
@@ -8753,6 +8903,7 @@ fn validate_constructor_call_candidate<'session>(
         local_receiver_unit_call: None,
         local_receiver_unit_calls: None,
         local_reference_alias: None,
+        conditional_local_reference_selection: None,
         formal_type,
         constructor_formal_type,
         result_type,
