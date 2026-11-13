@@ -1781,16 +1781,28 @@ fn classify_paired_block_shape(
     has_one_call_receipt: bool,
     has_two_call_receipt: bool,
     has_alias_receipt: bool,
+    has_conditional_selection_receipt: bool,
 ) -> PairedBlockShape {
     if source_kinds.len() != typed_kinds.len() {
         return PairedBlockShape::ReceiptMismatch;
     }
 
     let has_expected_receipts = match source_kinds.len() {
-        2 => !has_one_call_receipt && !has_two_call_receipt,
-        3 => has_one_call_receipt && !has_two_call_receipt,
-        4 => !has_one_call_receipt && has_two_call_receipt,
-        5 => !has_one_call_receipt && has_two_call_receipt && has_alias_receipt,
+        2 => !has_one_call_receipt && !has_two_call_receipt && !has_conditional_selection_receipt,
+        3 => has_one_call_receipt
+            && !has_two_call_receipt
+            && !has_conditional_selection_receipt,
+        4 => (has_one_call_receipt
+            && !has_two_call_receipt
+            && !has_alias_receipt
+            && has_conditional_selection_receipt)
+            || (!has_one_call_receipt
+                && has_two_call_receipt
+                && !has_conditional_selection_receipt),
+        5 => !has_one_call_receipt
+            && has_two_call_receipt
+            && has_alias_receipt
+            && !has_conditional_selection_receipt,
         _ => false,
     };
     if !has_expected_receipts {
@@ -1816,8 +1828,10 @@ fn classify_paired_block_shape(
     match source_kinds.len() {
         2 if matches_shape(2, 0) && !has_alias_receipt => PairedBlockShape::TwoLocals,
         3 if matches_shape(2, 1) && !has_alias_receipt => PairedBlockShape::TwoLocalsOneCall,
-        4 if matches_shape(2, 2) && !has_alias_receipt => PairedBlockShape::TwoLocalsTwoCalls,
-        4 if matches_shape(3, 1) => PairedBlockShape::ThreeLocalsOneCall,
+        4 if matches_shape(2, 2) && !has_alias_receipt && !has_conditional_selection_receipt => {
+            PairedBlockShape::TwoLocalsTwoCalls
+        }
+        4 if matches_shape(3, 1) && !has_alias_receipt => PairedBlockShape::ThreeLocalsOneCall,
         5 if matches_shape(3, 2)
             && !has_one_call_receipt
             && has_two_call_receipt
@@ -1887,6 +1901,10 @@ fn validate_two_local_constructor_pair(
             local_receiver_call.is_some(),
             local_receiver_call_pair.is_some(),
             local_reference_alias.is_some(),
+            tasty
+                .typed_bindings
+                .conditional_local_reference_selection(source_id, caller)
+                .is_some(),
         ),
         _ => PairedBlockShape::Unclassified,
     };
@@ -6428,9 +6446,19 @@ fn is_unit_type(definitions: &Definitions, ty: dotty_core::TypeId) -> bool {
 
 #[cfg(test)]
 mod paired_block_shape_tests {
-    use super::{PairedBlockShape, PairedStatementKind, classify_paired_block_shape as classify};
+    use super::{PairedBlockShape, PairedStatementKind, classify_paired_block_shape};
 
     use PairedStatementKind::{Apply, Other, ValDef};
+
+    fn classify(
+        source: &[PairedStatementKind],
+        typed: &[PairedStatementKind],
+        one_call: bool,
+        two_calls: bool,
+        alias: bool,
+    ) -> PairedBlockShape {
+        classify_paired_block_shape(source, typed, one_call, two_calls, alias, false)
+    }
 
     #[test]
     fn recognizes_only_the_ordered_legacy_statement_and_receipt_shapes() {
@@ -6481,6 +6509,28 @@ mod paired_block_shape_tests {
                 false
             ),
             PairedBlockShape::ThreeLocalsOneCall
+        );
+        assert_eq!(
+            classify_paired_block_shape(
+                &[ValDef, ValDef, ValDef, Apply],
+                &[ValDef, ValDef, ValDef, Apply],
+                true,
+                false,
+                false,
+                true,
+            ),
+            PairedBlockShape::ThreeLocalsOneCall
+        );
+        assert_eq!(
+            classify_paired_block_shape(
+                &[ValDef, ValDef, ValDef, Apply],
+                &[ValDef, ValDef, ValDef, Apply],
+                false,
+                false,
+                false,
+                true,
+            ),
+            PairedBlockShape::ReceiptMismatch
         );
         assert_eq!(
             classify(
