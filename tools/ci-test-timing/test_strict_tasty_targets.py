@@ -282,7 +282,7 @@ STRICT_REQUIRED_ENVS: DOTTY_REQUIRE_FIRST
         repository = Path(__file__).parents[2]
         manifest_path = repository / "tools/ci/strict_tasty_targets.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        self.assertEqual(manifest["baseline"]["inventory_count"], 26)
+        self.assertEqual(manifest["baseline"]["inventory_count"], 27)
         target_names = [target["name"] for target in manifest["targets"]]
         self.assertIn(
             "jvm_tasty_immutable_reference_local_pair_scala_consumer",
@@ -292,9 +292,15 @@ STRICT_REQUIRED_ENVS: DOTTY_REQUIRE_FIRST
             "jvm_tasty_two_local_counter_set_scala_consumer",
             target_names,
         )
-        candidate_target = "jvm_tasty_conditional_local_reference_proof"
-        candidate_environment = "DOTTY_REQUIRE_SCALA_TASTY_CONDITIONAL_LOCAL_REFERENCE_CONSUMER"
+        candidate_target = "jvm_tasty_conditional_reference_scala_consumer"
+        candidate_environment = "DOTTY_REQUIRE_SCALA_TASTY_CONDITIONAL_REFERENCE_SCALA_CONSUMER"
         self.assertIn(candidate_target, target_names)
+        self.assertIn("jvm_tasty_conditional_local_reference_proof", target_names)
+        self.assertIn(
+            "jvm_tasty_conditional_local_reference_proof",
+            manifest["sharding"]["shards"][3]["targets"],
+            "keep the independent source-bound forged-receiver proof required",
+        )
         self.assertIn(
             candidate_target,
             manifest["sharding"]["shards"][3]["targets"],
