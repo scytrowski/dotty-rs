@@ -1643,6 +1643,127 @@ fn preserves_option_map_rollback_and_tuple_to_array_automatic_preparation() {
     }
 }
 
+type EitherSwapSourceCase = (
+    TreeId<Untyped>,
+    TreeId<Untyped>,
+    TreeId<Untyped>,
+    TreeId<Untyped>,
+    TreeId<Untyped>,
+);
+
+fn assert_original_either_swap_typed_tree(
+    typer: &SourceTyper<'_>,
+    parsed: &dotty_parser::ParseResult,
+    source: SourceId,
+    source_root: TreeId<Untyped>,
+    typed_root: TreeId<Typed>,
+    source_cases: &[EitherSwapSourceCase],
+    index: &SourceSemanticIndex,
+) {
+    let get = |source_tree| {
+        typer
+            .source_typed_index()
+            .get(source, source_tree)
+            .expect("every traversed original source node has a typed mapping")
+    };
+    let TreeKind::DefDef(typed_method) = &typer.typed_ast().get(typed_root).kind else {
+        panic!("returned root is the typed original DefDef")
+    };
+    assert_eq!(get(source_root), typed_root);
+    let TreeKind::DefDef(source_method) = &parsed.ast.get(source_root).kind else {
+        unreachable!()
+    };
+    let source_rhs = source_method.rhs.unwrap();
+    let typed_rhs = typed_method.rhs.expect("typed original DefDef retains RHS");
+    assert_eq!(get(source_rhs), typed_rhs);
+    let TreeKind::Match(source_match) = &parsed.ast.get(source_rhs).kind else {
+        unreachable!()
+    };
+    let TreeKind::Match(typed_match) = &typer.typed_ast().get(typed_rhs).kind else {
+        panic!("typed DefDef RHS is the connected Match")
+    };
+    assert_eq!(get(source_match.selector), typed_match.selector);
+    let method = index.symbol_at(source, source_root).unwrap();
+    let owner = typer.store().symbols.get(method).owner.unwrap();
+    assert!(
+        matches!(
+            typer.typed_ast().get(typed_match.selector).kind,
+            TreeKind::This(_)
+        ),
+        "the connected Match selector remains the original this"
+    );
+    assert!(
+        matches!(
+            typer.store().types.get(typer.typed_ast().get(typed_match.selector).ty),
+            Type::ThisType { class } if *class == owner
+        ),
+        "the selector retains canonical Either this identity"
+    );
+    assert_eq!(typed_match.cases.len(), source_cases.len());
+    let params = typer.source_class_type_parameters(owner).unwrap();
+    let mut binders = Vec::new();
+    for (
+        (source_case, source_pattern, source_binder, source_body, source_application),
+        typed_case,
+    ) in source_cases.iter().zip(typed_match.cases.iter())
+    {
+        assert_eq!(get(*source_case), *typed_case);
+        let TreeKind::CaseDef(typed_case) = &typer.typed_ast().get(*typed_case).kind else {
+            panic!("connected case is CaseDef")
+        };
+        assert_eq!(typed_case.pattern, get(*source_pattern));
+        assert_eq!(typed_case.body, get(*source_body));
+        let TreeKind::UnApply(unapply) = &typer.typed_ast().get(typed_case.pattern).kind else {
+            panic!("connected source extractor lowers to UnApply")
+        };
+        assert_eq!(unapply.patterns.len(), 1);
+        assert_eq!(unapply.patterns[0], get(*source_binder));
+        let TreeKind::Bind(bind) = &typer.typed_ast().get(unapply.patterns[0]).kind else {
+            panic!("connected extractor argument is the original Bind")
+        };
+        let binder = typer
+            .pattern_binding_symbol_at(source, *source_binder)
+            .unwrap();
+        assert_eq!(
+            typer
+                .store()
+                .names
+                .resolve(typer.store().symbols.get(binder).name.text()),
+            typer.store().names.resolve(bind.name.text())
+        );
+        assert_eq!(typer.store().symbols.get(binder).owner, Some(method));
+        assert!(
+            !binders.contains(&binder),
+            "case binder symbols are distinct"
+        );
+        binders.push(binder);
+        let binder_type = match typer.store().symbols.info(binder) {
+            SymbolInfo::Complete(ty) => *ty,
+            other => panic!("binder has canonical completed type: {other:?}"),
+        };
+        let expected_parameter = if binders.len() == 1 {
+            params[0]
+        } else {
+            params[1]
+        };
+        assert!(matches!(typer.store().types.get(binder_type),
+            Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == expected_parameter));
+        let TreeKind::Block(typed_body) = &typer.typed_ast().get(typed_case.body).kind else {
+            panic!("original case body remains Block")
+        };
+        assert_eq!(typed_body.expr, get(*source_application));
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed_body.expr).kind else {
+            panic!("generated case constructor remains Apply")
+        };
+        assert_eq!(application.args.len(), 1);
+        assert!(
+            matches!(typer.store().types.get(typer.typed_ast().get(application.args[0]).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == binder),
+            "constructor application argument references its own case binder"
+        );
+    }
+}
+
 #[test]
 #[ignore = "requires pinned Scala 3.9.0 sources, classpath jars, and JDK environment"]
 fn types_acceptance_v_either_swap_with_original_generated_applications() {
@@ -1688,6 +1809,29 @@ fn types_acceptance_v_either_swap_with_original_generated_applications() {
         .symbol_at(source, tree)
         .expect("canonical source identity for the original Either.swap");
     let owner = store.symbols.get(method_symbol).owner.unwrap();
+    let TreeKind::DefDef(source_definition) = &parsed.ast.get(tree).kind else {
+        unreachable!()
+    };
+    let TreeKind::Match(source_match) = &parsed.ast.get(source_definition.rhs.unwrap()).kind else {
+        unreachable!()
+    };
+    let source_cases = source_match
+        .cases
+        .iter()
+        .map(|case_tree| {
+            let TreeKind::CaseDef(case) = &parsed.ast.get(*case_tree).kind else {
+                unreachable!()
+            };
+            let TreeKind::Apply(pattern) = &parsed.ast.get(case.pattern).kind else {
+                unreachable!()
+            };
+            let binder_tree = *pattern.args.first().expect("one source binder per case");
+            let TreeKind::Block(body) = &parsed.ast.get(case.body).kind else {
+                unreachable!()
+            };
+            (*case_tree, case.pattern, binder_tree, case.body, body.expr)
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
         observed_symbol_path(&store, owner),
         ".scala.util.Either",
@@ -1825,6 +1969,56 @@ fn types_acceptance_v_either_swap_with_original_generated_applications() {
         }
         *capture.borrow_mut() = Some(lines.join("\n"));
     }));
+    let rollback_projection_before = issue_1999_late_failure_projection(&typer, &parsed);
+    let rollback_store_before = typer.store().checkpoint();
+    let rollback_typed_before = typer.typed_ast().checkpoint();
+    let rollback_type_index_before = format!("{:?}", typer.type_index);
+    let index_ref = &index;
+    let generated_symbols = parsed
+        .ast
+        .iter()
+        .filter_map(|(source_tree, node)| match &node.kind {
+            TreeKind::TypeDef(definition)
+                if matches!(
+                    typer.store.names.resolve(definition.name.as_name().text()),
+                    "Left" | "Right"
+                ) =>
+            {
+                index.symbol_at(source, source_tree)
+            }
+            _ => None,
+        })
+        .flat_map(|class| {
+            [
+                dotty_core::source_semantics::GeneratedCaseClassMethodRole::Apply,
+                dotty_core::source_semantics::GeneratedCaseClassMethodRole::Unapply,
+            ]
+            .into_iter()
+            .filter_map(move |role| index_ref.generated_case_class_method(class, role))
+        })
+        .collect::<Vec<_>>();
+    let pre_rollback_seen = Rc::new(RefCell::new(false));
+    let pre_rollback_capture = Rc::clone(&pre_rollback_seen);
+    let observed_cases = source_cases.clone();
+    let observed_generated = generated_symbols.clone();
+    typer.transaction_failure_observer = Some(Rc::new(move |typer| {
+        for (_, _, binder_tree, _, _) in &observed_cases {
+            let binder = typer
+                .pattern_binding_symbol_at(source, *binder_tree)
+                .expect("the complete method has published each original binder before rollback");
+            assert!(matches!(
+                typer.store().symbols.info(binder),
+                SymbolInfo::Complete(_)
+            ));
+        }
+        for symbol in &observed_generated {
+            assert!(
+                matches!(typer.store().symbols.info(*symbol), SymbolInfo::Complete(_)),
+                "generated case-class completion is present before rollback: {symbol:?}"
+            );
+        }
+        *pre_rollback_capture.borrow_mut() = true;
+    }));
     let owner_info_before = *typer.store().symbols.info(owner);
     typer.inject_failure_after_outermost_success = true;
     let failed = typer
@@ -1839,12 +2033,67 @@ fn types_acceptance_v_either_swap_with_original_generated_applications() {
         } if failed_source == source
             && reason == "test-injected failure after successful source typing"
     ));
+    assert!(
+        *pre_rollback_seen.borrow(),
+        "the failure observer inspected state before rollback"
+    );
     assert_eq!(
         typer.store().symbols.info(owner),
         &owner_info_before,
         "late failure rolls semantic publication back"
     );
+    assert_eq!(
+        typer.store().checkpoint(),
+        rollback_store_before,
+        "late failure restores the complete semantic store checkpoint"
+    );
+    assert_eq!(
+        typer.typed_ast().checkpoint(),
+        rollback_typed_before,
+        "late failure restores the complete typed arena checkpoint"
+    );
+    assert_eq!(
+        format!("{:?}", typer.type_index),
+        rollback_type_index_before,
+        "late failure restores source type/index state"
+    );
+    assert_issue_1999_projection_unchanged(
+        &rollback_projection_before,
+        &issue_1999_late_failure_projection(&typer, &parsed),
+        "late failure restores mappings, binders, scopes, and typer-owned state",
+    );
     assert_eq!(typer.source_typed_index().get(source, tree), None);
+    for (case_tree, pattern_tree, binder_tree, body_tree, application_tree) in &source_cases {
+        for source_tree in [
+            *case_tree,
+            *pattern_tree,
+            *binder_tree,
+            *body_tree,
+            *application_tree,
+        ] {
+            assert!(
+                typer
+                    .source_typed_index()
+                    .get(source, source_tree)
+                    .is_none(),
+                "rollback removes the partial typed mapping for source tree {}",
+                source_tree.index()
+            );
+        }
+        assert!(
+            typer
+                .pattern_binding_symbol_at(source, *binder_tree)
+                .is_none(),
+            "rollback removes the original pattern binder mapping"
+        );
+    }
+    for symbol in &generated_symbols {
+        assert_eq!(
+            *typer.store().symbols.info(*symbol),
+            SymbolInfo::Missing,
+            "rollback removes generated case-class completion {symbol:?}"
+        );
+    }
     assert!(!typer.inject_failure_after_outermost_success);
     let typed_root = typer
         .type_method_definition(tree)
@@ -1852,6 +2101,15 @@ fn types_acceptance_v_either_swap_with_original_generated_applications() {
     assert_eq!(
         typer.source_typed_index().get(source, tree),
         Some(typed_root)
+    );
+    assert_original_either_swap_typed_tree(
+        &typer,
+        &parsed,
+        source,
+        tree,
+        typed_root,
+        &source_cases,
+        &index,
     );
     let TreeKind::DefDef(definition) = &parsed.ast.get(tree).kind else {
         unreachable!()
