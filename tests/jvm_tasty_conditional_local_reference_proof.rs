@@ -35,6 +35,10 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[path = "support/conditional_reference_artifacts.rs"]
+mod conditional_reference_artifacts;
+#[path = "support/conditional_rust_consumer.rs"]
+mod conditional_rust_consumer;
 #[path = "support/scala39_toolchain.rs"]
 mod scala39_toolchain;
 
@@ -61,28 +65,8 @@ public final class PairFactory {
 }
 "#;
 
-const SOURCE: &str = r#"package example
-
-class Counter(start: Int):
-  private var current: Int = start
-  def get(): Int = current
-  def set(value: Int): Unit = current = value
-
-class Pair(first: Counter, second: Counter):
-  private val left: Counter = first
-  private val right: Counter = second
-  def leftValue(): Int = left.get()
-  def rightValue(): Int = right.get()
-
-class PairFactory:
-  def create(firstSeed: Int, secondSeed: Int, chooseFirst: Boolean, nextValue: Int): Pair =
-    val first: Counter = new Counter(firstSeed)
-    val second: Counter = new Counter(secondSeed)
-    val selected: Counter =
-      if chooseFirst then first else second
-    selected.set(nextValue)
-    new Pair(first, second)
-"#;
+const SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_conditional_reference_selection/PairFactory.scala");
 
 #[derive(Clone, Copy, Debug)]
 enum IndexMutation {
@@ -795,7 +779,7 @@ fn authenticate(
         &parsed.ast,
         parsed.root,
         source_id,
-        "conditional-reference-selection.scala",
+        conditional_reference_artifacts::PRODUCER_SOURCE_NAME,
         SourceParseStatus::Clean,
         &mut store,
         &mut packages,
@@ -1412,7 +1396,7 @@ fn authenticate(
         typed_bindings: &bindings,
         source: SourceMetadata {
             id: source_id,
-            name: "conditional-reference-selection.scala".into(),
+            name: conditional_reference_artifacts::PRODUCER_SOURCE_NAME.into(),
         },
         class: factory,
         class_tree: factory_tree,
@@ -1631,7 +1615,7 @@ fn conditional_shape_reaches_the_authenticated_paired_producer_plan() {
     let mut callback_reached = false;
     let result = with_paired_jvm_tasty_batch_plan(
         SOURCE,
-        "conditional-reference-selection.scala",
+        conditional_reference_artifacts::PRODUCER_SOURCE_NAME,
         SourceId::from_index(22_681),
         |_| callback_reached = true,
     );

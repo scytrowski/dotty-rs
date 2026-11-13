@@ -142,3 +142,46 @@ The implementation-specific producer and proof regressions are in
 `jvm_tasty_local_receiver_call` and
 `jvm_tasty_conditional_local_reference_proof`. The repository's required
 workspace and JDK checks remain the final validation gates for this change.
+
+## Independent consumers of the original Rust batch (#2271)
+
+The Rust runtime proof uses the canonical producer source name `PairFactory.scala`
+and the source fixture SHA-256
+`c77b2b3e00bf602b86be30b29ceaa2300398feb34e80d2f76c37f391bb4d654f`. It emits
+two independent fresh sessions and compares the ordered six-file paths, complete
+bytes, and all three class-to-TASTy UUID links. The same canonical
+`PairFactory.tasty` bytes are passed to the pinned Scala 3.9 reader, while the
+independent Java client loads all six Rust outputs without compiling the
+producer source.
+
+The independent Java client is
+[`RustRuntimeProbe.java`](../tests/fixtures/jvm_tasty_conditional_reference_selection/RustRuntimeProbe.java),
+SHA-256 `97cfe2c30ff7cb0b07627ce83dd2392aaee898c4690bc70b40206200a37d4a1b`.
+The Scala support source in the Rust consumer proof has SHA-256
+`06266874ed9a7acdfc4d6a1c27bea3967055e474bca5a2f666af5ebfc8669c28`.
+
+| Rust artifact | SHA-256 | Linked TASTy UUID |
+| --- | --- | --- |
+| `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | `008071c3c00968ac0000000000008193` |
+| `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | `008071c3c00968ac0000000000008193` |
+| `example/Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` | `000b7d8d7441c7f00000000000008198` |
+| `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | `000b7d8d7441c7f00000000000008198` |
+| `example/PairFactory.class` | `351d311b48edb38d5b86b2621cb49568df508c944929633e4bdef35ea03d159c` | `00d07c03e8e3c6dc00000000000081a1` |
+| `example/PairFactory.tasty` | `327e42e222d13f21fe8fbe7f7b8ddc769abf31a85c1d97d9b6115ed5d39efe5e` | `00d07c03e8e3c6dc00000000000081a1` |
+
+Under `javap -v -c -p`, Rust `PairFactory.create` has descriptor
+`(IIZI)Lexample/Pair;`, classfile major 65, and two full StackMapTable frames.
+Its `ifeq` at offset 21 targets the second local load at 29; the fallthrough
+loads the first local at 24. Both paths merge into selected slot 7 at offset
+31, then call `Counter.set(I)V` once. Pair construction loads original slots 5
+and 6 in order. `java -Xverify:all -ea` proves both choices, signed and equal
+seeds, fresh repeated allocations, distinct Pair fields, and independent
+mutations of the original fields.
+
+Negative copies distinguish failure stages: verifier-valid flipped-branch and
+wrong-selected-slot classfiles fail the paired artifact contract and the Java
+runtime assertions; an invalid branch target and a selected read before its
+initialization fail JVM verification. Corruptions remain in isolated runtime
+copies, and the six canonical originals remain unchanged. The strict Java and
+Scala consumer checks are part of the CI JDK target and the pinned Scala
+conditional proof target, respectively; both must run on the final PR head.
