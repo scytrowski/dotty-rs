@@ -57,12 +57,13 @@ fn attempt(command: &mut Command) -> Output {
 
 fn configure_jdk_command(command: &mut Command, java_home: &Path) {
     let tmpdir = std::env::var_os("TMPDIR").expect("TMPDIR must be task-local");
-    command
-        .env("JAVA_HOME", java_home)
-        .env(
-            "JAVA_TOOL_OPTIONS",
-            format!("-XX:-UsePerfData -Djava.io.tmpdir={}", Path::new(&tmpdir).display()),
-        );
+    command.env("JAVA_HOME", java_home).env(
+        "JAVA_TOOL_OPTIONS",
+        format!(
+            "-XX:-UsePerfData -Djava.io.tmpdir={}",
+            Path::new(&tmpdir).display()
+        ),
+    );
 }
 
 fn first_diagnostic(output: &Output) -> String {
