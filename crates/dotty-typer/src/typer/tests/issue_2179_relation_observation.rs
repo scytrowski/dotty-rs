@@ -1643,6 +1643,248 @@ fn preserves_option_map_rollback_and_tuple_to_array_automatic_preparation() {
     }
 }
 
+#[test]
+#[ignore = "requires pinned Scala 3.9.0 sources, classpath jars, and JDK environment"]
+fn captures_acceptance_vi_hash_code_and_prop_clear_before_rollback() {
+    let scala_root = PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT"));
+    let revision = Command::new("git")
+        .args(["-C", scala_root.to_str().unwrap(), "rev-parse", "HEAD"])
+        .output()
+        .expect("git reads the pinned Scala source revision");
+    assert!(revision.status.success());
+    assert_eq!(
+        String::from_utf8(revision.stdout).unwrap().trim(),
+        "777528f19a58e794c9954a42f433373472ec57f8",
+        "acceptance VI observation uses the pinned Scala 3.9.0 source"
+    );
+    let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+    let release = std::env::var("SCALA39_JDK_RELEASE")
+        .expect("SCALA39_JDK_RELEASE")
+        .parse()
+        .unwrap();
+    assert_eq!(release, 21);
+    let jars =
+        std::env::split_paths(&std::env::var_os("SCALA39_CLASSPATH").expect("SCALA39_CLASSPATH"))
+            .collect::<Vec<_>>();
+
+    for (relative, wanted_tree, wanted_method, wanted_owner) in [
+        (
+            "library/src/scala/Enumeration.scala",
+            459,
+            "hashCode",
+            ".scala.Enumeration.Value",
+        ),
+        (
+            "library/src/scala/sys/PropImpl.scala",
+            99,
+            "clear",
+            ".scala.sys.PropImpl",
+        ),
+    ] {
+        let text = fs::read_to_string(scala_root.join(relative)).unwrap();
+        let source = SourceId::from_index(0);
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let scanner = ContextualScanner::new(&text).unwrap();
+        let parsed = dotty_parser::parse_compilation_unit(
+            SourceText::new(&text).unwrap(),
+            source,
+            scanner,
+            &mut store.names,
+        );
+        let index = name_compilation_unit(
+            &parsed.ast,
+            parsed.root,
+            source,
+            relative,
+            &mut store,
+            &mut packages,
+        )
+        .unwrap();
+        let (tree, node) = parsed
+            .ast
+            .iter()
+            .find(|(tree, node)| {
+                tree.index() == wanted_tree && matches!(node.kind, TreeKind::DefDef(_))
+            })
+            .expect("selected original DefDef");
+        let method_span = node.position.expect("selected DefDef retains source span");
+        let method_symbol = index
+            .symbol_at(source, tree)
+            .expect("selected DefDef has its canonical source symbol");
+
+        let mut entries: Vec<Box<dyn ClassPathEntry>> = vec![Box::new(
+            JdkClassPath::new(java_home.join("jmods")).unwrap(),
+        )];
+        for jar in &jars {
+            entries.push(Box::new(JarClassPath::new(jar.clone(), release).unwrap()));
+        }
+        let resolver = ClasspathSymbolResolver::new(
+            CompositeClassPath::new(entries),
+            definitions,
+            LoadingSession::with_packages(packages.snapshot()),
+        );
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+        let observed = Rc::new(RefCell::new(None::<String>));
+        let capture = observed.clone();
+        let parsed_ast = &parsed.ast;
+        typer.transaction_failure_error_observer = Some(Rc::new(move |typer, error| {
+            let method_info = typer.store.symbols.get(method_symbol);
+            let owner = method_info
+                .owner
+                .expect("method retains its canonical owner");
+            let owner_tree = match typer.index.definition_of(owner) {
+                Some(SourceDefinition::Canonical {
+                    source: actual_source,
+                    tree,
+                }) if actual_source == source => tree,
+                other => panic!("method owner is a canonical source definition: {other:?}"),
+            };
+            assert_eq!(
+                observed_symbol_path(typer.store, method_symbol),
+                format!("{wanted_owner}.{wanted_method}")
+            );
+            assert_eq!(observed_symbol_path(typer.store, owner), wanted_owner);
+            assert!(matches!(
+                typer.index.definition_of(method_symbol),
+                Some(SourceDefinition::Canonical { source: actual_source, tree: actual_tree })
+                    if actual_source == source && actual_tree == tree
+            ));
+
+            let mut lines = vec![
+                format!("root={relative}#tree={wanted_tree}"),
+                format!("method_span={:?}", method_span.span().range()),
+                format!(
+                    "canonical_method={method_symbol:?} path={wanted_owner}.{wanted_method} owner={owner:?} owner_tree={owner_tree:?} owner_path={wanted_owner} origin={:?}",
+                    method_info.origin
+                ),
+                format!("method_error={error:?}"),
+            ];
+            let diagnostic = match error {
+                TyperError::UnstableSelectionPrefix {
+                    source: error_source,
+                    tree_index,
+                    qualifier_type,
+                } => {
+                    assert_eq!(*error_source, source);
+                    let (diagnostic_tree, diagnostic_node) = parsed_ast
+                        .iter()
+                        .find(|(candidate, _)| candidate.index() == *tree_index)
+                        .unwrap();
+                    let diagnostic_span = diagnostic_node
+                        .position
+                        .expect("first error tree retains source span");
+                    assert_eq!(diagnostic_tree.index(), 458);
+                    lines.push(format!(
+                        "first_diagnostic=UnstableSelectionPrefix tree={} span={:?}",
+                        diagnostic_tree.index(),
+                        diagnostic_span.span().range()
+                    ));
+                    lines.push(format!(
+                        "qualifier_type={qualifier_type:?} semantic={:?}",
+                        typer.store.types.get(*qualifier_type)
+                    ));
+                    let mut symbols = Vec::new();
+                    type_symbols(typer.store, *qualifier_type, &mut symbols, &mut Vec::new());
+                    symbols.sort_by_key(|symbol| symbol.index());
+                    symbols.dedup();
+                    lines.push(format!(
+                        "qualifier_symbols={:?}",
+                        symbols
+                            .iter()
+                            .map(|symbol| observed_symbol_path(typer.store, *symbol))
+                            .collect::<Vec<_>>()
+                    ));
+                    "UnstableSelectionPrefix"
+                }
+                TyperError::ExpectedExpressionTypeMismatch {
+                    source: error_source,
+                    tree_index,
+                    actual,
+                    expected,
+                } => {
+                    assert_eq!(*error_source, source);
+                    let (diagnostic_tree, diagnostic_node) = parsed_ast
+                        .iter()
+                        .find(|(candidate, _)| candidate.index() == *tree_index)
+                        .unwrap();
+                    let diagnostic_span = diagnostic_node
+                        .position
+                        .expect("first error tree retains source span");
+                    assert_eq!(diagnostic_tree.index(), 98);
+                    lines.push(format!(
+                        "first_diagnostic=ExpectedExpressionTypeMismatch tree={} span={:?}",
+                        diagnostic_tree.index(),
+                        diagnostic_span.span().range()
+                    ));
+                    for (label, operand) in [("actual", *actual), ("expected", *expected)] {
+                        lines.push(format!(
+                            "{label}_type={operand:?} semantic={:?}",
+                            typer.store.types.get(operand)
+                        ));
+                        let mut symbols = Vec::new();
+                        type_symbols(typer.store, operand, &mut symbols, &mut Vec::new());
+                        symbols.sort_by_key(|symbol| symbol.index());
+                        symbols.dedup();
+                        lines.push(format!(
+                            "{label}_symbols={:?}",
+                            symbols
+                                .iter()
+                                .map(|symbol| observed_symbol_path(typer.store, *symbol))
+                                .collect::<Vec<_>>()
+                        ));
+                    }
+                    "ExpectedExpressionTypeMismatch"
+                }
+                other => panic!("unexpected acceptance VI first failure: {other:?}"),
+            };
+            lines.push(format!("nested_cause=none; diagnostic={diagnostic}"));
+            *capture.borrow_mut() = Some(lines.join("\n"));
+        }));
+
+        let store_before = typer.store().checkpoint();
+        let typed_before = typer.typed_ast().checkpoint();
+        let type_index_before = format!("{:?}", typer.type_index.checkpoint());
+        let typed_index_before = format!("{:?}", typer.typed_index.clone());
+        let source_typed_index_before = format!("{:?}", typer.source_typed_index());
+        let error = typer
+            .type_method_definition(tree)
+            .expect_err("the original complete DefDef remains blocked on this baseline");
+        assert!(
+            observed.borrow().is_some(),
+            "the test observer captures the original error before rollback: {error:?}"
+        );
+        assert_eq!(typer.store().checkpoint(), store_before);
+        assert_eq!(typer.typed_ast().checkpoint(), typed_before);
+        assert_eq!(
+            format!("{:?}", typer.type_index.checkpoint()),
+            type_index_before
+        );
+        assert_eq!(
+            format!("{:?}", typer.typed_index.clone()),
+            typed_index_before
+        );
+        assert_eq!(
+            format!("{:?}", typer.source_typed_index()),
+            source_typed_index_before
+        );
+        assert_eq!(typer.source_typed_index().get(source, tree), None);
+        println!(
+            "ACCEPTANCE_VI_OBSERVATION_BEGIN\n{}\nACCEPTANCE_VI_OBSERVATION_END",
+            observed.borrow().as_deref().unwrap()
+        );
+    }
+}
+
 type EitherSwapSourceCase = (
     TreeId<Untyped>,
     TreeId<Untyped>,
