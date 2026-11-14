@@ -25,6 +25,12 @@ const CLIENT_SHA256: &str = "d4668a27c5c660debd71d94a7ce117edec82b14c070dbae70c9
 const JAVA_CLIENT: &str =
     include_str!("fixtures/jvm_tasty_conditional_reference_selection/RustRuntimeProbe.java");
 const JAVA_CLIENT_SHA256: &str = "97cfe2c30ff7cb0b07627ce83dd2392aaee898c4690bc70b40206200a37d4a1b";
+const MUTABLE_REBINDING_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_mutable_reference_rebinding/MutableReferenceRebinding.scala");
+const MUTABLE_REBINDING_PROBE: &str =
+    include_str!("fixtures/jvm_tasty_mutable_reference_rebinding/RuntimeProbe.java");
+const MUTABLE_REBINDING_MANIFEST: &str =
+    include_str!("fixtures/jvm_tasty_mutable_reference_rebinding/oracle.json");
 const PATHS: [&str; 6] = [
     "example/Counter.class",
     "example/Counter.tasty",
@@ -228,6 +234,37 @@ fn sha256(path: &Path) -> String {
         .next()
         .expect("sha256sum output")
         .to_owned()
+}
+
+fn json_string_field<'a>(object: &'a str, field: &str) -> &'a str {
+    let key = format!("\"{field}\": \"");
+    let value = object
+        .split_once(&key)
+        .unwrap_or_else(|| panic!("manifest object has {field} string field"))
+        .1;
+    value
+        .split_once('"')
+        .expect("manifest string field is terminated")
+        .0
+}
+
+fn snapshot_receipt<'a>(manifest: &'a str, name: &str) -> (&'a str, &'a str) {
+    let snapshots = manifest
+        .split_once("\"snapshots\": {")
+        .expect("oracle manifest has snapshots object")
+        .1;
+    let key = format!("\"{name}\": {{");
+    let object = snapshots
+        .split_once(&key)
+        .unwrap_or_else(|| panic!("oracle manifest has {name} snapshot"))
+        .1
+        .split_once('}')
+        .expect("snapshot entry is terminated")
+        .0;
+    (
+        json_string_field(object, "path"),
+        json_string_field(object, "sha256"),
+    )
 }
 
 fn task_dir() -> PathBuf {
@@ -807,4 +844,306 @@ fn scala39_compiles_and_runs_against_the_original_rust_conditional_batch() {
         );
     }
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn scala39_mutable_reference_rebinding_oracle_is_pinned_and_executable() {
+    if std::env::var(REQUIRE).as_deref() != Ok("1") {
+        if std::env::var_os(REQUIRE).is_some() {
+            panic!("{REQUIRE} must equal 1 when set");
+        }
+        eprintln!("SKIP Scala 3.9 mutable reference rebinding oracle: strict gate is not required");
+        return;
+    }
+    let source_path = Path::new(
+        "tests/fixtures/jvm_tasty_mutable_reference_rebinding/MutableReferenceRebinding.scala",
+    );
+    let probe_path =
+        Path::new("tests/fixtures/jvm_tasty_mutable_reference_rebinding/RuntimeProbe.java");
+    assert_eq!(
+        sha256(source_path),
+        "2cbc91af8bcac9cc158f2c4b1045838d428ac58ae8e174890852e279efd1d469"
+    );
+    assert_eq!(
+        sha256(probe_path),
+        "709e0695297b0237d9e0b1a19c52ef4f2fbe981d3f4357e26fae6bf6363b59e3"
+    );
+    for name in ["javap", "print_tasty", "decompile", "typed_tree"] {
+        let (relative_path, expected_hash) = snapshot_receipt(MUTABLE_REBINDING_MANIFEST, name);
+        let path =
+            Path::new("tests/fixtures/jvm_tasty_mutable_reference_rebinding").join(relative_path);
+        assert_eq!(
+            sha256(&path),
+            expected_hash,
+            "oracle manifest SHA-256 for the {name} snapshot"
+        );
+    }
+
+    let pinned = scala39_toolchain::from_environment(output, |command| {
+        command.env(
+            "JAVA_HOME",
+            std::env::var_os("JAVA_HOME").expect("JAVA_HOME"),
+        );
+        command.env(
+            "JAVA_TOOL_OPTIONS",
+            format!(
+                "-XX:-UsePerfData -Djava.io.tmpdir={}",
+                std::env::var("TMPDIR").unwrap()
+            ),
+        );
+    });
+    let root = task_dir();
+    let classes = root.join("classes");
+    fs::create_dir_all(&classes).unwrap();
+    let mut scalac = scala39_toolchain::scalac(
+        &pinned.java_home,
+        &pinned.scalac,
+        PathBuf::from(std::env::var_os("TMPDIR").unwrap()),
+    );
+    scalac
+        .args(["-Werror", "-release", "21", "-d"])
+        .arg(&classes)
+        .arg(source_path);
+    output(&mut scalac);
+
+    for relative in PATHS {
+        let checked_in = Path::new("tests/fixtures/jvm_tasty_mutable_reference_rebinding/scala39")
+            .join(relative);
+        assert_eq!(
+            fs::read(classes.join(relative)).unwrap(),
+            fs::read(&checked_in).unwrap(),
+            "pinned Scala output must match checked-in oracle: {relative}"
+        );
+    }
+    for (relative, expected_hash) in [
+        (
+            "example/Counter.class",
+            "7b46dd47c9f27861ff6e66beb95b4936fa613851407cac9c64465bdbbf634d6e",
+        ),
+        (
+            "example/Counter.tasty",
+            "5b1c23bb7f960014cbbe3d37edcda07019ee968209ee9d4f24c08855bc683057",
+        ),
+        (
+            "example/Pair.class",
+            "90fe0433064510240969e1b2d5057baeb737b86ee9fca89242a5056b1f83de06",
+        ),
+        (
+            "example/Pair.tasty",
+            "72396247c4e8661b1e26f982daad2a7c30bad18984f1b11e103458e1a478c5ce",
+        ),
+        (
+            "example/PairFactory.class",
+            "5fe95908cb6cde1a417c90ad72e4560636c4c8c16e060545177a644f8f0cbffe",
+        ),
+        (
+            "example/PairFactory.tasty",
+            "736c135470d5aea4c80a786df751a5c4d10a6bca8076b4f5ff10b7639ee1b706",
+        ),
+    ] {
+        assert_eq!(
+            sha256(&classes.join(relative)),
+            expected_hash,
+            "pinned artifact manifest hash for {relative}"
+        );
+    }
+    for (name, expected_uuid) in [
+        ("Counter", "0037406b89e4eee800ccab48e5a4bd1b"),
+        ("Pair", "00d6f05f6fd1c0d300a94710d6406d5b"),
+        ("PairFactory", "0046fa06c00ff8d4002ce145a844c627"),
+    ] {
+        let class_bytes = fs::read(classes.join(format!("example/{name}.class"))).unwrap();
+        let tasty_bytes = fs::read(classes.join(format!("example/{name}.tasty"))).unwrap();
+        let mut reader = ClassReader::new(&class_bytes);
+        let class = ClassFile::decode(&mut reader).expect("pinned Scala class decodes");
+        assert!(reader.is_at_end());
+        assert_eq!(class.version.major, 65);
+        let link = class.tasty_link_id().unwrap().unwrap();
+        let rendered_uuid = link
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(rendered_uuid, expected_uuid, "pinned TASTy link for {name}");
+        let tasty = TastyFile::parse_and_validate_scala_3_9(&tasty_bytes)
+            .expect("pinned Scala sidecar validates");
+        assert_eq!(
+            (
+                tasty.header().major_version,
+                tasty.header().minor_version,
+                tasty.header().experimental_version
+            ),
+            (28, 9, 0)
+        );
+        assert_eq!(tasty.header().uuid, *link.as_bytes());
+    }
+    let probe = root.join("RuntimeProbe.java");
+    let probe_classes = root.join("probe-classes");
+    fs::create_dir_all(&probe_classes).unwrap();
+    fs::write(&probe, MUTABLE_REBINDING_PROBE).unwrap();
+    let mut javac = Command::new(pinned.java_home.join("bin/javac"));
+    javac
+        .args(["--release", "21", "-classpath"])
+        .arg(&classes)
+        .arg("-d")
+        .arg(&probe_classes)
+        .arg(&probe);
+    configure_jdk_command(&mut javac, &pinned.java_home);
+    output(&mut javac);
+    let mut java = Command::new(&pinned.java);
+    java.args(["-Xverify:all", "-ea", "-cp"])
+        .arg(format!("{}:{}", probe_classes.display(), classes.display()))
+        .arg("example.RuntimeProbe");
+    configure_jdk_command(&mut java, &pinned.java_home);
+    let run = output(&mut java);
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "mutable reference rebinding values=7/42,-9/11,5/-13 distinct=true"
+    );
+
+    let mut javap = Command::new(pinned.java_home.join("bin/javap"));
+    javap
+        .args(["-v", "-c", "-p", "-classpath"])
+        .arg(&classes)
+        .arg("example.PairFactory");
+    configure_jdk_command(&mut javap, &pinned.java_home);
+    let javap = String::from_utf8_lossy(&output(&mut javap).stdout).into_owned();
+    for evidence in [
+        "major version: 65",
+        "descriptor: (III)Lexample/Pair;",
+        "example/Counter.set:(I)V",
+    ] {
+        assert!(
+            javap.contains(evidence),
+            "javap lacks {evidence:?}:\n{javap}"
+        );
+    }
+    assert_eq!(
+        javap
+            .lines()
+            .filter(
+                |line| line.contains("invokevirtual") && line.contains("example/Counter.set:(I)V")
+            )
+            .count(),
+        1
+    );
+    let printed_tasty = fs::read_to_string(
+        "tests/fixtures/jvm_tasty_mutable_reference_rebinding/oracle/PairFactory.print-tasty.txt",
+    )
+    .unwrap();
+    for evidence in [
+        "tooling: Scala 3.9.0-bin-SNAPSHOT-git-777528f",
+        "VALDEF(8) 26 [selected]",
+        "ASSIGN(5)",
+        "TERMREFdirect 106",
+    ] {
+        assert!(
+            printed_tasty.contains(evidence),
+            "printed TASTy oracle lacks {evidence:?}"
+        );
+    }
+
+    let base = concat!(
+        "    val first: Counter = new Counter(firstSeed)\n",
+        "    val second: Counter = new Counter(secondSeed)\n",
+        "    var selected: Counter = first\n",
+        "    selected = second\n",
+        "    selected.set(nextValue)\n",
+        "    new Pair(first, second)"
+    );
+    let replace = |old: &str, new: &str| MUTABLE_REBINDING_SOURCE.replace(old, new);
+    let renamed = replace(
+        base,
+        concat!(
+            "    val left: Counter = new Counter(firstSeed)\n",
+            "    val right: Counter = new Counter(secondSeed)\n",
+            "    var active: Counter = left\n",
+            "    active = right\n",
+            "    active.set(nextValue)\n",
+            "    new Pair(left, right)"
+        ),
+    );
+    let reversed = replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
+        "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
+    );
+    let select_first = replace("    selected = second", "    selected = first");
+    let duplicate = replace(
+        "    selected = second\n    selected.set(nextValue)",
+        "    selected = second\n    selected = first\n    selected.set(nextValue)",
+    );
+    let allocation_rhs = replace(
+        "    selected = second",
+        "    selected = new Counter(nextValue)",
+    );
+    let nested_branch = replace(
+        "    selected = second",
+        "    if nextValue >= 0 then\n      selected = second\n    else\n      selected = first",
+    );
+    let nested_loop = replace(
+        "    selected = second",
+        "    while nextValue > 0 do\n      selected = second",
+    );
+    let val_write = replace(
+        "    var selected: Counter = first",
+        "    val selected: Counter = first",
+    );
+    let foreign = replace("    selected = second", "    selected = foreign");
+    let forward = replace(
+        "    var selected: Counter = first\n    selected = second",
+        "    var selected: Counter = later\n    selected = second\n    val later: Counter = first",
+    );
+    let uninitialized = replace(
+        "    var selected: Counter = first",
+        "    var selected: Counter = _",
+    );
+    let wrong_type = replace("    selected = second", "    selected = nextValue");
+    for (name, variant, expected_diagnostic) in [
+        ("renamed", renamed, None),
+        ("reversed", reversed, None),
+        ("select-first", select_first, None),
+        ("duplicate", duplicate, None),
+        ("allocation-rhs", allocation_rhs, None),
+        ("nested-branch", nested_branch, None),
+        ("nested-loop", nested_loop, None),
+        ("val-write", val_write, Some("[E052]")),
+        ("foreign", foreign, Some("[E119]")),
+        ("forward-reference", forward, Some("[E039]")),
+        ("uninitialized", uninitialized, Some("Warning:")),
+        ("wrong-type", wrong_type, Some("[E007]")),
+    ] {
+        let control_dir = root.join(format!("control-{name}"));
+        let control_classes = control_dir.join("classes");
+        fs::create_dir_all(&control_classes).unwrap();
+        let control_source = control_dir.join("MutableReferenceRebinding.scala");
+        fs::write(&control_source, variant).unwrap();
+        let mut command = scala39_toolchain::scalac(
+            &pinned.java_home,
+            &pinned.scalac,
+            PathBuf::from(std::env::var_os("TMPDIR").unwrap()),
+        );
+        command
+            .args(["-Werror", "-release", "21", "-d"])
+            .arg(&control_classes)
+            .arg(&control_source);
+        let result = attempt(&mut command);
+        match expected_diagnostic {
+            None => assert!(
+                result.status.success(),
+                "Scala-valid control {name}: {}",
+                complete_output(&result)
+            ),
+            Some(expected) => {
+                assert!(
+                    !result.status.success(),
+                    "invalid Scala control {name} unexpectedly compiled"
+                );
+                assert!(
+                    complete_output(&result).contains(expected),
+                    "{name} lacks {expected}: {}",
+                    complete_output(&result)
+                );
+            }
+        }
+    }
 }
