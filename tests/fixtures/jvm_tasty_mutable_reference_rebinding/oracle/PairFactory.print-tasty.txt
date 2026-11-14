@@ -1,0 +1,192 @@
+--------------------------------------------------------------------------------
+tests/fixtures/jvm_tasty_mutable_reference_rebinding/scala39/example/PairFactory.tasty
+--------------------------------------------------------------------------------
+Header:
+  version: 28.9.0
+  tooling: Scala 3.9.0-bin-SNAPSHOT-git-777528f
+     UUID: 0046fa06-c00f-f8d4-002c-e145a844c627
+
+Names (389 bytes, starting from 60):
+     0: ASTs
+     1: example
+     2: PairFactory
+     3: <init>
+     4: java
+     5: lang
+     6: java[Qualified . lang]
+     7: Object
+     8: java[Qualified . lang][Qualified . Object]
+     9: <init>[Signed Signature(List(),java.lang.Object) @<init>]
+    10: Unit
+    11: scala
+    12: create
+    13: firstSeed
+    14: Int
+    15: secondSeed
+    16: nextValue
+    17: Pair
+    18: example[Qualified . Pair]
+    19: Counter
+    20: example[Qualified . Counter]
+    21: <init>[Signed Signature(List(example.Counter, example.Counter),example.Pair) @<init>]
+    22: first
+    23: scala[Qualified . Int]
+    24: <init>[Signed Signature(List(scala.Int),example.Counter) @<init>]
+    25: second
+    26: selected
+    27: set
+    28: scala[Qualified . Unit]
+    29: set[Signed Signature(List(scala.Int),scala.Unit) @set]
+    30: SourceFile
+    31: annotation
+    32: scala[Qualified . annotation]
+    33: internal
+    34: scala[Qualified . annotation][Qualified . internal]
+    35: scala[Qualified . annotation][Qualified . internal][Qualified . SourceFile]
+    36: String
+    37: java[Qualified . lang][Qualified . String]
+    38: <init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]
+    39: tests/fixtures/jvm_tasty_mutable_reference_rebinding/MutableReferenceRebinding.scala
+    40: Positions
+    41: Comments
+    42: Attributes
+
+Trees (176 bytes, starting from 452):
+     0: PACKAGE(173)
+     3:   TERMREFpkg 1 [example]
+     5:   TYPEDEF(168) 2 [PairFactory]
+     9:     TEMPLATE(144)
+    12:       APPLY(10)
+    14:         SELECTin(8) 9 [<init>[Signed Signature(List(),java.lang.Object) @<init>]]
+    17:           NEW
+    18:             TYPEREF 7 [Object]
+    20:               TERMREFpkg 6 [java[Qualified . lang]]
+    22:           SHAREDtype 18
+    24:       DEFDEF(7) 3 [<init>]
+    27:         EMPTYCLAUSE
+    28:         TYPEREF 10 [Unit]
+    30:           TERMREFpkg 11 [scala]
+    32:         STABLE
+    33:       DEFDEF(121) 12 [create]
+    36:         PARAM(7) 13 [firstSeed]
+    39:           IDENTtpt 14 [Int]
+    41:             TYPEREF 14 [Int]
+    43:               TERMREFpkg 11 [scala]
+    45:         PARAM(5) 15 [secondSeed]
+    48:           IDENTtpt 14 [Int]
+    50:             SHAREDtype 41
+    52:         PARAM(5) 16 [nextValue]
+    55:           IDENTtpt 14 [Int]
+    57:             SHAREDtype 41
+    59:         IDENTtpt 17 [Pair]
+    61:           TYPEREF 17 [Pair]
+    63:             TERMREFpkg 1 [example]
+    65:         BLOCK(89)
+    67:           APPLY(14)
+    69:             SELECTin(8) 21 [<init>[Signed Signature(List(example.Counter, example.Counter),example.Pair) @<init>]]
+    72:               NEW
+    73:                 IDENTtpt 17 [Pair]
+    75:                   SHAREDtype 61
+    77:               SHAREDtype 61
+    79:             TERMREFdirect 83
+    81:             TERMREFdirect 106
+    83:           VALDEF(21) 22 [first]
+    86:             IDENTtpt 19 [Counter]
+    88:               TYPEREF 19 [Counter]
+    90:                 SHAREDtype 63
+    92:             APPLY(12)
+    94:               SELECTin(8) 24 [<init>[Signed Signature(List(scala.Int),example.Counter) @<init>]]
+    97:                 NEW
+    98:                   IDENTtpt 19 [Counter]
+   100:                     SHAREDtype 88
+   102:                 SHAREDtype 88
+   104:               TERMREFdirect 36
+   106:           VALDEF(19) 25 [second]
+   109:             IDENTtpt 19 [Counter]
+   111:               SHAREDtype 88
+   113:             APPLY(12)
+   115:               SELECTin(8) 24 [<init>[Signed Signature(List(scala.Int),example.Counter) @<init>]]
+   118:                 NEW
+   119:                   IDENTtpt 19 [Counter]
+   121:                     SHAREDtype 88
+   123:                 SHAREDtype 88
+   125:               TERMREFdirect 45
+   127:           VALDEF(8) 26 [selected]
+   130:             IDENTtpt 19 [Counter]
+   132:               SHAREDtype 88
+   134:             SHAREDtype 79
+   136:             MUTABLE
+   137:           ASSIGN(5)
+   139:             TERMREFdirect 127
+   142:             SHAREDtype 81
+   144:           APPLY(10)
+   146:             SELECTin(6) 29 [set[Signed Signature(List(scala.Int),scala.Unit) @set]]
+   149:               SHAREDtype 139
+   152:               SHAREDtype 88
+   154:             TERMREFdirect 52
+   156:     ANNOTATION(18)
+   158:       TYPEREF 30 [SourceFile]
+   160:         TERMREFpkg 34 [scala[Qualified . annotation][Qualified . internal]]
+   162:       APPLY(12)
+   164:         SELECTin(8) 38 [<init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]]
+   167:           NEW
+   168:             SHAREDtype 158
+   171:           SHAREDtype 158
+   174:         STRINGconst 39 [tests/fixtures/jvm_tasty_mutable_reference_rebinding/MutableReferenceRebinding.scala]
+   176:
+
+Positions (175 bytes, starting from 631):
+  lines: 22
+  line sizes:
+     15, 0, 26, 34, 26, 45, 0, 44, 35, 37, 35, 37, 0, 18, 69, 47, 49, 33, 21, 27
+     27, 0
+  positions:
+     0: 0 .. 645
+     5: 347 .. 645
+     9: 368 .. 645
+    18: 353 .. 353
+    24: 368 .. 368
+    28: 368 .. 368
+    33: 368 .. 645
+    36: 379 .. 393
+    39: 390 .. 393
+    45: 395 .. 410
+    48: 407 .. 410
+    52: 412 .. 426
+    55: 423 .. 426
+    59: 429 .. 433
+    67: 622 .. 645
+    73: 626 .. 630
+    79: 631 .. 636
+    81: 638 .. 644
+    83: 440 .. 483
+    86: 451 .. 458
+    92: 461 .. 483
+    98: 465 .. 472
+   104: 473 .. 482
+   106: 488 .. 533
+   109: 500 .. 507
+   113: 510 .. 533
+   119: 514 .. 521
+   125: 522 .. 532
+   127: 538 .. 567
+   130: 552 .. 559
+   134: 562 .. 567
+   139: 572 .. 580
+   142: 583 .. 589
+   144: 594 .. 617
+   146: 594 .. 606
+   149: 594 .. 602
+   154: 607 .. 616
+   162: 347 .. 645
+   168: 347 .. 347
+   174: 347 .. 347
+
+  source paths:
+     0: 39 [tests/fixtures/jvm_tasty_mutable_reference_rebinding/MutableReferenceRebinding.scala]
+
+Attributes (2 bytes, starting from 810):
+  SOURCEFILEattr 39 [tests/fixtures/jvm_tasty_mutable_reference_rebinding/MutableReferenceRebinding.scala]
+
+
+--------------------------------------------------------------------------------

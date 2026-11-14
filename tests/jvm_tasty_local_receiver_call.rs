@@ -6,7 +6,8 @@ use dotty_classfile::constant_pool::ConstantPoolIndex;
 use dotty_classfile::reader::Reader as ClassReader;
 use dotty_core::ast::TreeKind;
 use dotty_core::{
-    Definitions, Packages, SemanticStore, SourceId, SourceText, SymbolId, TermRefTarget, Type,
+    Definitions, Packages, SemanticStore, SourceId, SourceText, SymbolFlags, SymbolId,
+    TermRefTarget, Type,
 };
 use dotty_jvm_tasty_contract::{
     JvmTastyBatchArtifacts, JvmTastyClassFileArtifact, JvmTastyContractError,
@@ -37,6 +38,8 @@ const LOCAL_REFERENCE_ALIAS_TARGET: &str =
 const CONDITIONAL_REFERENCE_SELECTION_TARGET: &str = include_str!(
     "fixtures/jvm_tasty_conditional_reference_selection/ConditionalReferenceSelection.scala"
 );
+const MUTABLE_REFERENCE_REBINDING_TARGET: &str =
+    include_str!("fixtures/jvm_tasty_mutable_reference_rebinding/MutableReferenceRebinding.scala");
 const CONDITIONAL_CONTROL_SWAPPED: &str = include_str!(
     "fixtures/jvm_tasty_conditional_reference_selection/controls/SwappedBranches.scala"
 );
@@ -535,6 +538,383 @@ fn paired_result(source: &str, source_id: u32) -> Result<(), PairedPlanError> {
         SourceId::from_index(source_id),
         |_| (),
     )
+}
+
+#[test]
+fn mutable_reference_rebinding_audit_authenticates_assignment_identity_and_first_failure() {
+    let source_id = SourceId::from_index(22980);
+    let source_text = SourceText::new(MUTABLE_REFERENCE_REBINDING_TARGET).unwrap();
+    let scanner = ContextualScanner::new(MUTABLE_REFERENCE_REBINDING_TARGET).unwrap();
+    assert!(scanner.diagnostics().is_empty());
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let parsed = parse_compilation_unit(source_text, source_id, scanner, &mut store.names);
+    assert!(parsed.diagnostics.is_empty());
+    let mut packages = Packages::new();
+    let source_index = match name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source_id,
+        "MutableReferenceRebinding.scala",
+        SourceParseStatus::Clean,
+        &mut store,
+        &mut packages,
+    )
+    .unwrap()
+    {
+        NamingOutcome::Named { index, diagnostics } if diagnostics.is_empty() => index,
+        outcome => panic!("mutable rebinding source names cleanly: {outcome:?}"),
+    };
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("mutable rebinding root is a package");
+    };
+    assert_eq!(package.stats.len(), 3);
+    let factory_tree = *package.stats.last().unwrap();
+    let factory = source_index.symbol_at(source_id, factory_tree).unwrap();
+    let TreeKind::TypeDef(factory_def) = &parsed.ast.get(factory_tree).kind else {
+        panic!("PairFactory is a class");
+    };
+    let TreeKind::Template(factory_template) = &parsed.ast.get(factory_def.rhs).kind else {
+        panic!("PairFactory has a template");
+    };
+    let create_tree = *factory_template
+        .body
+        .iter()
+        .find(|tree| {
+            matches!(
+                &parsed.ast.get(**tree).kind,
+                TreeKind::DefDef(definition) if definition.rhs.is_some()
+            )
+        })
+        .unwrap();
+    let create = source_index.symbol_at(source_id, create_tree).unwrap();
+    assert_eq!(store.symbols.get(create).owner, Some(factory));
+    let TreeKind::DefDef(create_def) = &parsed.ast.get(create_tree).kind else {
+        panic!("create is a method");
+    };
+    let formals = create_def.value_param_clauses[0]
+        .iter()
+        .map(|tree| source_index.symbol_at(source_id, *tree).unwrap())
+        .collect::<Vec<_>>();
+    let [first_seed, second_seed, next_value] = formals.as_slice() else {
+        panic!("create has three canonical seed/value formals");
+    };
+    let body_tree = create_def.rhs.unwrap();
+    let TreeKind::Block(block) = &parsed.ast.get(body_tree).kind else {
+        panic!("create body is a source block");
+    };
+    assert_eq!(block.stats.len(), 5);
+    assert!(
+        block.stats[..3]
+            .iter()
+            .all(|tree| matches!(&parsed.ast.get(*tree).kind, TreeKind::ValDef(_)))
+    );
+    assert!(matches!(
+        &parsed.ast.get(block.stats[3]).kind,
+        TreeKind::Assign(_)
+    ));
+    assert!(matches!(
+        &parsed.ast.get(block.stats[4]).kind,
+        TreeKind::Apply(_)
+    ));
+
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source_id,
+        &source_index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for class_tree in package.stats.iter().copied() {
+        let class = source_index.symbol_at(source_id, class_tree).unwrap();
+        typer.complete_symbol(class).unwrap();
+        let TreeKind::TypeDef(definition) = &parsed.ast.get(class_tree).kind else {
+            unreachable!();
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind else {
+            unreachable!();
+        };
+        typer
+            .complete_symbol(
+                source_index
+                    .symbol_at(source_id, template.constructor)
+                    .unwrap(),
+            )
+            .unwrap();
+        for member in template.body.iter().copied() {
+            if matches!(&parsed.ast.get(member).kind, TreeKind::DefDef(_)) {
+                typer.type_method_definition(member).unwrap();
+            }
+        }
+    }
+
+    let locals = block.stats[..3]
+        .iter()
+        .map(|tree| typer.typed_local_binding_at(source_id, *tree).unwrap())
+        .collect::<Vec<_>>();
+    let [first, second, selected] = locals.as_slice() else {
+        panic!("create has first, second, and selected locals");
+    };
+    assert_ne!(first.symbol(), second.symbol());
+    assert_ne!(selected.symbol(), first.symbol());
+    assert_ne!(selected.symbol(), second.symbol());
+    assert!(
+        typer
+            .store()
+            .symbols
+            .get(selected.symbol())
+            .flags
+            .contains(SymbolFlags::MUTABLE)
+    );
+    for (tree, binding) in block.stats[..3].iter().zip(locals.iter()) {
+        assert_eq!(
+            typer.source_typed_index().get(source_id, *tree),
+            Some(binding.declaration())
+        );
+        assert_eq!(
+            typer.store().symbols.get(binding.symbol()).owner,
+            Some(create)
+        );
+    }
+
+    let typed_ast = typer.typed_ast();
+    let term_symbol = |tree| match typer.store().types.get(typed_ast.get(tree).ty) {
+        Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        } => *symbol,
+        other => panic!("tree retains canonical term identity: {other:?}"),
+    };
+    let TreeKind::ValDef(selected_source) = &parsed.ast.get(block.stats[2]).kind else {
+        panic!("selected source local remains a ValDef");
+    };
+    let selected_source_rhs = selected_source
+        .rhs
+        .expect("selected source local has an initializer");
+    let TreeKind::ValDef(selected_typed) = &typed_ast.get(selected.declaration()).kind else {
+        panic!("selected typed local remains a ValDef");
+    };
+    let selected_typed_rhs = selected_typed
+        .rhs
+        .expect("selected typed local retains its initializer");
+    assert_eq!(
+        typer
+            .source_typed_index()
+            .get(source_id, selected_source_rhs),
+        Some(selected_typed_rhs),
+        "selected initializer retains its source-to-typed mapping"
+    );
+    assert_eq!(
+        term_symbol(selected_typed_rhs),
+        first.symbol(),
+        "selected initializer resolves canonically to first"
+    );
+    let typed_assignment = typer
+        .source_typed_index()
+        .get(source_id, block.stats[3])
+        .expect("the source assignment has a typed identity");
+    let TreeKind::Assign(assignment) = &typed_ast.get(typed_assignment).kind else {
+        panic!("selected rebinding remains a typed assignment");
+    };
+    let TreeKind::Ident(_) = &parsed
+        .ast
+        .get(match &parsed.ast.get(block.stats[3]).kind {
+            TreeKind::Assign(assignment) => assignment.lhs,
+            _ => unreachable!(),
+        })
+        .kind
+    else {
+        panic!("assignment target is the selected local identifier");
+    };
+    assert_eq!(
+        typer.source_typed_index().get(
+            source_id,
+            match &parsed.ast.get(block.stats[3]).kind {
+                TreeKind::Assign(assignment) => assignment.lhs,
+                _ => unreachable!(),
+            }
+        ),
+        Some(assignment.lhs)
+    );
+    for (binding, formal) in [(first, *first_seed), (second, *second_seed)] {
+        let TreeKind::ValDef(local) = &typed_ast.get(binding.declaration()).kind else {
+            panic!("Counter allocation is a typed ValDef");
+        };
+        let TreeKind::Apply(construction) = &typed_ast.get(local.rhs.unwrap()).kind else {
+            panic!("Counter local is initialized by a constructor application");
+        };
+        assert_eq!(construction.args.len(), 1);
+        assert_eq!(term_symbol(construction.args[0]), formal);
+    }
+    assert_eq!(term_symbol(assignment.lhs), selected.symbol());
+    assert_eq!(term_symbol(assignment.rhs), second.symbol());
+    assert_eq!(
+        typer.source_typed_index().get(source_id, block.stats[3]),
+        Some(typed_assignment)
+    );
+
+    let typed_set = typer
+        .source_typed_index()
+        .get(source_id, block.stats[4])
+        .expect("the setter call has a typed identity");
+    let TreeKind::Apply(set_call) = &typed_ast.get(typed_set).kind else {
+        panic!("setter remains one Apply");
+    };
+    let TreeKind::Select(set_selection) = &typed_ast.get(set_call.function).kind else {
+        panic!("setter receiver remains a Select");
+    };
+    assert_eq!(term_symbol(set_selection.qualifier), selected.symbol());
+    assert_eq!(term_symbol(set_call.args[0]), *next_value);
+    let typed_pair = typer
+        .source_typed_index()
+        .get(source_id, block.expr)
+        .expect("the final Pair construction has a typed identity");
+    let TreeKind::Apply(pair_call) = &typed_ast.get(typed_pair).kind else {
+        panic!("the final expression constructs Pair");
+    };
+    assert_eq!(
+        pair_call
+            .args
+            .iter()
+            .map(|argument| term_symbol(*argument))
+            .collect::<Vec<_>>(),
+        [first.symbol(), second.symbol()]
+    );
+
+    let mut callback_reached = false;
+    let planned = with_paired_jvm_tasty_batch_plan(
+        MUTABLE_REFERENCE_REBINDING_TARGET,
+        "MutableReferenceRebinding.scala",
+        SourceId::from_index(22981),
+        |_| callback_reached = true,
+    );
+    println!("mutable rebinding paired producer first result: {planned:?}");
+    assert!(
+        !callback_reached,
+        "the first producer failure precedes plan acceptance"
+    );
+    assert!(
+        matches!(
+            &planned,
+            Err(PairedPlanError::BatchUnit { phase, reason })
+                if *phase == "cross-class constructor-call identity proof"
+                    && reason == "SourceShape(\"candidate method must have one plain formal clause and a concrete public body\")"
+        ),
+        "target remains frozen at its exact first paired-planning rejection"
+    );
+    let emission = emit_paired_jvm_tasty_batch(
+        MUTABLE_REFERENCE_REBINDING_TARGET,
+        "MutableReferenceRebinding.scala",
+        SourceId::from_index(22982),
+    );
+    assert!(
+        matches!(
+            emission,
+            Err(dotty::jvm_tasty_artifacts::PairedBatchArtifactError::Plan(
+                PairedPlanError::BatchUnit { phase, reason }
+            )) if phase == "cross-class constructor-call identity proof"
+                && reason == "SourceShape(\"candidate method must have one plain formal clause and a concrete public body\")"
+        ),
+        "batch emission returns the same first planning rejection before artifact work"
+    );
+}
+
+#[test]
+fn mutable_reference_rebinding_controls_keep_valid_deferred_separate_from_invalid() {
+    let replace_body = |old: &str, new: &str| MUTABLE_REFERENCE_REBINDING_TARGET.replace(old, new);
+    let original = concat!(
+        "    val first: Counter = new Counter(firstSeed)\n",
+        "    val second: Counter = new Counter(secondSeed)\n",
+        "    var selected: Counter = first\n",
+        "    selected = second\n",
+        "    selected.set(nextValue)\n",
+        "    new Pair(first, second)"
+    );
+    let renamed = replace_body(
+        original,
+        concat!(
+            "    val left: Counter = new Counter(firstSeed)\n",
+            "    val right: Counter = new Counter(secondSeed)\n",
+            "    var active: Counter = left\n",
+            "    active = right\n",
+            "    active.set(nextValue)\n",
+            "    new Pair(left, right)"
+        ),
+    );
+    let reversed = replace_body(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)",
+        "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
+    );
+    let select_first = replace_body("    selected = second", "    selected = first");
+    let duplicate = replace_body(
+        "    selected = second\n    selected.set(nextValue)",
+        "    selected = second\n    selected = first\n    selected.set(nextValue)",
+    );
+    let allocation_rhs = replace_body(
+        "    selected = second",
+        "    selected = new Counter(nextValue)",
+    );
+    let nested_branch = replace_body(
+        "    selected = second",
+        "    if nextValue >= 0 then\n      selected = second\n    else\n      selected = first",
+    );
+    let nested_loop = replace_body(
+        "    selected = second",
+        "    while nextValue > 0 do\n      selected = second",
+    );
+    let val_write = replace_body(
+        "    var selected: Counter = first",
+        "    val selected: Counter = first",
+    );
+    let foreign = replace_body("    selected = second", "    selected = foreign");
+    let forward_reference = replace_body(
+        "    var selected: Counter = first\n    selected = second",
+        "    var selected: Counter = later\n    selected = second\n    val later: Counter = first",
+    );
+    let uninitialized = replace_body(
+        "    var selected: Counter = first",
+        "    var selected: Counter = _",
+    );
+    let wrong_type = replace_body("    selected = second", "    selected = nextValue");
+
+    for (name, source, id) in [
+        ("renamed", renamed.as_str(), 22_990),
+        ("reversed-declarations", reversed.as_str(), 22_991),
+        ("select-first", select_first.as_str(), 22_992),
+        ("duplicate-assignment", duplicate.as_str(), 22_993),
+        ("allocation-in-rhs", allocation_rhs.as_str(), 22_994),
+        ("nested-branch", nested_branch.as_str(), 22_995),
+        ("nested-loop", nested_loop.as_str(), 22_996),
+    ] {
+        let result = paired_result(source, id);
+        println!("mutable rebinding valid Scala control {name}: {result:?}");
+        assert!(
+            matches!(
+                result,
+                Err(PairedPlanError::BatchUnit {
+                    phase: "cross-class constructor-call identity proof",
+                    reason
+                }) if reason.contains("SourceShape")
+            ),
+            "{name} is valid source but remains outside the current paired proof"
+        );
+    }
+
+    for (name, source, id) in [
+        ("val-write", val_write.as_str(), 22_997),
+        ("foreign-local", foreign.as_str(), 22_998),
+        ("forward-local", forward_reference.as_str(), 22_999),
+        ("uninitialized-local", uninitialized.as_str(), 23_000),
+        ("wrong-type", wrong_type.as_str(), 23_001),
+    ] {
+        let result = paired_result(source, id);
+        println!("mutable rebinding invalid control {name}: {result:?}");
+        assert!(
+            result.is_err(),
+            "{name} is rejected by the Rust source pipeline"
+        );
+    }
 }
 
 #[test]
