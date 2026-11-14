@@ -1643,6 +1643,437 @@ fn preserves_option_map_rollback_and_tuple_to_array_automatic_preparation() {
     }
 }
 
+#[test]
+#[ignore = "requires pinned Scala 3.9.0 sources, classpath jars, and JDK environment"]
+fn captures_acceptance_vi_hash_code_and_prop_clear_before_rollback() {
+    let scala_root = PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT"));
+    let revision = Command::new("git")
+        .args(["-C", scala_root.to_str().unwrap(), "rev-parse", "HEAD"])
+        .output()
+        .expect("git reads the pinned Scala source revision");
+    assert!(revision.status.success());
+    assert_eq!(
+        String::from_utf8(revision.stdout).unwrap().trim(),
+        "777528f19a58e794c9954a42f433373472ec57f8",
+        "acceptance VI observation uses the pinned Scala 3.9.0 source"
+    );
+    let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+    let release = std::env::var("SCALA39_JDK_RELEASE")
+        .expect("SCALA39_JDK_RELEASE")
+        .parse()
+        .unwrap();
+    assert_eq!(release, 21);
+    let jars =
+        std::env::split_paths(&std::env::var_os("SCALA39_CLASSPATH").expect("SCALA39_CLASSPATH"))
+            .collect::<Vec<_>>();
+
+    for (relative, wanted_tree, wanted_method, wanted_owner) in [
+        (
+            "library/src/scala/Enumeration.scala",
+            459,
+            "hashCode",
+            ".scala.Enumeration.Value",
+        ),
+        (
+            "library/src/scala/sys/PropImpl.scala",
+            99,
+            "clear",
+            ".scala.sys.PropImpl",
+        ),
+    ] {
+        let text = fs::read_to_string(scala_root.join(relative)).unwrap();
+        let source = SourceId::from_index(0);
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let scanner = ContextualScanner::new(&text).unwrap();
+        let parsed = dotty_parser::parse_compilation_unit(
+            SourceText::new(&text).unwrap(),
+            source,
+            scanner,
+            &mut store.names,
+        );
+        let index = name_compilation_unit(
+            &parsed.ast,
+            parsed.root,
+            source,
+            relative,
+            &mut store,
+            &mut packages,
+        )
+        .unwrap();
+        let (tree, node) = parsed
+            .ast
+            .iter()
+            .find(|(tree, node)| {
+                tree.index() == wanted_tree && matches!(node.kind, TreeKind::DefDef(_))
+            })
+            .expect("selected original DefDef");
+        let method_span = node.position.expect("selected DefDef retains source span");
+        let method_symbol = index
+            .symbol_at(source, tree)
+            .expect("selected DefDef has its canonical source symbol");
+
+        let mut entries: Vec<Box<dyn ClassPathEntry>> = vec![Box::new(
+            JdkClassPath::new(java_home.join("jmods")).unwrap(),
+        )];
+        for jar in &jars {
+            entries.push(Box::new(JarClassPath::new(jar.clone(), release).unwrap()));
+        }
+        let resolver = ClasspathSymbolResolver::new(
+            CompositeClassPath::new(entries),
+            definitions,
+            LoadingSession::with_packages(packages.snapshot()),
+        );
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+        let observed = Rc::new(RefCell::new(None::<String>));
+        let capture = observed.clone();
+        let parsed_ast = &parsed.ast;
+        typer.transaction_failure_error_observer = Some(Rc::new(move |typer, error| {
+            let method_info = typer.store.symbols.get(method_symbol);
+            let owner = method_info
+                .owner
+                .expect("method retains its canonical owner");
+            let owner_tree = match typer.index.definition_of(owner) {
+                Some(SourceDefinition::Canonical {
+                    source: actual_source,
+                    tree,
+                }) if actual_source == source => tree,
+                other => panic!("method owner is a canonical source definition: {other:?}"),
+            };
+            assert_eq!(
+                observed_symbol_path(typer.store, method_symbol),
+                format!("{wanted_owner}.{wanted_method}")
+            );
+            assert_eq!(observed_symbol_path(typer.store, owner), wanted_owner);
+            assert!(matches!(
+                typer.index.definition_of(method_symbol),
+                Some(SourceDefinition::Canonical { source: actual_source, tree: actual_tree })
+                    if actual_source == source && actual_tree == tree
+            ));
+
+            let mut lines = vec![
+                format!("root={relative}#tree={wanted_tree}"),
+                format!("method_span={:?}", method_span.span().range()),
+                format!(
+                    "canonical_method={method_symbol:?} path={wanted_owner}.{wanted_method} owner={owner:?} owner_tree={owner_tree:?} owner_path={wanted_owner} origin={:?}",
+                    method_info.origin
+                ),
+                format!("method_error={error:?}"),
+            ];
+            let diagnostic = match error {
+                TyperError::UnstableSelectionPrefix {
+                    source: error_source,
+                    tree_index,
+                    qualifier_type,
+                } => {
+                    assert_eq!(*error_source, source);
+                    let (diagnostic_tree, diagnostic_node) = parsed_ast
+                        .iter()
+                        .find(|(candidate, _)| candidate.index() == *tree_index)
+                        .unwrap();
+                    let diagnostic_span = diagnostic_node
+                        .position
+                        .expect("first error tree retains source span");
+                    assert_eq!(diagnostic_tree.index(), 458);
+                    lines.push(format!(
+                        "first_diagnostic=UnstableSelectionPrefix tree={} span={:?}",
+                        diagnostic_tree.index(),
+                        diagnostic_span.span().range()
+                    ));
+                    lines.push(format!(
+                        "qualifier_type={qualifier_type:?} semantic={:?}",
+                        typer.store.types.get(*qualifier_type)
+                    ));
+                    let mut symbols = Vec::new();
+                    type_symbols(typer.store, *qualifier_type, &mut symbols, &mut Vec::new());
+                    symbols.sort_by_key(|symbol| symbol.index());
+                    symbols.dedup();
+                    lines.push(format!(
+                        "qualifier_symbols={:?}",
+                        symbols
+                            .iter()
+                            .map(|symbol| observed_symbol_path(typer.store, *symbol))
+                            .collect::<Vec<_>>()
+                    ));
+                    for symbol in symbols {
+                        let info = typer.store.symbols.get(symbol);
+                        lines.push(format!(
+                            "qualifier_member={symbol:?} path={} owner={} kind={:?} origin={:?} info={:?}",
+                            observed_symbol_path(typer.store, symbol),
+                            info.owner
+                                .map(|owner| observed_symbol_path(typer.store, owner))
+                                .unwrap_or_else(|| "none".to_owned()),
+                            info.kind,
+                            info.origin,
+                            info.info
+                        ));
+                        if let SymbolInfo::Complete(signature) = info.info {
+                            lines.push(format!(
+                                "qualifier_member_signature={signature:?} semantic={:?}",
+                                typer.store.types.get(signature)
+                            ));
+                        }
+                    }
+                    "UnstableSelectionPrefix"
+                }
+                TyperError::ExpectedExpressionTypeMismatch {
+                    source: error_source,
+                    tree_index,
+                    actual,
+                    expected,
+                } => {
+                    assert_eq!(*error_source, source);
+                    let (diagnostic_tree, diagnostic_node) = parsed_ast
+                        .iter()
+                        .find(|(candidate, _)| candidate.index() == *tree_index)
+                        .unwrap();
+                    let diagnostic_span = diagnostic_node
+                        .position
+                        .expect("first error tree retains source span");
+                    assert_eq!(diagnostic_tree.index(), 98);
+                    lines.push(format!(
+                        "first_diagnostic=ExpectedExpressionTypeMismatch tree={} span={:?}",
+                        diagnostic_tree.index(),
+                        diagnostic_span.span().range()
+                    ));
+                    for (label, operand) in [("actual", *actual), ("expected", *expected)] {
+                        lines.push(format!(
+                            "{label}_type={operand:?} semantic={:?}",
+                            typer.store.types.get(operand)
+                        ));
+                        let mut symbols = Vec::new();
+                        type_symbols(typer.store, operand, &mut symbols, &mut Vec::new());
+                        symbols.sort_by_key(|symbol| symbol.index());
+                        symbols.dedup();
+                        lines.push(format!(
+                            "{label}_symbols={:?}",
+                            symbols
+                                .iter()
+                                .map(|symbol| observed_symbol_path(typer.store, *symbol))
+                                .collect::<Vec<_>>()
+                        ));
+                    }
+                    "ExpectedExpressionTypeMismatch"
+                }
+                other => panic!("unexpected acceptance VI first failure: {other:?}"),
+            };
+            // Preserve the source-level receiver and selected-member path for
+            // the failing expression. Any partial typed mappings exist only
+            // inside this failure callback and are deliberately observed
+            // before the enclosing transaction rolls back.
+            for (context_tree, context_node) in parsed_ast.iter() {
+                let Some(context_span) = context_node.position else {
+                    continue;
+                };
+                let context_range = context_span.span().range();
+                let method_range = method_span.span().range();
+                if context_range.start() < method_range.start()
+                    || context_range.end() > method_range.end()
+                {
+                    continue;
+                }
+                let source_text =
+                    &text[context_range.start() as usize..context_range.end() as usize];
+                let typed_tree = typer.source_typed_index().get(source, context_tree);
+                lines.push(format!(
+                    "context_node=tree={} span={context_range:?} kind={:?} source={source_text:?} typed_tree={typed_tree:?}",
+                    context_tree.index(), context_node.kind
+                ));
+                if let Some(typed_tree) = typed_tree {
+                    let typed_node = typer.typed_ast().get(typed_tree);
+                    let semantic_type = typer.store.types.get(typed_node.ty);
+                    lines.push(format!(
+                        "context_typed=source_tree={} typed_tree={typed_tree:?} kind={:?} type={:?} semantic={semantic_type:?}",
+                        context_tree.index(),
+                        typed_node.kind,
+                        typed_node.ty
+                    ));
+                    if let Type::TermRef {
+                        target: TermRefTarget::Symbol(symbol),
+                        ..
+                    } = semantic_type
+                    {
+                        let info = typer.store.symbols.get(*symbol);
+                        lines.push(format!(
+                            "context_member=source_tree={} symbol={symbol:?} path={} owner={} kind={:?} origin={:?} info={:?}",
+                            context_tree.index(),
+                            observed_symbol_path(typer.store, *symbol),
+                            info.owner
+                                .map(|owner| observed_symbol_path(typer.store, owner))
+                                .unwrap_or_else(|| "none".to_owned()),
+                            info.kind,
+                            info.origin,
+                            info.info
+                        ));
+                        if let SymbolInfo::Complete(signature) = info.info {
+                            lines.push(format!(
+                                "context_member_signature=source_tree={} type={signature:?} semantic={:?}",
+                                context_tree.index(),
+                                typer.store.types.get(signature)
+                            ));
+                            let mut symbols = Vec::new();
+                            type_symbols(typer.store, signature, &mut symbols, &mut Vec::new());
+                            symbols.sort_by_key(|symbol| symbol.index());
+                            symbols.dedup();
+                            lines.push(format!(
+                                "context_member_signature_symbols=source_tree={} symbols={:?}",
+                                context_tree.index(),
+                                symbols
+                                    .iter()
+                                    .map(|symbol| observed_symbol_path(typer.store, *symbol))
+                                    .collect::<Vec<_>>()
+                            ));
+                        }
+                    }
+                    if matches!(context_node.kind, TreeKind::PhaseSpecific(_)) {
+                        let mut pending = vec![typed_tree];
+                        let mut visited = Vec::new();
+                        while let Some(node_id) = pending.pop() {
+                            if visited.contains(&node_id) {
+                                continue;
+                            }
+                            visited.push(node_id);
+                            let node = typer.typed_ast().get(node_id);
+                            let semantic_type = typer.store.types.get(node.ty);
+                            lines.push(format!(
+                                "typed_subtree=tree={node_id:?} kind={:?} type={:?} semantic={semantic_type:?}",
+                                node.kind, node.ty
+                            ));
+                            if let Type::TermRef {
+                                target: TermRefTarget::Symbol(symbol),
+                                ..
+                            } = semantic_type
+                            {
+                                let info = typer.store.symbols.get(*symbol);
+                                lines.push(format!(
+                                    "typed_subtree_member={symbol:?} path={} owner={} kind={:?} origin={:?} info={:?}",
+                                    observed_symbol_path(typer.store, *symbol),
+                                    info.owner
+                                        .map(|owner| observed_symbol_path(typer.store, owner))
+                                        .unwrap_or_else(|| "none".to_owned()),
+                                    info.kind,
+                                    info.origin,
+                                    info.info
+                                ));
+                                if let SymbolInfo::Complete(signature) = info.info {
+                                    lines.push(format!(
+                                        "typed_subtree_signature={signature:?} semantic={:?}",
+                                        typer.store.types.get(signature)
+                                    ));
+                                    if let Type::Method(method_type) =
+                                        typer.store.types.get(signature)
+                                    {
+                                        for (index, parameter) in
+                                            method_type.params.iter().enumerate()
+                                        {
+                                            let mut symbols = Vec::new();
+                                            type_symbols(
+                                                typer.store,
+                                                parameter.ty,
+                                                &mut symbols,
+                                                &mut Vec::new(),
+                                            );
+                                            symbols.sort_by_key(|symbol| symbol.index());
+                                            symbols.dedup();
+                                            lines.push(format!(
+                                                "typed_subtree_parameter={index} type={:?} semantic={:?} symbols={:?}",
+                                                parameter.ty,
+                                                typer.store.types.get(parameter.ty),
+                                                symbols
+                                                    .iter()
+                                                    .map(|symbol| observed_symbol_path(typer.store, *symbol))
+                                                    .collect::<Vec<_>>()
+                                            ));
+                                        }
+                                        let mut symbols = Vec::new();
+                                        type_symbols(
+                                            typer.store,
+                                            method_type.result,
+                                            &mut symbols,
+                                            &mut Vec::new(),
+                                        );
+                                        symbols.sort_by_key(|symbol| symbol.index());
+                                        symbols.dedup();
+                                        lines.push(format!(
+                                            "typed_subtree_method_result={:?} semantic={:?} symbols={:?}",
+                                            method_type.result,
+                                            typer.store.types.get(method_type.result),
+                                            symbols
+                                                .iter()
+                                                .map(|symbol| observed_symbol_path(typer.store, *symbol))
+                                                .collect::<Vec<_>>()
+                                        ));
+                                    }
+                                }
+                            }
+                            match &node.kind {
+                                TreeKind::Select(selection) => pending.push(selection.qualifier),
+                                TreeKind::Apply(application) => {
+                                    pending.push(application.function);
+                                    pending.extend(application.args.iter().copied());
+                                }
+                                TreeKind::TypeApply(application) => {
+                                    pending.push(application.function);
+                                    pending.extend(application.args.iter().copied());
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                } else {
+                    lines.push(format!(
+                        "context_not_reached=source_tree={}; no source-to-typed mapping before first failure",
+                        context_tree.index()
+                    ));
+                }
+            }
+            lines.push(format!("nested_cause=none; diagnostic={diagnostic}"));
+            *capture.borrow_mut() = Some(lines.join("\n"));
+        }));
+
+        let store_before = typer.store().checkpoint();
+        let typed_before = typer.typed_ast().checkpoint();
+        let type_index_before = format!("{:?}", typer.type_index.checkpoint());
+        let typed_index_before = format!("{:?}", typer.typed_index.clone());
+        let source_typed_index_before = format!("{:?}", typer.source_typed_index());
+        let error = typer
+            .type_method_definition(tree)
+            .expect_err("the original complete DefDef remains blocked on this baseline");
+        assert!(
+            observed.borrow().is_some(),
+            "the test observer captures the original error before rollback: {error:?}"
+        );
+        assert_eq!(typer.store().checkpoint(), store_before);
+        assert_eq!(typer.typed_ast().checkpoint(), typed_before);
+        assert_eq!(
+            format!("{:?}", typer.type_index.checkpoint()),
+            type_index_before
+        );
+        assert_eq!(
+            format!("{:?}", typer.typed_index.clone()),
+            typed_index_before
+        );
+        assert_eq!(
+            format!("{:?}", typer.source_typed_index()),
+            source_typed_index_before
+        );
+        assert_eq!(typer.source_typed_index().get(source, tree), None);
+        println!(
+            "ACCEPTANCE_VI_OBSERVATION_BEGIN\n{}\nACCEPTANCE_VI_OBSERVATION_END",
+            observed.borrow().as_deref().unwrap()
+        );
+    }
+}
+
 type EitherSwapSourceCase = (
     TreeId<Untyped>,
     TreeId<Untyped>,
