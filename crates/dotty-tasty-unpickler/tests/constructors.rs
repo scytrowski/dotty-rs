@@ -409,10 +409,19 @@ fn a_generic_constructor_failure_rolls_back_both_parameter_identities_for_retry(
     let types = unpickler.index().type_count();
 
     let first = unpickler.complete_symbol(48).unwrap_err();
-    assert!(matches!(
-        &first,
-        UnpickleError::UnresolvedPackage { .. } | UnpickleError::UnresolvedMember { .. }
-    ));
+    assert!(
+        matches!(
+            &first,
+            UnpickleError::UnresolvedMember {
+                address: 14,
+                name,
+                namespace: Namespace::Type,
+                space: None,
+                ..
+            } if name == "Nothing"
+        ),
+        "the unsupported bounds dependency remains an exact typed resolution error: {first:?}"
+    );
     for (address, kind) in [
         (4, SymbolKind::Class),
         (9, SymbolKind::TypeParameter),
