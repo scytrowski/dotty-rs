@@ -559,11 +559,7 @@ impl SourceTyper<'_> {
                 // Publish the expected-context replacement only after the
                 // final conformance check succeeds. This keeps a rare late
                 // relation failure from leaving a stale typed-index entry.
-                let mapping_is_transaction_local = new_mappings.contains(&(self.source, tree));
-                if unit_adapted
-                    && mapping_is_transaction_local
-                    && self.typed_index.get(self.source, tree).is_some()
-                {
+                if unit_adapted && self.typed_index.get(self.source, tree).is_some() {
                     self.typed_index.remove(self.source, tree);
                     self.typed_index
                         .insert(self.source, tree, typed)

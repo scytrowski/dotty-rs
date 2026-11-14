@@ -3089,6 +3089,24 @@ fn expected_unit_adaptation_keeps_value_calls_and_checks_other_results() {
         "ordinary value-returning method bodies keep their result type"
     );
 
+    // Cache the value expression in a successful transaction before the
+    // enclosing Unit method asks for its expected type. Adaptation must replace
+    // that source mapping with the canonical block and remain stable on repeat.
+    let (discarded_tree, discarded_rhs) = methods["discarded"];
+    let discarded_method = index.symbol_at(source, discarded_tree).unwrap();
+    let discarded_context = typer.expression_context_for(discarded_method).unwrap();
+    let cached_rhs = typer
+        .type_expression(discarded_rhs, discarded_context)
+        .unwrap();
+    assert!(matches!(
+        typer.typed_ast().get(cached_rhs).kind,
+        TreeKind::Apply(_)
+    ));
+    assert_eq!(
+        typer.source_typed_index().get(source, discarded_rhs),
+        Some(cached_rhs)
+    );
+
     for name in ["wrongArgument", "wrongResult", "wrongMember"] {
         let (method_tree, rhs) = methods[name];
         let before_store = typer.store().checkpoint();
@@ -3110,21 +3128,42 @@ fn expected_unit_adaptation_keeps_value_calls_and_checks_other_results() {
             "{name} provenance rollback"
         );
         assert!(typer.source_typed_index().get(source, rhs).is_none());
+        assert_eq!(
+            typer.source_typed_index().get(source, discarded_rhs),
+            Some(cached_rhs),
+            "{name} preserves an earlier successful cached mapping"
+        );
     }
 
     // A later independent method succeeds in the same typer session after
     // failures that had already typed the argument call and earlier block.
-    let (discarded_tree, discarded_rhs) = methods["discarded"];
     let typed_method = typer.type_method_definition(discarded_tree).unwrap();
     let TreeKind::DefDef(definition) = &typer.typed_ast().get(typed_method).kind else {
         panic!("typed method root must remain a DefDef");
     };
     let typed_rhs = definition.rhs.unwrap();
+    assert_ne!(typed_rhs, cached_rhs, "the Unit context adds a typed block");
+    assert_eq!(
+        typer.source_typed_index().get(source, discarded_rhs),
+        Some(typed_rhs),
+        "the canonical source mapping follows successful cached adaptation"
+    );
+    let repeated_unit_rhs = typer
+        .type_expression_expected(discarded_rhs, discarded_context, definitions.unit)
+        .unwrap();
+    assert_eq!(
+        repeated_unit_rhs, typed_rhs,
+        "repeated adaptation is stable"
+    );
     let TreeKind::Block(adapted) = &typer.typed_ast().get(typed_rhs).kind else {
         panic!("expected Unit adaptation must retain a value stat and final ()");
     };
     assert_eq!(typer.typed_ast().get(typed_rhs).ty, definitions.unit);
     assert_eq!(adapted.stats.len(), 1, "the original call executes once");
+    assert_eq!(
+        adapted.stats[0], cached_rhs,
+        "cached adaptation reuses the original evaluated value tree"
+    );
     let call = adapted.stats[0];
     assert!(matches!(
         typer.typed_ast().get(call).kind,
