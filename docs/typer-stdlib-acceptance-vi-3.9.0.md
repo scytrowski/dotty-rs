@@ -9,34 +9,47 @@ ordinary `DefDef` main and analysis manifests twice each. Each invocation also
 used the runner's two-fresh-session determinism check. All four pairs of
 normalized reports were byte-identical.
 
-The main cohort is currently **20/25 typed, 5 blocked**; its historical
-acceptance-V receipt is 18/25 typed. The only root outcome changes are
-`Tuple.toArray` (tree 23), now typed as
-`scala.Array[java.lang.Object]`, and `Either.swap` (tree 84), now typed as
-`scala.util.Either[scala.util.Either.B,scala.util.Either.A]`. All other
-identities retain their historical status and result shape. The analysis
-cohort remains **16/25 typed, 9 blocked**, with all historical statuses and
-results unchanged. The frozen 16 main and 15 analysis required-typed identities
-still match their recorded exact result shapes. Per-root outcomes and the
-comparison with the historical receipts are in
+The main cohort is **20/25 typed, 5 blocked** and analysis is **16/25 typed,
+9 blocked**. The merged #2294 acceptance evidence already reported 20/25 main
+and 16/25 analysis. This fresh complete-`DefDef` replay finds no newly typed
+roots or regressions since that receipt; all 20 main and 16 analysis successful
+identities retain their recorded result types. The older Acceptance V baseline
+file records 18/25 main and 16/25 analysis and predates the Tuple and Either
+successes. The Acceptance V closeout's `SPRINT GOAL UNMET pending fresh hosted
+validation` remains a stale closeout state; it is not a fresh #2294 or
+Acceptance VI hosted result. The frozen 16 main and 15 analysis required-typed
+identities still match their exact protected result shapes. Per-root outcomes,
+complete blocked-root payloads, and the comparison with #2294 are in
 [`acceptance-vi/roots.tsv`](typer-stdlib-acceptance-vi/roots.tsv).
 
 Both target methods remain blocked on the current main. A focused test-only
 transaction observer captures each original `DefDef` failure before rollback
 in its own fresh semantic session and verifies that semantic-store, typed-tree,
-index, and source-to-typed mappings are restored afterward:
+index, and source-to-typed mappings are restored afterward. It records the
+in-span source nodes and any partial typed subtree before rollback:
 
-- `scala.Enumeration.Value.hashCode`, source tree 459, source bytes
-  `9430..9466`, has canonical source owner `.scala.Enumeration.Value`. Its
-  first diagnostic is `UnstableSelectionPrefix` at tree 458, bytes
-  `9461..9466`; the qualifier is the canonical `.scala.Enumeration.Value.id`
-  term reference. This error carries no expected-type comparison or nested
-  cause.
-- `scala.sys.PropImpl.clear`, source tree 99, source bytes `1297..1334`, has
-  canonical source owner `.scala.sys.PropImpl`. Its first diagnostic is
-  `ExpectedExpressionTypeMismatch` at tree 98, bytes `1317..1334`: actual
-  `.scala.collection.mutable.Shrinkable`, expected `Unit`, with no nested
-  cause.
+- `scala.Enumeration.Value.hashCode`, source tree 459, bytes `9430..9466`, has
+  canonical source owner `.scala.Enumeration.Value`. The `id` identifier
+  (tree 457) is typed as the canonical `.scala.Enumeration.Value.id` method;
+  its completed signature is `Int`. The following `id.##` selection (tree
+  458) has no typed mapping: the Rust typer fails there with
+  `UnstableSelectionPrefix`, before looking up `##`. The Scala oracle accepts
+  the same method as `this.id.##` and prints `hashCode(): Int`; its typed print
+  does not separately render a canonical `##` member symbol. The Rust failure
+  has no expected-type comparison or nested cause.
+- `scala.sys.PropImpl.clear`, source tree 99, bytes `1297..1334`, has
+  canonical source owner `.scala.sys.PropImpl`. The receiver is the original
+  `underlying` method, whose source signature is
+  `mutable.Map[String, String | Null]`; the argument is the canonical
+  `PropImpl.key: String` field. The parser preserves `underlying -= key` as an
+  infix node (tree 98), and the partial typed subtree is an `Apply` selecting
+  canonical TASTy member `.scala.collection.mutable.Shrinkable.-=`. Its loaded
+  signature has parameter `Shrinkable.A` and result
+  `.scala.collection.mutable.Shrinkable`; that is also the observed applied
+  expression type. The first error is the `Unit` conformance check at tree 98,
+  bytes `1317..1334`, with no nested cause. Scala's typed subtree keeps the
+  infix spelling inside the block and appends `()` to adapt the method body to
+  `Unit`; its typed printer does not show the desugared selected member tree.
 
 The complete observer receipt is in
 [`acceptance-vi/target-observations.tsv`](typer-stdlib-acceptance-vi/target-observations.tsv).
@@ -45,10 +58,16 @@ treated as stable identity. Neither target is silently reported as successful.
 
 The pinned Scala 3.9.0 compiler successfully typed both unchanged source files
 with `-Ystop-after:typer -Xprint:typer`. The typer tree shows
-`hashCode(): Int = this.id.##` and `clear(): Unit`, whose body discards the map
-operation's value. The existing positive ordinary-method oracle also passed;
-the negative control failed with Scala diagnostic E007 (`Int` found, `String`
-required). Results and output hashes are recorded in
+`hashCode(): Int = this.id.##`; `Value.id` is declared `Int`. It shows
+`clear(): Unit = { this.underlying -= PropImpl.this.key; () }`, confirming that
+the `Unit` boundary is the enclosing block's final `()`. The existing positive
+ordinary-method oracle also passed; the negative control failed with Scala
+diagnostic E007 (`Int` found, `String` required). These are local results, not
+hosted Acceptance VI evidence: no fresh hosted run has been verified, so
+**hosted Acceptance VI is NOT VERIFIED**. The independent reviewer reported
+that their supplied environment could not reproduce Scala-dependent checks;
+that is a non-reproduction due to reviewer prerequisites, not a failed result
+from these recorded local runs. Results and output hashes are recorded in
 [`acceptance-vi/scala-oracles.tsv`](typer-stdlib-acceptance-vi/scala-oracles.tsv).
 
 ## Provenance
@@ -71,9 +90,10 @@ Current report hashes are `36369b3aad1bd5155912aad4cbf679fe01f33d48cbabea931febe
 `021bb2d5a1e26ea575bf3f89b92c5a5e41acc2e124e753e43715608f0fe4bce4`). All
 31 required identities matched exactly.
 
-The original 33 unique selected Scala input files, including both target
-sources, are pinned by SHA-256 in
+The 33 unique cohort and target Scala input files are pinned by SHA-256 in
 [`acceptance-vi/source-inputs.tsv`](typer-stdlib-acceptance-vi/source-inputs.tsv).
+The table also pins the supporting `Shrinkable.scala` declaration source used
+to identify the `-=` signature.
 The target sources hash to `7370a0d85123fd15c9b75c132a38b911ad71f2a41e851e3121b5a6253939c1e8`
 (`Enumeration.scala`) and
 `3e9946686782a9af7259a130cf8ee7467cac28a91469c0e3f59c5fc778c6157e`
@@ -116,6 +136,7 @@ export SCALA39_ROOT=/path/to/scala3-at-777528f
 export JAVA_HOME=/path/to/temurin-21
 export PATH="$JAVA_HOME/bin:$PATH"
 export SCALA39_JDK_RELEASE=21
+export DOTTY_AUDIT_TYPE_METHOD_DEFINITION=1
 export COURSIER_MAVEN_ROOT=/path/to/pinned-maven-cache
 export TMPDIR=/path/to/persistent-scratch
 export TMP="$TMPDIR" TEMP="$TMPDIR"
@@ -158,8 +179,15 @@ java -Djava.io.tmpdir="$TMPDIR" -cp "$SCALA39_CLASSPATH" \
   tools/typer-classpath-corpus-audit/oracle-controls/OrdinaryNegative.scala
 ```
 
-The focused observer test was run twice in separate processes. Its failure
-callback sees the original attempt before transactional rollback; the test
+The two full-`DefDef` cohort audits were rerun with
+`DOTTY_AUDIT_TYPE_METHOD_DEFINITION=1`; their main and analysis report hashes
+were respectively
+`36369b3aad1bd5155912aad4cbf679fe01f33d48cbabea931febe039c9997bbf` and
+`671b3b9e1037d0416b228ab634b2cde4515beecab0926ae945488eb95eb9ed01`, matching
+both determinism sessions. Required-result gates passed for all 16 main and
+15 analysis identities. The focused observer test was run twice in separate
+processes and its normalized payloads matched. Its failure callback sees the
+original attempt before transactional rollback; the test
 then checks that the failed transaction restores the store, typed arena,
 type index, typed index, and source-to-typed index. No production typing
 semantics, manifest selection, source method, or corpus harness was changed.

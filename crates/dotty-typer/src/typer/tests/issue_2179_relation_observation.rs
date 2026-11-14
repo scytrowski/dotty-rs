@@ -1804,6 +1804,25 @@ fn captures_acceptance_vi_hash_code_and_prop_clear_before_rollback() {
                             .map(|symbol| observed_symbol_path(typer.store, *symbol))
                             .collect::<Vec<_>>()
                     ));
+                    for symbol in symbols {
+                        let info = typer.store.symbols.get(symbol);
+                        lines.push(format!(
+                            "qualifier_member={symbol:?} path={} owner={} kind={:?} origin={:?} info={:?}",
+                            observed_symbol_path(typer.store, symbol),
+                            info.owner
+                                .map(|owner| observed_symbol_path(typer.store, owner))
+                                .unwrap_or_else(|| "none".to_owned()),
+                            info.kind,
+                            info.origin,
+                            info.info
+                        ));
+                        if let SymbolInfo::Complete(signature) = info.info {
+                            lines.push(format!(
+                                "qualifier_member_signature={signature:?} semantic={:?}",
+                                typer.store.types.get(signature)
+                            ));
+                        }
+                    }
                     "UnstableSelectionPrefix"
                 }
                 TyperError::ExpectedExpressionTypeMismatch {
@@ -1847,6 +1866,176 @@ fn captures_acceptance_vi_hash_code_and_prop_clear_before_rollback() {
                 }
                 other => panic!("unexpected acceptance VI first failure: {other:?}"),
             };
+            // Preserve the source-level receiver and selected-member path for
+            // the failing expression. Any partial typed mappings exist only
+            // inside this failure callback and are deliberately observed
+            // before the enclosing transaction rolls back.
+            for (context_tree, context_node) in parsed_ast.iter() {
+                let Some(context_span) = context_node.position else {
+                    continue;
+                };
+                let context_range = context_span.span().range();
+                let method_range = method_span.span().range();
+                if context_range.start() < method_range.start()
+                    || context_range.end() > method_range.end()
+                {
+                    continue;
+                }
+                let source_text =
+                    &text[context_range.start() as usize..context_range.end() as usize];
+                let typed_tree = typer.source_typed_index().get(source, context_tree);
+                lines.push(format!(
+                    "context_node=tree={} span={context_range:?} kind={:?} source={source_text:?} typed_tree={typed_tree:?}",
+                    context_tree.index(), context_node.kind
+                ));
+                if let Some(typed_tree) = typed_tree {
+                    let typed_node = typer.typed_ast().get(typed_tree);
+                    let semantic_type = typer.store.types.get(typed_node.ty);
+                    lines.push(format!(
+                        "context_typed=source_tree={} typed_tree={typed_tree:?} kind={:?} type={:?} semantic={semantic_type:?}",
+                        context_tree.index(),
+                        typed_node.kind,
+                        typed_node.ty
+                    ));
+                    if let Type::TermRef {
+                        target: TermRefTarget::Symbol(symbol),
+                        ..
+                    } = semantic_type
+                    {
+                        let info = typer.store.symbols.get(*symbol);
+                        lines.push(format!(
+                            "context_member=source_tree={} symbol={symbol:?} path={} owner={} kind={:?} origin={:?} info={:?}",
+                            context_tree.index(),
+                            observed_symbol_path(typer.store, *symbol),
+                            info.owner
+                                .map(|owner| observed_symbol_path(typer.store, owner))
+                                .unwrap_or_else(|| "none".to_owned()),
+                            info.kind,
+                            info.origin,
+                            info.info
+                        ));
+                        if let SymbolInfo::Complete(signature) = info.info {
+                            lines.push(format!(
+                                "context_member_signature=source_tree={} type={signature:?} semantic={:?}",
+                                context_tree.index(),
+                                typer.store.types.get(signature)
+                            ));
+                            let mut symbols = Vec::new();
+                            type_symbols(typer.store, signature, &mut symbols, &mut Vec::new());
+                            symbols.sort_by_key(|symbol| symbol.index());
+                            symbols.dedup();
+                            lines.push(format!(
+                                "context_member_signature_symbols=source_tree={} symbols={:?}",
+                                context_tree.index(),
+                                symbols
+                                    .iter()
+                                    .map(|symbol| observed_symbol_path(typer.store, *symbol))
+                                    .collect::<Vec<_>>()
+                            ));
+                        }
+                    }
+                    if matches!(context_node.kind, TreeKind::PhaseSpecific(_)) {
+                        let mut pending = vec![typed_tree];
+                        let mut visited = Vec::new();
+                        while let Some(node_id) = pending.pop() {
+                            if visited.contains(&node_id) {
+                                continue;
+                            }
+                            visited.push(node_id);
+                            let node = typer.typed_ast().get(node_id);
+                            let semantic_type = typer.store.types.get(node.ty);
+                            lines.push(format!(
+                                "typed_subtree=tree={node_id:?} kind={:?} type={:?} semantic={semantic_type:?}",
+                                node.kind, node.ty
+                            ));
+                            if let Type::TermRef {
+                                target: TermRefTarget::Symbol(symbol),
+                                ..
+                            } = semantic_type
+                            {
+                                let info = typer.store.symbols.get(*symbol);
+                                lines.push(format!(
+                                    "typed_subtree_member={symbol:?} path={} owner={} kind={:?} origin={:?} info={:?}",
+                                    observed_symbol_path(typer.store, *symbol),
+                                    info.owner
+                                        .map(|owner| observed_symbol_path(typer.store, owner))
+                                        .unwrap_or_else(|| "none".to_owned()),
+                                    info.kind,
+                                    info.origin,
+                                    info.info
+                                ));
+                                if let SymbolInfo::Complete(signature) = info.info {
+                                    lines.push(format!(
+                                        "typed_subtree_signature={signature:?} semantic={:?}",
+                                        typer.store.types.get(signature)
+                                    ));
+                                    if let Type::Method(method_type) =
+                                        typer.store.types.get(signature)
+                                    {
+                                        for (index, parameter) in
+                                            method_type.params.iter().enumerate()
+                                        {
+                                            let mut symbols = Vec::new();
+                                            type_symbols(
+                                                typer.store,
+                                                parameter.ty,
+                                                &mut symbols,
+                                                &mut Vec::new(),
+                                            );
+                                            symbols.sort_by_key(|symbol| symbol.index());
+                                            symbols.dedup();
+                                            lines.push(format!(
+                                                "typed_subtree_parameter={index} type={:?} semantic={:?} symbols={:?}",
+                                                parameter.ty,
+                                                typer.store.types.get(parameter.ty),
+                                                symbols
+                                                    .iter()
+                                                    .map(|symbol| observed_symbol_path(typer.store, *symbol))
+                                                    .collect::<Vec<_>>()
+                                            ));
+                                        }
+                                        let mut symbols = Vec::new();
+                                        type_symbols(
+                                            typer.store,
+                                            method_type.result,
+                                            &mut symbols,
+                                            &mut Vec::new(),
+                                        );
+                                        symbols.sort_by_key(|symbol| symbol.index());
+                                        symbols.dedup();
+                                        lines.push(format!(
+                                            "typed_subtree_method_result={:?} semantic={:?} symbols={:?}",
+                                            method_type.result,
+                                            typer.store.types.get(method_type.result),
+                                            symbols
+                                                .iter()
+                                                .map(|symbol| observed_symbol_path(typer.store, *symbol))
+                                                .collect::<Vec<_>>()
+                                        ));
+                                    }
+                                }
+                            }
+                            match &node.kind {
+                                TreeKind::Select(selection) => pending.push(selection.qualifier),
+                                TreeKind::Apply(application) => {
+                                    pending.push(application.function);
+                                    pending.extend(application.args.iter().copied());
+                                }
+                                TreeKind::TypeApply(application) => {
+                                    pending.push(application.function);
+                                    pending.extend(application.args.iter().copied());
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                } else {
+                    lines.push(format!(
+                        "context_not_reached=source_tree={}; no source-to-typed mapping before first failure",
+                        context_tree.index()
+                    ));
+                }
+            }
             lines.push(format!("nested_cause=none; diagnostic={diagnostic}"));
             *capture.borrow_mut() = Some(lines.join("\n"));
         }));
