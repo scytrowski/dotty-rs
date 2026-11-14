@@ -10256,6 +10256,209 @@ mod tests {
     }
 
     #[test]
+    fn authentic_ctor_generic_audit_records_loader_and_ordinary_unpickler_boundary() {
+        use dotty_tasty::tasty::{
+            AstRefKind, DEFDEF_TAG, PARAM_TAG, TYPEBOUNDS_TAG, TYPEDEF_TAG, TYPEPARAM_TAG,
+        };
+        use dotty_tasty_unpickler::tasty_unpickler::UnpickleError;
+
+        let bytes = semantic_unpickler_fixture_bytes("CtorGeneric.tasty");
+        let file = dotty_tasty::tasty::TastyFile::parse_scala_3_9(&bytes)
+            .expect("authentic pinned Scala 3.9 CtorGeneric fixture");
+        let addresses = file.ast_address_index().expect("AST address index");
+
+        // These are roles in this exact file's address index, not name-derived
+        // synthetic symbols. The bounds are Nothing .. Any; the constructor's
+        // own A is separate from the class-header A.
+        assert_eq!(addresses.get_node(4).unwrap().tag, TYPEDEF_TAG);
+        assert_eq!(addresses.get_node(9).unwrap().tag, TYPEPARAM_TAG);
+        assert_eq!(addresses.get_node(12).unwrap().tag, TYPEBOUNDS_TAG);
+        let bounds = addresses
+            .get(12)
+            .unwrap()
+            .decode_type_bounds()
+            .expect("class-header type parameter bounds");
+        assert_eq!(bounds.tag, TYPEBOUNDS_TAG);
+        assert_eq!(
+            addresses.get_node(14).unwrap().tag,
+            dotty_tasty::tasty::TYPEREF_TAG
+        );
+        assert_eq!(
+            addresses.get_node(18).unwrap().tag,
+            dotty_tasty::tasty::TYPEREF_TAG
+        );
+        let ast_payload = file
+            .section(dotty_tasty::tasty::StandardSection::Asts)
+            .expect("ASTs section")
+            .payload;
+        let mut reference_reader = dotty_tasty::tasty::Reader::new(&ast_payload[65..]);
+        let reference = dotty_tasty::tasty::SimpleTerm::decode(&mut reference_reader)
+            .expect("TYPEREFDIRECT at address 65");
+        assert_eq!(
+            reference.ast_ref(),
+            Some(dotty_tasty::tasty::AstRef {
+                kind: AstRefKind::TypeRefDirect,
+                address: 51,
+            })
+        );
+        assert_eq!(addresses.get_node(48).unwrap().tag, DEFDEF_TAG);
+        assert_eq!(addresses.get_node(51).unwrap().tag, TYPEPARAM_TAG);
+        assert_eq!(addresses.get_node(60).unwrap().tag, PARAM_TAG);
+
+        // Ordinary, independent unpickling enters the authentic indexed
+        // declarations without seeding synthetic Scala/JDK symbols.
+        let mut independent_store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut independent_store);
+        let mut unpickler = TastyUnpickler::new(&file, &mut independent_store, definitions);
+        unpickler.enter_symbols().expect("ordinary enter_symbols");
+        let indexed = [4, 9, 48, 51, 60].map(|address| {
+            unpickler
+                .index()
+                .symbol_at(address)
+                .expect("indexed definition")
+        });
+        let class_completion = unpickler.complete_symbol(4);
+        assert!(matches!(
+            &class_completion,
+            Err(UnpickleError::UnresolvedMember {
+                address: 14,
+                name,
+                namespace: Namespace::Type,
+                ..
+            }) if name == "Nothing"
+        ));
+        let constructor_completion = unpickler.complete_symbol(48);
+        assert_eq!(constructor_completion, class_completion);
+        drop(unpickler);
+
+        let [class, class_a, constructor, constructor_a, formal_x] = indexed;
+        assert_eq!(independent_store.symbols.get(class).kind, SymbolKind::Class);
+        assert_eq!(
+            independent_store.symbols.get(class_a).kind,
+            SymbolKind::TypeParameter
+        );
+        assert_eq!(independent_store.symbols.get(class_a).owner, Some(class));
+        assert_eq!(
+            independent_store.symbols.get(constructor).kind,
+            SymbolKind::Constructor
+        );
+        assert_eq!(
+            independent_store.symbols.get(constructor).owner,
+            Some(class)
+        );
+        assert_eq!(
+            independent_store.symbols.get(constructor_a).kind,
+            SymbolKind::TypeParameter
+        );
+        assert_eq!(
+            independent_store.symbols.get(constructor_a).owner,
+            Some(constructor)
+        );
+        assert_eq!(
+            independent_store.symbols.get(formal_x).kind,
+            SymbolKind::Parameter
+        );
+        assert_eq!(
+            independent_store.symbols.get(formal_x).owner,
+            Some(constructor)
+        );
+        assert_ne!(class_a, constructor_a);
+        for symbol in [class, class_a, constructor, constructor_a, formal_x] {
+            assert_eq!(
+                independent_store.symbols.get(symbol).info,
+                SymbolInfo::Missing
+            );
+        }
+
+        // The selected semantic loader reaches its current typed structural
+        // gate first, with the authentic resource first on the classpath.
+        let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorGeneric");
+        let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-tasty-unpickler/tests/fixtures/semantic");
+        let semantic_fixture = ConstructorFixtureClassPath(
+            HashMap::from([(name.clone(), bytes)]),
+            fixture_root.clone(),
+        );
+        let java_home = std::env::var_os("JAVA_HOME").expect("JDK 21 JAVA_HOME");
+        let java_base = PathBuf::from(java_home).join("jmods/java.base.jmod");
+        assert!(java_base.is_file(), "actual JDK 21 java.base.jmod");
+        let visibility_root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tasty_visibility");
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(semantic_fixture),
+            Box::new(crate::class_path::DirectoryClassPath::new(
+                visibility_root.clone(),
+            )),
+        ]);
+        let selected = class_path
+            .find_class(&name)
+            .expect("classpath lookup")
+            .expect("authentic CtorGeneric selection");
+        assert_eq!(
+            selected.origin(),
+            &ClassOrigin::Directory(fixture_root.clone())
+        );
+        let mut loader_store = SemanticStore::new();
+        let mut loader = ClassLoader::new(class_path, &mut loader_store);
+        assert!(matches!(
+            loader.load_semantic_class_with_tasty_unpickler(&name),
+            Err(SemanticTastyLoadError::UnsupportedShape(
+                "the class template must have no type parameters and one constructor declaration"
+            ))
+        ));
+        assert!(loader.session.identified.is_empty());
+        assert!(loader.session.resolved.is_empty());
+        assert!(!loader.semantic_tasty_loaded.contains_key(&name));
+        drop(loader);
+
+        for (simple_name, fixture_name, expected_error) in [
+            (
+                "CtorCurriedGeneric",
+                "CtorCurriedGeneric.tasty",
+                "the class template may have at most one ordinary constructor parameter or immutable field",
+            ),
+            (
+                "CtorGenericContextOnly",
+                "CtorGenericContextOnly.tasty",
+                "the selected class-header field must be immutable and unannotated",
+            ),
+        ] {
+            let neighbor = BinaryName::from_internal(format!(
+                "me/cytrowski/tastyfixtures/semantic/{simple_name}"
+            ));
+            let mut neighbor_store = SemanticStore::new();
+            let neighbor_path = ConstructorFixtureClassPath(
+                HashMap::from([(
+                    neighbor.clone(),
+                    semantic_unpickler_fixture_bytes(fixture_name),
+                )]),
+                fixture_root.clone(),
+            );
+            let mut neighbor_loader = ClassLoader::new(neighbor_path, &mut neighbor_store);
+            let neighbor_error = neighbor_loader
+                .load_semantic_class_with_tasty_unpickler(&neighbor)
+                .expect_err("neighbor remains outside the generic-class audit boundary");
+            let SemanticTastyLoadError::UnsupportedShape(message) = neighbor_error else {
+                panic!("{simple_name} should reject structurally");
+            };
+            assert_eq!(
+                message, expected_error,
+                "{simple_name} remains outside the measured generic-class boundary"
+            );
+            assert!(neighbor_loader.session.identified.is_empty());
+            assert!(
+                !neighbor_loader
+                    .semantic_tasty_loaded
+                    .contains_key(&neighbor)
+            );
+        }
+
+        // The existing `authentic_ctor_with_val_loads_and_unsupported_neighbors_preserve_state`
+        // test supplies the positive CtorPlain load control without opening a
+        // second JDK classpath in this audit test.
+    }
+
+    #[test]
     fn semantic_class_loader_rejects_wrong_package_and_module_before_mutation() {
         let wrong_package_name = BinaryName::from_internal("other/package/Open");
         let module_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Holder");
