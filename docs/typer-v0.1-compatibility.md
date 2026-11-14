@@ -179,6 +179,9 @@ whose stat is the original expression and whose final expression is `()`.
 This preserves the value computation and its selected symbols while giving the
 enclosing result type `Unit`; ordinary conformance remains unchanged. The
 Scala 3.9 `PropImpl.clear` oracle confirms this shape for `underlying -= key`.
+In the frozen ordinary-method audit, its analysis root (tree 99) now types as
+`Unit` in both deterministic passes; it remains an observed, unprotected root,
+and the 25-root cohorts and committed receipt are unchanged.
 
 Source `null` expressions are represented by the canonical
 `Definitions.null_type` `TypeRef`, rather than `Type::Constant(Constant::Null)`.
