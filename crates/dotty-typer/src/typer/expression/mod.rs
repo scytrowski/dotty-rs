@@ -431,7 +431,7 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
-        let typed = match self.arena.try_get(tree).map(|node| &node.kind) {
+        let mut typed = match self.arena.try_get(tree).map(|node| &node.kind) {
             Some(TreeKind::Block(block))
                 if !block.stats.is_empty() && self.is_function_literal_value(block.expr) =>
             {
@@ -528,11 +528,54 @@ impl SourceTyper<'_> {
                     error,
                 })?;
         }
+        let mut unit_adapted = false;
+        // Scala adapts a value expression to Unit at an expected-Unit
+        // expression boundary by evaluating it as a statement and returning
+        // `()`. Keep the value-producing tree intact as the block's stat so
+        // its selected symbols, source identity, and evaluation are retained.
+        // This is deliberately not part of type conformance: no other
+        // expected type (and no general subtype relation) is relaxed here.
+        if expected == self.definitions.unit
+            && actual != self.definitions.unit
+            && actual != self.definitions.nothing_type
+        {
+            let unit_result = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                .literal(Constant::Unit, self.definitions.unit, None);
+            let adapted = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).block(
+                vec![typed],
+                unit_result,
+                self.definitions.unit,
+                self.arena.get(tree).position,
+            );
+            typed = adapted;
+            actual = self.definitions.unit;
+            unit_adapted = true;
+        }
         let mut completed_relation_types = std::collections::HashSet::new();
         self.complete_relation_type(actual, info_journal, &mut completed_relation_types, 0)?;
         self.complete_relation_type(expected, info_journal, &mut completed_relation_types, 0)?;
         match self.conforms(actual, expected) {
-            Ok(true) => Ok(typed),
+            Ok(true) => {
+                // Publish the expected-context replacement only after the
+                // final conformance check succeeds. This keeps a rare late
+                // relation failure from leaving a stale typed-index entry.
+                let mapping_is_transaction_local = new_mappings.contains(&(self.source, tree));
+                if unit_adapted
+                    && mapping_is_transaction_local
+                    && self.typed_index.get(self.source, tree).is_some()
+                {
+                    self.typed_index.remove(self.source, tree);
+                    self.typed_index
+                        .insert(self.source, tree, typed)
+                        .map_err(|error| TyperError::ConflictingTypedExpression {
+                            source: error.source,
+                            tree_index: error.untyped.index(),
+                            existing: error.existing.index(),
+                            attempted: error.attempted.index(),
+                        })?;
+                }
+                Ok(typed)
+            }
             Ok(false) => Err(TyperError::ExpectedExpressionTypeMismatch {
                 source: self.source,
                 tree_index: tree.index(),
