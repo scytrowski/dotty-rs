@@ -1,0 +1,13 @@
+/** Decompiled from tests/fixtures/jvm_tasty_mutable_reference_rebinding/scala39/example/PairFactory.tasty */
+package example {
+  @scala.annotation.internal.SourceFile("tests/fixtures/jvm_tasty_mutable_reference_rebinding/MutableReferenceRebinding.scala") class PairFactory() {
+    def create(firstSeed: scala.Int, secondSeed: scala.Int, nextValue: scala.Int): example.Pair = {
+      val first: example.Counter = new example.Counter(firstSeed)
+      val second: example.Counter = new example.Counter(secondSeed)
+      var selected: example.Counter = first
+      selected = second
+      selected.set(nextValue)
+      new example.Pair(first, second)
+    }
+  }
+}

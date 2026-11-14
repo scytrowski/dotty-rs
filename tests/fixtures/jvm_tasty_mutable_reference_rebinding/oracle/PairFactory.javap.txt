@@ -1,0 +1,129 @@
+Classfile tests/fixtures/jvm_tasty_mutable_reference_rebinding/scala39/example/PairFactory.class
+  Last modified Nov 14, 2026; size 865 bytes
+  SHA-256 checksum 5fe95908cb6cde1a417c90ad72e4560636c4c8c16e060545177a644f8f0cbffe
+  Compiled from "MutableReferenceRebinding.scala"
+public class example.PairFactory extends java.lang.Object
+  minor version: 0
+  major version: 65
+  flags: (0x0021) ACC_PUBLIC, ACC_SUPER
+  this_class: #2                          // example/PairFactory
+  super_class: #5                         // java/lang/Object
+  interfaces: 0, fields: 0, methods: 2, attributes: 5
+Constant pool:
+   #1 = Utf8               example/PairFactory
+   #2 = Class              #1             // example/PairFactory
+   #3 = Utf8               Ljava/lang/Object;
+   #4 = Utf8               java/lang/Object
+   #5 = Class              #4             // java/lang/Object
+   #6 = Utf8               MutableReferenceRebinding.scala
+   #7 = Utf8               <init>
+   #8 = Utf8               ()V
+   #9 = NameAndType        #7:#8          // "<init>":()V
+  #10 = Methodref          #5.#9          // java/lang/Object."<init>":()V
+  #11 = Utf8               this
+  #12 = Utf8               Lexample/PairFactory;
+  #13 = Utf8               create
+  #14 = Utf8               (III)Lexample/Pair;
+  #15 = Utf8               firstSeed
+  #16 = Utf8               secondSeed
+  #17 = Utf8               nextValue
+  #18 = Utf8               example/Counter
+  #19 = Class              #18            // example/Counter
+  #20 = Utf8               (I)V
+  #21 = NameAndType        #7:#20         // "<init>":(I)V
+  #22 = Methodref          #19.#21        // example/Counter."<init>":(I)V
+  #23 = Utf8               set
+  #24 = NameAndType        #23:#20        // set:(I)V
+  #25 = Methodref          #19.#24        // example/Counter.set:(I)V
+  #26 = Utf8               example/Pair
+  #27 = Class              #26            // example/Pair
+  #28 = Utf8               (Lexample/Counter;Lexample/Counter;)V
+  #29 = NameAndType        #7:#28         // "<init>":(Lexample/Counter;Lexample/Counter;)V
+  #30 = Methodref          #27.#29        // example/Pair."<init>":(Lexample/Counter;Lexample/Counter;)V
+  #31 = Utf8               first
+  #32 = Utf8               Lexample/Counter;
+  #33 = Utf8               second
+  #34 = Utf8               selected
+  #35 = Utf8               I
+  #36 = Utf8               Code
+  #37 = Utf8               LineNumberTable
+  #38 = Utf8               LocalVariableTable
+  #39 = Utf8               MethodParameters
+  #40 = Utf8               Signature
+  #41 = Utf8               SourceFile
+  #42 = Utf8               TASTY
+  #43 = Utf8               Scala3InlineInfo
+  #44 = Utf8               Scala
+{
+  public example.PairFactory();
+    descriptor: ()V
+    flags: (0x0001) ACC_PUBLIC
+    Code:
+      stack=1, locals=1, args_size=1
+         0: aload_0
+         1: invokespecial #10                 // Method java/lang/Object."<init>":()V
+         4: return
+      LineNumberTable:
+        line 14: 0
+      LocalVariableTable:
+        Start  Length  Slot  Name   Signature
+            0       5     0  this   Lexample/PairFactory;
+
+  public example.Pair create(int, int, int);
+    descriptor: (III)Lexample/Pair;
+    flags: (0x0001) ACC_PUBLIC
+    Code:
+      stack=4, locals=7, args_size=4
+         0: new           #19                 // class example/Counter
+         3: dup
+         4: iload_1
+         5: invokespecial #22                 // Method example/Counter."<init>":(I)V
+         8: astore        4
+        10: new           #19                 // class example/Counter
+        13: dup
+        14: iload_2
+        15: invokespecial #22                 // Method example/Counter."<init>":(I)V
+        18: astore        5
+        20: aload         4
+        22: astore        6
+        24: aload         5
+        26: astore        6
+        28: aload         6
+        30: iload_3
+        31: invokevirtual #25                 // Method example/Counter.set:(I)V
+        34: new           #27                 // class example/Pair
+        37: dup
+        38: aload         4
+        40: aload         5
+        42: invokespecial #30                 // Method example/Pair."<init>":(Lexample/Counter;Lexample/Counter;)V
+        45: areturn
+      LineNumberTable:
+        line 16: 0
+        line 17: 10
+        line 18: 20
+        line 19: 24
+        line 20: 28
+        line 21: 34
+      LocalVariableTable:
+        Start  Length  Slot  Name   Signature
+           10      36     4 first   Lexample/Counter;
+           20      26     5 second   Lexample/Counter;
+           24      22     6 selected   Lexample/Counter;
+            0      46     0  this   Lexample/PairFactory;
+            0      46     1 firstSeed   I
+            0      46     2 secondSeed   I
+            0      46     3 nextValue   I
+    MethodParameters:
+      Name                           Flags
+      firstSeed                      final
+      secondSeed                     final
+      nextValue                      final
+}
+Signature: #3                           // Ljava/lang/Object;
+SourceFile: "MutableReferenceRebinding.scala"
+  TASTY: length = 0x10 (unknown attribute)
+   00 46 FA 06 C0 0F F8 D4 00 2C E1 45 A8 44 C6 27
+
+  Scala3InlineInfo: length = 0x4 (unknown attribute)
+   01 00 00 00
+  Scala: length = 0x0 (unknown attribute)

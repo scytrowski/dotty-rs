@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "purpose": "Pinned Scala 3.9.0 and JDK 21 oracle for mutable local reference rebinding and the paired Rust producer's first rejection in issue #2298. The Scala 3.9 class and TASTy files are compiler outputs, not Rust artifacts.",
+  "repository_baseline": {
+    "integration_base_sha": "5ae4843aeb612c9664cff34bf4f824d9b2d731dd"
+  },
+  "source": {
+    "path": "MutableReferenceRebinding.scala",
+    "sha256": "2cbc91af8bcac9cc158f2c4b1045838d428ac58ae8e174890852e279efd1d469",
+    "java_probe_path": "RuntimeProbe.java",
+    "java_probe_sha256": "709e0695297b0237d9e0b1a19c52ef4f2fbe981d3f4357e26fae6bf6363b59e3"
+  },
+  "toolchain": {
+    "scala": {
+      "source_revision": "777528f19a58e794c9954a42f433373472ec57f8",
+      "version": "3.9.0-bin-SNAPSHOT-git-777528f",
+      "sbt_version": "1.12.1",
+      "build_command": "sbt --batch 'dist/universal:stage'"
+    },
+    "rust": "rustc 1.98.1",
+    "jdk": {
+      "vendor": "Eclipse Temurin",
+      "version": "21.0.13+9",
+      "release": 21
+    }
+  },
+  "commands": {
+    "compile": "scalac -Werror -release 21 -d classes MutableReferenceRebinding.scala",
+    "java_probe_compile": "javac --release 21 -cp classes -d probe-classes RuntimeProbe.java",
+    "java_probe_run": "java -Xverify:all -ea -cp probe-classes:classes example.RuntimeProbe",
+    "javap": "javap -v -c -p -classpath classes example.PairFactory",
+    "print_tasty": "scalac -color:never -print-tasty classes/example/PairFactory.tasty",
+    "decompile": "scalac -color:never -decompile classes/example/PairFactory.tasty",
+    "typed_tree": "scalac -Werror -release 21 -Vprint:typer -d typed MutableReferenceRebinding.scala"
+  },
+  "runtime": {
+    "probe_output": "mutable reference rebinding values=7/42,-9/11,5/-13 distinct=true",
+    "verification": "passed with java -Xverify:all -ea",
+    "cases": [
+      { "arguments": [7, 3, 42], "pair_values": [7, 42], "distinct_counter_fields": true },
+      { "arguments": [-9, 42, 11], "pair_values": [-9, 11], "distinct_counter_fields": true },
+      { "arguments": [5, 5, -13], "pair_values": [5, -13], "distinct_counter_fields": true }
+    ]
+  },
+  "pair_factory_create": {
+    "descriptor": "(III)Lexample/Pair;",
+    "classfile_major": 65,
+    "max_stack": 4,
+    "max_locals": 7,
+    "local_slots": {
+      "this": 0,
+      "firstSeed": 1,
+      "secondSeed": 2,
+      "nextValue": 3,
+      "first": 4,
+      "second": 5,
+      "selected": 6
+    },
+    "counter_allocations": 2,
+    "setter_calls": 1,
+    "observed_rebinding_bytecode": [
+      "20: aload 4; 22: astore 6",
+      "24: aload 5; 26: astore 6",
+      "28: aload 6; 30: iload_3; 31: invokevirtual Counter.set(I)V",
+      "34: new Pair; 38: aload 4; 40: aload 5; 42: invokespecial Pair.<init>(Counter,Counter)V"
+    ],
+    "tasty_version": "28.9.0",
+    "block_address": 65,
+    "block_stats": [
+      "VALDEF@83 first",
+      "VALDEF@106 second",
+      "mutable VALDEF@127 selected",
+      "ASSIGN@137 selected = second",
+      "APPLY@144 selected.set(nextValue)"
+    ],
+    "block_result": "APPLY@67 new Pair(first, second)",
+    "assignment_identity": {
+      "lhs": "TERMREFdirect@139 -> selected VALDEF@127",
+      "rhs": "SHAREDtype@142 -> TERMREFdirect@81 -> second VALDEF@106",
+      "selected_initializer": "SHAREDtype@134 -> TERMREFdirect@79 -> first VALDEF@83"
+    },
+    "pair_argument_references": [
+      "TERMREFdirect@79 -> first VALDEF@83",
+      "TERMREFdirect@81 -> second VALDEF@106"
+    ],
+    "tasty_uuid_links": {
+      "PairFactory": "0046fa06-c00f-f8d4-002c-e145a844c627"
+    }
+  },
+  "artifacts": [
+    { "path": "scala39/example/Counter.class", "sha256": "7b46dd47c9f27861ff6e66beb95b4936fa613851407cac9c64465bdbbf634d6e", "classfile_major": 65, "tasty_uuid": "0037406b-89e4-eee8-00cc-ab48e5a4bd1b" },
+    { "path": "scala39/example/Counter.tasty", "sha256": "5b1c23bb7f960014cbbe3d37edcda07019ee968209ee9d4f24c08855bc683057", "tasty_version": "28.9.0", "tasty_uuid": "0037406b-89e4-eee8-00cc-ab48e5a4bd1b" },
+    { "path": "scala39/example/Pair.class", "sha256": "90fe0433064510240969e1b2d5057baeb737b86ee9fca89242a5056b1f83de06", "classfile_major": 65, "tasty_uuid": "00d6f05f-6fd1-c0d3-00a9-4710d6406d5b" },
+    { "path": "scala39/example/Pair.tasty", "sha256": "72396247c4e8661b1e26f982daad2a7c30bad18984f1b11e103458e1a478c5ce", "tasty_version": "28.9.0", "tasty_uuid": "00d6f05f-6fd1-c0d3-00a9-4710d6406d5b" },
+    { "path": "scala39/example/PairFactory.class", "sha256": "5fe95908cb6cde1a417c90ad72e4560636c4c8c16e060545177a644f8f0cbffe", "classfile_major": 65, "tasty_uuid": "0046fa06-c00f-f8d4-002c-e145a844c627" },
+    { "path": "scala39/example/PairFactory.tasty", "sha256": "736c135470d5aea4c80a786df751a5c4d10a6bca8076b4f5ff10b7639ee1b706", "tasty_version": "28.9.0", "tasty_uuid": "0046fa06-c00f-f8d4-002c-e145a844c627" }
+  ],
+  "snapshots": {
+    "javap": { "path": "oracle/PairFactory.javap.txt", "sha256": "376ed2d0dab2379d76e09d9bc0fc8a404977a5e5bf9d4c9ce36ecc17a4147674", "workspace_path_header_normalized": true },
+    "print_tasty": { "path": "oracle/PairFactory.print-tasty.txt", "sha256": "43c56fb34e8febc55e4469e5fbb215badc0c1e8e5ba01214cb3080dcdde58f45" },
+    "decompile": { "path": "oracle/PairFactory.decompile.txt", "sha256": "00224933288c418eba63a2ef1286cfb9043320456e5005a1e095c000dab51bab", "workspace_path_header_normalized": true },
+    "typed_tree": { "path": "oracle/typer.txt", "sha256": "e8e18eba97ba6d1140b5c3091a4aa2ad0451b733f31559f7f4741689391b59d3", "workspace_path_header_normalized": true }
+  },
+  "control_matrix": [
+    { "control": "rename locals", "scala": "valid", "rust_producer": "deferred at cross-class constructor-call identity proof with SourceShape: candidate method must have one plain formal clause and a concrete public body" },
+    { "control": "reverse first and second declarations; keep Pair(first, second)", "scala": "valid", "rust_producer": "deferred at the same first failure" },
+    { "control": "assign selected = first", "scala": "valid", "rust_producer": "deferred at the same first failure" },
+    { "control": "assign selected twice", "scala": "valid", "rust_producer": "deferred at the same first failure" },
+    { "control": "assign a fresh Counter allocation", "scala": "valid", "rust_producer": "deferred at the same first failure" },
+    { "control": "nested if assignment", "scala": "valid", "rust_producer": "deferred at the same first failure" },
+    { "control": "nested while assignment", "scala": "valid", "rust_producer": "deferred at the same first failure" },
+    { "control": "write immutable val", "scala": "invalid E052", "rust_producer": "rejected" },
+    { "control": "assign foreign local", "scala": "invalid E119", "rust_producer": "rejected" },
+    { "control": "forward reference", "scala": "invalid E039", "rust_producer": "rejected" },
+    { "control": "uninitialized local", "scala": "invalid under -Werror", "rust_producer": "rejected" },
+    { "control": "assign Int to Counter", "scala": "invalid E007", "rust_producer": "rejected" }
+  ],
+  "rust_frontend": {
+    "pipeline": "ContextualScanner -> parser -> namer -> SourceTyper",
+    "identity_evidence": [
+      "first and second are distinct local symbols initialized from firstSeed and secondSeed respectively",
+      "selected is a mutable local symbol initialized from first",
+      "source assignment maps to a typed Assign whose lhs is selected and rhs is second by canonical TermRef symbol identity",
+      "selected.set receiver resolves to selected and its argument resolves to nextValue",
+      "final Pair constructor arguments resolve to first then second"
+    ],
+    "paired_producer": {
+      "phase": "cross-class constructor-call identity proof",
+      "error": "SourceShape(\"candidate method must have one plain formal clause and a concrete public body\")",
+      "callback_reached": false,
+      "artifact_batch_returned": false,
+      "partial_artifacts": 0
+    }
+  }
+}
