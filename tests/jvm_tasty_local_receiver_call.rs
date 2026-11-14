@@ -679,6 +679,37 @@ fn mutable_reference_rebinding_audit_authenticates_assignment_identity_and_first
     }
 
     let typed_ast = typer.typed_ast();
+    let term_symbol = |tree| match typer.store().types.get(typed_ast.get(tree).ty) {
+        Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        } => *symbol,
+        other => panic!("tree retains canonical term identity: {other:?}"),
+    };
+    let TreeKind::ValDef(selected_source) = &parsed.ast.get(block.stats[2]).kind else {
+        panic!("selected source local remains a ValDef");
+    };
+    let selected_source_rhs = selected_source
+        .rhs
+        .expect("selected source local has an initializer");
+    let TreeKind::ValDef(selected_typed) = &typed_ast.get(selected.declaration()).kind else {
+        panic!("selected typed local remains a ValDef");
+    };
+    let selected_typed_rhs = selected_typed
+        .rhs
+        .expect("selected typed local retains its initializer");
+    assert_eq!(
+        typer
+            .source_typed_index()
+            .get(source_id, selected_source_rhs),
+        Some(selected_typed_rhs),
+        "selected initializer retains its source-to-typed mapping"
+    );
+    assert_eq!(
+        term_symbol(selected_typed_rhs),
+        first.symbol(),
+        "selected initializer resolves canonically to first"
+    );
     let typed_assignment = typer
         .source_typed_index()
         .get(source_id, block.stats[3])
@@ -706,13 +737,6 @@ fn mutable_reference_rebinding_audit_authenticates_assignment_identity_and_first
         ),
         Some(assignment.lhs)
     );
-    let term_symbol = |tree| match typer.store().types.get(typed_ast.get(tree).ty) {
-        Type::TermRef {
-            target: TermRefTarget::Symbol(symbol),
-            ..
-        } => *symbol,
-        other => panic!("tree retains canonical term identity: {other:?}"),
-    };
     for (binding, formal) in [(first, *first_seed), (second, *second_seed)] {
         let TreeKind::ValDef(local) = &typed_ast.get(binding.declaration()).kind else {
             panic!("Counter allocation is a typed ValDef");
@@ -771,17 +795,28 @@ fn mutable_reference_rebinding_audit_authenticates_assignment_identity_and_first
         "the first producer failure precedes plan acceptance"
     );
     assert!(
-        planned.is_err(),
-        "mutable rebinding is not yet accepted by paired planning"
+        matches!(
+            &planned,
+            Err(PairedPlanError::BatchUnit { phase, reason })
+                if *phase == "cross-class constructor-call identity proof"
+                    && reason == "SourceShape(\"candidate method must have one plain formal clause and a concrete public body\")"
+        ),
+        "target remains frozen at its exact first paired-planning rejection"
+    );
+    let emission = emit_paired_jvm_tasty_batch(
+        MUTABLE_REFERENCE_REBINDING_TARGET,
+        "MutableReferenceRebinding.scala",
+        SourceId::from_index(22982),
     );
     assert!(
-        emit_paired_jvm_tasty_batch(
-            MUTABLE_REFERENCE_REBINDING_TARGET,
-            "MutableReferenceRebinding.scala",
-            SourceId::from_index(22982)
-        )
-        .is_err(),
-        "failed paired planning returns no artifact batch"
+        matches!(
+            emission,
+            Err(dotty::jvm_tasty_artifacts::PairedBatchArtifactError::Plan(
+                PairedPlanError::BatchUnit { phase, reason }
+            )) if phase == "cross-class constructor-call identity proof"
+                && reason == "SourceShape(\"candidate method must have one plain formal clause and a concrete public body\")"
+        ),
+        "batch emission returns the same first planning rejection before artifact work"
     );
 }
 

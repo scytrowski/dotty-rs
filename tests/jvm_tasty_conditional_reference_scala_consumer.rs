@@ -29,6 +29,8 @@ const MUTABLE_REBINDING_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_mutable_reference_rebinding/MutableReferenceRebinding.scala");
 const MUTABLE_REBINDING_PROBE: &str =
     include_str!("fixtures/jvm_tasty_mutable_reference_rebinding/RuntimeProbe.java");
+const MUTABLE_REBINDING_MANIFEST: &str =
+    include_str!("fixtures/jvm_tasty_mutable_reference_rebinding/oracle.json");
 const PATHS: [&str; 6] = [
     "example/Counter.class",
     "example/Counter.tasty",
@@ -232,6 +234,37 @@ fn sha256(path: &Path) -> String {
         .next()
         .expect("sha256sum output")
         .to_owned()
+}
+
+fn json_string_field<'a>(object: &'a str, field: &str) -> &'a str {
+    let key = format!("\"{field}\": \"");
+    let value = object
+        .split_once(&key)
+        .unwrap_or_else(|| panic!("manifest object has {field} string field"))
+        .1;
+    value
+        .split_once('"')
+        .expect("manifest string field is terminated")
+        .0
+}
+
+fn snapshot_receipt<'a>(manifest: &'a str, name: &str) -> (&'a str, &'a str) {
+    let snapshots = manifest
+        .split_once("\"snapshots\": {")
+        .expect("oracle manifest has snapshots object")
+        .1;
+    let key = format!("\"{name}\": {{");
+    let object = snapshots
+        .split_once(&key)
+        .unwrap_or_else(|| panic!("oracle manifest has {name} snapshot"))
+        .1
+        .split_once('}')
+        .expect("snapshot entry is terminated")
+        .0;
+    (
+        json_string_field(object, "path"),
+        json_string_field(object, "sha256"),
+    )
 }
 
 fn task_dir() -> PathBuf {
@@ -835,6 +868,16 @@ fn scala39_mutable_reference_rebinding_oracle_is_pinned_and_executable() {
         sha256(probe_path),
         "709e0695297b0237d9e0b1a19c52ef4f2fbe981d3f4357e26fae6bf6363b59e3"
     );
+    for name in ["javap", "print_tasty", "decompile", "typed_tree"] {
+        let (relative_path, expected_hash) = snapshot_receipt(MUTABLE_REBINDING_MANIFEST, name);
+        let path =
+            Path::new("tests/fixtures/jvm_tasty_mutable_reference_rebinding").join(relative_path);
+        assert_eq!(
+            sha256(&path),
+            expected_hash,
+            "oracle manifest SHA-256 for the {name} snapshot"
+        );
+    }
 
     let pinned = scala39_toolchain::from_environment(output, |command| {
         command.env(

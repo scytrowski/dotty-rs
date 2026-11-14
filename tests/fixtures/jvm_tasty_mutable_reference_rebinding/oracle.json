@@ -96,10 +96,10 @@
     { "path": "scala39/example/PairFactory.tasty", "sha256": "736c135470d5aea4c80a786df751a5c4d10a6bca8076b4f5ff10b7639ee1b706", "tasty_version": "28.9.0", "tasty_uuid": "0046fa06-c00f-f8d4-002c-e145a844c627" }
   ],
   "snapshots": {
-    "javap": { "path": "oracle/PairFactory.javap.txt", "sha256": "376ed2d0dab2379d76e09d9bc0fc8a404977a5e5bf9d4c9ce36ecc17a4147674", "workspace_path_header_normalized": true },
+    "javap": { "path": "oracle/PairFactory.javap.txt", "sha256": "317663655514da7a677662dd3e449a996fd921c6958a696deb33a155eb294931", "workspace_path_header_normalized": true },
     "print_tasty": { "path": "oracle/PairFactory.print-tasty.txt", "sha256": "43c56fb34e8febc55e4469e5fbb215badc0c1e8e5ba01214cb3080dcdde58f45" },
     "decompile": { "path": "oracle/PairFactory.decompile.txt", "sha256": "00224933288c418eba63a2ef1286cfb9043320456e5005a1e095c000dab51bab", "workspace_path_header_normalized": true },
-    "typed_tree": { "path": "oracle/typer.txt", "sha256": "e8e18eba97ba6d1140b5c3091a4aa2ad0451b733f31559f7f4741689391b59d3", "workspace_path_header_normalized": true }
+    "typed_tree": { "path": "oracle/typer.txt", "sha256": "0391e30335f86f4738319e8cb24e6f065af737a3fc764d95b962357060fb1798", "workspace_path_header_normalized": true }
   },
   "control_matrix": [
     { "control": "rename locals", "scala": "valid", "rust_producer": "deferred at cross-class constructor-call identity proof with SourceShape: candidate method must have one plain formal clause and a concrete public body" },
