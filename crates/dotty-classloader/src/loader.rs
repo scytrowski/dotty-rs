@@ -91,6 +91,16 @@ struct TastyTopLevelSelection {
     header_field_address: Option<u32>,
     constructor_address: u32,
     constructor_parameter_address: Option<u32>,
+    class_type_parameter: Option<TastyClassTypeParameterSelection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TastyClassTypeParameterSelection {
+    address: u32,
+    bounds_address: u32,
+    ordered_position: u32,
+    constructor_type_parameter_address: u32,
+    formal_type_reference_address: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2933,7 +2943,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             }
         };
         let has_single_term_parameter = !template_shape.term_params.is_empty();
-        if !template_shape.type_params.is_empty()
+        if template_shape.type_params.len() > 1
             || template_shape.stats.len() != 1
             || !matches!(
                 template_shape.stats.first(),
@@ -3056,35 +3066,62 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 "user annotations on the primary constructor are unsupported",
             ));
         }
+        let has_class_type_parameter = !template_shape.type_params.is_empty();
         let valid_constructor_parameters = if has_single_term_parameter {
-            match (
-                template_shape.term_params.as_slice(),
-                constructor.parameters.as_slice(),
-            ) {
-                (
-                    [
-                        dotty_tasty::tasty::ParameterNode::TermParam {
-                            name: template_parameter_name,
-                            ..
-                        },
-                    ],
-                    [
-                        dotty_tasty::tasty::ParameterNode::TermParam {
-                            name: constructor_parameter_name,
-                            ..
-                        },
-                    ],
-                ) => {
-                    constructor.header_items.len() == 1
-                        && matches!(
-                            &constructor.header_items[0],
-                            dotty_tasty::tasty::DefDefHeaderItem::Parameter(
-                                dotty_tasty::tasty::ParameterNode::TermParam { name, .. }
-                            ) if name == constructor_parameter_name
-                                && name == template_parameter_name
-                        )
+            match template_shape.term_params.as_slice() {
+                [
+                    dotty_tasty::tasty::ParameterNode::TermParam {
+                        name: template_parameter_name,
+                        ..
+                    },
+                ] => {
+                    let term_parameter_is_valid = if has_class_type_parameter {
+                        matches!(
+                            constructor.parameters.as_slice(),
+                            [
+                                dotty_tasty::tasty::ParameterNode::TypeParam { .. },
+                                dotty_tasty::tasty::ParameterNode::TermParam {
+                                    name: constructor_parameter_name,
+                                    ..
+                                },
+                            ] if constructor_parameter_name == template_parameter_name
+                        ) && matches!(
+                            constructor.header_items.as_slice(),
+                            [
+                                dotty_tasty::tasty::DefDefHeaderItem::Parameter(
+                                    dotty_tasty::tasty::ParameterNode::TypeParam { .. }
+                                ),
+                                dotty_tasty::tasty::DefDefHeaderItem::Parameter(
+                                    dotty_tasty::tasty::ParameterNode::TermParam {
+                                        name: constructor_parameter_name,
+                                        ..
+                                    }
+                                ),
+                            ] if constructor_parameter_name == template_parameter_name
+                        ) && Self::constructor_parameter_is_ordinary(constructor.parameters.last())
+                    } else {
+                        matches!(
+                            constructor.parameters.as_slice(),
+                            [dotty_tasty::tasty::ParameterNode::TermParam {
+                                name: constructor_parameter_name,
+                                ..
+                            }] if constructor_parameter_name == template_parameter_name
+                        ) && constructor.header_items.len() == 1
+                            && matches!(
+                                &constructor.header_items[0],
+                                dotty_tasty::tasty::DefDefHeaderItem::Parameter(
+                                    dotty_tasty::tasty::ParameterNode::TermParam {
+                                        name: constructor_parameter_name,
+                                        ..
+                                    }
+                                ) if constructor_parameter_name == template_parameter_name
+                            )
+                            && Self::constructor_parameter_is_ordinary(
+                                constructor.parameters.first(),
+                            )
+                    };
+                    term_parameter_is_valid
                         && constructor.clauses.is_empty()
-                        && Self::constructor_parameter_is_ordinary(constructor.parameters.first())
                         && (header_field_selection.is_some()
                             || Self::template_parameter_is_plain(
                                 template_shape.term_params.first(),
@@ -3105,7 +3142,12 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             ));
         }
         let constructor_parameter_address = if has_single_term_parameter {
-            let Some(parameter) = constructor.parameters.first() else {
+            let parameter = if has_class_type_parameter {
+                constructor.parameters.last()
+            } else {
+                constructor.parameters.first()
+            };
+            let Some(parameter) = parameter else {
                 unreachable!("supported constructor has one parameter")
             };
             let Some(parameter_node) = address_index.iter().find(|node| {
@@ -3136,12 +3178,245 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 "the indexed immutable field, constructor, and formal roles do not match",
             ));
         }
+        let class_type_parameter = if has_class_type_parameter {
+            Some(Self::validate_class_type_parameter_selection(
+                &address_index,
+                class_tree_node,
+                template_tree_node,
+                constructor_tree_node,
+                &template_shape,
+                &constructor,
+                constructor_parameter_address,
+            )?)
+        } else {
+            None
+        };
         Ok(TastyTopLevelSelection {
             binary_name: name.clone(),
             class_address,
             header_field_address: header_field_selection.map(|selection| selection.field_address),
             constructor_address,
             constructor_parameter_address,
+            class_type_parameter,
+        })
+    }
+
+    fn validate_class_type_parameter_selection(
+        index: &dotty_tasty::tasty::AstAddressIndex<'_>,
+        class_node: dotty_tasty::tasty::AstTreeNode,
+        template_node: dotty_tasty::tasty::AstTreeNode,
+        constructor_node: dotty_tasty::tasty::AstTreeNode,
+        template: &dotty_tasty::tasty::TemplateStructure<'_>,
+        constructor: &dotty_tasty::tasty::DefDefBody<'_>,
+        formal_address: Option<u32>,
+    ) -> Result<TastyClassTypeParameterSelection, SemanticTastyLoadError> {
+        use dotty_tasty::tasty::{
+            AstRefKind, DefDefHeaderItem, IDENTTPT_TAG, ParameterNode, RawTree, TYPEBOUNDS_TAG,
+            TYPEPARAM_TAG, TYPEREFDIRECT_TAG,
+        };
+
+        let [ParameterNode::TypeParam { .. }] = template.type_params.as_slice() else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the generic class selection requires exactly one direct class type parameter",
+            ));
+        };
+        let class_parameter = &template.type_params[0];
+        let class_parameter_node = index
+            .iter()
+            .find(|node| {
+                node.tag == TYPEPARAM_TAG
+                    && node.payload.as_ptr() == class_parameter.payload().as_ptr()
+                    && node.payload.len() == class_parameter.payload().len()
+            })
+            .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                "the class type parameter is missing from the AST address index",
+            ))?;
+        let class_parameter_address = u32::try_from(class_parameter_node.offset).map_err(|_| {
+            SemanticTastyLoadError::UnsupportedShape(
+                "the class type parameter address exceeds the supported wire range",
+            )
+        })?;
+        let class_parameter_tree_node = index.get_node(class_parameter_address).ok_or(
+            SemanticTastyLoadError::UnsupportedShape(
+                "the class type parameter is missing from the structural address index",
+            ),
+        )?;
+        if index.parent_of(class_parameter_address) != Some(template_node)
+            || index.parent_of(template_node.offset as u32) != Some(class_node)
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the selected type parameter is not directly owned by the class",
+            ));
+        }
+        let class_parameter_body = class_parameter.decode_body().map_err(|_| {
+            SemanticTastyLoadError::UnsupportedShape(
+                "the class type parameter bounds are malformed",
+            )
+        })?;
+        let RawTree::LengthNode(bounds) = &class_parameter_body.type_tree else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the class type parameter must retain its original bounds tree",
+            ));
+        };
+        if bounds.tag != TYPEBOUNDS_TAG {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the class type parameter must retain its original bounds tree",
+            ));
+        }
+        let bounds_node = index
+            .iter()
+            .find(|node| {
+                node.tag == TYPEBOUNDS_TAG
+                    && node.payload.as_ptr() == bounds.payload.as_ptr()
+                    && node.payload.len() == bounds.payload.len()
+                    && index.parent_of(node.offset as u32) == Some(class_parameter_tree_node)
+            })
+            .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                "the class type parameter bounds are missing from its indexed declaration",
+            ))?;
+        let bounds_address = u32::try_from(bounds_node.offset).map_err(|_| {
+            SemanticTastyLoadError::UnsupportedShape(
+                "the class type parameter bounds address exceeds the supported wire range",
+            )
+        })?;
+
+        let [
+            DefDefHeaderItem::Parameter(ParameterNode::TypeParam { .. }),
+            DefDefHeaderItem::Parameter(ParameterNode::TermParam { .. }),
+        ] = constructor.header_items.as_slice()
+        else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the generic constructor requires one type parameter followed by one ordinary formal",
+            ));
+        };
+        let constructor_parameter = match &constructor.header_items[0] {
+            DefDefHeaderItem::Parameter(parameter @ ParameterNode::TypeParam { .. }) => parameter,
+            _ => unreachable!("constructor type parameter shape checked above"),
+        };
+        let constructor_parameter_node = index
+            .iter()
+            .find(|node| {
+                node.tag == TYPEPARAM_TAG
+                    && node.payload.as_ptr() == constructor_parameter.payload().as_ptr()
+                    && node.payload.len() == constructor_parameter.payload().len()
+                    && index.parent_of(node.offset as u32) == Some(constructor_node)
+            })
+            .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                "the constructor type parameter is missing from its indexed declaration",
+            ))?;
+        let constructor_type_parameter_address = u32::try_from(constructor_parameter_node.offset)
+            .map_err(|_| {
+            SemanticTastyLoadError::UnsupportedShape(
+                "the constructor type parameter address exceeds the supported wire range",
+            )
+        })?;
+        let Some(formal_address) = formal_address else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the generic constructor formal is missing from the structural address index",
+            ));
+        };
+        let formal_tree_node =
+            index
+                .get_node(formal_address)
+                .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                    "the generic constructor formal is missing from the structural address index",
+                ))?;
+        let formal_node =
+            index
+                .get(formal_address)
+                .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                    "the generic constructor formal is missing from the AST address index",
+                ))?;
+        let formal =
+            constructor
+                .parameters
+                .last()
+                .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                    "the generic constructor requires one ordinary formal",
+                ))?;
+        if formal_tree_node.tag != dotty_tasty::tasty::PARAM_TAG
+            || formal_node.payload.as_ptr() != formal.payload().as_ptr()
+            || formal_node.payload.len() != formal.payload().len()
+            || index.parent_of(formal_address) != Some(constructor_node)
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the generic constructor formal is not a direct indexed constructor child",
+            ));
+        }
+        let formal_body = formal.decode_body().map_err(|_| {
+            SemanticTastyLoadError::UnsupportedShape(
+                "the generic constructor formal type is malformed",
+            )
+        })?;
+        let RawTree::NatAst {
+            tag: IDENTTPT_TAG,
+            child: reference_tree,
+            ..
+        } = formal_body.type_tree
+        else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the generic constructor formal must directly reference its type parameter",
+            ));
+        };
+        let RawTree::Leaf(reference_leaf) = *reference_tree else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the generic constructor formal must directly reference its type parameter",
+            ));
+        };
+        let Some(type_reference) = reference_leaf.ast_ref() else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the generic constructor formal must directly reference its type parameter",
+            ));
+        };
+        if type_reference.kind != AstRefKind::TypeRefDirect
+            || type_reference.address != constructor_type_parameter_address
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the generic constructor formal must reference its indexed constructor type parameter",
+            ));
+        }
+        let formal_type_nodes = index
+            .iter_nodes()
+            .filter(|node| {
+                node.tag == IDENTTPT_TAG
+                    && index.parent_of(node.offset as u32) == Some(formal_tree_node)
+            })
+            .collect::<Vec<_>>();
+        let [type_tree_node] = formal_type_nodes.as_slice() else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the constructor formal must contain one indexed identifier type tree",
+            ));
+        };
+        let reference_nodes = index
+            .iter_nodes()
+            .filter(|node| {
+                node.tag == TYPEREFDIRECT_TAG
+                    && index.parent_of(node.offset as u32) == Some(*type_tree_node)
+            })
+            .collect::<Vec<_>>();
+        let [reference_node] = reference_nodes.as_slice() else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the constructor formal type tree must contain one direct type reference",
+            ));
+        };
+        let reference_address = u32::try_from(reference_node.offset).map_err(|_| {
+            SemanticTastyLoadError::UnsupportedShape(
+                "the formal type reference address exceeds the supported wire range",
+            )
+        })?;
+        if index.parent_of(reference_address) != Some(*type_tree_node)
+            || index.parent_of(type_tree_node.offset as u32) != Some(formal_tree_node)
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the constructor formal type reference is not indexed under its formal",
+            ));
+        }
+        Ok(TastyClassTypeParameterSelection {
+            address: class_parameter_address,
+            bounds_address,
+            ordered_position: 0,
+            constructor_type_parameter_address,
+            formal_type_reference_address: reference_address,
         })
     }
 
@@ -10258,7 +10533,8 @@ mod tests {
     #[test]
     fn authentic_ctor_generic_audit_records_loader_and_ordinary_unpickler_boundary() {
         use dotty_tasty::tasty::{
-            AstRefKind, DEFDEF_TAG, PARAM_TAG, TYPEBOUNDS_TAG, TYPEDEF_TAG, TYPEPARAM_TAG,
+            AstRefKind, DEFDEF_TAG, IDENTTPT_TAG, PARAM_TAG, TYPEBOUNDS_TAG, TYPEDEF_TAG,
+            TYPEPARAM_TAG, TYPEREFDIRECT_TAG,
         };
         use dotty_tasty_unpickler::tasty_unpickler::UnpickleError;
 
@@ -10304,6 +10580,40 @@ mod tests {
         assert_eq!(addresses.get_node(48).unwrap().tag, DEFDEF_TAG);
         assert_eq!(addresses.get_node(51).unwrap().tag, TYPEPARAM_TAG);
         assert_eq!(addresses.get_node(60).unwrap().tag, PARAM_TAG);
+        let class_template = addresses.parent_of(9).expect("class A's owner");
+        assert_eq!(
+            class_template.tag,
+            dotty_tasty::tasty::TEMPLATE_TAG,
+            "class A is a direct child of the class template"
+        );
+        assert_eq!(
+            addresses.parent_of(class_template.offset as u32),
+            Some(addresses.get_node(4).unwrap()),
+            "the class template is a direct child of CtorGeneric"
+        );
+        assert_eq!(
+            addresses.parent_of(12),
+            Some(addresses.get_node(9).unwrap()),
+            "the original bounds belong to class A"
+        );
+        assert_eq!(
+            addresses.parent_of(51),
+            Some(addresses.get_node(48).unwrap()),
+            "constructor A is directly owned by the primary constructor"
+        );
+        assert_eq!(
+            addresses.parent_of(60),
+            Some(addresses.get_node(48).unwrap()),
+            "x is directly owned by the primary constructor"
+        );
+        let formal_type_tree = addresses.parent_of(65).expect("x's direct type reference");
+        assert_eq!(formal_type_tree.tag, IDENTTPT_TAG);
+        assert_eq!(
+            addresses.parent_of(formal_type_tree.offset as u32),
+            Some(addresses.get_node(60).unwrap()),
+            "the x type tree is directly owned by x"
+        );
+        assert_eq!(addresses.get_node(65).unwrap().tag, TYPEREFDIRECT_TAG);
 
         // Ordinary, independent unpickling enters the authentic indexed
         // declarations without seeding synthetic Scala/JDK symbols.
@@ -10370,13 +10680,13 @@ mod tests {
             );
         }
 
-        // The selected semantic loader reaches its current typed structural
-        // gate first, with the authentic resource first on the classpath.
+        // The selected semantic loader now returns an indexed structural
+        // receipt before any unpickling/completion transaction.
         let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorGeneric");
         let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../dotty-tasty-unpickler/tests/fixtures/semantic");
         let semantic_fixture = ConstructorFixtureClassPath(
-            HashMap::from([(name.clone(), bytes)]),
+            HashMap::from([(name.clone(), bytes.clone())]),
             fixture_root.clone(),
         );
         let java_home = std::env::var_os("JAVA_HOME").expect("JDK 21 JAVA_HOME");
@@ -10399,13 +10709,22 @@ mod tests {
             &ClassOrigin::Directory(fixture_root.clone())
         );
         let mut loader_store = SemanticStore::new();
-        let mut loader = ClassLoader::new(class_path, &mut loader_store);
-        assert!(matches!(
-            loader.load_semantic_class_with_tasty_unpickler(&name),
-            Err(SemanticTastyLoadError::UnsupportedShape(
-                "the class template must have no type parameters and one constructor declaration"
-            ))
-        ));
+        let loader = ClassLoader::new(class_path, &mut loader_store);
+        let selection =
+            ClassLoader::<CompositeClassPath>::validate_semantic_class_shape(&file, &name)
+                .expect("authentic CtorGeneric structure is selected");
+        let generic = selection
+            .class_type_parameter
+            .as_ref()
+            .expect("the class type parameter has an indexed receipt");
+        assert_eq!(selection.class_address, 4);
+        assert_eq!(selection.constructor_address, 48);
+        assert_eq!(selection.constructor_parameter_address, Some(60));
+        assert_eq!(generic.address, 9);
+        assert_eq!(generic.bounds_address, 12);
+        assert_eq!(generic.ordered_position, 0);
+        assert_eq!(generic.constructor_type_parameter_address, 51);
+        assert_eq!(generic.formal_type_reference_address, 65);
         assert!(loader.session.identified.is_empty());
         assert!(loader.session.resolved.is_empty());
         assert!(!loader.semantic_tasty_loaded.contains_key(&name));
@@ -10462,8 +10781,6 @@ mod tests {
     fn semantic_class_loader_rejects_wrong_package_and_module_before_mutation() {
         let wrong_package_name = BinaryName::from_internal("other/package/Open");
         let module_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Holder");
-        let generic_name =
-            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorGeneric");
         let cases = [
             (
                 wrong_package_name,
@@ -10484,11 +10801,6 @@ mod tests {
                 )
                 .expect("pinned module fixture"),
                 "the TASTy unit must contain exactly one top-level class declaration",
-            ),
-            (
-                generic_name,
-                semantic_unpickler_fixture_bytes("CtorGeneric.tasty"),
-                "the class template must have no type parameters and one constructor declaration",
             ),
             (
                 BinaryName::from_internal(
