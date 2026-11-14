@@ -278,6 +278,162 @@ fn a_generic_constructor_abstracts_its_own_type_parameter_into_the_result() {
 }
 
 #[test]
+fn generic_constructor_keeps_wire_and_semantic_type_parameter_identities_canonical() {
+    // `class CtorGeneric[A](x: A)`: address 9 is the class header A, 51 is
+    // the constructor's own A, and the formal's TYPEREFdirect at 65 names 51.
+    let file = TastyFile::parse_scala_3_9(CTOR_GENERIC).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+    let class = checked_class(&unpickler, &file, 4);
+    let constructor = unpickler.index().symbol_at(48).expect("constructor symbol");
+    let header_a = unpickler.index().symbol_at(9).expect("class header A");
+    let ctor_a = unpickler.index().symbol_at(51).expect("constructor A");
+    let formal_x = unpickler.index().symbol_at(60).expect("constructor x");
+
+    assert_ne!(header_a, ctor_a);
+    let wire_reference = unpickler.unpickle_type(65).unwrap();
+    let signature = unpickler.complete_symbol(48).unwrap();
+    assert_eq!(
+        unpickler.symbol_state_at(9),
+        Some((SymbolKind::TypeParameter, SymbolInfo::Missing)),
+        "constructor completion must not complete or substitute the class header A"
+    );
+    assert!(matches!(
+        unpickler.symbol_state_at(51),
+        Some((SymbolKind::TypeParameter, SymbolInfo::Complete(_)))
+    ));
+    assert!(matches!(
+        unpickler.symbol_state_at(60),
+        Some((SymbolKind::Parameter, SymbolInfo::Complete(_)))
+    ));
+    drop(unpickler);
+
+    assert_eq!(session.store.symbols.get(header_a).owner, Some(class));
+    assert_eq!(session.store.symbols.get(ctor_a).owner, Some(constructor));
+    assert_eq!(session.store.symbols.get(formal_x).owner, Some(constructor));
+    assert!(matches!(
+        session.store.types.get(wire_reference),
+        Type::TypeRef { target, .. } if target.symbol() == Some(ctor_a)
+    ));
+    let poly = poly(&session.store, signature);
+    let method = method(&session.store, poly.result);
+    assert_eq!(method.params.len(), 1);
+    assert_eq!(
+        session.store.types.get(method.params[0].ty),
+        &Type::ParamRef {
+            binder: signature,
+            index: 0
+        }
+    );
+    let Type::Applied { tycon, args } = session.store.types.get(method.result) else {
+        panic!("constructor result must apply the owner class");
+    };
+    assert!(matches!(
+        session.store.types.get(*tycon),
+        Type::TypeRef { prefix, target }
+            if *prefix == session.definitions.no_prefix && target.symbol() == Some(class)
+    ));
+    assert_eq!(args.len(), 1);
+    assert_eq!(
+        session.store.types.get(args[0]),
+        &Type::ParamRef {
+            binder: signature,
+            index: 0
+        }
+    );
+    // The cached wire type retains its declaration identity; only the
+    // constructor signature abstracts it into the Poly binder.
+    assert!(matches!(
+        session.store.types.get(wire_reference),
+        Type::TypeRef { target, .. } if target.symbol() == Some(ctor_a)
+    ));
+    assert_ne!(formal_x, ctor_a);
+}
+
+#[test]
+fn generic_constructor_repeat_and_fresh_store_loads_have_normalized_semantics() {
+    fn load() -> String {
+        let file = TastyFile::parse_scala_3_9(CTOR_GENERIC).unwrap();
+        let mut session = Session::new();
+        let mut unpickler = entered(&file, &mut session);
+        let signature = unpickler.complete_symbol(48).unwrap();
+        let type_count = unpickler.index().type_count();
+        assert_eq!(unpickler.complete_symbol(48).unwrap(), signature);
+        assert_eq!(unpickler.index().type_count(), type_count);
+
+        let class = unpickler.index().symbol_at(4).unwrap();
+        let ctor_a = unpickler.index().symbol_at(51).unwrap();
+        let header_a = unpickler.index().symbol_at(9).unwrap();
+        assert_ne!(header_a, ctor_a);
+        let poly = poly(&session.store, signature);
+        assert_eq!(poly.params.len(), 1);
+        let method = method(&session.store, poly.result);
+        assert_eq!(method.params.len(), 1);
+        assert!(matches!(
+            session.store.types.get(method.params[0].ty),
+            Type::ParamRef { binder, index: 0 } if *binder == signature
+        ));
+        let Type::Applied { tycon, args } = session.store.types.get(method.result) else {
+            panic!("constructor result must apply the owner class");
+        };
+        assert!(matches!(
+            session.store.types.get(*tycon),
+            Type::TypeRef { prefix, target }
+                if *prefix == session.definitions.no_prefix && target.symbol() == Some(class)
+        ));
+        assert_eq!(args.len(), 1);
+        assert!(matches!(
+            session.store.types.get(args[0]),
+            Type::ParamRef { binder, index: 0 } if *binder == signature
+        ));
+
+        // A normalized, arena-independent snapshot of the relevant graph.
+        let type_parameter_name = session.text(poly.params[0].name.as_name().text());
+        format!("Poly[{type_parameter_name}] -> Method(x: ParamRef(0)) -> CtorGeneric[ParamRef(0)]")
+    }
+
+    assert_eq!(load(), load());
+}
+
+#[test]
+fn a_generic_constructor_failure_rolls_back_both_parameter_identities_for_retry() {
+    // Without scala.Any/scala.Nothing in the package registry, completing
+    // the constructor's own A fails while reading its bounds. The enclosing
+    // operation must leave both the class-header A and constructor A, x, and
+    // the type arena exactly as they were so retrying is deterministic.
+    let file = TastyFile::parse_scala_3_9(CTOR_GENERIC).unwrap();
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut unpickler = TastyUnpickler::new(&file, &mut store, definitions);
+    unpickler.enter_symbols().unwrap();
+    let types = unpickler.index().type_count();
+
+    let first = unpickler.complete_symbol(48).unwrap_err();
+    assert!(matches!(
+        &first,
+        UnpickleError::UnresolvedPackage { .. } | UnpickleError::UnresolvedMember { .. }
+    ));
+    for (address, kind) in [
+        (4, SymbolKind::Class),
+        (9, SymbolKind::TypeParameter),
+        (48, SymbolKind::Constructor),
+        (51, SymbolKind::TypeParameter),
+        (60, SymbolKind::Parameter),
+    ] {
+        assert_eq!(
+            unpickler.symbol_state_at(address),
+            Some((kind, SymbolInfo::Missing)),
+            "completion at {address} must roll back"
+        );
+    }
+    assert_eq!(unpickler.index().type_count(), types);
+
+    let retry = unpickler.complete_symbol(48).unwrap_err();
+    assert_eq!(retry, first);
+    assert_eq!(unpickler.index().type_count(), types);
+}
+
+#[test]
 fn a_leading_implicit_term_clause_gets_a_synthetic_empty_ordinary_clause_first() {
     // `class CtorOldImplicit(implicit ord: Ordering[Int])` normalizes to
     // `Method() -> ImplicitMethod(ord) -> C`.
