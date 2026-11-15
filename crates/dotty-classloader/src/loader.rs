@@ -103,6 +103,13 @@ struct TastyClassTypeParameterSelection {
     formal_type_reference_address: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SemanticTastyGenericSymbols {
+    class_parameter: SymbolId,
+    constructor_parameter: SymbolId,
+    formal_parameter: SymbolId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TastyHeaderFieldSelection {
     binary_name: BinaryName,
@@ -642,6 +649,7 @@ pub struct ClassLoader<'store, E> {
     definitions: Definitions,
     #[allow(dead_code)]
     semantic_tasty_loaded: HashMap<BinaryName, SymbolId>,
+    semantic_tasty_generic_symbols: HashMap<BinaryName, SemanticTastyGenericSymbols>,
     header_field_tasty_loaded: HashMap<BinaryName, SymbolId>,
     header_field_tasty_formals: HashMap<BinaryName, SymbolId>,
     header_field_tasty_scopes: HashMap<BinaryName, ScopeId>,
@@ -918,6 +926,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             collect_load_profiles: false,
             definitions,
             semantic_tasty_loaded: HashMap::new(),
+            semantic_tasty_generic_symbols: HashMap::new(),
             header_field_tasty_loaded: HashMap::new(),
             header_field_tasty_formals: HashMap::new(),
             header_field_tasty_scopes: HashMap::new(),
@@ -1279,11 +1288,12 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         )
     }
 
-    /// The bounded commit/rollback boundary for the audited simple class.
-    /// Its write plan is deliberately explicit: the classpath resolver may
-    /// enter packages/classes and update `Object`; the unpickler may enter the
-    /// selected root, its optional indexed immutable header field and formal,
-    /// and bind canonical `Unit`/`Int`. Other mutations are rejected by
+    /// The bounded commit/rollback boundary for the audited simple and
+    /// single-root generic classes. Its write plan is deliberately explicit:
+    /// the classpath resolver may enter packages/classes and update `Object`;
+    /// the unpickler may enter the selected root, its optional indexed
+    /// immutable header field/formal and the indexed generic header; canonical
+    /// `Unit`/primitive/bounds identities are bound here. Other mutations are rejected by
     /// `validate_semantic_class_shape` before reaching this operation.
     fn load_semantic_class_transaction(
         &mut self,
@@ -1302,10 +1312,12 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .get(self.definitions.object_class)
             .clone();
         let mut materialized_class = None;
+        let mut materialized_generic_symbols = None;
         let result = self
             .load_semantic_class_semantics(file, name, selection)
-            .and_then(|class| {
+            .and_then(|(class, generic_symbols)| {
                 materialized_class = Some(class);
+                materialized_generic_symbols = generic_symbols;
                 if !self
                     .session
                     .packages
@@ -1342,6 +1354,33 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                             self.store.symbols.get(constructor).info,
                             SymbolInfo::Complete(_)
                         ));
+                        if let Some(symbols) = materialized_generic_symbols {
+                            assert_ne!(symbols.class_parameter, symbols.constructor_parameter);
+                            assert_eq!(
+                                self.store.symbols.get(symbols.class_parameter).owner,
+                                Some(class)
+                            );
+                            assert_eq!(
+                                self.store.symbols.get(symbols.constructor_parameter).owner,
+                                Some(constructor)
+                            );
+                            assert_eq!(
+                                self.store.symbols.get(symbols.formal_parameter).owner,
+                                Some(constructor)
+                            );
+                            assert!(matches!(
+                                self.store.symbols.get(symbols.class_parameter).info,
+                                SymbolInfo::Complete(_)
+                            ));
+                            assert!(matches!(
+                                self.store.symbols.get(symbols.constructor_parameter).info,
+                                SymbolInfo::Complete(_)
+                            ));
+                            assert!(matches!(
+                                self.store.symbols.get(symbols.formal_parameter).info,
+                                SymbolInfo::Complete(_)
+                            ));
+                        }
                         if selection.header_field_address.is_some() {
                             let SymbolInfo::Complete(class_info) =
                                 self.store.symbols.get(class).info
@@ -1393,7 +1432,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                         );
                     }
                     return Err(SemanticTastyLoadError::UnsupportedShape(
-                        if selection.header_field_address.is_some() {
+                        if selection.class_type_parameter.is_some() {
+                            "injected failure after generic class and constructor completion"
+                        } else if selection.header_field_address.is_some() {
                             "injected failure after indexed member and whole-class completion"
                         } else {
                             "injected failure after class and constructor completion"
@@ -1408,6 +1449,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 self.session.cache_resolved(name.clone(), class);
                 self.repository.mark_loaded(name.clone(), class);
                 self.semantic_tasty_loaded.insert(name.clone(), class);
+                if let Some(symbols) = materialized_generic_symbols {
+                    self.semantic_tasty_generic_symbols
+                        .insert(name.clone(), symbols);
+                }
                 Ok(class)
             }
             Err(error) => {
@@ -3578,7 +3623,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         file: &dotty_tasty::tasty::TastyFile<'_>,
         name: &BinaryName,
         selection: &TastyTopLevelSelection,
-    ) -> Result<SymbolId, SemanticTastyLoadError> {
+    ) -> Result<(SymbolId, Option<SemanticTastyGenericSymbols>), SemanticTastyLoadError> {
         // Materialize the one external class the frozen fixture requires. The
         // borrowed classpath keeps resource precedence identical to the
         // loader's configured path, while `into_session` returns the exact
@@ -3626,14 +3671,19 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             ));
         }
 
-        // Bind only the canonical Unit needed by the constructor result tree,
-        // Int needed by its one supported plain formal, and Boolean for
-        // external Scala type references. The session
+        // Bind only the canonical Unit needed by constructor result trees,
+        // Int for the supported nongeneric formal, and Boolean for external
+        // Scala type references. The bounded generic root also uses the
+        // authentic Nothing .. Any header bounds; bind those existing
+        // Definitions identities instead of manufacturing symbols. The session
         // checkpoint owns both symbol updates and package-scope entries, so a
         // later failure rolls them back together.
         self.bind_open_builtin_unit()?;
         self.bind_open_primitive("Boolean", self.definitions.boolean)?;
-        if selection.constructor_parameter_address.is_some() {
+        if selection.class_type_parameter.is_some() {
+            self.bind_open_primitive("Any", self.definitions.any_type)?;
+            self.bind_open_primitive("Nothing", self.definitions.nothing_type)?;
+        } else if selection.constructor_parameter_address.is_some() {
             self.bind_open_primitive("Int", self.definitions.int)?;
         }
 
@@ -3641,6 +3691,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let mut unpickler =
             TastyUnpickler::with_packages(file, self.store, self.definitions, packages);
         let mut entered_root_address = None;
+        let mut generic_formal_type_reference = None;
         let result = (|| {
             unpickler
                 .enter_symbols()
@@ -3710,33 +3761,63 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     address: constructor_address,
                     error,
                 })?;
+            if let Some(generic) = &selection.class_type_parameter {
+                generic_formal_type_reference = Some(
+                    unpickler
+                        .unpickle_type(generic.formal_type_reference_address)
+                        .map_err(|error| SemanticTastyLoadError::Unpickle {
+                            address: generic.formal_type_reference_address,
+                            error,
+                        })?,
+                );
+            }
             Ok((class, constructor))
         })();
         let (index, mut packages) = unpickler.into_parts();
         self.session.packages.swap_packages(&mut packages);
-        let result = match (result, selection.constructor_parameter_address) {
-            (Ok((class, constructor)), Some(parameter_address)) => {
-                match index
-                    .symbol_at(parameter_address)
-                    .map(|parameter| self.store.symbols.get(parameter))
-                {
-                    Some(parameter_symbol)
-                        if parameter_symbol.kind == SymbolKind::Parameter
-                            && parameter_symbol.owner == Some(constructor)
-                            && matches!(
-                                parameter_symbol.info,
-                                SymbolInfo::Complete(ty)
-                                    if type_ref_symbol(self.store, ty)
-                                        == type_ref_symbol(self.store, self.definitions.int)
-                            ) =>
-                    {
+        let mut generic_symbols = None;
+        let result = match (result, &selection.class_type_parameter) {
+            (Ok((class, constructor)), Some(generic)) => {
+                match self.validate_loaded_generic_constructor(
+                    &index,
+                    class,
+                    constructor,
+                    generic,
+                    selection.constructor_parameter_address,
+                    generic_formal_type_reference,
+                ) {
+                    Ok(symbols) => {
+                        generic_symbols = Some(symbols);
                         Ok((class, constructor))
                     }
-                    _ => Err(SemanticTastyLoadError::UnsupportedShape(
-                        "the constructor parameter must retain its indexed identity and canonical Int type",
-                    )),
+                    Err(error) => Err(error),
                 }
             }
+            (Ok((class, constructor)), None) => match selection.constructor_parameter_address {
+                Some(parameter_address) => {
+                    match index
+                        .symbol_at(parameter_address)
+                        .map(|parameter| self.store.symbols.get(parameter))
+                    {
+                        Some(parameter_symbol)
+                            if parameter_symbol.kind == SymbolKind::Parameter
+                                && parameter_symbol.owner == Some(constructor)
+                                && matches!(
+                                    parameter_symbol.info,
+                                    SymbolInfo::Complete(ty)
+                                        if type_ref_symbol(self.store, ty)
+                                            == type_ref_symbol(self.store, self.definitions.int)
+                                ) =>
+                        {
+                            Ok((class, constructor))
+                        }
+                        _ => Err(SemanticTastyLoadError::UnsupportedShape(
+                            "the constructor parameter must retain its indexed identity and canonical Int type",
+                        )),
+                    }
+                }
+                None => Ok((class, constructor)),
+            },
             (result, _) => result,
         };
         let (class, constructor) = match result {
@@ -3847,20 +3928,30 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             ),
             _ => false,
         };
-        let supported_constructor = match constructor_symbol.info {
-            SymbolInfo::Complete(info) if constructor_symbol.visibility == Visibility::Public => {
-                matches!(
-                    self.store.types.get(info),
-                    Type::Method(method)
-                        if method.kind == MethodKind::Plain
-                            && (method.params.is_empty()
-                                || (method.params.len() == 1
-                                    && type_ref_symbol(self.store, method.params[0].ty)
-                                        == type_ref_symbol(self.store, self.definitions.int)))
-                            && type_ref_symbol(self.store, method.result) == Some(class)
-                )
+        let supported_constructor = if selection.class_type_parameter.is_some() {
+            // The generic branch has already validated the exact indexed
+            // Poly[A] -> Method(x: ParamRef(0)) -> CtorGeneric[ParamRef(0)]
+            // graph, including the raw formal's reference to constructor A.
+            constructor_symbol.visibility == Visibility::Public
+                && matches!(constructor_symbol.info, SymbolInfo::Complete(_))
+        } else {
+            match constructor_symbol.info {
+                SymbolInfo::Complete(info)
+                    if constructor_symbol.visibility == Visibility::Public =>
+                {
+                    matches!(
+                        self.store.types.get(info),
+                        Type::Method(method)
+                            if method.kind == MethodKind::Plain
+                                && (method.params.is_empty()
+                                    || (method.params.len() == 1
+                                        && type_ref_symbol(self.store, method.params[0].ty)
+                                            == type_ref_symbol(self.store, self.definitions.int)))
+                                && type_ref_symbol(self.store, method.result) == Some(class)
+                    )
+                }
+                _ => false,
             }
-            _ => false,
         };
         if !symbol_matches_binary_name(self.store, class, name)
             || class_symbol.kind != SymbolKind::Class
@@ -3875,7 +3966,169 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 "the indexed root or constructor has an unexpected identity or incomplete info",
             ));
         }
-        Ok(class)
+        Ok((class, generic_symbols))
+    }
+
+    fn validate_loaded_generic_constructor(
+        &self,
+        index: &dotty_tasty_unpickler::tasty_unpickler::TastySemanticIndex,
+        class: SymbolId,
+        constructor: SymbolId,
+        selection: &TastyClassTypeParameterSelection,
+        formal_address: Option<u32>,
+        formal_type_reference: Option<TypeId>,
+    ) -> Result<SemanticTastyGenericSymbols, SemanticTastyLoadError> {
+        let unsupported = || {
+            SemanticTastyLoadError::UnsupportedShape(
+                "the indexed generic constructor identities, bounds, and signature must match the selected class parameter",
+            )
+        };
+        let Some(class_parameter) = index.symbol_at(selection.address) else {
+            return Err(unsupported());
+        };
+        let Some(constructor_parameter) =
+            index.symbol_at(selection.constructor_type_parameter_address)
+        else {
+            return Err(unsupported());
+        };
+        let class_parameter_symbol = self.store.symbols.get(class_parameter);
+        let constructor_parameter_symbol = self.store.symbols.get(constructor_parameter);
+        if class_parameter == constructor_parameter
+            || selection.ordered_position != 0
+            || class_parameter_symbol.kind != SymbolKind::TypeParameter
+            || class_parameter_symbol.owner != Some(class)
+            || constructor_parameter_symbol.kind != SymbolKind::TypeParameter
+            || constructor_parameter_symbol.owner != Some(constructor)
+            || class_parameter_symbol.name != constructor_parameter_symbol.name
+            || self.store.names.resolve(class_parameter_symbol.name.text()) != "A"
+        {
+            return Err(unsupported());
+        }
+
+        let SymbolInfo::Complete(class_bounds) = class_parameter_symbol.info else {
+            return Err(unsupported());
+        };
+        let SymbolInfo::Complete(constructor_bounds) = constructor_parameter_symbol.info else {
+            return Err(unsupported());
+        };
+        let is_nothing_any_bounds = |bounds| {
+            matches!(
+                self.store.types.get(bounds),
+                Type::Bounds { low, high }
+                    if type_ref_symbol(self.store, *low) == Some(self.definitions.nothing_class)
+                        && type_ref_symbol(self.store, *high) == Some(self.definitions.any_class)
+            )
+        };
+        if !is_nothing_any_bounds(class_bounds) || !is_nothing_any_bounds(constructor_bounds) {
+            return Err(unsupported());
+        }
+
+        let SymbolInfo::Complete(class_info_type) = self.store.symbols.get(class).info else {
+            return Err(unsupported());
+        };
+        let Type::ClassInfo(class_info) = self.store.types.get(class_info_type) else {
+            return Err(unsupported());
+        };
+        let class_parameter_name = self.store.symbols.get(class_parameter).name;
+        if self
+            .store
+            .scopes
+            .get(class_info.declarations)
+            .lookup_all(&class_parameter_name)
+            != [class_parameter]
+        {
+            return Err(unsupported());
+        }
+
+        let formal = index
+            .symbol_at(formal_address.ok_or_else(unsupported)?)
+            .ok_or_else(unsupported)?;
+        let formal_symbol = self.store.symbols.get(formal);
+        let SymbolInfo::Complete(formal_type) = formal_symbol.info else {
+            return Err(unsupported());
+        };
+        let Some(wire_type) = formal_type_reference else {
+            return Err(unsupported());
+        };
+        let is_constructor_parameter_ref = |ty| {
+            matches!(
+                self.store.types.get(ty),
+                Type::TypeRef { prefix, target }
+                    if *prefix == self.definitions.no_prefix
+                        && target.symbol() == Some(constructor_parameter)
+            )
+        };
+        if formal_symbol.kind != SymbolKind::Parameter
+            || formal_symbol.owner != Some(constructor)
+            || self.store.names.resolve(formal_symbol.name.text()) != "x"
+            || !is_constructor_parameter_ref(formal_type)
+            || !is_constructor_parameter_ref(wire_type)
+        {
+            return Err(unsupported());
+        }
+
+        let SymbolInfo::Complete(constructor_type) = self.store.symbols.get(constructor).info
+        else {
+            return Err(unsupported());
+        };
+        let Type::Poly(poly) = self.store.types.get(constructor_type) else {
+            return Err(unsupported());
+        };
+        let [poly_parameter] = poly.params.as_slice() else {
+            return Err(unsupported());
+        };
+        if poly_parameter.bounds != constructor_bounds
+            || self
+                .store
+                .names
+                .resolve(poly_parameter.name.as_name().text())
+                != self
+                    .store
+                    .names
+                    .resolve(constructor_parameter_symbol.name.text())
+        {
+            return Err(unsupported());
+        }
+        let Type::Method(method) = self.store.types.get(poly.result) else {
+            return Err(unsupported());
+        };
+        let [method_parameter] = method.params.as_slice() else {
+            return Err(unsupported());
+        };
+        if method.kind != MethodKind::Plain
+            || self
+                .store
+                .names
+                .resolve(method_parameter.name.as_name().text())
+                != "x"
+            || !matches!(
+                self.store.types.get(method_parameter.ty),
+                Type::ParamRef { binder, index: 0 } if *binder == constructor_type
+            )
+        {
+            return Err(unsupported());
+        }
+        let Type::Applied { tycon, args } = self.store.types.get(method.result) else {
+            return Err(unsupported());
+        };
+        if type_ref_symbol(self.store, *tycon) != Some(class)
+            || !matches!(
+                self.store.types.get(*tycon),
+                Type::TypeRef { prefix, .. } if *prefix == self.definitions.no_prefix
+            )
+            || !matches!(args.as_slice(), [argument]
+            if matches!(
+                self.store.types.get(*argument),
+                Type::ParamRef { binder, index: 0 } if *binder == constructor_type
+            ))
+        {
+            return Err(unsupported());
+        }
+        Ok(SemanticTastyGenericSymbols {
+            class_parameter,
+            constructor_parameter,
+            formal_parameter: formal,
+        })
     }
 
     /// `TastyUnpickler::into_parts` deliberately drops its successful-entry
@@ -8439,6 +8692,165 @@ mod tests {
         }
     }
 
+    fn ctor_generic_test_loader(store: &mut SemanticStore) -> ClassLoader<'_, CompositeClassPath> {
+        let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-tasty-unpickler/tests/fixtures/semantic");
+        let generic = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorGeneric");
+        let plain = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorPlain");
+        let java_home = std::env::var_os("JAVA_HOME").expect("JDK 21 JAVA_HOME");
+        let java_base = PathBuf::from(&java_home).join("jmods/java.base.jmod");
+        assert!(java_base.is_file(), "actual JDK 21 java.base.jmod");
+        let jdk = crate::jdk_class_path::JdkClassPath::new(PathBuf::from(java_home).join("jmods"))
+            .expect("actual JDK 21 modules");
+        let fixtures = ConstructorFixtureClassPath(
+            HashMap::from([
+                (
+                    generic,
+                    semantic_unpickler_fixture_bytes("CtorGeneric.tasty"),
+                ),
+                (plain, semantic_unpickler_fixture_bytes("CtorPlain.tasty")),
+            ]),
+            fixture_root,
+        );
+        ClassLoader::new(
+            CompositeClassPath::new(vec![Box::new(fixtures), Box::new(jdk)]),
+            store,
+        )
+    }
+
+    fn normalized_loaded_ctor_generic(
+        loader: &mut ClassLoader<'_, CompositeClassPath>,
+        name: &BinaryName,
+        class: SymbolId,
+    ) -> String {
+        let symbols = loader.semantic_tasty_generic_symbols[name];
+        let class_parameter = symbols.class_parameter;
+        let constructor_parameter = symbols.constructor_parameter;
+        let formal_parameter = symbols.formal_parameter;
+        let class_symbol = loader.store.symbols.get(class);
+        let constructor_name = Name::new(loader.store.names.intern("<init>"), Namespace::Term);
+        let class_info = class_info(loader.store, class);
+        let constructor = loader
+            .store
+            .scopes
+            .get(class_info.declarations)
+            .lookup(&constructor_name)
+            .expect("completed class declares its constructor");
+        let class_parameter_name = loader.store.symbols.get(class_parameter).name;
+        assert_eq!(
+            loader
+                .store
+                .scopes
+                .get(class_info.declarations)
+                .lookup_all(&class_parameter_name),
+            [class_parameter]
+        );
+        assert_ne!(class_parameter, constructor_parameter);
+        assert_eq!(loader.store.symbols.get(class_parameter).owner, Some(class));
+        assert_eq!(
+            loader.store.symbols.get(constructor_parameter).owner,
+            Some(constructor)
+        );
+        assert_eq!(
+            loader.store.symbols.get(formal_parameter).owner,
+            Some(constructor)
+        );
+
+        let bound_names = |store: &SemanticStore, bounds| {
+            let Type::Bounds { low, high } = store.types.get(bounds) else {
+                panic!("generic parameter must retain Bounds");
+            };
+            format!(
+                "{}..{}",
+                symbol_name(store, type_ref_symbol(store, *low).unwrap()),
+                symbol_name(store, type_ref_symbol(store, *high).unwrap())
+            )
+        };
+        let SymbolInfo::Complete(class_bounds) = loader.store.symbols.get(class_parameter).info
+        else {
+            panic!("class header A must be complete");
+        };
+        let SymbolInfo::Complete(constructor_bounds) =
+            loader.store.symbols.get(constructor_parameter).info
+        else {
+            panic!("constructor A must be complete");
+        };
+        let class_bounds_name = bound_names(loader.store, class_bounds);
+        let constructor_bounds_name = bound_names(loader.store, constructor_bounds);
+        assert_eq!(class_bounds_name, "Nothing..Any");
+        assert_eq!(constructor_bounds_name, "Nothing..Any");
+
+        let SymbolInfo::Complete(formal_raw_type) = loader.store.symbols.get(formal_parameter).info
+        else {
+            panic!("constructor x must have completed raw info");
+        };
+        assert!(matches!(
+            loader.store.types.get(formal_raw_type),
+            Type::TypeRef { prefix, target }
+                if *prefix == loader.definitions.no_prefix
+                    && target.symbol() == Some(constructor_parameter)
+        ));
+
+        let SymbolInfo::Complete(constructor_type) = loader.store.symbols.get(constructor).info
+        else {
+            panic!("constructor must have complete info");
+        };
+        let Type::Poly(poly) = loader.store.types.get(constructor_type) else {
+            panic!("generic constructor must publish Poly info");
+        };
+        let [poly_parameter] = poly.params.as_slice() else {
+            panic!("generic constructor has one ordered type parameter");
+        };
+        assert_eq!(poly_parameter.bounds, constructor_bounds);
+        let Type::Method(method) = loader.store.types.get(poly.result) else {
+            panic!("generic constructor Poly body must be Method");
+        };
+        let [method_parameter] = method.params.as_slice() else {
+            panic!("generic constructor has one term parameter");
+        };
+        assert!(matches!(
+            loader.store.types.get(method_parameter.ty),
+            Type::ParamRef { binder, index: 0 } if *binder == constructor_type
+        ));
+        let Type::Applied { tycon, args } = loader.store.types.get(method.result) else {
+            panic!("generic constructor result must apply its class");
+        };
+        assert_eq!(type_ref_symbol(loader.store, *tycon), Some(class));
+        assert!(matches!(args.as_slice(), [arg]
+            if matches!(loader.store.types.get(*arg),
+                Type::ParamRef { binder, index: 0 } if *binder == constructor_type)));
+        assert_eq!(
+            type_ref_symbol(loader.store, class_info.parents[0]),
+            Some(loader.definitions.object_class)
+        );
+        let origin = loader.origin(class).expect("selected resource origin");
+        assert_eq!(
+            class_symbol.origin,
+            loader.store.symbols.get(class_parameter).origin
+        );
+        assert_eq!(
+            class_symbol.origin,
+            loader.store.symbols.get(constructor).origin
+        );
+        assert_eq!(
+            class_symbol.origin,
+            loader.store.symbols.get(constructor_parameter).origin
+        );
+        assert_eq!(
+            class_symbol.origin,
+            loader.store.symbols.get(formal_parameter).origin
+        );
+
+        format!(
+            "class={} parent={} header.A[{}] ctor.A[{}] x:ctor.A signature=Poly[A]->Method(x:ParamRef(0))->{}[ParamRef(0)] origin={origin:?}",
+            symbol_name(loader.store, class),
+            symbol_name(loader.store, loader.definitions.object_class),
+            class_bounds_name,
+            constructor_bounds_name,
+            symbol_name(loader.store, class),
+        )
+    }
+
     type SharedTastyResources = Arc<std::sync::Mutex<HashMap<BinaryName, Vec<u8>>>>;
 
     #[derive(Clone)]
@@ -10775,6 +11187,228 @@ mod tests {
         // The existing `authentic_ctor_with_val_loads_and_unsupported_neighbors_preserve_state`
         // test supplies the positive CtorPlain load control without opening a
         // second JDK classpath in this audit test.
+    }
+
+    #[test]
+    fn authentic_ctor_generic_loads_through_the_private_loader_and_repeats_canonically() {
+        let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorGeneric");
+        let load_and_snapshot = || {
+            let mut store = SemanticStore::new();
+            let mut loader = ctor_generic_test_loader(&mut store);
+            let plain_name =
+                BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorPlain");
+            let control = loader
+                .load_semantic_class_with_tasty_unpickler(&plain_name)
+                .expect("control class commits first with a real JDK Object");
+            let class = loader
+                .load_semantic_class_with_tasty_unpickler(&name)
+                .expect("the authentic generic root completes through the private loader");
+            assert_eq!(class_info(loader.store, class).parents.len(), 1);
+            assert_eq!(
+                loader.semantic_tasty_loaded.get(&name),
+                Some(&class),
+                "the root identity is published only after semantic completion"
+            );
+            assert_eq!(
+                loader.session.resolved.get(&name),
+                Some(&class),
+                "the root is published to the canonical loading session"
+            );
+            assert!(matches!(
+                loader.repository.get(&name),
+                Some(ClassEntry::Loaded(found)) if *found == class
+            ));
+            assert_eq!(
+                loader.store.symbols.get(class).owner,
+                Some(
+                    loader
+                        .session
+                        .packages
+                        .get(&["me", "cytrowski", "tastyfixtures", "semantic"])
+                        .expect("canonical fixture package")
+                )
+            );
+            let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-tasty-unpickler/tests/fixtures/semantic");
+            assert_eq!(
+                loader.origin(class),
+                Some(&ClassOrigin::Directory(fixture_root))
+            );
+            assert_eq!(
+                loader
+                    .session
+                    .resolved
+                    .get(&BinaryName::from_internal("java/lang/Object")),
+                Some(&loader.definitions.object_class),
+                "the parent is the real canonical JDK Object identity"
+            );
+            let scala = loader.session.packages.get(&["scala"]).unwrap();
+            let scala_scope = loader.session.packages.scope_of(scala).unwrap();
+            for (spelling, symbol) in [
+                ("Any", loader.definitions.any_class),
+                ("Nothing", loader.definitions.nothing_class),
+            ] {
+                assert_eq!(loader.store.symbols.get(symbol).owner, Some(scala));
+                assert_eq!(
+                    loader.store.scopes.get(scala_scope).lookup_all(&Name::new(
+                        loader.store.names.intern(spelling),
+                        Namespace::Type
+                    )),
+                    &[symbol],
+                    "{spelling} aliases its canonical Definitions symbol"
+                );
+            }
+            let symbols = loader.semantic_tasty_generic_symbols[&name];
+            let normalized = normalized_loaded_ctor_generic(&mut loader, &name, class);
+            let store_checkpoint = loader.store.checkpoint();
+            let session_checkpoint = loader.session.checkpoint();
+            assert_eq!(
+                loader
+                    .load_semantic_class_with_tasty_unpickler(&name)
+                    .expect("repeat load returns the committed root"),
+                class
+            );
+            assert_eq!(loader.semantic_tasty_generic_symbols[&name], symbols);
+            assert_eq!(loader.store.checkpoint(), store_checkpoint);
+            assert_eq!(loader.session.checkpoint(), session_checkpoint);
+            assert_eq!(
+                normalized_loaded_ctor_generic(&mut loader, &name, class),
+                normalized
+            );
+            assert!(loader.store.symbols.contains(control));
+            normalized
+        };
+
+        assert_eq!(load_and_snapshot(), load_and_snapshot());
+    }
+
+    #[test]
+    fn generic_loader_late_failure_preserves_control_and_retries_original_resource() {
+        let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorGeneric");
+        let plain_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorPlain");
+        let mut store = SemanticStore::new();
+        let mut loader = ctor_generic_test_loader(&mut store);
+        let control = loader
+            .load_semantic_class_with_tasty_unpickler(&plain_name)
+            .expect("control class commits before generic failure");
+        let control_origin = loader.origin(control).cloned().expect("control origin");
+        let resource = loader
+            .class_path
+            .find_class(&name)
+            .expect("fixture path lookup")
+            .expect("original CtorGeneric resource");
+        let original_bytes = resource.bytes().to_vec();
+        let file = tasty_symbol::parse_classloader_tasty(resource.bytes()).expect("valid fixture");
+        let selection =
+            ClassLoader::<CompositeClassPath>::validate_semantic_class_shape(&file, &name)
+                .expect("the indexed generic shape is supported");
+        assert_eq!(
+            selection
+                .class_type_parameter
+                .as_ref()
+                .map(|parameter| parameter.address),
+            Some(9)
+        );
+        assert_eq!(selection.constructor_parameter_address, Some(60));
+        let package = loader
+            .session
+            .packages
+            .get(&["me", "cytrowski", "tastyfixtures", "semantic"])
+            .expect("control class created canonical package");
+        let package_scope = loader.session.packages.scope_of(package).unwrap();
+        let package_entries = loader
+            .store
+            .scopes
+            .get(package_scope)
+            .entered_symbols()
+            .collect::<Vec<_>>();
+        let store_checkpoint = loader.store.checkpoint();
+        let session_checkpoint = loader.session.checkpoint();
+        let packages_checkpoint = loader.session.packages.checkpoint();
+        let object_before = loader
+            .store
+            .symbols
+            .get(loader.definitions.object_class)
+            .clone();
+        let any_before = loader
+            .store
+            .symbols
+            .get(loader.definitions.any_class)
+            .clone();
+        let nothing_before = loader
+            .store
+            .symbols
+            .get(loader.definitions.nothing_class)
+            .clone();
+
+        assert!(matches!(
+            loader.load_semantic_class_with_tasty_unpickler_injected_failure(&name),
+            Err(SemanticTastyLoadError::UnsupportedShape(
+                "injected failure after generic class and constructor completion"
+            ))
+        ));
+        assert_eq!(loader.store.checkpoint(), store_checkpoint);
+        assert_eq!(loader.session.checkpoint(), session_checkpoint);
+        assert_eq!(loader.session.packages.checkpoint(), packages_checkpoint);
+        assert_eq!(
+            loader.store.symbols.get(loader.definitions.object_class),
+            &object_before
+        );
+        assert_eq!(
+            loader.store.symbols.get(loader.definitions.any_class),
+            &any_before
+        );
+        assert_eq!(
+            loader.store.symbols.get(loader.definitions.nothing_class),
+            &nothing_before
+        );
+        assert_eq!(
+            loader
+                .store
+                .scopes
+                .get(package_scope)
+                .entered_symbols()
+                .collect::<Vec<_>>(),
+            package_entries
+        );
+        assert!(loader.store.symbols.contains(control));
+        assert_eq!(loader.origin(control), Some(&control_origin));
+        assert_eq!(loader.session.resolved.get(&plain_name), Some(&control));
+        assert_eq!(
+            loader.semantic_tasty_loaded.get(&plain_name),
+            Some(&control)
+        );
+        assert!(!loader.session.resolved.contains_key(&name));
+        assert!(loader.repository.get(&name).is_none());
+        assert!(!loader.semantic_tasty_loaded.contains_key(&name));
+        assert!(!loader.semantic_tasty_generic_symbols.contains_key(&name));
+        assert_eq!(resource.bytes(), original_bytes);
+
+        let class = loader
+            .load_semantic_class_with_tasty_unpickler(&name)
+            .expect("same loader retries the unchanged resource after rollback");
+        assert_eq!(loader.semantic_tasty_loaded.get(&name), Some(&class));
+        assert_eq!(loader.session.resolved.get(&name), Some(&class));
+        assert!(loader.semantic_tasty_generic_symbols.contains_key(&name));
+        let identities = loader.semantic_tasty_generic_symbols[&name];
+        let normalized = normalized_loaded_ctor_generic(&mut loader, &name, class);
+        assert_eq!(resource.bytes(), original_bytes);
+
+        let store_checkpoint = loader.store.checkpoint();
+        let session_checkpoint = loader.session.checkpoint();
+        assert_eq!(
+            loader
+                .load_semantic_class_with_tasty_unpickler(&name)
+                .expect("repeat loader publication returns the committed class"),
+            class
+        );
+        assert_eq!(loader.semantic_tasty_generic_symbols[&name], identities);
+        assert_eq!(loader.store.checkpoint(), store_checkpoint);
+        assert_eq!(loader.session.checkpoint(), session_checkpoint);
+        assert_eq!(
+            normalized_loaded_ctor_generic(&mut loader, &name, class),
+            normalized
+        );
     }
 
     #[test]
