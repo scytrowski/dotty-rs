@@ -4115,6 +4115,202 @@ mod tests {
     }
 
     #[test]
+    fn selected_ctor_generic_success_rolls_back_from_caller_and_retries_same_session() {
+        let generic_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorGeneric");
+        let open_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Open");
+        let fixture_root = fixture_path("../dotty-tasty-unpickler/tests/fixtures/semantic");
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            semantic_pair_class_path(),
+            definitions,
+            LoadingSession::new(),
+        );
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "semantic"],
+            )
+            .unwrap()
+            .expect("semantic fixture package");
+        let visibility_package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "visibility"],
+            )
+            .unwrap()
+            .expect("visibility fixture package");
+        let request =
+            semantic_member_request(&mut store, package, definitions.no_prefix, "CtorGeneric");
+        let open_request = semantic_member_request(
+            &mut store,
+            visibility_package,
+            definitions.no_prefix,
+            "Open",
+        );
+        let open = resolver
+            .resolve_member_with_semantic_class(&mut store, &open_request, &open_name)
+            .unwrap()
+            .expect("authentic Open commits before the enclosing transaction");
+        let package_scope = resolver
+            .package_scope(package)
+            .expect("semantic package scope");
+        let resolver_checkpoint = resolver.checkpoint();
+        let store_checkpoint = store.checkpoint();
+        let session_checkpoint = resolver.session.checkpoint();
+        let object_before = store.symbols.get(definitions.object_class).clone();
+        let unit_before = store.types.get(definitions.unit).clone();
+
+        let class = resolver
+            .resolve_member_with_semantic_class(&mut store, &request, &generic_name)
+            .unwrap()
+            .expect("authentic selected generic class");
+        assert!(resolver.is_semantic_class_identity(
+            &store,
+            class,
+            package,
+            package_scope,
+            request.name,
+            &generic_name,
+        ));
+        let origin = resolver.session.origins[&class].clone();
+        assert_eq!(origin, ClassOrigin::Directory(fixture_root));
+        let SymbolInfo::Complete(class_info_type) = store.symbols.get(class).info else {
+            panic!("generic class is complete");
+        };
+        let Type::ClassInfo(class_info) = store.types.get(class_info_type) else {
+            panic!("generic class owns a declaration scope");
+        };
+        let declaration_scope = class_info.declarations;
+        let class_parameters = store
+            .scopes
+            .get(declaration_scope)
+            .entered_symbols()
+            .filter(|symbol| {
+                store.symbols.get(*symbol).kind == SymbolKind::TypeParameter
+                    && store.symbols.get(*symbol).owner == Some(class)
+            })
+            .collect::<Vec<_>>();
+        let [class_parameter] = class_parameters.as_slice() else {
+            panic!("one class-owned A is entered");
+        };
+        let SymbolInfo::Complete(class_parameter_type) = store.symbols.get(*class_parameter).info
+        else {
+            panic!("class-owned A has completed bounds");
+        };
+        let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+        let constructor = store
+            .scopes
+            .get(declaration_scope)
+            .lookup(&constructor_name)
+            .expect("generic constructor");
+        let SymbolInfo::Complete(constructor_type) = store.symbols.get(constructor).info else {
+            panic!("constructor is complete");
+        };
+        let Type::Poly(poly) = store.types.get(constructor_type) else {
+            panic!("constructor has a Poly binder");
+        };
+        let [constructor_parameter] = poly.params.as_slice() else {
+            panic!("constructor owns one A binder");
+        };
+        assert_eq!(
+            store
+                .names
+                .resolve(constructor_parameter.name.as_name().text()),
+            store
+                .names
+                .resolve(store.symbols.get(*class_parameter).name.text())
+        );
+        let Type::Method(method) = store.types.get(poly.result) else {
+            panic!("Poly body is a method");
+        };
+        let [formal] = method.params.as_slice() else {
+            panic!("constructor has one formal x");
+        };
+        assert_eq!(store.names.resolve(formal.name.as_name().text()), "x");
+        let Type::Applied { tycon, args } = store.types.get(method.result) else {
+            panic!("constructor result applies the generic class");
+        };
+        let generic_types = [
+            class_info_type,
+            class_parameter_type,
+            constructor_type,
+            constructor_parameter.bounds,
+            poly.result,
+            formal.ty,
+            method.result,
+            *tycon,
+            args[0],
+        ];
+        let generic_symbols = [class, *class_parameter, constructor];
+        let generic_name_count = store
+            .scopes
+            .get(package_scope)
+            .lookup_all(&request.name)
+            .len();
+        assert_eq!(generic_name_count, 1);
+        assert_eq!(resolver.session.identified.get(&generic_name), Some(&class));
+        assert_eq!(resolver.session.resolved.get(&generic_name), Some(&class));
+        let had_metadata = resolver.session.metadata.contains_key(&class);
+        let had_class_type_parameters = resolver.session.class_type_parameters.contains_key(&class);
+
+        resolver.rollback_to(&mut store, resolver_checkpoint);
+        store.rollback_to(store_checkpoint);
+
+        assert_eq!(resolver.session.checkpoint(), session_checkpoint);
+        assert_eq!(store.symbols.get(definitions.object_class), &object_before);
+        assert_eq!(store.types.get(definitions.unit), &unit_before);
+        assert_eq!(resolver.session.identified.get(&open_name), Some(&open));
+        assert_eq!(resolver.session.resolved.get(&open_name), Some(&open));
+        assert!(resolver.session.origins.contains_key(&open));
+        assert!(store.symbols.contains(package));
+        assert!(store.scopes.contains(package_scope));
+        assert!(
+            store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&request.name)
+                .is_empty()
+        );
+        assert!(!resolver.session.identified.contains_key(&generic_name));
+        assert!(!resolver.session.resolved.contains_key(&generic_name));
+        assert!(!resolver.session.origins.contains_key(&class));
+        assert_eq!(resolver.session.metadata.contains_key(&class), had_metadata);
+        assert_eq!(
+            resolver.session.class_type_parameters.contains_key(&class),
+            had_class_type_parameters
+        );
+        for symbol in generic_symbols {
+            assert!(!store.symbols.contains(symbol));
+        }
+        assert!(!store.scopes.contains(declaration_scope));
+        for ty in generic_types {
+            assert!(!store.types.contains(ty), "stale generic TypeId {ty:?}");
+        }
+        assert!(resolver.class_path.is_some());
+
+        let retried = resolver
+            .resolve_member_with_semantic_class(&mut store, &request, &generic_name)
+            .expect("fresh authentic generic selection succeeds after outer rollback")
+            .expect("generic class after enclosing rollback");
+        assert!(resolver.is_semantic_class_identity(
+            &store,
+            retried,
+            package,
+            package_scope,
+            request.name,
+            &generic_name,
+        ));
+        assert_eq!(resolver.session.origins.get(&retried), Some(&origin));
+        assert_eq!(
+            store.scopes.get(package_scope).lookup_all(&request.name),
+            [retried]
+        );
+        assert_eq!(resolver.session.identified.get(&open_name), Some(&open));
+    }
+
+    #[test]
     fn ctor_generic_coexists_with_selected_open_and_ctor_with_val_in_both_orders() {
         fn run(order: [usize; 3]) -> Vec<String> {
             let cases = [
