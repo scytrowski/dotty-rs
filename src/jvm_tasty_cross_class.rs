@@ -18,6 +18,7 @@ use dotty_typer::{SourceTyper, TypedLocalBinding};
 
 mod conditional_local_reference;
 mod local_receiver_call;
+mod mutable_local_reference_reassignment;
 pub use conditional_local_reference::{
     ImmutableLocalConditionalReferenceSelectionProofInput,
     ValidatedImmutableLocalConditionalReferenceSelectionProof,
@@ -29,6 +30,10 @@ pub use local_receiver_call::{
     ValidatedImmutableLocalCounterSetCallsProof, validate_immutable_local_counter_set_call_proof,
     validate_immutable_local_counter_set_calls_after_alias_proof,
     validate_immutable_local_counter_set_calls_proof,
+};
+pub use mutable_local_reference_reassignment::{
+    MutableLocalReferenceReassignmentProofInput, ValidatedMutableLocalReferenceReassignmentProof,
+    validate_mutable_local_reference_reassignment_proof,
 };
 
 /// A typed failure while validating canonical constructor-call proofs.
