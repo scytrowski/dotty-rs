@@ -4421,8 +4421,38 @@ mod tests {
             .expect("semantic fixture package");
         let request =
             semantic_member_request(&mut store, package, definitions.no_prefix, "CtorGeneric");
+        let visibility_package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "visibility"],
+            )
+            .unwrap()
+            .expect("visibility fixture package");
+        let open_request = semantic_member_request(
+            &mut store,
+            visibility_package,
+            definitions.no_prefix,
+            "Open",
+        );
+        let open_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Open");
+        let open = resolver
+            .resolve_member_with_semantic_class(&mut store, &open_request, &open_name)
+            .unwrap()
+            .expect("authentic Open commits before injected generic failure");
         let store_mark = store.checkpoint();
         let session_mark = resolver.session.checkpoint();
+        let object_before = store.symbols.get(definitions.object_class).clone();
+        let unit_before = store.types.get(definitions.unit).clone();
+        let package_scope = resolver
+            .package_scope(package)
+            .expect("semantic package scope");
+        assert!(
+            store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&request.name)
+                .is_empty()
+        );
         resolver.inject_semantic_late_failure = true;
         let failure = resolver
             .transact(&mut store, |resolver, store| {
@@ -4443,8 +4473,215 @@ mod tests {
         );
         assert_eq!(store.checkpoint(), store_mark);
         assert_eq!(resolver.session.checkpoint(), session_mark);
+        assert_eq!(store.symbols.get(definitions.object_class), &object_before);
+        assert_eq!(store.types.get(definitions.unit), &unit_before);
+        assert_eq!(resolver.session.identified.get(&open_name), Some(&open));
+        assert_eq!(resolver.session.resolved.get(&open_name), Some(&open));
+        assert!(
+            store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&request.name)
+                .is_empty()
+        );
         assert!(!resolver.session.identified.contains_key(&generic_name));
         assert!(!resolver.session.resolved.contains_key(&generic_name));
+        assert!(!resolver.session.origins.values().any(|origin| {
+            origin
+                == &ClassOrigin::Directory(fixture_path(
+                    "../dotty-tasty-unpickler/tests/fixtures/semantic",
+                ))
+        }));
+        assert!(resolver.class_path.is_some());
+
+        resolver.inject_semantic_late_failure = false;
+        let retried = resolver
+            .resolve_member_with_semantic_class(&mut store, &request, &generic_name)
+            .expect("authentic retry after late failure succeeds in the same session")
+            .expect("generic class after late-failure retry");
+        assert!(resolver.is_semantic_class_identity(
+            &store,
+            retried,
+            package,
+            package_scope,
+            request.name,
+            &generic_name,
+        ));
+        assert_eq!(resolver.session.identified.get(&open_name), Some(&open));
+    }
+
+    #[test]
+    fn selected_ctor_generic_failure_after_open_keeps_first_typed_error_and_state() {
+        let generic_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorGeneric");
+        let open_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Open");
+        let fixture_root = fixture_path("../dotty-tasty-unpickler/tests/fixtures/semantic");
+        let authentic_generic = std::fs::read(fixture_root.join("CtorGeneric.tasty"))
+            .expect("authentic CtorGeneric bytes");
+        let wrong_root = std::fs::read(fixture_root.join("CtorWithVal.tasty"))
+            .expect("authentic wrong-root control bytes");
+
+        for (label, bytes, expected_invalid) in [
+            ("truncated", vec![0, 1, 2], true),
+            ("wrong root", wrong_root, false),
+        ] {
+            let origin = ClassOrigin::Directory(PathBuf::from(format!("<selected-{label}>")));
+            let selected = Arc::new(Mutex::new(Some(ClassResource::new(
+                bytes,
+                ClassFormat::Tasty,
+                origin.clone(),
+            ))));
+            // The wrapped class path contains authentic CtorGeneric bytes. If
+            // selected failure accidentally falls through to legacy loading,
+            // this request would succeed instead of reporting the selected
+            // resource's first failure.
+            let class_path = CompositeClassPath::new(vec![Box::new(SelectedResourceControl {
+                inner: semantic_pair_class_path(),
+                selected_name: "me/cytrowski/tastyfixtures/semantic/CtorGeneric",
+                selected: selected.clone(),
+            })]);
+            let mut store = SemanticStore::new();
+            let definitions = Definitions::bootstrap(&mut store);
+            let mut resolver =
+                ClasspathSymbolResolver::new(class_path, definitions, LoadingSession::new());
+            let visibility_package = resolver
+                .resolve_package(
+                    &mut store,
+                    &["me", "cytrowski", "tastyfixtures", "visibility"],
+                )
+                .unwrap()
+                .expect("visibility package");
+            let semantic_package = resolver
+                .session
+                .packages
+                .resolve_package(&mut store, "me/cytrowski/tastyfixtures/semantic");
+            let open_request = semantic_member_request(
+                &mut store,
+                visibility_package,
+                definitions.no_prefix,
+                "Open",
+            );
+            let generic_request = semantic_member_request(
+                &mut store,
+                semantic_package,
+                definitions.no_prefix,
+                "CtorGeneric",
+            );
+            let open = resolver
+                .resolve_member_with_semantic_class(&mut store, &open_request, &open_name)
+                .unwrap()
+                .expect("authentic selected Open commits first");
+            let store_before = store.checkpoint();
+            let session_before = resolver.session.checkpoint();
+            let object_before = store.symbols.get(definitions.object_class).clone();
+            let unit_before = store.types.get(definitions.unit).clone();
+            let generic_scope = resolver
+                .package_scope(semantic_package)
+                .expect("semantic package scope");
+            assert!(
+                store
+                    .scopes
+                    .get(generic_scope)
+                    .lookup_all(&generic_request.name)
+                    .is_empty()
+            );
+
+            let failure = resolver
+                .transact(&mut store, |resolver, store| {
+                    resolver.resolve_member_inner_with_semantic_request(
+                        store,
+                        &generic_request,
+                        &generic_name,
+                    )
+                })
+                .expect_err("selected generic failure is terminal after Open success");
+            let MemberResolutionFailure::SemanticLoad(failure) = failure else {
+                panic!("selected resource failure is typed before public conversion: {failure:?}");
+            };
+            assert_eq!(failure.binary_name, generic_name);
+            if expected_invalid {
+                assert!(
+                    matches!(
+                        &failure.source,
+                        SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(name, _))
+                            if name == &generic_name
+                    ),
+                    "truncated {label} failure: {:?}",
+                    failure.source
+                );
+            } else {
+                assert!(
+                    matches!(&failure.source, SemanticTastyLoadError::UnsupportedShape(_)),
+                    "wrong-root {label} failure: {:?}",
+                    failure.source
+                );
+            }
+            let selected_guard = selected.lock().expect("selected resource lock");
+            let selected_resource = selected_guard
+                .as_ref()
+                .expect("controlled selected resource");
+            assert_eq!(selected_resource.format(), ClassFormat::Tasty);
+            assert_eq!(selected_resource.origin(), &origin);
+            drop(selected_guard);
+
+            let public_error = resolver
+                .resolve_member_with_semantic_class(&mut store, &generic_request, &generic_name)
+                .expect_err("public selected route converts the same typed failure");
+            assert!(matches!(
+                public_error,
+                ResolutionError::Malformed { reason }
+                    if reason.contains(generic_name.as_internal())
+                        && reason.contains(if expected_invalid {
+                            "InvalidTastyFile"
+                        } else {
+                            "UnsupportedShape"
+                        })
+            ));
+
+            assert_eq!(store.checkpoint(), store_before);
+            assert_eq!(resolver.session.checkpoint(), session_before);
+            assert_eq!(store.symbols.get(definitions.object_class), &object_before);
+            assert_eq!(store.types.get(definitions.unit), &unit_before);
+            assert_eq!(resolver.session.identified.get(&open_name), Some(&open));
+            assert_eq!(resolver.session.resolved.get(&open_name), Some(&open));
+            assert!(resolver.session.origins.contains_key(&open));
+            assert_eq!(
+                store
+                    .scopes
+                    .get(resolver.package_scope(visibility_package).unwrap())
+                    .lookup_all(&open_request.name),
+                [open]
+            );
+            assert!(
+                store
+                    .scopes
+                    .get(generic_scope)
+                    .lookup_all(&generic_request.name)
+                    .is_empty()
+            );
+            assert!(!resolver.session.identified.contains_key(&generic_name));
+            assert!(!resolver.session.resolved.contains_key(&generic_name));
+            assert!(resolver.class_path.is_some());
+
+            *selected.lock().expect("selected resource lock") = Some(ClassResource::new(
+                authentic_generic.clone(),
+                ClassFormat::Tasty,
+                ClassOrigin::Directory(fixture_root.clone()),
+            ));
+            let retried = resolver
+                .resolve_member_with_semantic_class(&mut store, &generic_request, &generic_name)
+                .expect("restored authentic selected resource retries in the same session")
+                .expect("generic class after retry");
+            assert!(resolver.is_semantic_class_identity(
+                &store,
+                retried,
+                semantic_package,
+                generic_scope,
+                generic_request.name,
+                &generic_name,
+            ));
+            assert_eq!(resolver.session.identified.get(&open_name), Some(&open));
+        }
     }
 
     #[test]
