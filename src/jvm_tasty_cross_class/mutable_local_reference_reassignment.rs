@@ -627,6 +627,29 @@ pub fn validate_mutable_local_reference_reassignment_proof<'session>(
     let TreeKind::ValDef(typed_selected_def) = &typed_selected.kind else {
         return Err(typed("mutable declaration must remain typed ValDef"));
     };
+    let typed_type_tree = source_typed_index
+        .get(source_id, selected_def.tpt)
+        .ok_or_else(|| typed("mutable explicit annotation has no typed mapping"))?;
+    if typed_selected_def.tpt != typed_type_tree
+        || !matches!(
+            typed_ast.try_get(typed_type_tree).map(|node| &node.kind),
+            Some(TreeKind::TypeTree(_))
+        )
+        || !matches!(
+            typed_ast.try_get(typed_type_tree).map(|node| node.ty),
+            Some(ty) if is_canonical_class_type_ref(
+                store,
+                ty,
+                counter,
+                package,
+                definitions.no_prefix,
+            )
+        )
+    {
+        return Err(typed(
+            "mutable typed ValDef must preserve its exact canonical Counter annotation root",
+        ));
+    }
     let typed_initializer = source_typed_index
         .get(source_id, selected_initializer)
         .ok_or_else(|| typed("mutable initializer has no typed mapping"))?;
@@ -652,7 +675,15 @@ pub fn validate_mutable_local_reference_reassignment_proof<'session>(
         }
     };
     if selected_initializer_target != semantic_first
+        || !store.symbols.contains(selected_initializer_target)
+        || !originals
+            .iter()
+            .any(|local| local.symbol == selected_initializer_target)
         || source_init_ident.name != store.symbols.get(selected_initializer_target).name
+        || !matches!(
+            typed_ast.try_get(typed_initializer).map(|node| &node.kind),
+            Some(TreeKind::Ident(ident)) if ident.name == store.symbols.get(selected_initializer_target).name
+        )
     {
         return Err(typed(
             "mutable initializer must reference the exact first original Counter local",
@@ -709,6 +740,15 @@ pub fn validate_mutable_local_reference_reassignment_proof<'session>(
             ));
         }
     };
+    if !store.symbols.contains(assigned_target)
+        || !originals
+            .iter()
+            .any(|local| local.symbol == assigned_target)
+    {
+        return Err(typed(
+            "assignment RHS must designate one of the canonical original local symbols",
+        ));
+    }
     if !matches!(&lhs_node.kind, TreeKind::Ident(i) if i.name == store.symbols.get(selected).name)
         || !matches!(store.types.try_get(lhs_node.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(s), .. }) if *s == selected)
         || lhs_ident.name != store.symbols.get(selected).name
@@ -919,6 +959,17 @@ pub fn validate_mutable_local_reference_reassignment_proof<'session>(
     let typed_pair_new = source_typed_index
         .get(source_id, source_pair_new)
         .ok_or_else(|| typed("Pair New has no typed mapping"))?;
+    let source_pair_new_type = match &source_ast
+        .try_get(source_pair_new)
+        .ok_or_else(|| src("Pair New is stale"))?
+        .kind
+    {
+        TreeKind::New(new) => new.tpt,
+        _ => return Err(src("Pair constructor qualifier must remain New")),
+    };
+    let typed_pair_new_type = source_typed_index
+        .get(source_id, source_pair_new_type)
+        .ok_or_else(|| typed("Pair New type tree has no typed mapping"))?;
     let TreeKind::Apply(typed_pair_node) = &typed_ast
         .try_get(typed_pair_result)
         .ok_or_else(|| typed("typed Pair result is stale"))?
@@ -933,8 +984,16 @@ pub fn validate_mutable_local_reference_reassignment_proof<'session>(
     else {
         return Err(typed("typed Pair constructor function must remain Select"));
     };
+    let TreeKind::New(typed_pair_new_node) = &typed_ast
+        .try_get(typed_pair_new)
+        .ok_or_else(|| typed("typed Pair New is stale"))?
+        .kind
+    else {
+        return Err(typed("typed Pair constructor qualifier must remain New"));
+    };
     if typed_pair_node.function != typed_pair_function
         || typed_pair_selection.qualifier != typed_pair_new
+        || typed_pair_new_node.tpt != typed_pair_new_type
         || !matches!(
             typed_ast.try_get(typed_pair_new).map(|node| &node.kind),
             Some(TreeKind::New(_))
@@ -960,6 +1019,11 @@ pub fn validate_mutable_local_reference_reassignment_proof<'session>(
             ));
         }
     };
+    if !store.symbols.contains(pair_constructor) {
+        return Err(typed(
+            "typed Pair selection has a stale constructor symbol identity",
+        ));
+    }
     let expected_pair_args = [semantic_first, semantic_second];
     for i in 0..2 {
         let source_arg = match &source_ast
@@ -996,6 +1060,11 @@ pub fn validate_mutable_local_reference_reassignment_proof<'session>(
                 ));
             }
         };
+        if !store.symbols.contains(symbol) || !expected_pair_args.contains(&symbol) {
+            return Err(typed(
+                "Pair argument must designate one of the canonical original local symbols",
+            ));
+        }
         if symbol != expected_pair_args[i]
             || !matches!(&node.kind, TreeKind::Ident(ident) if ident.name == store.symbols.get(symbol).name)
             || source_arg.name != store.symbols.get(symbol).name
@@ -1020,6 +1089,9 @@ pub fn validate_mutable_local_reference_reassignment_proof<'session>(
             ));
         }
     };
+    if !store.symbols.contains(pair_class) {
+        return Err(typed("typed Pair result has a stale class symbol identity"));
+    }
     let pair_new_type = typed_ast
         .try_get(typed_pair_new)
         .ok_or_else(|| typed("typed Pair New is stale"))?
@@ -1044,25 +1116,138 @@ pub fn validate_mutable_local_reference_reassignment_proof<'session>(
             "factory result, Pair New, and canonical Pair constructor identities must agree",
         ));
     }
-    for tree in [
-        source_assignment,
-        source_assignment_lhs,
-        source_assignment_rhs,
-        source_setter,
-        source_setter_function,
-        source_setter_receiver,
-        source_setter_argument,
-        source_pair_function,
-        source_pair_new,
-        block.expr,
-        source_pair_arguments[0],
-        source_pair_arguments[1],
+    for (source_tree, typed_tree, description) in [
+        (source_block, typed_block, "factory Block"),
+        (declarations[0], typed_declarations[0], "first local"),
+        (declarations[1], typed_declarations[1], "second local"),
+        (declarations[2], typed_declarations[2], "selected local"),
+        (
+            originals[0].source_type_tree,
+            originals[0].typed_type_tree,
+            "first local annotation",
+        ),
+        (
+            originals[1].source_type_tree,
+            originals[1].typed_type_tree,
+            "second local annotation",
+        ),
+        (
+            selected_def.tpt,
+            typed_type_tree,
+            "selected local annotation",
+        ),
+        (
+            originals[0].initializer,
+            originals[0].typed_initializer,
+            "first initializer",
+        ),
+        (
+            originals[0].source_select,
+            originals[0].typed_select,
+            "first constructor selection",
+        ),
+        (
+            originals[0].source_new,
+            originals[0].typed_new,
+            "first constructor New",
+        ),
+        (
+            originals[0].source_new_type_tree,
+            originals[0].typed_new_type_tree,
+            "first constructor type tree",
+        ),
+        (
+            originals[0].source_argument,
+            originals[0].typed_argument,
+            "first seed argument",
+        ),
+        (
+            originals[1].initializer,
+            originals[1].typed_initializer,
+            "second initializer",
+        ),
+        (
+            originals[1].source_select,
+            originals[1].typed_select,
+            "second constructor selection",
+        ),
+        (
+            originals[1].source_new,
+            originals[1].typed_new,
+            "second constructor New",
+        ),
+        (
+            originals[1].source_new_type_tree,
+            originals[1].typed_new_type_tree,
+            "second constructor type tree",
+        ),
+        (
+            originals[1].source_argument,
+            originals[1].typed_argument,
+            "second seed argument",
+        ),
+        (
+            selected_initializer,
+            typed_initializer,
+            "selected initializer",
+        ),
+        (source_assignment, typed_assignment, "assignment"),
+        (
+            source_assignment_lhs,
+            typed_assignment_lhs,
+            "assignment LHS",
+        ),
+        (
+            source_assignment_rhs,
+            typed_assignment_rhs,
+            "assignment RHS",
+        ),
+        (source_setter, typed_setter, "setter call"),
+        (
+            source_setter_function,
+            typed_setter_function,
+            "setter selection",
+        ),
+        (
+            source_setter_receiver,
+            typed_setter_receiver,
+            "setter receiver",
+        ),
+        (
+            source_setter_argument,
+            typed_setter_argument,
+            "setter argument",
+        ),
+        (block.expr, typed_pair_result, "Pair result"),
+        (
+            source_pair_function,
+            typed_pair_function,
+            "Pair constructor selection",
+        ),
+        (source_pair_new, typed_pair_new, "Pair New"),
+        (
+            source_pair_new_type,
+            typed_pair_new_type,
+            "Pair constructor type tree",
+        ),
+        (
+            source_pair_arguments[0],
+            typed_pair_arguments[0],
+            "first Pair argument",
+        ),
+        (
+            source_pair_arguments[1],
+            typed_pair_arguments[1],
+            "second Pair argument",
+        ),
     ] {
-        require_source_position(
+        require_matching_source_typed_positions(
             source_ast,
+            typed_ast,
             source_id,
-            tree,
-            "factory body tree has a foreign source span",
+            source_tree,
+            typed_tree,
+            description,
         )?;
     }
     let typed_initializers = [

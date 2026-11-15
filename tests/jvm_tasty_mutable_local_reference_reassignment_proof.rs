@@ -13,6 +13,29 @@ use dotty_typer::{SourceTyper, TypedLocalBinding};
 const SOURCE: &str =
     include_str!("fixtures/jvm_tasty_mutable_reference_rebinding/MutableReferenceRebinding.scala");
 
+fn stale_symbol_id(store: &SemanticStore) -> dotty_core::SymbolId {
+    let mut foreign = SemanticStore::new();
+    loop {
+        let name = foreign.names.intern("stale");
+        let symbol = dotty_core::Symbol {
+            name: dotty_core::Name::new(name, dotty_core::Namespace::Term),
+            owner: None,
+            kind: dotty_core::SymbolKind::Value,
+            flags: dotty_core::SymbolFlags::EMPTY,
+            visibility: dotty_core::Visibility::Public,
+            info: dotty_core::SymbolInfo::Missing,
+            origin: dotty_core::SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: dotty_core::SymbolLinks::default(),
+        };
+        let id = foreign.symbols.alloc(symbol);
+        if !store.symbols.contains(id) {
+            return id;
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Mutation {
     None,
@@ -25,13 +48,23 @@ enum Mutation {
     WrongOwner,
     WrongScope,
     WrongInitializer,
+    MissingSelectedAnnotation,
+    WrongSelectedAnnotation,
+    SelectedInitializerNotIdent,
     WrongAssignmentTarget,
+    StaleAssignmentTarget,
     WrongSetterReceiver,
     WrongPairArguments,
+    StalePairConstructor,
     WrongResult,
     ReorderStatements,
     DuplicateAssignment,
     ForeignAssignedType,
+    MissingSourceBlockPosition,
+    MissingSourceSelectedPosition,
+    ForeignSourceSelectedPosition,
+    MissingTypedAssignmentPosition,
+    MismatchedTypedAssignmentPosition,
 }
 
 #[derive(Debug)]
@@ -212,11 +245,61 @@ fn validate(
             };
             selected_def.rhs = second_initializer;
         }
+        Mutation::MissingSelectedAnnotation => {
+            let selected_type = match &parsed.ast.get(block_stats[2]).kind {
+                TreeKind::ValDef(def) => def.tpt,
+                _ => unreachable!(),
+            };
+            source_typed_index.remove(source_id, selected_type);
+        }
+        Mutation::WrongSelectedAnnotation => {
+            let selected_type = match &parsed.ast.get(block_stats[2]).kind {
+                TreeKind::ValDef(def) => def.tpt,
+                _ => unreachable!(),
+            };
+            let first_type = match &parsed.ast.get(block_stats[0]).kind {
+                TreeKind::ValDef(def) => def.tpt,
+                _ => unreachable!(),
+            };
+            let typed_first_type = source_typed_index.get(source_id, first_type).unwrap();
+            source_typed_index.remove(source_id, selected_type);
+            source_typed_index
+                .insert(source_id, selected_type, typed_first_type)
+                .unwrap();
+        }
+        Mutation::SelectedInitializerNotIdent => {
+            let selected_initializer = match &parsed.ast.get(block_stats[2]).kind {
+                TreeKind::ValDef(def) => def.rhs.unwrap(),
+                _ => unreachable!(),
+            };
+            let typed_initializer = source_typed_index
+                .get(source_id, selected_initializer)
+                .unwrap();
+            let assignment_kind = typed_ast.get(typed_assignment).kind.clone();
+            let initializer_type = typed_ast.get(typed_initializer).ty;
+            typed_ast.get_mut(typed_initializer).kind = assignment_kind;
+            typed_ast.get_mut(typed_initializer).ty = initializer_type;
+        }
         Mutation::WrongAssignmentTarget => {
             let TreeKind::Assign(assign) = &mut parsed.ast.get_mut(assignment).kind else {
                 unreachable!()
             };
             assign.rhs = source_assignment_lhs;
+        }
+        Mutation::StaleAssignmentTarget => {
+            let TreeKind::Assign(assign) = &typed_ast.get(typed_assignment).kind else {
+                unreachable!()
+            };
+            let rhs = assign.rhs;
+            let prefix = match store.types.get(typed_ast.get(rhs).ty) {
+                dotty_core::Type::TermRef { prefix, .. } => *prefix,
+                _ => unreachable!(),
+            };
+            let stale_type = store.types.alloc(dotty_core::Type::TermRef {
+                prefix,
+                target: dotty_core::TermRefTarget::Symbol(stale_symbol_id(&store)),
+            });
+            typed_ast.get_mut(rhs).ty = stale_type;
         }
         Mutation::WrongSetterReceiver => {
             let TreeKind::Apply(setter) = &parsed.ast.get(block_stats[4]).kind else {
@@ -233,6 +316,21 @@ fn validate(
                 unreachable!()
             };
             pair.args.swap(0, 1);
+        }
+        Mutation::StalePairConstructor => {
+            let TreeKind::Apply(pair) = &parsed.ast.get(block_expr).kind else {
+                unreachable!()
+            };
+            let typed_function = source_typed_index.get(source_id, pair.function).unwrap();
+            let prefix = match store.types.get(typed_ast.get(typed_function).ty) {
+                dotty_core::Type::TermRef { prefix, .. } => *prefix,
+                _ => unreachable!(),
+            };
+            let stale_type = store.types.alloc(dotty_core::Type::TermRef {
+                prefix,
+                target: dotty_core::TermRefTarget::Symbol(stale_symbol_id(&store)),
+            });
+            typed_ast.get_mut(typed_function).ty = stale_type;
         }
         Mutation::WrongResult => {
             let typed_pair = source_typed_index.get(source_id, block_expr).unwrap();
@@ -278,6 +376,24 @@ fn validate(
                 target: dotty_core::TermRefTarget::Symbol(foreign),
             });
             typed_ast.get_mut(rhs).ty = foreign_type;
+        }
+        Mutation::MissingSourceBlockPosition => parsed.ast.get_mut(rhs).position = None,
+        Mutation::MissingSourceSelectedPosition => {
+            parsed.ast.get_mut(block_stats[2]).position = None;
+        }
+        Mutation::ForeignSourceSelectedPosition => {
+            let position = parsed.ast.get(block_stats[2]).position.unwrap();
+            parsed.ast.get_mut(block_stats[2]).position = Some(dotty_core::SourceSpan::new(
+                SourceId::from_index(source_number.wrapping_add(1)),
+                position.span(),
+            ));
+        }
+        Mutation::MissingTypedAssignmentPosition => {
+            typed_ast.get_mut(typed_assignment).position = None;
+        }
+        Mutation::MismatchedTypedAssignmentPosition => {
+            let rhs_position = parsed.ast.get(source_assignment_rhs).position.unwrap();
+            typed_ast.get_mut(typed_assignment).position = Some(rhs_position);
         }
     }
     let TreeKind::Block(current_block) = &parsed.ast.get(rhs).kind else {
@@ -371,13 +487,23 @@ fn mutable_reference_reassignment_rejects_forged_edges_and_shapes() {
         Mutation::WrongOwner,
         Mutation::WrongScope,
         Mutation::WrongInitializer,
+        Mutation::MissingSelectedAnnotation,
+        Mutation::WrongSelectedAnnotation,
+        Mutation::SelectedInitializerNotIdent,
         Mutation::WrongAssignmentTarget,
+        Mutation::StaleAssignmentTarget,
         Mutation::WrongSetterReceiver,
         Mutation::WrongPairArguments,
+        Mutation::StalePairConstructor,
         Mutation::WrongResult,
         Mutation::ReorderStatements,
         Mutation::DuplicateAssignment,
         Mutation::ForeignAssignedType,
+        Mutation::MissingSourceBlockPosition,
+        Mutation::MissingSourceSelectedPosition,
+        Mutation::ForeignSourceSelectedPosition,
+        Mutation::MissingTypedAssignmentPosition,
+        Mutation::MismatchedTypedAssignmentPosition,
     ] {
         assert!(
             validate(SOURCE, 23_000 + mutation as u32, mutation).is_err(),
@@ -396,4 +522,40 @@ fn assignment_mapping_failures_are_typed_binding_errors() {
         validate(SOURCE, 23_021, Mutation::MissingRhs),
         Err(CrossClassConstructorCallProofError::TypedBinding(_))
     ));
+    for (offset, mutation) in [
+        Mutation::MissingSelectedAnnotation,
+        Mutation::WrongSelectedAnnotation,
+        Mutation::SelectedInitializerNotIdent,
+        Mutation::StaleAssignmentTarget,
+        Mutation::StalePairConstructor,
+        Mutation::MissingTypedAssignmentPosition,
+        Mutation::MismatchedTypedAssignmentPosition,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(
+            matches!(
+                validate(SOURCE, 23_030 + offset as u32, mutation),
+                Err(CrossClassConstructorCallProofError::TypedBinding(_))
+            ),
+            "{mutation:?}"
+        );
+    }
+    for (offset, mutation) in [
+        Mutation::MissingSourceBlockPosition,
+        Mutation::MissingSourceSelectedPosition,
+        Mutation::ForeignSourceSelectedPosition,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(
+            matches!(
+                validate(SOURCE, 23_040 + offset as u32, mutation),
+                Err(CrossClassConstructorCallProofError::SourceIdentity(_))
+            ),
+            "{mutation:?}"
+        );
+    }
 }
