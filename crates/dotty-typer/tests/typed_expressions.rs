@@ -3003,3 +3003,232 @@ fn types_return_from_an_explicit_result_method_through_the_public_pipeline() {
         definitions.int
     );
 }
+
+#[test]
+fn expected_unit_adaptation_keeps_value_calls_and_checks_other_results() {
+    let text = concat!(
+        "class UnitAdapt { ",
+        "def tick(): Int = 42; ",
+        "def discarded(): Unit = tick(); ",
+        "def discardedBlock(): Unit = { val marker = 1; tick() }; ",
+        "def alreadyUnit(): Unit = (); ",
+        "def returnNothing(): Unit = return; ",
+        "def takesInt(value: Int): Int = value; ",
+        "def wrongArgument(): Unit = takesInt(\"bad\"); ",
+        "def wrongResult(): Boolean = tick(); ",
+        "def wrongMember(): Unit = missing(tick()) ",
+        "}"
+    );
+    let source = SourceId::from_index(2301);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "expected-unit.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let methods = parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            let name = store.names.resolve(definition.name.as_name().text());
+            matches!(
+                name,
+                "tick"
+                    | "discarded"
+                    | "discardedBlock"
+                    | "alreadyUnit"
+                    | "returnNothing"
+                    | "wrongArgument"
+                    | "wrongResult"
+                    | "wrongMember"
+            )
+            .then(|| (name.to_owned(), (tree, definition.rhs.unwrap())))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(methods.len(), 8);
+    let tick_method = index
+        .symbol_at(source, methods["tick"].0)
+        .expect("tick has a canonical source method symbol");
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(NoResolver));
+
+    let (tick_tree, _) = methods["tick"];
+    let typed_tick = typer.type_method_definition(tick_tree).unwrap();
+    let TreeKind::DefDef(tick_definition) = &typer.typed_ast().get(typed_tick).kind else {
+        panic!("typed method root must remain a DefDef");
+    };
+    assert_eq!(
+        typer
+            .widen_expression_type(typer.typed_ast().get(tick_definition.rhs.unwrap()).ty)
+            .unwrap(),
+        definitions.int,
+        "ordinary value-returning method bodies keep their result type"
+    );
+
+    // Cache the value expression in a successful transaction before the
+    // enclosing Unit method asks for its expected type. Adaptation must replace
+    // that source mapping with the canonical block and remain stable on repeat.
+    let (discarded_tree, discarded_rhs) = methods["discarded"];
+    let discarded_method = index.symbol_at(source, discarded_tree).unwrap();
+    let discarded_context = typer.expression_context_for(discarded_method).unwrap();
+    let cached_rhs = typer
+        .type_expression(discarded_rhs, discarded_context)
+        .unwrap();
+    assert!(matches!(
+        typer.typed_ast().get(cached_rhs).kind,
+        TreeKind::Apply(_)
+    ));
+    assert_eq!(
+        typer.source_typed_index().get(source, discarded_rhs),
+        Some(cached_rhs)
+    );
+
+    for name in ["wrongArgument", "wrongResult", "wrongMember"] {
+        let (method_tree, rhs) = methods[name];
+        let before_store = typer.store().checkpoint();
+        let before_typed = typer.typed_ast().iter().count();
+        let before_mappings = typer.source_typed_index().len();
+        assert!(
+            typer.type_method_definition(method_tree).is_err(),
+            "{name} must remain rejected"
+        );
+        assert_eq!(typer.store().checkpoint(), before_store, "{name} rollback");
+        assert_eq!(
+            typer.typed_ast().iter().count(),
+            before_typed,
+            "{name} typed rollback"
+        );
+        assert_eq!(
+            typer.source_typed_index().len(),
+            before_mappings,
+            "{name} provenance rollback"
+        );
+        assert!(typer.source_typed_index().get(source, rhs).is_none());
+        assert_eq!(
+            typer.source_typed_index().get(source, discarded_rhs),
+            Some(cached_rhs),
+            "{name} preserves an earlier successful cached mapping"
+        );
+    }
+
+    // A later independent method succeeds in the same typer session after
+    // failures that had already typed the argument call and earlier block.
+    let typed_method = typer.type_method_definition(discarded_tree).unwrap();
+    let TreeKind::DefDef(definition) = &typer.typed_ast().get(typed_method).kind else {
+        panic!("typed method root must remain a DefDef");
+    };
+    let typed_rhs = definition.rhs.unwrap();
+    assert_ne!(typed_rhs, cached_rhs, "the Unit context adds a typed block");
+    assert_eq!(
+        typer.source_typed_index().get(source, discarded_rhs),
+        Some(typed_rhs),
+        "the canonical source mapping follows successful cached adaptation"
+    );
+    let repeated_unit_rhs = typer
+        .type_expression_expected(discarded_rhs, discarded_context, definitions.unit)
+        .unwrap();
+    assert_eq!(
+        repeated_unit_rhs, typed_rhs,
+        "repeated adaptation is stable"
+    );
+    let TreeKind::Block(adapted) = &typer.typed_ast().get(typed_rhs).kind else {
+        panic!("expected Unit adaptation must retain a value stat and final ()");
+    };
+    assert_eq!(typer.typed_ast().get(typed_rhs).ty, definitions.unit);
+    assert_eq!(adapted.stats.len(), 1, "the original call executes once");
+    assert_eq!(
+        adapted.stats[0], cached_rhs,
+        "cached adaptation reuses the original evaluated value tree"
+    );
+    let call = adapted.stats[0];
+    assert!(matches!(
+        typer.typed_ast().get(call).kind,
+        TreeKind::Apply(_)
+    ));
+    assert_eq!(
+        typer.source_typed_index().get(source, discarded_rhs),
+        Some(typed_rhs),
+        "the source RHS maps to its canonical adapted tree"
+    );
+    let TreeKind::Literal(unit_literal) = &typer.typed_ast().get(adapted.expr).kind else {
+        panic!("Unit adaptation must end in the canonical () literal");
+    };
+    assert_eq!(unit_literal.value, Constant::Unit);
+    assert_eq!(typer.typed_ast().get(adapted.expr).ty, definitions.unit);
+    let TreeKind::Apply(application) = &typer.typed_ast().get(call).kind else {
+        unreachable!()
+    };
+    let function = typer.typed_ast().get(application.function);
+    assert!(matches!(function.kind, TreeKind::Ident(_)));
+    assert_eq!(
+        typer.store().types.get(function.ty).reference_symbol(),
+        Some(tick_method)
+    );
+
+    let (block_tree, _) = methods["discardedBlock"];
+    let typed_block_method = typer.type_method_definition(block_tree).unwrap();
+    let TreeKind::DefDef(block_definition) = &typer.typed_ast().get(typed_block_method).kind else {
+        panic!("typed method root must remain a DefDef");
+    };
+    let TreeKind::Block(block_adaptation) =
+        &typer.typed_ast().get(block_definition.rhs.unwrap()).kind
+    else {
+        panic!("a value-ending source block must adapt to Unit");
+    };
+    assert_eq!(block_adaptation.stats.len(), 1);
+    assert!(matches!(
+        typer.typed_ast().get(block_adaptation.stats[0]).kind,
+        TreeKind::Block(_)
+    ));
+
+    let (already_unit_tree, _) = methods["alreadyUnit"];
+    let already_unit = typer.type_method_definition(already_unit_tree).unwrap();
+    let TreeKind::DefDef(definition) = &typer.typed_ast().get(already_unit).kind else {
+        panic!("typed method root must remain a DefDef");
+    };
+    let unit_rhs = definition.rhs.unwrap();
+    assert_eq!(
+        typer
+            .widen_expression_type(typer.typed_ast().get(unit_rhs).ty)
+            .unwrap(),
+        definitions.unit
+    );
+    assert!(matches!(
+        typer.typed_ast().get(unit_rhs).kind,
+        TreeKind::Literal(_)
+    ));
+    let (nothing_tree, _) = methods["returnNothing"];
+    let nothing = typer.type_method_definition(nothing_tree).unwrap();
+    let TreeKind::DefDef(definition) = &typer.typed_ast().get(nothing).kind else {
+        panic!("typed method root must remain a DefDef");
+    };
+    assert_eq!(
+        typer.typed_ast().get(definition.rhs.unwrap()).ty,
+        definitions.nothing_type,
+        "Nothing remains a Nothing expression rather than being wrapped"
+    );
+}

@@ -28,6 +28,12 @@ EITHER_SWAP_POLYMORPHIC_BLOCKER = (
     "unapply: SymbolId(112), callable: TypeId(552) }"
 )
 EITHER_SWAP_LIVE_RESULT = "scala.util.Either[scala.util.Either.B,scala.util.Either.A]"
+PROP_IMPL_CLEAR_IDENTITY = "library/src/scala/sys/PropImpl.scala#tree=99"
+PROP_IMPL_CLEAR_HISTORICAL_BLOCKER = (
+    "blocked::ExpectedExpressionTypeMismatch { source: SourceId(0), tree_index: 98, "
+    "actual: TypeId(1674), expected: TypeId(9) }"
+)
+PROP_IMPL_CLEAR_LIVE_RESULT = "Unit"
 PRODUCT2_FIXTURE = Path("crates/dotty-typer/tests/fixtures/source-case-class-product2-3.9.0")
 PRODUCT2_SOURCE_SHA256 = "4b144913df1d2021359c44633dc2a23f21bf6288bf2528c86cc6f53d79b8ee31"
 SCALA_MATRIX_CASES = {
@@ -1378,6 +1384,28 @@ def validate_cohorts(root: Path, reports: list[Path], output: Path, baseline_rec
                 and wanted["second_status"] == "typed"
                 and wanted["first_status"] == wanted["second_status"]
                 and wanted["actual_result"] == EITHER_SWAP_LIVE_RESULT
+                and wanted["protected_success"] == "false"
+                and wanted["two_pass_equal"] == "true"
+            )
+            if completed and historical == found:
+                continue
+        if wanted["identity"] == PROP_IMPL_CLEAR_IDENTITY:
+            # Keep the committed 25 + 25 receipt immutable while reporting
+            # the one expected-Unit adaptation measured by issue #2301.
+            # The generated live receipt still records both successful passes.
+            historical = dict(wanted)
+            historical["first_status"] = PROP_IMPL_CLEAR_HISTORICAL_BLOCKER
+            historical["second_status"] = PROP_IMPL_CLEAR_HISTORICAL_BLOCKER
+            historical["actual_result"] = "not_available"
+            completed = (
+                wanted["cohort"] == "analysis"
+                and wanted["source_tree"] == "99"
+                and wanted["baseline_status"] == "not_protected"
+                and wanted["gate"] == "observe"
+                and wanted["first_status"] == "typed"
+                and wanted["second_status"] == "typed"
+                and wanted["first_status"] == wanted["second_status"]
+                and wanted["actual_result"] == PROP_IMPL_CLEAR_LIVE_RESULT
                 and wanted["protected_success"] == "false"
                 and wanted["two_pass_equal"] == "true"
             )

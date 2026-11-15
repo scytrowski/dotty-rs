@@ -345,6 +345,55 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
             self.assertEqual(live["actual_result"], gate.EITHER_SWAP_LIVE_RESULT)
             self.assertEqual(baseline.read_bytes(), baseline_bytes)
 
+    def test_live_cohort_receipt_reports_prop_impl_unit_adaptation_without_rewriting_baseline(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        baseline = repository / "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv"
+        baseline_bytes = baseline.read_bytes()
+        receipt_rows = gate.read_tsv(baseline)[1]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reports = self.cohort_reports(
+                receipt_rows,
+                root,
+                {gate.PROP_IMPL_CLEAR_IDENTITY: ("typed", gate.PROP_IMPL_CLEAR_LIVE_RESULT)},
+            )
+            output = root / "live.tsv"
+            gate.validate_cohorts(repository, reports, output, baseline)
+            live_rows = gate.read_tsv(output)[1]
+            live = next(row for row in live_rows if row["identity"] == gate.PROP_IMPL_CLEAR_IDENTITY)
+            self.assertEqual(live["cohort"], "analysis")
+            self.assertEqual(live["source_tree"], "99")
+            self.assertEqual(live["first_status"], "typed")
+            self.assertEqual(live["second_status"], "typed")
+            self.assertEqual(live["actual_result"], gate.PROP_IMPL_CLEAR_LIVE_RESULT)
+            self.assertEqual(live["protected_success"], "false")
+            self.assertEqual(live["two_pass_equal"], "true")
+            self.assertEqual(baseline.read_bytes(), baseline_bytes)
+
+    def test_live_cohort_receipt_rejects_unmeasured_prop_impl_drift(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        baseline = repository / "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv"
+        receipt_rows = gate.read_tsv(baseline)[1]
+        invalid_overrides = (
+            ("blocked::DifferentFailure", "not_available"),
+            ("typed", "scala.collection.mutable.Shrinkable"),
+            ("typed", "scala.Int"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index, override in enumerate(invalid_overrides):
+                reports = self.cohort_reports(
+                    receipt_rows,
+                    root,
+                    {gate.PROP_IMPL_CLEAR_IDENTITY: override},
+                )
+                with self.subTest(override=override), self.assertRaisesRegex(
+                    gate.ReceiptError, gate.PROP_IMPL_CLEAR_IDENTITY
+                ):
+                    gate.validate_cohorts(
+                        repository, reports, root / f"live-{index}.tsv", baseline
+                    )
+
     def test_live_cohort_receipt_rejects_other_either_swap_blocker_drift(self) -> None:
         repository = Path(__file__).resolve().parents[2]
         baseline = repository / "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv"
