@@ -842,6 +842,13 @@ pub fn validate_mutable_local_reference_reassignment_proof<'session>(
     let typed_setter_argument = source_typed_index
         .get(source_id, source_setter_argument)
         .ok_or_else(|| typed("setter argument has no typed mapping"))?;
+    let TreeKind::Select(source_setter_select) = &source_ast
+        .try_get(source_setter_function)
+        .ok_or_else(|| src("source setter selection is stale"))?
+        .kind
+    else {
+        return Err(src("source setter function must remain Select"));
+    };
     let typed_setter_function = source_typed_index
         .get(source_id, source_setter_function)
         .ok_or_else(|| typed("setter selection has no typed mapping"))?;
@@ -882,6 +889,7 @@ pub fn validate_mutable_local_reference_reassignment_proof<'session>(
         }
     };
     if typed_setter_node.function != typed_setter_function
+        || typed_setter_node.kind != ApplyKind::Regular
         || typed_setter_node.args.as_slice() != [typed_setter_argument]
         || typed_setter_select.qualifier != typed_setter_receiver
         || !matches!(&typed_receiver_node.kind, TreeKind::Ident(i) if i.name == store.symbols.get(selected).name)
@@ -893,6 +901,8 @@ pub fn validate_mutable_local_reference_reassignment_proof<'session>(
         || !store.symbols.contains(setter_method)
         || store.symbols.get(setter_method).kind != SymbolKind::Method
         || store.symbols.get(setter_method).owner != Some(counter)
+        || source_setter_select.name != store.symbols.get(setter_method).name
+        || typed_setter_select.name != store.symbols.get(setter_method).name
         || store
             .names
             .resolve(store.symbols.get(setter_method).name.text())
@@ -984,6 +994,13 @@ pub fn validate_mutable_local_reference_reassignment_proof<'session>(
     else {
         return Err(typed("typed Pair constructor function must remain Select"));
     };
+    let TreeKind::Select(source_pair_selection) = &source_ast
+        .try_get(source_pair_function)
+        .ok_or_else(|| src("source Pair constructor selection is stale"))?
+        .kind
+    else {
+        return Err(src("source Pair constructor function must remain Select"));
+    };
     let TreeKind::New(typed_pair_new_node) = &typed_ast
         .try_get(typed_pair_new)
         .ok_or_else(|| typed("typed Pair New is stale"))?
@@ -992,6 +1009,7 @@ pub fn validate_mutable_local_reference_reassignment_proof<'session>(
         return Err(typed("typed Pair constructor qualifier must remain New"));
     };
     if typed_pair_node.function != typed_pair_function
+        || typed_pair_node.kind != ApplyKind::Regular
         || typed_pair_selection.qualifier != typed_pair_new
         || typed_pair_new_node.tpt != typed_pair_new_type
         || !matches!(
@@ -1022,6 +1040,17 @@ pub fn validate_mutable_local_reference_reassignment_proof<'session>(
     if !store.symbols.contains(pair_constructor) {
         return Err(typed(
             "typed Pair selection has a stale constructor symbol identity",
+        ));
+    }
+    if source_pair_selection.name != store.symbols.get(pair_constructor).name
+        || typed_pair_selection.name != store.symbols.get(pair_constructor).name
+        || store
+            .names
+            .resolve(store.symbols.get(pair_constructor).name.text())
+            != "<init>"
+    {
+        return Err(typed(
+            "source and typed Pair selections must retain the canonical constructor name",
         ));
     }
     let expected_pair_args = [semantic_first, semantic_second];
@@ -1097,6 +1126,25 @@ pub fn validate_mutable_local_reference_reassignment_proof<'session>(
         .ok_or_else(|| typed("typed Pair New is stale"))?
         .ty;
     let result_type = signature.result;
+    let typed_pair_type_tree = typed_ast
+        .try_get(typed_pair_new_type)
+        .ok_or_else(|| typed("typed Pair New type tree is stale"))?;
+    if !matches!(&typed_pair_type_tree.kind, TreeKind::TypeTree(_))
+        || !is_canonical_class_type_ref(
+            store,
+            typed_pair_type_tree.ty,
+            pair_class,
+            package,
+            definitions.no_prefix,
+        )
+        || typed_ast
+            .try_get(typed_block)
+            .is_none_or(|typed_block_tree| typed_block_tree.ty != pair_result_type)
+    {
+        return Err(typed(
+            "typed Pair New annotation and Block result must retain the exact canonical Pair type",
+        ));
+    }
     if source_index.definition_of(pair_class).is_none_or(
         |d| !matches!(d, SourceDefinition::Canonical { source, .. } if source == source_id),
     ) || store.symbols.get(pair_class).owner != Some(package)

@@ -56,6 +56,15 @@ enum Mutation {
     WrongSetterReceiver,
     WrongPairArguments,
     StalePairConstructor,
+    WrongPairNewTypeTreeKind,
+    WrongPairNewType,
+    WrongBlockType,
+    TypedPairApplyKind,
+    TypedSetterApplyKind,
+    SourceSetterSelectName,
+    TypedSetterSelectName,
+    SourcePairSelectName,
+    TypedPairSelectName,
     WrongResult,
     ReorderStatements,
     DuplicateAssignment,
@@ -332,6 +341,99 @@ fn validate(
             });
             typed_ast.get_mut(typed_function).ty = stale_type;
         }
+        Mutation::WrongPairNewTypeTreeKind => {
+            let TreeKind::Apply(pair) = &parsed.ast.get(block_expr).kind else {
+                unreachable!()
+            };
+            let pair_function = pair.function;
+            let TreeKind::Select(selection) = &parsed.ast.get(pair_function).kind else {
+                unreachable!()
+            };
+            let pair_new = selection.qualifier;
+            let TreeKind::New(new) = &parsed.ast.get(pair_new).kind else {
+                unreachable!()
+            };
+            let typed_type_tree = source_typed_index.get(source_id, new.tpt).unwrap();
+            let assignment_kind = typed_ast.get(typed_assignment).kind.clone();
+            let original_type = typed_ast.get(typed_type_tree).ty;
+            typed_ast.get_mut(typed_type_tree).kind = assignment_kind;
+            typed_ast.get_mut(typed_type_tree).ty = original_type;
+        }
+        Mutation::WrongPairNewType => {
+            let TreeKind::Apply(pair) = &parsed.ast.get(block_expr).kind else {
+                unreachable!()
+            };
+            let TreeKind::Select(selection) = &parsed.ast.get(pair.function).kind else {
+                unreachable!()
+            };
+            let TreeKind::New(new) = &parsed.ast.get(selection.qualifier).kind else {
+                unreachable!()
+            };
+            let typed_type_tree = source_typed_index.get(source_id, new.tpt).unwrap();
+            typed_ast.get_mut(typed_type_tree).ty = definitions.int;
+        }
+        Mutation::WrongBlockType => {
+            let typed_block = source_typed_index.get(source_id, rhs).unwrap();
+            typed_ast.get_mut(typed_block).ty = definitions.int;
+        }
+        Mutation::TypedPairApplyKind => {
+            let typed_pair = source_typed_index.get(source_id, block_expr).unwrap();
+            let TreeKind::Apply(pair) = &mut typed_ast.get_mut(typed_pair).kind else {
+                unreachable!()
+            };
+            pair.kind = dotty_core::ast::ApplyKind::Using;
+        }
+        Mutation::TypedSetterApplyKind => {
+            let typed_setter = source_typed_index.get(source_id, block_stats[4]).unwrap();
+            let TreeKind::Apply(setter) = &mut typed_ast.get_mut(typed_setter).kind else {
+                unreachable!()
+            };
+            setter.kind = dotty_core::ast::ApplyKind::Using;
+        }
+        Mutation::SourceSetterSelectName | Mutation::TypedSetterSelectName => {
+            let TreeKind::Apply(setter) = &parsed.ast.get(block_stats[4]).kind else {
+                unreachable!()
+            };
+            let source_function = setter.function;
+            let selection_name =
+                dotty_core::Name::new(store.names.intern("create"), dotty_core::Namespace::Term);
+            if matches!(mutation, Mutation::SourceSetterSelectName) {
+                let TreeKind::Select(selection) = &mut parsed.ast.get_mut(source_function).kind
+                else {
+                    unreachable!()
+                };
+                selection.name = selection_name;
+            } else {
+                let typed_function = source_typed_index.get(source_id, source_function).unwrap();
+                let TreeKind::Select(selection) = &mut typed_ast.get_mut(typed_function).kind
+                else {
+                    unreachable!()
+                };
+                selection.name = selection_name;
+            }
+        }
+        Mutation::SourcePairSelectName | Mutation::TypedPairSelectName => {
+            let TreeKind::Apply(pair) = &parsed.ast.get(block_expr).kind else {
+                unreachable!()
+            };
+            let source_function = pair.function;
+            let selection_name =
+                dotty_core::Name::new(store.names.intern("create"), dotty_core::Namespace::Term);
+            if matches!(mutation, Mutation::SourcePairSelectName) {
+                let TreeKind::Select(selection) = &mut parsed.ast.get_mut(source_function).kind
+                else {
+                    unreachable!()
+                };
+                selection.name = selection_name;
+            } else {
+                let typed_function = source_typed_index.get(source_id, source_function).unwrap();
+                let TreeKind::Select(selection) = &mut typed_ast.get_mut(typed_function).kind
+                else {
+                    unreachable!()
+                };
+                selection.name = selection_name;
+            }
+        }
         Mutation::WrongResult => {
             let typed_pair = source_typed_index.get(source_id, block_expr).unwrap();
             let local_type = match store.symbols.get(selected).info {
@@ -495,6 +597,15 @@ fn mutable_reference_reassignment_rejects_forged_edges_and_shapes() {
         Mutation::WrongSetterReceiver,
         Mutation::WrongPairArguments,
         Mutation::StalePairConstructor,
+        Mutation::WrongPairNewTypeTreeKind,
+        Mutation::WrongPairNewType,
+        Mutation::WrongBlockType,
+        Mutation::TypedPairApplyKind,
+        Mutation::TypedSetterApplyKind,
+        Mutation::SourceSetterSelectName,
+        Mutation::TypedSetterSelectName,
+        Mutation::SourcePairSelectName,
+        Mutation::TypedPairSelectName,
         Mutation::WrongResult,
         Mutation::ReorderStatements,
         Mutation::DuplicateAssignment,
