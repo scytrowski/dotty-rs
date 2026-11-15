@@ -48,6 +48,10 @@ enum Mutation {
     WrongOwner,
     WrongScope,
     WrongInitializer,
+    WrongFirstInitializerSourceSelectName,
+    WrongFirstInitializerTypedSelectName,
+    WrongSecondInitializerSourceSelectName,
+    WrongSecondInitializerTypedSelectName,
     MissingSelectedAnnotation,
     WrongSelectedAnnotation,
     SelectedInitializerNotIdent,
@@ -253,6 +257,48 @@ fn validate(
                 unreachable!()
             };
             selected_def.rhs = second_initializer;
+        }
+        Mutation::WrongFirstInitializerSourceSelectName
+        | Mutation::WrongFirstInitializerTypedSelectName
+        | Mutation::WrongSecondInitializerSourceSelectName
+        | Mutation::WrongSecondInitializerTypedSelectName => {
+            let initializer_index = if matches!(
+                mutation,
+                Mutation::WrongFirstInitializerSourceSelectName
+                    | Mutation::WrongFirstInitializerTypedSelectName
+            ) {
+                0
+            } else {
+                1
+            };
+            let initializer = match &parsed.ast.get(block_stats[initializer_index]).kind {
+                TreeKind::ValDef(def) => def.rhs.unwrap(),
+                _ => unreachable!(),
+            };
+            let TreeKind::Apply(apply) = &parsed.ast.get(initializer).kind else {
+                unreachable!()
+            };
+            let source_function = apply.function;
+            let selection_name =
+                dotty_core::Name::new(store.names.intern("create"), dotty_core::Namespace::Term);
+            if matches!(
+                mutation,
+                Mutation::WrongFirstInitializerSourceSelectName
+                    | Mutation::WrongSecondInitializerSourceSelectName
+            ) {
+                let TreeKind::Select(selection) = &mut parsed.ast.get_mut(source_function).kind
+                else {
+                    unreachable!()
+                };
+                selection.name = selection_name;
+            } else {
+                let typed_function = source_typed_index.get(source_id, source_function).unwrap();
+                let TreeKind::Select(selection) = &mut typed_ast.get_mut(typed_function).kind
+                else {
+                    unreachable!()
+                };
+                selection.name = selection_name;
+            }
         }
         Mutation::MissingSelectedAnnotation => {
             let selected_type = match &parsed.ast.get(block_stats[2]).kind {
@@ -589,6 +635,10 @@ fn mutable_reference_reassignment_rejects_forged_edges_and_shapes() {
         Mutation::WrongOwner,
         Mutation::WrongScope,
         Mutation::WrongInitializer,
+        Mutation::WrongFirstInitializerSourceSelectName,
+        Mutation::WrongFirstInitializerTypedSelectName,
+        Mutation::WrongSecondInitializerSourceSelectName,
+        Mutation::WrongSecondInitializerTypedSelectName,
         Mutation::MissingSelectedAnnotation,
         Mutation::WrongSelectedAnnotation,
         Mutation::SelectedInitializerNotIdent,

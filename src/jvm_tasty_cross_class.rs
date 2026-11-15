@@ -890,6 +890,16 @@ fn validate_immutable_local_declaration_core(
             "selected constructor must belong to the canonical Counter class",
         ));
     }
+    if source_selection.name != store.symbols.get(constructor).name {
+        return Err(source_error(
+            "source initializer Select must retain the canonical constructor name",
+        ));
+    }
+    if typed_selection.name != store.symbols.get(constructor).name {
+        return Err(typed_error(
+            "typed initializer Select must retain the canonical constructor name",
+        ));
+    }
     let TreeKind::Ident(typed_seed) = &typed_ast
         .try_get(typed_argument)
         .ok_or_else(|| typed_error("typed seed Ident is stale"))?
