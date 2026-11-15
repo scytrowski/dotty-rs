@@ -1,7 +1,7 @@
 //! Shared-store implementation of the core symbol-resolution port.
 
 use crate::binary_name::BinaryName;
-use crate::class_path::{ClassPathEntry, safe_package_segments};
+use crate::class_path::{ClassFormat, ClassPathEntry, safe_package_segments};
 use crate::error::ClassLoadError;
 use crate::loader::{ClassLoadProfile, ClassLoader, SemanticTastyLoadError};
 use crate::session::{LoadingSession, SessionCheckpoint};
@@ -1385,7 +1385,8 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         else {
             return false;
         };
-        let constructor = store.symbols.get(constructor);
+        let constructor_id = constructor;
+        let constructor = store.symbols.get(constructor_id);
         if constructor.kind != SymbolKind::Constructor || constructor.owner != Some(class) {
             return false;
         }
@@ -1393,7 +1394,14 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             return false;
         };
         let Some(Type::Method(method)) = store.types.try_get(constructor_type) else {
-            return false;
+            return self.is_semantic_generic_constructor_identity(
+                store,
+                class,
+                class_info,
+                constructor_id,
+                constructor_type,
+                binary_name,
+            );
         };
         let canonical_int = store.types.get(self.definitions.int).reference_symbol();
         let supported_constructor_params = match method.params.as_slice() {
@@ -1410,6 +1418,97 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                 store.types.get(method.result),
                 Type::TypeRef { target: TypeRefTarget::Symbol(result), .. } if *result == class
             )
+    }
+
+    fn is_semantic_generic_constructor_identity(
+        &self,
+        store: &SemanticStore,
+        class: SymbolId,
+        class_info: &dotty_core::ClassInfo,
+        constructor: SymbolId,
+        constructor_type: TypeId,
+        binary_name: &BinaryName,
+    ) -> bool {
+        let Some(resource) = self
+            .class_path
+            .as_ref()
+            .and_then(|class_path| class_path.find_class(binary_name).ok().flatten())
+        else {
+            return false;
+        };
+        if resource.format() != ClassFormat::Tasty
+            || self.session.origins.get(&class) != Some(resource.origin())
+        {
+            return false;
+        }
+
+        let declarations = store.scopes.get(class_info.declarations);
+        let class_parameters = declarations
+            .entered_symbols()
+            .filter(|parameter| {
+                store.symbols.contains(*parameter)
+                    && store.symbols.get(*parameter).kind == SymbolKind::TypeParameter
+                    && store.symbols.get(*parameter).owner == Some(class)
+            })
+            .collect::<Vec<_>>();
+        let [class_parameter] = class_parameters.as_slice() else {
+            return false;
+        };
+        let class_parameter_symbol = store.symbols.get(*class_parameter);
+        if !class_parameter_symbol.name.is_type()
+            || !matches!(class_parameter_symbol.info, SymbolInfo::Complete(_))
+            || class_parameter_symbol.origin != store.symbols.get(class).origin
+            || store.symbols.get(constructor).origin != store.symbols.get(class).origin
+        {
+            return false;
+        }
+        let SymbolInfo::Complete(class_parameter_info) = class_parameter_symbol.info else {
+            return false;
+        };
+        let Some(Type::Bounds { low, high }) = store.types.try_get(class_parameter_info) else {
+            return false;
+        };
+        if store.types.get(*low).reference_symbol() != Some(self.definitions.nothing_class)
+            || store.types.get(*high).reference_symbol() != Some(self.definitions.any_class)
+        {
+            return false;
+        }
+
+        let Some(Type::Poly(poly)) = store.types.try_get(constructor_type) else {
+            return false;
+        };
+        let [poly_parameter] = poly.params.as_slice() else {
+            return false;
+        };
+        if store.names.resolve(poly_parameter.name.as_name().text())
+            != store.names.resolve(class_parameter_symbol.name.text())
+            || store.types.try_get(poly_parameter.bounds)
+                != store.types.try_get(class_parameter_info)
+        {
+            return false;
+        }
+        let Some(Type::Method(method)) = store.types.try_get(poly.result) else {
+            return false;
+        };
+        let [formal] = method.params.as_slice() else {
+            return false;
+        };
+        if method.kind != MethodKind::Plain
+            || store.names.resolve(formal.name.as_name().text()) != "x"
+            || !matches!(
+                store.types.try_get(formal.ty),
+                Some(Type::ParamRef { binder, index: 0 }) if *binder == constructor_type
+            )
+        {
+            return false;
+        }
+        let Some(Type::Applied { tycon, args }) = store.types.try_get(method.result) else {
+            return false;
+        };
+        store.types.get(*tycon).reference_symbol() == Some(class)
+            && matches!(args.as_slice(), [argument]
+                if matches!(store.types.try_get(*argument),
+                    Some(Type::ParamRef { binder, index: 0 }) if *binder == constructor_type))
     }
 
     #[allow(dead_code)]
@@ -1485,10 +1584,30 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         }
         let candidates = store.scopes.get(scope).lookup_all(&request.name);
         match candidates {
-            [] => self
-                .load_semantic_class_for_member(store, selected_name)
-                .map(Some)
-                .map_err(MemberResolutionFailure::SemanticLoad),
+            [] => {
+                let loaded = self
+                    .load_semantic_class_for_member(store, selected_name)
+                    .map_err(MemberResolutionFailure::SemanticLoad)?;
+                if self.is_semantic_class_identity(
+                    store,
+                    loaded,
+                    package,
+                    scope,
+                    request.name,
+                    selected_name,
+                ) {
+                    Ok(Some(loaded))
+                } else {
+                    Err(MemberResolutionFailure::SemanticLoad(
+                        SemanticMemberLoadFailure {
+                            binary_name: selected_name.clone(),
+                            source: SemanticTastyLoadError::UnsupportedShape(
+                                "the selected loader did not publish the validated canonical class identity",
+                            ),
+                        },
+                    ))
+                }
+            }
             [_] => {
                 let selected = self
                     .resolve_member_inner(store, request)
@@ -3353,6 +3472,7 @@ mod tests {
         fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
             let file = match name.as_internal() {
                 "me/cytrowski/tastyfixtures/semantic/CtorWithVal" => "CtorWithVal.tasty",
+                "me/cytrowski/tastyfixtures/semantic/CtorGeneric" => "CtorGeneric.tasty",
                 _ => return Ok(None),
             };
             let bytes = std::fs::read(self.root.join(file)).map_err(ClassPathError::from)?;
@@ -3859,6 +3979,472 @@ mod tests {
             Some(package),
             "the same arena slot is safe to reuse after its prior allocation was rolled back"
         );
+    }
+
+    #[test]
+    fn explicit_semantic_ctor_generic_repeats_preserve_canonical_binders_and_origin() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            semantic_pair_class_path(),
+            definitions,
+            LoadingSession::new(),
+        );
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "semantic"],
+            )
+            .unwrap()
+            .expect("semantic fixture package");
+        let package_scope = resolver.package_scope(package).expect("package scope");
+        let request =
+            semantic_member_request(&mut store, package, definitions.no_prefix, "CtorGeneric");
+        let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorGeneric");
+        let class = resolver
+            .resolve_member_with_semantic_class(&mut store, &request, &name)
+            .unwrap()
+            .expect("selected authentic generic class");
+        let SymbolInfo::Complete(info) = store.symbols.get(class).info else {
+            panic!("CtorGeneric is complete");
+        };
+        let Type::ClassInfo(class_info) = store.types.get(info) else {
+            panic!("CtorGeneric has class info");
+        };
+        let declaration_scope = class_info.declarations;
+        let declarations = store.scopes.get(declaration_scope);
+        let class_parameters = declarations
+            .entered_symbols()
+            .filter(|symbol| {
+                store.symbols.get(*symbol).kind == SymbolKind::TypeParameter
+                    && store.symbols.get(*symbol).owner == Some(class)
+            })
+            .collect::<Vec<_>>();
+        let [class_parameter] = class_parameters.as_slice() else {
+            panic!("class header has one canonical class-owned A");
+        };
+        assert_eq!(
+            store.symbols.get(*class_parameter).name.namespace(),
+            Namespace::Type
+        );
+        let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+        let constructor = declarations.lookup(&constructor_name).expect("constructor");
+        assert_eq!(store.symbols.get(constructor).owner, Some(class));
+        let SymbolInfo::Complete(constructor_type) = store.symbols.get(constructor).info else {
+            panic!("constructor is complete");
+        };
+        let Type::Poly(poly) = store.types.get(constructor_type) else {
+            panic!("constructor owns a Poly binder");
+        };
+        let [constructor_parameter] = poly.params.as_slice() else {
+            panic!("constructor has one ordered A parameter");
+        };
+        assert_eq!(
+            store
+                .names
+                .resolve(constructor_parameter.name.as_name().text()),
+            store
+                .names
+                .resolve(store.symbols.get(*class_parameter).name.text())
+        );
+        let Type::Method(method) = store.types.get(poly.result) else {
+            panic!("Poly body is the constructor method");
+        };
+        let [formal] = method.params.as_slice() else {
+            panic!("constructor has one x formal");
+        };
+        assert_eq!(store.names.resolve(formal.name.as_name().text()), "x");
+        assert!(matches!(
+            store.types.get(formal.ty),
+            Type::ParamRef { binder, index: 0 } if *binder == constructor_type
+        ));
+        let Type::Applied { tycon, args } = store.types.get(method.result) else {
+            panic!("constructor result applies CtorGeneric");
+        };
+        assert_eq!(store.types.get(*tycon).reference_symbol(), Some(class));
+        assert!(matches!(args.as_slice(), [argument]
+            if matches!(store.types.get(*argument),
+                Type::ParamRef { binder, index: 0 } if *binder == constructor_type)));
+        assert_eq!(
+            resolver.session.origins.get(&class),
+            Some(&ClassOrigin::Directory(fixture_path(
+                "../dotty-tasty-unpickler/tests/fixtures/semantic"
+            )))
+        );
+        assert_eq!(
+            store.scopes.get(package_scope).lookup_all(&request.name),
+            [class],
+            "the package-level type is entered exactly once"
+        );
+
+        let repeated = resolver
+            .resolve_member_with_semantic_class(&mut store, &request, &name)
+            .unwrap()
+            .expect("selected repeat authenticates the published graph");
+        assert_eq!(repeated, class);
+        let ordinary = resolver
+            .resolve_member(&mut store, &request)
+            .unwrap()
+            .expect("ordinary repeat reuses the selected identity");
+        assert_eq!(ordinary, class);
+        assert_eq!(
+            store.scopes.get(package_scope).lookup_all(&request.name),
+            [class],
+            "selected and ordinary repeats do not duplicate package entries"
+        );
+        let actual_origin = resolver.session.origins[&class].clone();
+        resolver.session.origins.insert(
+            class,
+            ClassOrigin::Directory(PathBuf::from("<foreign-CtorGeneric-origin>")),
+        );
+        let wrong_origin = resolver
+            .transact(&mut store, |resolver, store| {
+                resolver.resolve_member_inner_with_semantic_request(store, &request, &name)
+            })
+            .expect_err("same-shaped class from another origin is not authenticated");
+        assert!(matches!(
+            wrong_origin,
+            MemberResolutionFailure::SemanticLoad(SemanticMemberLoadFailure {
+                ref binary_name,
+                source: SemanticTastyLoadError::UnsupportedShape(
+                    "the canonical class identity was published by another loading path"
+                ),
+            }) if binary_name == &name
+        ));
+        resolver.session.origins.insert(class, actual_origin);
+    }
+
+    #[test]
+    fn ctor_generic_coexists_with_selected_open_and_ctor_with_val_in_both_orders() {
+        fn run(order: [usize; 3]) -> Vec<String> {
+            let cases = [
+                (
+                    "Open",
+                    ["me", "cytrowski", "tastyfixtures", "visibility"].as_slice(),
+                    "me/cytrowski/tastyfixtures/visibility/Open",
+                    "tests/fixtures/tasty_visibility",
+                ),
+                (
+                    "CtorWithVal",
+                    ["me", "cytrowski", "tastyfixtures", "semantic"].as_slice(),
+                    "me/cytrowski/tastyfixtures/semantic/CtorWithVal",
+                    "../dotty-tasty-unpickler/tests/fixtures/semantic",
+                ),
+                (
+                    "CtorGeneric",
+                    ["me", "cytrowski", "tastyfixtures", "semantic"].as_slice(),
+                    "me/cytrowski/tastyfixtures/semantic/CtorGeneric",
+                    "../dotty-tasty-unpickler/tests/fixtures/semantic",
+                ),
+            ];
+            let mut store = SemanticStore::new();
+            let definitions = Definitions::bootstrap(&mut store);
+            let mut resolver = ClasspathSymbolResolver::new(
+                semantic_pair_class_path(),
+                definitions,
+                LoadingSession::new(),
+            );
+            let mut packages = Vec::new();
+            let mut requests = Vec::new();
+            let mut names = Vec::new();
+            for (simple, package_path, binary, _) in cases {
+                let package = resolver
+                    .session
+                    .packages
+                    .resolve_package(&mut store, &package_path.join("/"));
+                packages.push(package);
+                requests.push(semantic_member_request(
+                    &mut store,
+                    package,
+                    definitions.no_prefix,
+                    simple,
+                ));
+                names.push(BinaryName::from_internal(binary));
+            }
+
+            let mut classes = vec![None; cases.len()];
+            for index in order {
+                classes[index] = Some(
+                    resolver
+                        .resolve_member_with_semantic_class(
+                            &mut store,
+                            &requests[index],
+                            &names[index],
+                        )
+                        .unwrap()
+                        .expect("selected class is loaded in the requested order"),
+                );
+            }
+            let mut summary = Vec::new();
+            for (index, (simple, _, _, relative_origin)) in cases.into_iter().enumerate() {
+                let class = classes[index].expect("all three selected classes loaded");
+                assert_eq!(resolver.session.identified.get(&names[index]), Some(&class));
+                assert_eq!(resolver.session.resolved.get(&names[index]), Some(&class));
+                assert_eq!(
+                    resolver.session.origins.get(&class),
+                    Some(&ClassOrigin::Directory(fixture_path(relative_origin)))
+                );
+                assert_eq!(store.symbols.get(class).owner, Some(packages[index]));
+                let package_scope = resolver.package_scope(packages[index]).unwrap();
+                assert_eq!(
+                    store
+                        .scopes
+                        .get(package_scope)
+                        .lookup_all(&requests[index].name),
+                    [class],
+                    "selected class has one canonical package declaration"
+                );
+                assert_eq!(
+                    resolver
+                        .resolve_member_with_semantic_class(
+                            &mut store,
+                            &requests[index],
+                            &names[index],
+                        )
+                        .unwrap(),
+                    Some(class),
+                    "selected repeat reuses the same identity"
+                );
+                assert_eq!(
+                    resolver
+                        .resolve_member(&mut store, &requests[index])
+                        .unwrap(),
+                    Some(class),
+                    "ordinary repeat reuses the selected identity"
+                );
+                if simple == "CtorGeneric" {
+                    let SymbolInfo::Complete(info) = store.symbols.get(class).info else {
+                        panic!("CtorGeneric is complete in each fresh store");
+                    };
+                    let Type::ClassInfo(class_info) = store.types.get(info) else {
+                        panic!("CtorGeneric has class info in each fresh store");
+                    };
+                    let class_parameter = store
+                        .scopes
+                        .get(class_info.declarations)
+                        .entered_symbols()
+                        .find(|symbol| {
+                            store.symbols.get(*symbol).kind == SymbolKind::TypeParameter
+                                && store.symbols.get(*symbol).owner == Some(class)
+                        })
+                        .expect("canonical class-header A");
+                    let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+                    let constructor = store
+                        .scopes
+                        .get(class_info.declarations)
+                        .lookup(&constructor_name)
+                        .expect("generic primary constructor");
+                    let SymbolInfo::Complete(constructor_type) =
+                        store.symbols.get(constructor).info
+                    else {
+                        panic!("constructor is complete");
+                    };
+                    let Type::Poly(poly) = store.types.get(constructor_type) else {
+                        panic!("constructor is polymorphic");
+                    };
+                    let Type::Method(method) = store.types.get(poly.result) else {
+                        panic!("constructor Poly body is a method");
+                    };
+                    assert!(matches!(method.params.as_slice(), [formal]
+                        if store.names.resolve(formal.name.as_name().text()) == "x"
+                            && matches!(store.types.get(formal.ty),
+                                Type::ParamRef { binder, index: 0 } if *binder == constructor_type)));
+                    assert!(matches!(store.types.get(method.result),
+                        Type::Applied { tycon, args }
+                            if store.types.get(*tycon).reference_symbol() == Some(class)
+                                && matches!(args.as_slice(), [argument]
+                                    if matches!(store.types.get(*argument),
+                                        Type::ParamRef { binder, index: 0 } if *binder == constructor_type))));
+                    summary.push(format!(
+                        "{simple}:{relative_origin}:class.A.owner={}:ctor.Poly.A.x=ParamRef(0):result=Self[ParamRef(0)]",
+                        store.names.resolve(store.symbols.get(class_parameter).name.text())
+                    ));
+                } else {
+                    summary.push(format!("{simple}:{relative_origin}"));
+                }
+            }
+            summary.sort();
+            summary
+        }
+
+        let forward = run([0, 1, 2]);
+        let reverse = run([2, 1, 0]);
+        assert_eq!(forward, reverse, "fresh stores converge in either order");
+    }
+
+    #[test]
+    fn ctor_generic_request_mismatches_keep_legacy_routing() {
+        let generic_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorGeneric");
+        for mismatch in ["namespace", "package", "space"] {
+            let mut store = SemanticStore::new();
+            let definitions = Definitions::bootstrap(&mut store);
+            let mut resolver = ClasspathSymbolResolver::new(
+                semantic_pair_class_path(),
+                definitions,
+                LoadingSession::new(),
+            );
+            let semantic_package = resolver
+                .resolve_package(
+                    &mut store,
+                    &["me", "cytrowski", "tastyfixtures", "semantic"],
+                )
+                .unwrap()
+                .expect("semantic fixture package");
+            let visibility_package = resolver
+                .resolve_package(
+                    &mut store,
+                    &["me", "cytrowski", "tastyfixtures", "visibility"],
+                )
+                .unwrap()
+                .expect("visibility fixture package");
+            let mut request = semantic_member_request(
+                &mut store,
+                semantic_package,
+                definitions.no_prefix,
+                "CtorGeneric",
+            );
+            match mismatch {
+                "namespace" => request.name = Name::new(request.name.text(), Namespace::Term),
+                "package" => {
+                    request = semantic_member_request(
+                        &mut store,
+                        visibility_package,
+                        definitions.no_prefix,
+                        "CtorGeneric",
+                    );
+                }
+                "space" => request.space = MemberSpace::Explicit(definitions.no_prefix),
+                _ => unreachable!(),
+            }
+            let result =
+                resolver.resolve_member_with_semantic_class(&mut store, &request, &generic_name);
+            assert!(
+                result.is_ok(),
+                "{mismatch} mismatch follows ordinary resolution: {result:?}"
+            );
+            assert!(
+                !resolver.session.identified.contains_key(&generic_name),
+                "{mismatch} mismatch must not select CtorGeneric"
+            );
+            assert!(
+                !resolver.session.origins.keys().any(|symbol| {
+                    store.symbols.contains(*symbol)
+                        && store.symbols.get(*symbol).name
+                            == Name::new(store.names.intern("CtorGeneric"), Namespace::Type)
+                }),
+                "{mismatch} mismatch does not publish a selected TASTy class"
+            );
+        }
+    }
+
+    #[test]
+    fn ctor_generic_collision_and_selected_load_failure_are_typed() {
+        let generic_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorGeneric");
+
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            semantic_pair_class_path(),
+            definitions,
+            LoadingSession::new(),
+        );
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "semantic"],
+            )
+            .unwrap()
+            .expect("semantic fixture package");
+        let request =
+            semantic_member_request(&mut store, package, definitions.no_prefix, "CtorGeneric");
+        let package_scope = resolver.package_scope(package).expect("package scope");
+        let foreign_package = resolver
+            .session
+            .packages
+            .resolve_package(&mut store, "foreign");
+        let foreign = store.symbols.alloc(Symbol {
+            name: request.name,
+            owner: Some(foreign_package),
+            kind: SymbolKind::Class,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: Default::default(),
+        });
+        store
+            .scopes
+            .get_mut(package_scope)
+            .enter(request.name, foreign);
+        let store_mark = store.checkpoint();
+        let session_mark = resolver.session.checkpoint();
+        let collision = resolver
+            .transact(&mut store, |resolver, store| {
+                resolver.resolve_member_inner_with_semantic_request(store, &request, &generic_name)
+            })
+            .expect_err("foreign same-spelled root is a selected typed failure");
+        assert!(
+            matches!(
+                collision,
+                MemberResolutionFailure::Resolver(ResolutionError::Malformed { ref reason })
+                    if reason.contains("does not match its canonical package/name")
+            ),
+            "foreign collision failure: {collision:?}"
+        );
+        assert_eq!(store.checkpoint(), store_mark);
+        assert_eq!(resolver.session.checkpoint(), session_mark);
+        assert_eq!(store.symbols.get(foreign).owner, Some(foreign_package));
+        assert_eq!(
+            store.scopes.get(package_scope).lookup_all(&request.name),
+            [foreign]
+        );
+        assert!(!resolver.session.identified.contains_key(&generic_name));
+        assert!(!resolver.session.resolved.contains_key(&generic_name));
+
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            semantic_pair_class_path(),
+            definitions,
+            LoadingSession::new(),
+        );
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "semantic"],
+            )
+            .unwrap()
+            .expect("semantic fixture package");
+        let request =
+            semantic_member_request(&mut store, package, definitions.no_prefix, "CtorGeneric");
+        let store_mark = store.checkpoint();
+        let session_mark = resolver.session.checkpoint();
+        resolver.inject_semantic_late_failure = true;
+        let failure = resolver
+            .transact(&mut store, |resolver, store| {
+                resolver.resolve_member_inner_with_semantic_request(store, &request, &generic_name)
+            })
+            .expect_err("selected generic completion failure is terminal");
+        assert!(
+            matches!(
+                failure,
+                MemberResolutionFailure::SemanticLoad(SemanticMemberLoadFailure {
+                    ref binary_name,
+                    source: SemanticTastyLoadError::UnsupportedShape(
+                        "injected failure after generic class and constructor completion"
+                    ),
+                }) if binary_name == &generic_name
+            ),
+            "selected generic failure: {failure:?}"
+        );
+        assert_eq!(store.checkpoint(), store_mark);
+        assert_eq!(resolver.session.checkpoint(), session_mark);
+        assert!(!resolver.session.identified.contains_key(&generic_name));
+        assert!(!resolver.session.resolved.contains_key(&generic_name));
     }
 
     #[test]
