@@ -34,7 +34,7 @@ use dotty_classfile::bytecode::CodeSequence;
 use dotty_classfile::bytecode::{
     AnalysisError, CfgCodeAnalyzer, ClassReference, ConstantPoolIndexOperand, ControlFlowGraph,
     Instruction, LocalIndex, SpecialMethodReference, VirtualMethodReference,
-    analyze as analyze_instructions,
+    analyze as analyze_instructions, assemble as assemble_instructions,
 };
 use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
 use std::io::Write;
@@ -1120,39 +1120,61 @@ fn mutable_reference_rebinding_java_21_consumes_original_rust_artifacts() {
         ]))
         .unwrap()
     };
+    let expected_instructions = [
+        Instruction::New(ClassReference::new(cp_operand(1))),
+        Instruction::Dup,
+        Instruction::ILoad(LocalIndex::new(1)),
+        Instruction::InvokeSpecial(SpecialMethodReference::new(cp_operand(6))),
+        Instruction::AStore(LocalIndex::new(4)),
+        Instruction::New(ClassReference::new(cp_operand(11))),
+        Instruction::Dup,
+        Instruction::ILoad(LocalIndex::new(2)),
+        Instruction::InvokeSpecial(SpecialMethodReference::new(cp_operand(16))),
+        Instruction::AStore(LocalIndex::new(5)),
+        Instruction::ALoad(LocalIndex::new(4)),
+        Instruction::AStore(LocalIndex::new(6)),
+        Instruction::ALoad(LocalIndex::new(5)),
+        Instruction::AStore(LocalIndex::new(6)),
+        Instruction::ALoad(LocalIndex::new(6)),
+        Instruction::ILoad(LocalIndex::new(3)),
+        Instruction::InvokeVirtual(VirtualMethodReference::new(cp_operand(32))),
+        Instruction::New(ClassReference::new(cp_operand(35))),
+        Instruction::Dup,
+        Instruction::ALoad(LocalIndex::new(4)),
+        Instruction::ALoad(LocalIndex::new(5)),
+        Instruction::InvokeSpecial(SpecialMethodReference::new(cp_operand(43))),
+        Instruction::AReturn,
+    ];
+    let expected_code = assemble_instructions(&expected_instructions, &class.constant_pool)
+        .expect("expected instruction sequence assembles against the decoded constant pool");
+    assert_eq!(
+        expected_code, code.code,
+        "the symbolic instruction sequence used for CFG analysis must match the original Rust-produced Code bytes"
+    );
+    assert!(
+        code.exception_table.is_empty(),
+        "straight-line PairFactory.create has no exception handlers"
+    );
+    let stack_map_tables = code
+        .attributes
+        .iter()
+        .filter_map(|attribute| match attribute {
+            Attribute::Other(raw)
+                if class.constant_pool.utf8(raw.name_index).ok() == Some("StackMapTable") =>
+            {
+                Some(raw)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        stack_map_tables.is_empty(),
+        "straight-line PairFactory.create has no nested StackMapTable attribute"
+    );
     let mut decoded_sequence = CodeSequence::new();
-    decoded_sequence
-        .instruction(Instruction::New(ClassReference::new(cp_operand(1))))
-        .instruction(Instruction::Dup)
-        .instruction(Instruction::ILoad(LocalIndex::new(1)))
-        .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
-            cp_operand(6),
-        )))
-        .instruction(Instruction::AStore(LocalIndex::new(4)))
-        .instruction(Instruction::New(ClassReference::new(cp_operand(11))))
-        .instruction(Instruction::Dup)
-        .instruction(Instruction::ILoad(LocalIndex::new(2)))
-        .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
-            cp_operand(16),
-        )))
-        .instruction(Instruction::AStore(LocalIndex::new(5)))
-        .instruction(Instruction::ALoad(LocalIndex::new(4)))
-        .instruction(Instruction::AStore(LocalIndex::new(6)))
-        .instruction(Instruction::ALoad(LocalIndex::new(5)))
-        .instruction(Instruction::AStore(LocalIndex::new(6)))
-        .instruction(Instruction::ALoad(LocalIndex::new(6)))
-        .instruction(Instruction::ILoad(LocalIndex::new(3)))
-        .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
-            cp_operand(32),
-        )))
-        .instruction(Instruction::New(ClassReference::new(cp_operand(35))))
-        .instruction(Instruction::Dup)
-        .instruction(Instruction::ALoad(LocalIndex::new(4)))
-        .instruction(Instruction::ALoad(LocalIndex::new(5)))
-        .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
-            cp_operand(43),
-        )))
-        .instruction(Instruction::AReturn);
+    for instruction in expected_instructions {
+        decoded_sequence.instruction(instruction);
+    }
     let graph = ControlFlowGraph::build(&decoded_sequence).unwrap();
     let analysis = CfgCodeAnalyzer::analyze_with_current_class(
         &graph,
