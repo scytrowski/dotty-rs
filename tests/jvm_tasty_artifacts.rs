@@ -12,8 +12,8 @@ use dotty_tasty::ast::{
     APPLY_TAG, ASSIGN_TAG, DEFDEF_TAG, PARAM_TAG, TERMREFDIRECT_TAG, VALDEF_TAG,
 };
 use dotty_tasty::reader::Reader as TastyReader;
-use dotty_tasty::section::StandardSection;
-use dotty_tasty::tasty::{DefinitionBody, TastyFile};
+use dotty_tasty::section::{EncodedSection, StandardSection};
+use dotty_tasty::tasty::{DefinitionBody, TastyFile, TastyFileBuilder};
 use dotty_tasty::term::{AstRefKind, RawTree, SimpleTerm, TermValue};
 use dotty_tasty::writer::Writer as TastyWriter;
 use dotty_tasty_pickler::{
@@ -21,6 +21,7 @@ use dotty_tasty_pickler::{
     NestedConstructorCallBinding, NestedConstructorCallPairBinding,
     OrderedConstructorCallArgumentPairBinding, PlannedCallBinding, SourceTypedBindings,
 };
+use std::cell::Cell;
 
 use dotty::jvm_tasty_artifacts::{
     PairedArtifactError, PairedBatchArtifactError, emit_paired_jvm_tasty_batch,
@@ -964,6 +965,118 @@ fn mutable_reference_rebinding_contract_rejects_semantic_corruption() {
             validate_jvm_tasty_batch_artifacts(&validated, valid.clone())
                 .expect("the exact paired artifacts pass the mutable contract");
 
+            let factory_tasty = plan.classes[2].tasty_plan.plan();
+            let factory_method = factory_tasty
+                .members
+                .iter()
+                .find_map(|member| match member {
+                    dotty_tasty_pickler::ClassMemberPicklePlan::Method { symbol, .. } => {
+                        Some(*symbol)
+                    }
+                    dotty_tasty_pickler::ClassMemberPicklePlan::Field(_) => None,
+                })
+                .expect("PairFactory.create method");
+            let assignment = factory_tasty
+                .typed_bindings
+                .mutable_counter_reference_assignment(source_id, factory_method)
+                .expect("same-session source-to-typed assignment receipt");
+            for corruption in [
+                MutableBindingCorruption::MissingAssignmentRhsMapping {
+                    source: source_id,
+                    tree: assignment.source_rhs,
+                },
+                MutableBindingCorruption::ForgedAssignmentReceipt {
+                    source: source_id,
+                    method: factory_method,
+                    typed_rhs: assignment.typed_lhs,
+                },
+            ] {
+                let bindings = MutableBindingFault {
+                    base: factory_tasty.typed_bindings,
+                    corruption: Cell::new(MutableBindingCorruption::None),
+                };
+                let corrupted_factory_plan = ClassStatePicklePlan {
+                    store: factory_tasty.store,
+                    definitions: factory_tasty.definitions,
+                    source_ast: factory_tasty.source_ast,
+                    typed_ast: factory_tasty.typed_ast,
+                    source_index: factory_tasty.source_index,
+                    typed_bindings: &bindings,
+                    source: factory_tasty.source.clone(),
+                    class: factory_tasty.class,
+                    class_tree: factory_tasty.class_tree,
+                    constructor: factory_tasty.constructor.clone(),
+                    members: factory_tasty.members,
+                };
+                let corrupted_factory = corrupted_factory_plan
+                    .validate()
+                    .expect("same-session complete class-state plan validates before fault injection");
+                bindings.corruption.set(corruption);
+                let corrupted_tasty_plans = [
+                    plan.classes[0].tasty_plan,
+                    plan.classes[1].tasty_plan,
+                    &corrupted_factory,
+                ];
+                let error = match validate_jvm_tasty_batch(plan.jvm_unit, &corrupted_tasty_plans) {
+                    Ok(_) => panic!("corrupt same-session source-to-typed assignment rejects the batch"),
+                    Err(error) => error,
+                };
+                let first_stage_matches = match corruption {
+                    MutableBindingCorruption::MissingAssignmentRhsMapping { source, tree } => {
+                        matches!(
+                            &error,
+                            JvmTastyContractError::BatchClass {
+                                class_index: 2,
+                                error,
+                                ..
+                            } if matches!(
+                                **error,
+                                JvmTastyContractError::TastyPlan(
+                                    dotty_tasty_pickler::PickleError::BodyBinding {
+                                        source: actual_source,
+                                        tree: actual_tree,
+                                        actual: None,
+                                        ..
+                                    }
+                                ) if actual_source == source && actual_tree == tree
+                            )
+                        )
+                    }
+                    MutableBindingCorruption::ForgedAssignmentReceipt {
+                        source,
+                        method,
+                        ..
+                    } => matches!(
+                        &error,
+                        JvmTastyContractError::BatchClass {
+                            class_index: 2,
+                            error,
+                            ..
+                        } if matches!(
+                            **error,
+                            JvmTastyContractError::TastyPlan(
+                                dotty_tasty_pickler::PickleError::Unsupported {
+                                    feature: dotty_tasty_pickler::UnsupportedFeature::BodyExpression,
+                                    symbol: Some(actual_method),
+                                }
+                            ) if actual_method == method
+                        ) && source == source_id
+                    ),
+                    MutableBindingCorruption::None => unreachable!(),
+                };
+                assert!(
+                    first_stage_matches,
+                    "{corruption:?} first rejects in complete PairFactory TASTy body validation: {error:?}"
+                );
+                assert!(
+                    !rejected_publications
+                        .path()
+                        .join(format!("same-session-{corruption:?}"))
+                        .exists(),
+                    "same-session mapping/receipt corruption has no accepted or published batch"
+                );
+            }
+
             let factory_code = |artifacts: &JvmTastyBatchArtifacts| {
                 let factory = artifacts
                     .classfiles
@@ -1100,7 +1213,7 @@ fn mutable_reference_rebinding_contract_rejects_semantic_corruption() {
                     .iter_mut()
                     .find(|artifact| artifact.tasty_path == "example/PairFactory.tasty")
                     .unwrap();
-                repoint_mutable_assignment_rhs_to_first(&mut sidecar.tasty_bytes);
+                repoint_mutable_assignment_lhs_to_second(&mut sidecar.tasty_bytes);
             }
             reject_artifacts(
                 "wrong-tasty-assignment-target",
@@ -1140,21 +1253,15 @@ fn mutable_reference_rebinding_contract_rejects_semantic_corruption() {
     )
     .unwrap();
 
-    for (label, source, expected_phase) in [
-        (
-            "forged-assignment-mapping",
-            MUTABLE_REFERENCE_REBINDING_BATCH.replace("selected = second", "selected = first"),
-            "JVM/TASTy cross-contract validation",
+    let (label, source, expected_phase) = (
+        "extra-setter-effect",
+        MUTABLE_REFERENCE_REBINDING_BATCH.replace(
+            "    selected.set(nextValue)\n",
+            "    selected.set(nextValue)\n    selected.set(nextValue)\n",
         ),
-        (
-            "extra-setter-effect",
-            MUTABLE_REFERENCE_REBINDING_BATCH.replace(
-                "    selected.set(nextValue)\n",
-                "    selected.set(nextValue)\n    selected.set(nextValue)\n",
-            ),
-            "cross-class constructor-call identity proof",
-        ),
-    ] {
+        "cross-class constructor-call identity proof",
+    );
+    {
         let destination = rejected_publications.path().join(label);
         let error =
             emit_paired_jvm_tasty_batch(&source, "MutableReferenceRebinding.scala", source_id)
@@ -1175,7 +1282,7 @@ fn mutable_reference_rebinding_contract_rejects_semantic_corruption() {
     }
 }
 
-fn repoint_mutable_assignment_rhs_to_first(tasty_bytes: &mut [u8]) {
+fn repoint_mutable_assignment_lhs_to_second(tasty_bytes: &mut Vec<u8>) {
     let tasty = TastyFile::parse_and_validate_scala_3_9(tasty_bytes).unwrap();
     let asts = tasty.section(StandardSection::Asts).unwrap();
     let asts_file_offset = asts.payload.as_ptr() as usize - tasty_bytes.as_ptr() as usize;
@@ -1196,8 +1303,8 @@ fn repoint_mutable_assignment_rhs_to_first(tasty_bytes: &mut [u8]) {
             })
             .unwrap_or_else(|| panic!("missing {expected_name} VALDEF"))
     };
-    let first = variable_address("first");
     let second = variable_address("second");
+    let selected = variable_address("selected");
     let assignment = index
         .iter_nodes_with_tag(ASSIGN_TAG)
         .next()
@@ -1209,23 +1316,69 @@ fn repoint_mutable_assignment_rhs_to_first(tasty_bytes: &mut [u8]) {
         panic!("ASSIGN address decodes as a length node");
     };
     let decoded = assignment_node.decode_assign().unwrap();
-    let RawTree::Leaf(rhs) = decoded.right else {
-        panic!("mutable assignment RHS is one direct reference leaf");
+    let RawTree::Leaf(lhs) = decoded.left else {
+        panic!("mutable assignment LHS is one direct reference leaf");
     };
-    assert_eq!(rhs.tag, TERMREFDIRECT_TAG);
-    assert_eq!(rhs.ast_ref().unwrap().address, second);
+    assert_eq!(lhs.tag, TERMREFDIRECT_TAG);
+    assert_eq!(lhs.ast_ref().unwrap().address, selected);
 
-    let replacement = SimpleTerm::new(TERMREFDIRECT_TAG, TermValue::AstRef(first)).unwrap();
+    let replacement = SimpleTerm::new(TERMREFDIRECT_TAG, TermValue::AstRef(second)).unwrap();
     let mut encoded = TastyWriter::new();
     replacement.encode(&mut encoded).unwrap();
     let assignment_payload_offset =
         assignment_node.payload.as_ptr() as usize - asts.payload.as_ptr() as usize;
-    let old_start = asts_file_offset + assignment_payload_offset + rhs.offset;
+    let old_start = asts_file_offset + assignment_payload_offset + lhs.offset;
     let mut old_encoded = TastyWriter::new();
-    rhs.encode(&mut old_encoded).unwrap();
-    assert_eq!(old_encoded.as_slice().len(), encoded.as_slice().len());
-    tasty_bytes[old_start..old_start + encoded.as_slice().len()]
-        .copy_from_slice(encoded.as_slice());
+    lhs.encode(&mut old_encoded).unwrap();
+    assert_ne!(old_encoded.as_slice().len(), encoded.as_slice().len());
+
+    let asts_start = asts_file_offset;
+    let mut rewritten_asts = asts.payload.to_vec();
+    let old_start_in_asts = old_start - asts_start;
+    let old_end_in_asts = old_start_in_asts + old_encoded.as_slice().len();
+    rewritten_asts.splice(
+        old_start_in_asts..old_end_in_asts,
+        encoded.as_slice().iter().copied(),
+    );
+    let mut delta = encoded.as_slice().len() as isize - old_encoded.as_slice().len() as isize;
+    let mut ancestors = vec![assignment.offset as u32];
+    let mut cursor = assignment.offset as u32;
+    while let Some(parent) = index.parent_of(cursor) {
+        ancestors.push(parent.offset as u32);
+        cursor = parent.offset as u32;
+    }
+    for address in ancestors {
+        let mut node_reader = TastyReader::new(&asts.payload[address as usize..]);
+        let tag = node_reader.read_u8().unwrap();
+        assert!(
+            tag >= 128,
+            "ancestor {address} is a category-five length node"
+        );
+        let old_payload_len = node_reader.read_nat().unwrap() as usize;
+        let mut old_prefix = TastyWriter::new();
+        old_prefix.write_nat(old_payload_len as u32);
+        let prefix_start = address as usize + 1;
+        let old_prefix_end = prefix_start + old_prefix.as_slice().len();
+        let updated_len = (old_payload_len as isize + delta) as u32;
+        let mut new_prefix = TastyWriter::new();
+        new_prefix.write_nat(updated_len);
+        rewritten_asts.splice(
+            prefix_start..old_prefix_end,
+            new_prefix.as_slice().iter().copied(),
+        );
+        delta += new_prefix.as_slice().len() as isize - old_prefix.as_slice().len() as isize;
+    }
+
+    let mut builder = TastyFileBuilder::new(tasty.header().clone(), tasty.names().clone());
+    for section in tasty.sections().iter() {
+        let payload = if section.name == asts.name {
+            rewritten_asts.clone()
+        } else {
+            section.payload.to_vec()
+        };
+        builder.push_section(EncodedSection::raw(section.name, payload));
+    }
+    *tasty_bytes = builder.encode_validated().unwrap();
     let reparsed = TastyFile::parse_and_validate_scala_3_9(tasty_bytes).unwrap();
     let reparsed_index = reparsed.ast_address_index().unwrap();
     let reparsed_assignment = reparsed_index
@@ -1240,10 +1393,211 @@ fn repoint_mutable_assignment_rhs_to_first(tasty_bytes: &mut [u8]) {
     else {
         panic!("reparsed ASSIGN address decodes as a length node");
     };
-    let RawTree::Leaf(rhs) = reparsed_node.decode_assign().unwrap().right else {
-        panic!("mutated RHS remains a leaf");
+    let decoded = reparsed_node.decode_assign().unwrap();
+    let RawTree::Leaf(lhs) = decoded.left else {
+        panic!("mutated assignment LHS remains a leaf");
     };
-    assert_eq!(rhs.ast_ref().unwrap().address, first);
+    let RawTree::Leaf(rhs) = decoded.right else {
+        panic!("the original assignment RHS remains a leaf");
+    };
+    assert_eq!(
+        lhs.ast_ref().unwrap().address,
+        variable_address_after_reparse(&reparsed, "second")
+    );
+    assert_eq!(rhs.ast_ref().unwrap().address, second);
+}
+
+fn variable_address_after_reparse(tasty: &TastyFile<'_>, expected_name: &str) -> u32 {
+    let index = tasty.ast_address_index().unwrap();
+    let asts = tasty.section(StandardSection::Asts).unwrap();
+    index
+        .iter_nodes_with_tag(VALDEF_TAG)
+        .find_map(|node| {
+            let mut reader = TastyReader::new(&asts.payload[node.offset..]);
+            let RawTree::LengthNode(raw) =
+                RawTree::decode_with_base_offset(&mut reader, node.offset).unwrap()
+            else {
+                panic!("VALDEF address decodes as a length node");
+            };
+            let body = raw.decode_definition_body().unwrap();
+            (tasty.names().render(body.name()).unwrap() == expected_name)
+                .then_some(node.offset as u32)
+        })
+        .unwrap_or_else(|| panic!("missing {expected_name} VALDEF"))
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MutableBindingCorruption {
+    None,
+    MissingAssignmentRhsMapping {
+        source: SourceId,
+        tree: dotty_core::TreeId<Untyped>,
+    },
+    ForgedAssignmentReceipt {
+        source: SourceId,
+        method: SymbolId,
+        typed_rhs: dotty_core::TreeId<Typed>,
+    },
+}
+
+struct MutableBindingFault<'a> {
+    base: &'a dyn SourceTypedBindings,
+    corruption: Cell<MutableBindingCorruption>,
+}
+
+impl SourceTypedBindings for MutableBindingFault<'_> {
+    fn typed_at(
+        &self,
+        source: SourceId,
+        tree: dotty_core::TreeId<Untyped>,
+    ) -> Option<dotty_core::TreeId<Typed>> {
+        if matches!(
+            self.corruption.get(),
+            MutableBindingCorruption::MissingAssignmentRhsMapping {
+                source: corrupt_source,
+                tree: corrupt_tree,
+            } if source == corrupt_source && tree == corrupt_tree
+        ) {
+            return None;
+        }
+        self.base.typed_at(source, tree)
+    }
+
+    fn planned_class_symbols(&self) -> &[SymbolId] {
+        self.base.planned_class_symbols()
+    }
+
+    fn planned_method_symbols(&self) -> &[SymbolId] {
+        self.base.planned_method_symbols()
+    }
+
+    fn nested_constructor_call(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<NestedConstructorCallBinding> {
+        self.base.nested_constructor_call(source, method)
+    }
+
+    fn nested_constructor_call_pair(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<NestedConstructorCallPairBinding> {
+        self.base.nested_constructor_call_pair(source, method)
+    }
+
+    fn direct_formal_constructor_call_pair(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<DirectFormalConstructorCallPairBinding> {
+        self.base
+            .direct_formal_constructor_call_pair(source, method)
+    }
+
+    fn ordered_constructor_call_argument_pair(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<OrderedConstructorCallArgumentPairBinding> {
+        self.base
+            .ordered_constructor_call_argument_pair(source, method)
+    }
+
+    fn planned_call(&self, source: SourceId, method: SymbolId) -> Option<PlannedCallBinding> {
+        self.base.planned_call(source, method)
+    }
+
+    fn local_value_bindings(&self, source: SourceId, method: SymbolId) -> Vec<LocalValueBinding> {
+        self.base.local_value_bindings(source, method)
+    }
+
+    fn local_counter_initializer(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<dotty_tasty_pickler::LocalCounterInitializerBinding> {
+        self.base.local_counter_initializer(source, method)
+    }
+
+    fn local_counter_initializers(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Vec<dotty_tasty_pickler::LocalCounterInitializerBinding> {
+        self.base.local_counter_initializers(source, method)
+    }
+
+    fn local_reference_alias(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<dotty_tasty_pickler::LocalReferenceAliasBinding> {
+        self.base.local_reference_alias(source, method)
+    }
+
+    fn mutable_counter_local_initializer(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<dotty_tasty_pickler::MutableCounterLocalInitializerBinding> {
+        self.base.mutable_counter_local_initializer(source, method)
+    }
+
+    fn mutable_counter_reference_assignment(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<dotty_tasty_pickler::MutableCounterReferenceAssignmentBinding> {
+        let mut binding = self
+            .base
+            .mutable_counter_reference_assignment(source, method)?;
+        if let MutableBindingCorruption::ForgedAssignmentReceipt {
+            source: corrupt_source,
+            method: corrupt_method,
+            typed_rhs,
+        } = self.corruption.get()
+            && source == corrupt_source
+            && method == corrupt_method
+        {
+            binding.typed_rhs = typed_rhs;
+        }
+        Some(binding)
+    }
+
+    fn conditional_local_reference_selection(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<dotty_tasty_pickler::ConditionalLocalReferenceSelectionBinding> {
+        self.base
+            .conditional_local_reference_selection(source, method)
+    }
+
+    fn formal_local_constructor_call_pair(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<dotty_tasty_pickler::FormalLocalConstructorCallPairBinding> {
+        self.base.formal_local_constructor_call_pair(source, method)
+    }
+
+    fn local_receiver_unit_call(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<dotty_tasty_pickler::LocalReceiverUnitCallBinding> {
+        self.base.local_receiver_unit_call(source, method)
+    }
+
+    fn local_receiver_unit_call_pair(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<[dotty_tasty_pickler::LocalReceiverUnitCallBinding; 2]> {
+        self.base.local_receiver_unit_call_pair(source, method)
+    }
 }
 
 #[test]

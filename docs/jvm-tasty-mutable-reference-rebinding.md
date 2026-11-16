@@ -116,14 +116,21 @@ checks the complete source statement order.
 
 The focused semantic corruption matrix is run by
 `cargo +1.98.1 test --test jvm_tasty_artifacts mutable_reference_rebinding_contract_rejects_semantic_corruption --locked`.
-It verifies first rejection and absence of partial output for forged source
-assignment mappings and duplicate effects, wrong JVM store/load slots,
-verifier-valid wrong setter receiver, swapped Pair arguments, malformed verifier stack/local bounds, wrong TASTy assignment target, and
-swapped TASTy UUID links. The full
-`jvm_tasty_artifacts` target passed all 69 tests. The prior attempted run
-without a staged compiler stopped at `scala39_toolchain` preflight before
-compilation. The pinned Rust gates and JDK 21 verifier passed as recorded
-above.
+It verifies first rejection and absence of a validated or published batch for
+same-session `SourceTypedBindings` faults that remove the assignment RHS mapping
+or forge the assignment receipt. Those faults retain the original source and
+typed trees, build the complete PairFactory class-state plan, and are rejected
+by `validate_jvm_tasty_batch` at class 2's TASTy body validation stage. The
+artifact cases verify rejection for wrong JVM store/load slots, a
+verifier-valid wrong setter receiver, swapped Pair arguments, malformed
+verifier stack/local bounds, and swapped TASTy UUID links. The well-formed
+TASTy mutation changes the actual ASSIGN LHS from `selected` to the `second`
+VALDEF, leaves its RHS at `second`, reparses the complete file, and is rejected
+at `TASTy plan identity`. Extra setter effects remain covered by a separate
+unsupported-source control. The full `jvm_tasty_artifacts` target passed all
+69 tests. The prior attempted run without a staged compiler stopped at
+`scala39_toolchain` preflight before compilation. The pinned Rust gates and
+JDK 21 verifier passed as recorded above.
 
 ## Initial toolchain blocker
 
