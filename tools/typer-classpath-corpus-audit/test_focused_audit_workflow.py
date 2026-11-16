@@ -94,6 +94,25 @@ class FocusedAuditWorkflowTests(unittest.TestCase):
         self.assertIn("--require-typed-cohort docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-analysis.tsv", workflow)
         self.assertIn("if-no-files-found: error", workflow)
 
+    def test_acceptance_vi_reuses_frozen_cohorts_and_closes_out_exact_reviewed_head(self) -> None:
+        repo = Path(__file__).resolve().parents[2]
+        workflow = (repo / ".github/workflows/typer-focused-audit.yml").read_text(encoding="utf-8")
+        verifier = (repo / "tools/typer-classpath-corpus-audit/verify_ordinary_cohort.py").read_text(encoding="utf-8")
+        self.assertIn("pull_request_review:\n    types: [submitted]", workflow)
+        self.assertIn("accepts_original_enumeration_hash_code_in_two_fresh_sessions", workflow)
+        self.assertIn("propimpl_clear_types_original_complete_method_in_two_fresh_sessions", workflow)
+        self.assertIn("propimpl_clear_rejects_bounded_negative_cases_and_retries_after_rollback", workflow)
+        self.assertIn("verify_ordinary_cohort.py acceptance-vi", workflow)
+        self.assertIn("--baseline-roots docs/typer-stdlib-acceptance-vi/roots.tsv", workflow)
+        self.assertIn("--main-manifest docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv", workflow)
+        self.assertIn("--analysis-manifest docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv", workflow)
+        self.assertIn("--reviewed-head-sha", workflow)
+        self.assertIn("review_state", workflow)
+        self.assertIn("ACCEPTANCE_VI_TARGETS", verifier)
+        self.assertIn("ACCEPTANCE_VI_JDK_RELEASE_SHA256", verifier)
+        self.assertIn("original-method receipts are missing or nondeterministic", verifier)
+        self.assertIn("approved independent review of this exact head is pending", verifier)
+
     def test_sealed_rollback_outputs_are_verified_and_uploaded_from_runner_scratch(self) -> None:
         repo = Path(__file__).resolve().parents[2]
         workflow = (repo / ".github/workflows/typer-focused-audit.yml").read_text(encoding="utf-8")

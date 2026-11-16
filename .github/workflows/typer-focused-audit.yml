@@ -24,7 +24,23 @@ on:
       - 'docs/typer-*.tsv'
       - 'docs/typer-lexical-closure-acceptance-recovery-3.9.0/**'
       - 'docs/typer-focused-smoke-baseline-3.9.0.txt'
+      - 'docs/typer-stdlib-acceptance-vi/**'
+  pull_request_review:
+    types: [submitted]
   workflow_dispatch:
+    inputs:
+      reviewed_head_sha:
+        description: Full PR head SHA approved by the independent reviewer
+        required: false
+        type: string
+      review_state:
+        description: Independent review state for reviewed_head_sha
+        required: false
+        type: choice
+        options:
+          - approved
+          - changes_requested
+          - commented
 
 permissions:
   contents: read
@@ -49,6 +65,8 @@ jobs:
       TMPDIR: ${{ github.workspace }}/target/tmp
       DOTTY_EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       DOTTY_EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+      DOTTY_REVIEWED_HEAD_SHA: ${{ github.event.review.commit_id || inputs.reviewed_head_sha || '' }}
+      DOTTY_REVIEW_STATE: ${{ github.event.review.state || inputs.review_state || '' }}
 
     steps:
       - name: Prepare worktree-local scratch
@@ -866,6 +884,47 @@ jobs:
           printf 'Cohorts: 25 frozen main roots + 25 frozen analysis roots; full corpus NOT RUN.\n' \
             > "$DOTTY_AUDIT_REPORT_DIR/status.txt"
 
+      - name: Type both original Acceptance VI roots in fresh sessions
+        shell: bash
+        env:
+          COURSIER_MAVEN_ROOT: ${{ github.workspace }}/target/coursier/v1/https/repo1.maven.org/maven2
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+        run: |
+          set -euo pipefail
+          mkdir -p "$DOTTY_AUDIT_REPORT_DIR"
+          for session in 1 2; do
+            cargo +1.98.1 test -p dotty-typer --lib --locked \
+              accepts_original_enumeration_hash_code_in_two_fresh_sessions \
+              -- --ignored --nocapture \
+              > "$DOTTY_AUDIT_REPORT_DIR/enumeration-hash-code-session-$session.log" 2>&1
+            grep -q 'test result: ok. 1 passed' \
+              "$DOTTY_AUDIT_REPORT_DIR/enumeration-hash-code-session-$session.log"
+            printf 'DOTTY_TESTED_SHA=%s\n' "$(git rev-parse HEAD)" \
+              >> "$DOTTY_AUDIT_REPORT_DIR/enumeration-hash-code-session-$session.log"
+          done
+          for session in 1 2; do
+            cargo +1.98.1 test -p dotty-typer --lib --locked \
+              propimpl_clear_types_original_complete_method_in_two_fresh_sessions \
+              -- --ignored --nocapture \
+              > "$DOTTY_AUDIT_REPORT_DIR/propimpl-clear-session-$session.log" 2>&1
+            grep -q 'test result: ok. 1 passed' \
+              "$DOTTY_AUDIT_REPORT_DIR/propimpl-clear-session-$session.log"
+            printf 'DOTTY_TESTED_SHA=%s\n' "$(git rev-parse HEAD)" \
+              >> "$DOTTY_AUDIT_REPORT_DIR/propimpl-clear-session-$session.log"
+          done
+          for test_name in \
+            canonical_any_hash_code_does_not_make_a_mutable_int_receiver_stable \
+            source_parameterless_value_selection_keeps_member_argument_and_generic_controls \
+            source_value_result_selection_preserves_member_visibility_across_aliases \
+            unstable_selection_prefix_fails_atomically \
+            bare_field_selection_on_a_mutable_local_still_requires_a_stable_prefix \
+            by_name_parameter_is_not_a_stable_selection_prefix; do
+            cargo +1.98.1 test -p dotty-typer --lib --locked "$test_name"
+          done
+          cargo +1.98.1 test -p dotty-typer --lib --locked \
+            propimpl_clear_rejects_bounded_negative_cases_and_retries_after_rollback \
+            -- --ignored --nocapture
+
       - name: Verify exact case-class Match cohort receipts
         shell: bash
         env:
@@ -1002,6 +1061,49 @@ jobs:
               --prior-checks-status "$DOTTY_PRIOR_JOB_STATUS" \
               --hosted-run "$DOTTY_HOSTED_RUN"
 
+      - name: Enforce Stdlib Acceptance VI exact-root release gate
+        if: always()
+        shell: bash
+        env:
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+          DOTTY_HOSTED_RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DOTTY_ARTIFACT_REFERENCE: typer-focused-audit-${{ github.event.pull_request.head.sha || github.sha }}
+          DOTTY_PRIOR_JOB_STATUS: ${{ job.status }}
+          DOTTY_REVIEWED_HEAD_SHA: ${{ github.event.review.commit_id || inputs.reviewed_head_sha || '' }}
+          DOTTY_REVIEW_STATE: ${{ github.event.review.state || inputs.review_state || '' }}
+        run: |
+          set -euo pipefail
+          jdk_version="$(sed -n 's/^JAVA_VERSION="\([^"]*\)".*/\1/p' "$JAVA_HOME/release")"
+          PYTHONDONTWRITEBYTECODE=1 python3 \
+            tools/typer-classpath-corpus-audit/verify_ordinary_cohort.py acceptance-vi \
+              --main-first "$DOTTY_AUDIT_REPORT_DIR/main-cohort-first.tsv" \
+              --main-second "$DOTTY_AUDIT_REPORT_DIR/main-cohort-second.tsv" \
+              --analysis-first "$DOTTY_AUDIT_REPORT_DIR/analysis-cohort-first.tsv" \
+              --analysis-second "$DOTTY_AUDIT_REPORT_DIR/analysis-cohort-second.tsv" \
+              --baseline-roots docs/typer-stdlib-acceptance-vi/roots.tsv \
+              --main-manifest docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv \
+              --analysis-manifest docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv \
+              --source-inputs docs/typer-stdlib-acceptance-vi/source-inputs.tsv \
+              --source-root "$SCALA39_ROOT" \
+              --artifact-manifest crates/dotty-typer/tests/fixtures/lexical-closure-contract/scala-artifacts.sha256.tsv \
+              --main-receipt-first "$DOTTY_AUDIT_REPORT_DIR/enumeration-hash-code-session-1.log" \
+              --main-receipt-second "$DOTTY_AUDIT_REPORT_DIR/enumeration-hash-code-session-2.log" \
+              --analysis-receipt-first "$DOTTY_AUDIT_REPORT_DIR/propimpl-clear-session-1.log" \
+              --analysis-receipt-second "$DOTTY_AUDIT_REPORT_DIR/propimpl-clear-session-2.log" \
+              --output "$DOTTY_AUDIT_REPORT_DIR/typer-stdlib-acceptance-vi.tsv" \
+              --report "$DOTTY_AUDIT_REPORT_DIR/typer-stdlib-acceptance-vi-closeout.md" \
+              --tested-revision "$(git rev-parse HEAD)" \
+              --pr-head-sha "${{ github.event.pull_request.head.sha || github.sha }}" \
+              --reviewed-head-sha "$DOTTY_REVIEWED_HEAD_SHA" \
+              --review-state "$DOTTY_REVIEW_STATE" \
+              --prior-checks-status "$DOTTY_PRIOR_JOB_STATUS" \
+              --hosted-run "$DOTTY_HOSTED_RUN" \
+              --artifact-reference "$DOTTY_ARTIFACT_REFERENCE" \
+              --jdk-version "$jdk_version" \
+              --jdk-release-sha256 "$(sha256sum "$JAVA_HOME/release" | cut -d' ' -f1)" \
+              --java-binary-sha256 "$(sha256sum "$JAVA_HOME/bin/java" | cut -d' ' -f1)" \
+              --jdk-base-module-sha256 "$(sha256sum "$JAVA_HOME/jmods/java.base.jmod" | cut -d' ' -f1)"
+
       - name: Write run-bound sealed Event acceptance report
         if: always()
         shell: bash
@@ -1015,7 +1117,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: typer-focused-audit-${{ github.sha }}
+          name: typer-focused-audit-${{ github.event.pull_request.head.sha || github.sha }}
           path: |
             ${{ github.workspace }}/target/typer-focused-report/
             ${{ github.workspace }}/target/typer-focused-intermediates/
