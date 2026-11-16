@@ -79,6 +79,70 @@ complete TASTy block and validate the emitted instructions before the batch is
 accepted. No source retyping, synthetic AST, new writer, CLI, or standalone
 publisher is involved.
 
+## Independent Java 21 client for Rust output
+
+Issue #2309 adds a separately authored client at
+[`tests/fixtures/jvm_tasty_mutable_reference_rebinding/RustRuntimeProbe.java`](../tests/fixtures/jvm_tasty_mutable_reference_rebinding/RustRuntimeProbe.java)
+(SHA-256 `e0679bf4a786026af8dbefa4fbbbe33fc253749d81d81502cf7fcc66ba4bd238`).
+The focused `jvm_tasty_artifacts` test emits the unchanged one-source batch
+from one Rust frontend session, publishes the six files to a fresh isolated
+class directory, compiles only this Java client with `javac --release 21`,
+and runs it against that directory with `java -Xverify:all -ea`. The oracle
+classes under `scala39/` are not on this test's classpath. It records the
+ordered paths, hashes and shared class/TASTy link UUIDs before compilation,
+then checks the same bytes and hashes after the positive run and all isolated
+negative copies.
+
+The Rust output receipt from the pinned workspace test is:
+
+| Ordered artifact path | SHA-256 | Class/TASTy UUID |
+| --- | --- | --- |
+| `example/Counter.class` | `b439e752205735537790a02963f67602cc0ff233d40ca2ef22f542064bf7e0b9` | `009ce3b8-b80c-cbac-0000-000000008193` |
+| `example/Counter.tasty` | `41510454f72931da9915aa0d4316fab0f163c9c5a134ecd5a3a735c5946a030a` | `009ce3b8-b80c-cbac-0000-000000008193` |
+| `example/Pair.class` | `f38e139eccf8bcd6a68c448898410f5ad9dee51856a53d65685b6b71393a4e02` | `00bced30-fb29-91f0-0000-000000008198` |
+| `example/Pair.tasty` | `3b016c54db4e3e52d9399a0ac0fe8cd26ea5d78031de2ac4c5bd0865336a2605` | `00bced30-fb29-91f0-0000-000000008198` |
+| `example/PairFactory.class` | `63d3525870cb42013171712825cc471f6f09f5bf153dd17793373441af215f6f` | `005eb921-38c3-47d2-0000-00000000819f` |
+| `example/PairFactory.tasty` | `8335b18001bdf9dd0ae02e62737c10f54cf96885594a7b121e00be900faf14fb` | `005eb921-38c3-47d2-0000-00000000819f` |
+
+`javap -v -c -p` and the repository classfile decoder inspect the actual Rust
+`PairFactory.class`: class major 65; `create` descriptor
+`(III)Lexample/Pair;`; `max_stack=4`, `max_locals=7`; two Counter allocations;
+stores of `first` then `second` into selected slot 6; one `set(I)V` call with
+slot 6 as receiver; and Pair arguments loaded from original slots 4 and 5.
+The test reconstructs the decoded instruction sequence with the actual
+constant-pool operands and validates its typed CFG and stack/local bounds.
+This straight-line method has no `StackMapTable` attribute; Java 21 accepts
+and verifies the class with `-Xverify:all`, and the decoder/CFG checks validate
+the emitted code and bounds without asserting a frame table that is absent.
+
+The independent probe checks `(7,3,42)`, `(-9,11,42)`, and `(5,5,-13)`.
+It reads Pair's supported public values and independently checks that the two
+reflected Pair fields hold distinct Counter objects. Mutating each held object
+after construction changes only its corresponding Pair value. The positive
+output is `rust mutable rebinding: signed/equal seeds, original identities
+and independent mutation passed`.
+
+Six isolated classpath copies exercise negatives. Rebinding selected to the
+first local, calling the setter on the first local, and reversing Pair's
+constructor arguments all remain JVM-verifier-valid and are rejected by the
+Java semantic witness. A descriptor changed from `I` to `Z` reaches
+`NoSuchMethodError`, a zeroed method stack bound reaches `VerifyError`, and a
+missing Counter class reaches `NoClassDefFoundError`. The existing paired
+contract corruption test additionally checks TASTy UUID mismatch and rejects
+verifier-valid wrong-slot, receiver, and Pair-argument edits before batch
+acceptance. No negative copy is used for the positive run.
+
+Run the focused consumer test with pinned Rust 1.98.1 and Temurin JDK 21.0.13+9:
+
+```sh
+DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo +1.98.1 test --test jvm_tasty_artifacts \
+  mutable_reference_rebinding_java_21_consumes_original_rust_artifacts \
+  --locked -- --nocapture
+```
+
+The test uses the registered scratch directory through `TMPDIR` and the
+task-specific `CARGO_TARGET_DIR`; it does not remove or rebuild shared caches.
+
 ## Controls
 
 The pinned Scala compiler accepts renamed locals, reversed declarations,
