@@ -1,7 +1,7 @@
 use super::*;
 use dotty_core::ast::Block;
 use dotty_tasty::tasty::{
-    AstField, AstNode, BLOCK_TAG, MUTABLE_TAG, SimpleTerm, TermValue, VALDEF_TAG,
+    ASSIGN_TAG, AstField, AstNode, BLOCK_TAG, MUTABLE_TAG, SimpleTerm, TermValue, VALDEF_TAG,
 };
 
 fn lower_local_value_inner(
@@ -227,6 +227,77 @@ pub(crate) fn lower_mutable_counter_declaration_fragment(
     context.wire_node(AstNode::Length {
         tag: BLOCK_TAG,
         fields: std::iter::once(AstField::Tree(expression))
+            .chain(prefix.into_iter().map(AstField::Tree))
+            .chain(std::iter::once(AstField::Tree(selected)))
+            .collect(),
+    })
+}
+
+pub(crate) struct MutableCounterAssignmentFragmentTrees {
+    pub prefix: [TreeId<Typed>; 2],
+    pub selected: TreeId<Typed>,
+    pub local: dotty_core::SymbolId,
+    pub rhs_local: dotty_core::SymbolId,
+}
+
+/// Emits only the two original Counter locals, the selected mutable
+/// declaration, and the one receipt-authenticated reference assignment.
+/// The assignment is the Unit-valued block result; surrounding method
+/// statements remain intentionally omitted.
+pub(crate) fn lower_mutable_counter_assignment_fragment(
+    store: &SemanticStore,
+    ast: &TypedAst,
+    roots: MutableCounterAssignmentFragmentTrees,
+    method: SymbolId,
+    parameters: &[SymbolId],
+    limits: ProjectionLimits,
+    context: &mut EncodingContext<'_>,
+) -> Result<AstLabel, PickleError> {
+    let mut budget = ExpressionBudget {
+        max_depth: bounded_expression_depth(limits.max_expression_depth),
+        item_limit: limits.max_items,
+        remaining: limits.max_items,
+        visited: HashSet::new(),
+    };
+    let prefix = roots
+        .prefix
+        .into_iter()
+        .map(|root| {
+            lower_local_value_inner(
+                store,
+                ast,
+                root,
+                method,
+                parameters,
+                ExpressionState {
+                    depth: 0,
+                    budget: &mut budget,
+                },
+                context,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let selected = lower_local_value_inner(
+        store,
+        ast,
+        roots.selected,
+        method,
+        parameters,
+        ExpressionState {
+            depth: 0,
+            budget: &mut budget,
+        },
+        context,
+    )?;
+    let target = context.local_reference(roots.local, None)?;
+    let rhs = context.local_reference(roots.rhs_local, None)?;
+    let assignment = context.wire_node(AstNode::Length {
+        tag: ASSIGN_TAG,
+        fields: vec![AstField::Tree(target), AstField::Tree(rhs)],
+    })?;
+    context.wire_node(AstNode::Length {
+        tag: BLOCK_TAG,
+        fields: std::iter::once(AstField::Tree(assignment))
             .chain(prefix.into_iter().map(AstField::Tree))
             .chain(std::iter::once(AstField::Tree(selected)))
             .collect(),

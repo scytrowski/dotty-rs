@@ -155,6 +155,17 @@ pub trait SourceTypedBindings {
         None
     }
 
+    /// Borrowed source/typed receipt for the single original Counter
+    /// reassignment. It authorizes only that assignment in the incomplete
+    /// mutable Counter fragment, not general reference mutation.
+    fn mutable_counter_reference_assignment(
+        &self,
+        _source: SourceId,
+        _method: SymbolId,
+    ) -> Option<MutableCounterReferenceAssignmentBinding> {
+        None
+    }
+
     /// Borrowed identity receipt for an immutable local selected between two
     /// existing references by one Boolean IF. This proof carries no producer
     /// authorization; implementations must preserve the same source session.
@@ -361,6 +372,28 @@ pub struct MutableCounterLocalInitializerBinding {
     pub local_type: TypeId,
 }
 
+/// Exact original source/typed identities for one selected-local Counter
+/// assignment borrowed from the #2299 reassignment proof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MutableCounterReferenceAssignmentBinding {
+    pub source_id: SourceId,
+    pub owner: SymbolId,
+    pub method: SymbolId,
+    pub scope: dotty_core::ScopeId,
+    pub source_block: TreeId<Untyped>,
+    pub typed_block: TreeId<Typed>,
+    pub source_assignment: TreeId<Untyped>,
+    pub typed_assignment: TreeId<Typed>,
+    pub source_lhs: TreeId<Untyped>,
+    pub typed_lhs: TreeId<Typed>,
+    pub source_rhs: TreeId<Untyped>,
+    pub typed_rhs: TreeId<Typed>,
+    pub local: SymbolId,
+    pub rhs_local: SymbolId,
+    pub second_local: SymbolId,
+    pub local_type: TypeId,
+}
+
 #[derive(Clone, Copy)]
 struct FragmentPredecessorInitializer {
     source_declaration: TreeId<Untyped>,
@@ -539,6 +572,15 @@ pub struct ValidatedMutableCounterDeclarationFragment<'p, 'a> {
     pub(crate) binding: MutableCounterLocalInitializerBinding,
 }
 
+/// Validated input for the explicitly incomplete #2303 assignment fragment.
+/// This is limited to the original mutable Counter local and its one borrowed
+/// assignment; it cannot be converted to `PickledTasty`.
+pub struct ValidatedMutableCounterReferenceAssignmentFragment<'p, 'a> {
+    pub(crate) plan: ValidatedClassStatePlan<'p, 'a>,
+    pub(crate) declaration: MutableCounterLocalInitializerBinding,
+    pub(crate) assignment: MutableCounterReferenceAssignmentBinding,
+}
+
 impl<'p, 'a> ValidatedPicklePlan<'p, 'a> {
     pub fn plan(&self) -> &'p PicklePlan<'a> {
         self.plan
@@ -574,6 +616,7 @@ impl<'a> PicklePlan<'a> {
             class_members: None,
             reference_fields: &[],
             planned_class_symbols: &[],
+            mutable_counter_assignment: None,
             local_bindings: HashMap::new(),
             registered_local_symbols: HashSet::new(),
             seen_local_bindings: HashSet::new(),
@@ -627,6 +670,7 @@ pub(crate) fn validate_class_state_method(
         class_members: Some(class.members),
         reference_fields,
         planned_class_symbols: class.typed_bindings.planned_class_symbols(),
+        mutable_counter_assignment: None,
         local_bindings: HashMap::new(),
         registered_local_symbols: HashSet::new(),
         seen_local_bindings: HashSet::new(),
@@ -695,6 +739,7 @@ pub(crate) fn validate_class_state_mutable_declaration_fragment(
         class_members: Some(class.members),
         reference_fields,
         planned_class_symbols: class.typed_bindings.planned_class_symbols(),
+        mutable_counter_assignment: None,
         local_bindings: HashMap::new(),
         registered_local_symbols: HashSet::new(),
         seen_local_bindings: HashSet::new(),
@@ -718,6 +763,66 @@ pub(crate) fn validate_class_state_mutable_declaration_fragment(
     Ok(())
 }
 
+pub(crate) fn validate_class_state_mutable_reference_assignment_fragment(
+    class: &crate::ClassStatePicklePlan<'_>,
+    method_symbol: SymbolId,
+    declaration: MutableCounterLocalInitializerBinding,
+    assignment: MutableCounterReferenceAssignmentBinding,
+    reference_fields: &[SymbolId],
+) -> Result<(), PickleError> {
+    let (method, local_values) =
+        crate::class_state_output::method_input_for_fragment(class, method_symbol)?;
+    let constructor = DefaultConstructorPlan {
+        symbol: class.constructor.symbol,
+        source_tree: class.constructor.source_tree,
+        parameter_clauses: class.constructor.parameter_clauses.clone(),
+    };
+    let plan = PicklePlan {
+        store: class.store,
+        definitions: class.definitions,
+        typed_ast: class.typed_ast,
+        source_ast: class.source_ast,
+        source_index: class.source_index,
+        typed_bindings: class.typed_bindings,
+        source: class.source.clone(),
+        source_root: class.class_tree,
+        class: class.class,
+        class_tree: class.class_tree,
+        constructor,
+        methods: std::slice::from_ref(&method),
+        local_values: &local_values,
+    };
+    let mut validator = Validator {
+        plan: &plan,
+        limits: ValidationLimits::default(),
+        remaining: ValidationLimits::default().max_items,
+        class_members: Some(class.members),
+        reference_fields,
+        planned_class_symbols: class.typed_bindings.planned_class_symbols(),
+        mutable_counter_assignment: Some(assignment),
+        local_bindings: HashMap::new(),
+        registered_local_symbols: HashSet::new(),
+        seen_local_bindings: HashSet::new(),
+        seen_local_symbols: HashSet::new(),
+        visible_locals: HashSet::new(),
+    };
+    for local in &local_values {
+        if validator
+            .local_bindings
+            .insert(local.source_tree, *local)
+            .is_some()
+            || !validator.registered_local_symbols.insert(local.symbol)
+        {
+            return Err(PickleError::DuplicateDeclaration {
+                symbol: local.symbol,
+            });
+        }
+    }
+    validator.method(&method, true)?;
+    validator.validate_mutable_counter_declaration_fragment(declaration)?;
+    validator.validate_mutable_counter_reference_assignment_fragment(declaration, assignment)
+}
+
 struct Validator<'p, 'a> {
     plan: &'p PicklePlan<'a>,
     limits: ValidationLimits,
@@ -725,6 +830,7 @@ struct Validator<'p, 'a> {
     class_members: Option<&'a [ClassMemberPicklePlan]>,
     reference_fields: &'a [SymbolId],
     planned_class_symbols: &'a [SymbolId],
+    mutable_counter_assignment: Option<MutableCounterReferenceAssignmentBinding>,
     local_bindings: HashMap<TreeId<Untyped>, LocalValueBinding>,
     registered_local_symbols: HashSet<SymbolId>,
     seen_local_bindings: HashSet<TreeId<Untyped>>,

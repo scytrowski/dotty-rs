@@ -2756,4 +2756,45 @@ impl ClassStatePicklePlan<'_> {
         )?;
         Ok(crate::ValidatedMutableCounterDeclarationFragment { plan, binding })
     }
+
+    /// Validate the one proof-authenticated Counter reference assignment
+    /// following the original mutable-local declaration. The result remains
+    /// an incomplete reader fragment, not a complete method body.
+    pub fn validate_mutable_counter_reference_assignment_fragment(
+        &self,
+        method: SymbolId,
+    ) -> Result<crate::ValidatedMutableCounterReferenceAssignmentFragment<'_, '_>, PickleError>
+    {
+        let plan = self.validate()?;
+        let declaration = self
+            .typed_bindings
+            .mutable_counter_local_initializer(self.source.id, method)
+            .ok_or(PickleError::Unsupported {
+                feature: crate::UnsupportedFeature::BodyExpression,
+                symbol: Some(method),
+            })?;
+        let assignment = self
+            .typed_bindings
+            .mutable_counter_reference_assignment(self.source.id, method)
+            .ok_or(PickleError::Unsupported {
+                feature: crate::UnsupportedFeature::BodyExpression,
+                symbol: Some(method),
+            })?;
+        let reference_fields = plan
+            .same_batch_reference_fields()
+            .map(|field| field.field())
+            .collect::<Vec<_>>();
+        crate::plan::validate_class_state_mutable_reference_assignment_fragment(
+            self,
+            method,
+            declaration,
+            assignment,
+            &reference_fields,
+        )?;
+        Ok(crate::ValidatedMutableCounterReferenceAssignmentFragment {
+            plan,
+            declaration,
+            assignment,
+        })
+    }
 }

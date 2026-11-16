@@ -59,18 +59,20 @@ pub use plan::{
     FormalLocalConstructorCallArgumentOrigin, FormalLocalConstructorCallPairBinding,
     LocalCounterInitializerBinding, LocalReceiverUnitCallBinding, LocalReferenceAliasBinding,
     LocalValueBinding, MethodPicklePlan, MutableCounterLocalInitializerBinding,
-    NestedConstructorCallBinding, NestedConstructorCallPairBinding,
-    OrderedConstructorCallArgumentBinding, OrderedConstructorCallArgumentOrigin,
-    OrderedConstructorCallArgumentPairBinding, PicklePlan, PlannedCallBinding,
-    PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings, ValidatedClassStatePlan,
-    ValidatedMutableCounterDeclarationFragment, ValidatedPicklePlan,
+    MutableCounterReferenceAssignmentBinding, NestedConstructorCallBinding,
+    NestedConstructorCallPairBinding, OrderedConstructorCallArgumentBinding,
+    OrderedConstructorCallArgumentOrigin, OrderedConstructorCallArgumentPairBinding, PicklePlan,
+    PlannedCallBinding, PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings,
+    ValidatedClassStatePlan, ValidatedMutableCounterDeclarationFragment,
+    ValidatedMutableCounterReferenceAssignmentFragment, ValidatedPicklePlan,
     ValidatedSameBatchReferenceField, ValidationLimits,
 };
 pub use projection::{
     EncodingContext, ProjectedFragment, ProjectedMethodSignature, ProjectionLimits,
 };
 pub use skeleton::{
-    DeclarationSkeleton, MutableCounterDeclarationFragment, OmittedMethodBody, SkeletonDeclaration,
+    DeclarationSkeleton, MutableCounterDeclarationFragment,
+    MutableCounterReferenceAssignmentFragment, OmittedMethodBody, SkeletonDeclaration,
 };
 
 pub use output::{PickleLimits, PickledTasty};

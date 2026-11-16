@@ -390,7 +390,7 @@ impl ValidatedClassStatePlan<'_, '_> {
         limits: PickleLimits,
         signature_only: bool,
     ) -> Result<Assembly, PickleError> {
-        self.assemble_class_state_mode(limits, signature_only, None)
+        self.assemble_class_state_mode(limits, signature_only, None, None)
     }
 
     pub(crate) fn assemble_class_state_fragment(
@@ -398,7 +398,16 @@ impl ValidatedClassStatePlan<'_, '_> {
         limits: PickleLimits,
         binding: crate::MutableCounterLocalInitializerBinding,
     ) -> Result<Assembly, PickleError> {
-        self.assemble_class_state_mode(limits, false, Some(binding))
+        self.assemble_class_state_mode(limits, false, Some(binding), None)
+    }
+
+    pub(crate) fn assemble_class_state_assignment_fragment(
+        &self,
+        limits: PickleLimits,
+        declaration: crate::MutableCounterLocalInitializerBinding,
+        assignment: crate::MutableCounterReferenceAssignmentBinding,
+    ) -> Result<Assembly, PickleError> {
+        self.assemble_class_state_mode(limits, false, Some(declaration), Some(assignment))
     }
 
     fn assemble_class_state_mode(
@@ -406,6 +415,7 @@ impl ValidatedClassStatePlan<'_, '_> {
         limits: PickleLimits,
         signature_only: bool,
         fragment_binding: Option<crate::MutableCounterLocalInitializerBinding>,
+        fragment_assignment: Option<crate::MutableCounterReferenceAssignmentBinding>,
     ) -> Result<Assembly, PickleError> {
         let p = self.plan();
         let constructor_tree = p.source_ast.try_get(p.constructor.source_tree).ok_or(
@@ -1174,19 +1184,38 @@ impl ValidatedClassStatePlan<'_, '_> {
                             .ok_or(PickleError::SourceDefinition {
                                 symbol: binding.local,
                             })?;
-                        let body = crate::expression::lower_mutable_counter_declaration_fragment(
-                            p.store,
-                            p.typed_ast,
-                            crate::expression::MutableCounterFragmentTrees {
-                                prefix: [prefix[0], prefix[1]],
-                                initializer: binding.typed_initializer,
-                                selected: selected.typed_declaration,
-                            },
-                            symbol,
-                            &parameter_ids,
-                            limits.projection,
-                            &mut context,
-                        )?;
+                        let body = if let Some(assignment) =
+                            fragment_assignment.filter(|assignment| assignment.method == symbol)
+                        {
+                            crate::expression::lower_mutable_counter_assignment_fragment(
+                                p.store,
+                                p.typed_ast,
+                                crate::expression::MutableCounterAssignmentFragmentTrees {
+                                    prefix: [prefix[0], prefix[1]],
+                                    selected: selected.typed_declaration,
+                                    local: assignment.local,
+                                    rhs_local: assignment.rhs_local,
+                                },
+                                symbol,
+                                &parameter_ids,
+                                limits.projection,
+                                &mut context,
+                            )?
+                        } else {
+                            crate::expression::lower_mutable_counter_declaration_fragment(
+                                p.store,
+                                p.typed_ast,
+                                crate::expression::MutableCounterFragmentTrees {
+                                    prefix: [prefix[0], prefix[1]],
+                                    initializer: binding.typed_initializer,
+                                    selected: selected.typed_declaration,
+                                },
+                                symbol,
+                                &parameter_ids,
+                                limits.projection,
+                                &mut context,
+                            )?
+                        };
                         method_fields.push(AstField::Tree(body));
                     } else if !signature_only {
                         let body = crate::expression::lower_expression(
