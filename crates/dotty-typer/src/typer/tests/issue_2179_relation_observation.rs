@@ -2505,7 +2505,7 @@ fn propimpl_clear_rejects_bounded_negative_cases_and_retries_after_rollback() {
     }
 
     let late_failure = original.replace("underlying -= key", "{ underlying -= key; missing }");
-    let (mut parsed, mut store, packages, definitions, index, source, root) =
+    let (parsed, mut store, packages, definitions, index, source, root) =
         parse_named_propimpl(&late_failure);
     let first_stat = match &parsed.ast.get(root).kind {
         TreeKind::DefDef(definition) => match &parsed.ast.get(definition.rhs.unwrap()).kind {
@@ -2578,24 +2578,15 @@ fn propimpl_clear_rejects_bounded_negative_cases_and_retries_after_rollback() {
     assert_eq!(typer.source_typed_index().get(source, root), None);
     drop(typer);
 
-    let invalid_ident = parsed
-        .ast
-        .iter()
-        .find_map(|(tree, node)| {
-            (matches!(node.kind, TreeKind::Ident(_))
-                && node.position.is_some_and(|position| {
-                    let range = position.span().range();
-                    let source_text = &late_failure[range.start() as usize..range.end() as usize];
-                    source_text == "missing"
-                }))
-            .then_some(tree)
-        })
-        .expect("late invalid identifier is retained in parsed source");
-    parsed.ast.get_mut(invalid_ident).kind = TreeKind::Literal(dotty_core::ast::Literal {
-        value: dotty_core::Constant::Unit,
-    });
+    // Keep this natural source-error control separate from the retry proof:
+    // correcting its AST would make the retry no longer exercise the original
+    // source method and would hide stale Typer/resolver transaction state.
+
+    let (parsed, mut store, packages, definitions, index, source, root) =
+        parse_named_propimpl(&original);
+    let (java_home, jars) = scala_classpath();
     let resolver = propimpl_resolver(&java_home, jars.clone(), definitions, &packages);
-    let mut retry = SourceTyper::new(
+    let mut typer = SourceTyper::new(
         &parsed.ast,
         source,
         &index,
@@ -2604,17 +2595,85 @@ fn propimpl_clear_rejects_bounded_negative_cases_and_retries_after_rollback() {
         &packages,
     )
     .with_resolver(Box::new(resolver));
-    let typed_root = retry
+    let store_before = typer.store().checkpoint();
+    let typed_before = typer.typed_ast().checkpoint();
+    let type_index_before = format!("{:?}", typer.type_index.checkpoint());
+    let typed_index_before = format!("{:?}", typer.typed_index);
+    let source_index_before = format!("{:?}", typer.source_typed_index());
+    typer.inject_failure_after_outermost_success = true;
+    let error = typer
         .type_method_definition(root)
-        .expect("corrected method succeeds in the same semantic session");
-    assert!(matches!(
-        retry.typed_ast().get(typed_root).kind,
-        TreeKind::DefDef(_)
-    ));
+        .expect_err("the injected late failure follows complete source typing");
+    assert!(
+        matches!(
+            error,
+            TyperError::SymbolResolution {
+                source: failed_source,
+                error: ResolutionError::Malformed { ref reason },
+                ..
+            } if failed_source == source
+                && reason == "test-injected failure after successful source typing"
+        ),
+        "the original method reaches the injected late failure: {error:?}"
+    );
+    assert_eq!(typer.store().checkpoint(), store_before);
+    assert_eq!(typer.typed_ast().checkpoint(), typed_before);
     assert_eq!(
-        retry.source_typed_index().get(source, root),
+        format!("{:?}", typer.type_index.checkpoint()),
+        type_index_before
+    );
+    assert_eq!(format!("{:?}", typer.typed_index), typed_index_before);
+    assert_eq!(
+        format!("{:?}", typer.source_typed_index()),
+        source_index_before
+    );
+    assert_eq!(typer.source_typed_index().get(source, root), None);
+    assert!(!typer.inject_failure_after_outermost_success);
+
+    let typed_root = typer
+        .type_method_definition(root)
+        .expect("the unchanged original method retries through the retained Typer and resolver");
+    assert_eq!(
+        typer.source_typed_index().get(source, root),
         Some(typed_root)
     );
+    let TreeKind::DefDef(typed_definition) = &typer.typed_ast().get(typed_root).kind else {
+        panic!("retry returns the complete original DefDef");
+    };
+    let method = index
+        .symbol_at(source, root)
+        .expect("original clear has its canonical method symbol");
+    let signature = match typer.store().symbols.info(method) {
+        SymbolInfo::Complete(signature) => *signature,
+        other => panic!("retry completes the original method signature: {other:?}"),
+    };
+    let Type::Method(signature) = typer.store().types.get(signature) else {
+        panic!("clear keeps its ordinary method signature");
+    };
+    assert_eq!(signature.result, definitions.unit);
+    let source_rhs = match &parsed.ast.get(root).kind {
+        TreeKind::DefDef(definition) => definition.rhs.expect("original clear RHS"),
+        _ => unreachable!(),
+    };
+    let typed_rhs = typed_definition.rhs.expect("retry retains the complete RHS");
+    assert_eq!(
+        typer.source_typed_index().get(source, source_rhs),
+        Some(typed_rhs)
+    );
+    let TreeKind::Block(adapted) = &typer.typed_ast().get(typed_rhs).kind else {
+        panic!("retry retains the Unit value-discard adaptation");
+    };
+    assert_eq!(typer.typed_ast().get(typed_rhs).ty, definitions.unit);
+    assert_eq!(adapted.stats.len(), 1);
+    assert!(matches!(
+        typer.typed_ast().get(adapted.stats[0]).kind,
+        TreeKind::Apply(_)
+    ));
+    let TreeKind::Literal(unit_literal) = &typer.typed_ast().get(adapted.expr).kind else {
+        panic!("retry ends with the canonical Unit literal");
+    };
+    assert_eq!(unit_literal.value, dotty_core::Constant::Unit);
+    assert_eq!(typer.typed_ast().get(adapted.expr).ty, definitions.unit);
 
     let (parsed, mut store, packages, definitions, index, _source, root) =
         parse_named_propimpl(&original);
