@@ -2,7 +2,9 @@ use dotty::jvm_tasty_cross_class::{
     CrossClassConstructorCallProofError, MutableLocalReferenceReassignmentProofInput,
     validate_mutable_local_reference_reassignment_proof,
 };
-use dotty::jvm_tasty_plan::mutable_local_reference_declaration_binding;
+use dotty::jvm_tasty_plan::{
+    mutable_local_reference_assignment_binding, mutable_local_reference_declaration_binding,
+};
 use dotty_core::ast::{ApplyKind, AstArena, TreeKind, Typed};
 use dotty_core::{Definitions, Packages, SemanticStore, SourceId, SourceText, TermRefTarget, Type};
 use dotty_core::{SourceTypedIndex, SymbolId, TreeId, Untyped};
@@ -46,6 +48,7 @@ struct FragmentBindings<'a> {
     source: SourceId,
     method: SymbolId,
     binding: MutableCounterLocalInitializerBinding,
+    assignment: dotty_tasty_pickler::MutableCounterReferenceAssignmentBinding,
     initializers: Vec<LocalCounterInitializerBinding>,
 }
 
@@ -96,6 +99,14 @@ impl SourceTypedBindings for FragmentBindings<'_> {
         } else {
             Vec::new()
         }
+    }
+
+    fn mutable_counter_reference_assignment(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<dotty_tasty_pickler::MutableCounterReferenceAssignmentBinding> {
+        (source == self.source && method == self.method).then_some(self.assignment)
     }
 }
 
@@ -325,6 +336,16 @@ enum Mutation {
     MissingSelectedInitializerSpanAfterProof,
     MismatchedSelectedInitializerSpanAfterProof,
     ForeignSelectedInitializerSourceAfterProof,
+    AssignmentChildEdgeAfterProof,
+    AssignmentUnitTypeAfterProof,
+    AssignmentSiblingTargetAfterProof,
+    AssignmentSecondMatchesRhsAfterProof,
+    AssignmentStaleTargetAfterProof,
+    AssignmentBeforeDeclarationAfterProof,
+    AssignmentDuplicateAfterProof,
+    AssignmentUnsupportedRhsAfterProof,
+    AssignmentImmutableTargetAfterProof,
+    AssignmentNonlocalTargetAfterProof,
 }
 
 #[derive(Debug)]
@@ -340,6 +361,7 @@ struct Receipt {
     setter_receiver: dotty_core::TreeId<dotty_core::Untyped>,
     pair_args: [dotty_core::TreeId<dotty_core::Untyped>; 2],
     fragment: Vec<u8>,
+    assignment_fragment: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -824,7 +846,17 @@ fn validate(
         | Mutation::StaleSelectedInitializerAfterProof
         | Mutation::MissingSelectedInitializerSpanAfterProof
         | Mutation::MismatchedSelectedInitializerSpanAfterProof
-        | Mutation::ForeignSelectedInitializerSourceAfterProof => {}
+        | Mutation::ForeignSelectedInitializerSourceAfterProof
+        | Mutation::AssignmentChildEdgeAfterProof
+        | Mutation::AssignmentUnitTypeAfterProof
+        | Mutation::AssignmentSiblingTargetAfterProof
+        | Mutation::AssignmentSecondMatchesRhsAfterProof
+        | Mutation::AssignmentStaleTargetAfterProof
+        | Mutation::AssignmentBeforeDeclarationAfterProof
+        | Mutation::AssignmentDuplicateAfterProof
+        | Mutation::AssignmentUnsupportedRhsAfterProof
+        | Mutation::AssignmentImmutableTargetAfterProof
+        | Mutation::AssignmentNonlocalTargetAfterProof => {}
     }
     let current_stats_len = match &parsed.ast.get(rhs).kind {
         TreeKind::Block(block) => block.stats.len(),
@@ -832,6 +864,7 @@ fn validate(
     };
     let (
         mut declaration_binding,
+        mut assignment_binding,
         selected_receipt,
         initializer_target_receipt,
         assigned_target_receipt,
@@ -874,6 +907,7 @@ fn validate(
             "accepted Block has the frozen statement count"
         );
         let declaration_binding = mutable_local_reference_declaration_binding(&proof);
+        let assignment_binding = mutable_local_reference_assignment_binding(&proof);
         let initializer_bindings = fragment_initializer_bindings(
             FragmentInitializerSession {
                 source_id,
@@ -894,6 +928,7 @@ fn validate(
         );
         (
             declaration_binding,
+            assignment_binding,
             proof.selected(),
             proof.initializer_target(),
             proof.assigned_target(),
@@ -971,6 +1006,56 @@ fn validate(
                 position.span(),
             ));
         }
+        Mutation::AssignmentChildEdgeAfterProof => {
+            source_typed_index.remove(source_id, assignment_binding.source_rhs);
+        }
+        Mutation::AssignmentUnitTypeAfterProof => {
+            typed_ast.get_mut(assignment_binding.typed_assignment).ty = definitions.int;
+        }
+        Mutation::AssignmentSiblingTargetAfterProof => {
+            assignment_binding.rhs_local = local_bindings[0].symbol();
+        }
+        Mutation::AssignmentSecondMatchesRhsAfterProof => {
+            assignment_binding.second_local = assignment_binding.rhs_local;
+        }
+        Mutation::AssignmentStaleTargetAfterProof => {
+            assignment_binding.local = stale_symbol_id(&store);
+        }
+        Mutation::AssignmentBeforeDeclarationAfterProof => {
+            let TreeKind::Block(block) = &mut parsed.ast.get_mut(rhs).kind else {
+                unreachable!()
+            };
+            block.stats.swap(2, 3);
+            let typed_block = source_typed_index.get(source_id, rhs).unwrap();
+            let TreeKind::Block(block) = &mut typed_ast.get_mut(typed_block).kind else {
+                unreachable!()
+            };
+            block.stats.swap(2, 3);
+        }
+        Mutation::AssignmentDuplicateAfterProof => {
+            let TreeKind::Block(block) = &mut parsed.ast.get_mut(rhs).kind else {
+                unreachable!()
+            };
+            block.stats[4] = assignment;
+            let typed_block = source_typed_index.get(source_id, rhs).unwrap();
+            let TreeKind::Block(block) = &mut typed_ast.get_mut(typed_block).kind else {
+                unreachable!()
+            };
+            block.stats[4] = typed_assignment;
+        }
+        Mutation::AssignmentUnsupportedRhsAfterProof => {
+            let replacement = typed_ast
+                .get(assignment_binding.typed_assignment)
+                .kind
+                .clone();
+            typed_ast.get_mut(assignment_binding.typed_rhs).kind = replacement;
+        }
+        Mutation::AssignmentImmutableTargetAfterProof => {
+            store.symbols.get_mut(assignment_binding.local).flags = dotty_core::SymbolFlags::EMPTY;
+        }
+        Mutation::AssignmentNonlocalTargetAfterProof => {
+            assignment_binding.local = method;
+        }
         _ => {}
     }
     let factory = store.symbols.get(method).owner.unwrap();
@@ -1007,6 +1092,7 @@ fn validate(
         source: source_id,
         method,
         binding: declaration_binding,
+        assignment: assignment_binding,
         initializers: initializer_bindings,
     };
     let member = [ClassMemberPicklePlan::Method {
@@ -1037,6 +1123,12 @@ fn validate(
         .validate_mutable_counter_declaration_fragment(method)
         .map_err(ValidationError::Pickle)?;
     let fragment = validated_fragment.emit().map_err(ValidationError::Pickle)?;
+    let validated_assignment_fragment = class_plan
+        .validate_mutable_counter_reference_assignment_fragment(method)
+        .map_err(ValidationError::Pickle)?;
+    let assignment_fragment = validated_assignment_fragment
+        .emit()
+        .map_err(ValidationError::Pickle)?;
     Ok(Receipt {
         selected: selected_receipt,
         initializer_target: initializer_target_receipt,
@@ -1049,10 +1141,11 @@ fn validate(
         setter_receiver: setter_receiver_receipt,
         pair_args: pair_args_receipt,
         fragment: fragment.bytes().to_vec(),
+        assignment_fragment: assignment_fragment.bytes().to_vec(),
     })
 }
 
-fn verify_fragment_with_pinned_scala(candidate: &[u8], label: &str) {
+fn verify_fragment_with_pinned_scala(candidate: &[u8], label: &str, expect_assignment: bool) {
     match std::env::var(REQUIRE_SCALA_FRAGMENT).as_deref() {
         Ok("1") => {}
         Ok(value) => panic!("{REQUIRE_SCALA_FRAGMENT} must equal 1, got {value:?}"),
@@ -1199,10 +1292,18 @@ fn verify_fragment_with_pinned_scala(candidate: &[u8], label: &str) {
         decompiled.contains("var selected: example.Counter = first"),
         "Scala 3.9 decompiles Rust mutable VALDEF and original target:\n{decompiled}"
     );
-    assert!(
-        decompiled.contains("\n      first\n"),
-        "Scala 3.9 decompiles the original initializer target as the fragment result:\n{decompiled}"
-    );
+    if expect_assignment {
+        assert!(
+            decompiled.contains("selected = second"),
+            "Scala 3.9 decompiles the original reference ASSIGN with its exact RHS:\n{decompiled}"
+        );
+        assert!(!decompiled.contains("selected = first"), "{decompiled}");
+    } else {
+        assert!(
+            decompiled.contains("\n      first\n"),
+            "Scala 3.9 decompiles the original initializer target as the fragment result:\n{decompiled}"
+        );
+    }
     assert!(!dependencies.join("example/PairFactory.tasty").exists());
     std::fs::remove_dir_all(&root).expect("remove fragment reader scratch");
 }
@@ -1240,7 +1341,10 @@ fn mutable_reference_reassignment_receipt_accepts_canonical_variants() {
     assert!(!original.fragment.is_empty());
     TastyFile::parse_and_validate_scala_3_9(&original.fragment)
         .expect("Rust-emitted mutable declaration fragment is well-formed TASTy 28.9");
-    verify_fragment_with_pinned_scala(&original.fragment, "original");
+    TastyFile::parse_and_validate_scala_3_9(&original.assignment_fragment)
+        .expect("Rust-emitted mutable assignment fragment is well-formed TASTy 28.9");
+    verify_fragment_with_pinned_scala(&original.fragment, "original", false);
+    verify_fragment_with_pinned_scala(&original.assignment_fragment, "assignment", true);
     assert_eq!(original.initializer_target, original.first);
     assert_eq!(original.declaration_binding.target, original.first);
     assert_eq!(original.declaration_binding.local, original.selected);
@@ -1269,7 +1373,8 @@ fn mutable_reference_reassignment_receipt_accepts_canonical_variants() {
         "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
     );
     let reversed = validate(&reversed, 22_992, Mutation::None).unwrap();
-    verify_fragment_with_pinned_scala(&reversed.fragment, "reversed");
+    verify_fragment_with_pinned_scala(&reversed.fragment, "reversed", false);
+    verify_fragment_with_pinned_scala(&reversed.assignment_fragment, "reversed-assignment", true);
     assert_ne!(reversed.first, reversed.second);
     assert_eq!(reversed.initializer_target, reversed.first);
     assert_eq!(reversed.declaration_binding.target, reversed.first);
@@ -1279,8 +1384,19 @@ fn mutable_reference_reassignment_receipt_accepts_canonical_variants() {
     );
 
     let changed_target = SOURCE.replace("selected = second", "selected = first");
-    let changed_target = validate(&changed_target, 22_993, Mutation::None).unwrap();
-    assert_eq!(changed_target.target, changed_target.first);
+    assert!(matches!(
+        validate(
+            &changed_target,
+            22_993,
+            Mutation::AssignmentSecondMatchesRhsAfterProof
+        ),
+        Err(ValidationError::Pickle(
+            dotty_tasty_pickler::PickleError::Unsupported {
+                feature: dotty_tasty_pickler::UnsupportedFeature::BodyExpression,
+                ..
+            }
+        ))
+    ));
 }
 
 #[test]
@@ -1387,6 +1503,30 @@ fn assignment_mapping_failures_are_typed_binding_errors() {
                 ))
             ),
             "{mutation:?}"
+        );
+    }
+}
+
+#[test]
+fn mutable_counter_assignment_fragment_rejects_forged_targets_and_shapes() {
+    for (offset, mutation) in [
+        Mutation::AssignmentChildEdgeAfterProof,
+        Mutation::AssignmentUnitTypeAfterProof,
+        Mutation::AssignmentSiblingTargetAfterProof,
+        Mutation::AssignmentStaleTargetAfterProof,
+        Mutation::AssignmentBeforeDeclarationAfterProof,
+        Mutation::AssignmentDuplicateAfterProof,
+        Mutation::AssignmentUnsupportedRhsAfterProof,
+        Mutation::AssignmentImmutableTargetAfterProof,
+        Mutation::AssignmentNonlocalTargetAfterProof,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let result = validate(SOURCE, 23_150 + offset as u32, mutation);
+        assert!(
+            matches!(result, Err(ValidationError::Pickle(_))),
+            "the assignment fragment rejects forged provenance or unsupported shape: {mutation:?}: {result:?}"
         );
     }
 }

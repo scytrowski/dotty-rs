@@ -26,11 +26,11 @@ use dotty_tasty_pickler::{
     FormalLocalConstructorCallArgumentBinding, FormalLocalConstructorCallArgumentOrigin,
     FormalLocalConstructorCallPairBinding, LocalCounterInitializerBinding,
     LocalReceiverUnitCallBinding, LocalReferenceAliasBinding, LocalValueBinding,
-    MutableCounterLocalInitializerBinding, NestedConstructorCallBinding,
-    NestedConstructorCallPairBinding, OrderedConstructorCallArgumentBinding,
-    OrderedConstructorCallArgumentOrigin, OrderedConstructorCallArgumentPairBinding, PickleError,
-    PlannedCallBinding, PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings,
-    ValidatedClassStatePlan,
+    MutableCounterLocalInitializerBinding, MutableCounterReferenceAssignmentBinding,
+    NestedConstructorCallBinding, NestedConstructorCallPairBinding,
+    OrderedConstructorCallArgumentBinding, OrderedConstructorCallArgumentOrigin,
+    OrderedConstructorCallArgumentPairBinding, PickleError, PlannedCallBinding,
+    PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings, ValidatedClassStatePlan,
 };
 use dotty_typer::{SourceTyper, TyperError};
 
@@ -68,6 +68,31 @@ pub fn mutable_local_reference_declaration_binding(
         typed_initializer: typed_initializers[2],
         local: proof.selected(),
         target: proof.initializer_target(),
+        local_type: proof.local_type(),
+    }
+}
+
+/// Projects the exact original assignment roots from the validated #2299
+/// proof. This receipt authorizes only the frozen `selected = second` node.
+pub fn mutable_local_reference_assignment_binding(
+    proof: &ValidatedMutableLocalReferenceReassignmentProof<'_>,
+) -> MutableCounterReferenceAssignmentBinding {
+    MutableCounterReferenceAssignmentBinding {
+        source_id: proof.source_id(),
+        owner: proof.owner(),
+        method: proof.method(),
+        scope: proof.scope(),
+        source_block: proof.source_block(),
+        typed_block: proof.typed_block(),
+        source_assignment: proof.source_assignment(),
+        typed_assignment: proof.typed_assignment(),
+        source_lhs: proof.source_assignment_lhs(),
+        typed_lhs: proof.typed_assignment_lhs(),
+        source_rhs: proof.source_assignment_rhs(),
+        typed_rhs: proof.typed_assignment_rhs(),
+        local: proof.selected(),
+        rhs_local: proof.assigned_target(),
+        second_local: proof.semantic_originals()[1],
         local_type: proof.local_type(),
     }
 }

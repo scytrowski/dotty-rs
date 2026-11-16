@@ -8,11 +8,11 @@
     "timing_method": "PR #2115 successful pinned serial run; issue #2272 target measured locally with pinned Scala/JDK; Cargo/libtest final per-binary result lines"
   },
   "baseline": {
-    "inventory_count": 27,
-    "accounted_test_seconds": 1431.21,
+    "inventory_count": 28,
+    "accounted_test_seconds": 1440.34,
     "cargo_build_seconds": 76,
-    "strict_step_seconds": 1507.21,
-    "full_job_seconds": 1959.31
+    "strict_step_seconds": 1516.34,
+    "full_job_seconds": 1968.44
   },
   "targets": [
     {
@@ -122,12 +122,16 @@
     {
       "name": "jvm_tasty_conditional_reference_scala_consumer",
       "measured_seconds": 9.31
+    },
+    {
+      "name": "jvm_tasty_mutable_local_reference_reassignment_proof",
+      "measured_seconds": 9.13
     }
   ],
   "sharding": {
     "strategy": "longest-processing-time-first; ties by target name, next shard by lowest accumulated time then ordinal",
     "shard_count": 4,
-    "estimated_runner_minutes": 26.97,
+    "estimated_runner_minutes": 27.12,
     "estimated_critical_path_minutes": 10.60,
     "shards": [
       {
@@ -156,14 +160,15 @@
       },
       {
         "id": "shard-3",
-        "estimated_test_seconds": 354.27,
+        "estimated_test_seconds": 363.4,
         "targets": [
           "jvm_tasty_dual_reference_forwarding_scala_consumer",
           "jvm_tasty_reference_local_scala_consumer",
           "jvm_tasty_nested_constructor_scala_consumer",
           "jvm_tasty_factory_scala_consumer",
           "jvm_tasty_factory_result_arguments",
-          "jvm_tasty_scala_consumer"
+          "jvm_tasty_scala_consumer",
+          "jvm_tasty_mutable_local_reference_reassignment_proof"
         ]
       },
       {

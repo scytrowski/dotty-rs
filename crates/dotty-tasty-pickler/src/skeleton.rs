@@ -4,9 +4,10 @@ use dotty_core::{Name, Symbol, SymbolId, SymbolInfo, TreeId, Type, Typed};
 use dotty_tasty::tasty::*;
 
 use crate::{
-    EncodingContext, MutableCounterLocalInitializerBinding, PickleError, ProjectionLimits,
-    ReferenceError, SourceMetadata, TypeRole, ValidatedMutableCounterDeclarationFragment,
-    ValidatedPicklePlan,
+    EncodingContext, MutableCounterLocalInitializerBinding,
+    MutableCounterReferenceAssignmentBinding, PickleError, ProjectionLimits, ReferenceError,
+    SourceMetadata, TypeRole, ValidatedMutableCounterDeclarationFragment,
+    ValidatedMutableCounterReferenceAssignmentFragment, ValidatedPicklePlan,
 };
 
 /// Canonical declaration identity bound to a node start in the ASTs section.
@@ -75,6 +76,39 @@ impl MutableCounterDeclarationFragment {
     }
     pub fn selected_initializer(&self) -> TreeId<dotty_core::Typed> {
         self.binding.typed_initializer
+    }
+}
+
+/// Rust-emitted, explicitly incomplete method body containing the borrowed
+/// mutable Counter declaration prefix and its one original reference ASSIGN.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MutableCounterReferenceAssignmentFragment {
+    bytes: Vec<u8>,
+    source: SourceMetadata,
+    intended_tasty_path: String,
+    declarations: Vec<SkeletonDeclaration>,
+    declaration: MutableCounterLocalInitializerBinding,
+    assignment: MutableCounterReferenceAssignmentBinding,
+}
+
+impl MutableCounterReferenceAssignmentFragment {
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+    pub fn source(&self) -> &SourceMetadata {
+        &self.source
+    }
+    pub fn intended_tasty_path(&self) -> &str {
+        &self.intended_tasty_path
+    }
+    pub fn declarations(&self) -> &[SkeletonDeclaration] {
+        &self.declarations
+    }
+    pub fn selected(&self) -> SymbolId {
+        self.declaration.local
+    }
+    pub fn assigned_value(&self) -> SymbolId {
+        self.assignment.rhs_local
     }
 }
 
@@ -600,6 +634,26 @@ impl ValidatedMutableCounterDeclarationFragment<'_, '_> {
             intended_tasty_path: output.intended_tasty_path,
             declarations: output.declarations,
             binding: self.binding,
+        })
+    }
+}
+
+impl ValidatedMutableCounterReferenceAssignmentFragment<'_, '_> {
+    /// Emit an owned incomplete TASTy fragment for the bounded assignment
+    /// reader check. It has no complete-artifact conversion path.
+    pub fn emit(&self) -> Result<MutableCounterReferenceAssignmentFragment, PickleError> {
+        let output = self.plan.assemble_class_state_assignment_fragment(
+            crate::PickleLimits::default(),
+            self.declaration,
+            self.assignment,
+        )?;
+        Ok(MutableCounterReferenceAssignmentFragment {
+            bytes: output.bytes,
+            source: output.source,
+            intended_tasty_path: output.intended_tasty_path,
+            declarations: output.declarations,
+            declaration: self.declaration,
+            assignment: self.assignment,
         })
     }
 }

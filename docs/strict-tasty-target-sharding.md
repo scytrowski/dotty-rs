@@ -1,7 +1,7 @@
 # Strict Scala/TASTy target sharding
 
 [`tools/ci/strict_tasty_targets.json`](../tools/ci/strict_tasty_targets.json)
-records the full 24-target strict test inventory, including
+records the full 28-target strict test inventory, including
 `jvm_tasty_immutable_reference_local_pair_scala_consumer`, and assigns every
 target exactly once to the active fixed shards. Membership is independently
 declared in the workflow. The validator checks that declaration against the

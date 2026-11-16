@@ -276,13 +276,13 @@ STRICT_REQUIRED_ENVS: DOTTY_REQUIRE_FIRST
                 with self.assertRaisesRegex(ManifestError, "workflow must select each fixed shard once in order"):
                     validate_manifest(manifest, self.root)
 
-    def test_real_inventory_requires_conditional_reference_scala_reader_in_strict_shard(
+    def test_real_inventory_requires_conditional_and_mutable_counter_scala_readers_in_strict_shards(
         self,
     ):
         repository = Path(__file__).parents[2]
         manifest_path = repository / "tools/ci/strict_tasty_targets.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        self.assertEqual(manifest["baseline"]["inventory_count"], 27)
+        self.assertEqual(manifest["baseline"]["inventory_count"], 28)
         target_names = [target["name"] for target in manifest["targets"]]
         self.assertIn(
             "jvm_tasty_immutable_reference_local_pair_scala_consumer",
@@ -294,7 +294,10 @@ STRICT_REQUIRED_ENVS: DOTTY_REQUIRE_FIRST
         )
         candidate_target = "jvm_tasty_conditional_reference_scala_consumer"
         candidate_environment = "DOTTY_REQUIRE_SCALA_TASTY_CONDITIONAL_REFERENCE_SCALA_CONSUMER"
+        mutable_counter_target = "jvm_tasty_mutable_local_reference_reassignment_proof"
+        mutable_counter_environment = "DOTTY_REQUIRE_SCALA_TASTY_MUTABLE_COUNTER_FRAGMENT"
         self.assertIn(candidate_target, target_names)
+        self.assertIn(mutable_counter_target, target_names)
         self.assertIn("jvm_tasty_conditional_local_reference_proof", target_names)
         self.assertIn(
             "jvm_tasty_conditional_local_reference_proof",
@@ -305,6 +308,10 @@ STRICT_REQUIRED_ENVS: DOTTY_REQUIRE_FIRST
             candidate_target,
             manifest["sharding"]["shards"][3]["targets"],
         )
+        self.assertIn(
+            mutable_counter_target,
+            manifest["sharding"]["shards"][2]["targets"],
+        )
         workflow = (repository / manifest["source"]["workflow"]).read_text(encoding="utf-8")
         environment_declaration = re.search(
             r"(?ms)^\s*STRICT_REQUIRED_ENVS:\s*>-\s*\n(.*?)(?=^\s*STRICT_TASTY_SHARD_[0-9]+_JOB:)",
@@ -312,10 +319,16 @@ STRICT_REQUIRED_ENVS: DOTTY_REQUIRE_FIRST
         )
         self.assertIsNotNone(environment_declaration)
         self.assertIn(candidate_environment, environment_declaration.group(1))
+        self.assertIn(mutable_counter_environment, environment_declaration.group(1))
         self.assertEqual(
             len(re.findall(rf"^\s*{candidate_environment}:\s*'1'\s*$", workflow, re.MULTILINE)),
             4,
             "all fixed shard invocations carry the required candidate-reader gate",
+        )
+        self.assertEqual(
+            len(re.findall(rf"^\s*{mutable_counter_environment}:\s*'1'\s*$", workflow, re.MULTILINE)),
+            4,
+            "all fixed shard invocations carry the required mutable Counter reader gate",
         )
         self.assertEqual(
             [shard["id"] for shard in manifest["sharding"]["shards"]],

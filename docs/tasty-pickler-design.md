@@ -820,6 +820,28 @@ those dependencies are not copied into the fragment. This reader check proves
 that the incomplete bytes can be read and decompiled, not that the fragment is a
 complete or executable compiler artifact.
 
+### Mutable Counter reference assignment fragment (#2303)
+
+`ClassStatePicklePlan::validate_mutable_counter_reference_assignment_fragment`
+consumes a second borrowed receipt from the same #2299 proof. It rechecks the
+assignment root and both child mappings against `SourceTypedBindings`, requires
+the original block's single assignment at the frozen source position after the
+two initialized locals and mutable `selected` declaration, and checks the
+Unit result, exact mutable target, method owner/scope, and original semantic
+`second` local RHS. The selected local type and RHS local type must resolve to
+the same planned Counter class. A sibling local, parameter, field, unsupported
+RHS, reordered/duplicate assignment, or stale/forged mapping is rejected.
+
+`MutableCounterReferenceAssignmentFragment` is an explicitly incomplete TASTy
+reader result with no conversion to `PickledTasty`. Its BLOCK stores the
+assignment expression first, followed by the original two local declarations
+and mutable declaration in source order. The `ASSIGN` children are the direct
+target reference to that same mutable `VALDEF`, then the direct reference to
+the original second local. The setter and final Pair construction are omitted;
+this fragment does not enable complete-body or generalized reference mutation.
+The focused test asks pinned Scala 3.9.0 to read and decompile Rust-authored
+bytes and checks the original `selected = second` expression.
+
 ### Sprint 2 v1 boundary
 
 The characterized v1 input is one named package, one ordinary public class
