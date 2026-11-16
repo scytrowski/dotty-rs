@@ -7,6 +7,42 @@ impl Validator<'_, '_> {
         assignment: crate::MutableCounterReferenceAssignmentBinding,
     ) -> Result<(), PickleError> {
         let p = self.plan;
+        let method = p
+            .methods
+            .iter()
+            .find(|method| method.symbol == assignment.method)
+            .ok_or(PickleError::SourceDefinition {
+                symbol: assignment.method,
+            })?;
+        let second_seed_formal = match method.parameter_clauses.as_slice() {
+            [formals] if formals.len() == 3 => formals[1],
+            _ => {
+                return Err(
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(assignment.method))
+                );
+            }
+        };
+        // Authenticate the semantic `second` local from its independently
+        // validated original Counter initializer: its constructor argument
+        // must be the method's second seed formal. The assignment receipt's
+        // `second_local` field is only a claim and cannot establish this role.
+        let initializers = p
+            .typed_bindings
+            .local_counter_initializers(p.source.id, assignment.method);
+        let semantic_seconds = initializers
+            .iter()
+            .filter(|initializer| {
+                declaration.prefix_locals.contains(&initializer.local)
+                    && initializer.argument_formal == second_seed_formal
+            })
+            .map(|initializer| initializer.local)
+            .collect::<Vec<_>>();
+        if initializers.len() != 2 || semantic_seconds.len() != 1 {
+            return Err(
+                self.unsupported(UnsupportedFeature::BodyExpression, Some(assignment.method))
+            );
+        }
+        let semantic_second = semantic_seconds[0];
         let source_block = self.source_tree(declaration.source_block)?;
         let typed_block =
             p.typed_ast
@@ -29,7 +65,7 @@ impl Validator<'_, '_> {
             || assignment.source_block != declaration.source_block
             || assignment.typed_block != declaration.typed_block
             || assignment.local != declaration.local
-            || !declaration.prefix_locals.contains(&assignment.second_local)
+            || assignment.second_local != semantic_second
             || assignment.rhs_local != assignment.second_local
             || assignment.rhs_local == assignment.local
             || source_block.stats.get(3) != Some(&assignment.source_assignment)
@@ -102,13 +138,7 @@ impl Validator<'_, '_> {
         self.validate_assignment_statement(
             assignment.source_assignment,
             assignment.typed_assignment,
-            self.plan
-                .methods
-                .iter()
-                .find(|method| method.symbol == assignment.method)
-                .ok_or(PickleError::SourceDefinition {
-                    symbol: assignment.method,
-                })?,
+            method,
             0,
             &mut HashSet::new(),
         )

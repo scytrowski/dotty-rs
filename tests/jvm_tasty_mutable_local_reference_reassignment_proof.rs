@@ -339,6 +339,7 @@ enum Mutation {
     AssignmentChildEdgeAfterProof,
     AssignmentUnitTypeAfterProof,
     AssignmentSiblingTargetAfterProof,
+    AssignmentSecondMatchesRhsAfterProof,
     AssignmentStaleTargetAfterProof,
     AssignmentBeforeDeclarationAfterProof,
     AssignmentDuplicateAfterProof,
@@ -849,6 +850,7 @@ fn validate(
         | Mutation::AssignmentChildEdgeAfterProof
         | Mutation::AssignmentUnitTypeAfterProof
         | Mutation::AssignmentSiblingTargetAfterProof
+        | Mutation::AssignmentSecondMatchesRhsAfterProof
         | Mutation::AssignmentStaleTargetAfterProof
         | Mutation::AssignmentBeforeDeclarationAfterProof
         | Mutation::AssignmentDuplicateAfterProof
@@ -1012,6 +1014,9 @@ fn validate(
         }
         Mutation::AssignmentSiblingTargetAfterProof => {
             assignment_binding.rhs_local = local_bindings[0].symbol();
+        }
+        Mutation::AssignmentSecondMatchesRhsAfterProof => {
+            assignment_binding.second_local = assignment_binding.rhs_local;
         }
         Mutation::AssignmentStaleTargetAfterProof => {
             assignment_binding.local = stale_symbol_id(&store);
@@ -1380,7 +1385,11 @@ fn mutable_reference_reassignment_receipt_accepts_canonical_variants() {
 
     let changed_target = SOURCE.replace("selected = second", "selected = first");
     assert!(matches!(
-        validate(&changed_target, 22_993, Mutation::None),
+        validate(
+            &changed_target,
+            22_993,
+            Mutation::AssignmentSecondMatchesRhsAfterProof
+        ),
         Err(ValidationError::Pickle(
             dotty_tasty_pickler::PickleError::Unsupported {
                 feature: dotty_tasty_pickler::UnsupportedFeature::BodyExpression,
