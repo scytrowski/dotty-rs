@@ -6418,9 +6418,10 @@ mod tests {
                 "unknown term is an ordinary miss"
             );
 
-            observations.push(format!(
+            observations.push(
                 "owner=InfoWrapped;kind=Method;namespace=Term;visibility=Public;result=ByName(F[Int]);parent=InfoBase[F[Int]];origin=semantic-fixtures"
-            ));
+                    .to_owned(),
+            );
         }
         assert_eq!(
             observations,
