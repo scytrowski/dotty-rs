@@ -177,6 +177,22 @@ target `selected`/`second`, and setter receiver/argument target
 `(III)Lexample/Pair;`, and `-from-tasty` succeeds for all three genuine Rust
 sidecars.
 
+The final strict target also runs the separately authored Java 21 probe from
+issue #2309 against this same `rust-artifacts` directory before compiling the
+Scala client. `javac --release 21` writes only to `java-client-classes`, and
+Scala writes only to `scala-client-classes`; neither output directory is on
+the producer path. The target checks the six receipt hashes before Java,
+between Java and Scala, after Scala runtime execution, and after Scala reader
+and corruption controls. Java runs with `-Xverify:all -ea` and must report
+`rust mutable rebinding: signed/equal seeds, original identities and
+independent mutation passed`; `javap -v -c -p` independently checks the
+producer's major version, method descriptor, Counter allocations, setter call,
+and local-slot loads. This test establishes shared physical input, while the
+focused `jvm_tasty_artifacts` Java test remains the detailed Java negative
+matrix for wrong selected slot, wrong setter receiver, changed Pair
+arguments, descriptor mismatch, invalid stack bound, and a missing Counter
+class.
+
 Reproduce the strict consumer with Rust 1.98.1, the Scala source revision and
 runtime JARs pinned above, and JDK 21.0.13+9. Point `TMPDIR` and
 `CARGO_TARGET_DIR` at task-local scratch directories before running:
@@ -188,6 +204,16 @@ COURSIER_MAVEN_ROOT=/path/to/coursier/maven2 \
 cargo +1.98.1 test --test jvm_tasty_mutable_reference_rebinding_scala_consumer \
   --locked -- --nocapture
 ```
+
+For the final shared-batch check, use
+`DOTTY_REQUIRE_SCALA_TASTY_MUTABLE_REFERENCE_REBINDING_SCALA_CONSUMER=1` on
+`jvm_tasty_mutable_reference_rebinding_scala_consumer`; that strict test runs
+both independent clients on one producer emission. The separate Java gate
+`DOTTY_CLASSFILE_REQUIRE_JDK=1` on `jvm_tasty_artifacts` continues to verify
+the Java client's complete bounded negative matrix and the Rust publisher's
+failure atomicity. Passing the two standalone targets alone does not establish
+that both clients saw one physical batch; the strict Scala consumer target
+provides that cross-client receipt.
 
 The verified local compiler reported
 `3.9.0-bin-SNAPSHOT-git-777528f`; its staged `with_compiler.jar` SHA-256 was
@@ -219,6 +245,48 @@ outside this bounded route. The Rust regression separately rejects an
 immutable write, unknown or forward assignment target, uninitialized local,
 and assignment of `Int` to `Counter`. The Scala and Rust outcomes are recorded
 separately in the tests and `oracle.json`.
+
+## Final acceptance coverage and frozen predecessor provenance
+
+The final issue gate uses the following existing regressions for its bounded
+matrix; the strict shared-batch target adds the Java-on-the-same-directory
+assertion described above.
+
+| Acceptance evidence | Regression |
+| --- | --- |
+| Fresh-session determinism, ordered six paths, byte equality, UUID equality, staged-file and promotion faults | `tests/jvm_tasty_artifacts.rs`: `fresh_batch_sessions_produce_byte_identical_complete_manifests`, `mutable_reference_rebinding_batch_publishes_six_artifacts_atomically` |
+| Source/typed assignment provenance, immutable or foreign target, wrong RHS/local identity, stale edge, and unsupported extra effect | `tests/jvm_tasty_artifacts.rs`: `mutable_reference_rebinding_contract_rejects_semantic_corruption`; `tests/jvm_tasty_mutable_local_reference_reassignment_proof.rs` |
+| Decoded JVM allocation/store/load/setter/Pair identity, verifier-valid wrong receiver or Pair args, invalid frame, descriptor and missing class | `tests/jvm_tasty_artifacts.rs`: `mutable_reference_rebinding_java_21_consumes_original_rust_artifacts`; `tests/jvm_tasty_mutable_reference_rebinding_scala_consumer.rs` |
+| TASTy mutable VALDEF, ordered ASSIGN/TERMREF edges, setter and constructor links; stale LHS/RHS, modifier, sidecar, UUID and descriptor controls | `tests/jvm_tasty_mutable_reference_rebinding_scala_consumer.rs`: `scala39_consumes_original_rust_mutable_reference_rebinding_batch` |
+| Prior immutable alias, conditional #2273, ordered-call and no-alias receipts | Existing immutable-alias, conditional-reference, ordered-call and no-alias receipt tests and fixtures; hashes are compared without regeneration |
+| Inventory is current and exactly once across four shards | `python3 tools/ci/validate_strict_tasty_targets.py`; four strict shard jobs, the follow-up gates and pinned Scala aggregate |
+
+The approved integration base is
+`6afdb2dca88cf71a784aacf6bc895b58d7496a4f`. The eight required reviewed
+predecessors are its first-parent ancestors. For each, the table records the
+reviewed final PR head, final READY_FOR_MERGE review, merge commit, and hosted
+Rust/JDK and strict Scala workflow runs. `R` links to the review; `CI` links
+to Rust checks plus the mandatory JDK job; `Scala` links to the four-shard
+workflow, follow-up consumer and aggregate. All listed predecessor runs
+completed successfully. The common frozen source and oracle JSON SHA-256
+values are `2cbc91af8bcac9cc158f2c4b1045838d428ac58ae8e174890852e279efd1d469`
+and `621fe24424e9a1a0115f2b7bc5578d542ae4925ac8293f31f3c55a5b03a88cc3`.
+
+| Issue / PR | Reviewed PR HEAD | READY review | Merge SHA | CI | Scala |
+| --- | --- | --- | --- | --- | --- |
+| #2298 / [#2314](https://github.com/scytrowski/dotty-rs/pull/2314) | `e7d4f49493c9b8801d062776a762aff0ad263b0e` | [review](https://github.com/scytrowski/dotty-rs/pull/2314#pullrequestreview-5905901676) | `b4a08e38bdcd01897091aa62ac0ec95b7df5a69d` | [run 43616587124](https://github.com/scytrowski/dotty-rs/actions/runs/43616587124) | [run 43616587156](https://github.com/scytrowski/dotty-rs/actions/runs/43616587156) |
+| #2299 / [#2317](https://github.com/scytrowski/dotty-rs/pull/2317) | `defea413d2c862aa0f97be85270286d44413c864` | [review](https://github.com/scytrowski/dotty-rs/pull/2317#pullrequestreview-5909982880) | `8db3c3f9067bb407e57c12f154e175b650fa1e6c` | [run 43697631702](https://github.com/scytrowski/dotty-rs/actions/runs/43697631702) | [run 43697631684](https://github.com/scytrowski/dotty-rs/actions/runs/43697631684) |
+| #2300 / [#2323](https://github.com/scytrowski/dotty-rs/pull/2323) | `d3b75f1fcb0300ddd0319cece5f237ea1c496871` | [review](https://github.com/scytrowski/dotty-rs/pull/2323#pullrequestreview-5917684876) | `55c6b962da423596785fd79514d40a1f6239f272` | [run 43839155825](https://github.com/scytrowski/dotty-rs/actions/runs/43839155825) | [run 43839156106](https://github.com/scytrowski/dotty-rs/actions/runs/43839156106) |
+| #2303 / [#2327](https://github.com/scytrowski/dotty-rs/pull/2327) | `36ad81402e9735d0528755cc38fb552cd34114fe` | [review](https://github.com/scytrowski/dotty-rs/pull/2327#pullrequestreview-5919512876) | `b123e936b9b7bd5576d6649e0c15c8e8fee24a1b` | [run 43860839671](https://github.com/scytrowski/dotty-rs/actions/runs/43860839671) | [run 43860839664](https://github.com/scytrowski/dotty-rs/actions/runs/43860839664) |
+| #2304 / [#2328](https://github.com/scytrowski/dotty-rs/pull/2328) | `2243e5421bbc439466c4d951caa8065890c28258` | [review](https://github.com/scytrowski/dotty-rs/pull/2328#pullrequestreview-5922014857) | `2dec37561e110379304ca0091d1049c43f2e9763` | [run 43887460124](https://github.com/scytrowski/dotty-rs/actions/runs/43887460124) | [run 43887460193](https://github.com/scytrowski/dotty-rs/actions/runs/43887460193) |
+| #2305 / [#2336](https://github.com/scytrowski/dotty-rs/pull/2336) | `dd7a3a7bfd824d2c47448c536061ceae95a588d9` | [review](https://github.com/scytrowski/dotty-rs/pull/2336#pullrequestreview-5924802368) | `4760e09f3aa9d9c64bb8d7d7deb61e2d4c8a2999` | [run 43922477213](https://github.com/scytrowski/dotty-rs/actions/runs/43922477213) | [run 43922479554](https://github.com/scytrowski/dotty-rs/actions/runs/43922479554) |
+| #2309 / [#2337](https://github.com/scytrowski/dotty-rs/pull/2337) | `7603fed981bfe93a341965a7c2201741350f4ae8` | [review](https://github.com/scytrowski/dotty-rs/pull/2337#pullrequestreview-5926476896) | `8d108e26fa5a0d27290517053b1f02397e37e523` | [run 43942794124](https://github.com/scytrowski/dotty-rs/actions/runs/43942794124) | [run 43942794062](https://github.com/scytrowski/dotty-rs/actions/runs/43942794062) |
+| #2310 / [#2338](https://github.com/scytrowski/dotty-rs/pull/2338) | `fce6a7d6fe60056392df0fec69ea4507bc65d237` | [review](https://github.com/scytrowski/dotty-rs/pull/2338#pullrequestreview-5928078636) | `6afdb2dca88cf71a784aacf6bc895b58d7496a4f` | [run 43959735736](https://github.com/scytrowski/dotty-rs/actions/runs/43959735736) | [run 43959735743](https://github.com/scytrowski/dotty-rs/actions/runs/43959735743) |
+
+The source/oracle hashes, artifact hashes and UUIDs above are predecessor
+receipts. The final acceptance execution SHA and its hosted run URLs must be
+recorded separately after the final PR head has completed every required gate;
+predecessor green runs do not satisfy that final-head requirement.
 
 ## Strict Scala gate status
 
