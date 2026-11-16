@@ -8,9 +8,14 @@ use dotty_jvm_tasty_contract::{
     validate_jvm_tasty_batch, validate_jvm_tasty_batch_artifacts,
 };
 use dotty_jvm_tasty_contract::{JvmTastyContractError, validate_classfile_tasty_link};
-use dotty_tasty::ast::{APPLY_TAG, DEFDEF_TAG, PARAM_TAG, TERMREFDIRECT_TAG};
+use dotty_tasty::ast::{
+    APPLY_TAG, ASSIGN_TAG, DEFDEF_TAG, PARAM_TAG, TERMREFDIRECT_TAG, VALDEF_TAG,
+};
+use dotty_tasty::reader::Reader as TastyReader;
+use dotty_tasty::section::StandardSection;
 use dotty_tasty::tasty::{DefinitionBody, TastyFile};
-use dotty_tasty::term::{AstRefKind, RawTree, TermValue};
+use dotty_tasty::term::{AstRefKind, RawTree, SimpleTerm, TermValue};
+use dotty_tasty::writer::Writer as TastyWriter;
 use dotty_tasty_pickler::{
     ClassStatePicklePlan, DirectFormalConstructorCallPairBinding, LocalValueBinding,
     NestedConstructorCallBinding, NestedConstructorCallPairBinding,
@@ -913,6 +918,332 @@ fn mutable_reference_rebinding_emits_the_exact_six_artifact_batch() {
         assert!(publish_paired_batch(&failed_destination, &first, Some(fault)).is_err());
         assert!(!failed_destination.exists(), "fault case {index}");
     }
+}
+
+#[test]
+fn mutable_reference_rebinding_contract_rejects_semantic_corruption() {
+    let source_id = SourceId::from_index(23_120);
+    let emitted = emit_paired_jvm_tasty_batch(
+        MUTABLE_REFERENCE_REBINDING_BATCH,
+        "MutableReferenceRebinding.scala",
+        source_id,
+    )
+    .unwrap();
+    let valid = JvmTastyBatchArtifacts {
+        classfiles: emitted
+            .classes()
+            .iter()
+            .map(|artifact| JvmTastyClassFileArtifact {
+                classfile_path: artifact.classfile_path().to_owned(),
+                classfile_bytes: artifact.classfile_bytes().to_vec(),
+            })
+            .collect(),
+        sidecars: emitted
+            .classes()
+            .iter()
+            .map(|artifact| JvmTastySidecarArtifact {
+                tasty_path: artifact.tasty_path().to_owned(),
+                tasty_bytes: artifact.tasty_bytes().to_vec(),
+            })
+            .collect(),
+    };
+    let rejected_publications = TestDirectory::new("mutable-contract-rejected-publications");
+
+    with_paired_jvm_tasty_batch_plan(
+        MUTABLE_REFERENCE_REBINDING_BATCH,
+        "MutableReferenceRebinding.scala",
+        source_id,
+        |plan| {
+            let tasty_plans = plan
+                .classes
+                .iter()
+                .map(|class| class.tasty_plan)
+                .collect::<Vec<_>>();
+            let validated = validate_jvm_tasty_batch(plan.jvm_unit, &tasty_plans)
+                .expect("the canonical one-session mutable source validates");
+            validate_jvm_tasty_batch_artifacts(&validated, valid.clone())
+                .expect("the exact paired artifacts pass the mutable contract");
+
+            let factory_code = |artifacts: &JvmTastyBatchArtifacts| {
+                let factory = artifacts
+                    .classfiles
+                    .iter()
+                    .find(|artifact| artifact.classfile_path == "example/PairFactory.class")
+                    .expect("PairFactory.class artifact");
+                let mut reader = Reader::new(&factory.classfile_bytes);
+                let decoded = ClassFile::decode(&mut reader).unwrap();
+                let create = decoded
+                    .methods
+                    .iter()
+                    .find(|method| {
+                        decoded.constant_pool.utf8(method.name_index).unwrap() == "create"
+                    })
+                    .unwrap();
+                let [Attribute::Code(code)] = create.attributes.as_slice() else {
+                    panic!("PairFactory.create has one Code attribute");
+                };
+                let start = code.code.as_ptr() as usize - factory.classfile_bytes.as_ptr() as usize;
+                (start, code.code.to_vec())
+            };
+            let unique = |code: &[u8], pattern: &[u8]| {
+                let found = code
+                    .windows(pattern.len())
+                    .enumerate()
+                    .filter_map(|(offset, bytes)| (bytes == pattern).then_some(offset))
+                    .collect::<Vec<_>>();
+                assert_eq!(found.len(), 1, "unique bytecode pattern {pattern:02x?}");
+                found[0]
+            };
+            let (code_start, code) = factory_code(&valid);
+            let assignment_store = unique(&code, &[0x19, 0x05, 0x3a, 0x06]) + 3;
+            let setter_receiver = unique(&code, &[0x19, 0x06, 0x1d, 0xb6]) + 1;
+            let pair_arguments = unique(&code, &[0x19, 0x04, 0x19, 0x05, 0xb7]);
+
+            let reject_artifacts = |label: &str,
+                                    artifacts: JvmTastyBatchArtifacts,
+                                    class_index: usize,
+                                    expected_phase: &str| {
+                let error = validate_jvm_tasty_batch_artifacts(&validated, artifacts)
+                    .expect_err("corrupted mutable batch must be rejected atomically");
+                assert!(
+                    matches!(
+                        error,
+                        JvmTastyContractError::BatchArtifact {
+                            class_index: actual_index,
+                            phase,
+                            ..
+                        } if actual_index == class_index && phase == expected_phase
+                    ),
+                    "{label} must first fail at {expected_phase}: {error:?}"
+                );
+                assert!(
+                    !rejected_publications.path().join(label).exists(),
+                    "rejected {label} has no accepted or published partial batch"
+                );
+            };
+
+            let mutate_factory = |label: &str, offset: usize, value: u8| {
+                let mut corrupted = valid.clone();
+                let factory = corrupted
+                    .classfiles
+                    .iter_mut()
+                    .find(|artifact| artifact.classfile_path == "example/PairFactory.class")
+                    .unwrap();
+                factory.classfile_bytes[code_start + offset] = value;
+                reject_artifacts(label, corrupted, 2, "cross-class invocation");
+            };
+            mutate_factory("selected-store-to-first-slot", assignment_store, 0x04);
+            mutate_factory("selected-load-from-second-slot", setter_receiver, 0x05);
+            mutate_factory(
+                "valid-counter-but-wrong-setter-receiver",
+                setter_receiver,
+                0x04,
+            );
+
+            let mut swapped_pair_arguments = valid.clone();
+            {
+                let factory = swapped_pair_arguments
+                    .classfiles
+                    .iter_mut()
+                    .find(|artifact| artifact.classfile_path == "example/PairFactory.class")
+                    .unwrap();
+                factory.classfile_bytes.swap(
+                    code_start + pair_arguments + 1,
+                    code_start + pair_arguments + 3,
+                );
+            }
+            reject_artifacts(
+                "swapped-pair-constructor-arguments",
+                swapped_pair_arguments,
+                2,
+                "cross-class invocation",
+            );
+
+            let mut malformed_stack_bound = valid.clone();
+            {
+                let factory = malformed_stack_bound
+                    .classfiles
+                    .iter_mut()
+                    .find(|artifact| artifact.classfile_path == "example/PairFactory.class")
+                    .unwrap();
+                factory.classfile_bytes[code_start - 8..code_start - 6]
+                    .copy_from_slice(&1u16.to_be_bytes());
+            }
+            reject_artifacts(
+                "malformed-mutable-method-stack-bound",
+                malformed_stack_bound,
+                2,
+                "cross-class invocation",
+            );
+
+            let mut malformed_local_frame_bound = valid.clone();
+            {
+                let factory = malformed_local_frame_bound
+                    .classfiles
+                    .iter_mut()
+                    .find(|artifact| artifact.classfile_path == "example/PairFactory.class")
+                    .unwrap();
+                factory.classfile_bytes[code_start - 6..code_start - 4]
+                    .copy_from_slice(&6u16.to_be_bytes());
+            }
+            reject_artifacts(
+                "malformed-mutable-method-frame-local-bound",
+                malformed_local_frame_bound,
+                2,
+                "cross-class invocation",
+            );
+
+            let mut wrong_assignment_target = valid.clone();
+            {
+                let sidecar = wrong_assignment_target
+                    .sidecars
+                    .iter_mut()
+                    .find(|artifact| artifact.tasty_path == "example/PairFactory.tasty")
+                    .unwrap();
+                repoint_mutable_assignment_rhs_to_first(&mut sidecar.tasty_bytes);
+            }
+            reject_artifacts(
+                "wrong-tasty-assignment-target",
+                wrong_assignment_target,
+                2,
+                "TASTy plan identity",
+            );
+
+            let mut swapped_uuids = valid.clone();
+            {
+                let counter_index = swapped_uuids
+                    .sidecars
+                    .iter()
+                    .position(|artifact| artifact.tasty_path == "example/Counter.tasty")
+                    .unwrap();
+                let pair_index = swapped_uuids
+                    .sidecars
+                    .iter()
+                    .position(|artifact| artifact.tasty_path == "example/Pair.tasty")
+                    .unwrap();
+                let (left, right) = if counter_index < pair_index {
+                    let (left, right) = swapped_uuids.sidecars.split_at_mut(pair_index);
+                    (&mut left[counter_index], &mut right[0])
+                } else {
+                    let (left, right) = swapped_uuids.sidecars.split_at_mut(counter_index);
+                    (&mut right[0], &mut left[pair_index])
+                };
+                std::mem::swap(&mut left.tasty_bytes, &mut right.tasty_bytes);
+            }
+            reject_artifacts(
+                "swapped-counter-pair-tasty-uuids",
+                swapped_uuids,
+                0,
+                "class-file/TASTy link",
+            );
+        },
+    )
+    .unwrap();
+
+    for (label, source, expected_phase) in [
+        (
+            "forged-assignment-mapping",
+            MUTABLE_REFERENCE_REBINDING_BATCH.replace("selected = second", "selected = first"),
+            "JVM/TASTy cross-contract validation",
+        ),
+        (
+            "extra-setter-effect",
+            MUTABLE_REFERENCE_REBINDING_BATCH.replace(
+                "    selected.set(nextValue)\n",
+                "    selected.set(nextValue)\n    selected.set(nextValue)\n",
+            ),
+            "cross-class constructor-call identity proof",
+        ),
+    ] {
+        let destination = rejected_publications.path().join(label);
+        let error =
+            emit_paired_jvm_tasty_batch(&source, "MutableReferenceRebinding.scala", source_id)
+                .expect_err("unsupported mutable proof variation returns no paired artifacts");
+        let first_phase = match &error {
+            PairedBatchArtifactError::Plan(PairedPlanError::BatchClass { phase, .. })
+            | PairedBatchArtifactError::Plan(PairedPlanError::BatchUnit { phase, .. }) => *phase,
+            other => panic!("{label} reaches a paired validation boundary: {other:?}"),
+        };
+        assert!(
+            first_phase == expected_phase,
+            "{label} first rejects at {expected_phase}, got {error:?}"
+        );
+        assert!(
+            !destination.exists(),
+            "{label} has no published partial batch"
+        );
+    }
+}
+
+fn repoint_mutable_assignment_rhs_to_first(tasty_bytes: &mut [u8]) {
+    let tasty = TastyFile::parse_and_validate_scala_3_9(tasty_bytes).unwrap();
+    let asts = tasty.section(StandardSection::Asts).unwrap();
+    let asts_file_offset = asts.payload.as_ptr() as usize - tasty_bytes.as_ptr() as usize;
+    let index = tasty.ast_address_index().unwrap();
+    let variable_address = |expected_name: &str| {
+        index
+            .iter_nodes_with_tag(VALDEF_TAG)
+            .find_map(|node| {
+                let mut reader = TastyReader::new(&asts.payload[node.offset..]);
+                let RawTree::LengthNode(raw) =
+                    RawTree::decode_with_base_offset(&mut reader, node.offset).unwrap()
+                else {
+                    panic!("VALDEF address decodes as a length node");
+                };
+                let body = raw.decode_definition_body().unwrap();
+                (tasty.names().render(body.name()).unwrap() == expected_name)
+                    .then_some(node.offset as u32)
+            })
+            .unwrap_or_else(|| panic!("missing {expected_name} VALDEF"))
+    };
+    let first = variable_address("first");
+    let second = variable_address("second");
+    let assignment = index
+        .iter_nodes_with_tag(ASSIGN_TAG)
+        .next()
+        .expect("mutable block assignment node");
+    let mut assignment_reader = TastyReader::new(&asts.payload[assignment.offset..]);
+    let RawTree::LengthNode(assignment_node) =
+        RawTree::decode_with_base_offset(&mut assignment_reader, assignment.offset).unwrap()
+    else {
+        panic!("ASSIGN address decodes as a length node");
+    };
+    let decoded = assignment_node.decode_assign().unwrap();
+    let RawTree::Leaf(rhs) = decoded.right else {
+        panic!("mutable assignment RHS is one direct reference leaf");
+    };
+    assert_eq!(rhs.tag, TERMREFDIRECT_TAG);
+    assert_eq!(rhs.ast_ref().unwrap().address, second);
+
+    let replacement = SimpleTerm::new(TERMREFDIRECT_TAG, TermValue::AstRef(first)).unwrap();
+    let mut encoded = TastyWriter::new();
+    replacement.encode(&mut encoded).unwrap();
+    let assignment_payload_offset =
+        assignment_node.payload.as_ptr() as usize - asts.payload.as_ptr() as usize;
+    let old_start = asts_file_offset + assignment_payload_offset + rhs.offset;
+    let mut old_encoded = TastyWriter::new();
+    rhs.encode(&mut old_encoded).unwrap();
+    assert_eq!(old_encoded.as_slice().len(), encoded.as_slice().len());
+    tasty_bytes[old_start..old_start + encoded.as_slice().len()]
+        .copy_from_slice(encoded.as_slice());
+    let reparsed = TastyFile::parse_and_validate_scala_3_9(tasty_bytes).unwrap();
+    let reparsed_index = reparsed.ast_address_index().unwrap();
+    let reparsed_assignment = reparsed_index
+        .iter_nodes_with_tag(ASSIGN_TAG)
+        .next()
+        .unwrap();
+    let reparsed_asts = reparsed.section(StandardSection::Asts).unwrap();
+    let mut reparsed_reader =
+        TastyReader::new(&reparsed_asts.payload[reparsed_assignment.offset..]);
+    let RawTree::LengthNode(reparsed_node) =
+        RawTree::decode_with_base_offset(&mut reparsed_reader, reparsed_assignment.offset).unwrap()
+    else {
+        panic!("reparsed ASSIGN address decodes as a length node");
+    };
+    let RawTree::Leaf(rhs) = reparsed_node.decode_assign().unwrap().right else {
+        panic!("mutated RHS remains a leaf");
+    };
+    assert_eq!(rhs.ast_ref().unwrap().address, first);
 }
 
 #[test]

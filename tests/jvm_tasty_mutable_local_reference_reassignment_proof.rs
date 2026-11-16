@@ -1,3 +1,4 @@
+use dotty::jvm_tasty_artifacts::emit_paired_jvm_tasty_batch;
 use dotty::jvm_tasty_cross_class::{
     CrossClassConstructorCallProofError, MutableLocalReferenceReassignmentProofInput,
     validate_mutable_local_reference_reassignment_proof,
@@ -1308,6 +1309,169 @@ fn verify_fragment_with_pinned_scala(candidate: &[u8], label: &str, expect_assig
     std::fs::remove_dir_all(&root).expect("remove fragment reader scratch");
 }
 
+fn verify_complete_paired_batch_with_pinned_scala() {
+    match std::env::var(REQUIRE_SCALA_FRAGMENT).as_deref() {
+        Ok("1") => {}
+        Ok(value) => panic!("{REQUIRE_SCALA_FRAGMENT} must equal 1, got {value:?}"),
+        Err(std::env::VarError::NotPresent) => return,
+        Err(error) => panic!("read {REQUIRE_SCALA_FRAGMENT}: {error}"),
+    }
+
+    let scala_root = PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT"));
+    let revision = checked_command(
+        Command::new("git")
+            .args(["-C"])
+            .arg(&scala_root)
+            .args(["rev-parse", "HEAD"]),
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&revision.stdout).trim(),
+        "777528f19a58e794c9954a42f433373472ec57f8"
+    );
+    let scalac = scala_root.join("dist/target/universal/stage/bin/scalac");
+    assert!(
+        scalac.is_file(),
+        "pinned staged scalac exists: {}",
+        scalac.display()
+    );
+    let version = checked_command(Command::new(&scalac).arg("-version"));
+    assert!(
+        String::from_utf8_lossy(&version.stdout).contains("3.9.0-bin-SNAPSHOT-git-777528f"),
+        "staged compiler reports the pinned revision: {}",
+        String::from_utf8_lossy(&version.stdout)
+    );
+
+    let batch = emit_paired_jvm_tasty_batch(
+        SOURCE,
+        "MutableReferenceRebinding.scala",
+        SourceId::from_index(23_110),
+    )
+    .expect("strict Scala reads the actual complete paired producer output");
+    assert_eq!(batch.classes().len(), 3);
+    let root = scala_fragment_scratch("complete-paired-batch");
+    for artifact in batch.classes() {
+        let classfile = root.join(artifact.classfile_path());
+        let tasty = root.join(artifact.tasty_path());
+        std::fs::create_dir_all(classfile.parent().expect("classfile parent"))
+            .expect("create paired class directory");
+        std::fs::write(classfile, artifact.classfile_bytes()).expect("write paired classfile");
+        std::fs::write(&tasty, artifact.tasty_bytes()).expect("write complete Rust TASTy sidecar");
+    }
+
+    let factory = root.join("example/PairFactory.tasty");
+    let printed = checked_command(
+        Command::new(&scalac)
+            .args(["-color:never", "-print-tasty"])
+            .arg(&factory),
+    );
+    let printed = String::from_utf8_lossy(&printed.stdout);
+    assert!(printed.contains("version: 28.9.0"), "{printed}");
+    let lines = printed.lines().collect::<Vec<_>>();
+    let named_node_address = |tag: &str, name: &str| {
+        lines
+            .iter()
+            .find(|line| {
+                printed_tasty_node_body(line).is_some_and(|body| {
+                    body.starts_with(tag) && body.ends_with(&format!("[{name}]"))
+                })
+            })
+            .and_then(|line| printed_tasty_node_address(line))
+            .unwrap_or_else(|| panic!("Scala -print-tasty omitted {tag} {name}:\n{printed}"))
+    };
+    let first = named_node_address("VALDEF(", "first");
+    let second = named_node_address("VALDEF(", "second");
+    let selected = named_node_address("VALDEF(", "selected");
+    let next_value = named_node_address("PARAM(", "nextValue");
+    let direct_targets = |from: usize, to: usize| {
+        lines[from..to]
+            .iter()
+            .filter_map(|line| {
+                printed_tasty_node_body(line)
+                    .and_then(|body| body.strip_prefix("TERMREFdirect "))
+                    .and_then(|target| target.parse::<u32>().ok())
+            })
+            .collect::<Vec<_>>()
+    };
+    let block_start = lines
+        .iter()
+        .position(|line| {
+            printed_tasty_node_body(line).is_some_and(|body| body.starts_with("BLOCK("))
+        })
+        .expect("official TASTy reader exposes the complete factory block");
+    let first_valdef = lines
+        .iter()
+        .position(|line| printed_tasty_node_address(line) == Some(first))
+        .unwrap();
+    let second_valdef = lines
+        .iter()
+        .position(|line| printed_tasty_node_address(line) == Some(second))
+        .unwrap();
+    let selected_valdef = lines
+        .iter()
+        .position(|line| printed_tasty_node_address(line) == Some(selected))
+        .unwrap();
+    let assignment = lines
+        .iter()
+        .position(|line| {
+            printed_tasty_node_body(line).is_some_and(|body| body.starts_with("ASSIGN("))
+        })
+        .expect("official reader decodes the mutable assignment");
+    let setter = lines
+        .iter()
+        .position(|line| printed_tasty_node_body(line).is_some_and(|body| body.contains("[set[")))
+        .expect("official reader decodes the selected receiver setter");
+    assert!(
+        block_start < first_valdef
+            && first_valdef < second_valdef
+            && second_valdef < selected_valdef
+            && selected_valdef < assignment
+            && assignment < setter,
+        "official reader changed ordered mutable statements:\n{printed}"
+    );
+    assert_eq!(
+        direct_targets(assignment + 1, setter),
+        [selected, second],
+        "official TASTy assignment maps selected to the second local"
+    );
+    assert_eq!(
+        direct_targets(setter, lines.len()),
+        [selected, next_value],
+        "official TASTy setter receiver and argument resolve to selected and nextValue"
+    );
+    assert_eq!(
+        direct_targets(block_start + 1, first_valdef),
+        [first, second],
+        "official TASTy Pair result retains first/second argument identity and order"
+    );
+
+    let decompiled = checked_command(
+        Command::new(&scalac)
+            .args(["-color:never", "-decompile"])
+            .arg(&factory),
+    );
+    let decompiled = String::from_utf8_lossy(&decompiled.stdout);
+    let ordered = [
+        "val first: example.Counter = new example.Counter(firstSeed)",
+        "val second: example.Counter = new example.Counter(secondSeed)",
+        "var selected: example.Counter = first",
+        "selected = second",
+        "selected.set(nextValue)",
+        "new example.Pair(first, second)",
+    ];
+    let mut prior = 0;
+    for statement in ordered {
+        let offset = decompiled
+            .find(statement)
+            .unwrap_or_else(|| panic!("Scala -decompile omitted {statement:?}:\n{decompiled}"));
+        assert!(
+            offset >= prior,
+            "Scala changed complete block order: {decompiled}"
+        );
+        prior = offset;
+    }
+    std::fs::remove_dir_all(&root).expect("remove complete paired Scala reader scratch");
+}
+
 fn checked_command(command: &mut Command) -> Output {
     let output = command.output().unwrap_or_else(|error| {
         panic!("start command {command:?}: {error}");
@@ -1319,6 +1483,16 @@ fn checked_command(command: &mut Command) -> Output {
         String::from_utf8_lossy(&output.stderr)
     );
     output
+}
+
+fn printed_tasty_node_body(line: &str) -> Option<&str> {
+    line.trim().split_once(": ").map(|(_, body)| body.trim())
+}
+
+fn printed_tasty_node_address(line: &str) -> Option<u32> {
+    line.trim()
+        .split_once(": ")
+        .and_then(|(address, _)| address.trim().parse::<u32>().ok())
 }
 
 fn scala_fragment_scratch(label: &str) -> PathBuf {
@@ -1345,6 +1519,7 @@ fn mutable_reference_reassignment_receipt_accepts_canonical_variants() {
         .expect("Rust-emitted mutable assignment fragment is well-formed TASTy 28.9");
     verify_fragment_with_pinned_scala(&original.fragment, "original", false);
     verify_fragment_with_pinned_scala(&original.assignment_fragment, "assignment", true);
+    verify_complete_paired_batch_with_pinned_scala();
     assert_eq!(original.initializer_target, original.first);
     assert_eq!(original.declaration_binding.target, original.first);
     assert_eq!(original.declaration_binding.local, original.selected);

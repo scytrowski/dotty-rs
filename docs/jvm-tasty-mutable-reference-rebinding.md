@@ -105,9 +105,25 @@ With `SCALA39_ROOT` pointing at the staged checkout,
 `DOTTY_REQUIRE_SCALA_TASTY_MUTABLE_COUNTER_FRAGMENT=1`, the pinned runtime
 artifacts from the approved Maven cache, and Temurin 21.0.13+9, the strict
 `jvm_tasty_mutable_local_reference_reassignment_proof` consumer passed all
-8 tests. The previously attempted run without a staged compiler stopped at
-`scala39_toolchain` preflight before compilation. The pinned Rust gates and
-JDK 21 verifier passed as recorded above.
+8 tests. In addition to the declaration and assignment fragments, it passes
+the actual complete `Counter`, `Pair`, and `PairFactory` class/TASTy artifacts
+emitted by the Rust one-session paired route to the pinned Scala reader. The
+reader accepts `PairFactory.tasty` with TASTy 28.9.0; `-print-tasty` identities
+are checked for the ordered `first`, `second`, and mutable `selected` VALDEFs,
+the `selected = second` ASSIGN, the `selected.set(nextValue)` receiver and
+argument, and the final `Pair(first, second)` result. `-decompile` independently
+checks the complete source statement order.
+
+The focused semantic corruption matrix is run by
+`cargo +1.98.1 test --test jvm_tasty_artifacts mutable_reference_rebinding_contract_rejects_semantic_corruption --locked`.
+It verifies first rejection and absence of partial output for forged source
+assignment mappings and duplicate effects, wrong JVM store/load slots,
+verifier-valid wrong setter receiver, swapped Pair arguments, malformed verifier stack/local bounds, wrong TASTy assignment target, and
+swapped TASTy UUID links. The full
+`jvm_tasty_artifacts` target passed all 69 tests. The prior attempted run
+without a staged compiler stopped at `scala39_toolchain` preflight before
+compilation. The pinned Rust gates and JDK 21 verifier passed as recorded
+above.
 
 ## Initial toolchain blocker
 
