@@ -3584,6 +3584,29 @@ mod tests {
         }
     }
 
+    fn selected_info_pair_context() -> (
+        SemanticStore,
+        Definitions,
+        ClasspathSymbolResolver<InfoPairAuditClassPath>,
+        SymbolId,
+    ) {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            info_pair_audit_class_path(),
+            definitions,
+            LoadingSession::new(),
+        );
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "semantic"],
+            )
+            .unwrap()
+            .expect("semantic fixture package");
+        (store, definitions, resolver, package)
+    }
+
     struct InfoPairClassFileClassPath {
         inner: InfoPairAuditClassPath,
         base: Vec<u8>,
@@ -6453,6 +6476,370 @@ mod tests {
             observations,
             [observations[0].clone(), observations[0].clone()]
         );
+    }
+
+    #[test]
+    fn selected_info_pair_and_m_identity_converge_across_request_orders() {
+        let base_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
+        let wrapped_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
+        let fixture_origin = ClassOrigin::Directory(fixture_path(
+            "../dotty-tasty-unpickler/tests/fixtures/semantic",
+        ));
+        let mut normalized_graphs = Vec::new();
+
+        for first_class in ["InfoBase", "InfoWrapped"] {
+            let (mut store, definitions, mut resolver, package) = selected_info_pair_context();
+            let base_request =
+                semantic_member_request(&mut store, package, definitions.no_prefix, "InfoBase");
+            let wrapped_request =
+                semantic_member_request(&mut store, package, definitions.no_prefix, "InfoWrapped");
+            let (first_request, second_request, first_binary) = if first_class == "InfoBase" {
+                (&base_request, &wrapped_request, &base_name)
+            } else {
+                (&wrapped_request, &base_request, &wrapped_name)
+            };
+
+            let first = resolver
+                .resolve_member_with_semantic_info_pair(&mut store, first_request)
+                .unwrap()
+                .expect("the first selected root loads the authentic pair");
+            assert_eq!(resolver.session.resolved.get(first_binary), Some(&first));
+
+            if first_class == "InfoBase" {
+                let second = resolver
+                    .resolve_member_with_semantic_info_pair(&mut store, second_request)
+                    .unwrap()
+                    .expect("the second selected root reuses the authentic pair");
+                assert_ne!(first, second);
+            }
+
+            let method_prefix = store.types.alloc(Type::type_ref(
+                definitions.no_prefix,
+                resolver.session.identified[&wrapped_name],
+            ));
+            let method_request = MemberRequest {
+                prefix: method_prefix,
+                name: Name::new(store.names.intern("m"), Namespace::Term),
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            };
+            let requested_method = resolver
+                .resolve_member(&mut store, &method_request)
+                .unwrap()
+                .expect("the selected canonical InfoWrapped owner exposes its original m");
+
+            if first_class == "InfoWrapped" {
+                let second = resolver
+                    .resolve_member_with_semantic_info_pair(&mut store, second_request)
+                    .unwrap()
+                    .expect("InfoBase selection reuses the authentic pair after m");
+                assert_ne!(first, second);
+            }
+
+            let base = resolver.session.identified[&base_name];
+            let wrapped = resolver.session.identified[&wrapped_name];
+            assert_eq!(resolver.session.resolved.get(&base_name), Some(&base));
+            assert_eq!(resolver.session.resolved.get(&wrapped_name), Some(&wrapped));
+            assert_eq!(resolver.session.origins.get(&base), Some(&fixture_origin));
+            assert_eq!(
+                resolver.session.origins.get(&wrapped),
+                Some(&fixture_origin)
+            );
+            assert!(matches!(
+                store.symbols.get(base).origin,
+                SymbolOrigin::Tasty(_)
+            ));
+            assert!(matches!(
+                store.symbols.get(wrapped).origin,
+                SymbolOrigin::Tasty(_)
+            ));
+
+            let package_scope = resolver.session.packages.scope_of(package).unwrap();
+            assert_eq!(
+                store
+                    .scopes
+                    .get(package_scope)
+                    .lookup_all(&Name::new(store.names.intern("InfoBase"), Namespace::Type)),
+                [base]
+            );
+            assert_eq!(
+                store.scopes.get(package_scope).lookup_all(&Name::new(
+                    store.names.intern("InfoWrapped"),
+                    Namespace::Type
+                )),
+                [wrapped]
+            );
+
+            let SymbolInfo::Complete(base_info_id) = store.symbols.get(base).info else {
+                panic!("InfoBase is complete");
+            };
+            let Type::ClassInfo(base_info) = store.types.get(base_info_id) else {
+                panic!("InfoBase has ClassInfo");
+            };
+            assert_eq!(base_info.class, base);
+            assert_eq!(store.scopes.get(base_info.declarations).owner, Some(base));
+            let base_type_parameters = store
+                .scopes
+                .get(base_info.declarations)
+                .entered_symbols()
+                .filter(|id| store.symbols.get(*id).kind == SymbolKind::TypeParameter)
+                .collect::<Vec<_>>();
+            let [base_parameter] = base_type_parameters.as_slice() else {
+                panic!("InfoBase has one canonical type parameter");
+            };
+            assert_eq!(
+                store
+                    .names
+                    .resolve(store.symbols.get(*base_parameter).name.text()),
+                "A"
+            );
+            let base_constructors = store
+                .scopes
+                .get(base_info.declarations)
+                .entered_symbols()
+                .filter(|id| store.symbols.get(*id).kind == SymbolKind::Constructor)
+                .collect::<Vec<_>>();
+            let [base_constructor] = base_constructors.as_slice() else {
+                panic!("InfoBase has one canonical constructor");
+            };
+            let SymbolInfo::Complete(base_constructor_type) =
+                store.symbols.get(*base_constructor).info
+            else {
+                panic!("InfoBase constructor is complete");
+            };
+            let Type::Poly(base_constructor_poly) = store.types.get(base_constructor_type) else {
+                panic!("InfoBase constructor retains its type binder");
+            };
+            assert_eq!(base_constructor_poly.params.len(), 1);
+            let Type::Method(base_constructor_method) =
+                store.types.get(base_constructor_poly.result)
+            else {
+                panic!("InfoBase constructor has a method result");
+            };
+            let Type::Applied {
+                tycon: base_tycon,
+                args: base_args,
+            } = store.types.get(base_constructor_method.result)
+            else {
+                panic!("InfoBase constructor returns applied InfoBase");
+            };
+            assert_eq!(info_pair_type_symbol(&store, *base_tycon), Some(base));
+            assert!(matches!(
+                store.types.get(base_args[0]),
+                Type::ParamRef { binder, index: 0 } if *binder == base_constructor_type
+            ));
+
+            let SymbolInfo::Complete(wrapped_info_id) = store.symbols.get(wrapped).info else {
+                panic!("InfoWrapped is complete");
+            };
+            let Type::ClassInfo(wrapped_info) = store.types.get(wrapped_info_id) else {
+                panic!("InfoWrapped has ClassInfo");
+            };
+            assert_eq!(wrapped_info.class, wrapped);
+            assert_eq!(
+                store.scopes.get(wrapped_info.declarations).owner,
+                Some(wrapped)
+            );
+            let wrapped_type_parameters = store
+                .scopes
+                .get(wrapped_info.declarations)
+                .entered_symbols()
+                .filter(|id| store.symbols.get(*id).kind == SymbolKind::TypeParameter)
+                .collect::<Vec<_>>();
+            let [wrapped_parameter] = wrapped_type_parameters.as_slice() else {
+                panic!("InfoWrapped has one canonical class type parameter");
+            };
+            assert_eq!(
+                store
+                    .names
+                    .resolve(store.symbols.get(*wrapped_parameter).name.text()),
+                "F"
+            );
+
+            let base_parents = wrapped_info
+                .parents
+                .iter()
+                .filter(|parent| {
+                    matches!(
+                        store.types.get(**parent),
+                        Type::Applied { tycon, args }
+                            if info_pair_type_symbol(&store, *tycon) == Some(base) && args.len() == 1
+                    )
+                })
+                .collect::<Vec<_>>();
+            let [base_parent_id] = base_parents.as_slice() else {
+                panic!("InfoWrapped has one direct applied InfoBase parent");
+            };
+            let Type::Applied {
+                args: parent_args, ..
+            } = store.types.get(**base_parent_id)
+            else {
+                panic!("InfoBase parent is applied");
+            };
+            let [applied_f_int] = parent_args.as_slice() else {
+                panic!("InfoBase parent applies F to Int");
+            };
+            let applied_f_int_id = *applied_f_int;
+            let Type::Applied {
+                tycon: parent_f_tycon,
+                args: parent_f_args,
+            } = store.types.get(*applied_f_int)
+            else {
+                panic!("InfoBase parent argument is applied F[Int]");
+            };
+            assert_eq!(
+                info_pair_type_symbol(&store, *parent_f_tycon),
+                Some(*wrapped_parameter)
+            );
+            assert_eq!(parent_f_args.len(), 1);
+            assert_eq!(
+                store.types.get(parent_f_args[0]).reference_symbol(),
+                store.types.get(definitions.int).reference_symbol()
+            );
+
+            let direct_m = store
+                .scopes
+                .get(wrapped_info.declarations)
+                .lookup_all(&Name::new(store.names.intern("m"), Namespace::Term));
+            assert_eq!(direct_m.len(), 1, "the owner has one m declaration");
+            let method = direct_m[0];
+            assert_eq!(store.symbols.get(method).owner, Some(wrapped));
+            assert_eq!(store.symbols.get(method).kind, SymbolKind::Method);
+            assert_eq!(store.symbols.get(method).name.namespace(), Namespace::Term);
+            assert_eq!(store.symbols.get(method).visibility, Visibility::Public);
+            assert_eq!(requested_method, method);
+            let SymbolInfo::Complete(method_type) = store.symbols.get(method).info else {
+                panic!("InfoWrapped.m is complete");
+            };
+            let Type::ByName {
+                result: method_result,
+            } = store.types.get(method_type)
+            else {
+                panic!("serialized InfoWrapped.m result retains ByName");
+            };
+            let method_result_id = *method_result;
+            let Type::Applied {
+                tycon: method_f_tycon,
+                args: method_f_args,
+            } = store.types.get(*method_result)
+            else {
+                panic!("InfoWrapped.m retains applied F[Int]");
+            };
+            assert_eq!(
+                info_pair_type_symbol(&store, *method_f_tycon),
+                Some(*wrapped_parameter)
+            );
+            assert_eq!(method_f_args.len(), 1);
+            assert_eq!(
+                store.types.get(method_f_args[0]).reference_symbol(),
+                store.types.get(definitions.int).reference_symbol()
+            );
+            let method_int_reference = store
+                .types
+                .get(method_f_args[0])
+                .reference_symbol()
+                .unwrap();
+            assert_eq!(
+                store.types.get(method_result_id),
+                store.types.get(applied_f_int_id)
+            );
+
+            let canonical_ids = (base, wrapped, *base_parameter, *wrapped_parameter, method);
+            let stable_type_ids = (
+                base_info_id,
+                wrapped_info_id,
+                **base_parent_id,
+                applied_f_int_id,
+                method_type,
+                method_result_id,
+                method_int_reference,
+            );
+            let identified_before_repeats = resolver.session.identified.clone();
+            let resolved_before_repeats = resolver.session.resolved.clone();
+            let origins_before_repeats = resolver.session.origins.clone();
+            assert_eq!(
+                resolver
+                    .resolve_member(&mut store, &method_request)
+                    .unwrap(),
+                Some(method),
+                "repeated term lookup preserves the original declaration"
+            );
+            for (request, expected) in [(&base_request, base), (&wrapped_request, wrapped)] {
+                assert_eq!(
+                    resolver
+                        .resolve_member_with_semantic_info_pair(&mut store, request)
+                        .unwrap(),
+                    Some(expected),
+                    "repeated selected class requests preserve canonical identity"
+                );
+            }
+            assert_eq!(
+                (base, wrapped, *base_parameter, *wrapped_parameter, method),
+                canonical_ids
+            );
+            assert_eq!(
+                (
+                    match store.symbols.get(base).info {
+                        SymbolInfo::Complete(info) => info,
+                        _ => unreachable!(),
+                    },
+                    match store.symbols.get(wrapped).info {
+                        SymbolInfo::Complete(info) => info,
+                        _ => unreachable!(),
+                    },
+                    match store.types.get(wrapped_info_id) {
+                        Type::ClassInfo(info) => *info
+                            .parents
+                            .iter()
+                            .find(|parent| {
+                                matches!(
+                                    store.types.get(**parent),
+                                    Type::Applied { tycon, .. }
+                                        if info_pair_type_symbol(&store, *tycon) == Some(base)
+                                )
+                            })
+                            .unwrap(),
+                        _ => unreachable!(),
+                    },
+                    applied_f_int_id,
+                    match store.symbols.get(method).info {
+                        SymbolInfo::Complete(info) => info,
+                        _ => unreachable!(),
+                    },
+                    match store.types.get(method_type) {
+                        Type::ByName { result } => *result,
+                        _ => unreachable!(),
+                    },
+                    method_int_reference,
+                ),
+                stable_type_ids
+            );
+
+            assert_eq!(resolver.session.identified, identified_before_repeats);
+            assert_eq!(resolver.session.resolved, resolved_before_repeats);
+            assert_eq!(resolver.session.origins, origins_before_repeats);
+            assert_eq!(resolver.session.identified.get(&base_name), Some(&base));
+            assert_eq!(
+                resolver.session.identified.get(&wrapped_name),
+                Some(&wrapped)
+            );
+            assert_eq!(resolver.session.resolved.get(&base_name), Some(&base));
+            assert_eq!(resolver.session.resolved.get(&wrapped_name), Some(&wrapped));
+
+            normalized_graphs.push(format!(
+                "InfoBase:{:?}:{:?}:owner=semantic-package;A-binder=constructor;InfoWrapped:{:?}:{:?}:owner=semantic-package;parent=InfoBase[F[Int]];m:{:?}:{:?}:owner=InfoWrapped;result=ByName(F[Int]);origin=semantic-fixtures",
+                store.symbols.get(base).kind,
+                store.symbols.get(base).visibility,
+                store.symbols.get(wrapped).kind,
+                store.symbols.get(wrapped).visibility,
+                store.symbols.get(method).kind,
+                store.symbols.get(method).visibility,
+            ));
+        }
+
+        assert_eq!(normalized_graphs.len(), 2);
+        assert_eq!(normalized_graphs[0], normalized_graphs[1]);
     }
 
     #[test]
