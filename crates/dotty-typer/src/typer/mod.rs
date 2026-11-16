@@ -22675,6 +22675,51 @@ mod tests {
     }
 
     #[test]
+    fn overloaded_value_member_applications_filter_inaccessible_candidates_before_resolution() {
+        let source_text = "class Box { private def secret(value: Int): Int = value; def secret(value: Boolean): Int = 2; protected def guarded(value: Int): Int = value; def guarded(value: Boolean): Int = 3 }; class C { def value: Box = new Box(); def privateOverload: Int = value.secret(1); def protectedOverload: Int = value.guarded(1); def privateAlias: Int = { val alias = value; alias.secret(1) }; def protectedAlias: Int = { val alias = value; alias.guarded(1) }; def privateParameter(alias: Box): Int = alias.secret(1); def protectedParameter(alias: Box): Int = alias.guarded(1); def publicOverload: Int = value.secret(true); def publicAlias: Int = { val alias = value; alias.secret(true) }; def publicParameter(alias: Box): Int = alias.guarded(true) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let cases = [
+            ("privateOverload", false),
+            ("protectedOverload", false),
+            ("privateAlias", false),
+            ("protectedAlias", false),
+            ("privateParameter", false),
+            ("protectedParameter", false),
+            ("publicOverload", true),
+            ("publicAlias", true),
+            ("publicParameter", true),
+        ];
+        for (method_name, should_type) in cases {
+            let (method, rhs) =
+                method_definition_and_rhs(&parsed, &store, &index, source, method_name);
+            let owner = store
+                .symbols
+                .get(method)
+                .owner
+                .expect("test method retains its class owner");
+            assert_eq!(
+                store.names.resolve(store.symbols.get(owner).name.text()),
+                "C"
+            );
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let context = typer.expression_context_for(method).unwrap();
+            let result = typer.type_expression_expected(rhs, context, definitions.int);
+            assert_eq!(result.is_ok(), should_type, "C.{method_name}: {result:?}");
+            if !should_type {
+                assert!(typer.typed_index.get(source, rhs).is_none());
+                assert!(typer.source_typed_index().get(source, rhs).is_none());
+            }
+        }
+    }
+
+    #[test]
     fn ordinary_empty_clause_source_method_is_not_auto_applied_as_a_value() {
         let source_text =
             "class C { def f(): Int = 1; def applied: Int = f(); def missing: Int = f }";
