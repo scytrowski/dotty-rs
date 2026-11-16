@@ -19,10 +19,9 @@ const FOREIGN_SOURCE: &str =
     include_str!("fixtures/source-nested-recursive-adt-3.9.0/ForeignSameSpelledExtractor.scala");
 const NESTED_CASE_CLASSIFICATIONS: &str =
     include_str!("fixtures/source-nested-recursive-adt-3.9.0/negative-cases.tsv");
-// This receipt includes arena IDs: canonical scala.Boolean TASTy lowering now
-// reuses Definitions.boolean instead of allocating an equivalent TypeRef, so
-// later diagnostic TypeIds are two slots earlier while rejection behavior is
-// unchanged.
+// This receipt includes arena IDs: bootstrap now registers canonical
+// scala.Any.## before source symbols are entered, shifting later diagnostic
+// IDs by one while rejection behavior remains unchanged.
 const STRUCTURAL_CONTROL_RECEIPTS: &str =
     include_str!("fixtures/source-binary-recursive-adt-3.9.0/rust-structural-controls.tsv");
 

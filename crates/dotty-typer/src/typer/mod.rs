@@ -22333,6 +22333,120 @@ mod tests {
     }
 
     #[test]
+    fn canonical_any_hash_code_is_selectable_on_a_stable_int_field_and_retries_after_rollback() {
+        let source_text = "class C { val value: Int = 1; def use: Int = value.## }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(use_method).unwrap(),
+            owner: use_method,
+            local_scopes: None,
+        };
+        let hash_code = definitions.any_hash_code_symbol(&store).unwrap();
+        let original_flags = store.symbols.get(hash_code).flags;
+        let int_class = store.types.get(definitions.int).reference_symbol().unwrap();
+        let SymbolInfo::Complete(int_info) = store.symbols.get(int_class).info else {
+            panic!("canonical Int must have complete class info");
+        };
+        let Type::ClassInfo(int_info) = store.types.get(int_info) else {
+            panic!("canonical Int must have class info");
+        };
+        let int_scope = int_info.declarations;
+        let original_int_parents = int_info.parents.clone();
+        let fake_name = Name::new(store.names.intern("##"), Namespace::Term);
+        let fake_method_info = store.types.alloc(Type::Method(MethodType {
+            params: Vec::new(),
+            result: definitions.int,
+            kind: MethodKind::Plain,
+        }));
+        let counterfeit = store.symbols.alloc(dotty_core::Symbol {
+            name: fake_name,
+            owner: Some(int_class),
+            kind: SymbolKind::Method,
+            flags: SymbolFlags::FINAL,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Complete(fake_method_info),
+            origin: SymbolOrigin::Builtin,
+            annotations: Vec::new(),
+            position: None,
+            links: dotty_core::SymbolLinks::default(),
+        });
+        store
+            .scopes
+            .get_mut(int_scope)
+            .enter(fake_name, counterfeit);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        // The bad compiler-owned candidate is rejected, and failed expression
+        // typing rolls back its typed result mappings before a same-session retry.
+        typer.store.symbols.get_mut(hash_code).flags = SymbolFlags::EMPTY;
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::MemberNotFound { name, .. })
+                if typer.store.names.resolve(name.text()) == "##"
+        ));
+        assert!(typer.typed_index.get(source, rhs).is_none());
+
+        typer.store.symbols.get_mut(hash_code).flags = original_flags;
+        let typed = typer.type_expression(rhs, context).unwrap();
+        assert!(matches!(
+            typer.typed_ast().get(typed).kind,
+            TreeKind::Select(_)
+        ));
+        assert!(matches!(
+            typer.store.types.get(typer.typed_ast().get(typed).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == hash_code
+        ));
+        assert_ne!(hash_code, counterfeit);
+        assert_eq!(
+            typer.store.symbols.get(hash_code).owner,
+            Some(definitions.any_class)
+        );
+        let SymbolInfo::Complete(hash_info) = typer.store.symbols.get(hash_code).info else {
+            panic!("canonical Any.## must keep complete method info");
+        };
+        assert!(
+            matches!(typer.store.types.get(hash_info), Type::Method(method)
+            if method.params.is_empty() && method.result == definitions.int)
+        );
+        let SymbolInfo::Complete(int_info) = typer.store.symbols.get(int_class).info else {
+            panic!("canonical Int must keep complete class info");
+        };
+        let Type::ClassInfo(int_info) = typer.store.types.get(int_info) else {
+            panic!("canonical Int must keep class info");
+        };
+        assert_eq!(int_info.parents, original_int_parents);
+    }
+
+    #[test]
+    fn canonical_any_hash_code_does_not_make_a_mutable_int_receiver_stable() {
+        let source_text = "class C { def use: Int = { var value: Int = 1; value.## } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(use_method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::UnstableSelectionPrefix { .. })
+        ));
+    }
+
+    #[test]
     fn unstable_receiver_can_call_local_extension() {
         let source_text = "class C { def choose(value: Boolean): Int = 1; def choose(value: Unit): Int = 2; def outer: Int = { var receiver: C = this; extension (value: C) { def choose(argument: Int): Int = argument }; receiver.choose(2) } }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);

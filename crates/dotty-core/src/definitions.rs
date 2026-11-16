@@ -146,6 +146,22 @@ impl std::fmt::Display for AnyEqualityOperatorRegistrationError {
 
 impl std::error::Error for AnyEqualityOperatorRegistrationError {}
 
+/// A malformed compiler-known `Any.##` member registry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnyHashCodeRegistrationError {
+    /// The captured symbol, owner scope, flags, or signature no longer match
+    /// the canonical compiler definition.
+    MalformedCanonicalEntry,
+}
+
+impl std::fmt::Display for AnyHashCodeRegistrationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl std::error::Error for AnyHashCodeRegistrationError {}
+
 /// A malformed compiler-known AnyRef identity member registry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AnyRefIdentityOperatorRegistrationError {
@@ -359,6 +375,8 @@ pub struct Definitions {
     /// info, matching Scala's intrinsic Any class definitions.
     any_equality_operators: Option<AnyEqualityOperatorSymbols>,
     any_equality_scope: Option<ScopeId>,
+    any_hash_code: Option<SymbolId>,
+    any_hash_code_scope: Option<ScopeId>,
 }
 
 impl Definitions {
@@ -436,6 +454,8 @@ impl Definitions {
             any_ref_identity_scope: None,
             any_equality_operators: None,
             any_equality_scope: None,
+            any_hash_code: None,
+            any_hash_code_scope: None,
         };
 
         // `Int` is a compiler-owned class shell rather than a classfile
@@ -455,6 +475,9 @@ impl Definitions {
         definitions
             .ensure_any_equality_operators(store)
             .expect("fresh builtin Any class should accept universal equality operators");
+        definitions
+            .ensure_any_hash_code(store)
+            .expect("fresh builtin Any class should accept its canonical hash code method");
         definitions
     }
 
@@ -528,6 +551,84 @@ impl Definitions {
             }
         }
         Some(ids)
+    }
+
+    /// Ensures the compiler-owned canonical Scala 3.9 `Any.##` method.
+    /// Scala's `Any` class metadata is intrinsic, so this member lives in a
+    /// dedicated semantic scope while retaining `scala.Any` as its owner.
+    pub fn ensure_any_hash_code(
+        &mut self,
+        store: &mut SemanticStore,
+    ) -> Result<SymbolId, AnyHashCodeRegistrationError> {
+        if self.any_hash_code.is_none() || self.any_hash_code_scope.is_none() {
+            let (symbol, scope) = self.register_any_hash_code(store);
+            self.any_hash_code = Some(symbol);
+            self.any_hash_code_scope = Some(scope);
+        }
+        self.any_hash_code_symbol(store)
+            .ok_or(AnyHashCodeRegistrationError::MalformedCanonicalEntry)
+    }
+
+    /// Returns the authenticated canonical Scala 3.9 `Any.##` identity.
+    /// Mutable metadata is checked on every read; malformed or counterfeit
+    /// entries are never repaired from their spelling.
+    pub fn any_hash_code_symbol(&self, store: &SemanticStore) -> Option<SymbolId> {
+        let symbol = self.any_hash_code?;
+        let scope = self.any_hash_code_scope?;
+        if !store.scopes.contains(scope) {
+            return None;
+        }
+        let scope_data = store.scopes.get(scope);
+        let name = Name::new(store.names.get("##")?, Namespace::Term);
+        if scope_data.owner != Some(self.any_class)
+            || scope_data.entered_symbols().count() != 1
+            || scope_data.lookup_all(&name) != [symbol]
+            || !store.symbols.contains(symbol)
+        {
+            return None;
+        }
+        let member = store.symbols.get(symbol);
+        if member.name != name
+            || member.owner != Some(self.any_class)
+            || member.kind != SymbolKind::Method
+            || member.origin != SymbolOrigin::Builtin
+            || member.visibility != Visibility::Public
+            || member.flags != SymbolFlags::FINAL
+        {
+            return None;
+        }
+        let SymbolInfo::Complete(info) = member.info else {
+            return None;
+        };
+        let Some(Type::Method(method)) = store.types.try_get(info) else {
+            return None;
+        };
+        (method.kind == MethodKind::Plain && method.params.is_empty() && method.result == self.int)
+            .then_some(symbol)
+    }
+
+    fn register_any_hash_code(&self, store: &mut SemanticStore) -> (SymbolId, ScopeId) {
+        let scope = store.scopes.alloc(Scope::new(Some(self.any_class)));
+        let name = Name::new(store.names.intern("##"), Namespace::Term);
+        let info = store.types.alloc(Type::Method(MethodType {
+            params: Vec::new(),
+            result: self.int,
+            kind: MethodKind::Plain,
+        }));
+        let symbol = store.symbols.alloc(Symbol {
+            name,
+            owner: Some(self.any_class),
+            kind: SymbolKind::Method,
+            flags: SymbolFlags::FINAL,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Complete(info),
+            origin: SymbolOrigin::Builtin,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        store.scopes.get_mut(scope).enter(name, symbol);
+        (symbol, scope)
     }
 
     fn register_any_equality_operators(
@@ -1818,6 +1919,50 @@ mod tests {
             definitions.ensure_any_equality_operators(&mut store),
             Err(AnyEqualityOperatorRegistrationError::MalformedCanonicalEntries)
         );
+    }
+
+    #[test]
+    fn any_hash_code_has_the_canonical_final_parameterless_int_signature() {
+        let mut store = SemanticStore::new();
+        let mut definitions = Definitions::bootstrap(&mut store);
+        let symbol = definitions.any_hash_code_symbol(&store).unwrap();
+        let member = store.symbols.get(symbol);
+        assert_eq!(member.owner, Some(definitions.any_class));
+        assert_eq!(member.kind, SymbolKind::Method);
+        assert_eq!(member.flags, SymbolFlags::FINAL);
+        let SymbolInfo::Complete(info) = member.info else {
+            panic!("canonical Any.## must have complete method info");
+        };
+        let Type::Method(method) = store.types.get(info) else {
+            panic!("canonical Any.## must have a method type");
+        };
+        assert!(method.params.is_empty());
+        assert_eq!(method.result, definitions.int);
+
+        store.symbols.get_mut(symbol).owner = Some(definitions.object_class);
+        assert_eq!(definitions.any_hash_code_symbol(&store), None);
+        store.symbols.get_mut(symbol).owner = Some(definitions.any_class);
+
+        let SymbolInfo::Complete(original_info) = store.symbols.get(symbol).info else {
+            unreachable!();
+        };
+        let wrong_signature = store.types.alloc(Type::Method(MethodType {
+            params: Vec::new(),
+            result: definitions.boolean,
+            kind: MethodKind::Plain,
+        }));
+        store.symbols.get_mut(symbol).info = SymbolInfo::Complete(wrong_signature);
+        assert_eq!(definitions.any_hash_code_symbol(&store), None);
+        store.symbols.get_mut(symbol).info = SymbolInfo::Complete(original_info);
+
+        store.symbols.get_mut(symbol).flags = SymbolFlags::EMPTY;
+        assert_eq!(definitions.any_hash_code_symbol(&store), None);
+        assert_eq!(
+            definitions.ensure_any_hash_code(&mut store),
+            Err(AnyHashCodeRegistrationError::MalformedCanonicalEntry)
+        );
+        store.symbols.get_mut(symbol).flags = SymbolFlags::FINAL;
+        assert_eq!(definitions.any_hash_code_symbol(&store), Some(symbol));
     }
 
     #[test]
