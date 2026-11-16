@@ -2043,9 +2043,9 @@ fn acceptance_vi_hash_code_session_receipt() -> Vec<String> {
         format!("root={target_path}#tree=459 span={method_span:?} source={:?}", &text[method_span.start() as usize..method_span.end() as usize]),
         format!("owner={} method={} owner_provenance=canonical-source", observed_symbol_path(typer.store(), owner), observed_symbol_path(typer.store(), method_symbol)),
         "result=scala.Int typed_root_kind=DefDef typed_rhs_result=scala.Int source_to_typed_root=true".to_owned(),
-        format!("id_definition_tree={} symbol={expected_id:?} owner={} kind=Method result=scala.Int", id_definition_tree.index(), observed_symbol_path(typer.store(), owner)),
+        format!("id_definition={target_path}#tree={} span={:?} owner={} kind=Method result=scala.Int", id_definition_tree.index(), parsed.ast.get(id_definition_tree).position.unwrap().span().range(), observed_symbol_path(typer.store(), owner)),
         format!("id_tree=457 span={id_span:?} symbol={} provenance=canonical-source", observed_symbol_path(typer.store(), id_reference)),
-        format!("source_id_negative=tree{} symbol={wrong_owner_id:?} path={} kind=Method owner_differs=true acceptance_credit=false", wrong_owner_id_tree.index(), observed_symbol_path(typer.store(), wrong_owner_id)),
+        format!("source_id_negative={target_path}#tree={} span={:?} path={} kind=Method owner_differs=true acceptance_credit=false", wrong_owner_id_tree.index(), parsed.ast.get(wrong_owner_id_tree).position.unwrap().span().range(), observed_symbol_path(typer.store(), wrong_owner_id)),
         format!("selection_tree=458 span={selection_span:?} typed_kind=Select member={} provenance={selected_provenance} signature=ByName[scala.Int] result=scala.Int", observed_symbol_path(typer.store(), selected_member)),
         "rollback=store,typed-arena,type-index,typed-index,source-to-typed-index restored; same-session retry=success".to_owned(),
     ]

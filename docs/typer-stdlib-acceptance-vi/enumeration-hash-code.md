@@ -13,6 +13,10 @@ sessions. In each session it injects a failure after complete source typing,
 checks rollback of the semantic store, typed arena, type index, typed index and
 source-to-typed index, then retries the same original method successfully. The
 normalized receipts match across sessions and contain no allocation IDs.
+Exact `SymbolId` equality checks stay inside each session; the receipt records
+stable source tree/span, owner path, kind, and result instead.
+Two separate focused-test processes emitted identical normalized receipts
+(`62b49022761bb6c3c610d547799284fb0c3514c2d38e7e0822339762ce5f0807`).
 
 The receipt proves canonical provenance at each step:
 
