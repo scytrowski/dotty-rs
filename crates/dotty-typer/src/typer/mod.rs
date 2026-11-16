@@ -22388,14 +22388,16 @@ mod tests {
         // typing rolls back its typed result mappings before a same-session retry.
         typer.store.symbols.get_mut(hash_code).flags = SymbolFlags::EMPTY;
         assert!(matches!(
-            typer.type_expression(rhs, context),
+            typer.type_expression_expected(rhs, context, definitions.int),
             Err(TyperError::MemberNotFound { name, .. })
                 if typer.store.names.resolve(name.text()) == "##"
         ));
         assert!(typer.typed_index.get(source, rhs).is_none());
 
         typer.store.symbols.get_mut(hash_code).flags = original_flags;
-        let typed = typer.type_expression(rhs, context).unwrap();
+        let typed = typer
+            .type_expression_expected(rhs, context, definitions.int)
+            .unwrap();
         assert!(matches!(
             typer.typed_ast().get(typed).kind,
             TreeKind::Select(_)
@@ -22412,9 +22414,18 @@ mod tests {
         let SymbolInfo::Complete(hash_info) = typer.store.symbols.get(hash_code).info else {
             panic!("canonical Any.## must keep complete method info");
         };
-        assert!(
-            matches!(typer.store.types.get(hash_info), Type::Method(method)
-            if method.params.is_empty() && method.result == definitions.int)
+        assert!(matches!(
+            typer.store.types.get(hash_info),
+            Type::ByName { result } if *result == definitions.int
+        ));
+        let selected_type = typer.typed_ast().get(typed).ty;
+        let mut info_journal = Vec::new();
+        assert_eq!(
+            typer
+                .widen_expression_type_journaled(selected_type, &mut info_journal, 0)
+                .unwrap(),
+            definitions.int,
+            "canonical Int.## exposes its parameterless Int result at a value boundary"
         );
         let SymbolInfo::Complete(int_info) = typer.store.symbols.get(int_class).info else {
             panic!("canonical Int must keep complete class info");
@@ -22444,6 +22455,40 @@ mod tests {
             typer.type_expression(rhs, context),
             Err(TyperError::UnstableSelectionPrefix { .. })
         ));
+    }
+
+    #[test]
+    fn ordinary_empty_clause_source_method_is_not_auto_applied_as_a_value() {
+        let source_text =
+            "class C { def f(): Int = 1; def applied: Int = f(); def missing: Int = f }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (applied_method, applied_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "applied");
+        let (missing_method, missing_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "missing");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let applied_context = typer.expression_context_for(applied_method).unwrap();
+        let applied = typer.type_expression(applied_rhs, applied_context);
+        assert!(
+            applied.is_ok(),
+            "explicit empty-clause call failed: {applied:?}"
+        );
+
+        let missing_context = typer.expression_context_for(missing_method).unwrap();
+        assert!(
+            typer
+                .type_expression_expected(missing_rhs, missing_context, definitions.int)
+                .is_err(),
+            "ordinary def f(): Int must remain methodic when used without an argument list"
+        );
+        assert!(typer.typed_index.get(source, missing_rhs).is_none());
     }
 
     #[test]

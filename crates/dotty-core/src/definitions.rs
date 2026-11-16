@@ -553,7 +553,7 @@ impl Definitions {
         Some(ids)
     }
 
-    /// Ensures the compiler-owned canonical Scala 3.9 `Any.##` method.
+    /// Ensures the compiler-owned canonical Scala 3.9 parameterless `Any.##` method.
     /// Scala's `Any` class metadata is intrinsic, so this member lives in a
     /// dedicated semantic scope while retaining `scala.Any` as its owner.
     pub fn ensure_any_hash_code(
@@ -600,21 +600,16 @@ impl Definitions {
         let SymbolInfo::Complete(info) = member.info else {
             return None;
         };
-        let Some(Type::Method(method)) = store.types.try_get(info) else {
+        let Some(Type::ByName { result }) = store.types.try_get(info) else {
             return None;
         };
-        (method.kind == MethodKind::Plain && method.params.is_empty() && method.result == self.int)
-            .then_some(symbol)
+        (*result == self.int).then_some(symbol)
     }
 
     fn register_any_hash_code(&self, store: &mut SemanticStore) -> (SymbolId, ScopeId) {
         let scope = store.scopes.alloc(Scope::new(Some(self.any_class)));
         let name = Name::new(store.names.intern("##"), Namespace::Term);
-        let info = store.types.alloc(Type::Method(MethodType {
-            params: Vec::new(),
-            result: self.int,
-            kind: MethodKind::Plain,
-        }));
+        let info = store.types.alloc(Type::ByName { result: self.int });
         let symbol = store.symbols.alloc(Symbol {
             name,
             owner: Some(self.any_class),
@@ -1922,7 +1917,7 @@ mod tests {
     }
 
     #[test]
-    fn any_hash_code_has_the_canonical_final_parameterless_int_signature() {
+    fn any_hash_code_has_the_canonical_parameterless_int_result_signature() {
         let mut store = SemanticStore::new();
         let mut definitions = Definitions::bootstrap(&mut store);
         let symbol = definitions.any_hash_code_symbol(&store).unwrap();
@@ -1930,14 +1925,15 @@ mod tests {
         assert_eq!(member.owner, Some(definitions.any_class));
         assert_eq!(member.kind, SymbolKind::Method);
         assert_eq!(member.flags, SymbolFlags::FINAL);
+        assert_eq!(member.visibility, Visibility::Public);
+        assert_eq!(member.origin, SymbolOrigin::Builtin);
         let SymbolInfo::Complete(info) = member.info else {
-            panic!("canonical Any.## must have complete method info");
+            panic!("canonical Any.## must have complete signature info");
         };
-        let Type::Method(method) = store.types.get(info) else {
-            panic!("canonical Any.## must have a method type");
+        let Type::ByName { result } = store.types.get(info) else {
+            panic!("canonical Any.## must have parameterless result info");
         };
-        assert!(method.params.is_empty());
-        assert_eq!(method.result, definitions.int);
+        assert_eq!(*result, definitions.int);
 
         store.symbols.get_mut(symbol).owner = Some(definitions.object_class);
         assert_eq!(definitions.any_hash_code_symbol(&store), None);
@@ -1946,11 +1942,22 @@ mod tests {
         let SymbolInfo::Complete(original_info) = store.symbols.get(symbol).info else {
             unreachable!();
         };
-        let wrong_signature = store.types.alloc(Type::Method(MethodType {
+        let old_empty_clause_signature = store.types.alloc(Type::Method(MethodType {
             params: Vec::new(),
-            result: definitions.boolean,
+            result: definitions.int,
             kind: MethodKind::Plain,
         }));
+        store.symbols.get_mut(symbol).info = SymbolInfo::Complete(old_empty_clause_signature);
+        assert_eq!(definitions.any_hash_code_symbol(&store), None);
+        assert_eq!(
+            definitions.ensure_any_hash_code(&mut store),
+            Err(AnyHashCodeRegistrationError::MalformedCanonicalEntry)
+        );
+        store.symbols.get_mut(symbol).info = SymbolInfo::Complete(original_info);
+
+        let wrong_signature = store.types.alloc(Type::ByName {
+            result: definitions.boolean,
+        });
         store.symbols.get_mut(symbol).info = SymbolInfo::Complete(wrong_signature);
         assert_eq!(definitions.any_hash_code_symbol(&store), None);
         store.symbols.get_mut(symbol).info = SymbolInfo::Complete(original_info);
