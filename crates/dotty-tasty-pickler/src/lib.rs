@@ -63,11 +63,14 @@ pub use plan::{
     OrderedConstructorCallArgumentBinding, OrderedConstructorCallArgumentOrigin,
     OrderedConstructorCallArgumentPairBinding, PicklePlan, PlannedCallBinding,
     PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings, ValidatedClassStatePlan,
-    ValidatedPicklePlan, ValidatedSameBatchReferenceField, ValidationLimits,
+    ValidatedMutableCounterDeclarationFragment, ValidatedPicklePlan,
+    ValidatedSameBatchReferenceField, ValidationLimits,
 };
 pub use projection::{
     EncodingContext, ProjectedFragment, ProjectedMethodSignature, ProjectionLimits,
 };
-pub use skeleton::{DeclarationSkeleton, OmittedMethodBody, SkeletonDeclaration};
+pub use skeleton::{
+    DeclarationSkeleton, MutableCounterDeclarationFragment, OmittedMethodBody, SkeletonDeclaration,
+};
 
 pub use output::{PickleLimits, PickledTasty};

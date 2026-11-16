@@ -795,6 +795,31 @@ mapping gap; and an unexpected typed root/reference target is a SourceTyper
 typing failure. The production pickler must report incomplete binding/semantic
 information or an unsupported form; it must not guess by spelling.
 
+### Mutable Counter declaration fragment (#2300)
+
+`ClassStatePicklePlan::validate_mutable_counter_declaration_fragment` accepts
+only the `var selected: Counter = first` declaration authenticated by the
+borrowed #2299 proof. It requires the source modifier list to be exactly
+`[Var]`, `SymbolFlags::MUTABLE`, the same planned Counter type, method owner and
+scope, the original source/typed declaration roots and the direct initializer
+`TermRef` to the semantic first local. `semantic_originals()` supplies the
+proof's seed-ordered local identities; `original_locals()` remains in source
+declaration order. The selected target comes from typed initializer root
+`typed_initializers()[2]`, never from the later assignment RHS.
+
+`MutableCounterDeclarationFragment` is a separate incomplete result with no
+conversion to `PickledTasty`. It contains a reader-inspectable method block
+formed from the original local declarations, the selected mutable `VALDEF`,
+and the original initializer reference. It deliberately omits the later
+assignment, setter call and final Pair expression. This narrow result does not
+expand ordinary complete-body local support: other mutable reference locals,
+non-Counter types, non-direct initializers and extra declaration forms remain
+unsupported. Scala 3.9 decompilation was checked against Rust-produced fragment
+bytes with only the original `Counter` and `Pair` classes on the classpath;
+those dependencies are not copied into the fragment. This reader check proves
+that the incomplete bytes can be read and decompiled, not that the fragment is a
+complete or executable compiler artifact.
+
 ### Sprint 2 v1 boundary
 
 The characterized v1 input is one named package, one ordinary public class

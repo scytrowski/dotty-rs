@@ -570,9 +570,12 @@ impl Validator<'_, '_> {
                     source_stat,
                     typed_stat,
                     method,
-                    reference_result.then_some(stat.ty),
-                    depth,
-                    visited,
+                    super::local::LocalValueValidation {
+                        reference_type: reference_result.then_some(stat.ty),
+                        depth,
+                        visited,
+                        fragment: false,
+                    },
                 )?;
                 continue;
             }

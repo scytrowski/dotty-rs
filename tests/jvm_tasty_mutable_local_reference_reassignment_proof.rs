@@ -5,14 +5,74 @@ use dotty::jvm_tasty_cross_class::{
 use dotty::jvm_tasty_plan::mutable_local_reference_declaration_binding;
 use dotty_core::ast::{AstArena, TreeKind, Typed};
 use dotty_core::{Definitions, Packages, SemanticStore, SourceId, SourceText};
+use dotty_core::{SourceTypedIndex, SymbolId, TreeId, Untyped};
 use dotty_jvm::JvmCompilationUnit;
 use dotty_lexer::ContextualScanner;
 use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty_parser::parse_compilation_unit;
+use dotty_tasty::file::TastyFile;
+use dotty_tasty_pickler::{
+    ClassMemberPicklePlan, ClassStatePicklePlan, LocalValueBinding,
+    MutableCounterLocalInitializerBinding, PrimaryConstructorInputPlan, SourceMetadata,
+    SourceTypedBindings,
+};
 use dotty_typer::{SourceTyper, TypedLocalBinding};
+use std::path::PathBuf;
+use std::process::{Command, Output};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const SOURCE: &str =
     include_str!("fixtures/jvm_tasty_mutable_reference_rebinding/MutableReferenceRebinding.scala");
+const REQUIRE_SCALA_FRAGMENT: &str = "DOTTY_REQUIRE_SCALA_TASTY_MUTABLE_COUNTER_FRAGMENT";
+const SCALA_FRAGMENT_SUPPORT: &str = r#"package example
+
+class Counter(start: Int):
+  private var current: Int = start
+  def get(): Int = current
+  def set(value: Int): Unit = current = value
+
+class Pair(first: Counter, second: Counter):
+  private val left: Counter = first
+  private val right: Counter = second
+  def leftValue(): Int = left.get()
+  def rightValue(): Int = right.get()
+"#;
+
+struct FragmentBindings<'a> {
+    typed: &'a SourceTypedIndex,
+    classes: Vec<SymbolId>,
+    methods: Vec<SymbolId>,
+    locals: Vec<LocalValueBinding>,
+    source: SourceId,
+    method: SymbolId,
+    binding: MutableCounterLocalInitializerBinding,
+}
+
+impl SourceTypedBindings for FragmentBindings<'_> {
+    fn typed_at(&self, source: SourceId, tree: TreeId<Untyped>) -> Option<TreeId<Typed>> {
+        self.typed.get(source, tree)
+    }
+    fn planned_class_symbols(&self) -> &[SymbolId] {
+        &self.classes
+    }
+    fn planned_method_symbols(&self) -> &[SymbolId] {
+        &self.methods
+    }
+    fn local_value_bindings(&self, source: SourceId, method: SymbolId) -> Vec<LocalValueBinding> {
+        if source == self.source && method == self.method {
+            self.locals.clone()
+        } else {
+            Vec::new()
+        }
+    }
+    fn mutable_counter_local_initializer(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<MutableCounterLocalInitializerBinding> {
+        (source == self.source && method == self.method).then_some(self.binding)
+    }
+}
 
 fn stale_symbol_id(store: &SemanticStore) -> dotty_core::SymbolId {
     let mut foreign = SemanticStore::new();
@@ -46,6 +106,8 @@ enum Mutation {
     WrongBinding,
     MissingSelectedBinding,
     ImmutableSelected,
+    MissingSourceVarModifier,
+    ExtraSourceVarModifier,
     WrongOwner,
     WrongScope,
     WrongInitializer,
@@ -93,13 +155,20 @@ struct Receipt {
     typed_assignment: dotty_core::TreeId<Typed>,
     setter_receiver: dotty_core::TreeId<dotty_core::Untyped>,
     pair_args: [dotty_core::TreeId<dotty_core::Untyped>; 2],
+    fragment: Vec<u8>,
+}
+
+#[derive(Debug)]
+enum ValidationError {
+    Proof(CrossClassConstructorCallProofError),
+    Pickle(dotty_tasty_pickler::PickleError),
 }
 
 fn validate(
     source: &str,
     source_number: u32,
     mutation: Mutation,
-) -> Result<Receipt, CrossClassConstructorCallProofError> {
+) -> Result<Receipt, ValidationError> {
     let source_id = SourceId::from_index(source_number);
     let source_text = SourceText::new(source).unwrap();
     let scanner = ContextualScanner::new(source).unwrap();
@@ -242,6 +311,23 @@ fn validate(
                 .get(selected)
                 .flags
                 .difference(dotty_core::SymbolFlags::MUTABLE);
+        }
+        Mutation::MissingSourceVarModifier => {
+            let TreeKind::ValDef(selected_def) = &mut parsed.ast.get_mut(block_stats[2]).kind
+            else {
+                unreachable!()
+            };
+            selected_def.metadata.modifiers.clear();
+        }
+        Mutation::ExtraSourceVarModifier => {
+            let TreeKind::ValDef(selected_def) = &mut parsed.ast.get_mut(block_stats[2]).kind
+            else {
+                unreachable!()
+            };
+            selected_def
+                .metadata
+                .modifiers
+                .push(dotty_core::ast::Modifier::Lazy);
         }
         Mutation::WrongOwner => {
             let owner = store.symbols.get(method).owner.unwrap();
@@ -569,7 +655,8 @@ fn validate(
             selected_binding: supplied_selected,
             jvm_unit: &jvm_unit,
         },
-    )?;
+    )
+    .map_err(ValidationError::Proof)?;
     assert_eq!(proof.scope(), selected_scope);
     assert_eq!(proof.source_block(), rhs);
     assert_eq!(proof.source_assignment(), assignment);
@@ -581,24 +668,274 @@ fn validate(
         5,
         "accepted Block has the frozen statement count"
     );
+    let declaration_binding = mutable_local_reference_declaration_binding(&proof);
+    let factory = store.symbols.get(method).owner.unwrap();
+    let factory_tree = match source_index.definition_of(factory).unwrap() {
+        dotty_core::SourceDefinition::Canonical { tree, .. } => tree,
+        _ => panic!("PairFactory has a canonical source definition"),
+    };
+    let TreeKind::TypeDef(factory_def) = &parsed.ast.get(factory_tree).kind else {
+        panic!("PairFactory definition")
+    };
+    let TreeKind::Template(factory_template) = &parsed.ast.get(factory_def.rhs).kind else {
+        panic!("PairFactory template")
+    };
+    let factory_constructor = source_index
+        .symbol_at(source_id, factory_template.constructor)
+        .unwrap();
+    let local_values = block_stats[..3]
+        .iter()
+        .enumerate()
+        .map(|(index, &source_tree)| LocalValueBinding {
+            source_tree,
+            symbol: local_bindings[index].symbol(),
+            typed_declaration: source_typed_index.get(source_id, source_tree).unwrap(),
+            scope: local_bindings[index].scope(),
+        })
+        .collect::<Vec<_>>();
+    let planned_classes = classes.iter().map(|(class, _, _)| *class).collect();
+    let planned_methods = vec![method];
+    let fragment_bindings = FragmentBindings {
+        typed: &source_typed_index,
+        classes: planned_classes,
+        methods: planned_methods,
+        locals: local_values,
+        source: source_id,
+        method,
+        binding: declaration_binding,
+    };
+    let member = [ClassMemberPicklePlan::Method {
+        symbol: method,
+        source_tree: method_tree,
+    }];
+    let class_plan = ClassStatePicklePlan {
+        store: &store,
+        definitions: &definitions,
+        source_ast: &parsed.ast,
+        typed_ast: &typed_ast,
+        source_index: &source_index,
+        typed_bindings: &fragment_bindings,
+        source: SourceMetadata {
+            id: source_id,
+            name: "MutableReferenceRebinding.scala".to_owned(),
+        },
+        class: factory,
+        class_tree: factory_tree,
+        constructor: PrimaryConstructorInputPlan {
+            symbol: factory_constructor,
+            source_tree: factory_template.constructor,
+            parameter_clauses: Vec::new(),
+        },
+        members: &member,
+    };
+    let validated_fragment = class_plan
+        .validate_mutable_counter_declaration_fragment(method)
+        .map_err(ValidationError::Pickle)?;
+    let fragment = validated_fragment.emit().map_err(ValidationError::Pickle)?;
     Ok(Receipt {
         selected: proof.selected(),
         initializer_target: proof.initializer_target(),
-        declaration_binding: mutable_local_reference_declaration_binding(&proof),
+        declaration_binding,
         target: proof.assigned_target(),
-        first: proof.original_locals()[0],
-        second: proof.original_locals()[1],
+        first: proof.semantic_originals()[0],
+        second: proof.semantic_originals()[1],
         assignment: proof.source_assignment(),
         typed_assignment: proof.typed_assignment(),
         setter_receiver: proof.source_setter_receiver(),
         pair_args: proof.source_pair_arguments(),
+        fragment: fragment.bytes().to_vec(),
     })
+}
+
+fn verify_fragment_with_pinned_scala(candidate: &[u8], label: &str) {
+    match std::env::var(REQUIRE_SCALA_FRAGMENT).as_deref() {
+        Ok("1") => {}
+        Ok(value) => panic!("{REQUIRE_SCALA_FRAGMENT} must equal 1, got {value:?}"),
+        Err(std::env::VarError::NotPresent) => {
+            eprintln!(
+                "skipping pinned Scala fragment reader; set {REQUIRE_SCALA_FRAGMENT}=1 to require it"
+            );
+            return;
+        }
+        Err(error) => panic!("read {REQUIRE_SCALA_FRAGMENT}: {error}"),
+    }
+
+    let scala_root = PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT"));
+    let revision = checked_command(
+        Command::new("git")
+            .args(["-C"])
+            .arg(&scala_root)
+            .args(["rev-parse", "HEAD"]),
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&revision.stdout).trim(),
+        "777528f19a58e794c9954a42f433373472ec57f8"
+    );
+    let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+    let java = java_home.join("bin/java");
+    let maven =
+        PathBuf::from(std::env::var_os("COURSIER_MAVEN_ROOT").expect("COURSIER_MAVEN_ROOT"));
+    let jar_paths = [
+        maven.join("org/scala-lang/scala3-library_3/3.9.0/scala3-library_3-3.9.0.jar"),
+        maven.join("org/scala-lang/scala-library/3.9.0/scala-library-3.9.0.jar"),
+        maven.join("org/scala-lang/scala3-compiler_3/3.9.0/scala3-compiler_3-3.9.0.jar"),
+        maven.join("org/scala-lang/tasty-core_3/3.9.0/tasty-core_3-3.9.0.jar"),
+        maven.join("org/scala-lang/scala3-interfaces/3.9.0/scala3-interfaces-3.9.0.jar"),
+        maven.join("org/scala-lang/modules/scala-asm/9.9.0-scala-1/scala-asm-9.9.0-scala-1.jar"),
+        maven.join("org/scala-sbt/compiler-interface/1.12.0/compiler-interface-1.12.0.jar"),
+        maven.join("org/scala-sbt/util-interface/1.11.5/util-interface-1.11.5.jar"),
+    ];
+    let expected_jar_hashes = [
+        "9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba",
+        "b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd",
+        "3e2c09a5ca6cef17a55f2f66e123815f9c4ea061fce20d0e9d2371989405a61a",
+        "66e12dda98bb23e864f3a31f8527c8338bf47bce9b85cc380b368c69c1ba8d0f",
+        "64dfde1d2c6309d65a01c5f3ea836137eb84338dcadeb16f85764561ef4e10db",
+        "75ac366e8ecb691e06a7e85041eed0f67919a646e5262fa0901225698c104375",
+        "92f487a505eafdd0a033e4ff4f38a81509a655c76257c64e6808dd873cc145c3",
+        "1fc950a9e1a35385e79316e23c120d4fd184f6a7af0274e00a703b0dc76376af",
+    ];
+    for (jar, expected_hash) in jar_paths.iter().zip(expected_jar_hashes) {
+        assert!(
+            jar.is_file(),
+            "pinned Scala dependency exists: {}",
+            jar.display()
+        );
+        let digest = checked_command(Command::new("sha256sum").arg(jar));
+        let actual_hash = String::from_utf8_lossy(&digest.stdout)
+            .split_whitespace()
+            .next()
+            .expect("sha256sum emits a digest")
+            .to_owned();
+        assert_eq!(
+            actual_hash,
+            expected_hash,
+            "Scala dependency hash {}",
+            jar.display()
+        );
+    }
+    let compiler_classpath = std::env::join_paths(&jar_paths).expect("compiler classpath");
+    let java_version = checked_command(Command::new(&java).args(["-version"]));
+    let java_version = format!(
+        "{}{}",
+        String::from_utf8_lossy(&java_version.stdout),
+        String::from_utf8_lossy(&java_version.stderr)
+    );
+    assert!(java_version.contains("21.0.13"), "{java_version}");
+    let java_hash = checked_command(Command::new("sha256sum").arg(&java));
+    assert_eq!(
+        String::from_utf8_lossy(&java_hash.stdout)
+            .split_whitespace()
+            .next()
+            .expect("sha256sum emits a digest"),
+        "9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155"
+    );
+    let version = checked_command(
+        Command::new(&java)
+            .arg("-XX:-UsePerfData")
+            .arg(format!(
+                "-Djava.io.tmpdir={}",
+                std::env::temp_dir().display()
+            ))
+            .args(["-cp"])
+            .arg(&compiler_classpath)
+            .args(["dotty.tools.dotc.Main", "-version"]),
+    );
+    assert!(String::from_utf8_lossy(&version.stdout).contains("Scala compiler version 3.9.0 --"));
+
+    let root = scala_fragment_scratch(label);
+    let candidate_root = root.join("candidate");
+    let package_dir = candidate_root.join("example");
+    let dependencies = root.join("dependencies");
+    std::fs::create_dir_all(&package_dir).expect("create candidate package directory");
+    std::fs::create_dir(&dependencies).expect("create dependency directory");
+    let candidate_path = package_dir.join("PairFactory.tasty");
+    let support_source = root.join("CounterPair.scala");
+    std::fs::write(&candidate_path, candidate).expect("write Rust fragment candidate");
+    std::fs::write(&support_source, SCALA_FRAGMENT_SUPPORT).expect("write Scala dependencies");
+
+    checked_command(
+        Command::new(&java)
+            .arg("-XX:-UsePerfData")
+            .arg(format!(
+                "-Djava.io.tmpdir={}",
+                std::env::temp_dir().display()
+            ))
+            .args(["-cp"])
+            .arg(&compiler_classpath)
+            .args(["dotty.tools.dotc.Main", "-classpath"])
+            .arg(&compiler_classpath)
+            .args(["-release", "21", "-d"])
+            .arg(&dependencies)
+            .arg(&support_source),
+    );
+    let reader_classpath = std::env::join_paths(
+        std::iter::once(candidate_root.as_path())
+            .chain(std::iter::once(dependencies.as_path()))
+            .chain(jar_paths.iter().map(PathBuf::as_path)),
+    )
+    .expect("reader classpath");
+    let decompiled = checked_command(
+        Command::new(&java)
+            .arg("-XX:-UsePerfData")
+            .arg(format!(
+                "-Djava.io.tmpdir={}",
+                std::env::temp_dir().display()
+            ))
+            .args(["-cp"])
+            .arg(&compiler_classpath)
+            .args(["dotty.tools.dotc.decompiler.Main", "-classpath"])
+            .arg(reader_classpath)
+            .args(["-color:never"])
+            .arg(&candidate_path),
+    );
+    let decompiled = String::from_utf8_lossy(&decompiled.stdout);
+    assert!(
+        decompiled.contains("var selected: example.Counter = first"),
+        "Scala 3.9 decompiles Rust mutable VALDEF and original target:\n{decompiled}"
+    );
+    assert!(
+        decompiled.contains("\n      first\n"),
+        "Scala 3.9 decompiles the original initializer target as the fragment result:\n{decompiled}"
+    );
+    assert!(!dependencies.join("example/PairFactory.tasty").exists());
+    std::fs::remove_dir_all(&root).expect("remove fragment reader scratch");
+}
+
+fn checked_command(command: &mut Command) -> Output {
+    let output = command.output().unwrap_or_else(|error| {
+        panic!("start command {command:?}: {error}");
+    });
+    assert!(
+        output.status.success(),
+        "command failed: {command:?}\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
+fn scala_fragment_scratch(label: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock follows Unix epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "dotty-mutable-counter-fragment-{}-{label}-{nonce}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&path).expect("create unique fragment reader scratch");
+    path
 }
 
 #[test]
 fn mutable_reference_reassignment_receipt_accepts_canonical_variants() {
     let original = validate(SOURCE, 22_990, Mutation::None).unwrap();
     assert_ne!(original.first, original.second);
+    assert!(!original.fragment.is_empty());
+    TastyFile::parse_and_validate_scala_3_9(&original.fragment)
+        .expect("Rust-emitted mutable declaration fragment is well-formed TASTy 28.9");
+    verify_fragment_with_pinned_scala(&original.fragment, "original");
     assert_eq!(original.initializer_target, original.first);
     assert_eq!(original.declaration_binding.target, original.first);
     assert_eq!(original.declaration_binding.local, original.selected);
@@ -627,8 +964,14 @@ fn mutable_reference_reassignment_receipt_accepts_canonical_variants() {
         "    val second: Counter = new Counter(secondSeed)\n    val first: Counter = new Counter(firstSeed)",
     );
     let reversed = validate(&reversed, 22_992, Mutation::None).unwrap();
+    verify_fragment_with_pinned_scala(&reversed.fragment, "reversed");
     assert_ne!(reversed.first, reversed.second);
-    assert!(reversed.target == reversed.first || reversed.target == reversed.second);
+    assert_eq!(reversed.initializer_target, reversed.first);
+    assert_eq!(reversed.declaration_binding.target, reversed.first);
+    assert_ne!(
+        reversed.first,
+        reversed.declaration_binding.prefix_locals[0]
+    );
 
     let changed_target = SOURCE.replace("selected = second", "selected = first");
     let changed_target = validate(&changed_target, 22_993, Mutation::None).unwrap();
@@ -644,6 +987,8 @@ fn mutable_reference_reassignment_rejects_forged_edges_and_shapes() {
         Mutation::WrongBinding,
         Mutation::MissingSelectedBinding,
         Mutation::ImmutableSelected,
+        Mutation::MissingSourceVarModifier,
+        Mutation::ExtraSourceVarModifier,
         Mutation::WrongOwner,
         Mutation::WrongScope,
         Mutation::WrongInitializer,
@@ -689,11 +1034,15 @@ fn mutable_reference_reassignment_rejects_forged_edges_and_shapes() {
 fn assignment_mapping_failures_are_typed_binding_errors() {
     assert!(matches!(
         validate(SOURCE, 23_020, Mutation::MissingAssignment),
-        Err(CrossClassConstructorCallProofError::TypedBinding(_))
+        Err(ValidationError::Proof(
+            CrossClassConstructorCallProofError::TypedBinding(_)
+        ))
     ));
     assert!(matches!(
         validate(SOURCE, 23_021, Mutation::MissingRhs),
-        Err(CrossClassConstructorCallProofError::TypedBinding(_))
+        Err(ValidationError::Proof(
+            CrossClassConstructorCallProofError::TypedBinding(_)
+        ))
     ));
     for (offset, mutation) in [
         Mutation::MissingSelectedAnnotation,
@@ -710,7 +1059,9 @@ fn assignment_mapping_failures_are_typed_binding_errors() {
         assert!(
             matches!(
                 validate(SOURCE, 23_030 + offset as u32, mutation),
-                Err(CrossClassConstructorCallProofError::TypedBinding(_))
+                Err(ValidationError::Proof(
+                    CrossClassConstructorCallProofError::TypedBinding(_)
+                ))
             ),
             "{mutation:?}"
         );
@@ -726,9 +1077,41 @@ fn assignment_mapping_failures_are_typed_binding_errors() {
         assert!(
             matches!(
                 validate(SOURCE, 23_040 + offset as u32, mutation),
-                Err(CrossClassConstructorCallProofError::SourceIdentity(_))
+                Err(ValidationError::Proof(
+                    CrossClassConstructorCallProofError::SourceIdentity(_)
+                ))
             ),
             "{mutation:?}"
         );
+    }
+}
+
+#[test]
+fn mutable_declaration_requires_exact_source_var_and_mutable_flag() {
+    for mutation in [
+        Mutation::ImmutableSelected,
+        Mutation::MissingSourceVarModifier,
+        Mutation::ExtraSourceVarModifier,
+    ] {
+        let result = validate(SOURCE, 23_060 + mutation as u32, mutation);
+        let rejected = match mutation {
+            Mutation::ImmutableSelected => matches!(
+                &result,
+                Err(ValidationError::Proof(
+                    CrossClassConstructorCallProofError::SourceIdentity(_)
+                ))
+            ),
+            Mutation::MissingSourceVarModifier | Mutation::ExtraSourceVarModifier => matches!(
+                &result,
+                Err(ValidationError::Pickle(
+                    dotty_tasty_pickler::PickleError::Unsupported {
+                        feature: dotty_tasty_pickler::UnsupportedFeature::SymbolMetadata,
+                        ..
+                    }
+                ))
+            ),
+            _ => unreachable!(),
+        };
+        assert!(rejected, "{mutation:?}: {result:?}");
     }
 }

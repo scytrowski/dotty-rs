@@ -64,6 +64,8 @@ pub struct ValidatedMutableLocalReferenceReassignmentProof<'session> {
     source_pair_arguments: [TreeId<Untyped>; 2],
     typed_pair_arguments: [TreeId<Typed>; 2],
     original_locals: [SymbolId; 2],
+    semantic_originals: [SymbolId; 2],
+    prefix_locals: [SymbolId; 2],
 }
 
 impl ValidatedMutableLocalReferenceReassignmentProof<'_> {
@@ -167,6 +169,16 @@ impl ValidatedMutableLocalReferenceReassignmentProof<'_> {
     }
     pub const fn original_locals(&self) -> [SymbolId; 2] {
         self.original_locals
+    }
+    /// The two immutable locals in seed/Pair semantic order, independent of
+    /// their source declaration order.
+    pub const fn semantic_originals(&self) -> [SymbolId; 2] {
+        self.semantic_originals
+    }
+    /// Original locals in source declaration order; this is distinct from the
+    /// semantic `first` target under reversed declarations.
+    pub const fn prefix_locals(&self) -> [SymbolId; 2] {
+        self.prefix_locals
     }
 }
 
@@ -1349,5 +1361,14 @@ pub fn validate_mutable_local_reference_reassignment_proof<'session>(
         source_pair_arguments,
         typed_pair_arguments,
         original_locals: [originals[0].symbol, originals[1].symbol],
+        semantic_originals: [semantic_first, semantic_second],
+        prefix_locals: [
+            original_bindings[0]
+                .ok_or_else(|| sid("first local has no original Typer binding"))?
+                .symbol(),
+            original_bindings[1]
+                .ok_or_else(|| sid("second local has no original Typer binding"))?
+                .symbol(),
+        ],
     })
 }
