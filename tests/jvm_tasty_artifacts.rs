@@ -34,7 +34,7 @@ use dotty_classfile::bytecode::CodeSequence;
 use dotty_classfile::bytecode::{
     AnalysisError, CfgCodeAnalyzer, ClassReference, ConstantPoolIndexOperand, ControlFlowGraph,
     Instruction, LocalIndex, SpecialMethodReference, VirtualMethodReference,
-    analyze as analyze_instructions,
+    analyze as analyze_instructions, assemble as assemble_instructions,
 };
 use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
 use std::io::Write;
@@ -82,6 +82,10 @@ const TWO_IMMUTABLE_LOCAL_PAIR_BATCH: &str =
     include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
 const MUTABLE_REFERENCE_REBINDING_BATCH: &str =
     include_str!("fixtures/jvm_tasty_mutable_reference_rebinding/MutableReferenceRebinding.scala");
+const MUTABLE_REFERENCE_REBINDING_JAVA: &[u8] =
+    include_bytes!("fixtures/jvm_tasty_mutable_reference_rebinding/RustRuntimeProbe.java");
+const MUTABLE_REFERENCE_REBINDING_JAVA_SHA256: &str =
+    "e0679bf4a786026af8dbefa4fbbbe33fc253749d81d81502cf7fcc66ba4bd238";
 const IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH: &str = "package example\n\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\n\nclass Pair(first: Counter, second: Counter):\n  private val left: Counter = first\n  private val right: Counter = second\n  def leftValue(): Int = left.get()\n  def rightValue(): Int = right.get()\n\nclass PairFactory:\n  def create(firstSeed: Int, secondSeed: Int): Pair =\n    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)\n    val alias: Counter = first\n    alias.set(secondSeed)\n    second.set(firstSeed)\n    new Pair(first, second)\n";
 const COUNTER_FACTORY_IDENTITY_ONLY: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n";
 const COUNTER_FACTORY_PRIMITIVE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n  def create(seed: Int): Int = seed\n";
@@ -918,6 +922,437 @@ fn mutable_reference_rebinding_emits_the_exact_six_artifact_batch() {
         let failed_destination = publication.path().join(format!("failed-{index}"));
         assert!(publish_paired_batch(&failed_destination, &first, Some(fault)).is_err());
         assert!(!failed_destination.exists(), "fault case {index}");
+    }
+}
+
+#[test]
+fn mutable_reference_rebinding_java_21_consumes_original_rust_artifacts() {
+    if !require_exact_jdk_21_or_skip() {
+        return;
+    }
+
+    let batch = emit_paired_jvm_tasty_batch(
+        MUTABLE_REFERENCE_REBINDING_BATCH,
+        "MutableReferenceRebinding.scala",
+        SourceId::from_index(23_160),
+    )
+    .expect("the unchanged original source emits six Rust-authored artifacts in one session");
+    assert_eq!(batch.classes().len(), 3);
+
+    let stage = TestDirectory::new("mutable-rebinding-java21-rust-consumer");
+    let classes = stage.path().join("original-rust-classes");
+    let published = publish_paired_batch(&classes, &batch, None).unwrap();
+    assert_eq!(published.len(), 6);
+
+    for artifact in batch.classes() {
+        let class_bytes = std::fs::read(classes.join(artifact.classfile_path())).unwrap();
+        let tasty_bytes = std::fs::read(classes.join(artifact.tasty_path())).unwrap();
+        let mut class_reader = Reader::new(&class_bytes);
+        let class = ClassFile::decode(&mut class_reader).unwrap();
+        assert!(class_reader.is_at_end());
+        let tasty = TastyFile::parse_and_validate_scala_3_9(&tasty_bytes).unwrap();
+        assert_eq!(
+            class.tasty_link_id().unwrap(),
+            Some(artifact.tasty_link_id())
+        );
+        assert_eq!(
+            TastyLinkId::from_bytes(tasty.header().uuid),
+            artifact.tasty_link_id()
+        );
+    }
+
+    let artifact_paths = [
+        "example/Counter.class",
+        "example/Counter.tasty",
+        "example/Pair.class",
+        "example/Pair.tasty",
+        "example/PairFactory.class",
+        "example/PairFactory.tasty",
+    ];
+    assert_eq!(
+        published,
+        artifact_paths
+            .iter()
+            .map(|relative| classes.join(relative))
+            .collect::<Vec<_>>(),
+        "publication receipt preserves the six class/TASTy paths in order"
+    );
+    let receipts = artifact_paths
+        .iter()
+        .map(|relative| {
+            let path = classes.join(relative);
+            let bytes = std::fs::read(&path).unwrap();
+            let artifact = batch
+                .classes()
+                .iter()
+                .find(|artifact| {
+                    artifact.classfile_path() == *relative || artifact.tasty_path() == *relative
+                })
+                .unwrap();
+            let link_id = artifact.tasty_link_id();
+            let uuid_bytes = link_id.as_bytes();
+            let hex = |bytes: &[u8]| {
+                bytes
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            };
+            let uuid = format!(
+                "{}-{}-{}-{}-{}",
+                hex(&uuid_bytes[0..4]),
+                hex(&uuid_bytes[4..6]),
+                hex(&uuid_bytes[6..8]),
+                hex(&uuid_bytes[8..10]),
+                hex(&uuid_bytes[10..16])
+            );
+            let digest = sha256sum(&path);
+            eprintln!(
+                "mutable-rebinding-rust-artifact {relative} sha256={digest} tasty_link={uuid}"
+            );
+            (path, relative.to_string(), bytes, digest, uuid)
+        })
+        .collect::<Vec<_>>();
+
+    let source_dir = stage.path().join("client-source");
+    let client_classes = stage.path().join("client-classes");
+    std::fs::create_dir(&source_dir).unwrap();
+    std::fs::create_dir(&client_classes).unwrap();
+    let client_source = source_dir.join("RustRuntimeProbe.java");
+    std::fs::write(&client_source, MUTABLE_REFERENCE_REBINDING_JAVA).unwrap();
+    let client_sha = sha256sum(&client_source);
+    assert_eq!(client_sha, MUTABLE_REFERENCE_REBINDING_JAVA_SHA256);
+    eprintln!("mutable-rebinding-java-client sha256={client_sha}");
+    let javac = Command::new("javac")
+        .args(["--release", "21", "-classpath"])
+        .arg(&classes)
+        .arg("-d")
+        .arg(&client_classes)
+        .arg(&client_source)
+        .output()
+        .expect("start JDK 21 javac for the separately authored consumer");
+    assert!(
+        javac.status.success(),
+        "javac --release 21 rejected the independent Java client:\n{}\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+
+    let javap = Command::new("javap")
+        .args(["-v", "-c", "-p", "-classpath"])
+        .arg(&classes)
+        .arg("example.PairFactory")
+        .output()
+        .expect("start JDK 21 javap for the original Rust PairFactory class");
+    assert!(
+        javap.status.success(),
+        "javap rejected original Rust PairFactory.class:\n{}",
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let dump = String::from_utf8_lossy(&javap.stdout);
+    let create_dump = dump
+        .split("public example.Pair create(")
+        .nth(1)
+        .expect("javap shows PairFactory.create")
+        .split("\n  public ")
+        .next()
+        .unwrap();
+    assert!(dump.contains("major version: 65"), "{dump}");
+    assert!(
+        create_dump.contains("descriptor: (III)Lexample/Pair;"),
+        "{create_dump}"
+    );
+    assert_eq!(
+        create_dump.matches("new           #").count(),
+        3,
+        "two Counter allocations and one Pair allocation:\n{create_dump}"
+    );
+    assert_eq!(
+        create_dump.matches("// class example/Counter").count(),
+        2,
+        "{create_dump}"
+    );
+    assert_eq!(
+        create_dump
+            .matches("// Method example/Counter.set:(I)V")
+            .count(),
+        1,
+        "{create_dump}"
+    );
+    for expected in [
+        "astore        6",
+        "aload         6",
+        "aload         4",
+        "aload         5",
+    ] {
+        assert!(
+            create_dump.contains(expected),
+            "javap omitted {expected:?}:\n{create_dump}"
+        );
+    }
+
+    let factory = batch
+        .classes()
+        .iter()
+        .find(|artifact| artifact.classfile_path() == "example/PairFactory.class")
+        .unwrap();
+    let mut reader = Reader::new(factory.classfile_bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+    assert!(reader.is_at_end());
+    assert_eq!((class.version.major, class.version.minor), (65, 0));
+    let create = class
+        .methods
+        .iter()
+        .find(|method| {
+            class.constant_pool.utf8(method.name_index).unwrap() == "create"
+                && class.constant_pool.utf8(method.descriptor_index).unwrap()
+                    == "(III)Lexample/Pair;"
+        })
+        .unwrap();
+    let [Attribute::Code(code)] = create.attributes.as_slice() else {
+        panic!("PairFactory.create has exactly one Code attribute");
+    };
+    assert_eq!((code.max_stack, code.max_locals), (4, 7));
+    let code_start = code.code.as_ptr() as usize - factory.classfile_bytes().as_ptr() as usize;
+    let cp_operand = |offset: usize| {
+        ConstantPoolIndexOperand::try_from(u16::from_be_bytes([
+            code.code[offset],
+            code.code[offset + 1],
+        ]))
+        .unwrap()
+    };
+    let expected_instructions = [
+        Instruction::New(ClassReference::new(cp_operand(1))),
+        Instruction::Dup,
+        Instruction::ILoad(LocalIndex::new(1)),
+        Instruction::InvokeSpecial(SpecialMethodReference::new(cp_operand(6))),
+        Instruction::AStore(LocalIndex::new(4)),
+        Instruction::New(ClassReference::new(cp_operand(11))),
+        Instruction::Dup,
+        Instruction::ILoad(LocalIndex::new(2)),
+        Instruction::InvokeSpecial(SpecialMethodReference::new(cp_operand(16))),
+        Instruction::AStore(LocalIndex::new(5)),
+        Instruction::ALoad(LocalIndex::new(4)),
+        Instruction::AStore(LocalIndex::new(6)),
+        Instruction::ALoad(LocalIndex::new(5)),
+        Instruction::AStore(LocalIndex::new(6)),
+        Instruction::ALoad(LocalIndex::new(6)),
+        Instruction::ILoad(LocalIndex::new(3)),
+        Instruction::InvokeVirtual(VirtualMethodReference::new(cp_operand(32))),
+        Instruction::New(ClassReference::new(cp_operand(35))),
+        Instruction::Dup,
+        Instruction::ALoad(LocalIndex::new(4)),
+        Instruction::ALoad(LocalIndex::new(5)),
+        Instruction::InvokeSpecial(SpecialMethodReference::new(cp_operand(43))),
+        Instruction::AReturn,
+    ];
+    let expected_code = assemble_instructions(&expected_instructions, &class.constant_pool)
+        .expect("expected instruction sequence assembles against the decoded constant pool");
+    assert_eq!(
+        expected_code, code.code,
+        "the symbolic instruction sequence used for CFG analysis must match the original Rust-produced Code bytes"
+    );
+    assert!(
+        code.exception_table.is_empty(),
+        "straight-line PairFactory.create has no exception handlers"
+    );
+    let stack_map_tables = code
+        .attributes
+        .iter()
+        .filter_map(|attribute| match attribute {
+            Attribute::Other(raw)
+                if class.constant_pool.utf8(raw.name_index).ok() == Some("StackMapTable") =>
+            {
+                Some(raw)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        stack_map_tables.is_empty(),
+        "straight-line PairFactory.create has no nested StackMapTable attribute"
+    );
+    let mut decoded_sequence = CodeSequence::new();
+    for instruction in expected_instructions {
+        decoded_sequence.instruction(instruction);
+    }
+    let graph = ControlFlowGraph::build(&decoded_sequence).unwrap();
+    let analysis = CfgCodeAnalyzer::analyze_with_current_class(
+        &graph,
+        "create",
+        "(III)Lexample/Pair;",
+        false,
+        &class.constant_pool,
+        class.this_class,
+    )
+    .expect("decoded straight-line code has a valid typed control-flow graph");
+    assert_eq!(analysis.max_stack, code.max_stack);
+    assert_eq!(analysis.max_locals, code.max_locals);
+    let unique = |pattern: &[u8]| {
+        let found = code
+            .code
+            .windows(pattern.len())
+            .enumerate()
+            .filter_map(|(offset, bytes)| (bytes == pattern).then_some(offset))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            found.len(),
+            1,
+            "unique decoded bytecode pattern {pattern:02x?}"
+        );
+        found[0]
+    };
+    let initializer = unique(&[0x19, 0x04, 0x3a, 0x06]);
+    let reassignment = unique(&[0x19, 0x05, 0x3a, 0x06]);
+    let setter = unique(&[0x19, 0x06, 0x1d, 0xb6]);
+    let pair_args = unique(&[0x19, 0x04, 0x19, 0x05, 0xb7]);
+    assert!(initializer < reassignment && reassignment < setter && setter < pair_args);
+    assert!(
+        create
+            .attributes
+            .iter()
+            .any(|attribute| matches!(attribute, Attribute::Code(_)))
+    );
+
+    let classpath = std::env::join_paths([client_classes.as_path(), classes.as_path()]).unwrap();
+    let run_probe = |classpath: &std::ffi::OsStr| {
+        Command::new("java")
+            .args(["-Xverify:all", "-ea", "-classpath"])
+            .arg(classpath)
+            .arg("example.RustRuntimeProbe")
+            .output()
+            .expect("start strict Java 21 execution against Rust artifacts")
+    };
+    let java = run_probe(&classpath);
+    assert!(
+        java.status.success(),
+        "java -Xverify:all -ea rejected the original Rust batch:\n{}\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "rust mutable rebinding: signed/equal seeds, original identities and independent mutation passed"
+    );
+
+    for (path, relative, original, digest, _) in &receipts {
+        assert_eq!(sha256sum(path), *digest, "JDK changed {relative}");
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            *original,
+            "JDK changed {relative}"
+        );
+    }
+
+    let copy_classes = |label: &str, omit: Option<&str>| {
+        let root = stage.path().join(label);
+        std::fs::create_dir(&root).unwrap();
+        for (_, relative, _, _, _) in &receipts {
+            if omit == Some(relative.as_str()) {
+                continue;
+            }
+            let destination = root.join(relative);
+            std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            std::fs::copy(classes.join(relative), destination).unwrap();
+        }
+        root
+    };
+    let run_negative =
+        |label: &str, root: &std::path::Path, expected: &str, verifier_valid: bool| {
+            let negative_cp = std::env::join_paths([client_classes.as_path(), root]).unwrap();
+            let result = run_probe(&negative_cp);
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            assert!(
+                !result.status.success(),
+                "negative {label} unexpectedly passed"
+            );
+            assert!(
+                stderr.contains(expected),
+                "negative {label} first rejection should contain {expected:?}:\n{stderr}"
+            );
+            if verifier_valid {
+                assert!(
+                    !stderr.contains("VerifyError"),
+                    "{label} must reach the runtime witness:\n{stderr}"
+                );
+                assert!(
+                    stderr.contains("AssertionError"),
+                    "{label} must be rejected by semantic identity/value assertions:\n{stderr}"
+                );
+            }
+            eprintln!(
+                "mutable-rebinding-negative {label} first_rejection={}",
+                if verifier_valid {
+                    "runtime witness"
+                } else {
+                    expected
+                }
+            );
+        };
+
+    let mutate_factory = |label: &str, offset: usize, replacement: u8| {
+        let root = copy_classes(label, None);
+        let path = root.join("example/PairFactory.class");
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[code_start + offset] = replacement;
+        std::fs::write(path, bytes).unwrap();
+        root
+    };
+    let root = mutate_factory("negative-wrong-selected-slot", reassignment + 3, 0x04);
+    run_negative("wrong-selected-slot", &root, "AssertionError", true);
+    let root = mutate_factory("negative-wrong-setter-receiver", setter + 1, 0x04);
+    run_negative("wrong-setter-receiver", &root, "AssertionError", true);
+
+    let root = copy_classes("negative-wrong-pair-arguments", None);
+    let pair_factory_path = root.join("example/PairFactory.class");
+    let mut bytes = std::fs::read(&pair_factory_path).unwrap();
+    bytes.swap(code_start + pair_args + 1, code_start + pair_args + 3);
+    std::fs::write(pair_factory_path, bytes).unwrap();
+    run_negative("wrong-pair-arguments", &root, "AssertionError", true);
+
+    let root = copy_classes("negative-wrong-descriptor", None);
+    let path = root.join("example/PairFactory.class");
+    let mut bytes = std::fs::read(&path).unwrap();
+    let descriptor = b"(III)Lexample/Pair;";
+    let positions = bytes
+        .windows(descriptor.len())
+        .enumerate()
+        .filter_map(|(index, value)| (value == descriptor).then_some(index))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        positions.len(),
+        1,
+        "method descriptor is unique in classfile"
+    );
+    bytes[positions[0] + 1] = b'Z';
+    std::fs::write(path, bytes).unwrap();
+    run_negative("wrong-descriptor", &root, "NoSuchMethodError", false);
+
+    let root = copy_classes("negative-broken-frame", None);
+    let path = root.join("example/PairFactory.class");
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[code_start - 8..code_start - 6].copy_from_slice(&0u16.to_be_bytes());
+    std::fs::write(path, bytes).unwrap();
+    run_negative("broken-frame-stack-bound", &root, "VerifyError", false);
+
+    let root = copy_classes("negative-missing-counter", Some("example/Counter.class"));
+    run_negative(
+        "missing-counter-class",
+        &root,
+        "NoClassDefFoundError",
+        false,
+    );
+
+    for (path, relative, original, digest, _) in &receipts {
+        assert_eq!(
+            sha256sum(path),
+            *digest,
+            "negative copies changed original {relative}"
+        );
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            *original,
+            "negative copies changed original {relative}"
+        );
     }
 }
 
