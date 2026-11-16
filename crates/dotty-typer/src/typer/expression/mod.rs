@@ -924,7 +924,18 @@ impl SourceTyper<'_> {
                                 prefix: receiver,
                             })?,
                     };
-                    self.member_type_on_journaled(&candidate, info_journal)
+                    let member_type = self.member_type_on_journaled(&candidate, info_journal)?;
+                    if self.definitions.any_hash_code_symbol(self.store) == Some(symbol)
+                        && let Some(Type::ByName { result }) = self.store.types.try_get(member_type)
+                    {
+                        // Scala 3.9 encodes Any.## as an ExprType: selecting
+                        // this canonical parameterless member yields its Int
+                        // result at a value boundary. Keep the TermRef's
+                        // symbol identity intact and limit this adaptation to
+                        // the authenticated builtin selected on canonical Int.
+                        return Ok(*result);
+                    }
+                    Ok(member_type)
                 }
             }
             Type::NoType | Type::NoPrefix | Type::Error(_) => {
