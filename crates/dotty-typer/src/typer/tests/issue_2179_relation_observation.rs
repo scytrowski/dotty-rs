@@ -1645,7 +1645,415 @@ fn preserves_option_map_rollback_and_tuple_to_array_automatic_preparation() {
 
 #[test]
 #[ignore = "requires pinned Scala 3.9.0 sources, classpath jars, and JDK environment"]
-fn captures_acceptance_vi_hash_code_and_prop_clear_before_rollback() {
+fn accepts_original_enumeration_hash_code_in_two_fresh_sessions() {
+    let first = acceptance_vi_hash_code_session_receipt();
+    let second = acceptance_vi_hash_code_session_receipt();
+    assert_eq!(
+        first, second,
+        "fresh frontend/resolver sessions normalize identically"
+    );
+    println!(
+        "ENUMERATION_HASH_CODE_ACCEPTANCE_BEGIN\n{}\nENUMERATION_HASH_CODE_ACCEPTANCE_END",
+        first.join("\n")
+    );
+}
+
+fn acceptance_vi_hash_code_session_receipt() -> Vec<String> {
+    let scala_root = PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT"));
+    let revision = Command::new("git")
+        .args(["-C", scala_root.to_str().unwrap(), "rev-parse", "HEAD"])
+        .output()
+        .expect("git reads the pinned Scala source revision");
+    assert!(revision.status.success());
+    assert_eq!(
+        String::from_utf8(revision.stdout).unwrap().trim(),
+        "777528f19a58e794c9954a42f433373472ec57f8",
+        "acceptance VI observation uses the pinned Scala 3.9.0 source"
+    );
+    let target_path = "library/src/scala/Enumeration.scala";
+    let text = fs::read_to_string(scala_root.join(target_path)).unwrap();
+    let source = SourceId::from_index(2307);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let scanner = ContextualScanner::new(&text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(&text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "source parses without recovery: {:?}",
+        parsed.diagnostics
+    );
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        target_path,
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let root = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            (tree.index() == 459 && matches!(node.kind, TreeKind::DefDef(_))).then_some(tree)
+        })
+        .expect("original hashCode tree 459");
+    let method_node = parsed.ast.get(root);
+    let method_span = method_node.position.unwrap().span().range();
+    assert_eq!((method_span.start(), method_span.end()), (9430, 9466));
+    assert_eq!(
+        &text[method_span.start() as usize..method_span.end() as usize],
+        "override def hashCode(): Int = id.##",
+        "type the unchanged original Scala 3.9 method"
+    );
+    let method_symbol = index
+        .symbol_at(source, root)
+        .expect("canonical hashCode source symbol");
+    let owner = store
+        .symbols
+        .get(method_symbol)
+        .owner
+        .expect("source method owner");
+    assert_eq!(
+        store.symbols.get(method_symbol).origin,
+        SymbolOrigin::Source(source)
+    );
+    assert_eq!(
+        observed_symbol_path(&store, method_symbol),
+        ".scala.Enumeration.Value.hashCode"
+    );
+    assert_eq!(
+        observed_symbol_path(&store, owner),
+        ".scala.Enumeration.Value"
+    );
+    assert!(matches!(
+        index.definition_of(method_symbol),
+        Some(SourceDefinition::Canonical { source: actual_source, tree })
+            if actual_source == source && tree == root
+    ));
+    assert!(matches!(
+        index.definition_of(owner),
+        Some(SourceDefinition::Canonical { source: actual_source, .. }) if actual_source == source
+    ));
+
+    let id_definition = parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            (store.names.resolve(definition.name.as_name().text()) == "id")
+                .then(|| index.symbol_at(source, tree).map(|symbol| (tree, symbol)))
+                .flatten()
+        })
+        .find(|(_, symbol)| store.symbols.get(*symbol).owner == Some(owner))
+        .expect("original Value.id DefDef has its canonical source symbol");
+    let (id_definition_tree, expected_id) = id_definition;
+    let expected_id_info = store.symbols.get(expected_id);
+    assert_eq!(expected_id_info.kind, SymbolKind::Method);
+    assert_eq!(expected_id_info.owner, Some(owner));
+    assert!(matches!(
+        index.definition_of(expected_id),
+        Some(SourceDefinition::Canonical { source: actual_source, tree })
+            if actual_source == source && tree == id_definition_tree
+    ));
+    assert_eq!(
+        observed_symbol_path(&store, expected_id),
+        ".scala.Enumeration.Value.id"
+    );
+
+    // Val.id is a bounded same-source counterfeit: its spelling and method
+    // shape match, but its canonical owner is not the original Value owner.
+    let wrong_owner_id = parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            if store.names.resolve(definition.name.as_name().text()) != "id" {
+                return None;
+            }
+            index.symbol_at(source, tree).map(|symbol| (tree, symbol))
+        })
+        .find(|(_, symbol)| store.symbols.get(*symbol).owner != Some(owner))
+        .expect("same-source Val.id counterfeit has a canonical source symbol");
+    let (wrong_owner_id_tree, wrong_owner_id) = wrong_owner_id;
+    assert_eq!(store.symbols.get(wrong_owner_id).kind, SymbolKind::Method);
+    assert_ne!(wrong_owner_id, expected_id);
+    assert_ne!(store.symbols.get(wrong_owner_id).owner, Some(owner));
+    assert!(matches!(
+        index.definition_of(wrong_owner_id),
+        Some(SourceDefinition::Canonical { source: actual_source, tree })
+            if actual_source == source && tree == wrong_owner_id_tree
+    ));
+    assert_eq!(
+        store
+            .names
+            .resolve(store.symbols.get(wrong_owner_id).name.text()),
+        "id",
+        "same-spelling wrong-owner source id cannot receive Value.id credit"
+    );
+    assert_eq!(
+        observed_symbol_path(&store, wrong_owner_id),
+        ".scala.Enumeration.Val.id"
+    );
+
+    let id_tree = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, _)| (tree.index() == 457).then_some(tree))
+        .expect("original id tree 457");
+    let selection_tree = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, _)| (tree.index() == 458).then_some(tree))
+        .expect("original id.## tree 458");
+    let id_span = parsed.ast.get(id_tree).position.unwrap().span().range();
+    let selection_span = parsed
+        .ast
+        .get(selection_tree)
+        .position
+        .unwrap()
+        .span()
+        .range();
+    assert_eq!(
+        &text[id_span.start() as usize..id_span.end() as usize],
+        "id"
+    );
+    assert_eq!(
+        &text[selection_span.start() as usize..selection_span.end() as usize],
+        "id.##"
+    );
+    let (java_home, jars) = scala_classpath();
+    let resolver = propimpl_resolver(&java_home, jars, definitions, &packages);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(resolver));
+    let store_before = typer.store().checkpoint();
+    let typed_before = typer.typed_ast().checkpoint();
+    let type_index_before = format!("{:?}", typer.type_index.checkpoint());
+    let typed_index_before = format!("{:?}", typer.typed_index);
+    let source_index_before = format!("{:?}", typer.source_typed_index());
+    typer.inject_failure_after_outermost_success = true;
+    let error = typer
+        .type_method_definition(root)
+        .expect_err("forced late failure follows full method typing");
+    assert!(
+        matches!(error, TyperError::SymbolResolution { error: ResolutionError::Malformed { ref reason }, .. }
+            if reason == "test-injected failure after successful source typing"),
+        "the injection occurs after complete typing: {error:?}"
+    );
+    assert_eq!(
+        typer.store().checkpoint(),
+        store_before,
+        "late failure rolls back semantic store"
+    );
+    assert_eq!(
+        typer.typed_ast().checkpoint(),
+        typed_before,
+        "late failure rolls back typed arena"
+    );
+    assert_eq!(
+        format!("{:?}", typer.type_index.checkpoint()),
+        type_index_before
+    );
+    assert_eq!(format!("{:?}", typer.typed_index), typed_index_before);
+    assert_eq!(
+        format!("{:?}", typer.source_typed_index()),
+        source_index_before
+    );
+    assert_eq!(typer.source_typed_index().get(source, root), None);
+
+    let typed_root = typer
+        .type_method_definition(root)
+        .expect("the original method retries in the same fresh session");
+    assert_eq!(
+        typer.source_typed_index().get(source, root),
+        Some(typed_root)
+    );
+    let typed_root_node = typer.typed_ast().get(typed_root);
+    let typed_definition = match &typed_root_node.kind {
+        TreeKind::DefDef(definition) => definition,
+        other => panic!("typed root remains a DefDef: {other:?}"),
+    };
+    assert!(matches!(
+        typer.store().types.get(typed_root_node.ty),
+        Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == method_symbol
+    ));
+    let method_signature = match typer.store().symbols.get(method_symbol).info {
+        SymbolInfo::Complete(signature) => signature,
+        other => panic!("hashCode signature completed: {other:?}"),
+    };
+    let method_type = match typer.store().types.get(method_signature) {
+        Type::Method(method) => method,
+        other => panic!("hashCode retains its method type: {other:?}"),
+    };
+    assert_eq!(
+        method_type.result, definitions.int,
+        "hashCode result is Int"
+    );
+    assert_eq!(
+        typed_root_node.position.unwrap().span().range(),
+        method_span
+    );
+    let typed_rhs = typed_definition
+        .rhs
+        .expect("typed hashCode retains its original RHS");
+    for tree in [id_tree, selection_tree] {
+        let source_node = parsed.ast.get(tree);
+        let source_range = source_node.position.unwrap().span().range();
+        let typed_tree = typer
+            .source_typed_index()
+            .get(source, tree)
+            .unwrap_or_else(|| panic!("source tree {} has a typed mapping", tree.index()));
+        assert_eq!(
+            typer
+                .typed_ast()
+                .get(typed_tree)
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            source_range,
+            "nested source and typed spans match for tree {}",
+            tree.index()
+        );
+    }
+    let id_typed = typer
+        .source_typed_index()
+        .get(source, id_tree)
+        .expect("the original id value expression is mapped");
+    let id_typed_node = typer.typed_ast().get(id_typed);
+    let id_reference = match typer.store().types.get(id_typed_node.ty) {
+        Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        } => *symbol,
+        other => panic!("id expression retains canonical method identity: {other:?}"),
+    };
+    assert_eq!(
+        id_reference, expected_id,
+        "id is the original source DefDef"
+    );
+    let id_reference_info = typer.store().symbols.get(id_reference);
+    assert_eq!(id_reference_info.kind, SymbolKind::Method);
+    assert_eq!(id_reference_info.owner, Some(owner));
+    assert_eq!(id_reference_info.origin, SymbolOrigin::Source(source));
+    assert!(matches!(
+        typer.index.definition_of(id_reference),
+        Some(SourceDefinition::Canonical { source: actual_source, tree })
+            if actual_source == source && tree == id_definition_tree
+    ));
+    let id_signature = match typer.store().symbols.get(id_reference).info {
+        SymbolInfo::Complete(signature) => signature,
+        other => panic!("id signature completed: {other:?}"),
+    };
+    assert_eq!(
+        id_signature, definitions.int,
+        "canonical id method result is Int"
+    );
+
+    let typed_selection = typer
+        .source_typed_index()
+        .get(source, selection_tree)
+        .expect("the original id.## selection is mapped");
+    let typed_select = match &typer.typed_ast().get(typed_selection).kind {
+        TreeKind::Select(select) => select,
+        other => panic!("the original id.## is a typed Select: {other:?}"),
+    };
+    assert_eq!(typer.store().names.resolve(typed_select.name.text()), "##");
+    assert_eq!(
+        typed_select.qualifier, id_typed,
+        "the typed Select qualifier maps to the original source id tree"
+    );
+    let selected_member = match typer
+        .store()
+        .types
+        .get(typer.typed_ast().get(typed_selection).ty)
+    {
+        Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        } => *symbol,
+        other => panic!("the original ## selection retains a member identity: {other:?}"),
+    };
+    let canonical_hash_code = definitions
+        .any_hash_code_symbol(typer.store())
+        .expect("canonical Any.## is available");
+    assert_eq!(selected_member, canonical_hash_code);
+    assert_eq!(
+        typer.store().symbols.get(selected_member).owner,
+        Some(definitions.any_class)
+    );
+    assert!(
+        matches!(
+            typer.store().types.get(typer.typed_ast().get(typed_rhs).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == selected_member
+        ),
+        "the method RHS is the selected ## expression"
+    );
+    let selected_info = typer.store().symbols.get(selected_member);
+    assert_eq!(typer.store().names.resolve(selected_info.name.text()), "##");
+    assert!(matches!(
+        selected_info.origin,
+        SymbolOrigin::Tasty(_) | SymbolOrigin::Classfile(_) | SymbolOrigin::Builtin
+    ));
+    let member_signature = match selected_info.info {
+        SymbolInfo::Complete(signature) => signature,
+        ref other => panic!("## has a completed canonical signature: {other:?}"),
+    };
+    assert!(
+        matches!(
+            typer.store().types.get(member_signature),
+            Type::ByName { result } if *result == definitions.int
+        ),
+        "selected ## signature returns Int: {:?}",
+        typer.store().types.get(member_signature)
+    );
+    assert!(
+        matches!(
+            typer.store().types.get(typer.typed_ast().get(typed_selection).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == selected_member
+        ),
+        "the original source selection resolves to canonical ##"
+    );
+    let selected_provenance = match selected_info.origin {
+        SymbolOrigin::Tasty(_) => "Tasty",
+        SymbolOrigin::Classfile(_) => "Classfile",
+        SymbolOrigin::Builtin => "Builtin",
+        SymbolOrigin::Synthetic => "Synthetic",
+        SymbolOrigin::Source(_) => unreachable!("selected ## is an external canonical member"),
+    };
+
+    vec![
+        format!("root={target_path}#tree=459 span={method_span:?} source={:?}", &text[method_span.start() as usize..method_span.end() as usize]),
+        format!("owner={} method={} owner_provenance=canonical-source", observed_symbol_path(typer.store(), owner), observed_symbol_path(typer.store(), method_symbol)),
+        "result=scala.Int typed_root_kind=DefDef typed_rhs_result=scala.Int source_to_typed_root=true".to_owned(),
+        format!("id_definition={target_path}#tree={} span={:?} owner={} kind=Method result=scala.Int", id_definition_tree.index(), parsed.ast.get(id_definition_tree).position.unwrap().span().range(), observed_symbol_path(typer.store(), owner)),
+        format!("id_tree=457 span={id_span:?} symbol={} provenance=canonical-source", observed_symbol_path(typer.store(), id_reference)),
+        format!("source_id_negative={target_path}#tree={} span={:?} path={} kind=Method owner_differs=true acceptance_credit=false", wrong_owner_id_tree.index(), parsed.ast.get(wrong_owner_id_tree).position.unwrap().span().range(), observed_symbol_path(typer.store(), wrong_owner_id)),
+        format!("selection_tree=458 span={selection_span:?} typed_kind=Select member={} provenance={selected_provenance} signature=ByName[scala.Int] result=scala.Int", observed_symbol_path(typer.store(), selected_member)),
+        "rollback=store,typed-arena,type-index,typed-index,source-to-typed-index restored; same-session retry=success".to_owned(),
+    ]
+}
+
+#[test]
+#[ignore = "requires pinned Scala 3.9.0 sources, classpath jars, and JDK environment"]
+fn captures_acceptance_vi_prop_clear_before_rollback() {
     let scala_root = PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT"));
     let revision = Command::new("git")
         .args(["-C", scala_root.to_str().unwrap(), "rev-parse", "HEAD"])
@@ -1667,20 +2075,12 @@ fn captures_acceptance_vi_hash_code_and_prop_clear_before_rollback() {
         std::env::split_paths(&std::env::var_os("SCALA39_CLASSPATH").expect("SCALA39_CLASSPATH"))
             .collect::<Vec<_>>();
 
-    for (relative, wanted_tree, wanted_method, wanted_owner) in [
-        (
-            "library/src/scala/Enumeration.scala",
-            459,
-            "hashCode",
-            ".scala.Enumeration.Value",
-        ),
-        (
-            "library/src/scala/sys/PropImpl.scala",
-            99,
-            "clear",
-            ".scala.sys.PropImpl",
-        ),
-    ] {
+    for (relative, wanted_tree, wanted_method, wanted_owner) in [(
+        "library/src/scala/sys/PropImpl.scala",
+        99,
+        "clear",
+        ".scala.sys.PropImpl",
+    )] {
         let text = fs::read_to_string(scala_root.join(relative)).unwrap();
         let source = SourceId::from_index(0);
         let mut store = SemanticStore::new();
