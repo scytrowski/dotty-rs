@@ -22437,6 +22437,113 @@ mod tests {
     }
 
     #[test]
+    fn canonical_any_hash_code_is_selectable_on_a_source_parameterless_value_result() {
+        let source_text = "class C { def value: Int = 1; def use: Int = value.## }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let value_method = method_definition_and_rhs(&parsed, &store, &index, source, "value").0;
+        let hash_code = definitions.any_hash_code_symbol(&store).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(use_method).unwrap();
+        let store_before = typer.store().checkpoint();
+        let typed_before = typer.typed_ast().checkpoint();
+        let type_index_before = format!("{:?}", typer.type_index.checkpoint());
+        let typed_index_before = format!("{:?}", typer.typed_index.clone());
+        let source_typed_index_before = format!("{:?}", typer.source_typed_index());
+        let rollback_observed = Rc::new(RefCell::new(false));
+        let observed = rollback_observed.clone();
+        typer.transaction_failure_observer = Some(Rc::new(move |typer| {
+            let selection = typer.source_typed_index().get(source, rhs);
+            *observed.borrow_mut() = selection.is_some_and(|selection| {
+                matches!(
+                    typer.store().types.get(typer.typed_ast().get(selection).ty),
+                    Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                        if *symbol == hash_code
+                )
+            });
+        }));
+        typer.inject_failure_after_outermost_success = true;
+        assert!(matches!(
+            typer.type_expression_expected(rhs, context, definitions.int),
+            Err(TyperError::SymbolResolution {
+                source: failure_source,
+                error: ResolutionError::Malformed { ref reason },
+                ..
+            }) if failure_source == source
+                && reason == "test-injected failure after successful source typing"
+        ));
+        assert!(*rollback_observed.borrow());
+        assert_eq!(typer.store().checkpoint(), store_before);
+        assert_eq!(typer.typed_ast().checkpoint(), typed_before);
+        assert_eq!(
+            format!("{:?}", typer.type_index.checkpoint()),
+            type_index_before
+        );
+        assert_eq!(
+            format!("{:?}", typer.typed_index.clone()),
+            typed_index_before
+        );
+        assert_eq!(
+            format!("{:?}", typer.source_typed_index()),
+            source_typed_index_before
+        );
+        assert!(typer.typed_index.get(source, rhs).is_none());
+        assert!(typer.source_typed_index().get(source, rhs).is_none());
+        typer.transaction_failure_observer = None;
+        assert!(!typer.inject_failure_after_outermost_success);
+        let typed = typer
+            .type_expression_expected(rhs, context, definitions.int)
+            .unwrap();
+        let selection_ty = typer.typed_ast().get(typed).ty;
+        let selection_kind = typer.typed_ast().get(typed).kind.clone();
+        let mut info_journal = Vec::new();
+        assert_eq!(
+            typer
+                .widen_expression_type_journaled(selection_ty, &mut info_journal, 0)
+                .unwrap(),
+            definitions.int
+        );
+        assert!(matches!(
+            typer.store.types.get(selection_ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                if *symbol == hash_code
+        ));
+        assert!(matches!(
+            &selection_kind,
+            TreeKind::Select(selection)
+                if typer.store.names.resolve(selection.name.text()) == "##"
+        ));
+        let Some(SourceDefinition::Canonical {
+            source: value_source,
+            tree: value_tree,
+        }) = index.definition_of(value_method)
+        else {
+            panic!("value method keeps its canonical source definition");
+        };
+        assert!(matches!(
+            index.definition_of(value_method),
+            Some(SourceDefinition::Canonical { source: actual, tree })
+                if actual == value_source && tree == value_tree
+        ));
+        assert_eq!(value_source, source);
+        assert_eq!(
+            index.symbol_at(value_source, value_tree),
+            Some(value_method)
+        );
+        assert_eq!(
+            typer.store.symbols.get(hash_code).owner,
+            Some(definitions.any_class)
+        );
+    }
+
+    #[test]
     fn canonical_any_hash_code_does_not_make_a_mutable_int_receiver_stable() {
         let source_text = "class C { def use: Int = { var value: Int = 1; value.## } }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
@@ -22455,6 +22562,161 @@ mod tests {
             typer.type_expression(rhs, context),
             Err(TyperError::UnstableSelectionPrefix { .. })
         ));
+    }
+
+    #[test]
+    fn source_parameterless_value_selection_keeps_member_argument_and_generic_controls() {
+        for (source_text, method, expected) in [
+            (
+                "class C { def value: Int = 1; def use: Int = value.notAMember }",
+                "use",
+                "member",
+            ),
+            (
+                "class C { def value: Int = 1; def use: Int = value.##(1) }",
+                "use",
+                "arguments",
+            ),
+            (
+                "class C { def generic[A](value: Int): Int = value; def use: Int = generic[Int](1).## }",
+                "use",
+                "stability",
+            ),
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, method);
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let context = typer.expression_context_for(method).unwrap();
+            let result = typer.type_expression(rhs, context);
+            match expected {
+                "member" => assert!(matches!(result, Err(TyperError::MemberNotFound { .. }))),
+                "arguments" => assert!(
+                    matches!(result, Err(TyperError::ApplicationCalleeNotMethod { .. })),
+                    "an argument list must not be accepted for parameterless ##: {result:?}"
+                ),
+                "stability" => assert!(matches!(
+                    result,
+                    Err(TyperError::UnstableSelectionPrefix { .. })
+                )),
+                _ => unreachable!(),
+            }
+            assert!(typer.typed_index.get(source, rhs).is_none());
+            assert!(typer.source_typed_index().get(source, rhs).is_none());
+        }
+    }
+
+    #[test]
+    fn source_value_result_selection_preserves_member_visibility_across_aliases() {
+        let source_text = "class Box { private def secret: Int = 1; protected def guarded: Int = 2; def exposed: Int = 3; private def takeSecret(arg: Int): Int = arg; protected def takeGuarded(arg: Int): Int = arg; def takeExposed(arg: Int): Int = arg; def next: Box = this; def value: Box = this; def privateInside: Int = value.secret }; class C { def value: Box = new Box(); def privateDirect: Int = value.secret; def privateParens: Int = (value).secret; def privateCall: Int = value.secret(); def privateApply: Int = value.takeSecret(1); def privateInfix: Int = value takeSecret 1; def privateChain: Int = value.next.secret; def protectedDirect: Int = value.guarded; def protectedApply: Int = value.takeGuarded(1); def protectedInfix: Int = value takeGuarded 1; def protectedAlias: Int = { val alias = value; alias.guarded }; def privateAlias: Int = { val alias = value; alias.secret }; def publicDirect: Int = value.exposed; def publicApply: Int = value.takeExposed(1); def publicInfix: Int = value takeExposed 1 }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let cases = [
+            ("C", "privateDirect", "inaccessible"),
+            ("C", "privateParens", "inaccessible"),
+            ("C", "privateCall", "inaccessible"),
+            ("C", "privateApply", "inaccessible"),
+            ("C", "privateInfix", "inaccessible"),
+            ("C", "privateChain", "unstable"),
+            ("C", "protectedDirect", "inaccessible"),
+            ("C", "protectedApply", "inaccessible"),
+            ("C", "protectedInfix", "inaccessible"),
+            ("C", "protectedAlias", "inaccessible"),
+            ("C", "privateAlias", "inaccessible"),
+            ("C", "publicDirect", "accessible"),
+            ("C", "publicApply", "accessible"),
+            ("C", "publicInfix", "accessible"),
+            ("Box", "privateInside", "accessible"),
+        ];
+        for (class_name, method_name, expected) in cases {
+            let (method, rhs) =
+                method_definition_and_rhs(&parsed, &store, &index, source, method_name);
+            let owner = store
+                .symbols
+                .get(method)
+                .owner
+                .expect("test method retains its class owner");
+            assert_eq!(
+                store.names.resolve(store.symbols.get(owner).name.text()),
+                class_name
+            );
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let context = typer.expression_context_for(method).unwrap();
+            let result = typer.type_expression_expected(rhs, context, definitions.int);
+            if expected == "accessible" {
+                assert!(result.is_ok(), "{class_name}.{method_name}: {result:?}");
+            } else if expected == "unstable" {
+                assert!(
+                    matches!(result, Err(TyperError::UnstableSelectionPrefix { .. })),
+                    "{class_name}.{method_name} must retain its unstable chained-prefix rejection: {result:?}"
+                );
+            } else {
+                assert!(
+                    matches!(result, Err(TyperError::MemberNotFound { .. })),
+                    "{class_name}.{method_name} must reject inaccessible selection: {result:?}"
+                );
+                assert!(typer.typed_index.get(source, rhs).is_none());
+                assert!(typer.source_typed_index().get(source, rhs).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn overloaded_value_member_applications_filter_inaccessible_candidates_before_resolution() {
+        let source_text = "class Box { private def secret(value: Int): Int = value; def secret(value: Boolean): Int = 2; protected def guarded(value: Int): Int = value; def guarded(value: Boolean): Int = 3 }; class C { def value: Box = new Box(); def privateOverload: Int = value.secret(1); def protectedOverload: Int = value.guarded(1); def privateAlias: Int = { val alias = value; alias.secret(1) }; def protectedAlias: Int = { val alias = value; alias.guarded(1) }; def privateParameter(alias: Box): Int = alias.secret(1); def protectedParameter(alias: Box): Int = alias.guarded(1); def publicOverload: Int = value.secret(true); def publicAlias: Int = { val alias = value; alias.secret(true) }; def publicParameter(alias: Box): Int = alias.guarded(true) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let cases = [
+            ("privateOverload", false),
+            ("protectedOverload", false),
+            ("privateAlias", false),
+            ("protectedAlias", false),
+            ("privateParameter", false),
+            ("protectedParameter", false),
+            ("publicOverload", true),
+            ("publicAlias", true),
+            ("publicParameter", true),
+        ];
+        for (method_name, should_type) in cases {
+            let (method, rhs) =
+                method_definition_and_rhs(&parsed, &store, &index, source, method_name);
+            let owner = store
+                .symbols
+                .get(method)
+                .owner
+                .expect("test method retains its class owner");
+            assert_eq!(
+                store.names.resolve(store.symbols.get(owner).name.text()),
+                "C"
+            );
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let context = typer.expression_context_for(method).unwrap();
+            let result = typer.type_expression_expected(rhs, context, definitions.int);
+            assert_eq!(result.is_ok(), should_type, "C.{method_name}: {result:?}");
+            if !should_type {
+                assert!(typer.typed_index.get(source, rhs).is_none());
+                assert!(typer.source_typed_index().get(source, rhs).is_none());
+            }
+        }
     }
 
     #[test]

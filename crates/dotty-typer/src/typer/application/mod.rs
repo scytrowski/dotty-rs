@@ -2,6 +2,7 @@
 
 use dotty_core::names::Namespace;
 
+use super::expression::SelectedMemberRequest;
 use super::*;
 
 pub(super) mod constructors;
@@ -131,15 +132,19 @@ impl SourceTyper<'_> {
         qualifier: TreeId<Typed>,
         name: Name,
         position: Option<SourceSpan>,
+        context: ExpressionContext,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TreeId<Typed>, ZeroArgumentSelectionError> {
         let selected = self
             .type_selected_member_on_qualifier(
-                tree_index,
-                qualifier,
-                name,
-                false,
-                position,
+                SelectedMemberRequest {
+                    tree_index,
+                    qualifier,
+                    name,
+                    backquoted: false,
+                    position,
+                    context,
+                },
                 info_journal,
             )
             .map_err(ZeroArgumentSelectionError::Selection)?;
@@ -623,7 +628,7 @@ impl SourceTyper<'_> {
                     Err(TyperError::ThisOwnerNotEnclosing { .. }) => false,
                     Err(error) => return Err(error),
                 };
-                same_owner && self.is_plain_private_source_method(candidate.symbol)
+                same_owner && self.is_plain_private_source_member(candidate.symbol)
             }
             Visibility::Protected
             | Visibility::Package(_)
@@ -765,22 +770,6 @@ impl SourceTyper<'_> {
         };
         self.store.names.resolve(error.message)
             == format!("unresolved .tasty class type parameter reference: #{index}")
-    }
-
-    fn is_plain_private_source_method(&self, symbol: SymbolId) -> bool {
-        let Some(SourceDefinition::Canonical { source, tree }) = self.index.definition_of(symbol)
-        else {
-            return false;
-        };
-        if source != self.source {
-            return false;
-        }
-        matches!(
-            self.arena.try_get(tree).map(|node| &node.kind),
-            Some(TreeKind::DefDef(definition))
-                if definition.metadata.visibility
-                    == Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: None })
-        )
     }
 
     pub(in crate::typer) fn type_resolved_application(

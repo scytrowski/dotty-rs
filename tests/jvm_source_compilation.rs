@@ -20327,14 +20327,9 @@ fn reference_receiver_calls_keep_private_access_rejected_and_allow_verified_bran
     assert!(
         matches!(
             private_result,
-            Err(PipelineFailure::Codegen(
-                JvmCodegenError::UnsupportedJvmVisibility {
-                    visibility: dotty_core::Visibility::Private,
-                    ..
-                }
-            ))
+            Err(PipelineFailure::Typer(TyperError::MemberNotFound { .. }))
         ),
-        "backend must reject private cross-class calls, got {private_result:?}"
+        "typer must reject private cross-class calls before code generation, got {private_result:?}"
     );
     assert!(private_output.class_files().is_empty());
 
@@ -28754,7 +28749,7 @@ fn cross_class_call_reports_primitive_receiver_to_the_typer() {
 }
 
 #[test]
-fn cross_class_private_method_call_reports_its_first_backend_failure() {
+fn cross_class_private_method_call_reports_its_first_typer_visibility_failure() {
     let source = CROSS_CLASS_TASTY_SOURCE.replace("def get()", "private def get()");
     let output = TestOutputDirectory::new("cross-class-private-method");
     let error = compile_source_batch(
@@ -28768,10 +28763,7 @@ fn cross_class_private_method_call_reports_its_first_backend_failure() {
     assert!(
         matches!(
             error,
-            PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmVisibility {
-                visibility: Visibility::Private,
-                ..
-            })
+            PipelineFailure::Typer(TyperError::MemberNotFound { .. })
         ),
         "{error:?}"
     );

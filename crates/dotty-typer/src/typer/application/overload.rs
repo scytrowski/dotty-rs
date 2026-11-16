@@ -146,6 +146,18 @@ impl SourceTyper<'_> {
                     .lookup_overload_members_journaled(receiver, operator, info_journal)
                     .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
             }
+            let mut accessible_members = Vec::with_capacity(members.len());
+            for member in members {
+                if self.is_selected_member_accessible(
+                    member.symbol,
+                    member.declaring_class,
+                    context,
+                    tree_index,
+                )? {
+                    accessible_members.push(member);
+                }
+            }
+            let members = accessible_members;
             if members.is_empty() && !self.any_equality_operator_name(operator) {
                 return Err(TyperError::MemberNotFound {
                     source: self.source,
@@ -699,6 +711,24 @@ impl SourceTyper<'_> {
                             }
                         };
                     }
+                    let had_inaccessible_member = if !java_class_qualifier {
+                        let original_len = members.len();
+                        let mut accessible_members = Vec::with_capacity(members.len());
+                        for member in members {
+                            if self.is_selected_member_accessible(
+                                member.symbol,
+                                member.declaring_class,
+                                context,
+                                function_tree.index(),
+                            )? {
+                                accessible_members.push(member);
+                            }
+                        }
+                        members = accessible_members;
+                        members.len() < original_len
+                    } else {
+                        false
+                    };
                     if java_class_qualifier {
                         members.retain(|member| {
                             self.store.symbols.contains(member.symbol)
@@ -711,7 +741,7 @@ impl SourceTyper<'_> {
                         });
                     }
                     if members.is_empty() {
-                        if java_class_qualifier {
+                        if java_class_qualifier || had_inaccessible_member {
                             return Err(TyperError::MemberNotFound {
                                 source: self.source,
                                 tree_index: function_tree.index(),
@@ -739,7 +769,7 @@ impl SourceTyper<'_> {
                         )?;
                         return Ok(None);
                     }
-                    if members.len() == 1 {
+                    if members.len() == 1 && !had_inaccessible_member {
                         // Only a call to one already-applicable method may read
                         // a mutable local receiver; selecting a member as a value
                         // still requires the ordinary stable-prefix check.

@@ -2045,9 +2045,67 @@ fn captures_acceptance_vi_hash_code_and_prop_clear_before_rollback() {
         let type_index_before = format!("{:?}", typer.type_index.checkpoint());
         let typed_index_before = format!("{:?}", typer.typed_index.clone());
         let source_typed_index_before = format!("{:?}", typer.source_typed_index());
-        let error = typer
-            .type_method_definition(tree)
-            .expect_err("the original complete DefDef remains blocked on this baseline");
+        if relative == "library/src/scala/Enumeration.scala" {
+            let typed_method = typer.type_method_definition(tree).unwrap_or_else(|error| {
+                panic!("the original Enumeration.Value.hashCode definition types: {error:?}")
+            });
+            assert_eq!(
+                typer.source_typed_index().get(source, tree),
+                Some(typed_method)
+            );
+            let (selection_tree, _) = parsed_ast
+                .iter()
+                .find(|(candidate, _)| candidate.index() == 458)
+                .expect("the original id.## selection is retained");
+            let typed_selection = typer
+                .source_typed_index()
+                .get(source, selection_tree)
+                .expect("the original value selection has a typed mapping");
+            let selection = typer.typed_ast().get(typed_selection);
+            let TreeKind::Select(selection_node) = &selection.kind else {
+                panic!("the original id.## remains a canonical selection")
+            };
+            assert_eq!(typer.store.names.resolve(selection_node.name.text()), "##");
+            let canonical_hash_code = definitions
+                .any_hash_code_symbol(typer.store())
+                .expect("canonical Any.## is available");
+            assert!(matches!(
+                typer.store.types.get(selection.ty),
+                Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                    if *symbol == canonical_hash_code
+            ));
+            let mut info_journal = Vec::new();
+            assert_eq!(
+                typer
+                    .widen_expression_type_journaled(selection.ty, &mut info_journal, 0)
+                    .unwrap(),
+                definitions.int,
+                "canonical ## produces Int at the ordinary value boundary"
+            );
+            assert!(observed.borrow().is_none());
+            println!(
+                "ACCEPTANCE_VI_TYPED_BEGIN\nroot=Enumeration.scala#tree=459\nsource_method={method_symbol:?}\ntyped_method={typed_method:?}\ncanonical_hash_code={canonical_hash_code:?}\nselection_tree=458 typed_selection={typed_selection:?} result=Int\nACCEPTANCE_VI_TYPED_END"
+            );
+            continue;
+        }
+        let error = match typer.type_method_definition(tree) {
+            Ok(typed_method) => {
+                assert_eq!(
+                    typer.source_typed_index().get(source, tree),
+                    Some(typed_method)
+                );
+                assert!(
+                    observed.borrow().is_none(),
+                    "successful original DefDef typing does not invoke the failure observer"
+                );
+                println!(
+                    "ACCEPTANCE_VI_TYPED_BEGIN\nroot={relative}#tree={}\ntyped_method={typed_method:?}\nACCEPTANCE_VI_TYPED_END",
+                    tree.index()
+                );
+                continue;
+            }
+            Err(error) => error,
+        };
         assert!(
             observed.borrow().is_some(),
             "the test observer captures the original error before rollback: {error:?}"

@@ -34,6 +34,12 @@ PROP_IMPL_CLEAR_HISTORICAL_BLOCKER = (
     "actual: TypeId(1674), expected: TypeId(9) }"
 )
 PROP_IMPL_CLEAR_LIVE_RESULT = "Unit"
+ENUMERATION_HASH_CODE_IDENTITY = "library/src/scala/Enumeration.scala#tree=459"
+ENUMERATION_HASH_CODE_HISTORICAL_BLOCKER = (
+    "blocked::UnstableSelectionPrefix { source: SourceId(0), tree_index: 458, "
+    "qualifier_type: TypeId(123) }"
+)
+ENUMERATION_HASH_CODE_LIVE_RESULT = "Int"
 PRODUCT2_FIXTURE = Path("crates/dotty-typer/tests/fixtures/source-case-class-product2-3.9.0")
 PRODUCT2_SOURCE_SHA256 = "4b144913df1d2021359c44633dc2a23f21bf6288bf2528c86cc6f53d79b8ee31"
 SCALA_MATRIX_CASES = {
@@ -1406,6 +1412,27 @@ def validate_cohorts(root: Path, reports: list[Path], output: Path, baseline_rec
                 and wanted["second_status"] == "typed"
                 and wanted["first_status"] == wanted["second_status"]
                 and wanted["actual_result"] == PROP_IMPL_CLEAR_LIVE_RESULT
+                and wanted["protected_success"] == "false"
+                and wanted["two_pass_equal"] == "true"
+            )
+            if completed and historical == found:
+                continue
+        if wanted["identity"] == ENUMERATION_HASH_CODE_IDENTITY:
+            # Keep the frozen 25 + 25 receipt immutable while recognizing the
+            # intended #2302 completion of Enumeration.Value.hashCode.
+            historical = dict(wanted)
+            historical["first_status"] = ENUMERATION_HASH_CODE_HISTORICAL_BLOCKER
+            historical["second_status"] = ENUMERATION_HASH_CODE_HISTORICAL_BLOCKER
+            historical["actual_result"] = "not_available"
+            completed = (
+                wanted["cohort"] == "main"
+                and wanted["source_tree"] == "459"
+                and wanted["baseline_status"] == "blocked"
+                and wanted["gate"] == "observe"
+                and wanted["first_status"] == "typed"
+                and wanted["second_status"] == "typed"
+                and wanted["first_status"] == wanted["second_status"]
+                and wanted["actual_result"] == ENUMERATION_HASH_CODE_LIVE_RESULT
                 and wanted["protected_success"] == "false"
                 and wanted["two_pass_equal"] == "true"
             )

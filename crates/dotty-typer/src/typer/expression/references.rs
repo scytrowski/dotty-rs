@@ -6,6 +6,15 @@ use dotty_core::ast::*;
 use dotty_core::types::*;
 use dotty_core::*;
 
+pub(in crate::typer) struct SelectedMemberRequest {
+    pub(in crate::typer) tree_index: u32,
+    pub(in crate::typer) qualifier: TreeId<Typed>,
+    pub(in crate::typer) name: Name,
+    pub(in crate::typer) backquoted: bool,
+    pub(in crate::typer) position: Option<SourceSpan>,
+    pub(in crate::typer) context: ExpressionContext,
+}
+
 impl SourceTyper<'_> {
     pub(in crate::typer) fn validate_cached_parent_argument_receiver_access(
         &self,
@@ -326,9 +335,62 @@ impl SourceTyper<'_> {
             // call chains such as `holder.value().get()` without treating a
             // mutable field reference like `holder.current.get()` as stable.
             Ok(())
+        } else if self.is_source_parameterless_method_value(qualifier, qualifier_type) {
+            // A source `def value: T` is a value-producing member, even though
+            // its reference retains the method symbol. Permit ordinary value
+            // member selection on that result; type projections continue to
+            // use `require_stable_selection_prefix` directly.
+            Ok(())
         } else {
             self.require_stable_selection_prefix(qualifier_type, tree_index)
         }
+    }
+
+    fn is_source_parameterless_method_value(
+        &self,
+        qualifier: TreeId<Typed>,
+        qualifier_type: TypeId,
+    ) -> bool {
+        if !self
+            .typed_arena
+            .try_get(qualifier)
+            .is_some_and(|tree| matches!(tree.kind, TreeKind::Ident(_) | TreeKind::Select(_)))
+        {
+            return false;
+        }
+        let Some(Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        }) = self.store.types.try_get(qualifier_type)
+        else {
+            return false;
+        };
+        if !self.store.symbols.contains(*symbol)
+            || self.store.symbols.get(*symbol).kind != SymbolKind::Method
+        {
+            return false;
+        }
+        let Some(SourceDefinition::Canonical { source, tree }) = self.index.definition_of(*symbol)
+        else {
+            return false;
+        };
+        if source != self.source {
+            return false;
+        }
+        let Some(TreeKind::DefDef(definition)) = self.arena.try_get(tree).map(|node| &node.kind)
+        else {
+            return false;
+        };
+        definition.type_params.is_empty()
+            && definition.value_param_clauses.is_empty()
+            && matches!(
+                self.store.symbols.get(*symbol).info,
+                SymbolInfo::Complete(info)
+                    if !matches!(
+                        self.store.types.try_get(info),
+                        Some(Type::NoType | Type::NoPrefix | Type::Error(_) | Type::Method(_) | Type::Poly(_))
+                    )
+            )
     }
 
     pub(in crate::typer) fn is_mutable_local_selection_receiver(
@@ -1029,6 +1091,23 @@ impl SourceTyper<'_> {
                     receiver: receiver_type,
                     name: selection.name,
                 })?;
+            if !self.store.symbols.contains(candidate) {
+                return Err(TyperError::UnknownSymbol { symbol: candidate });
+            }
+            let declaring_class = self.store.symbols.get(candidate).owner.unwrap_or(candidate);
+            if !self.is_selected_member_accessible(
+                candidate,
+                declaring_class,
+                context,
+                tree.index(),
+            )? {
+                return Err(TyperError::MemberNotFound {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    receiver: receiver_type,
+                    name: selection.name,
+                });
+            }
             let ty = self.store.types.alloc(Type::TermRef {
                 prefix: receiver_type,
                 target: TermRefTarget::Symbol(candidate),
@@ -1044,11 +1123,14 @@ impl SourceTyper<'_> {
             );
         }
         self.type_selected_member_on_qualifier(
-            tree.index(),
-            qualifier,
-            selection.name,
-            selection.backquoted,
-            position,
+            SelectedMemberRequest {
+                tree_index: tree.index(),
+                qualifier,
+                name: selection.name,
+                backquoted: selection.backquoted,
+                position,
+                context,
+            },
             info_journal,
         )
     }
@@ -1184,13 +1266,17 @@ impl SourceTyper<'_> {
     /// Selects a member from a qualifier already typed by the caller.
     pub(in crate::typer) fn type_selected_member_on_qualifier(
         &mut self,
-        tree_index: u32,
-        qualifier: TreeId<Typed>,
-        name: Name,
-        backquoted: bool,
-        position: Option<SourceSpan>,
+        request: SelectedMemberRequest,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TreeId<Typed>, TyperError> {
+        let SelectedMemberRequest {
+            tree_index,
+            qualifier,
+            name,
+            backquoted,
+            position,
+            context,
+        } = request;
         let receiver_type = self.typed_arena.get(qualifier).ty;
         let receiver = self.widen_expression_type_journaled(receiver_type, info_journal, 0)?;
         let receiver = self.this_type_receiver_view(receiver)?;
@@ -1279,6 +1365,19 @@ impl SourceTyper<'_> {
                 });
             }
         };
+        if !self.is_selected_member_accessible(
+            candidate.symbol,
+            candidate.declaring_class,
+            context,
+            tree_index,
+        )? {
+            return Err(TyperError::MemberNotFound {
+                source: self.source,
+                tree_index,
+                receiver,
+                name,
+            });
+        }
         let ty = self.store.types.alloc(Type::TermRef {
             prefix: receiver_type,
             target: TermRefTarget::Symbol(candidate.symbol),
@@ -1287,6 +1386,56 @@ impl SourceTyper<'_> {
             TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
                 .select(qualifier, name, backquoted, ty, position),
         )
+    }
+
+    pub(in crate::typer) fn is_selected_member_accessible(
+        &self,
+        symbol: SymbolId,
+        declaring_class: SymbolId,
+        context: ExpressionContext,
+        tree_index: u32,
+    ) -> Result<bool, TyperError> {
+        if !self.store.symbols.contains(symbol) {
+            return Ok(false);
+        }
+        let declaration = self.store.symbols.get(symbol);
+        match declaration.visibility {
+            Visibility::Public => Ok(true),
+            Visibility::Private => {
+                let current_class = match self.enclosing_this_owner(None, context.owner, tree_index)
+                {
+                    Ok(current_class) => current_class,
+                    Err(TyperError::ThisOwnerNotEnclosing { .. }) => return Ok(false),
+                    Err(error) => return Err(error),
+                };
+                Ok(current_class == declaring_class
+                    && declaration.owner == Some(declaring_class)
+                    && self.is_plain_private_source_member(symbol))
+            }
+            // Protected, package-private and qualified visibility need
+            // subclass/package-boundary proofs the source typer does not yet
+            // model at ordinary selection sites. Keep them fail-closed.
+            Visibility::Protected
+            | Visibility::Package(_)
+            | Visibility::PrivateWithin(_)
+            | Visibility::ProtectedWithin(_) => Ok(false),
+        }
+    }
+
+    pub(in crate::typer) fn is_plain_private_source_member(&self, symbol: SymbolId) -> bool {
+        let Some(SourceDefinition::Canonical { source, tree }) = self.index.definition_of(symbol)
+        else {
+            return false;
+        };
+        if source != self.source {
+            return false;
+        }
+        let visibility = match self.arena.try_get(tree).map(|node| &node.kind) {
+            Some(TreeKind::DefDef(definition)) => definition.metadata.visibility,
+            Some(TreeKind::ValDef(definition)) => definition.metadata.visibility,
+            _ => None,
+        };
+        visibility == Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: None })
     }
 
     pub(in crate::typer) fn any_ref_identity_operator_name(&self, name: Name) -> bool {
