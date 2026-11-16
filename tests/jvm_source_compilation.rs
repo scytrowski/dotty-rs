@@ -21373,11 +21373,11 @@ fn mutable_counter_reference_rebinding_preserves_source_identity_and_verifies_on
         .path()
         .to_str()
         .expect("UTF-8 generated class directory");
-    let tmpdir = std::env::var("TMPDIR").expect("managed scratch is exported as TMPDIR");
+    let tmpdir = std::env::temp_dir();
     let probe = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/jvm_tasty_mutable_reference_rebinding/RuntimeProbe.java");
     let javac = Command::new("javac")
-        .arg(format!("-J-Djava.io.tmpdir={tmpdir}"))
+        .arg(format!("-J-Djava.io.tmpdir={}", tmpdir.display()))
         .args([
             "--release",
             "21",
@@ -21396,7 +21396,7 @@ fn mutable_counter_reference_rebinding_preserves_source_identity_and_verifies_on
         String::from_utf8_lossy(&javac.stderr)
     );
     let java = Command::new("java")
-        .arg(format!("-Djava.io.tmpdir={tmpdir}"))
+        .arg(format!("-Djava.io.tmpdir={}", tmpdir.display()))
         .args([
             "-Xverify:all",
             "-ea",
@@ -21417,7 +21417,7 @@ fn mutable_counter_reference_rebinding_preserves_source_identity_and_verifies_on
         "mutable reference rebinding values=7/42,-9/11,5/-13 distinct=true"
     );
     let javap = Command::new("javap")
-        .arg(format!("-J-Djava.io.tmpdir={tmpdir}"))
+        .arg(format!("-J-Djava.io.tmpdir={}", tmpdir.display()))
         .args([
             "-v",
             "-c",
@@ -21461,7 +21461,7 @@ fn mutable_counter_reference_rebinding_preserves_source_identity_and_verifies_on
     )
     .expect("write selected=first runtime control");
     let javac = Command::new("javac")
-        .arg(format!("-J-Djava.io.tmpdir={tmpdir}"))
+        .arg(format!("-J-Djava.io.tmpdir={}", tmpdir.display()))
         .args([
             "--release",
             "21",
@@ -21479,7 +21479,7 @@ fn mutable_counter_reference_rebinding_preserves_source_identity_and_verifies_on
         String::from_utf8_lossy(&javac.stderr)
     );
     let java = Command::new("java")
-        .arg(format!("-Djava.io.tmpdir={tmpdir}"))
+        .arg(format!("-Djava.io.tmpdir={}", tmpdir.display()))
         .args([
             "-Xverify:all",
             "-ea",
@@ -21494,6 +21494,267 @@ fn mutable_counter_reference_rebinding_preserves_source_identity_and_verifies_on
         "java -Xverify:all rejected selected=first control: {}",
         String::from_utf8_lossy(&java.stderr)
     );
+}
+
+#[test]
+fn mutable_counter_reference_rebinding_rejects_invalid_inputs_without_partial_batches() {
+    #[derive(Clone, Copy)]
+    enum ExpectedSourceFailure {
+        Immutable,
+        Incompatible,
+        Uninitialized,
+    }
+    let invalid_sources = [
+        (
+            "immutable-selected",
+            MUTABLE_REFERENCE_REBINDING_SOURCE.replace("var selected", "val selected"),
+            ExpectedSourceFailure::Immutable,
+        ),
+        (
+            "incompatible-selected-reference",
+            MUTABLE_REFERENCE_REBINDING_SOURCE.replace("selected = second", "selected = nextValue"),
+            ExpectedSourceFailure::Incompatible,
+        ),
+        (
+            "uninitialized-selected-reference",
+            MUTABLE_REFERENCE_REBINDING_SOURCE
+                .replace("var selected: Counter = first", "var selected: Counter"),
+            ExpectedSourceFailure::Uninitialized,
+        ),
+    ];
+    for (case, source, expected_error) in invalid_sources {
+        let output = TestOutputDirectory::new(case);
+        let failure = compile_source_batch(
+            &source,
+            "MutableReferenceRebinding.scala",
+            output.path(),
+            SourceId::from_index(23050),
+            SourceUnitCardinality::AtLeastTwo,
+        )
+        .expect_err("invalid mutable-reference source must fail before batch publication");
+        let expected = match expected_error {
+            ExpectedSourceFailure::Immutable => matches!(
+                failure,
+                PipelineFailure::Typer(TyperError::AssignmentTargetImmutable { .. })
+            ),
+            ExpectedSourceFailure::Incompatible => matches!(
+                failure,
+                PipelineFailure::Typer(TyperError::ExpectedExpressionTypeMismatch { .. })
+            ),
+            ExpectedSourceFailure::Uninitialized => matches!(
+                failure,
+                PipelineFailure::Typer(TyperError::LocalValueRightHandSideMissing { .. })
+            ),
+        };
+        assert!(expected, "{case}: unexpected error {failure:?}");
+        assert!(
+            output.class_files().is_empty(),
+            "{case}: Counter and Pair must not be published before PairFactory rejection"
+        );
+    }
+
+    #[derive(Clone, Copy)]
+    enum Corruption {
+        LocalOwner,
+        MutabilityEvidence,
+        StaleBinding,
+        SetterOwner,
+    }
+
+    for (case, corruption) in [
+        ("selected-owner-mismatch", Corruption::LocalOwner),
+        (
+            "selected-mutability-mismatch",
+            Corruption::MutabilityEvidence,
+        ),
+        ("stale-selected-local-binding", Corruption::StaleBinding),
+        ("wrong-counter-set-owner", Corruption::SetterOwner),
+    ] {
+        let output = TestOutputDirectory::new(case);
+        let source_id = SourceId::from_index(23051);
+        let selected_symbol = RefCell::new(None);
+        let mut observe_typer = |ast: &AstArena<Untyped>,
+                                 _root: TreeId<Untyped>,
+                                 index: &SourceSemanticIndex,
+                                 typer: &mut SourceTyper<'_>,
+                                 _definitions: &Definitions| {
+            let (method_tree, method) = ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::DefDef(method)
+                        if typer.store().names.resolve(method.name.as_name().text())
+                            == "create" =>
+                    {
+                        Some((tree, method))
+                    }
+                    _ => None,
+                })
+                .expect("the audited factory method exists");
+            let method_symbol = index.symbol_at(source_id, method_tree).unwrap();
+            let TreeKind::Block(block) = &ast.get(method.rhs.unwrap()).kind else {
+                panic!("create remains a block")
+            };
+            let selected_tree = block
+                .stats
+                .iter()
+                .copied()
+                .find(|tree| {
+                    let TreeKind::ValDef(definition) = &ast.get(*tree).kind else {
+                        return false;
+                    };
+                    typer
+                        .store()
+                        .names
+                        .resolve(definition.name.as_name().text())
+                        == "selected"
+                })
+                .expect("selected declaration exists");
+            let binding = typer
+                .typed_local_binding_at(source_id, selected_tree)
+                .expect("selected has its canonical typed local binding");
+            assert_eq!(
+                typer.store().symbols.get(binding.symbol()).owner,
+                Some(method_symbol)
+            );
+            *selected_symbol.borrow_mut() = Some(binding.symbol());
+        };
+        let mut mutate_store = |ast: &AstArena<Untyped>,
+                                source: SourceId,
+                                index: &SourceSemanticIndex,
+                                store: &mut SemanticStore| {
+            if matches!(corruption, Corruption::LocalOwner) {
+                let selected = selected_symbol
+                    .borrow()
+                    .expect("typed observer captured selected's canonical symbol");
+                let pair = ast
+                    .iter()
+                    .find_map(|(tree, node)| match &node.kind {
+                        TreeKind::TypeDef(definition)
+                            if store.names.resolve(definition.name.as_name().text()) == "Pair" =>
+                        {
+                            index.symbol_at(source, tree)
+                        }
+                        _ => None,
+                    })
+                    .expect("Pair has its canonical source class symbol");
+                store.symbols.get_mut(selected).owner = Some(pair);
+            }
+            if matches!(corruption, Corruption::SetterOwner) {
+                let setter = ast
+                    .iter()
+                    .find_map(|(tree, node)| match &node.kind {
+                        TreeKind::DefDef(definition)
+                            if store.names.resolve(definition.name.as_name().text()) == "set" =>
+                        {
+                            index.symbol_at(source, tree)
+                        }
+                        _ => None,
+                    })
+                    .expect("Counter.set has its canonical source method symbol");
+                let pair = ast
+                    .iter()
+                    .find_map(|(tree, node)| match &node.kind {
+                        TreeKind::TypeDef(definition)
+                            if store.names.resolve(definition.name.as_name().text()) == "Pair" =>
+                        {
+                            index.symbol_at(source, tree)
+                        }
+                        _ => None,
+                    })
+                    .expect("Pair has its canonical source class symbol");
+                store.symbols.get_mut(setter).owner = Some(pair);
+            }
+        };
+        let mut corrupt_plan = |_ast: &AstArena<Untyped>,
+                                _root: TreeId<Untyped>,
+                                _index: &SourceSemanticIndex,
+                                _typed_index: &SourceTypedIndex,
+                                unit: &mut JvmCompilationUnit<'_>,
+                                _definitions: &Definitions| {
+            if matches!(
+                corruption,
+                Corruption::MutabilityEvidence | Corruption::StaleBinding
+            ) {
+                let factory = unit
+                    .classes
+                    .iter_mut()
+                    .find(|class| {
+                        unit.store
+                            .names
+                            .resolve(unit.store.symbols.get(class.class).name.text())
+                            == "PairFactory"
+                    })
+                    .expect("PairFactory has a class plan");
+                let create = factory
+                    .methods
+                    .iter_mut()
+                    .find(|method| {
+                        unit.store
+                            .names
+                            .resolve(unit.store.symbols.get(method.method).name.text())
+                            == "create"
+                    })
+                    .expect("PairFactory.create has a method plan");
+                let selected = create
+                    .locals
+                    .iter_mut()
+                    .find(|local| {
+                        unit.store
+                            .names
+                            .resolve(unit.store.symbols.get(local.symbol).name.text())
+                            == "selected"
+                    })
+                    .expect("selected has a local binding");
+                match corruption {
+                    Corruption::MutabilityEvidence => selected.mutable = false,
+                    Corruption::StaleBinding => {
+                        let typed_body = unit.typed_ast.get(create.body.unwrap());
+                        let TreeKind::Block(block) = &typed_body.kind else {
+                            panic!("create's typed body remains a Block")
+                        };
+                        selected.declaration = block.expr;
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        };
+        let result = compile_source_batch_with_typer_failure_observer(
+            MUTABLE_REFERENCE_REBINDING_SOURCE,
+            "MutableReferenceRebinding.scala",
+            output.path(),
+            source_id,
+            SourceUnitCardinality::AtLeastTwo,
+            SourceBatchObservers {
+                source: Some(&mut corrupt_plan),
+                source_store_mutator: Some(&mut mutate_store),
+                typer: Some(&mut observe_typer),
+                ..SourceBatchObservers::default()
+            },
+        );
+        let failure =
+            result.expect_err("corrupted local/member identity must fail before emission");
+        let expected = match corruption {
+            Corruption::LocalOwner | Corruption::SetterOwner => {
+                matches!(
+                    failure,
+                    PipelineFailure::Codegen(JvmCodegenError::WrongOwner { .. })
+                )
+            }
+            Corruption::MutabilityEvidence => matches!(
+                failure,
+                PipelineFailure::Codegen(JvmCodegenError::LocalMutabilityMismatch { .. })
+            ),
+            Corruption::StaleBinding => matches!(
+                failure,
+                PipelineFailure::Codegen(JvmCodegenError::InvalidLocalDeclaration { .. })
+            ),
+        };
+        assert!(expected, "{case}: unexpected error {failure:?}");
+        assert!(
+            output.class_files().is_empty(),
+            "{case}: no class from the three-class batch may be published"
+        );
+    }
 }
 
 #[test]
