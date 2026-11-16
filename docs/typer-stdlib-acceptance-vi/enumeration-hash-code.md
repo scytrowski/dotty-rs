@@ -19,10 +19,17 @@ The receipt proves canonical provenance at each step:
 - `hashCode` is the canonical source method owned by the canonical source class
   `scala.Enumeration.Value`.
 - Source tree 457 (`id`, bytes `9461..9463`) maps to canonical source method
-  `scala.Enumeration.Value.id`, whose result is `Int`.
+  `scala.Enumeration.Value.id`, resolved from its original `DefDef` source
+  tree, with `Method` kind, the exact `Value` owner identity, and result `Int`.
+- The same source also contains `Val.id`, a same-spelling `Method` under a
+  different owner. The regression verifies its canonical source identity does
+  not receive `Value.id` acceptance credit.
 - Source tree 458 (`id.##`, bytes `9461..9466`) maps to builtin `Any.##` with
   signature `ByName[Int]`; the typed method's original RHS refers to that
   selected member, and the enclosing complete `DefDef` result is `Int`.
+- The selected member equals the canonical `Any.##` `SymbolId`, is owned by
+  the canonical `Any` `SymbolId`, and remains a typed `Select` whose qualifier
+  is the mapped original `id` source tree.
 - The typed root and both nested source mappings retain their original spans.
 
 The pinned Scala 3.9.0 compiler oracle accepts the original file and prints
