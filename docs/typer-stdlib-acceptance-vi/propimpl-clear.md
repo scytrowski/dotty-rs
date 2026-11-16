@@ -8,10 +8,11 @@ resolver, semantic-store, and arena sessions. Both normalized semantic receipts
 match. The method's declared and typed result is `Unit`; its source RHS remains
 the original `underlying -= key` operation.
 
-The implementation under test is integration base
-`664f2515746867e37610ec2255172936fd5f7b97` plus test commit
-`f2975687f8b538e3b165d53ede1e233caaf503ee`. No production typing logic,
-cohort manifest, protected result, or release threshold changed.
+The implementation under test is PR commit
+`39cd81451b9c236db965f724ea4c5ba1078be423`, reachable from the PR head. The
+focused PropImpl acceptance and negative/rollback tests were rerun on that
+exact commit. No production typing logic, cohort manifest, protected result,
+or release threshold changed.
 
 ## Source and typed-tree evidence
 
@@ -56,19 +57,22 @@ or mappings:
 | declared result changed from `Unit` to unrelated `Int` | `ExpectedExpressionTypeMismatch` |
 | original source root presented under a different `SourceId` | no canonical source symbol; rejected before typing |
 
-For a late failure, the original operation is typed before an unresolved final
-identifier fails. The transaction observer confirms that ordering. The test
-then verifies the semantic store, typed arena, type index, typed index, and
-source-to-typed index return to their pre-attempt checkpoints, with no committed
-root or partial adaptation. After correcting the final node to `()`, retrying
-with the same semantic store, source index, package registry, and AST arena
-succeeds as a complete `DefDef`.
+The natural late-error control confirms that the original operation types
+before an unresolved final identifier fails, then verifies rollback of the
+semantic store, typed arena, type index, typed index, source-to-typed index, and
+committed root. Separately, the unchanged original method is run with the
+existing injected late-failure hook. The test verifies the same rollback
+checkpoints, then disables the automatically consumed injection and retries the
+original `DefDef` through the same `SourceTyper` and its retained resolver.
+That retry asserts the canonical method signature and typed root mapping, the
+single original `Shrinkable.-=` application, its enclosing `Unit` block, and
+the final canonical `()` literal.
 
 ## Frozen ordinary cohorts
 
-Both existing 25-root manifests were left byte-identical and run in ordinary
+Both existing 25-root manifests were left byte-identical and rerun in ordinary
 complete-`DefDef` mode with `--verify-determinism` on tested commit
-`f2975687f8b538e3b165d53ede1e233caaf503ee`. Each determinism run compared two
+`39cd81451b9c236db965f724ea4c5ba1078be423`. Each determinism run compared two
 fresh audit sessions and produced identical normalized results.
 
 | Cohort | Manifest SHA-256 | Roots | Typed | Blocked | Report SHA-256 |
