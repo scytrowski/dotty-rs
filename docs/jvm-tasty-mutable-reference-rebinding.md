@@ -143,6 +143,71 @@ DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo +1.98.1 test --test jvm_tasty_artifacts \
 The test uses the registered scratch directory through `TMPDIR` and the
 task-specific `CARGO_TARGET_DIR`; it does not remove or rebuild shared caches.
 
+## Independent Scala 3.9 client for original Rust output
+
+Issue #2310 adds the separately authored
+[`ScalaConsumer.scala`](../tests/fixtures/jvm_tasty_mutable_reference_rebinding/ScalaConsumer.scala)
+(SHA-256 `3bb34748134b696b9661486aa18918ead0a49a38db2d575a582b99fd797772d6`).
+The strict test `jvm_tasty_mutable_reference_rebinding_scala_consumer` builds
+the frozen `MutableReferenceRebinding.scala` through the Rust lexer, parser,
+namer, and source typer, then uses the resulting six class/TASTy artifacts as
+the only producer classes on the Scala compiler classpath. The pinned Scala
+runtime JARs are added for the client. The separately compiled client goes to
+its own output directory; the test rejects any emitted `example/Counter`,
+`example/Pair`, or `example/PairFactory` class there. It checks the six SHA-256
+values and classfile-to-sidecar UUID links in the preceding Rust receipt before
+the Scala client, after its run, and again after the reader/negative matrix.
+
+The Scala client calls the Rust-authored `PairFactory.create(Int, Int, Int)`
+with `(7,3,42)`, `(-9,11,42)`, and `(5,5,-13)`. It reflects Pair's original
+left/right Counter fields, asserts they are distinct, checks the first and
+mutated second values, then mutates both objects independently and verifies
+that each Pair accessor still observes its original object. It runs with
+`java -Xverify:all -ea` and prints
+`scala39-rust-mutable-reference-rebinding=ok`.
+
+The same test invokes official Scala 3.9 `-print-tasty`, `-decompile`, and
+`-from-tasty` on the unchanged Rust batch. It asserts the ordered factory
+`BLOCK`, the `first`, `second`, and mutable `selected` declarations, the
+`selected = second` assignment, the `selected.set(nextValue)` receiver and
+argument, and the final `Pair(first, second)` result. The printed AST links are
+checked by address: selected's initializer targets `first`, assignment LHS/RHS
+target `selected`/`second`, and setter receiver/argument target
+`selected`/`nextValue`. The decoded Rust classfile descriptor is
+`(III)Lexample/Pair;`, and `-from-tasty` succeeds for all three genuine Rust
+sidecars.
+
+Reproduce the strict consumer with Rust 1.98.1, the Scala source revision and
+runtime JARs pinned above, and JDK 21.0.13+9. Point `TMPDIR` and
+`CARGO_TARGET_DIR` at task-local scratch directories before running:
+
+```sh
+DOTTY_REQUIRE_SCALA_TASTY_MUTABLE_REFERENCE_REBINDING_SCALA_CONSUMER=1 \
+SCALA39_ROOT=/path/to/scala3-777528f19a58e794c9954a42f433373472ec57f8 \
+COURSIER_MAVEN_ROOT=/path/to/coursier/maven2 \
+cargo +1.98.1 test --test jvm_tasty_mutable_reference_rebinding_scala_consumer \
+  --locked -- --nocapture
+```
+
+The verified local compiler reported
+`3.9.0-bin-SNAPSHOT-git-777528f`; its staged `with_compiler.jar` SHA-256 was
+`0ef4231a0cceac40a1bb9424f9a7aba90714ef691e45167985daafbe7393891f`.
+The Temurin Java executable reported version `21.0.13+9` and SHA-256
+`9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155`.
+
+Negative cases use isolated copies, leaving the canonical positive bytes
+unchanged. Scala source linking first reports a missing `.tasty` sidecar for
+the missing-sidecar case and an out-of-sync class/TASTy pair for a changed
+UUID. Changing the selected local's mutable modifier to `FINAL` remains
+readable and decompiles it as `val selected`, demonstrating that successful
+TASTy reading alone does not prove the required mutability. Stale ASSIGN LHS
+and RHS links first fail in Scala 3.9's `readTasty` phase with
+`TreeWithoutOwner`. Changing only the JVM method descriptor leaves the Scala
+client compilable from the sidecar, then fails at runtime with
+`NoSuchMethodError` for `PairFactory.create(int, int, int)`. These observed
+first stages and diagnostics are printed by the strict target with
+`--nocapture`.
+
 ## Controls
 
 The pinned Scala compiler accepts renamed locals, reversed declarations,

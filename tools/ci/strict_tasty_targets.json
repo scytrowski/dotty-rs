@@ -5,14 +5,14 @@
     "step": "Run strict linked Scala and TASTy oracle release gates",
     "evidence_run": "https://github.com/scytrowski/dotty-rs/actions/runs/41819990007",
     "sample_sha": "b02e1c781bc9120cbd314525322e9e899c75a865",
-    "timing_method": "PR #2115 successful pinned serial run; issue #2272 target measured locally with pinned Scala/JDK; Cargo/libtest final per-binary result lines"
+    "timing_method": "PR #2115 successful pinned serial run; issue #2272 target measured locally with pinned Scala/JDK; Cargo/libtest final per-binary result lines; issue #2310 strict original-Rust Scala consumer measured locally with pinned Scala 3.9/JDK 21"
   },
   "baseline": {
-    "inventory_count": 28,
-    "accounted_test_seconds": 1440.34,
+    "inventory_count": 29,
+    "accounted_test_seconds": 1450.23,
     "cargo_build_seconds": 76,
-    "strict_step_seconds": 1516.34,
-    "full_job_seconds": 1968.44
+    "strict_step_seconds": 1526.23,
+    "full_job_seconds": 1978.33
   },
   "targets": [
     {
@@ -126,13 +126,17 @@
     {
       "name": "jvm_tasty_mutable_local_reference_reassignment_proof",
       "measured_seconds": 9.13
+    },
+    {
+      "name": "jvm_tasty_mutable_reference_rebinding_scala_consumer",
+      "measured_seconds": 9.89
     }
   ],
   "sharding": {
     "strategy": "longest-processing-time-first; ties by target name, next shard by lowest accumulated time then ordinal",
     "shard_count": 4,
-    "estimated_runner_minutes": 27.12,
-    "estimated_critical_path_minutes": 10.60,
+    "estimated_runner_minutes": 27.28,
+    "estimated_critical_path_minutes": 10.6,
     "shards": [
       {
         "id": "shard-1",
@@ -149,13 +153,14 @@
       },
       {
         "id": "shard-2",
-        "estimated_test_seconds": 355.38,
+        "estimated_test_seconds": 365.27,
         "targets": [
           "jvm_tasty_immutable_reference_local_pair_scala_consumer",
           "jvm_tasty_factory_result_scala_consumer",
           "jvm_tasty_dual_reference_forwarding",
           "jvm_tasty_cross_class_scala_consumer",
-          "jvm_tasty_multi_argument_constructor_calls"
+          "jvm_tasty_multi_argument_constructor_calls",
+          "jvm_tasty_mutable_reference_rebinding_scala_consumer"
         ]
       },
       {

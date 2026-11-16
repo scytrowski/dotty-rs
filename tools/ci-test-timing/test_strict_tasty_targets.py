@@ -282,7 +282,7 @@ STRICT_REQUIRED_ENVS: DOTTY_REQUIRE_FIRST
         repository = Path(__file__).parents[2]
         manifest_path = repository / "tools/ci/strict_tasty_targets.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        self.assertEqual(manifest["baseline"]["inventory_count"], 28)
+        self.assertEqual(manifest["baseline"]["inventory_count"], 29)
         target_names = [target["name"] for target in manifest["targets"]]
         self.assertIn(
             "jvm_tasty_immutable_reference_local_pair_scala_consumer",
@@ -296,8 +296,11 @@ STRICT_REQUIRED_ENVS: DOTTY_REQUIRE_FIRST
         candidate_environment = "DOTTY_REQUIRE_SCALA_TASTY_CONDITIONAL_REFERENCE_SCALA_CONSUMER"
         mutable_counter_target = "jvm_tasty_mutable_local_reference_reassignment_proof"
         mutable_counter_environment = "DOTTY_REQUIRE_SCALA_TASTY_MUTABLE_COUNTER_FRAGMENT"
+        mutable_rebinding_target = "jvm_tasty_mutable_reference_rebinding_scala_consumer"
+        mutable_rebinding_environment = "DOTTY_REQUIRE_SCALA_TASTY_MUTABLE_REFERENCE_REBINDING_SCALA_CONSUMER"
         self.assertIn(candidate_target, target_names)
         self.assertIn(mutable_counter_target, target_names)
+        self.assertIn(mutable_rebinding_target, target_names)
         self.assertIn("jvm_tasty_conditional_local_reference_proof", target_names)
         self.assertIn(
             "jvm_tasty_conditional_local_reference_proof",
@@ -312,6 +315,10 @@ STRICT_REQUIRED_ENVS: DOTTY_REQUIRE_FIRST
             mutable_counter_target,
             manifest["sharding"]["shards"][2]["targets"],
         )
+        self.assertIn(
+            mutable_rebinding_target,
+            manifest["sharding"]["shards"][1]["targets"],
+        )
         workflow = (repository / manifest["source"]["workflow"]).read_text(encoding="utf-8")
         environment_declaration = re.search(
             r"(?ms)^\s*STRICT_REQUIRED_ENVS:\s*>-\s*\n(.*?)(?=^\s*STRICT_TASTY_SHARD_[0-9]+_JOB:)",
@@ -320,6 +327,7 @@ STRICT_REQUIRED_ENVS: DOTTY_REQUIRE_FIRST
         self.assertIsNotNone(environment_declaration)
         self.assertIn(candidate_environment, environment_declaration.group(1))
         self.assertIn(mutable_counter_environment, environment_declaration.group(1))
+        self.assertIn(mutable_rebinding_environment, environment_declaration.group(1))
         self.assertEqual(
             len(re.findall(rf"^\s*{candidate_environment}:\s*'1'\s*$", workflow, re.MULTILINE)),
             4,
@@ -329,6 +337,11 @@ STRICT_REQUIRED_ENVS: DOTTY_REQUIRE_FIRST
             len(re.findall(rf"^\s*{mutable_counter_environment}:\s*'1'\s*$", workflow, re.MULTILINE)),
             4,
             "all fixed shard invocations carry the required mutable Counter reader gate",
+        )
+        self.assertEqual(
+            len(re.findall(rf"^\s*{mutable_rebinding_environment}:\s*'1'\s*$", workflow, re.MULTILINE)),
+            4,
+            "all fixed shard invocations require the original-Rust Scala client",
         )
         self.assertEqual(
             [shard["id"] for shard in manifest["sharding"]["shards"]],
