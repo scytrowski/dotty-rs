@@ -229,6 +229,30 @@ impl SourceTyper<'_> {
     ) -> Result<Vec<MemberCandidate>, MemberLookupError> {
         let receiver_view = self.normalize_member_receiver(receiver, journal)?;
         let class = class_symbol_for_type(self.store, receiver_view, false)?;
+        let canonical_int = self
+            .store
+            .types
+            .get(self.definitions.int)
+            .reference_symbol();
+        if canonical_int == Some(class)
+            && name == Name::new(self.store.names.intern("##"), dotty_core::Namespace::Term)
+        {
+            // Scala 3.9 models Any's universal members intrinsically, while
+            // canonical Int intentionally has no Any parent edge. Expose only
+            // the authenticated compiler symbol and leave both ClassInfo
+            // parent lists and primitive stability rules untouched.
+            return Ok(self
+                .definitions
+                .any_hash_code_symbol(self.store)
+                .into_iter()
+                .map(|symbol| MemberCandidate {
+                    symbol,
+                    declaring_class: self.definitions.any_class,
+                    receiver_view: self.definitions.any_type,
+                    inheritance_depth: 1,
+                })
+                .collect());
+        }
         let mut queue = VecDeque::from([PendingClass {
             symbol: class,
             receiver_view,

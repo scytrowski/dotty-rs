@@ -1936,13 +1936,13 @@ fn conditional_reference_selection_controls_record_scala_and_rust_outcomes() {
             "IfConditionTypeMismatch {{ source: SourceId({source_id}), tree_index: {tree_index}, actual: TypeId(5), expected: TypeId(8) }}"
         ),
         "wrong-branch-type" => format!(
-            "LocalValueTypeMismatch {{ source: SourceId({source_id}), tree_index: {tree_index}, actual: TypeId(105), expected: TypeId(101) }}"
+            "LocalValueTypeMismatch {{ source: SourceId({source_id}), tree_index: {tree_index}, actual: TypeId(106), expected: TypeId(102) }}"
         ),
         "missing-local" => format!(
-            "TermNameNotFound {{ source: SourceId({source_id}), tree_index: {tree_index}, name: Name {{ text: NameId(72), namespace: Term }}, position: Some(SourceSpan {{ source: SourceId({source_id}), span: Span {{ range: TextRange {{ start: 621, end: 632 }}, point: None }} }}) }}"
+            "TermNameNotFound {{ source: SourceId({source_id}), tree_index: {tree_index}, name: Name {{ text: NameId(73), namespace: Term }}, position: Some(SourceSpan {{ source: SourceId({source_id}), span: Span {{ range: TextRange {{ start: 621, end: 632 }}, point: None }} }}) }}"
         ),
         "uninitialized-reference" => format!(
-            "TermNameNotFound {{ source: SourceId({source_id}), tree_index: {tree_index}, name: Name {{ text: NameId(72), namespace: Term }}, position: Some(SourceSpan {{ source: SourceId({source_id}), span: Span {{ range: TextRange {{ start: 571, end: 576 }}, point: None }} }}) }}"
+            "TermNameNotFound {{ source: SourceId({source_id}), tree_index: {tree_index}, name: Name {{ text: NameId(73), namespace: Term }}, position: Some(SourceSpan {{ source: SourceId({source_id}), span: Span {{ range: TextRange {{ start: 571, end: 576 }}, point: None }} }}) }}"
         ),
         _ => unreachable!(),
     };

@@ -1939,6 +1939,22 @@ mod tests {
         assert!(method.params.is_empty());
         assert_eq!(method.result, definitions.int);
 
+        store.symbols.get_mut(symbol).owner = Some(definitions.object_class);
+        assert_eq!(definitions.any_hash_code_symbol(&store), None);
+        store.symbols.get_mut(symbol).owner = Some(definitions.any_class);
+
+        let SymbolInfo::Complete(original_info) = store.symbols.get(symbol).info else {
+            unreachable!();
+        };
+        let wrong_signature = store.types.alloc(Type::Method(MethodType {
+            params: Vec::new(),
+            result: definitions.boolean,
+            kind: MethodKind::Plain,
+        }));
+        store.symbols.get_mut(symbol).info = SymbolInfo::Complete(wrong_signature);
+        assert_eq!(definitions.any_hash_code_symbol(&store), None);
+        store.symbols.get_mut(symbol).info = SymbolInfo::Complete(original_info);
+
         store.symbols.get_mut(symbol).flags = SymbolFlags::EMPTY;
         assert_eq!(definitions.any_hash_code_symbol(&store), None);
         assert_eq!(

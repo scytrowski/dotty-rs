@@ -1489,11 +1489,11 @@ fn authentic_conditional_local_receipt_preserves_session_identities_for_source_c
         "one session emits deterministic candidate bytes"
     );
     assert_eq!(original.source, SourceId::from_index(22_650));
-    assert_eq!(original.method.index(), 60);
-    assert_eq!(original.condition_formal.index(), 63);
-    assert_eq!(original.targets.map(dotty_core::SymbolId::index), [65, 66]);
-    assert_eq!(original.selected.index(), 67);
-    assert_eq!(original.scope.index(), 18);
+    assert_eq!(original.method.index(), 61);
+    assert_eq!(original.condition_formal.index(), 64);
+    assert_eq!(original.targets.map(dotty_core::SymbolId::index), [66, 67]);
+    assert_eq!(original.selected.index(), 68);
+    assert_eq!(original.scope.index(), 19);
     assert_ne!(original.targets[0], original.targets[1]);
     assert!(!original.targets.contains(&original.selected));
 
