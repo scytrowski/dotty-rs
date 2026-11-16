@@ -93,12 +93,21 @@ separately in the tests and `oracle.json`.
 
 ## Strict Scala gate status
 
-The Scala source checkout is pinned to the revision above, but this worker
-environment did not have a staged compiler at `dist/.../stage/lib/with_compiler.jar`.
-The strict Scala 3.9 test therefore stopped at `scala39_toolchain` preflight
-before compilation. The JDK 21 and pinned Rust gates passed. The strict Scala
-consumer and aggregate remain required on the PR/CI environment with the staged
-compiler available.
+The pinned Scala source was staged with `sbt "dist/universal:stage"` using
+sbt 1.12.1 and Eclipse Temurin JDK 21.0.13+9. `scalac -version` reported
+`3.9.0-bin-SNAPSHOT-git-777528f`; the observed generated
+`with_compiler.jar` SHA-256 was
+`0ef4231a0cceac40a1bb9424f9a7aba90714ef691e45167985daafbe7393891f`.
+As with other local source builds, this generated JAR hash is provenance, not
+a stable identifier for the pinned Scala revision.
+
+With `SCALA39_ROOT` pointing at the staged checkout,
+`DOTTY_REQUIRE_SCALA_TASTY_MUTABLE_COUNTER_FRAGMENT=1`, the pinned runtime
+artifacts from the approved Maven cache, and Temurin 21.0.13+9, the strict
+`jvm_tasty_mutable_local_reference_reassignment_proof` consumer passed all
+8 tests. The previously attempted run without a staged compiler stopped at
+`scala39_toolchain` preflight before compilation. The pinned Rust gates and
+JDK 21 verifier passed as recorded above.
 
 ## Initial toolchain blocker
 
@@ -109,5 +118,4 @@ the long managed scratch directory. Setting sbt's supported
 resolved the path-length failure. The sandbox then reported `EPERM` while
 binding the Unix socket; the same bounded build command completed under the
 host-approved execution. The Scala source revision, compiler dependencies,
-JDK 21, and Rust 1.98.1 pins were unchanged. This host setup issue is resolved;
-the strict test rebuilds the checked-in oracle from the pinned checkout.
+JDK 21, and Rust 1.98.1 pins were unchanged. This host setup issue is resolved.
