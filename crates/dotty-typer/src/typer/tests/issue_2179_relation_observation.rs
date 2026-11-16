@@ -2132,6 +2132,690 @@ fn captures_acceptance_vi_hash_code_and_prop_clear_before_rollback() {
     }
 }
 
+#[test]
+#[ignore = "requires pinned Scala 3.9.0 sources, classpath jars, and JDK environment"]
+fn propimpl_clear_types_original_complete_method_in_two_fresh_sessions() {
+    let first = type_original_propimpl_clear_session();
+    let second = type_original_propimpl_clear_session();
+    assert_eq!(
+        first, second,
+        "normalized PropImpl.clear semantic receipts are stable across fresh sessions"
+    );
+    println!("{first}");
+}
+
+fn type_original_propimpl_clear_session() -> String {
+    let scala_root = PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT"));
+    let relative = "library/src/scala/sys/PropImpl.scala";
+    let text = fs::read_to_string(scala_root.join(relative)).expect("read pinned PropImpl.scala");
+    let revision = Command::new("git")
+        .args(["-C", scala_root.to_str().unwrap(), "rev-parse", "HEAD"])
+        .output()
+        .expect("git reads pinned Scala source revision");
+    assert!(revision.status.success());
+    assert_eq!(
+        String::from_utf8(revision.stdout).unwrap().trim(),
+        "777528f19a58e794c9954a42f433373472ec57f8"
+    );
+
+    let source = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(&text).expect("pinned source is valid UTF-8"),
+        source,
+        ContextualScanner::new(&text).expect("scan original source"),
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        relative,
+        &mut store,
+        &mut packages,
+    )
+    .expect("name original PropImpl source");
+    let (root, source_node) = parsed
+        .ast
+        .iter()
+        .find(|(tree, node)| tree.index() == 99 && matches!(node.kind, TreeKind::DefDef(_)))
+        .expect("original complete clear DefDef at tree 99");
+    let root_span = source_node
+        .position
+        .expect("clear source span")
+        .span()
+        .range();
+    assert_eq!((root_span.start(), root_span.end()), (1297, 1334));
+    let method = index
+        .symbol_at(source, root)
+        .expect("clear has a canonical source method symbol");
+    let owner = store.symbols.get(method).owner.expect("clear owner");
+    assert_eq!(observed_symbol_path(&store, owner), ".scala.sys.PropImpl");
+    assert_eq!(
+        observed_symbol_path(&store, method),
+        ".scala.sys.PropImpl.clear"
+    );
+    assert!(matches!(
+        index.definition_of(method),
+        Some(SourceDefinition::Canonical { source: actual_source, tree })
+            if actual_source == source && tree == root
+    ));
+
+    let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+    assert_eq!(
+        std::env::var("SCALA39_JDK_RELEASE").expect("SCALA39_JDK_RELEASE"),
+        "21"
+    );
+    let jars =
+        std::env::split_paths(&std::env::var_os("SCALA39_CLASSPATH").expect("SCALA39_CLASSPATH"))
+            .collect::<Vec<_>>();
+    let mut entries: Vec<Box<dyn ClassPathEntry>> = vec![Box::new(
+        JdkClassPath::new(java_home.join("jmods")).unwrap(),
+    )];
+    for jar in jars {
+        entries.push(Box::new(JarClassPath::new(jar, 21).unwrap()));
+    }
+    let resolver = ClasspathSymbolResolver::new(
+        CompositeClassPath::new(entries),
+        definitions,
+        LoadingSession::with_packages(packages.snapshot()),
+    );
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(resolver));
+    // This is the ordinary complete-definition entry point: no injected
+    // complete_symbol, manual member preparation, or caller priming.
+    let typed_root = typer
+        .type_method_definition(root)
+        .expect("original PropImpl.clear complete DefDef types");
+    assert_eq!(
+        typer.source_typed_index().get(source, root),
+        Some(typed_root)
+    );
+    let TreeKind::DefDef(typed_method) = &typer.typed_ast().get(typed_root).kind else {
+        panic!("the returned root is the complete typed DefDef");
+    };
+    let signature = match typer.store().symbols.info(method) {
+        SymbolInfo::Complete(signature) => *signature,
+        other => panic!("the original method signature is complete: {other:?}"),
+    };
+    let Type::Method(signature) = typer.store().types.get(signature) else {
+        panic!("clear keeps its ordinary method signature");
+    };
+    assert_eq!(
+        signature.result, definitions.unit,
+        "declared result is Unit"
+    );
+    let source_rhs = match &parsed.ast.get(root).kind {
+        TreeKind::DefDef(definition) => definition.rhs.expect("original RHS"),
+        _ => unreachable!(),
+    };
+    let rhs_range = parsed
+        .ast
+        .get(source_rhs)
+        .position
+        .expect("original RHS span")
+        .span()
+        .range();
+    assert_eq!((rhs_range.start(), rhs_range.end()), (1317, 1334));
+    let TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) = &parsed.ast.get(source_rhs).kind
+    else {
+        panic!("the unchanged source RHS remains underlying -= key");
+    };
+    assert_eq!(
+        typer.store().names.resolve(infix.op.text()),
+        "-=",
+        "the source operation is the original -= spelling"
+    );
+    let typed_rhs = typed_method.rhs.expect("typed clear retains its RHS");
+    assert_eq!(
+        typer.source_typed_index().get(source, source_rhs),
+        Some(typed_rhs),
+        "the original RHS maps to the Unit-adapted typed root"
+    );
+    let TreeKind::Block(adapted) = &typer.typed_ast().get(typed_rhs).kind else {
+        panic!("value-discard adaptation retains an enclosing Block");
+    };
+    assert_eq!(typer.typed_ast().get(typed_rhs).ty, definitions.unit);
+    assert_eq!(
+        adapted.stats.len(),
+        1,
+        "the original operation executes once"
+    );
+    let operation_tree = adapted.stats[0];
+    assert_eq!(
+        typer.source_typed_index().get(source, source_rhs),
+        Some(typed_rhs)
+    );
+    let operation = typer.typed_ast().get(operation_tree);
+    let TreeKind::Apply(application) = &operation.kind else {
+        panic!("the original -= remains a typed application");
+    };
+    let function = typer.typed_ast().get(application.function);
+    let TreeKind::Select(selection) = &function.kind else {
+        panic!("-= selects the canonical Shrinkable member");
+    };
+    assert_eq!(typer.store().names.resolve(selection.name.text()), "-=");
+    let selected_member = typer
+        .store()
+        .types
+        .get(function.ty)
+        .reference_symbol()
+        .expect("selected operation has a canonical member reference");
+    let selected_path = observed_symbol_path(typer.store(), selected_member);
+    assert_eq!(
+        selected_path, ".scala.collection.mutable.Shrinkable.-=",
+        "the unchanged source operation resolves to canonical Shrinkable.-="
+    );
+    assert_eq!(application.args.len(), 1);
+    assert_eq!(
+        application.args[0],
+        typer
+            .source_typed_index()
+            .get(source, infix.right)
+            .expect("the original key argument keeps its typed mapping"),
+        "the original key remains the operation's argument"
+    );
+    assert_eq!(
+        selection.qualifier,
+        typer
+            .source_typed_index()
+            .get(source, infix.left)
+            .expect("the original receiver keeps its typed mapping"),
+        "the original receiver remains the operation's function prefix"
+    );
+    let member_signature = match typer.store().symbols.info(selected_member) {
+        SymbolInfo::Complete(signature) => *signature,
+        other => panic!("canonical -= signature is complete: {other:?}"),
+    };
+    let Type::Method(member_signature) = typer.store().types.get(member_signature) else {
+        panic!("canonical -= has a method type");
+    };
+    assert_eq!(operation.ty, member_signature.result);
+    let mut operation_result_symbols = Vec::new();
+    type_symbols(
+        typer.store(),
+        operation.ty,
+        &mut operation_result_symbols,
+        &mut Vec::new(),
+    );
+    let operation_result_paths = operation_result_symbols
+        .iter()
+        .map(|symbol| observed_symbol_path(typer.store(), *symbol))
+        .collect::<Vec<_>>();
+    assert!(
+        operation_result_paths
+            .iter()
+            .any(|path| path == ".scala.collection.mutable.Shrinkable"),
+        "the inner operation keeps its original Shrinkable result: {operation_result_paths:?}"
+    );
+    let TreeKind::Literal(unit_literal) = &typer.typed_ast().get(adapted.expr).kind else {
+        panic!("Unit adaptation ends in the canonical () literal");
+    };
+    assert_eq!(unit_literal.value, dotty_core::Constant::Unit);
+    assert_eq!(typer.typed_ast().get(adapted.expr).ty, definitions.unit);
+
+    let mut source_nodes_in_root = Vec::new();
+    let mut mapped_source_nodes = Vec::new();
+    for (tree, node) in parsed.ast.iter() {
+        let Some(position) = node.position else {
+            continue;
+        };
+        let range = position.span().range();
+        if range.start() < root_span.start() || range.end() > root_span.end() {
+            continue;
+        }
+        source_nodes_in_root.push(format!(
+            "{}:{}..{}",
+            tree.index(),
+            range.start(),
+            range.end()
+        ));
+        if typer.source_typed_index().get(source, tree).is_some() {
+            mapped_source_nodes.push(format!(
+                "{}:{}..{}",
+                tree.index(),
+                range.start(),
+                range.end()
+            ));
+        }
+    }
+    for tree in [root, source_rhs, infix.left, infix.right] {
+        assert!(
+            typer.source_typed_index().get(source, tree).is_some(),
+            "required original source tree {} retains a typed mapping",
+            tree.index()
+        );
+    }
+    mapped_source_nodes.sort();
+    source_nodes_in_root.sort();
+    assert!(
+        !mapped_source_nodes.is_empty() && mapped_source_nodes == source_nodes_in_root,
+        "every source node in the original DefDef span has a typed mapping; mapped={mapped_source_nodes:?} source={source_nodes_in_root:?}"
+    );
+    format!(
+        "root={relative}#tree=99 span=1297..1334 owner=.scala.sys.PropImpl result=Unit rhs=1317..1334 operation=Shrinkable.-= operation_result=Shrinkable receiver=tree{} argument=tree{} adaptation=Block(statements=1,final=()) mappings={}",
+        infix.left.index(),
+        infix.right.index(),
+        mapped_source_nodes.join(",")
+    )
+}
+
+#[test]
+#[ignore = "requires pinned Scala 3.9.0 sources, classpath jars, and JDK environment"]
+fn propimpl_clear_rejects_bounded_negative_cases_and_retries_after_rollback() {
+    let scala_root = PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT"));
+    let original = fs::read_to_string(scala_root.join("library/src/scala/sys/PropImpl.scala"))
+        .expect("read pinned PropImpl.scala");
+    for (name, bad_source, expected_error) in [
+        (
+            "wrong-key-type",
+            original.replace("underlying -= key", "underlying -= 1"),
+            "OverloadApplicationNoApplicable",
+        ),
+        (
+            "missing-receiver",
+            original.replace("underlying -= key", "missing -= key"),
+            "TermNameNotFound",
+        ),
+        (
+            "incompatible-receiver",
+            original.replace("underlying -= key", "42 -= key"),
+            "MemberNotFound",
+        ),
+        (
+            "missing-member",
+            original.replace("underlying -= key", "underlying.noSuchMember(key)"),
+            "MemberNotFound",
+        ),
+        (
+            "wrong-result-type",
+            original.replace("def clear(): Unit", "def clear(): Int"),
+            "ExpectedExpressionTypeMismatch",
+        ),
+    ] {
+        assert_ne!(
+            bad_source, original,
+            "{name} mutation must change its input"
+        );
+        let (parsed, mut store, packages, definitions, index, source, root) =
+            parse_named_propimpl(&bad_source);
+        let (java_home, jars) = scala_classpath();
+        let resolver = propimpl_resolver(&java_home, jars, definitions, &packages);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+        let store_before = typer.store().checkpoint();
+        let typed_before = typer.typed_ast().checkpoint();
+        let type_index_before = format!("{:?}", typer.type_index.checkpoint());
+        let typed_index_before = format!("{:?}", typer.typed_index);
+        let source_index_before = format!("{:?}", typer.source_typed_index());
+        let error = typer
+            .type_method_definition(root)
+            .expect_err("invalid PropImpl.clear variant is rejected");
+        assert!(
+            format!("{error:?}").contains(expected_error),
+            "{name} reports the intended failure: {error:?}"
+        );
+        assert_eq!(
+            typer.store().checkpoint(),
+            store_before,
+            "{name} store rollback"
+        );
+        assert_eq!(
+            typer.typed_ast().checkpoint(),
+            typed_before,
+            "{name} typed arena rollback"
+        );
+        assert_eq!(
+            format!("{:?}", typer.type_index.checkpoint()),
+            type_index_before,
+            "{name} type index rollback"
+        );
+        assert_eq!(
+            format!("{:?}", typer.typed_index),
+            typed_index_before,
+            "{name} typed index rollback"
+        );
+        assert_eq!(
+            format!("{:?}", typer.source_typed_index()),
+            source_index_before,
+            "{name} source map rollback"
+        );
+        assert_eq!(
+            typer.source_typed_index().get(source, root),
+            None,
+            "{name} has no committed root"
+        );
+    }
+
+    let late_failure = original.replace("underlying -= key", "{ underlying -= key; missing }");
+    let (parsed, mut store, packages, definitions, index, source, root) =
+        parse_named_propimpl(&late_failure);
+    let first_stat = match &parsed.ast.get(root).kind {
+        TreeKind::DefDef(definition) => match &parsed.ast.get(definition.rhs.unwrap()).kind {
+            TreeKind::Block(block) => *block.stats.first().expect("operation precedes failure"),
+            other => panic!("late-failure method body is a Block: {other:?}"),
+        },
+        _ => unreachable!(),
+    };
+    let (java_home, jars) = scala_classpath();
+    let resolver = propimpl_resolver(&java_home, jars.clone(), definitions, &packages);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(resolver));
+    let reached_late_failure = Rc::new(RefCell::new(false));
+    let observed_late_failure = Rc::clone(&reached_late_failure);
+    typer.transaction_failure_error_observer = Some(Rc::new(move |typer, error| {
+        assert!(format!("{error:?}").contains("TermNameNotFound"));
+        let typed_operation = typer
+            .source_typed_index()
+            .get(source, first_stat)
+            .expect("the earlier -= stat typed before the late failure");
+        assert!(matches!(
+            typer.typed_ast().get(typed_operation).kind,
+            TreeKind::Apply(_)
+        ));
+        *observed_late_failure.borrow_mut() = true;
+    }));
+    let store_before = typer.store().checkpoint();
+    let typed_before = typer.typed_ast().checkpoint();
+    let type_index_before = format!("{:?}", typer.type_index.checkpoint());
+    let typed_index_before = format!("{:?}", typer.typed_index);
+    let source_index_before = format!("{:?}", typer.source_typed_index());
+    let error = typer
+        .type_method_definition(root)
+        .expect_err("late unresolved expression rejects the whole method");
+    assert!(
+        format!("{error:?}").contains("TermNameNotFound"),
+        "late failure reaches the invalid final expression: {error:?}"
+    );
+    assert!(
+        *reached_late_failure.borrow(),
+        "transaction observer confirms failure after the original operation typed"
+    );
+    assert_eq!(
+        typer.store().checkpoint(),
+        store_before,
+        "late failure restores semantic store"
+    );
+    assert_eq!(
+        typer.typed_ast().checkpoint(),
+        typed_before,
+        "late failure removes partial typed trees"
+    );
+    assert_eq!(
+        format!("{:?}", typer.type_index.checkpoint()),
+        type_index_before,
+        "late failure restores type index"
+    );
+    assert_eq!(format!("{:?}", typer.typed_index), typed_index_before);
+    assert_eq!(
+        format!("{:?}", typer.source_typed_index()),
+        source_index_before
+    );
+    assert_eq!(typer.source_typed_index().get(source, root), None);
+    drop(typer);
+
+    // Keep this natural source-error control separate from the retry proof:
+    // correcting its AST would make the retry no longer exercise the original
+    // source method and would hide stale Typer/resolver transaction state.
+
+    let (parsed, mut store, packages, definitions, index, source, root) =
+        parse_named_propimpl(&original);
+    let (java_home, jars) = scala_classpath();
+    let resolver = propimpl_resolver(&java_home, jars.clone(), definitions, &packages);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(resolver));
+    let store_before = typer.store().checkpoint();
+    let typed_before = typer.typed_ast().checkpoint();
+    let type_index_before = format!("{:?}", typer.type_index.checkpoint());
+    let typed_index_before = format!("{:?}", typer.typed_index);
+    let source_index_before = format!("{:?}", typer.source_typed_index());
+    typer.inject_failure_after_outermost_success = true;
+    let error = typer
+        .type_method_definition(root)
+        .expect_err("the injected late failure follows complete source typing");
+    assert!(
+        matches!(
+            error,
+            TyperError::SymbolResolution {
+                source: failed_source,
+                error: ResolutionError::Malformed { ref reason },
+                ..
+            } if failed_source == source
+                && reason == "test-injected failure after successful source typing"
+        ),
+        "the original method reaches the injected late failure: {error:?}"
+    );
+    assert_eq!(typer.store().checkpoint(), store_before);
+    assert_eq!(typer.typed_ast().checkpoint(), typed_before);
+    assert_eq!(
+        format!("{:?}", typer.type_index.checkpoint()),
+        type_index_before
+    );
+    assert_eq!(format!("{:?}", typer.typed_index), typed_index_before);
+    assert_eq!(
+        format!("{:?}", typer.source_typed_index()),
+        source_index_before
+    );
+    assert_eq!(typer.source_typed_index().get(source, root), None);
+    assert!(!typer.inject_failure_after_outermost_success);
+
+    let typed_root = typer
+        .type_method_definition(root)
+        .expect("the unchanged original method retries through the retained Typer and resolver");
+    assert_eq!(
+        typer.source_typed_index().get(source, root),
+        Some(typed_root)
+    );
+    let TreeKind::DefDef(typed_definition) = &typer.typed_ast().get(typed_root).kind else {
+        panic!("retry returns the complete original DefDef");
+    };
+    let method = index
+        .symbol_at(source, root)
+        .expect("original clear has its canonical method symbol");
+    let signature = match typer.store().symbols.info(method) {
+        SymbolInfo::Complete(signature) => *signature,
+        other => panic!("retry completes the original method signature: {other:?}"),
+    };
+    let Type::Method(signature) = typer.store().types.get(signature) else {
+        panic!("clear keeps its ordinary method signature");
+    };
+    assert_eq!(signature.result, definitions.unit);
+    let source_rhs = match &parsed.ast.get(root).kind {
+        TreeKind::DefDef(definition) => definition.rhs.expect("original clear RHS"),
+        _ => unreachable!(),
+    };
+    let typed_rhs = typed_definition
+        .rhs
+        .expect("retry retains the complete RHS");
+    assert_eq!(
+        typer.source_typed_index().get(source, source_rhs),
+        Some(typed_rhs)
+    );
+    let TreeKind::Block(adapted) = &typer.typed_ast().get(typed_rhs).kind else {
+        panic!("retry retains the Unit value-discard adaptation");
+    };
+    assert_eq!(typer.typed_ast().get(typed_rhs).ty, definitions.unit);
+    assert_eq!(adapted.stats.len(), 1);
+    let TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) = &parsed.ast.get(source_rhs).kind
+    else {
+        panic!("the retry source RHS remains the original -= operation");
+    };
+    let operation = typer.typed_ast().get(adapted.stats[0]);
+    let TreeKind::Apply(application) = &operation.kind else {
+        panic!("retry preserves the original -= application");
+    };
+    let function = typer.typed_ast().get(application.function);
+    let TreeKind::Select(selection) = &function.kind else {
+        panic!("retry preserves the selected -= member");
+    };
+    let selected = typer
+        .store()
+        .types
+        .get(function.ty)
+        .reference_symbol()
+        .expect("retry resolves a canonical member");
+    assert_eq!(
+        observed_symbol_path(typer.store(), selected),
+        ".scala.collection.mutable.Shrinkable.-="
+    );
+    assert_eq!(
+        selection.qualifier,
+        typer.source_typed_index().get(source, infix.left).unwrap()
+    );
+    assert_eq!(application.args.len(), 1);
+    assert_eq!(
+        application.args[0],
+        typer.source_typed_index().get(source, infix.right).unwrap()
+    );
+    assert_eq!(
+        typer.typed_ast().get(adapted.stats[0]).ty,
+        match typer.store().symbols.info(selected) {
+            SymbolInfo::Complete(signature) => match typer.store().types.get(*signature) {
+                Type::Method(method) => method.result,
+                other => panic!("retry keeps the selected method signature: {other:?}"),
+            },
+            other => panic!("retry completes the selected member: {other:?}"),
+        }
+    );
+    let TreeKind::Literal(unit_literal) = &typer.typed_ast().get(adapted.expr).kind else {
+        panic!("retry ends with the canonical Unit literal");
+    };
+    assert_eq!(unit_literal.value, dotty_core::Constant::Unit);
+    assert_eq!(typer.typed_ast().get(adapted.expr).ty, definitions.unit);
+
+    let (parsed, mut store, packages, definitions, index, _source, root) =
+        parse_named_propimpl(&original);
+    let wrong_source = SourceId::from_index(1);
+    let resolver = propimpl_resolver(&java_home, jars, definitions, &packages);
+    let mut wrong_owner = SourceTyper::new(
+        &parsed.ast,
+        wrong_source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(resolver));
+    let error = wrong_owner
+        .type_method_definition(root)
+        .expect_err("a source root owned by another source identity is rejected");
+    assert!(
+        format!("{error:?}").contains("without a canonical source symbol"),
+        "incorrect source owner is rejected before typing: {error:?}"
+    );
+    assert_eq!(
+        wrong_owner.source_typed_index().get(wrong_source, root),
+        None
+    );
+}
+
+fn parse_named_propimpl(
+    text: &str,
+) -> (
+    dotty_parser::ParseResult,
+    SemanticStore,
+    Packages,
+    Definitions,
+    dotty_core::SourceSemanticIndex,
+    SourceId,
+    TreeId<Untyped>,
+) {
+    let source = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(text).expect("source text is valid UTF-8"),
+        source,
+        ContextualScanner::new(text).expect("scan source"),
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "library/src/scala/sys/PropImpl.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect("name PropImpl source variant");
+    let root = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            (matches!(node.kind, TreeKind::DefDef(_))
+                && index.symbol_at(source, tree).is_some_and(|symbol| {
+                    store.names.resolve(store.symbols.get(symbol).name.text()) == "clear"
+                }))
+            .then_some(tree)
+        })
+        .expect("clear DefDef in source");
+    (parsed, store, packages, definitions, index, source, root)
+}
+
+fn scala_classpath() -> (PathBuf, Vec<PathBuf>) {
+    let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+    assert_eq!(
+        std::env::var("SCALA39_JDK_RELEASE").expect("SCALA39_JDK_RELEASE"),
+        "21"
+    );
+    let jars =
+        std::env::split_paths(&std::env::var_os("SCALA39_CLASSPATH").expect("SCALA39_CLASSPATH"))
+            .collect();
+    (java_home, jars)
+}
+
+fn propimpl_resolver(
+    java_home: &std::path::Path,
+    jars: Vec<PathBuf>,
+    definitions: Definitions,
+    packages: &Packages,
+) -> ClasspathSymbolResolver<CompositeClassPath> {
+    let mut entries: Vec<Box<dyn ClassPathEntry>> = vec![Box::new(
+        JdkClassPath::new(java_home.join("jmods")).unwrap(),
+    )];
+    for jar in jars {
+        entries.push(Box::new(JarClassPath::new(jar, 21).unwrap()));
+    }
+    ClasspathSymbolResolver::new(
+        CompositeClassPath::new(entries),
+        definitions,
+        LoadingSession::with_packages(packages.snapshot()),
+    )
+}
+
 type EitherSwapSourceCase = (
     TreeId<Untyped>,
     TreeId<Untyped>,
