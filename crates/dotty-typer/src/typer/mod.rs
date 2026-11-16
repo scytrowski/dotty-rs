@@ -22614,6 +22614,67 @@ mod tests {
     }
 
     #[test]
+    fn source_value_result_selection_preserves_member_visibility_across_aliases() {
+        let source_text = "class Box { private def secret: Int = 1; protected def guarded: Int = 2; def exposed: Int = 3; private def takeSecret(arg: Int): Int = arg; protected def takeGuarded(arg: Int): Int = arg; def takeExposed(arg: Int): Int = arg; def next: Box = this; def value: Box = this; def privateInside: Int = value.secret }; class C { def value: Box = new Box(); def privateDirect: Int = value.secret; def privateParens: Int = (value).secret; def privateCall: Int = value.secret(); def privateApply: Int = value.takeSecret(1); def privateInfix: Int = value takeSecret 1; def privateChain: Int = value.next.secret; def protectedDirect: Int = value.guarded; def protectedApply: Int = value.takeGuarded(1); def protectedInfix: Int = value takeGuarded 1; def protectedAlias: Int = { val alias = value; alias.guarded }; def privateAlias: Int = { val alias = value; alias.secret }; def publicDirect: Int = value.exposed; def publicApply: Int = value.takeExposed(1); def publicInfix: Int = value takeExposed 1 }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let cases = [
+            ("C", "privateDirect", "inaccessible"),
+            ("C", "privateParens", "inaccessible"),
+            ("C", "privateCall", "inaccessible"),
+            ("C", "privateApply", "inaccessible"),
+            ("C", "privateInfix", "inaccessible"),
+            ("C", "privateChain", "unstable"),
+            ("C", "protectedDirect", "inaccessible"),
+            ("C", "protectedApply", "inaccessible"),
+            ("C", "protectedInfix", "inaccessible"),
+            ("C", "protectedAlias", "inaccessible"),
+            ("C", "privateAlias", "inaccessible"),
+            ("C", "publicDirect", "accessible"),
+            ("C", "publicApply", "accessible"),
+            ("C", "publicInfix", "accessible"),
+            ("Box", "privateInside", "accessible"),
+        ];
+        for (class_name, method_name, expected) in cases {
+            let (method, rhs) =
+                method_definition_and_rhs(&parsed, &store, &index, source, method_name);
+            let owner = store
+                .symbols
+                .get(method)
+                .owner
+                .expect("test method retains its class owner");
+            assert_eq!(
+                store.names.resolve(store.symbols.get(owner).name.text()),
+                class_name
+            );
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let context = typer.expression_context_for(method).unwrap();
+            let result = typer.type_expression_expected(rhs, context, definitions.int);
+            if expected == "accessible" {
+                assert!(result.is_ok(), "{class_name}.{method_name}: {result:?}");
+            } else if expected == "unstable" {
+                assert!(
+                    matches!(result, Err(TyperError::UnstableSelectionPrefix { .. })),
+                    "{class_name}.{method_name} must retain its unstable chained-prefix rejection: {result:?}"
+                );
+            } else {
+                assert!(
+                    matches!(result, Err(TyperError::MemberNotFound { .. })),
+                    "{class_name}.{method_name} must reject inaccessible selection: {result:?}"
+                );
+                assert!(typer.typed_index.get(source, rhs).is_none());
+                assert!(typer.source_typed_index().get(source, rhs).is_none());
+            }
+        }
+    }
+
+    #[test]
     fn ordinary_empty_clause_source_method_is_not_auto_applied_as_a_value() {
         let source_text =
             "class C { def f(): Int = 1; def applied: Int = f(); def missing: Int = f }";

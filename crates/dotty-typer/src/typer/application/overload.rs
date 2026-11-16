@@ -146,6 +146,18 @@ impl SourceTyper<'_> {
                     .lookup_overload_members_journaled(receiver, operator, info_journal)
                     .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
             }
+            let mut accessible_members = Vec::with_capacity(members.len());
+            for member in members {
+                if self.is_selected_member_accessible(
+                    member.symbol,
+                    member.declaring_class,
+                    context,
+                    tree_index,
+                )? {
+                    accessible_members.push(member);
+                }
+            }
+            let members = accessible_members;
             if members.is_empty() && !self.any_equality_operator_name(operator) {
                 return Err(TyperError::MemberNotFound {
                     source: self.source,

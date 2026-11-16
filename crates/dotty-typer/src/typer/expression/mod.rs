@@ -19,6 +19,7 @@ mod patterns;
 mod references;
 pub(super) use blocks::LocalMethodIndex;
 pub(super) use function::{FunctionLiteralIndex, FunctionLiteralTypingContext};
+pub(in crate::typer) use references::SelectedMemberRequest;
 
 impl SourceTyper<'_> {
     /// Returns the canonical widened type for supported constants.
@@ -207,6 +208,7 @@ impl SourceTyper<'_> {
             operand,
             unary_name,
             position,
+            context,
             info_journal,
         )
         .map_err(|error| match error {
