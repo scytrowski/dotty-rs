@@ -370,6 +370,57 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
             self.assertEqual(live["two_pass_equal"], "true")
             self.assertEqual(baseline.read_bytes(), baseline_bytes)
 
+    def test_live_cohort_receipt_accepts_only_measured_enumeration_hash_code_completion(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        baseline = repository / "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv"
+        baseline_bytes = baseline.read_bytes()
+        receipt_rows = gate.read_tsv(baseline)[1]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reports = self.cohort_reports(
+                receipt_rows,
+                root,
+                {gate.ENUMERATION_HASH_CODE_IDENTITY: ("typed", gate.ENUMERATION_HASH_CODE_LIVE_RESULT)},
+            )
+            output = root / "live.tsv"
+            gate.validate_cohorts(repository, reports, output, baseline)
+            live_rows = gate.read_tsv(output)[1]
+            live = next(
+                row for row in live_rows if row["identity"] == gate.ENUMERATION_HASH_CODE_IDENTITY
+            )
+            self.assertEqual(live["cohort"], "main")
+            self.assertEqual(live["source_tree"], "459")
+            self.assertEqual(live["first_status"], "typed")
+            self.assertEqual(live["second_status"], "typed")
+            self.assertEqual(live["actual_result"], gate.ENUMERATION_HASH_CODE_LIVE_RESULT)
+            self.assertEqual(live["protected_success"], "false")
+            self.assertEqual(live["two_pass_equal"], "true")
+            self.assertEqual(baseline.read_bytes(), baseline_bytes)
+
+    def test_live_cohort_receipt_rejects_unmeasured_enumeration_drift(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        baseline = repository / "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv"
+        receipt_rows = gate.read_tsv(baseline)[1]
+        invalid_overrides = (
+            ("blocked::DifferentFailure", "not_available"),
+            ("typed", "String"),
+            ("typed", "scala.Any"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index, override in enumerate(invalid_overrides):
+                reports = self.cohort_reports(
+                    receipt_rows,
+                    root,
+                    {gate.ENUMERATION_HASH_CODE_IDENTITY: override},
+                )
+                with self.subTest(override=override), self.assertRaisesRegex(
+                    gate.ReceiptError, gate.ENUMERATION_HASH_CODE_IDENTITY
+                ):
+                    gate.validate_cohorts(
+                        repository, reports, root / f"live-{index}.tsv", baseline
+                    )
+
     def test_live_cohort_receipt_rejects_unmeasured_prop_impl_drift(self) -> None:
         repository = Path(__file__).resolve().parents[2]
         baseline = repository / "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv"
