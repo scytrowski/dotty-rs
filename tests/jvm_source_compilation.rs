@@ -61,6 +61,8 @@ const IMMUTABLE_REFERENCE_LOCAL_PAIR_REVERSED_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactoryReversed.scala");
 const TWO_IMMUTABLE_REFERENCE_LOCALS_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
+const MUTABLE_REFERENCE_REBINDING_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_mutable_reference_rebinding/MutableReferenceRebinding.scala");
 const CONDITIONAL_REFERENCE_SELECTION_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_conditional_reference_selection/PairFactory.scala");
 const MULTI_ARGUMENT_FACTORY_SOURCE: &str =
@@ -21001,6 +21003,497 @@ fn immutable_reference_locals_use_canonical_slots_and_verify_on_the_jvm() {
             String::from_utf8_lossy(&java.stderr)
         );
     }
+}
+
+#[test]
+fn mutable_counter_reference_rebinding_preserves_source_identity_and_verifies_on_jdk21() {
+    let output = TestOutputDirectory::new("mutable-counter-reference-rebinding");
+    let source_id = SourceId::from_index(23040);
+    let local_bindings = RefCell::new(None);
+    let slots = RefCell::new(None);
+    let mut observe_typer = |ast: &AstArena<Untyped>,
+                             _root: TreeId<Untyped>,
+                             index: &SourceSemanticIndex,
+                             typer: &mut SourceTyper<'_>,
+                             _definitions: &Definitions| {
+        let (method_tree, method) = ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(method)
+                    if typer.store().names.resolve(method.name.as_name().text()) == "create" =>
+                {
+                    Some((tree, method))
+                }
+                _ => None,
+            })
+            .expect("the audited PairFactory.create declaration is present");
+        let method_symbol = index.symbol_at(source_id, method_tree).unwrap();
+        let TreeKind::Block(block) = &ast.get(method.rhs.unwrap()).kind else {
+            panic!("create retains its source block")
+        };
+        let bindings = block.stats[..3]
+            .iter()
+            .map(|declaration| {
+                let binding = typer
+                    .typed_local_binding_at(source_id, *declaration)
+                    .expect("each original local has a canonical typed binding");
+                assert_eq!(
+                    typer.store().symbols.get(binding.symbol()).owner,
+                    Some(method_symbol)
+                );
+                assert_eq!(
+                    typer.store().scopes.get(binding.scope()).owner,
+                    Some(method_symbol)
+                );
+                (
+                    *declaration,
+                    JvmLocalBinding {
+                        declaration: binding.declaration(),
+                        symbol: binding.symbol(),
+                        mutable: typer
+                            .store()
+                            .symbols
+                            .get(binding.symbol())
+                            .flags
+                            .contains(SymbolFlags::MUTABLE),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        *local_bindings.borrow_mut() = Some(bindings);
+    };
+    let mut observe_source = |ast: &AstArena<Untyped>,
+                              _root: TreeId<Untyped>,
+                              index: &SourceSemanticIndex,
+                              typed_index: &SourceTypedIndex,
+                              unit: &mut JvmCompilationUnit<'_>,
+                              definitions: &Definitions| {
+        let (method_tree, method) = ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(method)
+                    if unit.store.names.resolve(method.name.as_name().text()) == "create" =>
+                {
+                    Some((tree, method))
+                }
+                _ => None,
+            })
+            .expect("the audited PairFactory.create declaration is present");
+        let method_symbol = index.symbol_at(source_id, method_tree).unwrap();
+        let body = ast.get(method.rhs.unwrap());
+        let TreeKind::Block(block) = &body.kind else {
+            panic!("create retains the audited source block")
+        };
+        assert_eq!(block.stats.len(), 5);
+        let [
+            first_decl,
+            second_decl,
+            selected_decl,
+            assignment_tree,
+            setter_tree,
+        ] = block.stats.as_slice()
+        else {
+            panic!("create has the two allocations, mutable local, assignment and setter")
+        };
+
+        let locals = local_bindings
+            .borrow()
+            .as_ref()
+            .expect("source and typed observations share this frontend session")
+            .clone();
+        assert_eq!(locals.len(), 3);
+        assert_eq!(
+            locals.iter().map(|(tree, _)| *tree).collect::<Vec<_>>(),
+            [*first_decl, *second_decl, *selected_decl]
+        );
+        for (declaration, binding) in &locals {
+            let typed_declaration = typed_index
+                .get(source_id, *declaration)
+                .expect("each original local declaration has a typed binding");
+            assert_eq!(typed_declaration, binding.declaration);
+            assert_eq!(
+                unit.store.symbols.get(binding.symbol).owner,
+                Some(method_symbol)
+            );
+        }
+        let [first, second, selected] =
+            [locals[0].1.symbol, locals[1].1.symbol, locals[2].1.symbol];
+        assert_ne!(first, second);
+        assert_ne!(first, selected);
+        assert_ne!(second, selected);
+        assert!(
+            unit.store
+                .symbols
+                .get(selected)
+                .flags
+                .contains(SymbolFlags::MUTABLE)
+        );
+        assert!(locals[2].1.mutable);
+
+        let typed_assignment = typed_index
+            .get(source_id, *assignment_tree)
+            .expect("the original source assignment has a typed binding");
+        let TreeKind::Assign(typed_assignment) = &unit.typed_ast.get(typed_assignment).kind else {
+            panic!("source assignment maps to a typed Assign")
+        };
+        let lhs = term_type_target(unit, unit.typed_ast.get(typed_assignment.lhs).ty)
+            .expect("assignment lhs is the canonical selected local reference");
+        let rhs = term_type_target(unit, unit.typed_ast.get(typed_assignment.rhs).ty)
+            .expect("assignment rhs is the canonical second local reference");
+        assert_eq!(lhs, selected);
+        assert_eq!(rhs, second);
+
+        let TreeKind::Apply(setter_apply) = &ast.get(*setter_tree).kind else {
+            panic!("the setter source expression is one Apply")
+        };
+        let TreeKind::Select(setter_select) = &ast.get(setter_apply.function).kind else {
+            panic!("the setter call selects set on the original receiver")
+        };
+        let typed_receiver = typed_index
+            .get(source_id, setter_select.qualifier)
+            .expect("the setter receiver has a source-to-typed edge");
+        let receiver = term_type_target(unit, unit.typed_ast.get(typed_receiver).ty)
+            .expect("the selected setter receiver is the mutable local symbol");
+        assert_eq!(receiver, selected);
+        assert_eq!(setter_apply.args.len(), 1);
+        let typed_setter_arg = typed_index
+            .get(source_id, setter_apply.args[0])
+            .expect("the setter argument has a typed binding");
+        assert_eq!(
+            term_type_target(unit, unit.typed_ast.get(typed_setter_arg).ty),
+            Some(
+                index
+                    .symbol_at(source_id, method.value_param_clauses[0][2])
+                    .unwrap()
+            )
+        );
+
+        let TreeKind::Apply(pair_apply) = &ast.get(block.expr).kind else {
+            panic!("the block result constructs the original Pair")
+        };
+        assert_eq!(pair_apply.args.len(), 2);
+        let pair_argument_symbols = pair_apply
+            .args
+            .iter()
+            .map(|argument| {
+                let typed = typed_index
+                    .get(source_id, *argument)
+                    .expect("each Pair argument has an original typed binding");
+                term_type_target(unit, unit.typed_ast.get(typed).ty)
+                    .expect("each Pair argument retains its canonical local symbol")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(pair_argument_symbols, [first, second]);
+
+        let owner = unit.store.symbols.get(method_symbol).owner.unwrap();
+        let layout = unit
+            .local_layout(owner, method_symbol, definitions)
+            .unwrap();
+        let selected_slot = layout.local(selected).unwrap();
+        assert_eq!(selected_slot.declaration(), locals[2].1.declaration);
+        assert!(selected_slot.is_mutable());
+        *slots.borrow_mut() = Some((
+            layout.local(first).unwrap().slot(),
+            layout.local(second).unwrap().slot(),
+            selected_slot.slot(),
+        ));
+    };
+
+    let artifacts = compile_source_batch_with_typer_and_source_observer(
+        MUTABLE_REFERENCE_REBINDING_SOURCE,
+        "MutableReferenceRebinding.scala",
+        output.path(),
+        source_id,
+        SourceUnitCardinality::AtLeastTwo,
+        &mut observe_typer,
+        &mut observe_source,
+    )
+    .expect("the real source-to-JVM path accepts the audited initialized mutable local");
+    assert_eq!(
+        artifacts.len(),
+        3,
+        "Counter, Pair and PairFactory are emitted together"
+    );
+    let (first_slot, second_slot, selected_slot) = slots
+        .into_inner()
+        .expect("the frontend observer ran on the same session");
+    let factory_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "example/PairFactory")
+        .expect("PairFactory is emitted");
+    let factory = decode_emitted_class(factory_artifact);
+    assert_eq!(factory.version.major, 65);
+    assert_eq!(factory.version.minor, 0);
+    assert!(
+        methods_with_descriptors(&factory)
+            .contains(&("create".into(), "(III)Lexample/Pair;".into()))
+    );
+    let code = emitted_method_code(&factory, "create");
+    let instructions = decode_subset_instructions(code);
+    let allocations = instructions
+        .iter()
+        .filter_map(|(offset, opcode)| (*opcode == 0xbb).then_some(*offset))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        allocations.len(),
+        3,
+        "two Counters and the final Pair are allocated"
+    );
+    let allocated_classes = allocations
+        .iter()
+        .map(|offset| {
+            let cp_index = u16::from_be_bytes([code[offset + 1], code[offset + 2]]);
+            let ConstantPoolEntry::Class { name_index } = factory
+                .constant_pool
+                .get(ConstantPoolIndex(cp_index))
+                .unwrap()
+            else {
+                panic!("allocation references a class constant")
+            };
+            factory.constant_pool.utf8(*name_index).unwrap().to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        allocated_classes,
+        ["example/Counter", "example/Counter", "example/Pair"]
+    );
+    let stores_to_selected = instructions
+        .iter()
+        .filter(|(offset, opcode)| *opcode == 0x3a && code[*offset + 1] as u16 == selected_slot)
+        .count();
+    assert_eq!(
+        stores_to_selected, 2,
+        "initializer and reassignment store selected"
+    );
+    let loads_from_selected = instructions
+        .iter()
+        .filter(|(offset, opcode)| *opcode == 0x19 && code[*offset + 1] as u16 == selected_slot)
+        .count();
+    assert_eq!(
+        loads_from_selected, 1,
+        "the selected receiver is loaded once for set"
+    );
+    assert!(
+        instructions
+            .iter()
+            .any(|(offset, opcode)| { *opcode == 0x19 && code[*offset + 1] as u16 == first_slot })
+    );
+    assert!(
+        instructions
+            .iter()
+            .any(|(offset, opcode)| { *opcode == 0x19 && code[*offset + 1] as u16 == second_slot })
+    );
+    let selected_stores = instructions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (offset, opcode))| {
+            (*opcode == 0x3a && code[*offset + 1] as u16 == selected_slot)
+                .then_some((index, *offset))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(selected_stores.len(), 2);
+    for ((index, _), expected_source_slot) in selected_stores.iter().zip([first_slot, second_slot])
+    {
+        let (load_offset, load_opcode) = instructions[index - 1];
+        assert_eq!(load_opcode, 0x19);
+        assert_eq!(code[load_offset + 1] as u16, expected_source_slot);
+    }
+    let setter_call = instructions
+        .iter()
+        .position(|(offset, opcode)| {
+            *opcode == 0xb6 && {
+                let cp_index = u16::from_be_bytes([code[*offset + 1], code[*offset + 2]]);
+                let ConstantPoolEntry::Methodref {
+                    class_index,
+                    name_and_type_index,
+                } = factory
+                    .constant_pool
+                    .get(ConstantPoolIndex(cp_index))
+                    .unwrap()
+                else {
+                    panic!("setter invocation references a Methodref")
+                };
+                factory.constant_pool.class_name(*class_index) == Ok("example/Counter")
+                    && factory.constant_pool.name_and_type(*name_and_type_index)
+                        == Ok(("set", "(I)V"))
+            }
+        })
+        .expect("exactly one Counter.set call appears in the method");
+    let (selected_receiver_offset, selected_receiver_opcode) = instructions[setter_call - 2];
+    assert_eq!(selected_receiver_opcode, 0x19);
+    assert_eq!(code[selected_receiver_offset + 1] as u16, selected_slot);
+    assert_eq!(
+        instructions[setter_call - 1].1,
+        0x1d,
+        "nextValue remains formal slot 3"
+    );
+    let pair_call = instructions
+        .iter()
+        .position(|(offset, opcode)| {
+            *opcode == 0xb7 && {
+                let cp_index = u16::from_be_bytes([code[*offset + 1], code[*offset + 2]]);
+                let ConstantPoolEntry::Methodref {
+                    class_index,
+                    name_and_type_index,
+                } = factory
+                    .constant_pool
+                    .get(ConstantPoolIndex(cp_index))
+                    .unwrap()
+                else {
+                    panic!("Pair invocation references a Methodref")
+                };
+                factory.constant_pool.class_name(*class_index) == Ok("example/Pair")
+                    && factory.constant_pool.name_and_type(*name_and_type_index)
+                        == Ok(("<init>", "(Lexample/Counter;Lexample/Counter;)V"))
+            }
+        })
+        .expect("Pair is constructed once from its original local references");
+    for (position, expected_slot) in [(pair_call - 2, first_slot), (pair_call - 1, second_slot)] {
+        let (load_offset, opcode) = instructions[position];
+        assert_eq!(opcode, 0x19);
+        assert_eq!(code[load_offset + 1] as u16, expected_slot);
+    }
+    assert_invocation_sequence(
+        &factory,
+        code,
+        &[
+            (0xb7, "example/Counter", "<init>", "(I)V"),
+            (0xb7, "example/Counter", "<init>", "(I)V"),
+            (0xb6, "example/Counter", "set", "(I)V"),
+            (
+                0xb7,
+                "example/Pair",
+                "<init>",
+                "(Lexample/Counter;Lexample/Counter;)V",
+            ),
+        ],
+    );
+
+    let output_path = output
+        .path()
+        .to_str()
+        .expect("UTF-8 generated class directory");
+    let tmpdir = std::env::var("TMPDIR").expect("managed scratch is exported as TMPDIR");
+    let probe = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/jvm_tasty_mutable_reference_rebinding/RuntimeProbe.java");
+    let javac = Command::new("javac")
+        .arg(format!("-J-Djava.io.tmpdir={tmpdir}"))
+        .args([
+            "--release",
+            "21",
+            "-classpath",
+            output_path,
+            "-d",
+            output_path,
+        ])
+        .arg(&probe)
+        .output()
+        .expect("start strict JDK 21 compilation for the independent runtime probe");
+    assert!(
+        javac.status.success(),
+        "javac --release 21 rejected RuntimeProbe.java\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .arg(format!("-Djava.io.tmpdir={tmpdir}"))
+        .args([
+            "-Xverify:all",
+            "-ea",
+            "-classpath",
+            output_path,
+            "example.RuntimeProbe",
+        ])
+        .output()
+        .expect("start strict JDK 21 verifier/runtime probe");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all -ea rejected emitted classes\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "mutable reference rebinding values=7/42,-9/11,5/-13 distinct=true"
+    );
+    let javap = Command::new("javap")
+        .arg(format!("-J-Djava.io.tmpdir={tmpdir}"))
+        .args([
+            "-v",
+            "-c",
+            "-p",
+            "-classpath",
+            output_path,
+            "example.PairFactory",
+        ])
+        .output()
+        .expect("start javap for generated PairFactory");
+    assert!(
+        javap.status.success(),
+        "javap failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javap.stdout),
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let javap = String::from_utf8_lossy(&javap.stdout);
+    assert!(javap.contains("major version: 65"));
+    assert!(javap.contains("descriptor: (III)Lexample/Pair;"));
+    assert!(javap.contains("Counter.set:(I)V"));
+
+    let first_selected_output = TestOutputDirectory::new("mutable-counter-reference-select-first");
+    let first_selected_source =
+        MUTABLE_REFERENCE_REBINDING_SOURCE.replace("selected = second", "selected = first");
+    compile_source_batch(
+        &first_selected_source,
+        "MutableReferenceRebindingFirst.scala",
+        first_selected_output.path(),
+        SourceId::from_index(23041),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect("the audited selected=first control remains valid source/JVM input");
+    let first_selected_path = first_selected_output
+        .path()
+        .to_str()
+        .expect("UTF-8 generated control class directory");
+    let control_harness = first_selected_output.path().join("SelectFirstHarness.java");
+    fs::write(
+        &control_harness,
+        "import example.Pair; import example.PairFactory; public final class SelectFirstHarness { public static void main(String[] args) { Pair pair = new PairFactory().create(7, 3, 42); if (pair.leftValue() != 42 || pair.rightValue() != 3) throw new AssertionError(\"selected=first must update only first\"); } }\n",
+    )
+    .expect("write selected=first runtime control");
+    let javac = Command::new("javac")
+        .arg(format!("-J-Djava.io.tmpdir={tmpdir}"))
+        .args([
+            "--release",
+            "21",
+            "-classpath",
+            first_selected_path,
+            "-d",
+            first_selected_path,
+        ])
+        .arg(&control_harness)
+        .output()
+        .expect("compile selected=first Java runtime control");
+    assert!(
+        javac.status.success(),
+        "javac rejected selected=first control: {}",
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .arg(format!("-Djava.io.tmpdir={tmpdir}"))
+        .args([
+            "-Xverify:all",
+            "-ea",
+            "-classpath",
+            first_selected_path,
+            "SelectFirstHarness",
+        ])
+        .output()
+        .expect("run selected=first JDK 21 control");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected selected=first control: {}",
+        String::from_utf8_lossy(&java.stderr)
+    );
 }
 
 #[test]
