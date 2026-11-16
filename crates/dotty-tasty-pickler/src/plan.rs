@@ -361,6 +361,16 @@ pub struct MutableCounterLocalInitializerBinding {
     pub local_type: TypeId,
 }
 
+#[derive(Clone, Copy)]
+struct FragmentPredecessorInitializer {
+    source_declaration: TreeId<Untyped>,
+    typed_declaration: TreeId<Typed>,
+    local: SymbolId,
+    proof: MutableCounterLocalInitializerBinding,
+    source_initializer: TreeId<Untyped>,
+    typed_initializer: TreeId<Typed>,
+}
+
 /// Exact source/typed identities for one immutable local reference selection.
 /// The binding is provenance only and never authorizes serialization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1411,6 +1421,13 @@ impl<'a> Validator<'_, 'a> {
         {
             return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(binding.method)));
         }
+        let initializers = p
+            .typed_bindings
+            .local_counter_initializers(p.source.id, binding.method);
+        if initializers.len() != binding.prefix_locals.len() {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(binding.method)));
+        }
+        let mut visited_initializers = HashSet::new();
         for index in 0..2 {
             self.validate_fragment_local(
                 binding.prefix_source_declarations[index],
@@ -1418,6 +1435,7 @@ impl<'a> Validator<'_, 'a> {
                 binding.prefix_locals[index],
                 binding,
                 false,
+                &mut visited_initializers,
             )?;
         }
         self.validate_fragment_local(
@@ -1426,6 +1444,7 @@ impl<'a> Validator<'_, 'a> {
             binding.local,
             binding,
             true,
+            &mut visited_initializers,
         )?;
         Ok(())
     }
@@ -1437,6 +1456,7 @@ impl<'a> Validator<'_, 'a> {
         symbol_id: SymbolId,
         proof: MutableCounterLocalInitializerBinding,
         selected: bool,
+        visited_initializers: &mut HashSet<TreeId<Typed>>,
     ) -> Result<(), PickleError> {
         let p = self.plan;
         let local = p
@@ -1546,10 +1566,16 @@ impl<'a> Validator<'_, 'a> {
             });
         }
         if selected {
-            let (TreeKind::Ident(source_ident), TreeKind::Ident(typed_ident)) = (
-                &self.source_tree(source_rhs)?.kind,
-                &p.typed_ast.get(typed_rhs).kind,
-            ) else {
+            if !visited_initializers.insert(typed_rhs) {
+                return Err(PickleError::RepeatedExpression { tree: typed_rhs });
+            }
+            let typed_initializer = p
+                .typed_ast
+                .try_get(typed_rhs)
+                .ok_or(PickleError::InvalidTypedTree { tree: typed_rhs })?;
+            let (TreeKind::Ident(source_ident), TreeKind::Ident(typed_ident)) =
+                (&self.source_tree(source_rhs)?.kind, &typed_initializer.kind)
+            else {
                 return Err(
                     self.unsupported(UnsupportedFeature::BodyExpression, Some(proof.method))
                 );
@@ -1557,16 +1583,17 @@ impl<'a> Validator<'_, 'a> {
             let Type::TermRef {
                 prefix,
                 target: TermRefTarget::Symbol(target),
-            } = self.ty(p.typed_ast.get(typed_rhs).ty)?
+            } = self.ty(typed_initializer.ty)?
             else {
                 return Err(PickleError::BodyType {
                     tree: typed_rhs,
-                    ty: p.typed_ast.get(typed_rhs).ty,
+                    ty: typed_initializer.ty,
                 });
             };
             if *target != proof.target
                 || *prefix != p.definitions.no_prefix
                 || !proof.prefix_locals.contains(target)
+                || !self.visible_locals.contains(target)
                 || source_ident.name != self.symbol(*target)?.name
                 || typed_ident.name != self.symbol(*target)?.name
             {
@@ -1574,10 +1601,145 @@ impl<'a> Validator<'_, 'a> {
                     self.unsupported(UnsupportedFeature::BodyExpression, Some(proof.method))
                 );
             }
+        } else {
+            self.validate_fragment_predecessor_initializer(
+                FragmentPredecessorInitializer {
+                    source_declaration: source_id,
+                    typed_declaration: typed_id,
+                    local: symbol_id,
+                    proof,
+                    source_initializer: source_rhs,
+                    typed_initializer: typed_rhs,
+                },
+                visited_initializers,
+            )?;
         }
         if !self.seen_local_bindings.insert(source_id) || !self.seen_local_symbols.insert(symbol_id)
         {
             return Err(PickleError::DuplicateDeclaration { symbol: symbol_id });
+        }
+        self.visible_locals.insert(symbol_id);
+        Ok(())
+    }
+
+    fn validate_fragment_predecessor_initializer(
+        &mut self,
+        fragment: FragmentPredecessorInitializer,
+        visited: &mut HashSet<TreeId<Typed>>,
+    ) -> Result<(), PickleError> {
+        let FragmentPredecessorInitializer {
+            source_declaration,
+            typed_declaration,
+            local,
+            proof,
+            source_initializer,
+            typed_initializer,
+        } = fragment;
+        let p = self.plan;
+        let declarations = p
+            .typed_bindings
+            .local_counter_initializers(p.source.id, proof.method);
+        let mut matching = declarations
+            .iter()
+            .filter(|initializer| initializer.local == local);
+        let initializer = matching.next().copied().ok_or_else(|| {
+            self.unsupported(UnsupportedFeature::BodyExpression, Some(proof.method))
+        })?;
+        if matching.next().is_some()
+            || initializer.source_block != proof.source_block
+            || initializer.typed_block != proof.typed_block
+            || initializer.source_declaration != source_declaration
+            || initializer.typed_declaration != typed_declaration
+            || initializer.source_initializer != source_initializer
+            || initializer.typed_initializer != typed_initializer
+            || initializer.local != local
+            || initializer.scope != proof.scope
+            || !self.same_reference_type(initializer.local_type, proof.local_type)?
+            || initializer.call.source_apply != source_initializer
+            || initializer.call.typed_apply != typed_initializer
+        {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(proof.method)));
+        }
+        let source_declaration_node = self.source_tree(source_declaration)?;
+        let typed_declaration_node =
+            p.typed_ast
+                .try_get(typed_declaration)
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: typed_declaration,
+                })?;
+        let (TreeKind::ValDef(source_val), TreeKind::ValDef(typed_val)) =
+            (&source_declaration_node.kind, &typed_declaration_node.kind)
+        else {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(proof.method)));
+        };
+        if initializer.source_type_tree != source_val.tpt
+            || initializer.typed_type_tree != typed_val.tpt
+        {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(proof.method)));
+        }
+        let source = self.source_tree(source_initializer)?;
+        let typed =
+            p.typed_ast
+                .try_get(typed_initializer)
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: typed_initializer,
+                })?;
+        self.source_typed_binding(source_initializer, typed_initializer)?;
+        self.paired_source_typed_span(source.position, typed.position, typed_initializer)?;
+        let method = p
+            .methods
+            .iter()
+            .find(|method| method.symbol == proof.method)
+            .ok_or(PickleError::SourceDefinition {
+                symbol: proof.method,
+            })?;
+        if !visited.insert(typed_initializer) {
+            return Err(PickleError::RepeatedExpression {
+                tree: typed_initializer,
+            });
+        }
+        self.validate_nested_constructor_argument(
+            initializer.call,
+            initializer.argument_formal,
+            proof.local_type,
+            method,
+            1,
+            visited,
+        )?;
+        let (TreeKind::New(source_new), TreeKind::New(typed_new)) = (
+            &self.source_tree(initializer.call.source_new)?.kind,
+            &p.typed_ast
+                .try_get(initializer.call.typed_new)
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: initializer.call.typed_new,
+                })?
+                .kind,
+        ) else {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(proof.method)));
+        };
+        for (source_id, typed_id) in [
+            (source_initializer, typed_initializer),
+            (
+                initializer.call.source_select,
+                initializer.call.typed_select,
+            ),
+            (initializer.call.source_new, initializer.call.typed_new),
+            (source_new.tpt, typed_new.tpt),
+            (
+                initializer.call.source_argument,
+                initializer.call.typed_argument,
+            ),
+        ] {
+            let source = self.source_tree(source_id)?;
+            let typed = p
+                .typed_ast
+                .try_get(typed_id)
+                .ok_or(PickleError::InvalidTypedTree { tree: typed_id })?;
+            if source.position.is_none() || typed.position.is_none() {
+                return Err(PickleError::BodySpan { tree: typed_id });
+            }
+            self.source_typed_binding(source_id, typed_id)?;
+            self.paired_source_typed_span(source.position, typed.position, typed_id)?;
         }
         Ok(())
     }

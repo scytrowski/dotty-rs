@@ -3,8 +3,8 @@ use dotty::jvm_tasty_cross_class::{
     validate_mutable_local_reference_reassignment_proof,
 };
 use dotty::jvm_tasty_plan::mutable_local_reference_declaration_binding;
-use dotty_core::ast::{AstArena, TreeKind, Typed};
-use dotty_core::{Definitions, Packages, SemanticStore, SourceId, SourceText};
+use dotty_core::ast::{ApplyKind, AstArena, TreeKind, Typed};
+use dotty_core::{Definitions, Packages, SemanticStore, SourceId, SourceText, TermRefTarget, Type};
 use dotty_core::{SourceTypedIndex, SymbolId, TreeId, Untyped};
 use dotty_jvm::JvmCompilationUnit;
 use dotty_lexer::ContextualScanner;
@@ -12,9 +12,9 @@ use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_d
 use dotty_parser::parse_compilation_unit;
 use dotty_tasty::file::TastyFile;
 use dotty_tasty_pickler::{
-    ClassMemberPicklePlan, ClassStatePicklePlan, LocalValueBinding,
-    MutableCounterLocalInitializerBinding, PrimaryConstructorInputPlan, SourceMetadata,
-    SourceTypedBindings,
+    ClassMemberPicklePlan, ClassStatePicklePlan, LocalCounterInitializerBinding, LocalValueBinding,
+    MutableCounterLocalInitializerBinding, NestedConstructorCallBinding,
+    PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings,
 };
 use dotty_typer::{SourceTyper, TypedLocalBinding};
 use std::path::PathBuf;
@@ -46,6 +46,20 @@ struct FragmentBindings<'a> {
     source: SourceId,
     method: SymbolId,
     binding: MutableCounterLocalInitializerBinding,
+    initializers: Vec<LocalCounterInitializerBinding>,
+}
+
+struct FragmentInitializerSession<'a> {
+    source_id: SourceId,
+    method: SymbolId,
+    scope: dotty_core::ScopeId,
+    source_block: TreeId<Untyped>,
+    typed_block: TreeId<Typed>,
+    store: &'a SemanticStore,
+    source_ast: &'a AstArena<Untyped>,
+    typed_ast: &'a AstArena<Typed>,
+    source_index: &'a dotty_core::SourceSemanticIndex,
+    typed_bindings: &'a SourceTypedIndex,
 }
 
 impl SourceTypedBindings for FragmentBindings<'_> {
@@ -72,6 +86,17 @@ impl SourceTypedBindings for FragmentBindings<'_> {
     ) -> Option<MutableCounterLocalInitializerBinding> {
         (source == self.source && method == self.method).then_some(self.binding)
     }
+    fn local_counter_initializers(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Vec<LocalCounterInitializerBinding> {
+        if source == self.source && method == self.method {
+            self.initializers.clone()
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 fn stale_symbol_id(store: &SemanticStore) -> dotty_core::SymbolId {
@@ -95,6 +120,156 @@ fn stale_symbol_id(store: &SemanticStore) -> dotty_core::SymbolId {
             return id;
         }
     }
+}
+
+fn fragment_initializer_bindings(
+    session: FragmentInitializerSession<'_>,
+    locals: [SymbolId; 2],
+    declarations: [TreeId<Untyped>; 2],
+) -> Vec<LocalCounterInitializerBinding> {
+    let FragmentInitializerSession {
+        source_id,
+        method,
+        scope,
+        source_block,
+        typed_block,
+        store,
+        source_ast,
+        typed_ast,
+        source_index,
+        typed_bindings,
+    } = session;
+    declarations
+        .into_iter()
+        .zip(locals)
+        .map(|(source_declaration, local)| {
+            let typed_declaration = typed_bindings
+                .get(source_id, source_declaration)
+                .expect("typed predecessor declaration");
+            let (TreeKind::ValDef(source_val), TreeKind::ValDef(typed_val)) = (
+                &source_ast.get(source_declaration).kind,
+                &typed_ast.get(typed_declaration).kind,
+            ) else {
+                panic!("predecessor declarations are ValDefs")
+            };
+            let source_initializer = source_val.rhs.expect("predecessor source initializer");
+            let typed_initializer = typed_val.rhs.expect("predecessor typed initializer");
+            let (TreeKind::Apply(source_apply), TreeKind::Apply(typed_apply)) = (
+                &source_ast.get(source_initializer).kind,
+                &typed_ast.get(typed_initializer).kind,
+            ) else {
+                panic!("predecessor initializers are direct constructor applications")
+            };
+            assert_eq!(source_apply.kind, ApplyKind::Regular);
+            assert_eq!(typed_apply.kind, ApplyKind::Regular);
+            let source_select = source_apply.function;
+            let typed_select = typed_apply.function;
+            let (TreeKind::Select(source_select_node), TreeKind::Select(typed_select_node)) = (
+                &source_ast.get(source_select).kind,
+                &typed_ast.get(typed_select).kind,
+            ) else {
+                panic!("predecessor initializer functions are constructor selects")
+            };
+            let source_new = source_select_node.qualifier;
+            let typed_new = typed_select_node.qualifier;
+            let (TreeKind::New(source_new_node), TreeKind::New(typed_new_node)) = (
+                &source_ast.get(source_new).kind,
+                &typed_ast.get(typed_new).kind,
+            ) else {
+                panic!("predecessor constructor selections qualify a New")
+            };
+            assert_eq!(typed_bindings.get(source_id, source_new), Some(typed_new));
+            assert_eq!(
+                typed_bindings.get(source_id, source_new_node.tpt),
+                Some(typed_new_node.tpt)
+            );
+            let source_argument = *source_apply.args.first().expect("one constructor arg");
+            let typed_argument = *typed_apply.args.first().expect("one typed constructor arg");
+            let constructor = match store.types.get(typed_ast.get(typed_select).ty) {
+                Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                } => *symbol,
+                other => panic!("constructor select has TermRef type: {other:?}"),
+            };
+            let argument_formal = match store.types.get(typed_ast.get(typed_argument).ty) {
+                Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                } => *symbol,
+                other => panic!("constructor argument has formal TermRef type: {other:?}"),
+            };
+            let constructor_tree = match source_index.definition_of(constructor) {
+                Some(dotty_core::SourceDefinition::Canonical { source, tree })
+                    if source == source_id =>
+                {
+                    tree
+                }
+                other => panic!("constructor has canonical source: {other:?}"),
+            };
+            let TreeKind::DefDef(constructor_definition) = &source_ast.get(constructor_tree).kind
+            else {
+                panic!("constructor definition")
+            };
+            let constructor_formal_tree = *constructor_definition
+                .value_param_clauses
+                .first()
+                .and_then(|clause| clause.first())
+                .expect("one constructor formal");
+            let constructor_formal = source_index
+                .derived_symbol_at(constructor, source_id, constructor_formal_tree)
+                .expect("canonical constructor formal symbol");
+            let class = store
+                .symbols
+                .get(constructor)
+                .owner
+                .expect("constructor owner");
+            let formal_type = match store.symbols.get(constructor_formal).info {
+                dotty_core::SymbolInfo::Complete(ty) => ty,
+                other => panic!("constructor argument formal is complete: {other:?}"),
+            };
+            assert_eq!(
+                store.symbols.get(constructor_formal).owner,
+                Some(constructor)
+            );
+            assert_eq!(store.symbols.get(argument_formal).owner, Some(method));
+            let local_type = match store.symbols.get(local).info {
+                dotty_core::SymbolInfo::Complete(ty) => ty,
+                other => panic!("predecessor local is complete: {other:?}"),
+            };
+            assert_eq!(store.symbols.get(local).owner, Some(method));
+            let call = NestedConstructorCallBinding {
+                source_apply: source_initializer,
+                typed_apply: typed_initializer,
+                source_select,
+                source_new,
+                source_argument,
+                typed_select,
+                typed_new,
+                typed_argument,
+                class,
+                constructor,
+                formal: constructor_formal,
+                formal_type,
+                result_type: typed_ast.get(typed_initializer).ty,
+            };
+            LocalCounterInitializerBinding {
+                source_block,
+                typed_block,
+                source_declaration,
+                typed_declaration,
+                source_initializer,
+                typed_initializer,
+                source_type_tree: source_val.tpt,
+                typed_type_tree: typed_val.tpt,
+                local,
+                scope,
+                local_type,
+                argument_formal,
+                call,
+            }
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -141,6 +316,12 @@ enum Mutation {
     ForeignSourceSelectedPosition,
     MissingTypedAssignmentPosition,
     MismatchedTypedAssignmentPosition,
+    WrongFirstPrefixInitializerKindAfterProof,
+    WrongSecondPrefixInitializerTypeAfterProof,
+    MissingFirstPrefixInitializerBindingAfterProof,
+    MissingSecondPrefixInitializerSpanAfterProof,
+    ReorderedPrefixReceiptAfterProof,
+    StaleSelectedInitializerAfterProof,
 }
 
 #[derive(Debug)]
@@ -632,43 +813,137 @@ fn validate(
             let rhs_position = parsed.ast.get(source_assignment_rhs).position.unwrap();
             typed_ast.get_mut(typed_assignment).position = Some(rhs_position);
         }
+        Mutation::WrongFirstPrefixInitializerKindAfterProof
+        | Mutation::WrongSecondPrefixInitializerTypeAfterProof
+        | Mutation::MissingFirstPrefixInitializerBindingAfterProof
+        | Mutation::MissingSecondPrefixInitializerSpanAfterProof
+        | Mutation::ReorderedPrefixReceiptAfterProof
+        | Mutation::StaleSelectedInitializerAfterProof => {}
     }
-    let TreeKind::Block(current_block) = &parsed.ast.get(rhs).kind else {
-        panic!("Block survives mutation")
+    let current_stats_len = match &parsed.ast.get(rhs).kind {
+        TreeKind::Block(block) => block.stats.len(),
+        _ => panic!("Block survives mutation"),
     };
-    let jvm_unit = JvmCompilationUnit {
-        store: &store,
-        typed_ast: &typed_ast,
-        classes: Vec::new(),
-    };
-    let proof = validate_mutable_local_reference_reassignment_proof(
-        MutableLocalReferenceReassignmentProofInput {
-            source_id,
-            method_tree,
+    let (
+        mut declaration_binding,
+        selected_receipt,
+        initializer_target_receipt,
+        assigned_target_receipt,
+        semantic_originals,
+        assignment_receipt,
+        typed_assignment_receipt,
+        setter_receiver_receipt,
+        pair_args_receipt,
+        initializer_bindings,
+    ) = {
+        let jvm_unit = JvmCompilationUnit {
             store: &store,
-            definitions: &definitions,
-            source_ast: &parsed.ast,
             typed_ast: &typed_ast,
-            source_index: &source_index,
-            source_typed_index: &source_typed_index,
-            original_bindings: [Some(local_bindings[0]), Some(local_bindings[1])],
-            selected_binding: supplied_selected,
-            jvm_unit: &jvm_unit,
-        },
-    )
-    .map_err(ValidationError::Proof)?;
-    assert_eq!(proof.scope(), selected_scope);
-    assert_eq!(proof.source_block(), rhs);
-    assert_eq!(proof.source_assignment(), assignment);
-    assert_eq!(proof.typed_assignment(), typed_assignment);
-    assert_eq!(proof.source_assignment_lhs(), source_assignment_lhs);
-    assert_eq!(proof.source_assignment_rhs(), source_assignment_rhs);
-    assert_eq!(
-        current_block.stats.len(),
-        5,
-        "accepted Block has the frozen statement count"
-    );
-    let declaration_binding = mutable_local_reference_declaration_binding(&proof);
+            classes: Vec::new(),
+        };
+        let proof = validate_mutable_local_reference_reassignment_proof(
+            MutableLocalReferenceReassignmentProofInput {
+                source_id,
+                method_tree,
+                store: &store,
+                definitions: &definitions,
+                source_ast: &parsed.ast,
+                typed_ast: &typed_ast,
+                source_index: &source_index,
+                source_typed_index: &source_typed_index,
+                original_bindings: [Some(local_bindings[0]), Some(local_bindings[1])],
+                selected_binding: supplied_selected,
+                jvm_unit: &jvm_unit,
+            },
+        )
+        .map_err(ValidationError::Proof)?;
+        assert_eq!(proof.scope(), selected_scope);
+        assert_eq!(proof.source_block(), rhs);
+        assert_eq!(proof.source_assignment(), assignment);
+        assert_eq!(proof.typed_assignment(), typed_assignment);
+        assert_eq!(proof.source_assignment_lhs(), source_assignment_lhs);
+        assert_eq!(proof.source_assignment_rhs(), source_assignment_rhs);
+        assert_eq!(
+            current_stats_len, 5,
+            "accepted Block has the frozen statement count"
+        );
+        let declaration_binding = mutable_local_reference_declaration_binding(&proof);
+        let initializer_bindings = fragment_initializer_bindings(
+            FragmentInitializerSession {
+                source_id,
+                method,
+                scope: selected_scope,
+                source_block: rhs,
+                typed_block: source_typed_index
+                    .get(source_id, rhs)
+                    .expect("typed source block"),
+                store: &store,
+                source_ast: &parsed.ast,
+                typed_ast: &typed_ast,
+                source_index: &source_index,
+                typed_bindings: &source_typed_index,
+            },
+            declaration_binding.prefix_locals,
+            declaration_binding.prefix_source_declarations,
+        );
+        (
+            declaration_binding,
+            proof.selected(),
+            proof.initializer_target(),
+            proof.assigned_target(),
+            proof.semantic_originals(),
+            proof.source_assignment(),
+            proof.typed_assignment(),
+            proof.source_setter_receiver(),
+            proof.source_pair_arguments(),
+            initializer_bindings,
+        )
+    };
+    match mutation {
+        Mutation::WrongFirstPrefixInitializerKindAfterProof => {
+            let typed_rhs = initializer_bindings[0].typed_initializer;
+            let typed_argument = initializer_bindings[0].call.typed_argument;
+            let replacement = typed_ast.get(typed_argument).kind.clone();
+            typed_ast.get_mut(typed_rhs).kind = replacement;
+        }
+        Mutation::WrongSecondPrefixInitializerTypeAfterProof => {
+            let typed_rhs = initializer_bindings[1].typed_initializer;
+            typed_ast.get_mut(typed_rhs).ty = definitions.int;
+        }
+        Mutation::MissingFirstPrefixInitializerBindingAfterProof => {
+            source_typed_index.remove(source_id, initializer_bindings[0].source_initializer);
+        }
+        Mutation::MissingSecondPrefixInitializerSpanAfterProof => {
+            typed_ast
+                .get_mut(initializer_bindings[1].typed_initializer)
+                .position = None;
+        }
+        Mutation::ReorderedPrefixReceiptAfterProof => {
+            declaration_binding.prefix_source_declarations.swap(0, 1);
+            declaration_binding.prefix_typed_declarations.swap(0, 1);
+            declaration_binding.prefix_locals.swap(0, 1);
+        }
+        Mutation::StaleSelectedInitializerAfterProof => {
+            let source_rhs = declaration_binding.source_initializer;
+            let typed_declaration = declaration_binding.typed_declaration;
+            let old_typed_rhs = declaration_binding.typed_initializer;
+            let mut stale_arena = AstArena::<Typed>::new();
+            for (_, tree) in typed_ast.iter() {
+                stale_arena.alloc(tree.clone());
+            }
+            let stale = stale_arena.alloc(typed_ast.get(old_typed_rhs).clone());
+            declaration_binding.typed_initializer = stale;
+            let TreeKind::ValDef(typed_val) = &mut typed_ast.get_mut(typed_declaration).kind else {
+                unreachable!()
+            };
+            typed_val.rhs = Some(stale);
+            source_typed_index.remove(source_id, source_rhs);
+            source_typed_index
+                .insert(source_id, source_rhs, stale)
+                .unwrap();
+        }
+        _ => {}
+    }
     let factory = store.symbols.get(method).owner.unwrap();
     let factory_tree = match source_index.definition_of(factory).unwrap() {
         dotty_core::SourceDefinition::Canonical { tree, .. } => tree,
@@ -703,6 +978,7 @@ fn validate(
         source: source_id,
         method,
         binding: declaration_binding,
+        initializers: initializer_bindings,
     };
     let member = [ClassMemberPicklePlan::Method {
         symbol: method,
@@ -733,16 +1009,16 @@ fn validate(
         .map_err(ValidationError::Pickle)?;
     let fragment = validated_fragment.emit().map_err(ValidationError::Pickle)?;
     Ok(Receipt {
-        selected: proof.selected(),
-        initializer_target: proof.initializer_target(),
+        selected: selected_receipt,
+        initializer_target: initializer_target_receipt,
         declaration_binding,
-        target: proof.assigned_target(),
-        first: proof.semantic_originals()[0],
-        second: proof.semantic_originals()[1],
-        assignment: proof.source_assignment(),
-        typed_assignment: proof.typed_assignment(),
-        setter_receiver: proof.source_setter_receiver(),
-        pair_args: proof.source_pair_arguments(),
+        target: assigned_target_receipt,
+        first: semantic_originals[0],
+        second: semantic_originals[1],
+        assignment: assignment_receipt,
+        typed_assignment: typed_assignment_receipt,
+        setter_receiver: setter_receiver_receipt,
+        pair_args: pair_args_receipt,
         fragment: fragment.bytes().to_vec(),
     })
 }
@@ -1114,4 +1390,47 @@ fn mutable_declaration_requires_exact_source_var_and_mutable_flag() {
         };
         assert!(rejected, "{mutation:?}: {result:?}");
     }
+}
+
+#[test]
+fn fragment_authenticates_both_predecessor_constructor_initializers() {
+    for mutation in [
+        Mutation::WrongFirstPrefixInitializerKindAfterProof,
+        Mutation::WrongSecondPrefixInitializerTypeAfterProof,
+    ] {
+        let result = validate(SOURCE, 23_080 + mutation as u32, mutation);
+        assert!(
+            matches!(result, Err(ValidationError::Pickle(_))),
+            "fragment rejects a forged predecessor initializer at its own boundary: {mutation:?}: {result:?}"
+        );
+    }
+    for mutation in [
+        Mutation::MissingFirstPrefixInitializerBindingAfterProof,
+        Mutation::MissingSecondPrefixInitializerSpanAfterProof,
+        Mutation::ReorderedPrefixReceiptAfterProof,
+    ] {
+        let result = validate(SOURCE, 23_090 + mutation as u32, mutation);
+        assert!(
+            matches!(result, Err(ValidationError::Pickle(_))),
+            "fragment authenticates source/typed bindings, spans, and declaration order: {mutation:?}: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn fragment_rejects_a_stale_selected_initializer_with_a_typed_error() {
+    let result = validate(
+        SOURCE,
+        23_100 + Mutation::StaleSelectedInitializerAfterProof as u32,
+        Mutation::StaleSelectedInitializerAfterProof,
+    );
+    assert!(
+        matches!(
+            result,
+            Err(ValidationError::Pickle(
+                dotty_tasty_pickler::PickleError::InvalidTypedTree { .. }
+            ))
+        ),
+        "a stale selected initializer is rejected without panicking: {result:?}"
+    );
 }
