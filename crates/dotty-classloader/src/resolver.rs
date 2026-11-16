@@ -3423,10 +3423,11 @@ mod tests {
     use crate::jdk_class_path::JdkClassPath;
     use crate::jmod_class_path::JmodClassPath;
     use dotty_core::{
-        ClassInfo, MemberSelector, Name, Namespace, Packages, Scope, SourceId, Symbol, SymbolFlags,
-        SymbolOrigin, Visibility,
+        ClassInfo, MemberSelector, Name, Namespace, Packages, Scope, ScopeId, SourceId, Symbol,
+        SymbolFlags, SymbolOrigin, Visibility,
     };
     use std::cell::RefCell;
+    use std::collections::{HashMap, HashSet};
     use std::path::PathBuf;
     use std::rc::Rc;
     use std::sync::Arc;
@@ -6478,14 +6479,590 @@ mod tests {
         );
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    struct InfoPairIdentitySnapshot {
+        base: SymbolId,
+        wrapped: SymbolId,
+        method: SymbolId,
+        package_scope: ScopeId,
+        base_declarations: ScopeId,
+        wrapped_declarations: ScopeId,
+        base_members: Vec<SymbolId>,
+        wrapped_members: Vec<SymbolId>,
+        reachable_symbols: HashSet<SymbolId>,
+        reachable_types: HashSet<TypeId>,
+        identified: std::collections::HashMap<BinaryName, SymbolId>,
+        resolved: std::collections::HashMap<BinaryName, SymbolId>,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct InfoPairGraphObservation {
+        identities: InfoPairIdentitySnapshot,
+        normalized_graph: String,
+    }
+
+    fn info_pair_symbol_path(store: &SemanticStore, symbol: SymbolId) -> String {
+        let mut names = Vec::new();
+        let mut current = Some(symbol);
+        let mut seen = HashSet::new();
+        while let Some(id) = current {
+            assert!(
+                seen.insert(id),
+                "symbol owner chain must not contain a cycle"
+            );
+            let symbol = store.symbols.get(id);
+            names.push(format!(
+                "{}:{:?}",
+                store.names.resolve(symbol.name.text()),
+                symbol.name.namespace()
+            ));
+            current = symbol.owner;
+        }
+        names.reverse();
+        names.join(".")
+    }
+
+    fn info_pair_origin_label(origin: SymbolOrigin) -> &'static str {
+        match origin {
+            SymbolOrigin::Tasty(_) => "Tasty",
+            SymbolOrigin::Classfile(_) => "Classfile",
+            SymbolOrigin::Source(_) => "Source",
+            SymbolOrigin::Synthetic => "Synthetic",
+            SymbolOrigin::Builtin => "Builtin",
+        }
+    }
+
+    fn info_pair_normalize_symbol(
+        store: &SemanticStore,
+        symbol_id: SymbolId,
+        binders: &mut HashMap<TypeId, String>,
+        active_types: &mut HashSet<TypeId>,
+    ) -> String {
+        let symbol = store.symbols.get(symbol_id);
+        let path = info_pair_symbol_path(store, symbol_id);
+        let info = match symbol.info {
+            SymbolInfo::Complete(ty) => {
+                info_pair_normalize_type(store, ty, &path, binders, active_types)
+            }
+            SymbolInfo::Missing => "Missing".to_string(),
+            SymbolInfo::Deferred(_) => "Deferred".to_string(),
+            SymbolInfo::Error => "Error".to_string(),
+        };
+        format!(
+            "{path}{{kind={:?};visibility={:?};origin={};info={info}}}",
+            symbol.kind,
+            symbol.visibility,
+            info_pair_origin_label(symbol.origin),
+        )
+    }
+
+    fn info_pair_normalize_type(
+        store: &SemanticStore,
+        id: TypeId,
+        context: &str,
+        binders: &mut HashMap<TypeId, String>,
+        active_types: &mut HashSet<TypeId>,
+    ) -> String {
+        if !active_types.insert(id) {
+            return format!("Rec({context})");
+        }
+        let child =
+            |child_id, context: &str, binders: &mut HashMap<_, _>, active: &mut HashSet<_>| {
+                info_pair_normalize_type(store, child_id, context, binders, active)
+            };
+        let normalized = match store.types.get(id) {
+            Type::NoType => "NoType".to_string(),
+            Type::Error(error) => format!("Error({})", store.names.resolve(error.message)),
+            Type::NoPrefix => "NoPrefix".to_string(),
+            Type::TypeRef { prefix, target } => {
+                let target = match target {
+                    TypeRefTarget::Symbol(symbol) => info_pair_symbol_path(store, *symbol),
+                    TypeRefTarget::Name(name) => {
+                        format!("name:{}", store.names.resolve(name.as_name().text()))
+                    }
+                };
+                format!(
+                    "TypeRef({}, {target})",
+                    child(*prefix, context, binders, active_types)
+                )
+            }
+            Type::TermRef { prefix, target } => {
+                let target = match target {
+                    dotty_core::TermRefTarget::Symbol(symbol) => {
+                        info_pair_symbol_path(store, *symbol)
+                    }
+                    dotty_core::TermRefTarget::Name(name) => {
+                        format!("name:{}", store.names.resolve(name.as_name().text()))
+                    }
+                };
+                format!(
+                    "TermRef({}, {target})",
+                    child(*prefix, context, binders, active_types)
+                )
+            }
+            Type::ThisType { class } => {
+                format!("This({})", info_pair_symbol_path(store, *class))
+            }
+            Type::SuperType {
+                this_type,
+                super_type,
+            } => format!(
+                "Super({}, {})",
+                child(*this_type, context, binders, active_types),
+                child(*super_type, context, binders, active_types)
+            ),
+            Type::Constant(value) => format!(
+                "Constant({})",
+                match value {
+                    dotty_core::Constant::Unit => "Unit".to_string(),
+                    dotty_core::Constant::Null => "Null".to_string(),
+                    dotty_core::Constant::Boolean(value) => format!("Boolean({value})"),
+                    dotty_core::Constant::Byte(value) => format!("Byte({value})"),
+                    dotty_core::Constant::Short(value) => format!("Short({value})"),
+                    dotty_core::Constant::Char(value) => format!("Char({value})"),
+                    dotty_core::Constant::Int(value) => format!("Int({value})"),
+                    dotty_core::Constant::Long(value) => format!("Long({value})"),
+                    dotty_core::Constant::FloatBits(value) => format!("FloatBits({value})"),
+                    dotty_core::Constant::DoubleBits(value) => format!("DoubleBits({value})"),
+                    dotty_core::Constant::String(value) => {
+                        format!("String({})", store.names.resolve(*value))
+                    }
+                    dotty_core::Constant::StringUtf16(value) => {
+                        format!("StringUtf16({value:?})")
+                    }
+                    dotty_core::Constant::Class(value) => {
+                        format!("Class({})", child(*value, context, binders, active_types))
+                    }
+                }
+            ),
+            Type::Applied { tycon, args } => format!(
+                "Applied({}, [{}])",
+                child(*tycon, context, binders, active_types),
+                args.iter()
+                    .map(|arg| child(*arg, context, binders, active_types))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Type::Bounds { low, high } => format!(
+                "Bounds({}, {})",
+                child(*low, context, binders, active_types),
+                child(*high, context, binders, active_types)
+            ),
+            Type::AliasingBounds { alias } => {
+                format!("Alias({})", child(*alias, context, binders, active_types))
+            }
+            Type::ByName { result } => {
+                format!("ByName({})", child(*result, context, binders, active_types))
+            }
+            Type::Flexible { underlying } => {
+                format!(
+                    "Flexible({})",
+                    child(*underlying, context, binders, active_types)
+                )
+            }
+            Type::And { left, right } => format!(
+                "And({}, {})",
+                child(*left, context, binders, active_types),
+                child(*right, context, binders, active_types)
+            ),
+            Type::Or { left, right } => format!(
+                "Or({}, {})",
+                child(*left, context, binders, active_types),
+                child(*right, context, binders, active_types)
+            ),
+            Type::Refined { parent, name, info } => format!(
+                "Refined({}, {}:{:?}, {})",
+                child(*parent, context, binders, active_types),
+                store.names.resolve(name.text()),
+                name.namespace(),
+                child(*info, context, binders, active_types)
+            ),
+            Type::Recursive { parent } => {
+                format!(
+                    "Recursive({})",
+                    child(*parent, context, binders, active_types)
+                )
+            }
+            Type::RecThis { binder } => format!(
+                "RecThis({})",
+                binders
+                    .get(binder)
+                    .cloned()
+                    .expect("recursive this reference points to an observed binder")
+            ),
+            Type::Method(method) => {
+                binders.insert(id, format!("{context}.method-binder"));
+                let params = method
+                    .params
+                    .iter()
+                    .map(|param| {
+                        format!(
+                            "{}:{}:erased={}:varargs={}",
+                            store.names.resolve(param.name.as_name().text()),
+                            child(param.ty, context, binders, active_types),
+                            param.erased,
+                            param.varargs
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "Method({:?}; [{params}]; {})",
+                    method.kind,
+                    child(method.result, context, binders, active_types)
+                )
+            }
+            Type::Poly(poly) => {
+                binders.insert(id, format!("{context}.poly-binder"));
+                let params = poly
+                    .params
+                    .iter()
+                    .map(|param| {
+                        format!(
+                            "{}:{:?}:{}",
+                            store.names.resolve(param.name.as_name().text()),
+                            param.declared_variance,
+                            child(param.bounds, context, binders, active_types)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "Poly([{params}]; {})",
+                    child(poly.result, context, binders, active_types)
+                )
+            }
+            Type::TypeLambda(lambda) => {
+                binders.insert(id, format!("{context}.lambda-binder"));
+                let params = lambda
+                    .params
+                    .iter()
+                    .map(|param| {
+                        format!(
+                            "{}:{:?}:{}",
+                            store.names.resolve(param.name.as_name().text()),
+                            param.declared_variance,
+                            child(param.bounds, context, binders, active_types)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "Lambda([{params}]; {})",
+                    child(lambda.result, context, binders, active_types)
+                )
+            }
+            Type::ParamRef { binder, index } => format!(
+                "ParamRef({}, {index})",
+                binders
+                    .get(binder)
+                    .cloned()
+                    .expect("parameter reference points to an observed binder")
+            ),
+            Type::Match(matched) => format!(
+                "Match({}, {}, [{}])",
+                child(matched.bound, context, binders, active_types),
+                child(matched.scrutinee, context, binders, active_types),
+                matched
+                    .cases
+                    .iter()
+                    .map(|case| child(*case, context, binders, active_types))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Type::MatchCase { pattern, result } => format!(
+                "MatchCase({}, {})",
+                child(*pattern, context, binders, active_types),
+                child(*result, context, binders, active_types)
+            ),
+            Type::Annotated { underlying, .. } => format!(
+                "Annotated({}, present)",
+                child(*underlying, context, binders, active_types)
+            ),
+            Type::Wildcard { bounds } => {
+                format!(
+                    "Wildcard({})",
+                    child(*bounds, context, binders, active_types)
+                )
+            }
+            Type::JavaArray { element } => {
+                format!(
+                    "JavaArray({})",
+                    child(*element, context, binders, active_types)
+                )
+            }
+            Type::Repeated { element } => {
+                format!(
+                    "Repeated({})",
+                    child(*element, context, binders, active_types)
+                )
+            }
+            Type::ClassInfo(class_info) => {
+                let owner = store
+                    .scopes
+                    .get(class_info.declarations)
+                    .owner
+                    .map(|owner| info_pair_symbol_path(store, owner))
+                    .unwrap_or_else(|| "none".to_string());
+                let mut declarations = store
+                    .scopes
+                    .get(class_info.declarations)
+                    .entered_symbols()
+                    .map(|symbol| info_pair_normalize_symbol(store, symbol, binders, active_types))
+                    .collect::<Vec<_>>();
+                declarations.sort();
+                format!(
+                    "ClassInfo(class={};prefix={};parents=[{}];self={};scope-owner={owner};declarations=[{}])",
+                    info_pair_symbol_path(store, class_info.class),
+                    child(class_info.prefix, context, binders, active_types),
+                    class_info
+                        .parents
+                        .iter()
+                        .map(|parent| child(*parent, context, binders, active_types))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    class_info
+                        .self_type
+                        .map(|self_type| child(self_type, context, binders, active_types))
+                        .unwrap_or_else(|| "none".to_string()),
+                    declarations.join(", ")
+                )
+            }
+        };
+        active_types.remove(&id);
+        normalized
+    }
+
+    fn info_pair_collect_type_ids(
+        store: &SemanticStore,
+        id: TypeId,
+        type_ids: &mut HashSet<TypeId>,
+        symbol_ids: &mut HashSet<SymbolId>,
+    ) {
+        if !type_ids.insert(id) {
+            return;
+        }
+        let mut children = Vec::new();
+        match store.types.get(id) {
+            Type::TypeRef { prefix, target } => {
+                children.push(*prefix);
+                if let TypeRefTarget::Symbol(symbol) = target {
+                    info_pair_record_symbol_chain(store, *symbol, symbol_ids);
+                }
+            }
+            Type::TermRef { prefix, target } => {
+                children.push(*prefix);
+                if let dotty_core::TermRefTarget::Symbol(symbol) = target {
+                    info_pair_record_symbol_chain(store, *symbol, symbol_ids);
+                }
+            }
+            Type::ThisType { class } => {
+                info_pair_record_symbol_chain(store, *class, symbol_ids);
+            }
+            Type::SuperType {
+                this_type,
+                super_type,
+            } => children.extend([*this_type, *super_type]),
+            Type::Applied { tycon, args } => {
+                children.push(*tycon);
+                children.extend(args.iter().copied());
+            }
+            Type::Bounds { low, high } => children.extend([*low, *high]),
+            Type::AliasingBounds { alias } => children.push(*alias),
+            Type::ByName { result } => children.push(*result),
+            Type::Flexible { underlying } => children.push(*underlying),
+            Type::And { left, right } | Type::Or { left, right } => {
+                children.extend([*left, *right]);
+            }
+            Type::Refined { parent, info, .. } => children.extend([*parent, *info]),
+            Type::Recursive { parent } => children.push(*parent),
+            Type::RecThis { .. } => {}
+            Type::Method(method) => {
+                children.extend(method.params.iter().map(|param| param.ty));
+                children.push(method.result);
+            }
+            Type::Poly(poly) => {
+                children.extend(poly.params.iter().map(|param| param.bounds));
+                children.push(poly.result);
+            }
+            Type::TypeLambda(lambda) => {
+                children.extend(lambda.params.iter().map(|param| param.bounds));
+                children.push(lambda.result);
+            }
+            Type::ParamRef { binder, .. } => children.push(*binder),
+            Type::Match(matched) => {
+                children.extend([matched.bound, matched.scrutinee]);
+                children.extend(matched.cases.iter().copied());
+            }
+            Type::MatchCase { pattern, result } => children.extend([*pattern, *result]),
+            Type::Annotated { underlying, .. } => children.push(*underlying),
+            Type::Wildcard { bounds } => children.push(*bounds),
+            Type::JavaArray { element } | Type::Repeated { element } => children.push(*element),
+            Type::ClassInfo(class_info) => {
+                info_pair_record_symbol_chain(store, class_info.class, symbol_ids);
+                children.push(class_info.prefix);
+                children.extend(class_info.parents.iter().copied());
+                children.extend(class_info.self_type);
+                for symbol in store.scopes.get(class_info.declarations).entered_symbols() {
+                    info_pair_collect_symbol_ids(store, symbol, type_ids, symbol_ids);
+                }
+            }
+            Type::NoType | Type::Error(_) | Type::NoPrefix | Type::Constant(_) => {}
+        }
+        for child in children {
+            info_pair_collect_type_ids(store, child, type_ids, symbol_ids);
+        }
+    }
+
+    fn info_pair_collect_symbol_ids(
+        store: &SemanticStore,
+        id: SymbolId,
+        type_ids: &mut HashSet<TypeId>,
+        symbol_ids: &mut HashSet<SymbolId>,
+    ) {
+        symbol_ids.insert(id);
+        let symbol = store.symbols.get(id);
+        if let Some(owner) = symbol.owner {
+            info_pair_record_symbol_chain(store, owner, symbol_ids);
+        }
+        if let SymbolInfo::Complete(info) = symbol.info {
+            info_pair_collect_type_ids(store, info, type_ids, symbol_ids);
+        }
+    }
+
+    fn info_pair_record_symbol_chain(
+        store: &SemanticStore,
+        id: SymbolId,
+        symbol_ids: &mut HashSet<SymbolId>,
+    ) {
+        let mut current = Some(id);
+        while let Some(symbol_id) = current {
+            if !symbol_ids.insert(symbol_id) {
+                break;
+            }
+            current = store.symbols.get(symbol_id).owner;
+        }
+    }
+
+    fn info_pair_observe_graph(
+        store: &SemanticStore,
+        resolver: &ClasspathSymbolResolver<InfoPairAuditClassPath>,
+        package: SymbolId,
+        base_class_name: Name,
+        wrapped_class_name: Name,
+        method_name: Name,
+    ) -> InfoPairGraphObservation {
+        let base_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
+        let wrapped_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
+        let base = resolver.session.identified[&base_name];
+        let wrapped = resolver.session.identified[&wrapped_name];
+        let base_origin = resolver
+            .session
+            .origins
+            .get(&base)
+            .expect("selected InfoBase retains its resource provenance");
+        let wrapped_origin = resolver
+            .session
+            .origins
+            .get(&wrapped)
+            .expect("selected InfoWrapped retains its resource provenance");
+        let fixture_origin = ClassOrigin::Directory(fixture_path(
+            "../dotty-tasty-unpickler/tests/fixtures/semantic",
+        ));
+        assert_eq!(base_origin, &fixture_origin);
+        assert_eq!(wrapped_origin, &fixture_origin);
+        assert_eq!(store.symbols.get(base).owner, Some(package));
+        assert_eq!(store.symbols.get(wrapped).owner, Some(package));
+        assert_eq!(store.symbols.get(base).kind, SymbolKind::Trait);
+        assert_eq!(store.symbols.get(wrapped).kind, SymbolKind::Class);
+        assert_eq!(store.symbols.get(base).visibility, Visibility::Public);
+        assert_eq!(store.symbols.get(wrapped).visibility, Visibility::Public);
+        let package_scope = resolver.session.packages.scope_of(package).unwrap();
+        let base_class_entries = store.scopes.get(package_scope).lookup_all(&base_class_name);
+        let wrapped_class_entries = store
+            .scopes
+            .get(package_scope)
+            .lookup_all(&wrapped_class_name);
+        assert_eq!(base_class_entries, [base]);
+        assert_eq!(wrapped_class_entries, [wrapped]);
+
+        let SymbolInfo::Complete(base_info_type) = store.symbols.get(base).info else {
+            panic!("InfoBase is complete");
+        };
+        let Type::ClassInfo(base_info) = store.types.get(base_info_type) else {
+            panic!("InfoBase has ClassInfo");
+        };
+        let SymbolInfo::Complete(wrapped_info_type) = store.symbols.get(wrapped).info else {
+            panic!("InfoWrapped is complete");
+        };
+        let Type::ClassInfo(wrapped_info) = store.types.get(wrapped_info_type) else {
+            panic!("InfoWrapped has ClassInfo");
+        };
+        assert_eq!(store.scopes.get(base_info.declarations).owner, Some(base));
+        assert_eq!(
+            store.scopes.get(wrapped_info.declarations).owner,
+            Some(wrapped)
+        );
+        let base_members = store
+            .scopes
+            .get(base_info.declarations)
+            .entered_symbols()
+            .collect::<Vec<_>>();
+        let wrapped_members = store
+            .scopes
+            .get(wrapped_info.declarations)
+            .entered_symbols()
+            .collect::<Vec<_>>();
+        let method_entries = store
+            .scopes
+            .get(wrapped_info.declarations)
+            .lookup_all(&method_name);
+        assert_eq!(
+            method_entries.len(),
+            1,
+            "InfoWrapped owns one m declaration"
+        );
+        let method = method_entries[0];
+
+        let mut reachable_symbols = HashSet::new();
+        let mut reachable_types = HashSet::new();
+        info_pair_collect_symbol_ids(store, base, &mut reachable_types, &mut reachable_symbols);
+        info_pair_collect_symbol_ids(store, wrapped, &mut reachable_types, &mut reachable_symbols);
+        let mut binders = HashMap::new();
+        let mut active_types = HashSet::new();
+        let normalized_graph = format!(
+            "package={};base={};base-resource={:?};wrapped={};wrapped-resource={:?}",
+            info_pair_symbol_path(store, package),
+            info_pair_normalize_symbol(store, base, &mut binders, &mut active_types),
+            base_origin,
+            info_pair_normalize_symbol(store, wrapped, &mut binders, &mut active_types),
+            wrapped_origin,
+        );
+        InfoPairGraphObservation {
+            identities: InfoPairIdentitySnapshot {
+                base,
+                wrapped,
+                method,
+                package_scope,
+                base_declarations: base_info.declarations,
+                wrapped_declarations: wrapped_info.declarations,
+                base_members,
+                wrapped_members,
+                reachable_symbols,
+                reachable_types,
+                identified: resolver.session.identified.clone(),
+                resolved: resolver.session.resolved.clone(),
+            },
+            normalized_graph,
+        }
+    }
+
     #[test]
     fn selected_info_pair_and_m_identity_converge_across_request_orders() {
         let base_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
         let wrapped_name =
             BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
-        let fixture_origin = ClassOrigin::Directory(fixture_path(
-            "../dotty-tasty-unpickler/tests/fixtures/semantic",
-        ));
         let mut normalized_graphs = Vec::new();
 
         for first_class in ["InfoBase", "InfoWrapped"] {
@@ -6494,29 +7071,46 @@ mod tests {
                 semantic_member_request(&mut store, package, definitions.no_prefix, "InfoBase");
             let wrapped_request =
                 semantic_member_request(&mut store, package, definitions.no_prefix, "InfoWrapped");
+            let base_class_name = base_request.name;
+            let wrapped_class_name = wrapped_request.name;
+            let method_name = Name::new(store.names.intern("m"), Namespace::Term);
             let (first_request, second_request, first_binary) = if first_class == "InfoBase" {
                 (&base_request, &wrapped_request, &base_name)
             } else {
                 (&wrapped_request, &base_request, &wrapped_name)
             };
-
             let first = resolver
                 .resolve_member_with_semantic_info_pair(&mut store, first_request)
                 .unwrap()
-                .expect("the first selected root loads the authentic pair");
+                .expect("selected root loads the authentic pair");
             assert_eq!(resolver.session.resolved.get(first_binary), Some(&first));
 
             if first_class == "InfoBase" {
                 let second = resolver
                     .resolve_member_with_semantic_info_pair(&mut store, second_request)
                     .unwrap()
-                    .expect("the second selected root reuses the authentic pair");
+                    .expect("second selected root reuses the authentic pair");
                 assert_ne!(first, second);
             }
 
+            // Capture the original completed `m` declaration and every reachable
+            // semantic identity before the first ordinary term request.
+            let observe =
+                |store: &SemanticStore,
+                 resolver: &ClasspathSymbolResolver<InfoPairAuditClassPath>| {
+                    info_pair_observe_graph(
+                        store,
+                        resolver,
+                        package,
+                        base_class_name,
+                        wrapped_class_name,
+                        method_name,
+                    )
+                };
+            let baseline = observe(&store, &resolver);
             let method_prefix = store.types.alloc(Type::type_ref(
                 definitions.no_prefix,
-                resolver.session.identified[&wrapped_name],
+                baseline.identities.wrapped,
             ));
             let method_request = MemberRequest {
                 prefix: method_prefix,
@@ -6527,315 +7121,56 @@ mod tests {
             let requested_method = resolver
                 .resolve_member(&mut store, &method_request)
                 .unwrap()
-                .expect("the selected canonical InfoWrapped owner exposes its original m");
+                .expect("canonical InfoWrapped owner exposes its original m");
+            assert_eq!(requested_method, baseline.identities.method);
+            let after_first_m = observe(&store, &resolver);
+            assert_eq!(after_first_m.identities, baseline.identities);
+            assert_eq!(after_first_m.normalized_graph, baseline.normalized_graph);
 
             if first_class == "InfoWrapped" {
                 let second = resolver
                     .resolve_member_with_semantic_info_pair(&mut store, second_request)
                     .unwrap()
-                    .expect("InfoBase selection reuses the authentic pair after m");
+                    .expect("InfoBase selection reuses the pair after m");
                 assert_ne!(first, second);
+                let after_base_select = observe(&store, &resolver);
+                assert_eq!(after_base_select.identities, baseline.identities);
+                assert_eq!(
+                    after_base_select.normalized_graph,
+                    baseline.normalized_graph
+                );
             }
 
-            let base = resolver.session.identified[&base_name];
-            let wrapped = resolver.session.identified[&wrapped_name];
-            assert_eq!(resolver.session.resolved.get(&base_name), Some(&base));
-            assert_eq!(resolver.session.resolved.get(&wrapped_name), Some(&wrapped));
-            assert_eq!(resolver.session.origins.get(&base), Some(&fixture_origin));
-            assert_eq!(
-                resolver.session.origins.get(&wrapped),
-                Some(&fixture_origin)
-            );
-            assert!(matches!(
-                store.symbols.get(base).origin,
-                SymbolOrigin::Tasty(_)
-            ));
-            assert!(matches!(
-                store.symbols.get(wrapped).origin,
-                SymbolOrigin::Tasty(_)
-            ));
-
-            let package_scope = resolver.session.packages.scope_of(package).unwrap();
-            assert_eq!(
-                store
-                    .scopes
-                    .get(package_scope)
-                    .lookup_all(&Name::new(store.names.intern("InfoBase"), Namespace::Type)),
-                [base]
-            );
-            assert_eq!(
-                store.scopes.get(package_scope).lookup_all(&Name::new(
-                    store.names.intern("InfoWrapped"),
-                    Namespace::Type
-                )),
-                [wrapped]
-            );
-
-            let SymbolInfo::Complete(base_info_id) = store.symbols.get(base).info else {
-                panic!("InfoBase is complete");
-            };
-            let Type::ClassInfo(base_info) = store.types.get(base_info_id) else {
-                panic!("InfoBase has ClassInfo");
-            };
-            assert_eq!(base_info.class, base);
-            assert_eq!(store.scopes.get(base_info.declarations).owner, Some(base));
-            let base_type_parameters = store
-                .scopes
-                .get(base_info.declarations)
-                .entered_symbols()
-                .filter(|id| store.symbols.get(*id).kind == SymbolKind::TypeParameter)
-                .collect::<Vec<_>>();
-            let [base_parameter] = base_type_parameters.as_slice() else {
-                panic!("InfoBase has one canonical type parameter");
-            };
-            assert_eq!(
-                store
-                    .names
-                    .resolve(store.symbols.get(*base_parameter).name.text()),
-                "A"
-            );
-            let base_constructors = store
-                .scopes
-                .get(base_info.declarations)
-                .entered_symbols()
-                .filter(|id| store.symbols.get(*id).kind == SymbolKind::Constructor)
-                .collect::<Vec<_>>();
-            let [base_constructor] = base_constructors.as_slice() else {
-                panic!("InfoBase has one canonical constructor");
-            };
-            let SymbolInfo::Complete(base_constructor_type) =
-                store.symbols.get(*base_constructor).info
-            else {
-                panic!("InfoBase constructor is complete");
-            };
-            let Type::Poly(base_constructor_poly) = store.types.get(base_constructor_type) else {
-                panic!("InfoBase constructor retains its type binder");
-            };
-            assert_eq!(base_constructor_poly.params.len(), 1);
-            let Type::Method(base_constructor_method) =
-                store.types.get(base_constructor_poly.result)
-            else {
-                panic!("InfoBase constructor has a method result");
-            };
-            let Type::Applied {
-                tycon: base_tycon,
-                args: base_args,
-            } = store.types.get(base_constructor_method.result)
-            else {
-                panic!("InfoBase constructor returns applied InfoBase");
-            };
-            assert_eq!(info_pair_type_symbol(&store, *base_tycon), Some(base));
-            assert!(matches!(
-                store.types.get(base_args[0]),
-                Type::ParamRef { binder, index: 0 } if *binder == base_constructor_type
-            ));
-
-            let SymbolInfo::Complete(wrapped_info_id) = store.symbols.get(wrapped).info else {
-                panic!("InfoWrapped is complete");
-            };
-            let Type::ClassInfo(wrapped_info) = store.types.get(wrapped_info_id) else {
-                panic!("InfoWrapped has ClassInfo");
-            };
-            assert_eq!(wrapped_info.class, wrapped);
-            assert_eq!(
-                store.scopes.get(wrapped_info.declarations).owner,
-                Some(wrapped)
-            );
-            let wrapped_type_parameters = store
-                .scopes
-                .get(wrapped_info.declarations)
-                .entered_symbols()
-                .filter(|id| store.symbols.get(*id).kind == SymbolKind::TypeParameter)
-                .collect::<Vec<_>>();
-            let [wrapped_parameter] = wrapped_type_parameters.as_slice() else {
-                panic!("InfoWrapped has one canonical class type parameter");
-            };
-            assert_eq!(
-                store
-                    .names
-                    .resolve(store.symbols.get(*wrapped_parameter).name.text()),
-                "F"
-            );
-
-            let base_parents = wrapped_info
-                .parents
-                .iter()
-                .filter(|parent| {
-                    matches!(
-                        store.types.get(**parent),
-                        Type::Applied { tycon, args }
-                            if info_pair_type_symbol(&store, *tycon) == Some(base) && args.len() == 1
-                    )
-                })
-                .collect::<Vec<_>>();
-            let [base_parent_id] = base_parents.as_slice() else {
-                panic!("InfoWrapped has one direct applied InfoBase parent");
-            };
-            let Type::Applied {
-                args: parent_args, ..
-            } = store.types.get(**base_parent_id)
-            else {
-                panic!("InfoBase parent is applied");
-            };
-            let [applied_f_int] = parent_args.as_slice() else {
-                panic!("InfoBase parent applies F to Int");
-            };
-            let applied_f_int_id = *applied_f_int;
-            let Type::Applied {
-                tycon: parent_f_tycon,
-                args: parent_f_args,
-            } = store.types.get(*applied_f_int)
-            else {
-                panic!("InfoBase parent argument is applied F[Int]");
-            };
-            assert_eq!(
-                info_pair_type_symbol(&store, *parent_f_tycon),
-                Some(*wrapped_parameter)
-            );
-            assert_eq!(parent_f_args.len(), 1);
-            assert_eq!(
-                store.types.get(parent_f_args[0]).reference_symbol(),
-                store.types.get(definitions.int).reference_symbol()
-            );
-
-            let direct_m = store
-                .scopes
-                .get(wrapped_info.declarations)
-                .lookup_all(&Name::new(store.names.intern("m"), Namespace::Term));
-            assert_eq!(direct_m.len(), 1, "the owner has one m declaration");
-            let method = direct_m[0];
-            assert_eq!(store.symbols.get(method).owner, Some(wrapped));
-            assert_eq!(store.symbols.get(method).kind, SymbolKind::Method);
-            assert_eq!(store.symbols.get(method).name.namespace(), Namespace::Term);
-            assert_eq!(store.symbols.get(method).visibility, Visibility::Public);
-            assert_eq!(requested_method, method);
-            let SymbolInfo::Complete(method_type) = store.symbols.get(method).info else {
-                panic!("InfoWrapped.m is complete");
-            };
-            let Type::ByName {
-                result: method_result,
-            } = store.types.get(method_type)
-            else {
-                panic!("serialized InfoWrapped.m result retains ByName");
-            };
-            let method_result_id = *method_result;
-            let Type::Applied {
-                tycon: method_f_tycon,
-                args: method_f_args,
-            } = store.types.get(*method_result)
-            else {
-                panic!("InfoWrapped.m retains applied F[Int]");
-            };
-            assert_eq!(
-                info_pair_type_symbol(&store, *method_f_tycon),
-                Some(*wrapped_parameter)
-            );
-            assert_eq!(method_f_args.len(), 1);
-            assert_eq!(
-                store.types.get(method_f_args[0]).reference_symbol(),
-                store.types.get(definitions.int).reference_symbol()
-            );
-            let method_int_reference = store
-                .types
-                .get(method_f_args[0])
-                .reference_symbol()
-                .unwrap();
-            assert_eq!(
-                store.types.get(method_result_id),
-                store.types.get(applied_f_int_id)
-            );
-
-            let canonical_ids = (base, wrapped, *base_parameter, *wrapped_parameter, method);
-            let stable_type_ids = (
-                base_info_id,
-                wrapped_info_id,
-                **base_parent_id,
-                applied_f_int_id,
-                method_type,
-                method_result_id,
-                method_int_reference,
-            );
-            let identified_before_repeats = resolver.session.identified.clone();
-            let resolved_before_repeats = resolver.session.resolved.clone();
-            let origins_before_repeats = resolver.session.origins.clone();
             assert_eq!(
                 resolver
                     .resolve_member(&mut store, &method_request)
                     .unwrap(),
-                Some(method),
-                "repeated term lookup preserves the original declaration"
+                Some(baseline.identities.method),
+                "repeated m lookup keeps the pre-request declaration"
             );
-            for (request, expected) in [(&base_request, base), (&wrapped_request, wrapped)] {
+            let after_repeated_m = observe(&store, &resolver);
+            assert_eq!(after_repeated_m.identities, baseline.identities);
+            assert_eq!(after_repeated_m.normalized_graph, baseline.normalized_graph);
+
+            for (request, expected) in [
+                (&base_request, baseline.identities.base),
+                (&wrapped_request, baseline.identities.wrapped),
+            ] {
                 assert_eq!(
                     resolver
                         .resolve_member_with_semantic_info_pair(&mut store, request)
                         .unwrap(),
                     Some(expected),
-                    "repeated selected class requests preserve canonical identity"
+                    "repeated selected class request preserves identity"
+                );
+                let after_class_repeat = observe(&store, &resolver);
+                assert_eq!(after_class_repeat.identities, baseline.identities);
+                assert_eq!(
+                    after_class_repeat.normalized_graph,
+                    baseline.normalized_graph
                 );
             }
-            assert_eq!(
-                (base, wrapped, *base_parameter, *wrapped_parameter, method),
-                canonical_ids
-            );
-            assert_eq!(
-                (
-                    match store.symbols.get(base).info {
-                        SymbolInfo::Complete(info) => info,
-                        _ => unreachable!(),
-                    },
-                    match store.symbols.get(wrapped).info {
-                        SymbolInfo::Complete(info) => info,
-                        _ => unreachable!(),
-                    },
-                    match store.types.get(wrapped_info_id) {
-                        Type::ClassInfo(info) => *info
-                            .parents
-                            .iter()
-                            .find(|parent| {
-                                matches!(
-                                    store.types.get(**parent),
-                                    Type::Applied { tycon, .. }
-                                        if info_pair_type_symbol(&store, *tycon) == Some(base)
-                                )
-                            })
-                            .unwrap(),
-                        _ => unreachable!(),
-                    },
-                    applied_f_int_id,
-                    match store.symbols.get(method).info {
-                        SymbolInfo::Complete(info) => info,
-                        _ => unreachable!(),
-                    },
-                    match store.types.get(method_type) {
-                        Type::ByName { result } => *result,
-                        _ => unreachable!(),
-                    },
-                    method_int_reference,
-                ),
-                stable_type_ids
-            );
-
-            assert_eq!(resolver.session.identified, identified_before_repeats);
-            assert_eq!(resolver.session.resolved, resolved_before_repeats);
-            assert_eq!(resolver.session.origins, origins_before_repeats);
-            assert_eq!(resolver.session.identified.get(&base_name), Some(&base));
-            assert_eq!(
-                resolver.session.identified.get(&wrapped_name),
-                Some(&wrapped)
-            );
-            assert_eq!(resolver.session.resolved.get(&base_name), Some(&base));
-            assert_eq!(resolver.session.resolved.get(&wrapped_name), Some(&wrapped));
-
-            normalized_graphs.push(format!(
-                "InfoBase:{:?}:{:?}:owner=semantic-package;A-binder=constructor;InfoWrapped:{:?}:{:?}:owner=semantic-package;parent=InfoBase[F[Int]];m:{:?}:{:?}:owner=InfoWrapped;result=ByName(F[Int]);origin=semantic-fixtures",
-                store.symbols.get(base).kind,
-                store.symbols.get(base).visibility,
-                store.symbols.get(wrapped).kind,
-                store.symbols.get(wrapped).visibility,
-                store.symbols.get(method).kind,
-                store.symbols.get(method).visibility,
-            ));
+            normalized_graphs.push(baseline.normalized_graph);
         }
 
         assert_eq!(normalized_graphs.len(), 2);
