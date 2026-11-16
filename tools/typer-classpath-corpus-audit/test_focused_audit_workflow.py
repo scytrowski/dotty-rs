@@ -123,6 +123,45 @@ class FocusedAuditWorkflowTests(unittest.TestCase):
         self.assertIn("original-method receipts are missing or nondeterministic", verifier)
         self.assertIn("approved independent review of this exact head is pending", verifier)
 
+    def test_dispatch_propagates_selected_pr_head_and_api_base_through_full_workflow(self) -> None:
+        repo = Path(__file__).resolve().parents[2]
+        workflow = (repo / ".github/workflows/typer-focused-audit.yml").read_text(encoding="utf-8")
+        head = "a" * 40
+        workflow_branch_sha = "b" * 40
+        dispatch_inputs = {"reviewed_head_sha": head}
+        resolved_head = dispatch_inputs["reviewed_head_sha"] or workflow_branch_sha
+        self.assertEqual(resolved_head, head)
+        self.assertNotEqual(resolved_head, workflow_branch_sha)
+        self.assertIn("inputs.reviewed_head_sha || github.sha", workflow)
+
+        fetch_start = workflow.index("- name: Fetch published pull request reviews for exact-head verification")
+        base_export = workflow.index('environment.write(f"DOTTY_EXPECTED_BASE_SHA={base_sha}\\n")')
+        environment_record = workflow.index("- name: Verify pinned inputs and record environment")
+        nested_receipts = workflow.index("- name: Verify nested recursive ADT execution receipts")
+        binary_receipts = workflow.index("- name: Verify binary recursive ADT receipts and revision pins")
+        cohort_receipts = workflow.index("- name: Verify strict recursive Expr receipts and pinned controls")
+        acceptance_v = workflow.index("- name: Enforce Stdlib Acceptance V release gate")
+        acceptance_vi = workflow.index("- name: Enforce Stdlib Acceptance VI exact-root release gate")
+        artifact = workflow.index("- name: Upload focused report, timings, and intermediates")
+        self.assertLess(fetch_start, base_export)
+        self.assertLess(base_export, environment_record)
+        self.assertLess(environment_record, nested_receipts)
+        self.assertLess(nested_receipts, binary_receipts)
+        self.assertLess(binary_receipts, cohort_receipts)
+        self.assertLess(cohort_receipts, acceptance_v)
+        self.assertLess(acceptance_v, acceptance_vi)
+        self.assertLess(acceptance_vi, artifact)
+        self.assertIn('printf \'pull_request_head_sha\\t%s\\n\' "$DOTTY_EXPECTED_SOURCE_SHA"', workflow)
+        self.assertIn('printf \'pull_request_base_sha\\t%s\\n\' "$DOTTY_EXPECTED_BASE_SHA"', workflow)
+        for evidence_arg in (
+            "--nested-pr-head-sha \"$DOTTY_EXPECTED_SOURCE_SHA\"",
+            "--expected-head-sha \"$DOTTY_EXPECTED_SOURCE_SHA\"",
+        ):
+            with self.subTest(evidence_arg=evidence_arg):
+                self.assertIn(evidence_arg, workflow)
+        self.assertNotIn("github.event.pull_request.head.sha || github.sha", workflow)
+        self.assertIn("name: typer-focused-audit-${{ github.event.pull_request.head.sha || inputs.reviewed_head_sha || github.sha }}", workflow)
+
     def test_sealed_rollback_outputs_are_verified_and_uploaded_from_runner_scratch(self) -> None:
         repo = Path(__file__).resolve().parents[2]
         workflow = (repo / ".github/workflows/typer-focused-audit.yml").read_text(encoding="utf-8")

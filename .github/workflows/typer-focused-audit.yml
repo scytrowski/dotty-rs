@@ -87,7 +87,7 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/pulls/$DOTTY_PULL_REQUEST_NUMBER" > "$RUNNER_TEMP/pr.json"
           gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls/$DOTTY_PULL_REQUEST_NUMBER/reviews" \
             | jq 'add // []' > "$RUNNER_TEMP/reviews.json"
-          python3 - "$RUNNER_TEMP/pr.json" "$RUNNER_TEMP/reviews.json" "$DOTTY_REVIEW_EVIDENCE" "$DOTTY_EXPECTED_SOURCE_SHA" <<'PY'
+          python3 - "$RUNNER_TEMP/pr.json" "$RUNNER_TEMP/reviews.json" "$DOTTY_REVIEW_EVIDENCE" "$DOTTY_EXPECTED_SOURCE_SHA" "$GITHUB_ENV" <<'PY'
           import json
           import sys
           from pathlib import Path
@@ -98,10 +98,14 @@ jobs:
               raise SystemExit("GitHub PR head differs from the checked-out reviewed head")
           if pr.get("base", {}).get("ref") != "main":
               raise SystemExit("Acceptance closeout must target the main branch")
-          Path(sys.argv[3]).write_text(
-              json.dumps({"pull_request": pr, "reviews": reviews}, sort_keys=True) + "\n",
-              encoding="utf-8",
-          )
+          base_sha = pr.get("base", {}).get("sha", "")
+          if len(base_sha) != 40 or any(ch not in "0123456789abcdef" for ch in base_sha):
+              raise SystemExit("GitHub PR base SHA is missing or malformed")
+          with Path(sys.argv[3]).open("w", encoding="utf-8") as evidence:
+              json.dump({"pull_request": pr, "reviews": reviews}, evidence, sort_keys=True)
+              evidence.write("\n")
+          with Path(sys.argv[5]).open("a", encoding="utf-8") as environment:
+              environment.write(f"DOTTY_EXPECTED_BASE_SHA={base_sha}\n")
           PY
 
       - name: Enforce integrated recursive Expr prerequisites
@@ -134,15 +138,8 @@ jobs:
             }
           done
           printf 'Verified #2132-#2137 and prior recursive Expr prerequisite merge ancestry at HEAD %s\n' "$(git rev-parse HEAD)"
-          expected_base_sha="$(python3 - "$GITHUB_WORKSPACE/target/typer-focused-report/published-review-evidence.json" <<'PY'
-          import json
-          import sys
-          from pathlib import Path
-          print(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["pull_request"]["base"]["sha"])
-          PY
-          )"
-          git merge-base --is-ancestor "$expected_base_sha" HEAD || {
-            echo "integrated baseline $expected_base_sha is not an ancestor of tested HEAD=$(git rev-parse HEAD)" >&2
+          git merge-base --is-ancestor "$DOTTY_EXPECTED_BASE_SHA" HEAD || {
+            echo "integrated baseline $DOTTY_EXPECTED_BASE_SHA is not an ancestor of tested HEAD=$(git rev-parse HEAD)" >&2
             exit 1
           }
 
@@ -210,15 +207,15 @@ jobs:
           {
             printf 'dotty-rs_commit\t%s\n' "$(git rev-parse HEAD)"
             printf 'scala3_commit\t%s\n' "$(git -C "$SCALA39_ROOT" rev-parse HEAD)"
-            printf 'pull_request_head_sha\t%s\n' "${{ github.event.pull_request.head.sha || github.sha }}"
+            printf 'pull_request_head_sha\t%s\n' "$DOTTY_EXPECTED_SOURCE_SHA"
             printf 'tested_source_sha\t%s\n' "$(git rev-parse HEAD)"
-            printf 'pull_request_base_sha\t%s\n' "${{ github.event.pull_request.base.sha || github.sha }}"
+            printf 'pull_request_base_sha\t%s\n' "$DOTTY_EXPECTED_BASE_SHA"
             printf 'issue2080_baseline_sha\t%s\n' "$DOTTY_EXPECTED_BASE_SHA"
             printf 'issue2080_tested_sha\t%s\n' "$(git rev-parse HEAD)"
-            printf 'issue2080_pr_head_sha\t%s\n' "${{ github.event.pull_request.head.sha || github.sha }}"
+            printf 'issue2080_pr_head_sha\t%s\n' "$DOTTY_EXPECTED_SOURCE_SHA"
             printf 'issue2138_baseline_sha\t%s\n' "$DOTTY_EXPECTED_BASE_SHA"
             printf 'issue2138_tested_sha\t%s\n' "$(git rev-parse HEAD)"
-            printf 'issue2138_pr_head_sha\t%s\n' "${{ github.event.pull_request.head.sha || github.sha }}"
+            printf 'issue2138_pr_head_sha\t%s\n' "$DOTTY_EXPECTED_SOURCE_SHA"
             printf 'github_actions_run\t%s/%s/actions/runs/%s\n' \
               "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
             printf 'main_manifest_sha256\t%s\n' \
@@ -709,7 +706,7 @@ jobs:
             --nested-report "$DOTTY_AUDIT_REPORT_DIR/nested-recursive-adt-e2e-report.md" \
             --nested-baseline-sha "$DOTTY_EXPECTED_BASE_SHA" \
             --nested-tested-sha "$(git rev-parse HEAD)" \
-            --nested-pr-head-sha "${{ github.event.pull_request.head.sha || github.sha }}"
+            --nested-pr-head-sha "$DOTTY_EXPECTED_SOURCE_SHA"
 
       - name: Verify binary recursive ADT receipts and revision pins
         shell: bash
@@ -723,7 +720,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 "$verifier" binary-positive-log \
             --log "$DOTTY_AUDIT_REPORT_DIR/binary-positive.log" \
             --tested-sha "$(git rev-parse HEAD)" --expected-sha "$DOTTY_EXPECTED_SOURCE_SHA" \
-            --expected-head-sha "${{ github.event.pull_request.head.sha || github.sha }}" \
+            --expected-head-sha "$DOTTY_EXPECTED_SOURCE_SHA" \
             --baseline-sha "$DOTTY_EXPECTED_BASE_SHA" \
             --output "$DOTTY_AUDIT_REPORT_DIR/binary-recursive-adt-positive.tsv"
           PYTHONDONTWRITEBYTECODE=1 python3 "$verifier" binary-negative-logs \
@@ -731,7 +728,7 @@ jobs:
             --structural-log "$DOTTY_AUDIT_REPORT_DIR/binary-structural-rust.log" \
             --rollback-log "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-negative-rust.log" \
             --baseline-sha "$DOTTY_EXPECTED_BASE_SHA" --tested-sha "$(git rev-parse HEAD)" \
-            --expected-head-sha "${{ github.event.pull_request.head.sha || github.sha }}" \
+            --expected-head-sha "$DOTTY_EXPECTED_SOURCE_SHA" \
             --output "$DOTTY_AUDIT_REPORT_DIR/binary-recursive-adt-negative-rollback.tsv"
 
       - name: Verify strict recursive Expr receipts and pinned controls
@@ -977,7 +974,7 @@ jobs:
               --source "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-cohorts.tsv" \
               --baseline-sha "$DOTTY_EXPECTED_BASE_SHA" \
               --tested-sha "$(git rev-parse HEAD)" \
-              --expected-head-sha "${{ github.event.pull_request.head.sha || github.sha }}" \
+              --expected-head-sha "$DOTTY_EXPECTED_SOURCE_SHA" \
               --output "$DOTTY_AUDIT_REPORT_DIR/binary-recursive-adt-protected-cohorts.tsv"
           cp "$DOTTY_AUDIT_REPORT_DIR/binary-recursive-adt-protected-cohorts.tsv" \
             "$DOTTY_AUDIT_REPORT_DIR/nested-recursive-adt-protected-cohorts.tsv"
@@ -1153,7 +1150,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: typer-focused-audit-${{ github.event.pull_request.head.sha || github.sha }}
+          name: typer-focused-audit-${{ github.event.pull_request.head.sha || inputs.reviewed_head_sha || github.sha }}
           path: |
             ${{ github.workspace }}/target/typer-focused-report/
             ${{ github.workspace }}/target/typer-focused-intermediates/
