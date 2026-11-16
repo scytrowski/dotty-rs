@@ -4424,6 +4424,31 @@ mod tests {
                                 && store.symbols.get(*symbol).owner == Some(class)
                         })
                         .expect("canonical class-header A");
+                    assert_eq!(
+                        store
+                            .names
+                            .resolve(store.symbols.get(class_parameter).name.text()),
+                        "A",
+                        "the class header binder has its own canonical declaration"
+                    );
+                    let SymbolInfo::Complete(class_parameter_bounds) =
+                        store.symbols.get(class_parameter).info
+                    else {
+                        panic!("class-header A has completed bounds");
+                    };
+                    let Type::Bounds { low, high } = store.types.get(class_parameter_bounds) else {
+                        panic!("class-header A preserves its bounds");
+                    };
+                    assert_eq!(
+                        store.types.get(*low).reference_symbol(),
+                        Some(definitions.nothing_class),
+                        "the class-header lower bound remains Nothing"
+                    );
+                    assert_eq!(
+                        store.types.get(*high).reference_symbol(),
+                        Some(definitions.any_class),
+                        "the class-header upper bound remains Any"
+                    );
                     let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
                     let constructor = store
                         .scopes
@@ -4438,13 +4463,45 @@ mod tests {
                     let Type::Poly(poly) = store.types.get(constructor_type) else {
                         panic!("constructor is polymorphic");
                     };
+                    let [constructor_parameter] = poly.params.as_slice() else {
+                        panic!("constructor owns one canonical A binder");
+                    };
+                    assert_eq!(
+                        store
+                            .names
+                            .resolve(constructor_parameter.name.as_name().text()),
+                        "A",
+                        "the constructor binder preserves the source spelling"
+                    );
+                    let Type::Bounds {
+                        low: constructor_low,
+                        high: constructor_high,
+                    } = store.types.get(constructor_parameter.bounds)
+                    else {
+                        panic!("constructor A preserves its bounds");
+                    };
+                    assert_eq!(
+                        store.types.get(*constructor_low).reference_symbol(),
+                        Some(definitions.nothing_class),
+                        "constructor A retains the Nothing lower bound"
+                    );
+                    assert_eq!(
+                        store.types.get(*constructor_high).reference_symbol(),
+                        Some(definitions.any_class),
+                        "constructor A retains the Any upper bound"
+                    );
                     let Type::Method(method) = store.types.get(poly.result) else {
                         panic!("constructor Poly body is a method");
                     };
-                    assert!(matches!(method.params.as_slice(), [formal]
-                        if store.names.resolve(formal.name.as_name().text()) == "x"
-                            && matches!(store.types.get(formal.ty),
-                                Type::ParamRef { binder, index: 0 } if *binder == constructor_type)));
+                    assert!(
+                        matches!(
+                            method.params.as_slice(),
+                            [formal] if store.names.resolve(formal.name.as_name().text()) == "x"
+                                && matches!(store.types.get(formal.ty),
+                                    Type::ParamRef { binder, index: 0 } if *binder == constructor_type)
+                        ),
+                        "x refers to constructor-owned A, not class-header A"
+                    );
                     assert!(matches!(store.types.get(method.result),
                         Type::Applied { tycon, args }
                             if store.types.get(*tycon).reference_symbol() == Some(class)
@@ -4452,8 +4509,8 @@ mod tests {
                                     if matches!(store.types.get(*argument),
                                         Type::ParamRef { binder, index: 0 } if *binder == constructor_type))));
                     summary.push(format!(
-                        "{simple}:{relative_origin}:class.A.owner={}:ctor.Poly.A.x=ParamRef(0):result=Self[ParamRef(0)]",
-                        store.names.resolve(store.symbols.get(class_parameter).name.text())
+                        "{simple}:{relative_origin}:class.A.owner=class:class.A.bounds=Nothing..Any:ctor.Poly.A.bounds=Nothing..Any:x=ctor.A:result=Self[ctor.A]:origin={:?}",
+                        resolver.session.origins.get(&class).expect("selected origin")
                     ));
                 } else {
                     summary.push(format!("{simple}:{relative_origin}"));
