@@ -2,6 +2,7 @@ use dotty::jvm_tasty_cross_class::{
     CrossClassConstructorCallProofError, MutableLocalReferenceReassignmentProofInput,
     validate_mutable_local_reference_reassignment_proof,
 };
+use dotty::jvm_tasty_plan::mutable_local_reference_declaration_binding;
 use dotty_core::ast::{AstArena, TreeKind, Typed};
 use dotty_core::{Definitions, Packages, SemanticStore, SourceId, SourceText};
 use dotty_jvm::JvmCompilationUnit;
@@ -83,6 +84,8 @@ enum Mutation {
 #[derive(Debug)]
 struct Receipt {
     selected: dotty_core::SymbolId,
+    initializer_target: dotty_core::SymbolId,
+    declaration_binding: dotty_tasty_pickler::MutableCounterLocalInitializerBinding,
     target: dotty_core::SymbolId,
     first: dotty_core::SymbolId,
     second: dotty_core::SymbolId,
@@ -580,6 +583,8 @@ fn validate(
     );
     Ok(Receipt {
         selected: proof.selected(),
+        initializer_target: proof.initializer_target(),
+        declaration_binding: mutable_local_reference_declaration_binding(&proof),
         target: proof.assigned_target(),
         first: proof.original_locals()[0],
         second: proof.original_locals()[1],
@@ -594,6 +599,13 @@ fn validate(
 fn mutable_reference_reassignment_receipt_accepts_canonical_variants() {
     let original = validate(SOURCE, 22_990, Mutation::None).unwrap();
     assert_ne!(original.first, original.second);
+    assert_eq!(original.initializer_target, original.first);
+    assert_eq!(original.declaration_binding.target, original.first);
+    assert_eq!(original.declaration_binding.local, original.selected);
+    assert_ne!(
+        original.declaration_binding.source_declaration,
+        original.declaration_binding.source_block
+    );
     assert_eq!(original.target, original.second);
     assert_ne!(original.setter_receiver, original.assignment);
     assert_ne!(original.pair_args[0], original.pair_args[1]);

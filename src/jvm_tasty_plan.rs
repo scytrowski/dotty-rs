@@ -26,19 +26,48 @@ use dotty_tasty_pickler::{
     FormalLocalConstructorCallArgumentBinding, FormalLocalConstructorCallArgumentOrigin,
     FormalLocalConstructorCallPairBinding, LocalCounterInitializerBinding,
     LocalReceiverUnitCallBinding, LocalReferenceAliasBinding, LocalValueBinding,
-    NestedConstructorCallBinding, NestedConstructorCallPairBinding,
-    OrderedConstructorCallArgumentBinding, OrderedConstructorCallArgumentOrigin,
-    OrderedConstructorCallArgumentPairBinding, PickleError, PlannedCallBinding,
-    PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings, ValidatedClassStatePlan,
+    MutableCounterLocalInitializerBinding, NestedConstructorCallBinding,
+    NestedConstructorCallPairBinding, OrderedConstructorCallArgumentBinding,
+    OrderedConstructorCallArgumentOrigin, OrderedConstructorCallArgumentPairBinding, PickleError,
+    PlannedCallBinding, PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings,
+    ValidatedClassStatePlan,
 };
 use dotty_typer::{SourceTyper, TyperError};
 
 use crate::jvm_tasty_cross_class::{
     CrossClassConstructorCallProofInput, ImmutableLocalConditionalReferenceSelectionProofInput,
     ImmutableLocalInitializerPairProofInput, ValidatedCrossClassConstructorCallProof,
+    ValidatedMutableLocalReferenceReassignmentProof,
     validate_cross_class_constructor_call_proofs_with_typer,
     validate_immutable_local_conditional_reference_selection_proof,
 };
+
+/// Projects only the exact mutable declaration roots from the validated #2299
+/// proof. The borrowed receipt carries no Assign, setter, or paired-producer
+/// authorization.
+pub fn mutable_local_reference_declaration_binding(
+    proof: &ValidatedMutableLocalReferenceReassignmentProof<'_>,
+) -> MutableCounterLocalInitializerBinding {
+    let source_declarations = proof.source_declarations();
+    let typed_declarations = proof.typed_declarations();
+    let source_initializers = proof.source_initializers();
+    let typed_initializers = proof.typed_initializers();
+    MutableCounterLocalInitializerBinding {
+        source_id: proof.source_id(),
+        owner: proof.owner(),
+        method: proof.method(),
+        scope: proof.scope(),
+        source_block: proof.source_block(),
+        typed_block: proof.typed_block(),
+        source_declaration: source_declarations[2],
+        typed_declaration: typed_declarations[2],
+        source_initializer: source_initializers[2],
+        typed_initializer: typed_initializers[2],
+        local: proof.selected(),
+        target: proof.initializer_target(),
+        local_type: proof.local_type(),
+    }
+}
 
 /// Errors are tagged by the frontend or producer stage that rejected the
 /// source. The debug-form payload retains the stage's exact diagnostic data.

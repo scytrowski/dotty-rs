@@ -145,6 +145,16 @@ pub trait SourceTypedBindings {
         None
     }
 
+    /// Borrowed receipt for the mutable Counter declaration fragment only.
+    /// It does not authorize serialization of the surrounding method body.
+    fn mutable_counter_local_initializer(
+        &self,
+        _source: SourceId,
+        _method: SymbolId,
+    ) -> Option<MutableCounterLocalInitializerBinding> {
+        None
+    }
+
     /// Borrowed identity receipt for an immutable local selected between two
     /// existing references by one Boolean IF. This proof carries no producer
     /// authorization; implementations must preserve the same source session.
@@ -325,6 +335,25 @@ pub struct LocalReferenceAliasBinding {
     pub local: SymbolId,
     pub target: SymbolId,
     pub scope: dotty_core::ScopeId,
+    pub local_type: TypeId,
+}
+
+/// Exact declaration and original initializer roots from the #2299 proof.
+/// This is evidence for a separately incomplete declaration fragment only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MutableCounterLocalInitializerBinding {
+    pub source_id: SourceId,
+    pub owner: SymbolId,
+    pub method: SymbolId,
+    pub scope: dotty_core::ScopeId,
+    pub source_block: TreeId<Untyped>,
+    pub typed_block: TreeId<Typed>,
+    pub source_declaration: TreeId<Untyped>,
+    pub typed_declaration: TreeId<Typed>,
+    pub source_initializer: TreeId<Untyped>,
+    pub typed_initializer: TreeId<Typed>,
+    pub local: SymbolId,
+    pub target: SymbolId,
     pub local_type: TypeId,
 }
 

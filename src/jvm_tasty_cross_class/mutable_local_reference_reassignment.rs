@@ -48,6 +48,7 @@ pub struct ValidatedMutableLocalReferenceReassignmentProof<'session> {
     source_assignment_rhs: TreeId<Untyped>,
     typed_assignment_rhs: TreeId<Typed>,
     selected: SymbolId,
+    initializer_target: SymbolId,
     assigned_target: SymbolId,
     counter: SymbolId,
     local_type: TypeId,
@@ -116,6 +117,11 @@ impl ValidatedMutableLocalReferenceReassignmentProof<'_> {
     }
     pub const fn selected(&self) -> SymbolId {
         self.selected
+    }
+    /// Canonical local targeted by the original selected declaration RHS.
+    /// This is independent of the later assignment's RHS target.
+    pub const fn initializer_target(&self) -> SymbolId {
+        self.initializer_target
     }
     pub const fn assigned_target(&self) -> SymbolId {
         self.assigned_target
@@ -1327,6 +1333,7 @@ pub fn validate_mutable_local_reference_reassignment_proof<'session>(
         source_assignment_rhs,
         typed_assignment_rhs,
         selected,
+        initializer_target: selected_initializer_target,
         assigned_target,
         counter,
         local_type,

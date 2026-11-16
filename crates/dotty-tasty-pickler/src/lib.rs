@@ -58,12 +58,12 @@ pub use plan::{
     DistinctReferenceMethodSignature, FormalLocalConstructorCallArgumentBinding,
     FormalLocalConstructorCallArgumentOrigin, FormalLocalConstructorCallPairBinding,
     LocalCounterInitializerBinding, LocalReceiverUnitCallBinding, LocalReferenceAliasBinding,
-    LocalValueBinding, MethodPicklePlan, NestedConstructorCallBinding,
-    NestedConstructorCallPairBinding, OrderedConstructorCallArgumentBinding,
-    OrderedConstructorCallArgumentOrigin, OrderedConstructorCallArgumentPairBinding, PicklePlan,
-    PlannedCallBinding, PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings,
-    ValidatedClassStatePlan, ValidatedPicklePlan, ValidatedSameBatchReferenceField,
-    ValidationLimits,
+    LocalValueBinding, MethodPicklePlan, MutableCounterLocalInitializerBinding,
+    NestedConstructorCallBinding, NestedConstructorCallPairBinding,
+    OrderedConstructorCallArgumentBinding, OrderedConstructorCallArgumentOrigin,
+    OrderedConstructorCallArgumentPairBinding, PicklePlan, PlannedCallBinding,
+    PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings, ValidatedClassStatePlan,
+    ValidatedPicklePlan, ValidatedSameBatchReferenceField, ValidationLimits,
 };
 pub use projection::{
     EncodingContext, ProjectedFragment, ProjectedMethodSignature, ProjectionLimits,
