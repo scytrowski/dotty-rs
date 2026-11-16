@@ -74,6 +74,8 @@ const IMMUTABLE_LOCAL_PAIR_REVERSED_BATCH: &str =
     include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactoryReversed.scala");
 const TWO_IMMUTABLE_LOCAL_PAIR_BATCH: &str =
     include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
+const MUTABLE_REFERENCE_REBINDING_BATCH: &str =
+    include_str!("fixtures/jvm_tasty_mutable_reference_rebinding/MutableReferenceRebinding.scala");
 const IMMUTABLE_LOCAL_ALIAS_CALL_PAIR_BATCH: &str = "package example\n\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\n\nclass Pair(first: Counter, second: Counter):\n  private val left: Counter = first\n  private val right: Counter = second\n  def leftValue(): Int = left.get()\n  def rightValue(): Int = right.get()\n\nclass PairFactory:\n  def create(firstSeed: Int, secondSeed: Int): Pair =\n    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)\n    val alias: Counter = first\n    alias.set(secondSeed)\n    second.set(firstSeed)\n    new Pair(first, second)\n";
 const COUNTER_FACTORY_IDENTITY_ONLY: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n";
 const COUNTER_FACTORY_PRIMITIVE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n  def create(seed: Int): Int = seed\n";
@@ -835,6 +837,34 @@ public final class ReferenceLocalBatchHarness {
         undersized_stack[code_start - 8..code_start - 6].copy_from_slice(&2u16.to_be_bytes());
         run_local_negative("undersized-reference-local-stack", &undersized_stack);
     }
+}
+
+#[test]
+fn mutable_reference_rebinding_baseline_rejects_before_the_paired_callback() {
+    use std::cell::Cell;
+
+    let callback_reached = Cell::new(false);
+    let result = with_paired_jvm_tasty_batch_plan(
+        MUTABLE_REFERENCE_REBINDING_BATCH,
+        "MutableReferenceRebinding.scala",
+        SourceId::from_index(23050),
+        |_| callback_reached.set(true),
+    );
+
+    assert!(
+        matches!(
+            result,
+            Err(PairedPlanError::BatchUnit {
+                phase: "cross-class constructor-call identity proof",
+                ref reason,
+            }) if reason == "SourceShape(\"candidate method must have one plain formal clause and a concrete public body\")"
+        ),
+        "unexpected first paired-planning result: {result:?}"
+    );
+    assert!(
+        !callback_reached.get(),
+        "rejected planning cannot reach its consumer"
+    );
 }
 
 #[test]
