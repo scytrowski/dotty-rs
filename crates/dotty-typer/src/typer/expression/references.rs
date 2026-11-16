@@ -326,9 +326,62 @@ impl SourceTyper<'_> {
             // call chains such as `holder.value().get()` without treating a
             // mutable field reference like `holder.current.get()` as stable.
             Ok(())
+        } else if self.is_source_parameterless_method_value(qualifier, qualifier_type) {
+            // A source `def value: T` is a value-producing member, even though
+            // its reference retains the method symbol. Permit ordinary value
+            // member selection on that result; type projections continue to
+            // use `require_stable_selection_prefix` directly.
+            Ok(())
         } else {
             self.require_stable_selection_prefix(qualifier_type, tree_index)
         }
+    }
+
+    fn is_source_parameterless_method_value(
+        &self,
+        qualifier: TreeId<Typed>,
+        qualifier_type: TypeId,
+    ) -> bool {
+        if !self
+            .typed_arena
+            .try_get(qualifier)
+            .is_some_and(|tree| matches!(tree.kind, TreeKind::Ident(_) | TreeKind::Select(_)))
+        {
+            return false;
+        }
+        let Some(Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        }) = self.store.types.try_get(qualifier_type)
+        else {
+            return false;
+        };
+        if !self.store.symbols.contains(*symbol)
+            || self.store.symbols.get(*symbol).kind != SymbolKind::Method
+        {
+            return false;
+        }
+        let Some(SourceDefinition::Canonical { source, tree }) = self.index.definition_of(*symbol)
+        else {
+            return false;
+        };
+        if source != self.source {
+            return false;
+        }
+        let Some(TreeKind::DefDef(definition)) = self.arena.try_get(tree).map(|node| &node.kind)
+        else {
+            return false;
+        };
+        definition.type_params.is_empty()
+            && definition.value_param_clauses.is_empty()
+            && matches!(
+                self.store.symbols.get(*symbol).info,
+                SymbolInfo::Complete(info)
+                    if !matches!(
+                        self.store.types.try_get(info),
+                        Some(Type::NoType | Type::NoPrefix | Type::Error(_) | Type::Method(_) | Type::Poly(_))
+                    )
+            )
     }
 
     pub(in crate::typer) fn is_mutable_local_selection_receiver(
