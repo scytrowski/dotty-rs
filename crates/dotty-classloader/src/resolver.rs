@@ -6418,10 +6418,36 @@ mod tests {
                 "unknown term is an ordinary miss"
             );
 
-            observations.push(
-                "owner=InfoWrapped;kind=Method;namespace=Term;visibility=Public;result=ByName(F[Int]);parent=InfoBase[F[Int]];origin=semantic-fixtures"
-                    .to_owned(),
-            );
+            observations.push(format!(
+                "owner={};kind={:?};namespace={:?};visibility={:?};result=ByName({}[{}]);parent={}[{}[{}]];origin=semantic-fixtures",
+                store.names.resolve(
+                    store
+                        .symbols
+                        .get(store.symbols.get(member).owner.unwrap())
+                        .name
+                        .text()
+                ),
+                store.symbols.get(member).kind,
+                store.symbols.get(member).name.namespace(),
+                store.symbols.get(member).visibility,
+                store.names.resolve(store.symbols.get(f_parameter).name.text()),
+                store.names.resolve(
+                    store
+                        .symbols
+                        .get(store.types.get(definitions.int).reference_symbol().unwrap())
+                        .name
+                        .text()
+                ),
+                store.names.resolve(store.symbols.get(base).name.text()),
+                store.names.resolve(store.symbols.get(f_parameter).name.text()),
+                store.names.resolve(
+                    store
+                        .symbols
+                        .get(store.types.get(definitions.int).reference_symbol().unwrap())
+                        .name
+                        .text()
+                ),
+            ));
         }
         assert_eq!(
             observations,
