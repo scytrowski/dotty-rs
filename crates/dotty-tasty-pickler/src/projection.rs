@@ -90,6 +90,7 @@ pub struct EncodingContext<'a> {
     local_receiver_unit_call_pairs: HashMap<SymbolId, [crate::LocalReceiverUnitCallBinding; 2]>,
     local_values_by_typed_declaration: HashMap<TreeId<Typed>, SymbolId>,
     local_value_symbols: HashSet<SymbolId>,
+    proof_local_symbols: HashSet<SymbolId>,
     local_reference_targets: HashMap<(SymbolId, Option<TypeId>), AstLabel>,
     conditional_selection_ifs: HashMap<(SymbolId, TreeId<Typed>), [SymbolId; 2]>,
     external: HashMap<SymbolId, (NameRef, NameRef)>,
@@ -222,6 +223,7 @@ impl<'a> EncodingContext<'a> {
             local_receiver_unit_call_pairs: HashMap::new(),
             local_values_by_typed_declaration: HashMap::new(),
             local_value_symbols: HashSet::new(),
+            proof_local_symbols: HashSet::new(),
             local_reference_targets: HashMap::new(),
             conditional_selection_ifs: HashMap::new(),
             external: HashMap::new(),
@@ -471,6 +473,48 @@ impl<'a> EncodingContext<'a> {
             });
         }
         Ok(())
+    }
+
+    /// Reserve a local whose identity was validated through the explicit
+    /// SourceTyper/proof binding port. The ordinary local path continues to
+    /// require a SourceSemanticIndex declaration.
+    pub(crate) fn reserve_fragment_local_binding(
+        &mut self,
+        binding: crate::LocalValueBinding,
+    ) -> Result<(), PickleError> {
+        self.run(|context| {
+            context.charge(1)?;
+            let record = context.symbol(binding.symbol)?;
+            let owner = record
+                .owner
+                .ok_or(reference(binding.symbol, ReferenceError::Owner))?;
+            if record.kind != SymbolKind::Local
+                || record.origin != SymbolOrigin::Source(context.source)
+                || record.visibility != Visibility::Public
+                || !record.annotations.is_empty()
+                || !context.store.scopes.contains(binding.scope)
+                || context.store.scopes.get(binding.scope).owner != Some(owner)
+            {
+                return Err(reference(binding.symbol, ReferenceError::Metadata));
+            }
+            if context.declarations.contains_key(&binding.symbol)
+                || context
+                    .local_values_by_typed_declaration
+                    .contains_key(&binding.typed_declaration)
+            {
+                return Err(PickleError::DuplicateDeclaration {
+                    symbol: binding.symbol,
+                });
+            }
+            let label = context.wire.reserve().map_err(construction)?;
+            context.declarations.insert(binding.symbol, label);
+            context.local_value_symbols.insert(binding.symbol);
+            context.proof_local_symbols.insert(binding.symbol);
+            context
+                .local_values_by_typed_declaration
+                .insert(binding.typed_declaration, binding.symbol);
+            Ok(())
+        })
     }
     fn run<T>(
         &mut self,
@@ -748,13 +792,15 @@ impl<'a> EncodingContext<'a> {
         if s.origin != SymbolOrigin::Source(self.source) {
             return Err(reference(symbol, ReferenceError::NotLocal));
         }
-        let Some(SourceDefinition::Canonical { source, tree }) =
-            self.source_index.definition_of(symbol)
-        else {
-            return Err(PickleError::SourceDefinition { symbol });
-        };
-        if source != self.source || self.source_index.symbol_at(source, tree) != Some(symbol) {
-            return Err(PickleError::SourceDefinition { symbol });
+        if !self.proof_local_symbols.contains(&symbol) {
+            let Some(SourceDefinition::Canonical { source, tree }) =
+                self.source_index.definition_of(symbol)
+            else {
+                return Err(PickleError::SourceDefinition { symbol });
+            };
+            if source != self.source || self.source_index.symbol_at(source, tree) != Some(symbol) {
+                return Err(PickleError::SourceDefinition { symbol });
+            }
         }
         self.namespace(symbol, s.name.is_type())?;
         self.text(s.name.text())?;

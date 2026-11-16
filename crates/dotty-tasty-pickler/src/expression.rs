@@ -17,6 +17,7 @@ use crate::{
 };
 
 mod block;
+pub(crate) use block::{MutableCounterFragmentTrees, lower_mutable_counter_declaration_fragment};
 
 struct ExpressionBudget {
     max_depth: usize,

@@ -3718,7 +3718,7 @@ impl Validator<'_, '_> {
         Ok(())
     }
 
-    fn validate_nested_constructor_argument(
+    pub(super) fn validate_nested_constructor_argument(
         &mut self,
         binding: crate::NestedConstructorCallBinding,
         caller_formal: SymbolId,

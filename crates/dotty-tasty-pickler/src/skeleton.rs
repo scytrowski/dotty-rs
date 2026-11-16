@@ -4,7 +4,8 @@ use dotty_core::{Name, Symbol, SymbolId, SymbolInfo, TreeId, Type, Typed};
 use dotty_tasty::tasty::*;
 
 use crate::{
-    EncodingContext, PickleError, ProjectionLimits, ReferenceError, SourceMetadata, TypeRole,
+    EncodingContext, MutableCounterLocalInitializerBinding, PickleError, ProjectionLimits,
+    ReferenceError, SourceMetadata, TypeRole, ValidatedMutableCounterDeclarationFragment,
     ValidatedPicklePlan,
 };
 
@@ -35,6 +36,46 @@ pub struct DeclarationSkeleton {
     pub(crate) intended_tasty_path: String,
     pub(crate) declarations: Vec<SkeletonDeclaration>,
     pub(crate) omitted_bodies: Vec<OmittedMethodBody>,
+}
+
+/// Rust-emitted, explicitly incomplete method body containing the borrowed
+/// declaration prefix, mutable selected declaration, and initializer reference.
+/// It is intended for pinned reader inspection, not execution or publication
+/// as a complete file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MutableCounterDeclarationFragment {
+    bytes: Vec<u8>,
+    source: SourceMetadata,
+    intended_tasty_path: String,
+    declarations: Vec<SkeletonDeclaration>,
+    binding: MutableCounterLocalInitializerBinding,
+}
+
+impl MutableCounterDeclarationFragment {
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+    pub fn source(&self) -> &SourceMetadata {
+        &self.source
+    }
+    pub fn intended_tasty_path(&self) -> &str {
+        &self.intended_tasty_path
+    }
+    pub fn declarations(&self) -> &[SkeletonDeclaration] {
+        &self.declarations
+    }
+    pub fn selected(&self) -> SymbolId {
+        self.binding.local
+    }
+    pub fn initializer_target(&self) -> SymbolId {
+        self.binding.target
+    }
+    pub fn selected_declaration(&self) -> TreeId<dotty_core::Untyped> {
+        self.binding.source_declaration
+    }
+    pub fn selected_initializer(&self) -> TreeId<dotty_core::Typed> {
+        self.binding.typed_initializer
+    }
 }
 
 /// Private common assembly result; completeness is selected before emission.
@@ -542,6 +583,23 @@ impl ValidatedPicklePlan<'_, '_> {
             intended_tasty_path,
             declarations,
             bodies,
+        })
+    }
+}
+
+impl ValidatedMutableCounterDeclarationFragment<'_, '_> {
+    /// Emit an owned, explicitly incomplete TASTy document for reader
+    /// inspection. This result has no complete-artifact conversion path.
+    pub fn emit(&self) -> Result<MutableCounterDeclarationFragment, PickleError> {
+        let output = self
+            .plan
+            .assemble_class_state_fragment(crate::PickleLimits::default(), self.binding)?;
+        Ok(MutableCounterDeclarationFragment {
+            bytes: output.bytes,
+            source: output.source,
+            intended_tasty_path: output.intended_tasty_path,
+            declarations: output.declarations,
+            binding: self.binding,
         })
     }
 }

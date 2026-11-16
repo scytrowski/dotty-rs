@@ -242,6 +242,24 @@ pub(crate) fn intended_class_tasty_path(
     ))
 }
 
+pub(crate) fn method_input_for_fragment(
+    p: &crate::ClassStatePicklePlan<'_>,
+    symbol: SymbolId,
+) -> Result<(MethodPicklePlan, Vec<crate::LocalValueBinding>), PickleError> {
+    let source_tree = p
+        .members
+        .iter()
+        .find_map(|member| match member {
+            ClassMemberPicklePlan::Method {
+                symbol: found,
+                source_tree,
+            } if *found == symbol => Some(*source_tree),
+            _ => None,
+        })
+        .ok_or(PickleError::SourceDefinition { symbol })?;
+    method_input(p, symbol, source_tree)
+}
+
 fn method_input(
     p: &crate::ClassStatePicklePlan<'_>,
     symbol: SymbolId,
@@ -372,6 +390,23 @@ impl ValidatedClassStatePlan<'_, '_> {
         limits: PickleLimits,
         signature_only: bool,
     ) -> Result<Assembly, PickleError> {
+        self.assemble_class_state_mode(limits, signature_only, None)
+    }
+
+    pub(crate) fn assemble_class_state_fragment(
+        &self,
+        limits: PickleLimits,
+        binding: crate::MutableCounterLocalInitializerBinding,
+    ) -> Result<Assembly, PickleError> {
+        self.assemble_class_state_mode(limits, false, Some(binding))
+    }
+
+    fn assemble_class_state_mode(
+        &self,
+        limits: PickleLimits,
+        signature_only: bool,
+        fragment_binding: Option<crate::MutableCounterLocalInitializerBinding>,
+    ) -> Result<Assembly, PickleError> {
         let p = self.plan();
         let constructor_tree = p.source_ast.try_get(p.constructor.source_tree).ok_or(
             PickleError::InvalidSourceTree {
@@ -424,12 +459,17 @@ impl ValidatedClassStatePlan<'_, '_> {
             .same_batch_reference_fields()
             .map(|field| field.field())
             .collect::<Vec<_>>();
+        let signature_locals = if fragment_binding.is_some() {
+            &[][..]
+        } else {
+            local_values.as_slice()
+        };
         crate::plan::validate_class_state_method(
             p,
             &methods,
-            &local_values,
+            signature_locals,
             &reference_fields,
-            signature_only,
+            signature_only || fragment_binding.is_some(),
         )?;
 
         let mut context = EncodingContext::new(
@@ -440,6 +480,20 @@ impl ValidatedClassStatePlan<'_, '_> {
             limits.projection,
         )?;
         context.reserve_declaration(p.class)?;
+        if let Some(binding) = fragment_binding {
+            for symbol in binding
+                .prefix_locals
+                .into_iter()
+                .chain(std::iter::once(binding.local))
+            {
+                let local = local_values
+                    .iter()
+                    .find(|local| local.symbol == symbol)
+                    .copied()
+                    .ok_or(PickleError::SourceDefinition { symbol })?;
+                context.reserve_fragment_local_binding(local)?;
+            }
+        }
         for member in p.members {
             let ClassMemberPicklePlan::Method { symbol, .. } = *member else {
                 continue;
@@ -637,7 +691,13 @@ impl ValidatedClassStatePlan<'_, '_> {
                         method_parameters.push(parameter);
                     }
                     for local in locals {
-                        context.reserve_local_binding(*local)?;
+                        let fragment_local = fragment_binding.is_some_and(|binding| {
+                            binding.prefix_locals.contains(&local.symbol)
+                                || binding.local == local.symbol
+                        });
+                        if !fragment_local {
+                            context.reserve_local_binding(*local)?;
+                        }
                         method_local_symbols.push(local.symbol);
                     }
                 }
@@ -1094,7 +1154,41 @@ impl ValidatedClassStatePlan<'_, '_> {
                     // `method_input` ran the shared recursive source/typed
                     // validator before any body is lowered, including nested
                     // bindings, literal payloads, spans, and local identities.
-                    if !signature_only {
+                    if let Some(binding) =
+                        fragment_binding.filter(|binding| binding.method == symbol)
+                    {
+                        let prefix = binding
+                            .prefix_locals
+                            .map(|symbol| {
+                                local_values
+                                    .iter()
+                                    .find(|local| local.symbol == symbol)
+                                    .map(|local| local.typed_declaration)
+                                    .ok_or(PickleError::SourceDefinition { symbol })
+                            })
+                            .into_iter()
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let selected = local_values
+                            .iter()
+                            .find(|local| local.symbol == binding.local)
+                            .ok_or(PickleError::SourceDefinition {
+                                symbol: binding.local,
+                            })?;
+                        let body = crate::expression::lower_mutable_counter_declaration_fragment(
+                            p.store,
+                            p.typed_ast,
+                            crate::expression::MutableCounterFragmentTrees {
+                                prefix: [prefix[0], prefix[1]],
+                                initializer: binding.typed_initializer,
+                                selected: selected.typed_declaration,
+                            },
+                            symbol,
+                            &parameter_ids,
+                            limits.projection,
+                            &mut context,
+                        )?;
+                        method_fields.push(AstField::Tree(body));
+                    } else if !signature_only {
                         let body = crate::expression::lower_expression(
                             p.store,
                             p.typed_ast,
@@ -1198,16 +1292,22 @@ impl ValidatedClassStatePlan<'_, '_> {
             major_version: SCALA_3_9_MAJOR_VERSION,
             minor_version: SCALA_3_9_MINOR_VERSION,
             experimental_version: SCALA_3_9_EXPERIMENTAL_VERSION,
-            tooling_version: "dotty-rs class-state pickler".into(),
+            tooling_version: if fragment_binding.is_some() {
+                "dotty-rs incomplete local declaration fragment".into()
+            } else {
+                "dotty-rs class-state pickler".into()
+            },
             uuid: [0; 16],
         };
-        crate::output::prepare_header(
-            &mut header,
-            &fragment.names,
-            &asts,
-            &attributes,
-            limits.max_file_bytes,
-        )?;
+        if fragment_binding.is_none() {
+            crate::output::prepare_header(
+                &mut header,
+                &fragment.names,
+                &asts,
+                &attributes,
+                limits.max_file_bytes,
+            )?;
+        }
         let builder = TastyFileBuilder::new(header, fragment.names)
             .with_section(asts)
             .with_section(attributes);

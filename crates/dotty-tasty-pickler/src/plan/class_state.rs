@@ -2728,4 +2728,32 @@ impl ClassStatePicklePlan<'_> {
             same_batch_reference_fields,
         })
     }
+
+    /// Validate the class-state declarations and method signature, then
+    /// validate only the proof-authenticated first/selected local prefix.
+    /// Remaining method statements are intentionally outside this fragment.
+    pub fn validate_mutable_counter_declaration_fragment(
+        &self,
+        method: SymbolId,
+    ) -> Result<crate::ValidatedMutableCounterDeclarationFragment<'_, '_>, PickleError> {
+        let plan = self.validate()?;
+        let binding = self
+            .typed_bindings
+            .mutable_counter_local_initializer(self.source.id, method)
+            .ok_or(PickleError::Unsupported {
+                feature: crate::UnsupportedFeature::BodyExpression,
+                symbol: Some(method),
+            })?;
+        let reference_fields = plan
+            .same_batch_reference_fields()
+            .map(|field| field.field())
+            .collect::<Vec<_>>();
+        crate::plan::validate_class_state_mutable_declaration_fragment(
+            self,
+            method,
+            binding,
+            &reference_fields,
+        )?;
+        Ok(crate::ValidatedMutableCounterDeclarationFragment { plan, binding })
+    }
 }
