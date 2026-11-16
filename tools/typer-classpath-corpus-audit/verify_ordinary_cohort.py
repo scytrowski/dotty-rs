@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import re
 import sys
@@ -674,6 +675,99 @@ def _manifest_identities(path: Path, expected_sha256: str, cohort: str) -> tuple
     return identities, failures
 
 
+def _published_review_result(
+    evidence: dict[str, object] | None, pull_request_number: int | None, pr_head_sha: str
+) -> tuple[bool, str, str, str, str, list[str]]:
+    """Authenticate a current-head approval from the published GitHub PR review list."""
+    failures: list[str] = []
+    if evidence is None or pull_request_number is None:
+        return False, "", "", "", "", ["published pull request review evidence is missing"]
+    pull = evidence.get("pull_request")
+    reviews = evidence.get("reviews")
+    if not isinstance(pull, dict) or not isinstance(reviews, list):
+        return False, "", "", "", "", ["published pull request review evidence has an invalid shape"]
+    head = pull.get("head")
+    base = pull.get("base")
+    author = pull.get("user")
+    if pull.get("number") != pull_request_number:
+        failures.append("published review evidence names a different pull request")
+    if not isinstance(head, dict) or head.get("sha") != pr_head_sha:
+        failures.append("published pull request head does not equal the tested PR head")
+    if not isinstance(base, dict) or base.get("ref") != "main":
+        failures.append("published pull request does not target main")
+    if not isinstance(author, dict) or not isinstance(author.get("login"), str) or not author["login"]:
+        failures.append("published pull request author identity is missing")
+        author_login = ""
+    else:
+        author_login = author["login"].casefold()
+
+    latest_by_reviewer: dict[str, tuple[dict[str, object], str]] = {}
+    for review in reviews:
+        if not isinstance(review, dict) or review.get("commit_id") != pr_head_sha:
+            continue
+        user = review.get("user")
+        if not isinstance(user, dict) or not isinstance(user.get("login"), str):
+            continue
+        reviewer = user["login"]
+        if not reviewer:
+            continue
+        body = review.get("body", "")
+        body = body if isinstance(body, str) else ""
+        logical = re.search(
+            r"(?m)^<!-- agent-review:v1 verdict=(READY_FOR_MERGE|CHANGES_REQUESTED) head=([0-9a-f]{40}) -->$",
+            body,
+        )
+        verdict = logical.group(1) if logical is not None and logical.group(2) == pr_head_sha else ""
+        if reviewer.casefold() == author_login and not verdict:
+            # GitHub's authenticated reviewer may own the PR. In that case,
+            # only a published structured agent-review verdict supplies the
+            # delegated independent review signal.
+            continue
+        submitted = review.get("submitted_at")
+        review_id = review.get("id")
+        if not isinstance(submitted, str) or not isinstance(review_id, int):
+            continue
+        previous = latest_by_reviewer.get(reviewer.casefold())
+        if previous is None or (submitted, review_id) > (
+            str(previous[0].get("submitted_at", "")), int(previous[0].get("id", 0))
+        ):
+            latest_by_reviewer[reviewer.casefold()] = (review, verdict)
+
+    latest_pairs = list(latest_by_reviewer.values())
+    latest_reviews = [pair[0] for pair in latest_pairs]
+    if not latest_reviews:
+        failures.append("no independent published review is attached to the exact PR head")
+    blocking = [
+        (review, verdict) for review, verdict in latest_pairs
+        if str(review.get("state", "")).upper() in {"CHANGES_REQUESTED", "DISMISSED"}
+        or verdict == "CHANGES_REQUESTED"
+    ]
+    if blocking:
+        failures.append("latest independent review on the exact PR head is dismissed or requests changes")
+    approved: list[tuple[dict[str, object], str]] = []
+    for review, verdict in latest_pairs:
+        state = str(review.get("state", "")).upper()
+        user = review.get("user")
+        reviewer = user.get("login", "") if isinstance(user, dict) else ""
+        is_pr_author = isinstance(reviewer, str) and reviewer.casefold() == author_login
+        ready_comment = state == "COMMENTED" and verdict == "READY_FOR_MERGE"
+        if (state == "APPROVED" and not is_pr_author) or ready_comment:
+            approved.append((review, "READY_FOR_MERGE" if ready_comment else "APPROVED"))
+    if not approved:
+        failures.append("no independent exact-head APPROVED or READY_FOR_MERGE COMMENT review exists")
+    if failures:
+        return False, "", "", "", "", failures
+    selected = max(
+        approved,
+        key=lambda pair: (str(pair[0].get("submitted_at", "")), int(pair[0].get("id", 0))),
+    )
+    selected, logical_verdict = selected
+    user = selected["user"]
+    assert isinstance(user, dict)
+    url = selected.get("html_url", "")
+    return True, pr_head_sha, logical_verdict, str(user["login"]), str(url), []
+
+
 def _acceptance_vi_target_receipt(
     log_path: Path, cohort: str, tested_revision: str
 ) -> tuple[str, list[str]]:
@@ -754,6 +848,8 @@ def verify_acceptance_vi(
     java_binary_sha256: str,
     jdk_base_module_sha256: str,
     environment: dict[str, str] | None = None,
+    review_evidence: dict[str, object] | None = None,
+    pull_request_number: int | None = None,
 ) -> tuple[list[str], list[dict[str, str]], bool]:
     """Verify additive Acceptance VI against the immutable #2297 complete-root baseline."""
     import hashlib
@@ -781,6 +877,10 @@ def verify_acceptance_vi(
         identities, manifest_failures = _manifest_identities(path, expected_hash, cohort)
         failures.extend(manifest_failures)
         expected_manifests[cohort] = set(identities)
+    manifest_rows = {
+        "main": {row.get("identity", ""): row for row in read_tsv(main_manifest_path)},
+        "analysis": {row.get("identity", ""): row for row in read_tsv(analysis_manifest_path)},
+    }
 
     baseline_rows = read_tsv(baseline_roots_path)
     baseline: dict[str, dict[str, str]] = {}
@@ -836,12 +936,45 @@ def verify_acceptance_vi(
     )
     failures.extend(provenance_failures)
     env = os.environ if environment is None else environment
-    review_verified = (
-        bool(re.fullmatch(r"[0-9a-f]{40}", reviewed_head_sha))
-        and reviewed_head_sha == pr_head_sha
-        and review_state.lower() == "approved"
-        and env.get("GITHUB_EVENT_NAME") in {"pull_request_review", "workflow_dispatch"}
+    review_verified, authenticated_reviewed_head, authenticated_review_state, authenticated_reviewer, authenticated_review_url, review_failures = (
+        _published_review_result(review_evidence, pull_request_number, pr_head_sha)
     )
+    pull_for_pending = review_evidence.get("pull_request") if isinstance(review_evidence, dict) else None
+    review_list_for_pending = review_evidence.get("reviews") if isinstance(review_evidence, dict) else None
+    pending_pr_without_head_review = (
+        env.get("GITHUB_EVENT_NAME") == "pull_request"
+        and isinstance(pull_for_pending, dict)
+        and pull_for_pending.get("number") == pull_request_number
+        and isinstance(pull_for_pending.get("head"), dict)
+        and pull_for_pending["head"].get("sha") == pr_head_sha
+        and isinstance(pull_for_pending.get("user"), dict)
+        and isinstance(review_list_for_pending, list)
+        and not any(
+            isinstance(review, dict)
+            and review.get("commit_id") == pr_head_sha
+            and isinstance(review.get("user"), dict)
+            and isinstance(review["user"].get("login"), str)
+            and review["user"]["login"].casefold() != str(pull_for_pending["user"].get("login", "")).casefold()
+            for review in review_list_for_pending
+        )
+    )
+    if pending_pr_without_head_review:
+        # The ordinary PR run is allowed to publish an explicit unmet report
+        # while approval is pending. Review and dispatch runs fail closed.
+        review_failures = [
+            failure for failure in review_failures
+            if "no independent published review is attached" not in failure
+            and "no independent exact-head APPROVED or READY_FOR_MERGE COMMENT review exists" not in failure
+        ]
+    failures.extend(review_failures)
+    # CLI strings are output hints only. The TSV and PASS state use values resolved
+    # from the published review evidence returned by GitHub's API.
+    reviewed_head_sha = authenticated_reviewed_head
+    review_state = authenticated_review_state
+    review_event = env.get("GITHUB_EVENT_NAME") in {"pull_request_review", "workflow_dispatch"}
+    if review_verified and not review_event:
+        review_verified = False
+        failures.append("final Acceptance VI PASS requires a pull_request_review or workflow_dispatch run")
 
     cohort_reports = {
         "main": (main_first, main_second),
@@ -904,6 +1037,23 @@ def verify_acceptance_vi(
         for identity in sorted(expected_manifests[cohort]):
             row = first.get(identity, {})
             base_row = baseline.get(identity, {})
+            manifest_row = manifest_rows[cohort].get(identity, {})
+            identity_fields = (
+                ("owner_path", "owner"),
+                ("method_name", "method"),
+                ("line", "line"),
+                ("range", "source_range"),
+                ("expected_result", "declared_result"),
+            )
+            for report_field, baseline_field in identity_fields:
+                if row.get(report_field, "") != base_row.get(baseline_field, ""):
+                    failures.append(f"{identity}: report {report_field} differs from frozen root baseline")
+            for report_field, manifest_field in (
+                ("owner_path", "owner_path"),
+                ("method_name", "method_name"),
+            ):
+                if report_field in row and manifest_field in manifest_row and row[report_field] != manifest_row[manifest_field]:
+                    failures.append(f"{identity}: report {report_field} differs from frozen cohort manifest")
             output_rows.append({
                 "cohort": cohort,
                 "identity": identity,
@@ -941,6 +1091,8 @@ def verify_acceptance_vi(
                 "tested_revision": tested_revision,
                 "reviewed_head_sha": reviewed_head_sha or "pending",
                 "review_status": review_state or "pending",
+                "reviewer_login": authenticated_reviewer or "pending",
+                "review_url": authenticated_review_url or "pending",
                 "hosted_run": hosted_run,
                 "artifact_reference": artifact_reference,
                 "final_merge_sha": "pending until merge",
@@ -951,6 +1103,8 @@ def verify_acceptance_vi(
                 "receipt_sha256": "", "tested_revision": tested_revision,
                 "reviewed_head_sha": reviewed_head_sha or "pending",
                 "review_status": review_state or "pending", "hosted_run": hosted_run,
+                "reviewer_login": authenticated_reviewer or "pending",
+                "review_url": authenticated_review_url or "pending",
                 "artifact_reference": artifact_reference,
                 "final_merge_sha": "pending until merge",
             })
@@ -986,7 +1140,7 @@ def write_acceptance_vi_outputs(
     columns = (
         "cohort", "identity", "owner", "source_range", "source_sha256", "result", "baseline_status", "baseline_result",
         "status", "source_tree", "typed_tree", "target_owner", "target_result",
-        "receipt_sha256", "tested_revision", "pr_head_sha", "reviewed_head_sha", "review_status",
+        "receipt_sha256", "tested_revision", "pr_head_sha", "reviewed_head_sha", "review_status", "reviewer_login", "review_url",
         "jdk_version", "jdk_release_sha256", "java_binary_sha256", "jdk_base_module_sha256",
         "hosted_run", "artifact_reference", "final_merge_sha",
     )
@@ -1012,6 +1166,8 @@ def write_acceptance_vi_outputs(
         f"Protected successes retained: 20 main and 16 analysis with exact result shapes.\n\n"
         f"Tested revision: `{tested_revision}`; PR head: `{pr_head_sha}`; "
         f"reviewed head: `{reviewed_head_sha or 'pending'}`; independent review: `{review_state or 'pending'}`.\n\n"
+        f"Published reviewer: `{next((row['reviewer_login'] for row in rows if row.get('reviewer_login') not in (None, '', 'pending')), 'pending')}`; "
+        f"review record: {next((row['review_url'] for row in rows if row.get('review_url') not in (None, '', 'pending')), 'pending')}.\n\n"
         f"Pinned Scala source: `{PINNED_SCALA_REVISION}`; JDK: `{jdk_version}` "
         f"(release `{jdk_release_sha256}`, java `{java_binary_sha256}`, java.base.jmod `{jdk_base_module_sha256}`).\n\n"
         f"Hosted focused audit: {hosted_run}; artifact: `{artifact_reference}`. "
@@ -1147,8 +1303,8 @@ def main() -> int:
         parser.add_argument("--report", type=Path, required=True)
         parser.add_argument("--tested-revision", required=True)
         parser.add_argument("--pr-head-sha", required=True)
-        parser.add_argument("--reviewed-head-sha", default="")
-        parser.add_argument("--review-state", default="")
+        parser.add_argument("--pull-request-number", type=int, required=True)
+        parser.add_argument("--review-evidence", type=Path, required=True)
         parser.add_argument("--prior-checks-status", default="unknown")
         parser.add_argument("--hosted-run", default="pending")
         parser.add_argument("--artifact-reference", default="pending")
@@ -1198,6 +1354,7 @@ def main() -> int:
         arguments.command = "ordinary"
     try:
         if arguments.command == "acceptance-vi":
+            review_evidence = json.loads(arguments.review_evidence.read_text(encoding="utf-8"))
             failures, rows, passed = verify_acceptance_vi(
                 arguments.main_first,
                 arguments.main_second,
@@ -1216,15 +1373,25 @@ def main() -> int:
                 arguments.prior_checks_status,
                 arguments.hosted_run,
                 arguments.artifact_reference,
-                arguments.reviewed_head_sha,
-                arguments.review_state,
+                "",
+                "",
                 arguments.jdk_version,
                 arguments.jdk_release_sha256,
                 arguments.java_binary_sha256,
                 arguments.jdk_base_module_sha256,
+                review_evidence=review_evidence,
+                pull_request_number=arguments.pull_request_number,
             )
             main_count = sum(row["cohort"] == "main" and row["status"] == "typed" for row in rows)
             analysis_count = sum(row["cohort"] == "analysis" and row["status"] == "typed" for row in rows)
+            authenticated_reviewed_head = next(
+                (row.get("reviewed_head_sha", "") for row in rows if row.get("reviewed_head_sha") not in (None, "", "pending")),
+                "",
+            )
+            authenticated_review_state = next(
+                (row.get("review_status", "") for row in rows if row.get("review_status") not in (None, "", "pending")),
+                "",
+            )
             write_acceptance_vi_outputs(
                 arguments.output,
                 arguments.report,
@@ -1234,8 +1401,8 @@ def main() -> int:
                 (main_count, analysis_count),
                 arguments.tested_revision,
                 arguments.pr_head_sha,
-                arguments.reviewed_head_sha,
-                arguments.review_state,
+                authenticated_reviewed_head,
+                authenticated_review_state,
                 arguments.hosted_run,
                 arguments.artifact_reference,
                 arguments.jdk_version,
@@ -1258,6 +1425,7 @@ def main() -> int:
             provenance_failures = acceptance_v_provenance_failures(
                 arguments.tested_revision, arguments.pr_head_sha,
                 arguments.prior_checks_status, arguments.hosted_run,
+                allowed_events=("pull_request", "pull_request_review", "workflow_dispatch"),
             )
             failures = gate_failures + provenance_failures
             arguments.output.parent.mkdir(parents=True, exist_ok=True)
@@ -1329,8 +1497,8 @@ def main() -> int:
                 (0, 0),
                 arguments.tested_revision,
                 arguments.pr_head_sha,
-                arguments.reviewed_head_sha,
-                arguments.review_state,
+                "",
+                "",
                 arguments.hosted_run,
                 arguments.artifact_reference,
                 arguments.jdk_version,

@@ -106,8 +106,18 @@ class FocusedAuditWorkflowTests(unittest.TestCase):
         self.assertIn("--baseline-roots docs/typer-stdlib-acceptance-vi/roots.tsv", workflow)
         self.assertIn("--main-manifest docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv", workflow)
         self.assertIn("--analysis-manifest docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv", workflow)
-        self.assertIn("--reviewed-head-sha", workflow)
-        self.assertIn("review_state", workflow)
+        self.assertIn("pull_request_number:", workflow)
+        self.assertIn("gh api --paginate --slurp", workflow)
+        self.assertIn('pr.get("base", {}).get("ref") != "main"', workflow)
+        self.assertIn('pull-requests: read', workflow)
+        self.assertIn("--review-evidence", workflow)
+        self.assertIn("READY_FOR_MERGE", verifier)
+        self.assertNotIn("inputs.review_state", workflow)
+        self.assertIn('allowed_events=("pull_request", "pull_request_review", "workflow_dispatch")', verifier)
+        for gate in ("Enforce Stdlib Acceptance V release gate", "Enforce Stdlib Acceptance VI exact-root release gate"):
+            with self.subTest(gate=gate):
+                section = workflow.split(f"- name: {gate}\n", 1)[1].split("\n      - name:", 1)[0]
+                self.assertIn("$DOTTY_EXPECTED_SOURCE_SHA", section)
         self.assertIn("ACCEPTANCE_VI_TARGETS", verifier)
         self.assertIn("ACCEPTANCE_VI_JDK_RELEASE_SHA256", verifier)
         self.assertIn("original-method receipts are missing or nondeterministic", verifier)

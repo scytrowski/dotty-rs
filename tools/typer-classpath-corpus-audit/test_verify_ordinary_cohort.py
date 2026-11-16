@@ -1,6 +1,7 @@
 import csv
 import contextlib
 import hashlib
+import json
 import importlib.util
 import io
 import os
@@ -784,6 +785,27 @@ class AcceptanceVIGateTests(unittest.TestCase):
         self.artifacts = self.repo / "crates/dotty-typer/tests/fixtures/lexical-closure-contract/scala-artifacts.sha256.tsv"
         self.tested = "a" * 40
         self.head = self.tested
+        self.pull_request_number = 2308
+        self.review_evidence = {
+            "pull_request": {
+                "number": self.pull_request_number,
+                "head": {"sha": self.head},
+                "base": {"ref": "main", "sha": "e" * 40},
+                "user": {"login": "pr-author"},
+            },
+            "reviews": [{
+                "id": 17,
+                "commit_id": self.head,
+                "state": "COMMENTED",
+                "body": (
+                    "<!-- agent-review:v1 verdict=READY_FOR_MERGE head=" + self.head + " -->\n"
+                    "## Review summary\nExact-head checks verified."
+                ),
+                "submitted_at": "2026-11-17T10:00:00Z",
+                "html_url": "https://github.com/scytrowski/dotty-rs/pull/2308#pullrequestreview-17",
+                "user": {"login": "independent-reviewer"},
+            }],
+        }
         self.source_root = self.directory / "scala"
         self.source_root.mkdir()
         source_rows = []
@@ -904,6 +926,8 @@ class AcceptanceVIGateTests(unittest.TestCase):
             "artifact_reference": "typer-focused-audit-" + self.tested,
             "reviewed_head_sha": self.head,
             "review_state": "approved",
+            "review_evidence": self.review_evidence,
+            "pull_request_number": self.pull_request_number,
             "jdk_version": "21.0.8",
             "jdk_release_sha256": MODULE.ACCEPTANCE_VI_JDK_RELEASE_SHA256,
             "java_binary_sha256": MODULE.ACCEPTANCE_VI_JAVA_SHA256,
@@ -928,9 +952,120 @@ class AcceptanceVIGateTests(unittest.TestCase):
         self.assertEqual(sum(row["cohort"] == "main" and row["status"] == "typed" for row in rows), 21)
         self.assertEqual(sum(row["cohort"] == "analysis" and row["status"] == "typed" for row in rows), 17)
 
+    def test_approved_exact_head_passes_retained_v_provenance_then_vi(self) -> None:
+        environment = {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "GITHUB_RUN_ID": "123",
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_REPOSITORY": "scytrowski/dotty-rs",
+            "DOTTY_EXPECTED_SOURCE_SHA": self.tested,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "acceptance-v.tsv"
+            report = Path(temporary) / "acceptance-v.md"
+            args = [
+                "verify_ordinary_cohort.py", "acceptance-v",
+                "--main-first", str(self.main_first), "--main-second", str(self.main_second),
+                "--analysis-first", str(self.analysis_first), "--analysis-second", str(self.analysis_second),
+                "--protected-successes", str(self.baseline),
+                "--output", str(output), "--report", str(report),
+                "--tested-revision", self.tested, "--pr-head-sha", self.head,
+                "--prior-checks-status", "success",
+                "--hosted-run", "https://github.com/scytrowski/dotty-rs/actions/runs/123",
+            ]
+            with (
+                mock.patch.object(sys, "argv", args),
+                mock.patch.dict(os.environ, environment, clear=True),
+                mock.patch.object(MODULE, "verify_acceptance_v", return_value=([], [])),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                v_result = MODULE.main()
+            self.assertEqual(v_result, 0)
+            self.assertIn("Outcome: PASS", report.read_text(encoding="utf-8"))
+        failures, _, passed = self.verify(environment=environment)
+        self.assertEqual(failures, [])
+        self.assertTrue(passed)
+
+    def test_rejects_absent_stale_self_dismissed_and_changes_requested_review_evidence(self) -> None:
+        self_review = {
+            **self.review_evidence["reviews"][0],
+            "user": {"login": "pr-author"},
+            "body": "READY_FOR_MERGE",
+        }
+        cases = (
+            (None, "published pull request review evidence is missing"),
+            ({**self.review_evidence, "reviews": [{**self.review_evidence["reviews"][0], "commit_id": "b" * 40}]}, "no independent published review"),
+            ({**self.review_evidence, "reviews": [self_review]}, "no independent published review"),
+            ({**self.review_evidence, "reviews": [{**self.review_evidence["reviews"][0], "body": "READY_FOR_MERGE"}]}, "no independent exact-head APPROVED"),
+            ({**self.review_evidence, "reviews": [{**self.review_evidence["reviews"][0], "state": "DISMISSED"}]}, "dismissed or requests changes"),
+            ({**self.review_evidence, "reviews": [{**self.review_evidence["reviews"][0], "state": "CHANGES_REQUESTED"}]}, "dismissed or requests changes"),
+        )
+        for evidence, expected in cases:
+            with self.subTest(expected=expected):
+                failures, _, passed = self.verify(review_evidence=evidence)
+                self.assertFalse(passed)
+                self.assertTrue(any(expected in failure for failure in failures))
+
+        delegated_same_account = {
+            **self.review_evidence,
+            "reviews": [{
+                **self.review_evidence["reviews"][0],
+                "user": {"login": "pr-author"},
+                "body": "<!-- agent-review:v1 verdict=READY_FOR_MERGE head=" + self.head + " -->",
+            }],
+        }
+        failures, _, passed = self.verify(review_evidence=delegated_same_account)
+        self.assertEqual(failures, [])
+        self.assertTrue(passed)
+
+        failures, _, passed = self.verify(
+            environment={
+                "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "workflow_dispatch",
+                "GITHUB_RUN_ID": "123", "GITHUB_SERVER_URL": "https://github.com",
+                "GITHUB_REPOSITORY": "scytrowski/dotty-rs", "DOTTY_EXPECTED_SOURCE_SHA": self.tested,
+            },
+            review_evidence=None,
+            reviewed_head_sha=self.head,
+            review_state="approved",
+        )
+        self.assertFalse(passed)
+        self.assertTrue(any("published pull request review evidence is missing" in failure for failure in failures))
+
+    def test_rejects_target_source_span_or_method_identity_mutations_in_both_attempts(self) -> None:
+        identity = MODULE.ACCEPTANCE_VI_TARGETS["main"]["identity"]
+        for column, replacement, failure_fragment in (
+            (4, "1..2", "report range differs from frozen root baseline"),
+            (1, "scala.Enumeration.Value.forged", "report owner_path differs from frozen root baseline"),
+            (2, "forgedMethod", "report method_name differs from frozen root baseline"),
+        ):
+            self.write_cohort("main", self.main_first)
+            lines = self.main_first.read_text(encoding="utf-8").splitlines()
+            for index, line in enumerate(lines):
+                if line.startswith(identity + "\t"):
+                    fields = line.split("\t")
+                    fields[column] = replacement
+                    lines[index] = "\t".join(fields)
+                    break
+            forged = "\n".join(lines) + "\n"
+            self.main_first.write_text(forged, encoding="utf-8")
+            self.main_second.write_text(forged, encoding="utf-8")
+            failures, rows, passed = self.verify()
+            self.assertFalse(passed)
+            self.assertTrue(any(failure_fragment in failure for failure in failures))
+            target_row = next(row for row in rows if row["identity"] == identity)
+            if column == 4:
+                self.assertEqual(target_row["source_range"], "1..2")
+
     def test_cli_writes_unmet_report_until_review_event_names_same_head(self) -> None:
         output = self.directory / "acceptance-vi.tsv"
         report = self.directory / "acceptance-vi.md"
+        review_evidence = self.directory / "reviews.json"
+        review_evidence.write_text(
+            json.dumps({"pull_request": self.review_evidence["pull_request"], "reviews": []}),
+            encoding="utf-8",
+        )
         args = [
             "verify_ordinary_cohort.py", "acceptance-vi",
             "--main-first", str(self.main_first), "--main-second", str(self.main_second),
@@ -943,6 +1078,8 @@ class AcceptanceVIGateTests(unittest.TestCase):
             "--analysis-receipt-first", str(self.prop_log_first), "--analysis-receipt-second", str(self.prop_log_second),
             "--output", str(output), "--report", str(report),
             "--tested-revision", self.tested, "--pr-head-sha", self.head,
+            "--pull-request-number", str(self.pull_request_number),
+            "--review-evidence", str(review_evidence),
             "--prior-checks-status", "success",
             "--hosted-run", "https://github.com/scytrowski/dotty-rs/actions/runs/123",
             "--artifact-reference", "typer-focused-audit-" + self.tested,
@@ -962,6 +1099,17 @@ class AcceptanceVIGateTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("Outcome: SPRINT GOAL UNMET", report.read_text(encoding="utf-8"))
         self.assertEqual(len(MODULE.read_tsv(output)), 50)
+
+        review_evidence.write_text(json.dumps(self.review_evidence), encoding="utf-8")
+        environment["GITHUB_EVENT_NAME"] = "workflow_dispatch"
+        with mock.patch.object(sys, "argv", args), mock.patch.dict(os.environ, environment, clear=True):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                result = MODULE.main()
+        self.assertEqual(result, 0)
+        closeout = report.read_text(encoding="utf-8")
+        self.assertIn("Outcome: PASS", closeout)
+        self.assertIn(f"reviewed head: `{self.head}`; independent review: `READY_FOR_MERGE`", closeout)
+        self.assertIn("Published reviewer: `independent-reviewer`", closeout)
 
     def test_rejects_changed_manifest_membership_and_denominator(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1078,10 +1226,6 @@ class AcceptanceVIGateTests(unittest.TestCase):
         failures, _, passed = self.verify(jdk_version="21.0.13")
         self.assertFalse(passed)
         self.assertTrue(any("pinned JDK must be 21.0.8" in failure for failure in failures))
-
-        failures, _, passed = self.verify(reviewed_head_sha="b" * 40)
-        self.assertFalse(passed)
-        self.assertEqual(failures, [])
 
         failures, _, passed = self.verify(pr_head_sha="b" * 40)
         self.assertFalse(passed)

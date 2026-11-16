@@ -29,21 +29,18 @@ on:
     types: [submitted]
   workflow_dispatch:
     inputs:
-      reviewed_head_sha:
-        description: Full PR head SHA approved by the independent reviewer
-        required: false
+      pull_request_number:
+        description: PR number whose published reviews should be checked
+        required: true
         type: string
-      review_state:
-        description: Independent review state for reviewed_head_sha
-        required: false
-        type: choice
-        options:
-          - approved
-          - changes_requested
-          - commented
+      reviewed_head_sha:
+        description: Full PR head SHA to check out and verify against GitHub
+        required: true
+        type: string
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: typer-focused-audit-${{ github.event.pull_request.number || github.ref }}
@@ -63,10 +60,8 @@ jobs:
       SCALA39_ROOT: ${{ github.workspace }}/scala39-source
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
       TMPDIR: ${{ github.workspace }}/target/tmp
-      DOTTY_EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      DOTTY_EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
-      DOTTY_REVIEWED_HEAD_SHA: ${{ github.event.review.commit_id || inputs.reviewed_head_sha || '' }}
-      DOTTY_REVIEW_STATE: ${{ github.event.review.state || inputs.review_state || '' }}
+      DOTTY_EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || inputs.reviewed_head_sha || github.sha }}
+      DOTTY_PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number || inputs.pull_request_number || '' }}
 
     steps:
       - name: Prepare worktree-local scratch
@@ -75,8 +70,39 @@ jobs:
       - name: Check out dotty-rs
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.event.pull_request.head.sha || inputs.reviewed_head_sha || github.sha }}
           fetch-depth: 0
+
+      - name: Fetch published pull request reviews for exact-head verification
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DOTTY_PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number || inputs.pull_request_number || '' }}
+          DOTTY_EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || inputs.reviewed_head_sha || github.sha }}
+          DOTTY_REVIEW_EVIDENCE: ${{ github.workspace }}/target/typer-focused-report/published-review-evidence.json
+        run: |
+          set -euo pipefail
+          test -n "$DOTTY_PULL_REQUEST_NUMBER"
+          mkdir -p "$(dirname "$DOTTY_REVIEW_EVIDENCE")"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$DOTTY_PULL_REQUEST_NUMBER" > "$RUNNER_TEMP/pr.json"
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls/$DOTTY_PULL_REQUEST_NUMBER/reviews" \
+            | jq 'add // []' > "$RUNNER_TEMP/reviews.json"
+          python3 - "$RUNNER_TEMP/pr.json" "$RUNNER_TEMP/reviews.json" "$DOTTY_REVIEW_EVIDENCE" "$DOTTY_EXPECTED_SOURCE_SHA" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          pr = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          reviews = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+          expected_head = sys.argv[4]
+          if pr.get("head", {}).get("sha") != expected_head:
+              raise SystemExit("GitHub PR head differs from the checked-out reviewed head")
+          if pr.get("base", {}).get("ref") != "main":
+              raise SystemExit("Acceptance closeout must target the main branch")
+          Path(sys.argv[3]).write_text(
+              json.dumps({"pull_request": pr, "reviews": reviews}, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
 
       - name: Enforce integrated recursive Expr prerequisites
         shell: bash
@@ -108,8 +134,15 @@ jobs:
             }
           done
           printf 'Verified #2132-#2137 and prior recursive Expr prerequisite merge ancestry at HEAD %s\n' "$(git rev-parse HEAD)"
-          git merge-base --is-ancestor "$DOTTY_EXPECTED_BASE_SHA" HEAD || {
-            echo "integrated baseline $DOTTY_EXPECTED_BASE_SHA is not an ancestor of tested HEAD=$(git rev-parse HEAD)" >&2
+          expected_base_sha="$(python3 - "$GITHUB_WORKSPACE/target/typer-focused-report/published-review-evidence.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          print(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["pull_request"]["base"]["sha"])
+          PY
+          )"
+          git merge-base --is-ancestor "$expected_base_sha" HEAD || {
+            echo "integrated baseline $expected_base_sha is not an ancestor of tested HEAD=$(git rev-parse HEAD)" >&2
             exit 1
           }
 
@@ -982,6 +1015,7 @@ jobs:
           DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
           DOTTY_HOSTED_RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           DOTTY_PRIOR_JOB_STATUS: ${{ job.status }}
+          DOTTY_EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || inputs.reviewed_head_sha || github.sha }}
         run: |
           set -euo pipefail
           mkdir -p "$DOTTY_AUDIT_REPORT_DIR"
@@ -1024,7 +1058,7 @@ jobs:
               --output "$DOTTY_AUDIT_REPORT_DIR/stdlib-acceptance-iv.tsv" \
               --report "$DOTTY_AUDIT_REPORT_DIR/acceptance-iv-closeout.md" \
               --tested-revision "$(git rev-parse HEAD)" \
-              --pr-head-sha "${{ github.event.pull_request.head.sha || github.sha }}" \
+              --pr-head-sha "$DOTTY_EXPECTED_SOURCE_SHA" \
               --prior-checks-status "$DOTTY_PRIOR_JOB_STATUS" \
               --hosted-run "$DOTTY_HOSTED_RUN"
 
@@ -1035,6 +1069,7 @@ jobs:
           DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
           DOTTY_HOSTED_RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           DOTTY_PRIOR_JOB_STATUS: ${{ job.status }}
+          DOTTY_EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || inputs.reviewed_head_sha || github.sha }}
         run: |
           set -euo pipefail
           mkdir -p "$DOTTY_AUDIT_REPORT_DIR"
@@ -1057,7 +1092,7 @@ jobs:
               --output "$DOTTY_AUDIT_REPORT_DIR/typer-stdlib-acceptance-v.tsv" \
               --report "$DOTTY_AUDIT_REPORT_DIR/typer-stdlib-acceptance-v-closeout.md" \
               --tested-revision "$(git rev-parse HEAD)" \
-              --pr-head-sha "${{ github.event.pull_request.head.sha || github.sha }}" \
+              --pr-head-sha "$DOTTY_EXPECTED_SOURCE_SHA" \
               --prior-checks-status "$DOTTY_PRIOR_JOB_STATUS" \
               --hosted-run "$DOTTY_HOSTED_RUN"
 
@@ -1067,10 +1102,11 @@ jobs:
         env:
           DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
           DOTTY_HOSTED_RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          DOTTY_ARTIFACT_REFERENCE: typer-focused-audit-${{ github.event.pull_request.head.sha || github.sha }}
+          DOTTY_ARTIFACT_REFERENCE: typer-focused-audit-${{ github.event.pull_request.head.sha || inputs.reviewed_head_sha || github.sha }}
           DOTTY_PRIOR_JOB_STATUS: ${{ job.status }}
-          DOTTY_REVIEWED_HEAD_SHA: ${{ github.event.review.commit_id || inputs.reviewed_head_sha || '' }}
-          DOTTY_REVIEW_STATE: ${{ github.event.review.state || inputs.review_state || '' }}
+          DOTTY_EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || inputs.reviewed_head_sha || github.sha }}
+          DOTTY_PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number || inputs.pull_request_number || '' }}
+          DOTTY_REVIEW_EVIDENCE: ${{ github.workspace }}/target/typer-focused-report/published-review-evidence.json
         run: |
           set -euo pipefail
           jdk_version="$(sed -n 's/^JAVA_VERSION="\([^"]*\)".*/\1/p' "$JAVA_HOME/release")"
@@ -1093,9 +1129,9 @@ jobs:
               --output "$DOTTY_AUDIT_REPORT_DIR/typer-stdlib-acceptance-vi.tsv" \
               --report "$DOTTY_AUDIT_REPORT_DIR/typer-stdlib-acceptance-vi-closeout.md" \
               --tested-revision "$(git rev-parse HEAD)" \
-              --pr-head-sha "${{ github.event.pull_request.head.sha || github.sha }}" \
-              --reviewed-head-sha "$DOTTY_REVIEWED_HEAD_SHA" \
-              --review-state "$DOTTY_REVIEW_STATE" \
+              --pr-head-sha "$DOTTY_EXPECTED_SOURCE_SHA" \
+              --pull-request-number "$DOTTY_PULL_REQUEST_NUMBER" \
+              --review-evidence "$DOTTY_REVIEW_EVIDENCE" \
               --prior-checks-status "$DOTTY_PRIOR_JOB_STATUS" \
               --hosted-run "$DOTTY_HOSTED_RUN" \
               --artifact-reference "$DOTTY_ARTIFACT_REFERENCE" \
@@ -1110,7 +1146,7 @@ jobs:
         env:
           DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
           DOTTY_AUDIT_JOB_STATUS: ${{ job.status }}
-          DOTTY_PR_URL: ${{ github.event.pull_request.html_url || '' }}
+          DOTTY_PR_URL: ${{ github.event.pull_request.html_url || format('{0}/{1}/pull/{2}', github.server_url, github.repository, inputs.pull_request_number) }}
         run: python3 tools/write-typer-focused-audit-report.py
 
       - name: Upload focused report, timings, and intermediates
