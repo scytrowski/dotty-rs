@@ -6261,6 +6261,201 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_infowrapped_m_term_request_returns_the_original_completed_member() {
+        let mut observations = Vec::new();
+        for _ in 0..2 {
+            let mut store = SemanticStore::new();
+            let definitions = Definitions::bootstrap(&mut store);
+            let mut resolver = ClasspathSymbolResolver::new(
+                info_pair_audit_class_path(),
+                definitions,
+                LoadingSession::new(),
+            );
+            let package = resolver
+                .resolve_package(
+                    &mut store,
+                    &["me", "cytrowski", "tastyfixtures", "semantic"],
+                )
+                .unwrap()
+                .expect("semantic fixture package");
+
+            // The selected pair path enters the authentic original classes and
+            // gives us the canonical owner to use as an ordinary term prefix.
+            let class_request =
+                semantic_member_request(&mut store, package, definitions.no_prefix, "InfoWrapped");
+            let wrapped = resolver
+                .resolve_member_with_semantic_info_pair(&mut store, &class_request)
+                .unwrap()
+                .expect("selected semantic pair enters InfoWrapped");
+            let base_name =
+                BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
+            let wrapped_name =
+                BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
+            let base = resolver.session.identified[&base_name];
+            assert_eq!(resolver.session.resolved.get(&wrapped_name), Some(&wrapped));
+            let origin = ClassOrigin::Directory(fixture_path(
+                "../dotty-tasty-unpickler/tests/fixtures/semantic",
+            ));
+            assert_eq!(resolver.session.origins.get(&wrapped), Some(&origin));
+            assert_eq!(resolver.session.origins.get(&base), Some(&origin));
+
+            let wrapped_prefix = store
+                .types
+                .alloc(Type::type_ref(definitions.no_prefix, wrapped));
+            let request = MemberRequest {
+                prefix: wrapped_prefix,
+                name: Name::new(store.names.intern("m"), Namespace::Term),
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            };
+            let member = resolver
+                .resolve_member(&mut store, &request)
+                .unwrap()
+                .expect("ordinary term lookup finds InfoWrapped.m");
+
+            let SymbolInfo::Complete(wrapped_info) = store.symbols.get(wrapped).info else {
+                panic!("InfoWrapped has completed ClassInfo");
+            };
+            let Type::ClassInfo(wrapped_info) = store.types.get(wrapped_info) else {
+                panic!("InfoWrapped owns ClassInfo");
+            };
+            assert_eq!(store.symbols.get(wrapped).owner, Some(package));
+            assert_eq!(store.symbols.get(wrapped).kind, SymbolKind::Class);
+            assert_eq!(store.symbols.get(base).kind, SymbolKind::Trait);
+            let direct_m = store
+                .scopes
+                .get(wrapped_info.declarations)
+                .lookup_all(&Name::new(store.names.intern("m"), Namespace::Term));
+            assert_eq!(
+                direct_m,
+                [member],
+                "lookup returns the original direct declaration"
+            );
+            assert_eq!(store.symbols.get(member).owner, Some(wrapped));
+            assert_eq!(store.symbols.get(member).kind, SymbolKind::Method);
+            assert_eq!(store.symbols.get(member).name.namespace(), Namespace::Term);
+            assert_eq!(store.symbols.get(member).visibility, Visibility::Public);
+            let SymbolInfo::Complete(method_info) = store.symbols.get(member).info else {
+                panic!("InfoWrapped.m is already fully completed from original TASTy");
+            };
+
+            let parent = wrapped_info
+                .parents
+                .iter()
+                .find(|parent| {
+                    matches!(
+                        store.types.get(**parent),
+                        Type::Applied { tycon, .. }
+                            if info_pair_type_symbol(&store, *tycon) == Some(base)
+                    )
+                })
+                .expect("InfoWrapped has direct applied InfoBase parent");
+            let Type::Applied { args, .. } = store.types.get(*parent) else {
+                panic!("InfoBase parent is applied");
+            };
+            let [f_int] = args.as_slice() else {
+                panic!("InfoBase parent has one applied argument");
+            };
+            let Type::Applied { tycon, args } = store.types.get(*f_int) else {
+                panic!("parent argument is F[Int]");
+            };
+            assert_eq!(args.len(), 1);
+            let f_parameter = store
+                .scopes
+                .get(wrapped_info.declarations)
+                .entered_symbols()
+                .find(|id| {
+                    let symbol = store.symbols.get(*id);
+                    symbol.kind == SymbolKind::TypeParameter
+                        && store.names.resolve(symbol.name.text()) == "F"
+                })
+                .expect("InfoWrapped declares F");
+            assert_eq!(info_pair_type_symbol(&store, *tycon), Some(f_parameter));
+            assert_eq!(
+                info_pair_type_symbol(&store, args[0]),
+                info_pair_type_symbol(&store, definitions.int)
+            );
+
+            let Type::ByName { result } = store.types.get(method_info) else {
+                panic!("serialized InfoWrapped.m result retains its ByName wrapper");
+            };
+            assert_eq!(store.types.get(*result), store.types.get(*f_int));
+
+            let repeated = resolver
+                .resolve_member(&mut store, &request)
+                .unwrap()
+                .expect("repeat ordinary lookup succeeds");
+            assert_eq!(repeated, member, "same-session lookup preserves identity");
+
+            let wrong_owner = store
+                .types
+                .alloc(Type::type_ref(definitions.no_prefix, base));
+            let wrong_owner_request = MemberRequest {
+                prefix: wrong_owner,
+                ..request.clone()
+            };
+            assert_eq!(
+                resolver.resolve_member(&mut store, &wrong_owner_request),
+                Ok(None),
+                "m is not directly declared by InfoBase"
+            );
+            let wrong_namespace_request = MemberRequest {
+                name: Name::new(store.names.intern("m"), Namespace::Type),
+                ..request.clone()
+            };
+            assert_eq!(
+                resolver.resolve_member(&mut store, &wrong_namespace_request),
+                Ok(None),
+                "the TASTy definition is in the term namespace"
+            );
+            let unknown_request = MemberRequest {
+                name: Name::new(store.names.intern("unknown"), Namespace::Term),
+                ..request
+            };
+            assert_eq!(
+                resolver.resolve_member(&mut store, &unknown_request),
+                Ok(None),
+                "unknown term is an ordinary miss"
+            );
+
+            observations.push(format!(
+                "owner={};kind={:?};namespace={:?};visibility={:?};result=ByName({}[{}]);parent={}[{}[{}]];origin=semantic-fixtures",
+                store.names.resolve(
+                    store
+                        .symbols
+                        .get(store.symbols.get(member).owner.unwrap())
+                        .name
+                        .text()
+                ),
+                store.symbols.get(member).kind,
+                store.symbols.get(member).name.namespace(),
+                store.symbols.get(member).visibility,
+                store.names.resolve(store.symbols.get(f_parameter).name.text()),
+                store.names.resolve(
+                    store
+                        .symbols
+                        .get(store.types.get(definitions.int).reference_symbol().unwrap())
+                        .name
+                        .text()
+                ),
+                store.names.resolve(store.symbols.get(base).name.text()),
+                store.names.resolve(store.symbols.get(f_parameter).name.text()),
+                store.names.resolve(
+                    store
+                        .symbols
+                        .get(store.types.get(definitions.int).reference_symbol().unwrap())
+                        .name
+                        .text()
+                ),
+            ));
+        }
+        assert_eq!(
+            observations,
+            [observations[0].clone(), observations[0].clone()]
+        );
+    }
+
+    #[test]
     fn explicit_info_pair_requests_select_both_roots_in_both_orders() {
         let package_path = ["me", "cytrowski", "tastyfixtures", "semantic"];
         let base_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
