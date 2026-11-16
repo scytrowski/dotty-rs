@@ -1573,8 +1573,17 @@ impl<'a> Validator<'_, 'a> {
                 .typed_ast
                 .try_get(typed_rhs)
                 .ok_or(PickleError::InvalidTypedTree { tree: typed_rhs })?;
+            let source_initializer = self.source_tree(source_rhs)?;
+            if source_initializer.position.is_none() || typed_initializer.position.is_none() {
+                return Err(PickleError::BodySpan { tree: typed_rhs });
+            }
+            self.paired_source_typed_span(
+                source_initializer.position,
+                typed_initializer.position,
+                typed_rhs,
+            )?;
             let (TreeKind::Ident(source_ident), TreeKind::Ident(typed_ident)) =
-                (&self.source_tree(source_rhs)?.kind, &typed_initializer.kind)
+                (&source_initializer.kind, &typed_initializer.kind)
             else {
                 return Err(
                     self.unsupported(UnsupportedFeature::BodyExpression, Some(proof.method))

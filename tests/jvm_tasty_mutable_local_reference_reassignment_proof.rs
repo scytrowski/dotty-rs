@@ -322,6 +322,9 @@ enum Mutation {
     MissingSecondPrefixInitializerSpanAfterProof,
     ReorderedPrefixReceiptAfterProof,
     StaleSelectedInitializerAfterProof,
+    MissingSelectedInitializerSpanAfterProof,
+    MismatchedSelectedInitializerSpanAfterProof,
+    ForeignSelectedInitializerSourceAfterProof,
 }
 
 #[derive(Debug)]
@@ -818,7 +821,10 @@ fn validate(
         | Mutation::MissingFirstPrefixInitializerBindingAfterProof
         | Mutation::MissingSecondPrefixInitializerSpanAfterProof
         | Mutation::ReorderedPrefixReceiptAfterProof
-        | Mutation::StaleSelectedInitializerAfterProof => {}
+        | Mutation::StaleSelectedInitializerAfterProof
+        | Mutation::MissingSelectedInitializerSpanAfterProof
+        | Mutation::MismatchedSelectedInitializerSpanAfterProof
+        | Mutation::ForeignSelectedInitializerSourceAfterProof => {}
     }
     let current_stats_len = match &parsed.ast.get(rhs).kind {
         TreeKind::Block(block) => block.stats.len(),
@@ -941,6 +947,29 @@ fn validate(
             source_typed_index
                 .insert(source_id, source_rhs, stale)
                 .unwrap();
+        }
+        Mutation::MissingSelectedInitializerSpanAfterProof => {
+            typed_ast
+                .get_mut(declaration_binding.typed_initializer)
+                .position = None;
+        }
+        Mutation::MismatchedSelectedInitializerSpanAfterProof => {
+            let assignment_position = typed_ast.get(typed_assignment).position.unwrap();
+            typed_ast
+                .get_mut(declaration_binding.typed_initializer)
+                .position = Some(assignment_position);
+        }
+        Mutation::ForeignSelectedInitializerSourceAfterProof => {
+            let position = typed_ast
+                .get(declaration_binding.typed_initializer)
+                .position
+                .unwrap();
+            typed_ast
+                .get_mut(declaration_binding.typed_initializer)
+                .position = Some(dotty_core::SourceSpan::new(
+                SourceId::from_index(999_999),
+                position.span(),
+            ));
         }
         _ => {}
     }
@@ -1432,5 +1461,35 @@ fn fragment_rejects_a_stale_selected_initializer_with_a_typed_error() {
             ))
         ),
         "a stale selected initializer is rejected without panicking: {result:?}"
+    );
+}
+
+#[test]
+fn fragment_authenticates_selected_initializer_spans_after_proof() {
+    for mutation in [
+        Mutation::MissingSelectedInitializerSpanAfterProof,
+        Mutation::MismatchedSelectedInitializerSpanAfterProof,
+    ] {
+        let result = validate(SOURCE, 23_110 + mutation as u32, mutation);
+        assert!(
+            matches!(
+                result,
+                Err(ValidationError::Pickle(
+                    dotty_tasty_pickler::PickleError::BodySpan { .. }
+                ))
+            ),
+            "fragment rejects absent or mismatched selected initializer span: {mutation:?}: {result:?}"
+        );
+    }
+    let mutation = Mutation::ForeignSelectedInitializerSourceAfterProof;
+    let result = validate(SOURCE, 23_120 + mutation as u32, mutation);
+    assert!(
+        matches!(
+            result,
+            Err(ValidationError::Pickle(
+                dotty_tasty_pickler::PickleError::SourceSpan { .. }
+            ))
+        ),
+        "fragment rejects a selected initializer span from another source: {result:?}"
     );
 }
