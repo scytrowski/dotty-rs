@@ -66,6 +66,27 @@ fn first_diagnostic(output: &Output) -> String {
         .to_owned()
 }
 
+fn require_compiler_success(success: bool, control: &str, diagnostic: &str) -> Result<(), String> {
+    if success {
+        Ok(())
+    } else {
+        Err(format!(
+            "{control} Scala compilation unexpectedly failed: {diagnostic}"
+        ))
+    }
+}
+
+#[test]
+fn descriptor_control_rejects_unrelated_compiler_failure() {
+    let injected = "INJECTED: unrelated compiler infrastructure failure";
+    let result = require_compiler_success(false, "descriptor disagreement", injected);
+
+    assert!(
+        result.unwrap_err().contains(injected),
+        "unrelated compiler failure cannot satisfy the descriptor control"
+    );
+}
+
 fn sha256(path: &Path) -> String {
     String::from_utf8_lossy(&output(Command::new("sha256sum").arg(path)).stdout)
         .split_whitespace()
@@ -707,41 +728,40 @@ fn scala39_consumes_original_rust_mutable_reference_rebinding_batch() {
         .arg(&mismatch_out)
         .arg(&source),
     );
-    if compile.status.success() {
-        let mut run = Command::new(&pinned.java);
-        run.args(["-Xverify:all", "-ea", "-cp"])
-            .arg(format!(
-                "{}:{}:{}",
-                mismatch_out.display(),
-                mismatch.display(),
-                pinned.libraries
-            ))
-            .arg("consumer.ScalaConsumer");
-        configure_jdk(
-            &mut run,
-            &pinned.java_home,
-            Path::new(&std::env::var("TMPDIR").unwrap()),
-        );
-        let failed = attempt(&mut run);
-        assert!(
-            !failed.status.success(),
-            "descriptor mismatch fails at JVM linkage"
-        );
-        assert!(
-            combined(&failed).contains("NoSuchMethodError"),
-            "descriptor mismatch first fails at JVM linkage: {}",
-            first_diagnostic(&failed)
-        );
-        eprintln!(
-            "SCALA_NEGATIVE_FIRST_FAILURE descriptor-disagreement: {}",
-            first_diagnostic(&failed)
-        );
-    } else {
-        eprintln!(
-            "SCALA_NEGATIVE_FIRST_FAILURE descriptor-disagreement: {}",
-            first_diagnostic(&compile)
-        );
-    }
+    require_compiler_success(
+        compile.status.success(),
+        "descriptor disagreement",
+        &first_diagnostic(&compile),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let mut run = Command::new(&pinned.java);
+    run.args(["-Xverify:all", "-ea", "-cp"])
+        .arg(format!(
+            "{}:{}:{}",
+            mismatch_out.display(),
+            mismatch.display(),
+            pinned.libraries
+        ))
+        .arg("consumer.ScalaConsumer");
+    configure_jdk(
+        &mut run,
+        &pinned.java_home,
+        Path::new(&std::env::var("TMPDIR").unwrap()),
+    );
+    let failed = attempt(&mut run);
+    assert!(
+        !failed.status.success(),
+        "descriptor mismatch fails at JVM linkage"
+    );
+    assert!(
+        combined(&failed).contains("NoSuchMethodError"),
+        "descriptor mismatch first fails at JVM linkage: {}",
+        first_diagnostic(&failed)
+    );
+    eprintln!(
+        "SCALA_NEGATIVE_FIRST_FAILURE descriptor-disagreement: {}",
+        first_diagnostic(&failed)
+    );
 
     for (path, expected) in receipt::ARTIFACT_SHA256 {
         assert_eq!(
