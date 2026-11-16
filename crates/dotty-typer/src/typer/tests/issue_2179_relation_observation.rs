@@ -2655,7 +2655,9 @@ fn propimpl_clear_rejects_bounded_negative_cases_and_retries_after_rollback() {
         TreeKind::DefDef(definition) => definition.rhs.expect("original clear RHS"),
         _ => unreachable!(),
     };
-    let typed_rhs = typed_definition.rhs.expect("retry retains the complete RHS");
+    let typed_rhs = typed_definition
+        .rhs
+        .expect("retry retains the complete RHS");
     assert_eq!(
         typer.source_typed_index().get(source, source_rhs),
         Some(typed_rhs)
@@ -2665,10 +2667,47 @@ fn propimpl_clear_rejects_bounded_negative_cases_and_retries_after_rollback() {
     };
     assert_eq!(typer.typed_ast().get(typed_rhs).ty, definitions.unit);
     assert_eq!(adapted.stats.len(), 1);
-    assert!(matches!(
-        typer.typed_ast().get(adapted.stats[0]).kind,
-        TreeKind::Apply(_)
-    ));
+    let TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) = &parsed.ast.get(source_rhs).kind
+    else {
+        panic!("the retry source RHS remains the original -= operation");
+    };
+    let operation = typer.typed_ast().get(adapted.stats[0]);
+    let TreeKind::Apply(application) = &operation.kind else {
+        panic!("retry preserves the original -= application");
+    };
+    let function = typer.typed_ast().get(application.function);
+    let TreeKind::Select(selection) = &function.kind else {
+        panic!("retry preserves the selected -= member");
+    };
+    let selected = typer
+        .store()
+        .types
+        .get(function.ty)
+        .reference_symbol()
+        .expect("retry resolves a canonical member");
+    assert_eq!(
+        observed_symbol_path(typer.store(), selected),
+        ".scala.collection.mutable.Shrinkable.-="
+    );
+    assert_eq!(
+        selection.qualifier,
+        typer.source_typed_index().get(source, infix.left).unwrap()
+    );
+    assert_eq!(application.args.len(), 1);
+    assert_eq!(
+        application.args[0],
+        typer.source_typed_index().get(source, infix.right).unwrap()
+    );
+    assert_eq!(
+        typer.typed_ast().get(adapted.stats[0]).ty,
+        match typer.store().symbols.info(selected) {
+            SymbolInfo::Complete(signature) => match typer.store().types.get(*signature) {
+                Type::Method(method) => method.result,
+                other => panic!("retry keeps the selected method signature: {other:?}"),
+            },
+            other => panic!("retry completes the selected member: {other:?}"),
+        }
+    );
     let TreeKind::Literal(unit_literal) = &typer.typed_ast().get(adapted.expr).kind else {
         panic!("retry ends with the canonical Unit literal");
     };
