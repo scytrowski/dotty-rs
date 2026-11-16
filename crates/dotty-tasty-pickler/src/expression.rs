@@ -254,7 +254,27 @@ fn lower_expression_inner(
             return Err(PickleError::InvalidSymbol { symbol: target });
         }
         let symbol = store.symbols.get(target);
+        let mutable_counter_assignment =
+            context
+                .mutable_counter_assignment(method, root)
+                .filter(|binding| {
+                    binding.typed_lhs == assignment.lhs
+                        && binding.local == target
+                        && binding.typed_rhs == assignment.rhs
+                        && ast.try_get(assignment.rhs).is_some_and(|rhs| {
+                            matches!(
+                                store.types.try_get(rhs.ty),
+                                Some(Type::TermRef {
+                                    target: TermRefTarget::Symbol(rhs_local),
+                                    ..
+                                }) if *rhs_local == binding.rhs_local
+                            )
+                        })
+                });
         let lhs = match symbol.kind {
+            dotty_core::SymbolKind::Local if mutable_counter_assignment.is_some() => {
+                context.local_reference(target, None)?
+            }
             dotty_core::SymbolKind::Local
                 if symbol.owner == Some(method)
                     && symbol.flags == dotty_core::SymbolFlags::MUTABLE

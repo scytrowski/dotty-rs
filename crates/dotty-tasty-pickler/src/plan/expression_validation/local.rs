@@ -31,6 +31,7 @@ impl Validator<'_, '_> {
             visited,
             fragment,
         } = validation;
+        let _ = fragment;
         let depth_limit = self.limits.expression_depth_limit();
         if depth > depth_limit {
             return Err(PickleError::LimitExceeded {
@@ -97,15 +98,12 @@ impl Validator<'_, '_> {
                 );
             }
         };
-        let mutable_fragment = fragment
-            .then(|| {
-                self.plan
-                    .typed_bindings
-                    .mutable_counter_local_initializer(self.plan.source.id, method.symbol)
-            })
-            .flatten()
+        let mutable_proof = self
+            .plan
+            .typed_bindings
+            .mutable_counter_local_initializer(self.plan.source.id, method.symbol)
             .filter(|proof| proof.source_declaration == source_id);
-        if reference_local_type.is_some() && mutable && mutable_fragment.is_none() {
+        if reference_local_type.is_some() && mutable && mutable_proof.is_none() {
             return Err(self.unsupported(UnsupportedFeature::SourceMetadata, Some(binding.symbol)));
         }
         if source_val.metadata.visibility.is_some() || !source_val.metadata.annotations.is_empty() {
@@ -254,7 +252,7 @@ impl Validator<'_, '_> {
             if mutable {
                 self.validate_mutable_counter_local_initializer(
                     MutableCounterInitializerValidation {
-                        proof: mutable_fragment
+                        proof: mutable_proof
                             .expect("mutable declaration fragment receipt is present"),
                         local: binding,
                         local_type,
@@ -420,6 +418,13 @@ impl Validator<'_, '_> {
             .plan
             .typed_bindings
             .local_counter_initializers(self.plan.source.id, method.symbol);
+        let target_initializer_matches = initializers.iter().any(|initializer| {
+            initializer.local == proof.target
+                && initializer.scope == proof.scope
+                && self
+                    .same_reference_type(initializer.local_type, local_type)
+                    .unwrap_or(false)
+        });
         if proof.source_id != self.plan.source.id
             || proof.owner != self.plan.class
             || proof.method != method.symbol
@@ -436,12 +441,8 @@ impl Validator<'_, '_> {
             || target.owner != Some(method.symbol)
             || target.origin != SymbolOrigin::Source(self.plan.source.id)
             || target.flags != SymbolFlags::EMPTY
-            || target_type != local_type
-            || !initializers.iter().any(|initializer| {
-                initializer.local == proof.target
-                    && initializer.scope == proof.scope
-                    && initializer.local_type == local_type
-            })
+            || !self.same_reference_type(target_type, local_type)?
+            || !target_initializer_matches
             || source_ident.name != target.name
             || typed_ident.name != target.name
             || *prefix != self.plan.definitions.no_prefix

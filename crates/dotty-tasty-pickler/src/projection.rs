@@ -88,6 +88,7 @@ pub struct EncodingContext<'a> {
     planned_calls: HashMap<SymbolId, crate::PlannedCallBinding>,
     local_receiver_unit_calls: HashMap<SymbolId, crate::LocalReceiverUnitCallBinding>,
     local_receiver_unit_call_pairs: HashMap<SymbolId, [crate::LocalReceiverUnitCallBinding; 2]>,
+    mutable_counter_assignments: HashMap<SymbolId, crate::MutableCounterReferenceAssignmentBinding>,
     local_values_by_typed_declaration: HashMap<TreeId<Typed>, SymbolId>,
     local_value_symbols: HashSet<SymbolId>,
     proof_local_symbols: HashSet<SymbolId>,
@@ -173,6 +174,37 @@ impl<'a> EncodingContext<'a> {
         })
     }
 
+    pub(crate) fn register_mutable_counter_assignment(
+        &mut self,
+        method: SymbolId,
+        binding: crate::MutableCounterReferenceAssignmentBinding,
+    ) -> Result<(), PickleError> {
+        self.run(|context| {
+            if binding.method != method || binding.source_id != context.source {
+                return Err(reference(binding.local, ReferenceError::Metadata));
+            }
+            if context
+                .mutable_counter_assignments
+                .insert(method, binding)
+                .is_some()
+            {
+                return Err(reference(binding.local, ReferenceError::Metadata));
+            }
+            Ok(())
+        })
+    }
+
+    pub(crate) fn mutable_counter_assignment(
+        &self,
+        method: SymbolId,
+        typed_assignment: TreeId<Typed>,
+    ) -> Option<crate::MutableCounterReferenceAssignmentBinding> {
+        self.mutable_counter_assignments
+            .get(&method)
+            .copied()
+            .filter(|binding| binding.typed_assignment == typed_assignment)
+    }
+
     pub(crate) fn register_planned_call(
         &mut self,
         caller: SymbolId,
@@ -221,6 +253,7 @@ impl<'a> EncodingContext<'a> {
             planned_calls: HashMap::new(),
             local_receiver_unit_calls: HashMap::new(),
             local_receiver_unit_call_pairs: HashMap::new(),
+            mutable_counter_assignments: HashMap::new(),
             local_values_by_typed_declaration: HashMap::new(),
             local_value_symbols: HashSet::new(),
             proof_local_symbols: HashSet::new(),
@@ -311,6 +344,12 @@ impl<'a> EncodingContext<'a> {
                 .conditional_local_reference_selection(p.source.id, method.symbol)
             {
                 context.register_conditional_local_reference_selection(method.symbol, selection)?;
+            }
+            if let Some(assignment) = p
+                .typed_bindings
+                .mutable_counter_reference_assignment(p.source.id, method.symbol)
+            {
+                context.register_mutable_counter_assignment(method.symbol, assignment)?;
             }
         }
         let mut registered_classes = Vec::new();
