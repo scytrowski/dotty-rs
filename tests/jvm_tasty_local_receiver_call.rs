@@ -541,7 +541,7 @@ fn paired_result(source: &str, source_id: u32) -> Result<(), PairedPlanError> {
 }
 
 #[test]
-fn mutable_reference_rebinding_audit_authenticates_assignment_identity_and_first_failure() {
+fn mutable_reference_rebinding_audit_authenticates_assignment_identity_and_paired_success() {
     let source_id = SourceId::from_index(22980);
     let source_text = SourceText::new(MUTABLE_REFERENCE_REBINDING_TARGET).unwrap();
     let scanner = ContextualScanner::new(MUTABLE_REFERENCE_REBINDING_TARGET).unwrap();
@@ -789,19 +789,13 @@ fn mutable_reference_rebinding_audit_authenticates_assignment_identity_and_first
         SourceId::from_index(22981),
         |_| callback_reached = true,
     );
-    println!("mutable rebinding paired producer first result: {planned:?}");
     assert!(
-        !callback_reached,
-        "the first producer failure precedes plan acceptance"
+        callback_reached,
+        "the exact mutable proof reaches paired planning"
     );
     assert!(
-        matches!(
-            &planned,
-            Err(PairedPlanError::BatchUnit { phase, reason })
-                if *phase == "cross-class constructor-call identity proof"
-                    && reason == "SourceShape(\"candidate method must have one plain formal clause and a concrete public body\")"
-        ),
-        "target remains frozen at its exact first paired-planning rejection"
+        planned.is_ok(),
+        "the authenticated mutable source is accepted: {planned:?}"
     );
     let emission = emit_paired_jvm_tasty_batch(
         MUTABLE_REFERENCE_REBINDING_TARGET,
@@ -809,19 +803,13 @@ fn mutable_reference_rebinding_audit_authenticates_assignment_identity_and_first
         SourceId::from_index(22982),
     );
     assert!(
-        matches!(
-            emission,
-            Err(dotty::jvm_tasty_artifacts::PairedBatchArtifactError::Plan(
-                PairedPlanError::BatchUnit { phase, reason }
-            )) if phase == "cross-class constructor-call identity proof"
-                && reason == "SourceShape(\"candidate method must have one plain formal clause and a concrete public body\")"
-        ),
-        "batch emission returns the same first planning rejection before artifact work"
+        emission.is_ok(),
+        "batch emission preserves the accepted proof: {emission:?}"
     );
 }
 
 #[test]
-fn mutable_reference_rebinding_controls_keep_valid_deferred_separate_from_invalid() {
+fn mutable_reference_rebinding_controls_keep_supported_variants_separate_from_invalid() {
     let replace_body = |old: &str, new: &str| MUTABLE_REFERENCE_REBINDING_TARGET.replace(old, new);
     let original = concat!(
         "    val first: Counter = new Counter(firstSeed)\n",
@@ -881,6 +869,15 @@ fn mutable_reference_rebinding_controls_keep_valid_deferred_separate_from_invali
     for (name, source, id) in [
         ("renamed", renamed.as_str(), 22_990),
         ("reversed-declarations", reversed.as_str(), 22_991),
+    ] {
+        let result = paired_result(source, id);
+        assert!(
+            result.is_ok(),
+            "{name} preserves the authenticated contract: {result:?}"
+        );
+    }
+
+    for (name, source, id) in [
         ("select-first", select_first.as_str(), 22_992),
         ("duplicate-assignment", duplicate.as_str(), 22_993),
         ("allocation-in-rhs", allocation_rhs.as_str(), 22_994),
@@ -888,16 +885,25 @@ fn mutable_reference_rebinding_controls_keep_valid_deferred_separate_from_invali
         ("nested-loop", nested_loop.as_str(), 22_996),
     ] {
         let result = paired_result(source, id);
-        println!("mutable rebinding valid Scala control {name}: {result:?}");
+        let rejected_at_proof_boundary = matches!(
+            &result,
+            Err(PairedPlanError::BatchUnit {
+                phase: "cross-class constructor-call identity proof"
+                    | "class-state TASTy planning"
+                    | "cross-class invocation",
+                ..
+            })
+        ) || matches!(
+            &result,
+            Err(PairedPlanError::BatchClass {
+                phase: "JVM/TASTy cross-contract validation",
+                reason,
+                ..
+            }) if reason.contains("Unsupported")
+        );
         assert!(
-            matches!(
-                result,
-                Err(PairedPlanError::BatchUnit {
-                    phase: "cross-class constructor-call identity proof",
-                    reason
-                }) if reason.contains("SourceShape")
-            ),
-            "{name} is valid source but remains outside the current paired proof"
+            rejected_at_proof_boundary,
+            "{name} is rejected at its first supported-proof boundary: {result:?}"
         );
     }
 

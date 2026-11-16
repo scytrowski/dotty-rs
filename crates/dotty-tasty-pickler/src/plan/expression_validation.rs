@@ -2540,8 +2540,28 @@ impl Validator<'_, '_> {
                     && selection.owner == p.class
                     && method.parameter_clauses[0][2] == selection.condition_formal
             });
+        let mutable_rebinding_pair_shape = argument_count == 2
+            && method.parameter_clauses.len() == 1
+            && method.parameter_clauses[0].len() == 3
+            && p.typed_bindings
+                .mutable_counter_local_initializer(p.source.id, method.symbol)
+                .is_some_and(|declaration| {
+                    declaration.method == method.symbol
+                        && p.typed_bindings
+                            .mutable_counter_reference_assignment(p.source.id, method.symbol)
+                            .is_some_and(|assignment| {
+                                assignment.method == method.symbol
+                                    && assignment.source_block == declaration.source_block
+                                    && assignment.typed_block == declaration.typed_block
+                            })
+                })
+            && p.typed_bindings
+                .formal_local_constructor_call_pair(p.source.id, method.symbol)
+                .is_some();
         if method.parameter_clauses.len() != 1
-            || (method.parameter_clauses[0].len() != argument_count && !conditional_pair_shape)
+            || (method.parameter_clauses[0].len() != argument_count
+                && !conditional_pair_shape
+                && !mutable_rebinding_pair_shape)
         {
             return Err(self.unsupported(UnsupportedFeature::ParameterClauses, Some(method.symbol)));
         }
@@ -3010,9 +3030,30 @@ impl Validator<'_, '_> {
         let conditional_selection = p
             .typed_bindings
             .conditional_local_reference_selection(p.source.id, method.symbol);
+        let mutable_rebinding = p
+            .typed_bindings
+            .mutable_counter_local_initializer(p.source.id, method.symbol)
+            .zip(
+                p.typed_bindings
+                    .mutable_counter_reference_assignment(p.source.id, method.symbol),
+            )
+            .is_some_and(|(declaration, assignment)| {
+                declaration.method == method.symbol
+                    && assignment.method == method.symbol
+                    && declaration.source_block == assignment.source_block
+                    && declaration.typed_block == assignment.typed_block
+                    && p.typed_bindings
+                        .local_receiver_unit_call(p.source.id, method.symbol)
+                        .is_some()
+            });
         let formal_clause_matches =
             match (method.parameter_clauses.as_slice(), conditional_selection) {
-                ([formals], None) => formals.as_slice() == binding.method_formals,
+                ([formals], None) => {
+                    formals.as_slice() == binding.method_formals
+                        || (mutable_rebinding
+                            && formals.len() == 3
+                            && formals[..2] == binding.method_formals)
+                }
                 ([formals], Some(selection)) => {
                     formals.len() == 4
                         && formals[..2] == binding.method_formals
@@ -3039,7 +3080,12 @@ impl Validator<'_, '_> {
             source_method.value_param_clauses.as_slice(),
             conditional_selection,
         ) {
-            ([formals], None) => formals.as_slice() == binding.source_method_formals,
+            ([formals], None) => {
+                formals.as_slice() == binding.source_method_formals
+                    || (mutable_rebinding
+                        && formals.len() == 3
+                        && formals[..2] == binding.source_method_formals)
+            }
             ([formals], Some(selection)) => {
                 formals.len() == 4
                     && formals[..2] == binding.source_method_formals
@@ -3061,9 +3107,16 @@ impl Validator<'_, '_> {
         if method_signature.params.len()
             != if conditional_selection.is_some() {
                 4
+            } else if mutable_rebinding {
+                3
             } else {
                 2
             }
+            || (mutable_rebinding
+                && method_signature
+                    .params
+                    .iter()
+                    .any(|parameter| parameter.ty != p.definitions.int))
             || conditional_selection.is_some_and(|_| {
                 method_signature.params[0].ty != p.definitions.int
                     || method_signature.params[1].ty != p.definitions.int

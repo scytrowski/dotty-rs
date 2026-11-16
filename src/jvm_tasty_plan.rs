@@ -218,6 +218,10 @@ struct BatchSourceTypedBindings<'a> {
     planned_calls: Vec<(SourceId, SymbolId, PlannedCallBinding)>,
     local_values: Vec<(SourceId, SymbolId, LocalValueBinding)>,
     local_counter_initializers: Vec<(SourceId, SymbolId, LocalCounterInitializerBinding)>,
+    mutable_counter_local_initializers:
+        Vec<(SourceId, SymbolId, MutableCounterLocalInitializerBinding)>,
+    mutable_counter_assignments:
+        Vec<(SourceId, SymbolId, MutableCounterReferenceAssignmentBinding)>,
     local_reference_aliases: Vec<(SourceId, SymbolId, LocalReferenceAliasBinding)>,
     conditional_local_reference_selections: Vec<(
         SourceId,
@@ -347,6 +351,30 @@ impl SourceTypedBindings for BatchSourceTypedBindings<'_> {
             .find_map(|(proof_source, proof_method, binding)| {
                 (*proof_source == source && *proof_method == method).then_some(*binding)
             })
+    }
+
+    fn mutable_counter_local_initializer(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<MutableCounterLocalInitializerBinding> {
+        self.mutable_counter_local_initializers.iter().find_map(
+            |(binding_source, binding_method, binding)| {
+                (*binding_source == source && *binding_method == method).then_some(*binding)
+            },
+        )
+    }
+
+    fn mutable_counter_reference_assignment(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<MutableCounterReferenceAssignmentBinding> {
+        self.mutable_counter_assignments.iter().find_map(
+            |(binding_source, binding_method, binding)| {
+                (*binding_source == source && *binding_method == method).then_some(*binding)
+            },
+        )
     }
 
     fn formal_local_constructor_call_pair(
@@ -1267,6 +1295,17 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                                         parsed.ast.try_get(block.stats[3]).map(|node| &node.kind),
                                         Some(TreeKind::Apply(_))
                                     ))
+                                || (block.stats.len() == 4
+                                    && block.stats[..3].iter().all(|declaration| {
+                                        matches!(
+                                            parsed.ast.try_get(*declaration).map(|node| &node.kind),
+                                            Some(TreeKind::ValDef(_))
+                                        )
+                                    })
+                                    && matches!(
+                                        parsed.ast.try_get(block.stats[3]).map(|node| &node.kind),
+                                        Some(TreeKind::Assign(_))
+                                    ))
                                 || (block.stats.len() == 5
                                     && block.stats[..3].iter().all(|declaration| {
                                         matches!(
@@ -1274,12 +1313,18 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                                             Some(TreeKind::ValDef(_))
                                         )
                                     })
-                                    && block.stats[3..].iter().all(|stat| {
+                                    && (block.stats[3..].iter().all(|stat| {
                                         matches!(
                                             parsed.ast.try_get(*stat).map(|node| &node.kind),
                                             Some(TreeKind::Apply(_))
                                         )
-                                    })) =>
+                                    }) || (matches!(
+                                        parsed.ast.try_get(block.stats[3]).map(|node| &node.kind),
+                                        Some(TreeKind::Assign(_))
+                                    ) && matches!(
+                                        parsed.ast.try_get(block.stats[4]).map(|node| &node.kind),
+                                        Some(TreeKind::Apply(_))
+                                    )))) =>
                         {
                             let final_constructor_uses_local = matches!(
                                 parsed.ast.try_get(block.expr).map(|node| &node.kind),
@@ -1293,7 +1338,7 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                             if !final_constructor_uses_local {
                                 Vec::new()
                             } else {
-                                let local_count = if (block.stats.len() == 4
+                                let mutable_rebinding = block.stats.len() == 5
                                     && block.stats[..3].iter().all(|stat| {
                                         matches!(
                                             parsed.ast.try_get(*stat).map(|node| &node.kind),
@@ -1302,8 +1347,33 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                                     })
                                     && matches!(
                                         parsed.ast.try_get(block.stats[3]).map(|node| &node.kind),
+                                        Some(TreeKind::Assign(_))
+                                    )
+                                    && matches!(
+                                        parsed.ast.try_get(block.stats[4]).map(|node| &node.kind),
                                         Some(TreeKind::Apply(_))
-                                    ))
+                                    )
+                                    && typer
+                                        .typed_local_binding_at(source_id, block.stats[2])
+                                        .is_some_and(|binding| {
+                                            typer.store().symbols.get(binding.symbol()).flags
+                                                == dotty_core::SymbolFlags::MUTABLE
+                                        });
+                                let local_count = if mutable_rebinding
+                                    || (block.stats.len() == 4
+                                        && block.stats[..3].iter().all(|stat| {
+                                            matches!(
+                                                parsed.ast.try_get(*stat).map(|node| &node.kind),
+                                                Some(TreeKind::ValDef(_))
+                                            )
+                                        })
+                                        && matches!(
+                                            parsed
+                                                .ast
+                                                .try_get(block.stats[3])
+                                                .map(|node| &node.kind),
+                                            Some(TreeKind::Apply(_))
+                                        ))
                                     || (block.stats.len() == 5
                                         && matches!(
                                             parsed
@@ -1328,21 +1398,31 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                                     .stats
                                     .iter()
                                     .take(local_count)
-                                    .filter_map(|declaration| {
+                                    .enumerate()
+                                    .filter_map(|(local_index, declaration)| {
                                         typer
                                             .typed_local_binding_at(source_id, *declaration)
                                             .filter(|binding| {
-                                                typer
+                                                let flags = typer
                                                     .store()
                                                     .symbols
                                                     .get(binding.symbol())
-                                                    .flags
-                                                    .is_empty()
+                                                    .flags;
+                                                flags.is_empty()
+                                                    || (mutable_rebinding
+                                                        && local_index == 2
+                                                        && flags
+                                                            == dotty_core::SymbolFlags::MUTABLE)
                                             })
                                             .map(|binding| JvmLocalBinding {
                                                 declaration: binding.declaration(),
                                                 symbol: binding.symbol(),
-                                                mutable: false,
+                                                mutable: typer
+                                                    .store()
+                                                    .symbols
+                                                    .get(binding.symbol())
+                                                    .flags
+                                                    == dotty_core::SymbolFlags::MUTABLE,
                                             })
                                     })
                                     .collect()
@@ -1817,6 +1897,16 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                         selection.scope,
                     ));
                 }
+                if let Some(mutable) = proof.mutable_local_reference_reassignment() {
+                    let declarations = mutable.source_declarations();
+                    let typed_declarations = mutable.typed_declarations();
+                    locals.push((
+                        declarations[2],
+                        mutable.selected(),
+                        typed_declarations[2],
+                        mutable.scope(),
+                    ));
+                }
                 locals.into_iter().map(|local| {
                     (
                         proof.source_id(),
@@ -1908,6 +1998,30 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                         }))
                     }).collect()
                 }
+            })
+            .collect(),
+        mutable_counter_local_initializers: constructor_call_proofs
+            .iter()
+            .filter_map(|proof| {
+                proof.mutable_local_reference_reassignment().map(|mutable| {
+                    (
+                        proof.source_id(),
+                        proof.method(),
+                        mutable_local_reference_declaration_binding(mutable),
+                    )
+                })
+            })
+            .collect(),
+        mutable_counter_assignments: constructor_call_proofs
+            .iter()
+            .filter_map(|proof| {
+                proof.mutable_local_reference_reassignment().map(|mutable| {
+                    (
+                        proof.source_id(),
+                        proof.method(),
+                        mutable_local_reference_assignment_binding(mutable),
+                    )
+                })
             })
             .collect(),
         local_reference_aliases: constructor_call_proofs

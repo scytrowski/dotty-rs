@@ -670,7 +670,11 @@ pub(crate) fn validate_class_state_method(
         class_members: Some(class.members),
         reference_fields,
         planned_class_symbols: class.typed_bindings.planned_class_symbols(),
-        mutable_counter_assignment: None,
+        mutable_counter_assignment: methods.first().and_then(|method| {
+            class
+                .typed_bindings
+                .mutable_counter_reference_assignment(class.source.id, method.symbol)
+        }),
         local_bindings: HashMap::new(),
         registered_local_symbols: HashSet::new(),
         seen_local_bindings: HashSet::new(),
@@ -690,6 +694,18 @@ pub(crate) fn validate_class_state_method(
         }
     }
     for method in methods {
+        let declaration = class
+            .typed_bindings
+            .mutable_counter_local_initializer(class.source.id, method.symbol);
+        let assignment = class
+            .typed_bindings
+            .mutable_counter_reference_assignment(class.source.id, method.symbol);
+        if declaration.is_some() != assignment.is_some() {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::BodyExpression,
+                symbol: Some(method.symbol),
+            });
+        }
         validator.method(method, signature_only)?;
     }
     if validator.seen_local_bindings.len() != local_values.len() {
@@ -2249,8 +2265,24 @@ impl<'a> Validator<'_, 'a> {
             return Err(self.unsupported(UnsupportedFeature::TypeParameters, Some(method.symbol)));
         }
         self.parameters(method.symbol, definition, &method.parameter_clauses)?;
+        let mutable_rebinding_method = self
+            .plan
+            .typed_bindings
+            .mutable_counter_reference_assignment(p.source.id, method.symbol)
+            .is_some_and(|assignment| {
+                assignment.method == method.symbol
+                    && self
+                        .plan
+                        .typed_bindings
+                        .mutable_counter_local_initializer(p.source.id, method.symbol)
+                        .is_some_and(|declaration| {
+                            declaration.method == method.symbol
+                                && declaration.source_block == assignment.source_block
+                                && declaration.typed_block == assignment.typed_block
+                        })
+            });
         if definition.value_param_clauses.len() > 1
-            || definition.source_param_clause_order.is_some()
+            || (definition.source_param_clause_order.is_some() && !mutable_rebinding_method)
         {
             return Err(self.unsupported(UnsupportedFeature::ParameterClauses, Some(method.symbol)));
         }

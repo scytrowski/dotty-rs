@@ -45,7 +45,7 @@ three calls preserve distinct Pair fields and produce `(left,right)` values
 `(7,42)`, `(-9,11)`, and `(5,-13)`. Equal seeds still produce distinct
 objects, so value equality cannot substitute for reference identity.
 
-## Rust source identity and current producer boundary
+## Rust paired producer integration
 
 The fixture passes through the real contextual scanner, parser, namer, and
 source typer. The regression follows canonical symbols through source-to-typed
@@ -53,36 +53,52 @@ bindings: the two constructor arguments refer to the respective seed formals;
 the mutable local's initializer refers to `first`; the typed assignment maps
 `selected` to `second`; the setter receiver maps back to `selected` and its
 argument to `nextValue`; the Pair call still receives `first` and `second`.
-This is identity evidence from the frontend; it does not claim a Rust class or
-TASTy batch was emitted.
+The paired regression emits exactly `Counter`, `Pair`, and `PairFactory` class
+files with their TASTy sidecars from that one source session. It decodes every
+class as major 65, every sidecar as TASTy 28.9.0, verifies the real UUID links,
+and compares ordered paths, bytes, and UUIDs across two independent sessions.
+The test also exercises all six staged-file fault points and both promotion
+fault points, asserting that no failed destination is visible.
 
-The paired producer currently rejects at its first cross-class constructor
-call identity proof with
-`SourceShape("candidate method must have one plain formal clause and a concrete public body")`.
-The planning callback is not reached, no artifact batch is returned, and no
-partial artifacts are published. This issue records that boundary rather than
-changing production planner, encoder, ABI validation, or publishing code.
+At the merged base, the paired planning callback was not reached. The recorded
+first failure was
+`SourceShape("candidate method must have one plain formal clause and a concrete public body")`
+in the cross-class constructor-call identity proof, before any artifact
+publication. The integrated route now admits only the original mutable
+declaration/assignment/setter receipts and the five-statement
+`ValDef, ValDef, ValDef, Assign, Apply` shape. The classifier keeps that route
+separate from legacy alias and ordered-call shapes. Renamed locals and reversed
+declarations remain accepted when their canonical identities preserve the
+same contract; assigning `selected` back to `first`, duplicate writes,
+allocation right sides, and nested branch/loop shapes remain rejected.
 
-The ownership boundary is explicit: the frontend owns canonical local and
-assignment identities; `dotty-jvm` already owns lowering initialized mutable
-reference assignments within its checked unit; the paired TASTy planner and
-publisher own any future proof that relates this local-rebinding method to a
-cross-class artifact batch. This evidence-only increment changes none of those
-production layers. A follow-up that accepts this factory shape belongs at the
-paired planner/contract boundary and must preserve the frontend identities
-recorded here.
+The frontend owns canonical local and assignment identities; `dotty-jvm`
+owns lowering the initialized mutable reference local and assignment; the
+paired TASTy planner and artifact contract join those identities to the
+complete TASTy block and validate the emitted instructions before the batch is
+accepted. No source retyping, synthetic AST, new writer, CLI, or standalone
+publisher is involved.
 
 ## Controls
 
-The pinned compiler accepts renamed locals, reversed declarations, assignment
-back to `first`, duplicate assignment, allocation on the assignment right
-side, nested conditional assignment, and nested loop assignment. These valid
-shapes remain outside the current paired producer proof and encounter the same
-first Rust rejection. The compiler rejects an immutable write (E052), unknown
-assignment target (E119), forward reference (E039), uninitialized local under
-`-Werror`, and assignment of `Int` to `Counter` (E007). The Rust regression
-keeps valid-but-deferred and invalid cases distinct. Exact controls and their
-pinned outcomes are summarized in `oracle.json`.
+The pinned Scala compiler accepts renamed locals, reversed declarations,
+assignment back to `first`, duplicate assignment, allocation on the assignment
+right side, nested conditional assignment, and nested loop assignment. The
+paired producer accepts only renamed and reversed variants that preserve the
+exact selected-to-second contract; the other valid source controls remain
+outside this bounded route. The Rust regression separately rejects an
+immutable write, unknown or forward assignment target, uninitialized local,
+and assignment of `Int` to `Counter`. The Scala and Rust outcomes are recorded
+separately in the tests and `oracle.json`.
+
+## Strict Scala gate status
+
+The Scala source checkout is pinned to the revision above, but this worker
+environment did not have a staged compiler at `dist/.../stage/lib/with_compiler.jar`.
+The strict Scala 3.9 test therefore stopped at `scala39_toolchain` preflight
+before compilation. The JDK 21 and pinned Rust gates passed. The strict Scala
+consumer and aggregate remain required on the PR/CI environment with the staged
+compiler available.
 
 ## Initial toolchain blocker
 

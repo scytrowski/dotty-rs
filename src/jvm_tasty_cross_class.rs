@@ -113,6 +113,8 @@ pub struct ValidatedCrossClassConstructorCallProof<'session> {
     local_receiver_unit_calls: Option<LocalReceiverUnitCallsReceipt>,
     local_reference_alias: Option<LocalReferenceAliasBinding>,
     conditional_local_reference_selection: Option<ConditionalLocalReferenceSelectionBinding>,
+    mutable_local_reference_reassignment:
+        Option<ValidatedMutableLocalReferenceReassignmentProof<'session>>,
     formal_type: TypeId,
     constructor_formal_type: TypeId,
     result_type: TypeId,
@@ -1760,6 +1762,12 @@ impl ValidatedCrossClassConstructorCallProof<'_> {
     ) -> Option<ConditionalLocalReferenceSelectionBinding> {
         self.conditional_local_reference_selection
     }
+    /// Exact original identity proof for the bounded mutable Counter route.
+    pub const fn mutable_local_reference_reassignment(
+        &self,
+    ) -> Option<&ValidatedMutableLocalReferenceReassignmentProof<'_>> {
+        self.mutable_local_reference_reassignment.as_ref()
+    }
     /// Canonical semantic type of the method formal and constructor argument.
     pub const fn formal_type(&self) -> TypeId {
         self.formal_type
@@ -1966,7 +1974,7 @@ fn validate_cross_class_constructor_call_proofs_inner<'session>(
                 ));
             }
             let proof = if method_def.value_param_clauses.len() == 1
-                && matches!(method_def.value_param_clauses[0].len(), 2 | 4)
+                && matches!(method_def.value_param_clauses[0].len(), 2..=4)
             {
                 validate_two_argument_constructor_call_candidate(
                     source_id,
@@ -2117,7 +2125,7 @@ fn validate_two_argument_constructor_call_candidate<'session>(
         || method_def.metadata.visibility.is_some()
         || !method_def.type_params.is_empty()
         || method_def.value_param_clauses.len() != 1
-        || !matches!(method_def.value_param_clauses[0].len(), 2 | 4)
+        || !matches!(method_def.value_param_clauses[0].len(), 2..=4)
     {
         return Err(source_error(
             "two-argument candidate must have one plain two-formal clause and a concrete public body",
@@ -2130,7 +2138,59 @@ fn validate_two_argument_constructor_call_candidate<'session>(
         "factory method declaration has a foreign source position",
     )?;
 
+    let is_mutable_reassignment_candidate = method_def.value_param_clauses[0].len() == 3;
     let is_conditional_candidate = method_def.value_param_clauses[0].len() == 4;
+    let mutable_reassignment_proof = if is_mutable_reassignment_candidate {
+        let typer = typer.ok_or_else(|| {
+            typed_error("mutable factory requires the original Typer binding resolver")
+        })?;
+        let Some(TreeKind::Block(block)) = source_ast.try_get(source_rhs).map(|node| &node.kind)
+        else {
+            return Err(source_error(
+                "mutable factory body must be its original Block",
+            ));
+        };
+        if block.stats.len() != 5
+            || block.stats[..3].iter().any(|tree| {
+                !matches!(
+                    source_ast.try_get(*tree).map(|node| &node.kind),
+                    Some(TreeKind::ValDef(_))
+                )
+            })
+            || !matches!(
+                source_ast.try_get(block.stats[3]).map(|node| &node.kind),
+                Some(TreeKind::Assign(_))
+            )
+            || !matches!(
+                source_ast.try_get(block.stats[4]).map(|node| &node.kind),
+                Some(TreeKind::Apply(_))
+            )
+        {
+            return Err(source_error(
+                "three-formal mutable factory requires two Counter vals, one mutable Counter val, one Assign, one setter Apply",
+            ));
+        }
+        Some(validate_mutable_local_reference_reassignment_proof(
+            MutableLocalReferenceReassignmentProofInput {
+                source_id,
+                method_tree,
+                store,
+                definitions,
+                source_ast,
+                typed_ast,
+                source_index,
+                source_typed_index,
+                original_bindings: [
+                    typer.typed_local_binding_at(source_id, block.stats[0]),
+                    typer.typed_local_binding_at(source_id, block.stats[1]),
+                ],
+                selected_binding: typer.typed_local_binding_at(source_id, block.stats[2]),
+                jvm_unit,
+            },
+        )?)
+    } else {
+        None
+    };
     let method_formal_trees = [
         method_def.value_param_clauses[0][0],
         method_def.value_param_clauses[0][1],
@@ -2306,6 +2366,11 @@ fn validate_two_argument_constructor_call_candidate<'session>(
                 || method_signature.params[1].ty != definitions.int
                 || method_signature.params[2].ty != definitions.boolean
                 || method_signature.params[3].ty != definitions.int))
+        || (is_mutable_reassignment_candidate
+            && method_signature
+                .params
+                .iter()
+                .any(|parameter| parameter.ty != definitions.int))
     {
         return Err(semantic_error(
             "factory signature must retain its two ordered reference formals",
@@ -2334,7 +2399,23 @@ fn validate_two_argument_constructor_call_candidate<'session>(
                                 source_ast.try_get(*stat).map(|node| &node.kind),
                                 Some(TreeKind::Apply(_))
                             )
-                        })) =>
+                        }))
+                    || (is_mutable_reassignment_candidate
+                        && block.stats.len() == 5
+                        && block.stats[..3].iter().all(|stat| {
+                            matches!(
+                                source_ast.try_get(*stat).map(|node| &node.kind),
+                                Some(TreeKind::ValDef(_))
+                            )
+                        })
+                        && matches!(
+                            source_ast.try_get(block.stats[3]).map(|node| &node.kind),
+                            Some(TreeKind::Assign(_))
+                        )
+                        && matches!(
+                            source_ast.try_get(block.stats[4]).map(|node| &node.kind),
+                            Some(TreeKind::Apply(_))
+                        )) =>
             {
                 (block.expr, Some(block))
             }
@@ -2403,24 +2484,26 @@ fn validate_two_argument_constructor_call_candidate<'session>(
     let immutable_local_pair = if let Some(block) =
         source_block.filter(|block| matches!(block.stats.len(), 2..=5))
     {
-        if block.stats.iter().any(|declaration| {
-            !matches!(
-                source_ast.try_get(*declaration).map(|node| &node.kind),
-                Some(TreeKind::ValDef(_))
-            )
-        }) && (block.stats.len() < 3
-            || block.stats[..2].iter().any(|declaration| {
+        if mutable_reassignment_proof.is_none()
+            && block.stats.iter().any(|declaration| {
                 !matches!(
                     source_ast.try_get(*declaration).map(|node| &node.kind),
                     Some(TreeKind::ValDef(_))
                 )
             })
-            || block.stats[2..].iter().any(|stat| {
-                !matches!(
-                    source_ast.try_get(*stat).map(|node| &node.kind),
-                    Some(TreeKind::Apply(_)) | Some(TreeKind::ValDef(_))
-                )
-            }))
+            && (block.stats.len() < 3
+                || block.stats[..2].iter().any(|declaration| {
+                    !matches!(
+                        source_ast.try_get(*declaration).map(|node| &node.kind),
+                        Some(TreeKind::ValDef(_))
+                    )
+                })
+                || block.stats[2..].iter().any(|stat| {
+                    !matches!(
+                        source_ast.try_get(*stat).map(|node| &node.kind),
+                        Some(TreeKind::Apply(_)) | Some(TreeKind::ValDef(_))
+                    )
+                }))
         {
             return Err(source_error(
                 "local Pair call block must contain two vals, an optional alias, then Counter.set calls",
@@ -2497,6 +2580,60 @@ fn validate_two_argument_constructor_call_candidate<'session>(
                 result_type: typed_setter.ty,
             });
             Some(*proof.initializer_pair())
+        } else if let Some(proof) = mutable_reassignment_proof.as_ref() {
+            let source_setter = source_ast
+                .try_get(proof.source_setter())
+                .ok_or_else(|| source_error("mutable setter source tree is stale"))?;
+            let TreeKind::Apply(source_apply) = &source_setter.kind else {
+                return Err(source_error("mutable setter must remain an Apply"));
+            };
+            let source_select = source_apply.function;
+            let typed_setter = typed_ast
+                .try_get(proof.typed_setter())
+                .ok_or_else(|| typed_error("mutable typed setter is stale"))?;
+            let TreeKind::Apply(typed_apply) = &typed_setter.kind else {
+                return Err(typed_error("mutable typed setter must remain an Apply"));
+            };
+            let typed_select = typed_apply.function;
+            let argument_formal = match store.types.try_get(
+                typed_ast
+                    .try_get(proof.typed_setter_argument())
+                    .ok_or_else(|| typed_error("mutable setter argument is stale"))?
+                    .ty,
+            ) {
+                Some(Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                }) => *symbol,
+                _ => {
+                    return Err(typed_error(
+                        "mutable setter argument must retain its canonical formal TermRef",
+                    ));
+                }
+            };
+            local_receiver_unit_call = Some(LocalReceiverUnitCallReceipt {
+                source_apply: proof.source_setter(),
+                typed_apply: proof.typed_setter(),
+                source_select,
+                typed_select,
+                source_receiver: proof.source_setter_receiver(),
+                typed_receiver: proof.typed_setter_receiver(),
+                source_argument: proof.source_setter_argument(),
+                typed_argument: proof.typed_setter_argument(),
+                receiver: proof.selected(),
+                method: proof.setter_method(),
+                argument_formal,
+                receiver_scope: proof.scope(),
+                argument_type: typed_ast
+                    .try_get(proof.typed_setter_argument())
+                    .ok_or_else(|| typed_error("mutable setter argument is stale"))?
+                    .ty,
+                result_type: typed_setter.ty,
+            });
+            Some(validate_mutable_rebinding_local_initializer_pair_proof(
+                input,
+                proof.selected(),
+            )?)
         } else if block.stats.len() == 5 {
             let calls = validate_immutable_local_counter_set_calls_after_alias_proof(
                 ImmutableLocalReferenceAliasProofInput {
@@ -4075,6 +4212,7 @@ fn validate_two_argument_constructor_call_candidate<'session>(
         local_receiver_unit_calls,
         local_reference_alias,
         conditional_local_reference_selection,
+        mutable_local_reference_reassignment: mutable_reassignment_proof,
         formal_type: method_formal_types[0],
         constructor_formal_type,
         result_type,
@@ -5296,7 +5434,23 @@ pub fn validate_immutable_local_initializer_pair_proof<'session>(
     ValidatedImmutableLocalInitializerPairProof<'session>,
     CrossClassConstructorCallProofError,
 > {
-    validate_immutable_local_initializer_pair_proof_inner(input, 0, false)
+    validate_immutable_local_initializer_pair_proof_inner(input, 0, false, false, None)
+}
+
+fn validate_mutable_rebinding_local_initializer_pair_proof<'session>(
+    input: ImmutableLocalInitializerPairProofInput<'session>,
+    selected_local: SymbolId,
+) -> Result<
+    ValidatedImmutableLocalInitializerPairProof<'session>,
+    CrossClassConstructorCallProofError,
+> {
+    validate_immutable_local_initializer_pair_proof_inner(
+        input,
+        0,
+        false,
+        true,
+        Some(selected_local),
+    )
 }
 
 /// Authenticate the supported immutable direct-reference alias of the first
@@ -5306,7 +5460,13 @@ pub fn validate_immutable_local_reference_alias_proof<'session>(
     input: ImmutableLocalReferenceAliasProofInput<'session>,
 ) -> Result<ValidatedImmutableLocalReferenceAliasProof<'session>, CrossClassConstructorCallProofError>
 {
-    let pair = validate_immutable_local_initializer_pair_proof_inner(input.initializers, 2, true)?;
+    let pair = validate_immutable_local_initializer_pair_proof_inner(
+        input.initializers,
+        2,
+        true,
+        false,
+        None,
+    )?;
     validate_immutable_local_reference_alias_from_pair(pair, input.alias_binding)
 }
 
@@ -5315,6 +5475,8 @@ fn validate_immutable_local_initializer_pair_proof_inner<'session>(
     input: ImmutableLocalInitializerPairProofInput<'session>,
     counter_set_call_count: usize,
     alias_prefix: bool,
+    mutable_rebinding: bool,
+    mutable_selected_local: Option<SymbolId>,
 ) -> Result<
     ValidatedImmutableLocalInitializerPairProof<'session>,
     CrossClassConstructorCallProofError,
@@ -5371,7 +5533,7 @@ fn validate_immutable_local_initializer_pair_proof_inner<'session>(
     }
     if !method_def.type_params.is_empty()
         || method_def.value_param_clauses.len() != 1
-        || method_def.value_param_clauses[0].len() != 2
+        || method_def.value_param_clauses[0].len() != if mutable_rebinding { 3 } else { 2 }
     {
         return Err(source_error(
             "factory method must have exactly two ordinary Int formals",
@@ -5407,7 +5569,7 @@ fn validate_immutable_local_initializer_pair_proof_inner<'session>(
         ));
     };
     if signature.kind != dotty_core::MethodKind::Plain
-        || signature.params.len() != 2
+        || signature.params.len() != if mutable_rebinding { 3 } else { 2 }
         || signature
             .params
             .iter()
@@ -5474,7 +5636,23 @@ fn validate_immutable_local_initializer_pair_proof_inner<'session>(
         return Err(source_error("factory body must be the original Block"));
     };
     let expected_stats = 2 + usize::from(alias_prefix) + counter_set_call_count;
-    if block.stats.len() != expected_stats {
+    let mutable_stats = mutable_rebinding
+        && block.stats.len() == 5
+        && block.stats[..3].iter().all(|stat| {
+            matches!(
+                source_ast.try_get(*stat).map(|node| &node.kind),
+                Some(TreeKind::ValDef(_))
+            )
+        })
+        && matches!(
+            source_ast.try_get(block.stats[3]).map(|node| &node.kind),
+            Some(TreeKind::Assign(_))
+        )
+        && matches!(
+            source_ast.try_get(block.stats[4]).map(|node| &node.kind),
+            Some(TreeKind::Apply(_))
+        );
+    if block.stats.len() != expected_stats && !mutable_stats {
         return Err(source_error(match counter_set_call_count {
             0 if !alias_prefix => "factory Block must contain exactly two local ValDefs",
             1 => "factory Block must contain exactly two local ValDefs and one Counter.set call",
@@ -5497,14 +5675,15 @@ fn validate_immutable_local_initializer_pair_proof_inner<'session>(
             "third factory Block statistic must be the immutable local alias ValDef",
         ));
     }
-    if block.stats[2 + usize::from(alias_prefix)..]
-        .iter()
-        .any(|stat| {
-            !matches!(
-                source_ast.try_get(*stat).map(|node| &node.kind),
-                Some(TreeKind::Apply(_))
-            )
-        })
+    if !mutable_rebinding
+        && block.stats[2 + usize::from(alias_prefix)..]
+            .iter()
+            .any(|stat| {
+                !matches!(
+                    source_ast.try_get(*stat).map(|node| &node.kind),
+                    Some(TreeKind::Apply(_))
+                )
+            })
     {
         return Err(source_error(if counter_set_call_count == 1 {
             "third factory Block statistic must be the original Counter.set Apply"
@@ -5539,7 +5718,8 @@ fn validate_immutable_local_initializer_pair_proof_inner<'session>(
         return Err(typed_error("original source Block must remain typed Block"));
     };
     if typed_block_tree.stats.get(..2) != Some(typed_declarations.as_slice())
-        || typed_block_tree.stats.len() != expected_stats
+        || (typed_block_tree.stats.len() != expected_stats
+            && !(mutable_rebinding && typed_block_tree.stats.len() == 5))
         || typed_block_tree.expr != typed_final_expression
     {
         return Err(typed_error(
@@ -5911,9 +6091,11 @@ fn validate_immutable_local_initializer_pair_proof_inner<'session>(
     let scope = store.scopes.get(first_core.scope);
     let scope_entries = scope.entered_symbols().collect::<Vec<_>>();
     if scope.owner != Some(method)
-        || scope_entries.len() != 2 + usize::from(alias_prefix)
+        || scope_entries.len() != 2 + usize::from(alias_prefix) + usize::from(mutable_rebinding)
         || !scope_entries.contains(&local_symbols[0])
         || !scope_entries.contains(&local_symbols[1])
+        || (mutable_rebinding
+            && mutable_selected_local.is_none_or(|selected| !scope_entries.contains(&selected)))
     {
         return Err(identity_error(
             "both locals must occupy the exact two-entry method-owned Block scope",
@@ -8919,6 +9101,7 @@ fn validate_constructor_call_candidate<'session>(
         local_receiver_unit_calls: None,
         local_reference_alias: None,
         conditional_local_reference_selection: None,
+        mutable_local_reference_reassignment: None,
         formal_type,
         constructor_formal_type,
         result_type,

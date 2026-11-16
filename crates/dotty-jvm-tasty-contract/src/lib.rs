@@ -1785,6 +1785,7 @@ struct MixedConstructorPairRef {
     local_alias_copy: Option<LocalReferenceAliasCopyRef>,
     local_receiver_call: Option<LocalReceiverUnitCallRef>,
     local_receiver_call_pair: Option<[LocalReceiverUnitCallRef; 2]>,
+    mutable_reassignment: Option<MutableReassignmentRef>,
     conditional_selection: Option<ConditionalSelectionRef>,
     max_stack: u16,
     max_locals: u16,
@@ -1802,6 +1803,13 @@ struct ConditionalSelectionRef {
 struct LocalReferenceAliasCopyRef {
     source_local_slot: u16,
     alias_local_slot: u16,
+}
+
+#[derive(Clone, Copy)]
+struct MutableReassignmentRef {
+    initializer_source_slot: u16,
+    selected_local_slot: u16,
+    assignment_rhs_slot: u16,
 }
 
 struct LocalReceiverUnitCallRef {
@@ -1830,6 +1838,7 @@ enum PairedBlockShape {
     /// existing proof-cardinality failure remains the first reported failure.
     ThreeLocalsOneCall,
     ThreeLocalsConditionalSelection,
+    ThreeLocalsMutableReassignmentOneCall,
     ReceiptMismatch,
     Unclassified,
 }
@@ -1838,6 +1847,7 @@ enum PairedBlockShape {
 enum PairedStatementKind {
     ValDef,
     Apply,
+    Assign,
     Other,
 }
 
@@ -1851,6 +1861,7 @@ fn paired_statement_kinds<P: AstPhase>(
             ast.try_get(*tree).map(|tree| match tree.kind {
                 TreeKind::ValDef(_) => PairedStatementKind::ValDef,
                 TreeKind::Apply(_) => PairedStatementKind::Apply,
+                TreeKind::Assign(_) => PairedStatementKind::Assign,
                 _ => PairedStatementKind::Other,
             })
         })
@@ -1864,6 +1875,7 @@ fn classify_paired_block_shape(
     has_two_call_receipt: bool,
     has_alias_receipt: bool,
     has_conditional_selection_receipt: bool,
+    has_mutable_reassignment_receipt: bool,
 ) -> PairedBlockShape {
     if source_kinds.len() != typed_kinds.len() {
         return PairedBlockShape::ReceiptMismatch;
@@ -1882,10 +1894,15 @@ fn classify_paired_block_shape(
                     && !has_conditional_selection_receipt)
         }
         5 => {
-            !has_one_call_receipt
+            (!has_one_call_receipt
                 && has_two_call_receipt
                 && has_alias_receipt
-                && !has_conditional_selection_receipt
+                && !has_conditional_selection_receipt)
+                || (has_mutable_reassignment_receipt
+                    && has_one_call_receipt
+                    && !has_two_call_receipt
+                    && !has_alias_receipt
+                    && !has_conditional_selection_receipt)
         }
         _ => false,
     };
@@ -1927,6 +1944,18 @@ fn classify_paired_block_shape(
             && has_alias_receipt =>
         {
             PairedBlockShape::TwoLocalsAliasTwoCalls
+        }
+        5 if source_kinds[..3] == [PairedStatementKind::ValDef; 3]
+            && typed_kinds[..3] == [PairedStatementKind::ValDef; 3]
+            && source_kinds[3..] == [PairedStatementKind::Assign, PairedStatementKind::Apply]
+            && typed_kinds[3..] == [PairedStatementKind::Assign, PairedStatementKind::Apply]
+            && has_mutable_reassignment_receipt
+            && has_one_call_receipt
+            && !has_two_call_receipt
+            && !has_alias_receipt
+            && !has_conditional_selection_receipt =>
+        {
+            PairedBlockShape::ThreeLocalsMutableReassignmentOneCall
         }
         _ => PairedBlockShape::Unclassified,
     }
@@ -1994,6 +2023,10 @@ fn validate_two_local_constructor_pair(
                 .typed_bindings
                 .conditional_local_reference_selection(source_id, caller)
                 .is_some(),
+            tasty
+                .typed_bindings
+                .mutable_counter_reference_assignment(source_id, caller)
+                .is_some(),
         ),
         _ => PairedBlockShape::Unclassified,
     };
@@ -2030,13 +2063,20 @@ fn validate_two_local_constructor_pair(
         block_shape,
         PairedBlockShape::ThreeLocalsConditionalSelection
     );
+    let has_mutable_reassignment = matches!(
+        block_shape,
+        PairedBlockShape::ThreeLocalsMutableReassignmentOneCall
+    );
+    let mutable_assignment = tasty
+        .typed_bindings
+        .mutable_counter_reference_assignment(source_id, caller);
     let has_alias = matches!(block_shape, PairedBlockShape::TwoLocalsAliasTwoCalls)
         || (matches!(block_shape, PairedBlockShape::Unclassified)
             && source_block.stats.len() == 5
             && local_reference_alias.is_some());
     if initializers.len() != 2
         || locals.len()
-            != if has_alias || has_conditional_selection {
+            != if has_alias || has_conditional_selection || has_mutable_reassignment {
                 3
             } else {
                 2
@@ -2336,7 +2376,28 @@ fn validate_two_local_constructor_pair(
                 == SymbolOrigin::Source(source_id)
             && matches!(tasty.store.symbols.get(method.parameters()[3].symbol()).info, SymbolInfo::Complete(ty) if ty == tasty.definitions.int)
     } else {
-        method.parameters().len() == 2
+        let mutable_assignment = tasty
+            .typed_bindings
+            .mutable_counter_reference_assignment(source_id, caller);
+        let setter_call = tasty
+            .typed_bindings
+            .local_receiver_unit_call(source_id, caller);
+        if mutable_assignment.is_some() {
+            method.parameters().len() == 3
+                && method.parameters()[2].slot() == 3
+                && method.parameters()[2].ty() == dotty_jvm::JvmType::Int
+                && setter_call.is_some_and(|call| {
+                    let formal = call.argument_formal;
+                    method.parameters()[2].symbol() == formal
+                        && tasty.store.symbols.contains(formal)
+                        && tasty.store.symbols.get(formal).kind == SymbolKind::Parameter
+                        && tasty.store.symbols.get(formal).owner == Some(caller)
+                        && tasty.store.symbols.get(formal).origin == SymbolOrigin::Source(source_id)
+                        && matches!(tasty.store.symbols.get(formal).info, SymbolInfo::Complete(ty) if ty == tasty.definitions.int)
+                })
+        } else {
+            method.parameters().len() == 2
+        }
     };
     if !conditional_formals_match
         || method.parameters()[0].symbol() != pair.method_formals[0]
@@ -2529,10 +2590,101 @@ fn validate_two_local_constructor_pair(
         });
     }
 
-    let local_symbols = [initializers[0].local, initializers[1].local];
-    let conditional_selected = conditional_selection.map(|selection| selection.selected);
     let counter_class =
         local_class.ok_or_else(|| "two-local Counter class is absent".to_owned())?;
+    let mut local_symbols = vec![initializers[0].local, initializers[1].local];
+    let mut mutable_reassignment_ref = None;
+    if has_mutable_reassignment {
+        let mutable = mutable_assignment.ok_or_else(|| {
+            "mutable reassignment shape has no exact assignment receipt".to_owned()
+        })?;
+        let declaration = tasty
+            .typed_bindings
+            .mutable_counter_local_initializer(source_id, caller)
+            .ok_or_else(|| "mutable reassignment has no declaration receipt".to_owned())?;
+        let selected = locals
+            .get(2)
+            .ok_or_else(|| "mutable selected local is absent from canonical bindings".to_owned())?;
+        if declaration.source_block != source_rhs
+            || declaration.typed_block != typed_rhs
+            || declaration.source_declaration != selected.source_tree
+            || declaration.typed_declaration != selected.typed_declaration
+            || declaration.local != mutable.local
+            || selected.symbol != mutable.local
+            || selected.scope != declaration.scope
+            || !tasty.store.symbols.contains(mutable.local)
+            || tasty.store.symbols.get(mutable.local).kind != SymbolKind::Local
+            || tasty.store.symbols.get(mutable.local).owner != Some(caller)
+            || tasty.store.symbols.get(mutable.local).origin != SymbolOrigin::Source(source_id)
+            || tasty.store.symbols.get(mutable.local).flags != dotty_core::SymbolFlags::MUTABLE
+            || !matches!(tasty.store.symbols.get(mutable.local).info, SymbolInfo::Complete(ty) if ty == declaration.local_type)
+            || !matches!(tasty.store.types.try_get(declaration.local_type), Some(Type::TypeRef { target: TypeRefTarget::Symbol(class), .. }) if Some(*class) == local_class)
+        {
+            return Err(
+                "mutable selected local differs from its exact source declaration receipt".into(),
+            );
+        }
+        let slot = layout
+            .local(mutable.local)
+            .map_err(|error| format!("mutable selected local has no JVM slot: {error:?}"))?;
+        if slot.declaration() != selected.typed_declaration
+            || !slot.is_mutable()
+            || slot.ty() != dotty_jvm::JvmType::Reference(counter_class)
+        {
+            return Err("mutable selected local differs from its canonical JVM slot".into());
+        }
+        local_slots.push(slot.slot());
+        local_symbols.push(mutable.local);
+        let initializer_source_slot = local_symbols
+            .iter()
+            .position(|symbol| *symbol == declaration.target)
+            .and_then(|index| local_slots.get(index).copied())
+            .ok_or_else(|| {
+                "mutable initializer does not reference an original Counter local".to_owned()
+            })?;
+        let assignment_rhs_slot = local_symbols
+            .iter()
+            .position(|symbol| *symbol == mutable.rhs_local)
+            .and_then(|index| local_slots.get(index).copied())
+            .ok_or_else(|| "mutable assignment RHS is not an original Counter local".to_owned())?;
+        let source_selected = source_block
+            .stats
+            .get(2)
+            .and_then(|tree| tasty.source_ast.try_get(*tree))
+            .ok_or_else(|| "mutable selected source declaration is missing".to_owned())?;
+        let typed_selected = typed_block
+            .stats
+            .get(2)
+            .and_then(|tree| tasty.typed_ast.try_get(*tree))
+            .ok_or_else(|| "mutable selected typed declaration is missing".to_owned())?;
+        let assignment_source = source_block
+            .stats
+            .get(3)
+            .copied()
+            .ok_or_else(|| "mutable assignment source statement is missing".to_owned())?;
+        let assignment_typed = typed_block
+            .stats
+            .get(3)
+            .copied()
+            .ok_or_else(|| "mutable assignment typed statement is missing".to_owned())?;
+        if !matches!(&source_selected.kind, TreeKind::ValDef(value) if value.rhs == Some(declaration.source_initializer))
+            || !matches!(&typed_selected.kind, TreeKind::ValDef(value) if value.rhs == Some(declaration.typed_initializer))
+            || assignment_source != mutable.source_assignment
+            || assignment_typed != mutable.typed_assignment
+            || tasty.typed_bindings.typed_at(source_id, assignment_source) != Some(assignment_typed)
+            || !matches!(tasty.typed_ast.try_get(declaration.typed_initializer).and_then(|tree| tasty.store.types.try_get(tree.ty)), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == declaration.target)
+        {
+            return Err(
+                "mutable initializer or assignment no longer matches its source receipt".into(),
+            );
+        }
+        mutable_reassignment_ref = Some(MutableReassignmentRef {
+            initializer_source_slot,
+            selected_local_slot: slot.slot(),
+            assignment_rhs_slot,
+        });
+    }
+    let conditional_selected = conditional_selection.map(|selection| selection.selected);
     let local_alias_copy = local_reference_alias
         .map(|alias| {
             let source_index = local_symbols
@@ -2571,7 +2723,9 @@ fn validate_two_local_constructor_pair(
                                   required_receiver: Option<SymbolId>,
                                   required_formal: Option<SymbolId>|
      -> Result<LocalReceiverUnitCallRef, String> {
-        let call_prefix = if has_alias || has_conditional_selection {
+        let call_prefix = if has_mutable_reassignment {
+            4
+        } else if has_alias || has_conditional_selection {
             3
         } else {
             2
@@ -2664,6 +2818,15 @@ fn validate_two_local_constructor_pair(
                     .and_then(|symbol| locals.iter().find(|local| local.symbol == symbol))
                     .map(|local| local.scope)
             })
+            .or_else(|| {
+                has_mutable_reassignment
+                    .then_some(binding.receiver)
+                    .filter(|symbol| {
+                        Some(*symbol) == mutable_assignment.map(|assignment| assignment.local)
+                    })
+                    .and_then(|symbol| locals.iter().find(|local| local.symbol == symbol))
+                    .map(|local| local.scope)
+            })
             .ok_or_else(|| "Counter.set receiver has no authenticated local binding".to_owned())?;
         if binding.receiver_scope != receiver_scope {
             return Err("Counter.set receiver scope differs from its initialized local".into());
@@ -2719,9 +2882,21 @@ fn validate_two_local_constructor_pair(
             validate_receiver_call(
                 binding,
                 0,
-                Some(conditional_selected.unwrap_or(pair_first_receiver)),
+                Some(if has_mutable_reassignment {
+                    mutable_assignment
+                        .map(|assignment| assignment.local)
+                        .unwrap_or(pair_first_receiver)
+                } else {
+                    conditional_selected.unwrap_or(pair_first_receiver)
+                }),
                 Some(if has_conditional_selection {
                     method.parameters()[3].symbol()
+                } else if has_mutable_reassignment {
+                    tasty
+                        .typed_bindings
+                        .local_receiver_unit_call(source_id, caller)
+                        .map(|call| call.argument_formal)
+                        .unwrap_or(pair.method_formals[1])
                 } else {
                     pair.method_formals[1]
                 }),
@@ -2806,6 +2981,8 @@ fn validate_two_local_constructor_pair(
         || method.descriptor().as_str()
             != if has_conditional_selection {
                 format!("(IIZI)L{};", outer_metadata.identity().internal_name())
+            } else if has_mutable_reassignment {
+                format!("(III)L{};", outer_metadata.identity().internal_name())
             } else {
                 format!("(II)L{};", outer_metadata.identity().internal_name())
             }
@@ -2823,6 +3000,7 @@ fn validate_two_local_constructor_pair(
             | PairedBlockShape::TwoLocalsTwoCalls
             | PairedBlockShape::TwoLocalsAliasTwoCalls
             | PairedBlockShape::ThreeLocalsConditionalSelection
+            | PairedBlockShape::ThreeLocalsMutableReassignmentOneCall
     ) {
         return Err(
             "two-local proof does not retain an accepted ordered statement/proof shape".into(),
@@ -2836,6 +3014,7 @@ fn validate_two_local_constructor_pair(
         local_alias_copy,
         local_receiver_call,
         local_receiver_call_pair,
+        mutable_reassignment: mutable_reassignment_ref,
         conditional_selection: conditional_selection_ref,
         max_stack: 4,
         max_locals: layout.max_locals(),
@@ -3331,6 +3510,7 @@ fn validate_formal_local_constructor_pair(
         local_alias_copy: None,
         local_receiver_call: None,
         local_receiver_call_pair: None,
+        mutable_reassignment: None,
         conditional_selection: None,
         max_stack: 4,
         max_locals: layout.max_locals(),
@@ -3823,6 +4003,7 @@ fn validate_mixed_constructor_pair(
         local_alias_copy: None,
         local_receiver_call: None,
         local_receiver_call_pair: None,
+        mutable_reassignment: None,
         conditional_selection: None,
         max_stack,
         max_locals: 3,
@@ -5512,6 +5693,17 @@ fn validate_cross_class_call_code(
                     ));
                 }
             }
+            if let Some(reassignment) = mixed_pair.mutable_reassignment {
+                take_factory_local(
+                    code.code,
+                    &mut pc,
+                    false,
+                    reassignment.initializer_source_slot,
+                )?;
+                take_factory_local(code.code, &mut pc, true, reassignment.selected_local_slot)?;
+                take_factory_local(code.code, &mut pc, false, reassignment.assignment_rhs_slot)?;
+                take_factory_local(code.code, &mut pc, true, reassignment.selected_local_slot)?;
+            }
             if let Some(alias) = mixed_pair.local_alias_copy {
                 take_factory_local(code.code, &mut pc, false, alias.source_local_slot)?;
                 take_factory_local(code.code, &mut pc, true, alias.alias_local_slot)?;
@@ -6826,7 +7018,7 @@ fn is_unit_type(definitions: &Definitions, ty: dotty_core::TypeId) -> bool {
 mod paired_block_shape_tests {
     use super::{PairedBlockShape, PairedStatementKind, classify_paired_block_shape};
 
-    use PairedStatementKind::{Apply, Other, ValDef};
+    use PairedStatementKind::{Apply, Assign, Other, ValDef};
 
     fn classify(
         source: &[PairedStatementKind],
@@ -6835,7 +7027,7 @@ mod paired_block_shape_tests {
         two_calls: bool,
         alias: bool,
     ) -> PairedBlockShape {
-        classify_paired_block_shape(source, typed, one_call, two_calls, alias, false)
+        classify_paired_block_shape(source, typed, one_call, two_calls, alias, false, false)
     }
 
     #[test]
@@ -6896,6 +7088,7 @@ mod paired_block_shape_tests {
                 false,
                 false,
                 true,
+                false,
             ),
             PairedBlockShape::ThreeLocalsConditionalSelection
         );
@@ -6907,6 +7100,7 @@ mod paired_block_shape_tests {
                 false,
                 false,
                 true,
+                false,
             ),
             PairedBlockShape::ReceiptMismatch
         );
@@ -6969,6 +7163,46 @@ mod paired_block_shape_tests {
                 false
             ),
             PairedBlockShape::ReceiptMismatch
+        );
+    }
+
+    #[test]
+    fn recognizes_mutable_reassignment_only_with_exact_assignment_and_call_receipts() {
+        assert_eq!(
+            classify_paired_block_shape(
+                &[ValDef, ValDef, ValDef, Assign, Apply],
+                &[ValDef, ValDef, ValDef, Assign, Apply],
+                true,
+                false,
+                false,
+                false,
+                true,
+            ),
+            PairedBlockShape::ThreeLocalsMutableReassignmentOneCall
+        );
+        assert_eq!(
+            classify_paired_block_shape(
+                &[ValDef, ValDef, ValDef, Assign, Apply],
+                &[ValDef, ValDef, ValDef, Assign, Apply],
+                true,
+                false,
+                false,
+                false,
+                false,
+            ),
+            PairedBlockShape::ReceiptMismatch
+        );
+        assert_eq!(
+            classify_paired_block_shape(
+                &[ValDef, ValDef, ValDef, Assign, Apply],
+                &[ValDef, ValDef, ValDef, Apply, Assign],
+                true,
+                false,
+                false,
+                false,
+                true,
+            ),
+            PairedBlockShape::Unclassified
         );
     }
 }

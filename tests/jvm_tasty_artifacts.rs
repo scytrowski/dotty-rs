@@ -840,31 +840,79 @@ public final class ReferenceLocalBatchHarness {
 }
 
 #[test]
-fn mutable_reference_rebinding_baseline_rejects_before_the_paired_callback() {
-    use std::cell::Cell;
-
-    let callback_reached = Cell::new(false);
-    let result = with_paired_jvm_tasty_batch_plan(
+fn mutable_reference_rebinding_emits_the_exact_six_artifact_batch() {
+    let first = emit_paired_jvm_tasty_batch(
         MUTABLE_REFERENCE_REBINDING_BATCH,
         "MutableReferenceRebinding.scala",
         SourceId::from_index(23050),
-        |_| callback_reached.set(true),
-    );
+    )
+    .expect("the exact mutable Counter rebinding source produces a paired batch");
+    let second = emit_paired_jvm_tasty_batch(
+        MUTABLE_REFERENCE_REBINDING_BATCH,
+        "MutableReferenceRebinding.scala",
+        SourceId::from_index(23051),
+    )
+    .expect("a fresh source session produces the same paired batch");
 
-    assert!(
-        matches!(
-            result,
-            Err(PairedPlanError::BatchUnit {
-                phase: "cross-class constructor-call identity proof",
-                ref reason,
-            }) if reason == "SourceShape(\"candidate method must have one plain formal clause and a concrete public body\")"
-        ),
-        "unexpected first paired-planning result: {result:?}"
+    let expected = [
+        ("example/Counter.class", "example/Counter.tasty"),
+        ("example/Pair.class", "example/Pair.tasty"),
+        ("example/PairFactory.class", "example/PairFactory.tasty"),
+    ];
+    assert_eq!(first.source_id(), SourceId::from_index(23050));
+    assert_eq!(first.classes().len(), expected.len());
+    assert_eq!(second.classes().len(), expected.len());
+    for ((first, second), (class_path, tasty_path)) in
+        first.classes().iter().zip(second.classes()).zip(expected)
+    {
+        assert_eq!(first.classfile_path(), class_path);
+        assert_eq!(first.tasty_path(), tasty_path);
+        assert_eq!(first.classfile_path(), second.classfile_path());
+        assert_eq!(first.tasty_path(), second.tasty_path());
+        assert_eq!(first.classfile_bytes(), second.classfile_bytes());
+        assert_eq!(first.tasty_bytes(), second.tasty_bytes());
+        assert_eq!(first.tasty_link_id(), second.tasty_link_id());
+        let tasty = TastyFile::parse_and_validate_scala_3_9(first.tasty_bytes()).unwrap();
+        assert_eq!(
+            (
+                tasty.header().major_version,
+                tasty.header().minor_version,
+                tasty.header().experimental_version,
+            ),
+            (28, 9, 0)
+        );
+        assert_eq!(
+            first.tasty_link_id(),
+            TastyLinkId::from_bytes(tasty.header().uuid)
+        );
+        let mut reader = Reader::new(first.classfile_bytes());
+        let class = ClassFile::decode(&mut reader).unwrap();
+        assert!(reader.is_at_end());
+        assert_eq!((class.version.major, class.version.minor), (65, 0));
+        assert_eq!(class.tasty_link_id().unwrap(), Some(first.tasty_link_id()));
+        validate_classfile_tasty_link(&class, first.tasty_bytes()).unwrap();
+    }
+
+    let publication = TestDirectory::new("mutable-rebinding-six-artifacts");
+    let destination = publication.path().join("classes");
+    assert_eq!(
+        publish_paired_batch(&destination, &first, None)
+            .unwrap()
+            .len(),
+        6
     );
-    assert!(
-        !callback_reached.get(),
-        "rejected planning cannot reach its consumer"
-    );
+    for (index, fault) in (1..=6)
+        .map(BatchPublishFault::AfterStagedFiles)
+        .chain([
+            BatchPublishFault::BeforePromotion,
+            BatchPublishFault::AfterPromotion,
+        ])
+        .enumerate()
+    {
+        let failed_destination = publication.path().join(format!("failed-{index}"));
+        assert!(publish_paired_batch(&failed_destination, &first, Some(fault)).is_err());
+        assert!(!failed_destination.exists(), "fault case {index}");
+    }
 }
 
 #[test]
