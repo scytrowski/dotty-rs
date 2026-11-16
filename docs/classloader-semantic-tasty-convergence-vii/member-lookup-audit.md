@@ -112,8 +112,18 @@ Validation on test commit `58cd7780a79c449bfecdff06023a1c93113371c6`:
 - `cargo fmt --all -- --check`, `python3 tools/check-frontend-boundaries.py`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked`, and `git diff --check` — passed; the focused classloader Clippy check also passed at the listed commit.
 - The required JDK gate with `DOTTY_CLASSFILE_REQUIRE_JDK=1` — passed using Temurin 21.0.13+9-LTS.
 
-Hosted PR CI and independent review URLs are added to this receipt after they
-are available.
+## Hosted validation and review tracking
+
+The PR was opened at
+[scytrowski/dotty-rs#2335](https://github.com/scytrowski/dotty-rs/pull/2335).
+These hosted workflows were running on PR head
+`d9b91df44c35d554ab8a4f173dbde02436f6aaec` when recorded:
+
+- [CI run 43908581367](https://github.com/scytrowski/dotty-rs/actions/runs/43908581367) — in progress.
+- [Typer focused audit run 43908581676](https://github.com/scytrowski/dotty-rs/actions/runs/43908581676) — in progress.
+- [JVM TASTy factory Scala consumer run 43908581577](https://github.com/scytrowski/dotty-rs/actions/runs/43908581577) — in progress.
+
+Independent review tracking is on the [PR reviews tab](https://github.com/scytrowski/dotty-rs/pull/2335/reviews); review is pending and owned by the orchestrator.
 
 The historical frozen #1927/#1931 14-unit/126-row comparator and #1995
 four-method evidence remain unchanged.
