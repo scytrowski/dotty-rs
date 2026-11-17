@@ -1343,7 +1343,7 @@ fn build_tokens(
         }
     }
 
-    fuse_case_declarations(source, &mut tokens)?;
+    fuse_case_declarations(source, &mut tokens);
     classify_end_markers(source, &mut tokens);
 
     Ok(tokens)
@@ -1951,35 +1951,24 @@ fn next_real_token(tokens: &[Token], index: usize) -> Option<&Token> {
         .find(|token| !is_layout_token(token.kind))
 }
 
-fn fuse_case_declarations(source: &str, tokens: &mut Vec<Token>) -> Result<(), TextRangeError> {
-    let mut index = 0;
-    while index + 1 < tokens.len() {
-        if has_source_line_break(
-            source,
-            tokens[index].span.end(),
-            tokens[index + 1].span.start(),
-        ) {
-            index += 1;
-            continue;
+fn fuse_case_declarations(source: &str, tokens: &mut Vec<Token>) {
+    // Compact in place. dedup_by passes the later token first and retains
+    // the earlier one when the pair is fused.
+    tokens.dedup_by(|current, previous| {
+        if previous.kind != TokenKind::Keyword(HardKeyword::Case) {
+            return false;
         }
-        let Some(fused_kind) = (match (tokens[index].kind, tokens[index + 1].kind) {
-            (TokenKind::Keyword(HardKeyword::Case), TokenKind::Keyword(HardKeyword::Class)) => {
-                Some(TokenKind::CaseClass)
-            }
-            (TokenKind::Keyword(HardKeyword::Case), TokenKind::Keyword(HardKeyword::Object)) => {
-                Some(TokenKind::CaseObject)
-            }
-            _ => None,
-        }) else {
-            index += 1;
-            continue;
+        let kind = match current.kind {
+            TokenKind::Keyword(HardKeyword::Class) => TokenKind::CaseClass,
+            TokenKind::Keyword(HardKeyword::Object) => TokenKind::CaseObject,
+            _ => return false,
         };
-
-        let span = TextRange::new(tokens[index].span.start(), tokens[index + 1].span.end())?;
-        tokens[index] = Token::new(fused_kind, span);
-        tokens.remove(index + 1);
-    }
-    Ok(())
+        if has_source_line_break(source, previous.span.end(), current.span.start()) {
+            return false;
+        }
+        *previous = Token::new(kind, previous.span.cover(current.span));
+        true
+    });
 }
 
 fn classify_end_markers(source: &str, tokens: &mut [Token]) {
@@ -2709,6 +2698,34 @@ mod tests {
                 TokenKind::CaseObject,
                 TokenKind::Identifier,
                 TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn fuses_repeated_declarations_with_exact_source_ranges() {
+        let source = "case /* doc */ class C\ncase object D\ncase\nclass E";
+        let scanner = ContextualScanner::new(source).unwrap();
+        let declarations: Vec<_> = scanner
+            .tokens()
+            .iter()
+            .filter(|token| {
+                matches!(
+                    token.kind,
+                    TokenKind::CaseClass
+                        | TokenKind::CaseObject
+                        | TokenKind::Keyword(HardKeyword::Case | HardKeyword::Class)
+                )
+            })
+            .map(|token| (token.kind, token.span.start(), token.span.end()))
+            .collect();
+        assert_eq!(
+            declarations,
+            [
+                (TokenKind::CaseClass, 0, 20),
+                (TokenKind::CaseObject, 23, 34),
+                (TokenKind::Keyword(HardKeyword::Case), 37, 41),
+                (TokenKind::Keyword(HardKeyword::Class), 42, 47),
             ]
         );
     }

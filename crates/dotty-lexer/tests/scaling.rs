@@ -32,3 +32,14 @@ fn argument_lists() {
         }
     }
 }
+
+#[test]
+#[ignore = "manual release-mode scaling benchmark"]
+fn case_declarations() {
+    for count in [1000, 2000, 4000] {
+        let source: String = (0..count)
+            .map(|n| format!("case class C{n}(x: Int)\n"))
+            .collect();
+        println!("{count} case classes: {:?}", median_scan(&source));
+    }
+}
