@@ -163,41 +163,25 @@ pub(crate) fn integer_radix(text: Option<&str>) -> u32 {
 }
 
 fn parse_long_literal(spelling: &str) -> Option<i64> {
-    let digits = spelling.strip_suffix(['l', 'L'])?.replace('_', "");
-    let (negative, digits) = if let Some(digits) = digits.strip_prefix('-') {
-        (true, digits)
-    } else if let Some(digits) = digits.strip_prefix('+') {
-        (false, digits)
-    } else {
-        (false, digits.as_str())
-    };
-    let radix = integer_radix(Some(digits));
-    let digits = digits
-        .strip_prefix("0x")
-        .or_else(|| digits.strip_prefix("0X"))
-        .or_else(|| digits.strip_prefix("0b"))
-        .or_else(|| digits.strip_prefix("0B"))
-        .unwrap_or(digits);
-    let value = u64::from_str_radix(digits, radix).ok()?;
-    if negative {
-        if radix != 10 {
-            // Non-decimal Long spellings represent a signed 64-bit bit
-            // pattern. Apply the source minus sign to that value with the
-            // same wrapping arithmetic used by the JVM Long representation.
-            Some((value as i64).wrapping_neg())
-        } else if value == 1_u64 << 63 {
-            Some(i64::MIN)
+    let spelling = spelling.strip_suffix(['l', 'L'])?.replace('_', "");
+    if let Some((digits, radix, negative)) = non_decimal_digits(&spelling) {
+        let value = u64::from_str_radix(digits, radix).ok()? as i64;
+        Some(if negative {
+            value.wrapping_neg()
         } else {
-            i64::try_from(value).ok()?.checked_neg()
-        }
-    } else if radix != 10 {
-        // Scala accepts a full-width non-decimal Long bit pattern and
-        // interprets it as a signed two's-complement value (e.g. the
-        // hexadecimal spelling 0xFFFFFFFFFFFFFFFFL denotes -1).
-        Some(value as i64)
+            value
+        })
     } else {
-        i64::try_from(value).ok()
+        spelling.parse().ok()
     }
+}
+
+/// Non-decimal Scala literals encode a bit pattern at the destination width.
+/// The optional unary sign applies after interpreting that pattern.
+fn non_decimal_digits(spelling: &str) -> Option<(&str, u32, bool)> {
+    let digits = spelling.strip_prefix(['-', '+']).unwrap_or(spelling);
+    let radix = integer_radix(Some(digits));
+    (radix != 10).then(|| (&digits[2..], radix, spelling.starts_with('-')))
 }
 
 fn parse_float_literal(spelling: &str) -> Option<f32> {
@@ -230,30 +214,16 @@ fn numeric_constant(token_kind: TokenKind, spelling: &str) -> Option<Constant> {
 }
 
 fn parse_integer_literal(spelling: &str) -> Option<i32> {
-    let digits = spelling.replace('_', "");
-    let (negative, digits) = if let Some(digits) = digits.strip_prefix('-') {
-        (true, digits)
-    } else if let Some(digits) = digits.strip_prefix('+') {
-        (false, digits)
-    } else {
-        (false, digits.as_str())
-    };
-    let radix = integer_radix(Some(digits));
-    let digits = digits
-        .strip_prefix("0x")
-        .or_else(|| digits.strip_prefix("0X"))
-        .or_else(|| digits.strip_prefix("0b"))
-        .or_else(|| digits.strip_prefix("0B"))
-        .unwrap_or(digits);
-    let value = u64::from_str_radix(digits, radix).ok()?;
-    if negative {
-        if value == 1_u64 << 31 {
-            Some(i32::MIN)
+    let spelling = spelling.replace('_', "");
+    if let Some((digits, radix, negative)) = non_decimal_digits(&spelling) {
+        let value = u32::from_str_radix(digits, radix).ok()? as i32;
+        Some(if negative {
+            value.wrapping_neg()
         } else {
-            i32::try_from(value).ok()?.checked_neg()
-        }
+            value
+        })
     } else {
-        i32::try_from(value).ok()
+        spelling.parse().ok()
     }
 }
 
@@ -457,6 +427,22 @@ mod tests {
                 value: Constant::Long(255)
             })
         ));
+    }
+
+    #[test]
+    fn singleton_ints_use_32_bit_patterns_only_for_non_decimal_bases() {
+        for (spelling, expected) in [
+            ("0xFFFF_FFFF", Some(-1)),
+            ("-0xFFFFFFFF", Some(1)),
+            ("0b10000000000000000000000000000000", Some(i32::MIN)),
+            ("-0x80000000", Some(i32::MIN)),
+            ("0x1_0000_0000", None),
+            ("2147483648", None),
+            ("-2147483648", Some(i32::MIN)),
+            ("-2147483649", None),
+        ] {
+            assert_eq!(parse_integer_literal(spelling), expected, "{spelling}");
+        }
     }
 
     #[test]
