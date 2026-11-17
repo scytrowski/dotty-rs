@@ -113,7 +113,9 @@ where
 
         let body_start = self.current().span.start();
         if crate::expr::can_start_expr(self.current().kind)
-            || !self.has_physical_line_break(arrow_start, body_start)
+            || !self
+                .line_break_in_gap(arrow_start, body_start)
+                .unwrap_or(true)
         {
             return false;
         }
@@ -223,10 +225,8 @@ where
     ) -> TreeId<Untyped> {
         self.consume_case_newlines();
         let body_starts_after_newline = self
-            .source
-            .as_str()
-            .get(mark.start as usize..self.current().span.start() as usize)
-            .is_some_and(|gap| gap.chars().any(dotty_core::is_line_break_char));
+            .line_break_in_gap(mark.start, self.current().span.start())
+            .unwrap_or(false);
         if body_indent.is_none() && body_starts_after_newline {
             // A case whose body starts on the next line may have no eager or
             // parser-requested body Indent. Give the scanner a chance to close

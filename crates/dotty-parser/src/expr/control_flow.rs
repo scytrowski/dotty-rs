@@ -384,7 +384,9 @@ where
         let first = self.first_catch_handler_token();
         let (kind, start) = (first.kind, first.span.start());
         let requests_feedback_region = kind == TokenKind::Keyword(dotty_core::HardKeyword::Case)
-            && self.has_physical_line_break(self.current().span.end(), start)
+            && self
+                .line_break_in_gap(self.current().span.end(), start)
+                .unwrap_or(true)
             && self.catch_has_multiple_unindented_cases();
         let case_region = if requests_feedback_region {
             self.observe_match_cases_indented()

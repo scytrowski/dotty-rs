@@ -299,7 +299,10 @@ where
             pattern_offset += 1;
         }
         let pattern = self.cursor.lookahead(pattern_offset).clone();
-        if !self.has_physical_line_break(self.last_real_token_end, pattern.span.start()) {
+        if !self
+            .line_break_in_gap(self.last_real_token_end, pattern.span.start())
+            .unwrap_or(true)
+        {
             return false;
         }
         if pattern.kind == TokenKind::Keyword(HardKeyword::Case) {

@@ -242,10 +242,8 @@ where
                     Location::Elsewhere | Location::InBlock
                 )
                 && self
-                    .source
-                    .as_str()
-                    .get(assignment_end as usize..self.current().span.start() as usize)
-                    .is_some_and(|gap| gap.chars().any(dotty_core::is_line_break_char));
+                    .line_break_in_gap(assignment_end, self.current().span.start())
+                    .unwrap_or(false);
             let rhs = if let Some(start) = missing_rhs_start {
                 self.report_issue(ParseIssue::Expression(
                     ExpressionIssue::MissingAssignmentRhs {

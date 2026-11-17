@@ -335,7 +335,9 @@ where
         if matches!(
             self.current().kind,
             TokenKind::Newline | TokenKind::Newlines
-        ) || self.has_physical_line_break(operator_end, self.current().span.start())
+        ) || self
+            .line_break_in_gap(operator_end, self.current().span.start())
+            .unwrap_or(true)
         {
             self.report_issue(ParseIssue::Expression(
                 ExpressionIssue::PrefixOperandMustShareLine {
@@ -376,19 +378,13 @@ where
                     .token_text(&operand)
                     .ok()
                     .is_some_and(is_term_operator_identifier))
-            || self.has_physical_line_break(self.current().span.end(), operand.span.start())
+            || self
+                .line_break_in_gap(self.current().span.end(), operand.span.start())
+                .unwrap_or(true)
         {
             return None;
         }
 
         self.intern_current_term_name().ok()
-    }
-
-    pub(crate) fn has_physical_line_break(&self, start: u32, end: u32) -> bool {
-        self.source
-            .as_str()
-            .get(start as usize..end as usize)
-            .map(|text| text.chars().any(dotty_core::is_line_break_char))
-            .unwrap_or(true)
     }
 }

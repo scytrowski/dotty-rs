@@ -216,10 +216,8 @@ where
         let next_start = self.cursor.lookahead(lookahead).span.start();
         let current_end = self.current().span.end();
         let gap_has_line_break = self
-            .source
-            .as_str()
-            .get(current_end as usize..next_start as usize)
-            .is_some_and(|gap| gap.chars().any(dotty_core::is_line_break_char));
+            .line_break_in_gap(current_end, next_start)
+            .unwrap_or(false);
         if lookahead == 1 && !gap_has_line_break {
             return None;
         }

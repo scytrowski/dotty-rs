@@ -596,10 +596,8 @@ where
         let body_start = body.span.start();
         let arrow_end = self.current().span.end();
         let has_line_break = self
-            .source
-            .as_str()
-            .get(arrow_end as usize..body_start as usize)
-            .is_some_and(|gap| gap.chars().any(dotty_core::is_line_break_char));
+            .line_break_in_gap(arrow_end, body_start)
+            .unwrap_or(false);
         has_line_break && self.can_start_block_stat(&body)
     }
 

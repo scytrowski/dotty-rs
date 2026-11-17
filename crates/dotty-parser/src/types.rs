@@ -1472,20 +1472,14 @@ where
         let next = self.cursor.lookahead(lookahead).clone();
         if next.kind == TokenKind::Punctuation(Punctuation::LeftBrace)
             || matches!(self.token_text(&next).ok(), Some("->" | "?->"))
-            || self.physical_line_break_between(self.current().span.end(), next.span.start())
+            || self
+                .line_break_in_gap(self.current().span.end(), next.span.start())
+                .unwrap_or(true)
         {
             return true;
         }
 
         !self.can_start_type_operand(&next)
-    }
-
-    fn physical_line_break_between(&self, start: u32, end: u32) -> bool {
-        self.source
-            .as_str()
-            .get(start as usize..end as usize)
-            .map(|text| text.chars().any(dotty_core::is_line_break_char))
-            .unwrap_or(true)
     }
 
     /// Parses Dotty's capture-set source grammar. The returned references are

@@ -65,7 +65,9 @@ where
         let has_braced_cases = next_kind == TokenKind::Punctuation(Punctuation::LeftBrace);
         let has_inline_case = self.features().sub_cases
             && next_kind == TokenKind::Keyword(dotty_core::HardKeyword::Case)
-            && !self.has_physical_line_break(self.current().span.end(), next_token.span.start());
+            && !self
+                .line_break_in_gap(self.current().span.end(), next_token.span.start())
+                .unwrap_or(true);
         let case_region = if !has_braced_cases && !has_inline_case {
             // Ask the scanner to identify the active case region, whether
             // its Indent was emitted eagerly or opened by parser feedback.
