@@ -71,7 +71,7 @@ fn method_tree(
 
 #[test]
 fn plain_constructor_parameter_is_visible_to_own_methods_without_accessor() {
-    let text = "class C(xs: Int) { def read: Int = xs; def shadow(xs: Int): Int = xs }";
+    let text = "class C(xs: Int) { def read: Int = xs; def shadow(xs: Int): Int = xs; def local: Int = { val xs: Int = 2; xs } }";
     let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
     let class = class_symbol(&parsed, &store, &index, source, "C");
     let parameter_tree = parsed
@@ -93,8 +93,10 @@ fn plain_constructor_parameter_is_visible_to_own_methods_without_accessor() {
     let parameter = index.symbol_at(source, parameter_tree).unwrap();
     let read_tree = method_tree(&parsed, &store, "read");
     let shadow_tree = method_tree(&parsed, &store, "shadow");
+    let local_tree = method_tree(&parsed, &store, "local");
     let read_ident = ident_in_method(&parsed, read_tree, "xs", &store);
     let shadow_ident = ident_in_method(&parsed, shadow_tree, "xs", &store);
+    let local_ident = ident_in_method(&parsed, local_tree, "xs", &store);
     let shadow_parameter = match &parsed.ast.get(shadow_tree).kind {
         TreeKind::DefDef(method) => index
             .symbol_at(source, method.value_param_clauses[0][0])
@@ -139,6 +141,14 @@ fn plain_constructor_parameter_is_visible_to_own_methods_without_accessor() {
         shadow_parameter,
         "method parameters keep their normal lexical precedence"
     );
+    typer.type_method_definition(local_tree).unwrap();
+    let local_target = typed_ident_target(&typer, source, local_ident);
+    assert_eq!(
+        typer.store().symbols.get(local_target).owner,
+        index.symbol_at(source, local_tree),
+        "local declarations keep their normal lexical precedence"
+    );
+    assert_ne!(local_target, parameter);
 }
 
 #[test]
@@ -278,6 +288,10 @@ fn late_method_failure_rolls_back_parameter_completion_and_retry_succeeds() {
     assert_eq!(typer.source_typed_index().get(source, bad_tree), None);
     assert_eq!(typer.source_typed_index().get(source, bad_rhs), None);
     assert_eq!(typer.source_typed_index().get(source, bad_ident), None);
+    assert!(
+        typer.expression_scopes.is_empty(),
+        "a failed method does not leave a live expression scope"
+    );
     typer.type_method_definition(good_tree).unwrap();
     let good_ident = ident_in_method(&parsed, good_tree, "xs", typer.store());
     assert_eq!(typed_ident_target(&typer, source, good_ident), parameter);
