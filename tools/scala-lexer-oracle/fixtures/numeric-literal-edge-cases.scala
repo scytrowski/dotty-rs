@@ -10,3 +10,6 @@ val missingDecimalDigits = 1.e2
 val invalidLongSuffix = 1.0L
 val invalidHexSuffix = 0xFFd
 val repeatedSeparators = 1__0
+val leadingDotExponent = .5e2
+val signedFloatExponent = .5E-1f
+val separatedBasePrefix = 0x_FF

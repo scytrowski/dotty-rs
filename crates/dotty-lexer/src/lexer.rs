@@ -834,7 +834,7 @@ impl<'source> RawLexer<'source> {
         if self.cursor.peek() == Some('.') {
             let _ = self.cursor.bump();
             kind = RawTokenKind::DecimalLiteral;
-            self.scan_decimal_digits(start, NumericComponent::FractionalPart)?;
+            self.consume_digits(start, 10)?;
         } else {
             if self.cursor.peek() == Some('0')
                 && matches!(self.cursor.peek_nth(1), Some('x' | 'X' | 'b' | 'B'))
@@ -864,29 +864,29 @@ impl<'source> RawLexer<'source> {
             {
                 let _ = self.cursor.bump();
                 kind = RawTokenKind::DecimalLiteral;
-                self.scan_decimal_digits(start, NumericComponent::FractionalPart)?;
+                self.consume_digits(start, 10)?;
             }
+        }
 
-            if base == 10 && matches!(self.cursor.peek(), Some('e' | 'E')) {
+        if base == 10 && matches!(self.cursor.peek(), Some('e' | 'E')) {
+            let _ = self.cursor.bump();
+            kind = RawTokenKind::ExponentLiteral;
+            if matches!(self.cursor.peek(), Some('+' | '-')) {
                 let _ = self.cursor.bump();
-                kind = RawTokenKind::ExponentLiteral;
-                if matches!(self.cursor.peek(), Some('+' | '-')) {
-                    let _ = self.cursor.bump();
-                }
-                if !self
-                    .cursor
-                    .peek()
-                    .is_some_and(|character| character.is_ascii_digit())
-                {
-                    self.report_issue(
-                        start,
-                        LexerIssue::Numeric(NumericIssue::MissingDigits {
-                            component: NumericComponent::Exponent,
-                        }),
-                    )?;
-                } else {
-                    self.scan_decimal_digits(start, NumericComponent::Exponent)?;
-                }
+            }
+            if !self
+                .cursor
+                .peek()
+                .is_some_and(|character| character.is_ascii_digit())
+            {
+                self.report_issue(
+                    start,
+                    LexerIssue::Numeric(NumericIssue::MissingDigits {
+                        component: NumericComponent::Exponent,
+                    }),
+                )?;
+            } else {
+                self.consume_digits(start, 10)?;
             }
         }
 
@@ -938,31 +938,7 @@ impl<'source> RawLexer<'source> {
     }
 
     fn scan_based_digits(&mut self, start: u32, base: u32) -> Result<(), RawLexerError> {
-        let mut saw_digit = false;
-        let mut trailing_separator = false;
-
-        while let Some(character) = self.cursor.peek() {
-            if digit_value(character).is_some_and(|digit| digit < base) {
-                saw_digit = true;
-                trailing_separator = false;
-                let _ = self.cursor.bump();
-            } else if character == '_' {
-                if !saw_digit || trailing_separator {
-                    self.report_issue(
-                        start,
-                        LexerIssue::Numeric(NumericIssue::MisplacedSeparator),
-                    )?;
-                }
-                trailing_separator = true;
-                let _ = self.cursor.bump();
-            } else {
-                break;
-            }
-        }
-
-        if trailing_separator {
-            self.report_issue(start, LexerIssue::Numeric(NumericIssue::TrailingSeparator))?;
-        }
+        let saw_digit = self.consume_digits(start, base)?;
         let invalid_non_decimal_digit = base != 10
             && self.cursor.peek().is_some_and(|character| {
                 character.is_ascii_alphanumeric() && !(saw_digit && matches!(character, 'l' | 'L'))
@@ -986,26 +962,16 @@ impl<'source> RawLexer<'source> {
         Ok(())
     }
 
-    fn scan_decimal_digits(
-        &mut self,
-        start: u32,
-        component: NumericComponent,
-    ) -> Result<(), RawLexerError> {
+    fn consume_digits(&mut self, start: u32, base: u32) -> Result<bool, RawLexerError> {
         let mut saw_digit = false;
         let mut trailing_separator = false;
 
         while let Some(character) = self.cursor.peek() {
-            if character.is_ascii_digit() {
+            if digit_value(character).is_some_and(|digit| digit < base) {
                 saw_digit = true;
                 trailing_separator = false;
                 let _ = self.cursor.bump();
             } else if character == '_' {
-                if !saw_digit || trailing_separator {
-                    self.report_issue(
-                        start,
-                        LexerIssue::Numeric(NumericIssue::MisplacedSeparator),
-                    )?;
-                }
                 trailing_separator = true;
                 let _ = self.cursor.bump();
             } else {
@@ -1016,14 +982,7 @@ impl<'source> RawLexer<'source> {
         if trailing_separator {
             self.report_issue(start, LexerIssue::Numeric(NumericIssue::TrailingSeparator))?;
         }
-        if !saw_digit {
-            self.report_issue(
-                start,
-                LexerIssue::Numeric(NumericIssue::MissingDigits { component }),
-            )?;
-        }
-
-        Ok(())
+        Ok(saw_digit)
     }
 
     fn scan_char_literal(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
@@ -2788,6 +2747,27 @@ mod tests {
     }
 
     #[test]
+    fn scans_leading_dot_exponents_and_permitted_digit_separators() {
+        for (source, kind) in [
+            (".5e2", RawTokenKind::ExponentLiteral),
+            (".5E-1f", RawTokenKind::FloatLiteral),
+            ("1__000", RawTokenKind::IntegerLiteral),
+            ("0x_FF", RawTokenKind::IntegerLiteral),
+            ("0b__10L", RawTokenKind::LongLiteral),
+            ("1.2__3e4__5", RawTokenKind::ExponentLiteral),
+        ] {
+            let end = source.len() as u32;
+            let (items, diagnostics) = scan(source);
+            assert_eq!(
+                items,
+                [token(kind, 0, end), token(RawTokenKind::Eof, end, end)],
+                "{source}"
+            );
+            assert!(diagnostics.is_empty(), "{source}: {diagnostics:?}");
+        }
+    }
+
+    #[test]
     fn diagnoses_malformed_numeric_separators() {
         let (items, diagnostics) = scan("1_ 0x_1 1.0_");
 
@@ -2798,7 +2778,7 @@ mod tests {
                 ..
             })
         )));
-        assert_eq!(diagnostics.len(), 3);
+        assert_eq!(diagnostics.len(), 2);
         assert_eq!(
             diagnostics
                 .iter()
@@ -2806,7 +2786,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 &LexerIssue::Numeric(NumericIssue::TrailingSeparator),
-                &LexerIssue::Numeric(NumericIssue::MisplacedSeparator),
                 &LexerIssue::Numeric(NumericIssue::TrailingSeparator),
             ]
         );
@@ -2817,7 +2796,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 TextRange::new(0, 2).unwrap(),
-                TextRange::new(3, 5).unwrap(),
                 TextRange::new(8, 12).unwrap(),
             ]
         );
