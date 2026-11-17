@@ -8355,8 +8355,7 @@ mod tests {
         let definitions = Definitions::bootstrap(&mut store);
         let mut resolver =
             ClasspathSymbolResolver::new(class_path, definitions, LoadingSession::new());
-        let control_name =
-            BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Open");
+        let control_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Open");
         let committed_control = resolver
             .load_class(&mut store, &control_name)
             .expect("the genuine Open class commits before the bounded failure");
