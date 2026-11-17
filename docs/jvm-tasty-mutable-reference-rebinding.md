@@ -284,9 +284,11 @@ and `621fe24424e9a1a0115f2b7bc5578d542ae4925ac8293f31f3c55a5b03a88cc3`.
 | #2310 / [#2338](https://github.com/scytrowski/dotty-rs/pull/2338) | `fce6a7d6fe60056392df0fec69ea4507bc65d237` | [review](https://github.com/scytrowski/dotty-rs/pull/2338#pullrequestreview-5928078636) | `6afdb2dca88cf71a784aacf6bc895b58d7496a4f` | [run 43959735736](https://github.com/scytrowski/dotty-rs/actions/runs/43959735736) | [run 43959735743](https://github.com/scytrowski/dotty-rs/actions/runs/43959735743) |
 
 The source/oracle hashes, artifact hashes and UUIDs above are predecessor
-receipts. The final acceptance execution SHA and its hosted run URLs must be
-recorded separately after the final PR head has completed every required gate;
-predecessor green runs do not satisfy that final-head requirement.
+receipts. The acceptance code/test SHA and its hosted run URLs are recorded
+separately below for the exact SHA they validate. The later ledger-only commit
+has a distinct PR head and must complete its own hosted gates; neither
+predecessor runs nor the earlier code/test SHA are represented as checks for
+that newer head.
 
 ## Strict Scala gate status
 
@@ -384,12 +386,29 @@ invocation omitted the JDK from `PATH` and failed when an existing test tried
 to launch `javac`; the corrected invocation above passed.
 
 The execution SHA above is the code-and-test checkpoint used for this local
-receipt. The final acceptance PR head and its hosted CI run URLs are tracked
-separately in the PR so that the published checks correspond to the reviewed
-head; predecessor workflow runs in the preceding table are not represented as
-this attempt's checks. Hosted checks for the final PR head are pending; no
-final-head CI run URLs or successful hosted aggregate are claimed by this
-receipt.
+receipt. The exact-head hosted runs below validate the code/test checkpoint
+`7a0caf66dc18f42780e575ad78dd7236d2e35b2d`; these are not claimed as checks on
+the newer PR head created by this ledger-only update. Hosted CI must complete
+again for that new PR head before final acceptance. The predecessor workflow
+runs in the earlier table are not represented as this attempt's checks.
+
+For code/test HEAD
+[`7a0caf66dc18f42780e575ad78dd7236d2e35b2d`](https://github.com/scytrowski/dotty-rs/commit/7a0caf66dc18f42780e575ad78dd7236d2e35b2d),
+all required hosted jobs completed successfully:
+
+| Workflow | Job | Result |
+| --- | --- | --- |
+| [CI / JDK run 44082646003](https://github.com/scytrowski/dotty-rs/actions/runs/44082646003) | [Rust checks, job 134037025580](https://github.com/scytrowski/dotty-rs/actions/runs/44082646003/job/134037025580) | success |
+| [CI / JDK run 44082646003](https://github.com/scytrowski/dotty-rs/actions/runs/44082646003) | [Classfile/JDK gate, job 134037024859](https://github.com/scytrowski/dotty-rs/actions/runs/44082646003/job/134037024859) | success |
+| [Strict Scala run 44082646000](https://github.com/scytrowski/dotty-rs/actions/runs/44082646000) | [Shard 1/4, job 134037118110](https://github.com/scytrowski/dotty-rs/actions/runs/44082646000/job/134037118110) | success |
+| [Strict Scala run 44082646000](https://github.com/scytrowski/dotty-rs/actions/runs/44082646000) | [Shard 2/4, job 134037118325](https://github.com/scytrowski/dotty-rs/actions/runs/44082646000/job/134037118325) | success |
+| [Strict Scala run 44082646000](https://github.com/scytrowski/dotty-rs/actions/runs/44082646000) | [Shard 3/4, job 134037117989](https://github.com/scytrowski/dotty-rs/actions/runs/44082646000/job/134037117989) | success |
+| [Strict Scala run 44082646000](https://github.com/scytrowski/dotty-rs/actions/runs/44082646000) | [Shard 4/4, job 134037117541](https://github.com/scytrowski/dotty-rs/actions/runs/44082646000/job/134037117541) | success |
+| [Strict Scala run 44082646000](https://github.com/scytrowski/dotty-rs/actions/runs/44082646000) | [Aggregate and follow-up gates, job 134046505022](https://github.com/scytrowski/dotty-rs/actions/runs/44082646000/job/134046505022) | success |
+
+These hosted checks correspond to code/test HEAD `7a0caf66...`; this receipt
+update changes documentation only and creates a newer PR head that still
+requires its own successful hosted checks.
 
 The six-artifact regression can be selected with the exact command below. It
 must report exactly one passed test; Cargo's successful exit status alone is
