@@ -72,7 +72,7 @@ where
             let else_indent = self.source_line_indent_prefix(token.span.start());
             if self.context.block_end != Some(TokenKind::Punctuation(Punctuation::RightBrace))
                 && else_indent.len() < if_indent.len()
-                && if_indent.starts_with(&else_indent)
+                && if_indent.starts_with(else_indent)
             {
                 return None;
             }
@@ -381,14 +381,12 @@ where
         }
 
         self.consume_control_newlines();
-        let case_handler = self.catch_keyword_is_followed_by_cases();
         let first_body_token = self.first_catch_handler_token();
-        let requests_feedback_region = case_handler
-            && self.catch_has_multiple_unindented_cases()
-            && first_body_token.kind != TokenKind::Punctuation(Punctuation::LeftBrace)
-            && first_body_token.kind != TokenKind::Indent
+        let requests_feedback_region = first_body_token.kind
+            == TokenKind::Keyword(dotty_core::HardKeyword::Case)
             && self
-                .has_physical_line_break(self.current().span.end(), first_body_token.span.start());
+                .has_physical_line_break(self.current().span.end(), first_body_token.span.start())
+            && self.catch_has_multiple_unindented_cases();
         let case_region = if requests_feedback_region {
             self.observe_match_cases_indented()
         } else if first_body_token.kind == TokenKind::Indent {
@@ -406,17 +404,19 @@ where
         let mut delimiter_depth = 0u32;
         let mut layout_depth = 0u32;
         let mut first_case_column = None;
-        let line_index = self.source.line_index().ok();
 
         loop {
             let token = self.cursor.lookahead(offset).clone();
             match token.kind {
                 TokenKind::Eof => return false,
-                TokenKind::Punctuation(Punctuation::RightBrace) if delimiter_depth == 0 => {
+                TokenKind::Punctuation(
+                    Punctuation::RightParen | Punctuation::RightBracket | Punctuation::RightBrace,
+                ) if delimiter_depth == 0 => {
                     return false;
                 }
                 TokenKind::Indent => layout_depth += 1,
-                TokenKind::Outdent => layout_depth = layout_depth.saturating_sub(1),
+                TokenKind::Outdent if layout_depth == 0 => return false,
+                TokenKind::Outdent => layout_depth -= 1,
                 TokenKind::Punctuation(
                     Punctuation::LeftParen | Punctuation::LeftBracket | Punctuation::LeftBrace,
                 ) => delimiter_depth += 1,
@@ -426,15 +426,11 @@ where
                 TokenKind::Keyword(dotty_core::HardKeyword::Case)
                     if delimiter_depth == 0 && layout_depth == 0 =>
                 {
-                    if let Some(line_index) = &line_index {
-                        let column = line_index
-                            .utf8_column(self.source.as_str(), token.span.start())
-                            .ok();
-                        if first_case_column.is_some_and(|first| column == Some(first)) {
-                            return true;
-                        }
-                        first_case_column.get_or_insert(column.unwrap_or_default());
+                    let column = self.source_line_before(token.span.start()).chars().count();
+                    if first_case_column == Some(column) {
+                        return true;
                     }
+                    first_case_column.get_or_insert(column);
                 }
                 _ => {}
             }
@@ -451,37 +447,6 @@ where
             offset += 1;
         }
         self.cursor.lookahead(offset).clone()
-    }
-
-    fn catch_keyword_is_followed_by_cases(&mut self) -> bool {
-        let first = self.first_catch_handler_token();
-        match first.kind {
-            TokenKind::Keyword(dotty_core::HardKeyword::Case) => true,
-            TokenKind::Indent | TokenKind::Punctuation(Punctuation::LeftBrace) => {
-                let mut offset = 1;
-                while matches!(
-                    self.cursor.lookahead(offset).kind,
-                    TokenKind::Newline | TokenKind::Newlines
-                ) {
-                    offset += 1;
-                }
-                if matches!(
-                    self.cursor.lookahead(offset).kind,
-                    TokenKind::Indent | TokenKind::Punctuation(Punctuation::LeftBrace)
-                ) {
-                    offset += 1;
-                }
-                while matches!(
-                    self.cursor.lookahead(offset).kind,
-                    TokenKind::Newline | TokenKind::Newlines
-                ) {
-                    offset += 1;
-                }
-                self.cursor.lookahead(offset).kind
-                    == TokenKind::Keyword(dotty_core::HardKeyword::Case)
-            }
-            _ => false,
-        }
     }
 
     fn catch_starts_case_handler(&mut self) -> bool {
@@ -1967,6 +1932,27 @@ mod tests {
             TokenKind::Keyword(HardKeyword::Catch)
         );
         assert!(parser.catch_has_multiple_unindented_cases());
+    }
+
+    #[test]
+    fn catch_lookahead_stops_at_the_enclosing_argument_delimiter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "catch\n  case A => a)\n  case B",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Catch), 0, 5),
+                token(TokenKind::Keyword(HardKeyword::Case), 8, 12),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::Operator, 15, 17),
+                token(TokenKind::Identifier, 18, 19),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 19, 20),
+                token(TokenKind::Keyword(HardKeyword::Case), 23, 27),
+                token(TokenKind::Identifier, 28, 29),
+                token(TokenKind::Eof, 29, 29),
+            ],
+            &mut names,
+        );
+        assert!(!parser.catch_has_multiple_unindented_cases());
     }
 
     #[test]

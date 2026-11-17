@@ -145,6 +145,21 @@ where
         SourceSpan::new(self.source_id, Span::without_point(self.current().span))
     }
 
+    pub(crate) fn source_line_before(&self, offset: u32) -> &'src str {
+        self.source
+            .as_str()
+            .get(..offset as usize)
+            .unwrap_or_default()
+            .rsplit(dotty_core::is_line_break_char)
+            .next()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn source_line_indent_prefix(&self, offset: u32) -> &'src str {
+        let line = self.source_line_before(offset);
+        &line[..line.len() - line.trim_start_matches([' ', '\t']).len()]
+    }
+
     /// Returns the current parser context.
     pub const fn context(&self) -> &ParseContext {
         &self.context

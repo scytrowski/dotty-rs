@@ -124,7 +124,7 @@ where
         // boundaries remain malformed-body recovery cases.
         let case_indent = self.source_line_indent_prefix(case_start);
         let body_indent = self.source_line_indent_prefix(body_start);
-        body_indent.len() < case_indent.len() && case_indent.starts_with(&body_indent)
+        body_indent.len() < case_indent.len() && case_indent.starts_with(body_indent)
     }
 
     /// Parses a consecutive case list, leaving its enclosing `}`/`Outdent` untouched.

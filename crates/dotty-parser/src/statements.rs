@@ -746,7 +746,7 @@ where
                 if target != TokenKind::Keyword(*active_target) {
                     return false;
                 }
-                marker_indent.starts_with(&self.source_line_indent_prefix(*owner_start))
+                marker_indent.starts_with(self.source_line_indent_prefix(*owner_start))
             })
     }
 
@@ -776,11 +776,7 @@ where
 
         let owner_is_inline_else_if = self.ast.get(tree).position.is_some_and(|position| {
             let owner_start = position.span().range().start();
-            let source_before_owner = &self.source.as_str()[..owner_start as usize];
-            let owner_line_start = source_before_owner
-                .rfind(['\n', '\r', '\u{000c}', '\u{001a}'])
-                .map_or(0, |index| index + 1);
-            let prefix = &source_before_owner[owner_line_start..];
+            let prefix = self.source_line_before(owner_start);
             matches!(self.ast.get(tree).kind, TreeKind::If(_))
                 && !prefix.trim().is_empty()
                 && prefix.trim_end().ends_with("else")
@@ -788,15 +784,11 @@ where
         let indentation_allows_owner = self.ast.get(tree).position.is_some_and(|position| {
             let owner_start = position.span().range().start();
             let owner_indent = self.source_line_indent_prefix(owner_start);
-            let source_before_owner = &self.source.as_str()[..owner_start as usize];
-            let owner_line_start = source_before_owner
-                .rfind(['\n', '\r', '\u{000c}', '\u{001a}'])
-                .map_or(0, |index| index + 1);
             let owner_starts_after_only_indentation =
-                owner_start as usize - owner_line_start == owner_indent.len();
+                self.source_line_before(owner_start) == owner_indent;
             let marker_indent = self.source_line_indent_prefix(marker_start);
 
-            !owner_starts_after_only_indentation || marker_indent.starts_with(owner_indent.as_str())
+            !owner_starts_after_only_indentation || marker_indent.starts_with(owner_indent)
         });
         if !owner_is_inline_else_if
             && indentation_allows_owner
