@@ -374,7 +374,6 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
         ));
     }
 
-    let mut source_initializers = Vec::with_capacity(2);
     let mut seed_formals = [formals[0]; 2];
     for index in 0..2 {
         let TreeKind::ValDef(def) = &source_ast
@@ -387,7 +386,6 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
         let initializer = def
             .rhs
             .ok_or_else(|| src("Counter local must have an initializer"))?;
-        source_initializers.push(initializer);
         let TreeKind::Apply(apply) = &source_ast
             .try_get(initializer)
             .ok_or_else(|| src("Counter initializer is stale"))?
@@ -564,7 +562,8 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
             "selected initializer must be a direct original-local reference",
         ));
     };
-    if !matches!(store.types.try_get(typed_ast.try_get(typed_selected_initializer).ok_or_else(|| typed("selected initializer is stale"))?.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == semantic_first)
+    if source_typed_index.get(source_id, selected_initializer) != Some(typed_selected_initializer)
+        || !matches!(store.types.try_get(typed_ast.try_get(typed_selected_initializer).ok_or_else(|| typed("selected initializer is stale"))?.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == semantic_first)
         || selected_initializer_ident.name != store.symbols.get(semantic_first).name
         || !matches!(typed_ast.try_get(typed_selected_initializer).map(|node| &node.kind), Some(TreeKind::Ident(ident)) if ident.name == selected_initializer_ident.name)
         || source_typed_index.get(source_id, selected_initializer)
@@ -572,6 +571,41 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
     {
         return Err(typed(
             "selected initializer must reference the original first Counter local",
+        ));
+    }
+    let typed_selected_declaration = source_typed_index
+        .get(source_id, declarations[2])
+        .ok_or_else(|| typed("selected declaration has no typed mapping"))?;
+    let TreeKind::ValDef(typed_selected_def) = &typed_ast
+        .try_get(typed_selected_declaration)
+        .ok_or_else(|| typed("typed selected declaration is stale"))?
+        .kind
+    else {
+        return Err(typed("selected declaration must remain a typed ValDef"));
+    };
+    let typed_selected_type_tree = source_typed_index
+        .get(source_id, selected_def.tpt)
+        .ok_or_else(|| typed("selected Counter annotation has no typed mapping"))?;
+    if typed_selected_def.rhs != Some(typed_selected_initializer)
+        || typed_selected_def.tpt != typed_selected_type_tree
+        || !is_canonical_class_type_ref(
+            store,
+            typed_ast
+                .try_get(typed_selected_type_tree)
+                .ok_or_else(|| typed("typed selected annotation is stale"))?
+                .ty,
+            counter,
+            package,
+            definitions.no_prefix,
+        )
+        || typed_ast
+            .try_get(typed_selected_declaration)
+            .ok_or_else(|| typed("typed selected declaration is stale"))?
+            .ty
+            != local_type
+    {
+        return Err(typed(
+            "typed selected ValDef must preserve its exact Counter annotation and initializer",
         ));
     }
 
@@ -702,7 +736,6 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
         || typed_setter_node.args.as_slice() != [typed_setter_argument]
         || typed_setter_select.qualifier != typed_setter_receiver
         || store.names.resolve(typed_setter_select.name.text()) != "set"
-        || store.names.resolve(typed_setter_select.name.text()) != "set"
         || !matches!(store.types.try_get(typed_ast.try_get(typed_setter_receiver).ok_or_else(|| typed("typed setter receiver is stale"))?.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == selected)
         || !matches!(typed_ast.try_get(typed_setter_argument).map(|node| &node.kind), Some(TreeKind::Ident(ident)) if ident.name == store.symbols.get(formals[3]).name)
     {
@@ -732,6 +765,10 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
             .names
             .resolve(store.symbols.get(setter_method).name.text())
             != "set"
+        || !has_source_origin(store, setter_method, source_id)
+        || source_index.definition_of(setter_method).is_none_or(
+            |definition| !matches!(definition, SourceDefinition::Canonical { source, .. } if source == source_id),
+        )
     {
         return Err(typed("setter must be the original Counter.set method"));
     }
@@ -749,30 +786,12 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
             "Counter.set must preserve its original Int-to-Unit signature",
         ));
     }
-    let setter_method = match store.types.try_get(
-        typed_ast
-            .try_get(typed_setter_function)
-            .ok_or_else(|| typed("typed setter selection is stale"))?
-            .ty,
-    ) {
-        Some(Type::TermRef {
-            target: TermRefTarget::Symbol(method),
-            ..
-        }) => *method,
-        _ => {
-            return Err(typed(
-                "setter selection must resolve to a canonical method TermRef",
-            ));
-        }
-    };
-    if !store.symbols.contains(setter_method)
-        || store.symbols.get(setter_method).owner != Some(counter)
-        || store
-            .names
-            .resolve(store.symbols.get(setter_method).name.text())
-            != "set"
+    if !matches!(store.types.try_get(typed_ast.try_get(typed_setter_argument).ok_or_else(|| typed("typed setter argument is stale"))?.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == formals[3])
+        || !matches!(source_ast.try_get(setter_apply.args[0]).map(|node| &node.kind), Some(TreeKind::Ident(ident)) if ident.name == store.symbols.get(formals[3]).name)
     {
-        return Err(typed("setter must be the original Counter.set method"));
+        return Err(typed(
+            "setter argument must be the original fourth Int formal",
+        ));
     }
     let TreeKind::Apply(pair_apply) = &source_ast
         .try_get(block.expr)
@@ -854,6 +873,10 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
     if !store.symbols.contains(pair_constructor)
         || store.symbols.get(pair_constructor).owner != Some(pair_class)
         || store.names.resolve(store.symbols.get(pair_constructor).name.text()) != "<init>"
+        || !has_source_origin(store, pair_constructor, source_id)
+        || source_index.definition_of(pair_constructor).is_none_or(
+            |definition| !matches!(definition, SourceDefinition::Canonical { source, .. } if source == source_id),
+        )
         || store.names.resolve(typed_pair_select.name.text()) != "<init>"
         || !store.symbols.contains(pair_class)
         || store.symbols.get(pair_class).kind != SymbolKind::Class
@@ -887,67 +910,20 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
             "typed Pair must retain the exact source-mapped constructor selection",
         ));
     }
-    let typed_pair_function = source_typed_index
-        .get(source_id, pair_apply.function)
-        .ok_or_else(|| typed("Pair constructor selection has no typed mapping"))?;
-    let TreeKind::Select(typed_pair_select) = &typed_ast
-        .try_get(typed_pair_function)
-        .ok_or_else(|| typed("typed Pair constructor selection is stale"))?
-        .kind
-    else {
-        return Err(typed("Pair constructor must retain its typed Select"));
-    };
-    let pair_constructor = match store.types.try_get(
-        typed_ast
-            .try_get(typed_pair_function)
-            .ok_or_else(|| typed("typed Pair constructor selection is stale"))?
-            .ty,
-    ) {
-        Some(Type::TermRef {
-            target: TermRefTarget::Symbol(symbol),
-            ..
-        }) => *symbol,
-        _ => {
-            return Err(typed(
-                "Pair selection must resolve to a constructor TermRef",
-            ));
-        }
-    };
-    let pair_class = match store.types.try_get(
-        typed_ast
-            .try_get(typed_pair)
-            .ok_or_else(|| typed("typed Pair result is stale"))?
-            .ty,
-    ) {
-        Some(Type::TypeRef {
-            target: TypeRefTarget::Symbol(symbol),
-            ..
-        }) => *symbol,
-        _ => return Err(typed("Pair result must retain its canonical class TypeRef")),
-    };
-    if !store.symbols.contains(pair_constructor)
-        || store.symbols.get(pair_constructor).owner != Some(pair_class)
-        || store
-            .names
-            .resolve(store.symbols.get(pair_constructor).name.text())
-            != "<init>"
-        || store.names.resolve(typed_pair_select.name.text()) != "<init>"
-        || !store.symbols.contains(pair_class)
-        || store.symbols.get(pair_class).kind != SymbolKind::Class
-        || store
-            .names
-            .resolve(store.symbols.get(pair_class).name.text())
-            != "Pair"
-    {
-        return Err(typed(
-            "Pair result must use the original Pair constructor and class",
-        ));
-    }
-
     // Every decisive tree identity is from the same source and keeps its exact
     // original span through the source-to-typed edge.
     for (source_tree, typed_tree, description) in [
         (source_block, typed_block, "Block"),
+        (
+            declarations[2],
+            typed_declarations[2],
+            "selected declaration",
+        ),
+        (
+            selected_initializer,
+            typed_selected_initializer,
+            "selected initializer",
+        ),
         (source_if, typed_if, "If"),
         (source_condition, typed_condition, "condition"),
         (source_assignments[0], typed_assignments[0], "THEN Assign"),

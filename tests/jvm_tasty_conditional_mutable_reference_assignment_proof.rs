@@ -170,6 +170,14 @@ fn copy_typed_arena(source: &AstArena<Typed>) -> AstArena<Typed> {
     copy
 }
 
+fn copy_untyped_arena(source: &AstArena<Untyped>) -> AstArena<Untyped> {
+    let mut copy = AstArena::<Untyped>::new();
+    for (_, node) in source.iter() {
+        copy.alloc(node.clone());
+    }
+    copy
+}
+
 fn validate_conditional_fixture(
     source: &str,
     source_id: SourceId,
@@ -244,7 +252,7 @@ fn validate_conditional_fixture(
         source_id,
         &source_index,
         &mut store,
-        definitions.clone(),
+        definitions,
         &packages,
     );
     for (class, constructor, formals) in &declarations {
@@ -532,6 +540,7 @@ fn source_if_preserves_both_assignment_identities_and_records_first_paired_rejec
         typed_ast: &typed_ast,
         classes: Vec::new(),
     };
+    let source_typed_count_before = typed_bindings.len();
     let proof = validate_conditional_mutable_reference_assignment_proof(
         ConditionalMutableReferenceAssignmentProofInput {
             source_id,
@@ -561,7 +570,7 @@ fn source_if_preserves_both_assignment_identities_and_records_first_paired_rejec
     assert_eq!(binding.typed_assignments, typed_branches);
     assert_eq!(binding.local, local_symbols[2]);
     assert_eq!(binding.rhs_locals, [local_symbols[1], local_symbols[0]]);
-    drop(proof);
+    assert_eq!(typed_bindings.len(), source_typed_count_before);
     let reject_typed = |candidate: &AstArena<Typed>| {
         let candidate_unit = dotty_jvm::JvmCompilationUnit {
             store: &store,
@@ -697,6 +706,76 @@ fn source_if_preserves_both_assignment_identities_and_records_first_paired_rejec
     assert!(
         reject_typed(&wrong_setter_ast),
         "setter receiver must be selected"
+    );
+
+    let mut non_unit_if_ast = copy_typed_arena(&typed_ast);
+    non_unit_if_ast.get_mut(typed_if_id).ty = definitions.int;
+    assert!(
+        reject_typed(&non_unit_if_ast),
+        "the original If must have canonical Unit type"
+    );
+
+    let mut duplicate_arm_source = copy_untyped_arena(&parsed.ast);
+    let TreeKind::If(duplicate_arm_if) = &mut duplicate_arm_source.get_mut(stats[3]).kind else {
+        unreachable!()
+    };
+    duplicate_arm_if.else_branch = duplicate_arm_if.then_branch;
+    assert!(
+        validate_conditional_mutable_reference_assignment_proof(
+            ConditionalMutableReferenceAssignmentProofInput {
+                source_id,
+                method_tree,
+                store: &store,
+                definitions: &definitions,
+                source_ast: &duplicate_arm_source,
+                typed_ast: &typed_ast,
+                source_index: &source_index,
+                source_typed_index: &typed_bindings,
+                original_bindings: [Some(first), Some(second)],
+                selected_binding: Some(selected),
+                jvm_unit: &jvm_unit,
+            },
+        )
+        .is_err(),
+        "missing/duplicated If arm cannot be authenticated"
+    );
+
+    let wrong_owner_method = package
+        .stats
+        .iter()
+        .find_map(|class_tree| {
+            let TreeKind::TypeDef(class_def) = &parsed.ast.get(*class_tree).kind else {
+                return None;
+            };
+            let TreeKind::Template(template) = &parsed.ast.get(class_def.rhs).kind else {
+                return None;
+            };
+            template.body.iter().find_map(|member| {
+                let TreeKind::DefDef(definition) = &parsed.ast.get(*member).kind else {
+                    return None;
+                };
+                (store.names.resolve(definition.name.as_name().text()) == "set").then_some(*member)
+            })
+        })
+        .expect("Counter.set exists as a foreign-owner control");
+    assert!(
+        validate_conditional_mutable_reference_assignment_proof(
+            ConditionalMutableReferenceAssignmentProofInput {
+                source_id,
+                method_tree: wrong_owner_method,
+                store: &store,
+                definitions: &definitions,
+                source_ast: &parsed.ast,
+                typed_ast: &typed_ast,
+                source_index: &source_index,
+                source_typed_index: &typed_bindings,
+                original_bindings: [Some(first), Some(second)],
+                selected_binding: Some(selected),
+                jvm_unit: &jvm_unit,
+            },
+        )
+        .is_err(),
+        "a foreign method owner is rejected"
     );
 
     let mut wrong_target_ast = copy_typed_arena(&typed_ast);
