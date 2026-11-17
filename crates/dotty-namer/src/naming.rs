@@ -697,6 +697,7 @@ fn run_name_compilation_unit(
             companion_links: Vec::new(),
             package_private_boundary: None,
             source_package_wrappers: HashMap::new(),
+            synthetic_enum_module_classes: HashSet::new(),
             wrapped_type_names: HashMap::new(),
             source_diagnostics_allowed,
             source_diagnostic: None,
@@ -730,6 +731,7 @@ struct Namer<'a> {
     companion_links: Vec<PendingCompanion>,
     package_private_boundary: Option<(SymbolId, SymbolId)>,
     source_package_wrappers: HashMap<SymbolId, (SymbolId, ScopeId)>,
+    synthetic_enum_module_classes: HashSet<SymbolId>,
     wrapped_type_names: HashMap<Vec<String>, HashSet<TypeName>>,
     source_diagnostics_allowed: bool,
     source_diagnostic: Option<NamerDiagnostic>,
@@ -2756,6 +2758,7 @@ impl Namer<'_> {
             position: None,
             links: SymbolLinks::default(),
         });
+        self.synthetic_enum_module_classes.insert(module_class);
         self.enter_in_scope(owner_scope, module_class_name, module_class);
         let module_scope = self.store.scopes.alloc(Scope::new(Some(module_class)));
         self.index.record_scope(module_class, module_scope)?;
@@ -3829,7 +3832,7 @@ impl Namer<'_> {
         owner: Option<SymbolId>,
     ) -> NamerError {
         if self.source_diagnostics_allowed
-            && self.visibility_owner_chain_has_no_synthetic_module_class(owner)
+            && self.visibility_owner_chain_is_known(owner)
             && let Some(span) = self
                 .arena
                 .get(tree)
@@ -3856,18 +3859,16 @@ impl Namer<'_> {
         }
     }
 
-    /// Avoid classifying owner-resolution failures under synthetic enum
-    /// companion scopes, which currently hide the source enum boundary.
-    /// In particular, enum case parameters are owned below a synthetic
-    /// companion module class whose source enum boundary is not represented in
-    /// the current semantic owner chain.
-    fn visibility_owner_chain_has_no_synthetic_module_class(
-        &self,
-        mut owner: Option<SymbolId>,
-    ) -> bool {
+    fn is_named_module_class(&self, symbol: SymbolId) -> bool {
+        self.store.symbols.get(symbol).origin != SymbolOrigin::Synthetic
+            || self.synthetic_enum_module_classes.contains(&symbol)
+    }
+
+    /// Keep unresolved qualifiers under unrecognized synthetic owners internal.
+    fn visibility_owner_chain_is_known(&self, mut owner: Option<SymbolId>) -> bool {
         while let Some(symbol) = owner {
             let info = self.store.symbols.get(symbol);
-            if info.kind == SymbolKind::ModuleClass && info.origin == SymbolOrigin::Synthetic {
+            if info.kind == SymbolKind::ModuleClass && !self.is_named_module_class(symbol) {
                 return false;
             }
             owner = info.owner;
@@ -3892,7 +3893,7 @@ impl Namer<'_> {
                 SymbolKind::Class | SymbolKind::Trait => {
                     Some(self.store.names.resolve(current.name.text()))
                 }
-                SymbolKind::ModuleClass if current.origin != SymbolOrigin::Synthetic => self
+                SymbolKind::ModuleClass if self.is_named_module_class(symbol) => self
                     .store
                     .names
                     .resolve(current.name.text())

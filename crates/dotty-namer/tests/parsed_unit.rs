@@ -4887,7 +4887,7 @@ fn diagnostic_aware_naming_rejects_confirmed_invalid_visibility_and_rolls_back()
 }
 
 #[test]
-fn diagnostic_aware_naming_keeps_recovered_and_enum_owner_failures_internal() {
+fn diagnostic_aware_naming_keeps_recovered_visibility_failures_internal() {
     let separator_text = "class Outer { private[Missing] val hidden = 1 val next = 2 }";
     let separator_source = SourceId::from_index(322);
     let mut separator_store = SemanticStore::new();
@@ -4945,29 +4945,6 @@ fn diagnostic_aware_naming_keeps_recovered_and_enum_owner_failures_internal() {
         &mut packages,
     )
     .expect_err("parser recovery must not be reported as a confirmed source issue");
-    assert!(matches!(
-        error,
-        NamerError::InvalidVisibilityQualifier { .. }
-    ));
-    assert_eq!(store.checkpoint(), checkpoint);
-    assert!(packages.is_empty());
-
-    let (enum_source, source, mut store) = parsed_source(
-        "enum Color { case Red(private[Color] val value: Int) }",
-        320,
-    );
-    let mut packages = Packages::new();
-    let checkpoint = store.checkpoint();
-    let error = name_compilation_unit_with_diagnostics(
-        &enum_source.ast,
-        enum_source.root,
-        source,
-        "Color.scala",
-        SourceParseStatus::Clean,
-        &mut store,
-        &mut packages,
-    )
-    .expect_err("the unresolved synthetic enum boundary is an internal naming limitation");
     assert!(matches!(
         error,
         NamerError::InvalidVisibilityQualifier { .. }
@@ -5395,35 +5372,80 @@ fn diagnostic_aware_naming_keeps_malformed_root_internal_and_rolls_back() {
 }
 
 #[test]
-fn valid_enum_case_parameter_visibility_exposes_an_unresolved_boundary() {
-    let source_text = "enum Color { case Red(private[Color] val value: Int) }";
-    let (parsed, source, mut store) = parsed_source(source_text, 316);
-    let checkpoint = store.checkpoint();
-    let mut packages = Packages::new();
+fn qualified_enum_case_fields_use_the_actual_companion_module_class() {
+    for (qualifier, companion) in [
+        ("private", ""),
+        ("protected", ""),
+        ("private", "\nobject Color"),
+        ("protected", "\nobject Color"),
+    ] {
+        let text =
+            format!("enum Color {{ case Red({qualifier}[Color] val value: Int) }}{companion}");
+        let named = named_source(&text, 316);
+        let (tree, _) = named.parsed.ast.iter().find(|(_, node)| {
+            matches!(&node.kind, TreeKind::ValDef(def) if named.store.names.resolve(def.name.as_name().text()) == "value")
+        }).unwrap();
+        let field = named
+            .store
+            .symbols
+            .get(named.index.symbol_at(named.source, tree).unwrap());
+        let case = named.store.symbols.get(field.owner.unwrap());
+        let module_class = case.owner.unwrap();
+        assert_eq!(
+            named.store.symbols.get(module_class).kind,
+            SymbolKind::ModuleClass
+        );
+        assert_eq!(
+            field.visibility,
+            if qualifier == "private" {
+                Visibility::PrivateWithin(module_class)
+            } else {
+                Visibility::ProtectedWithin(module_class)
+            }
+        );
+    }
+}
 
-    let error = name_compilation_unit(
+#[test]
+fn diagnostic_aware_naming_rejects_an_unknown_enum_case_boundary() {
+    let (parsed, source, mut store) = parsed_source(
+        "enum Color { case Red(private[Missing] val value: Int) }",
+        320,
+    );
+    let span = parsed
+        .ast
+        .iter()
+        .find_map(|(_, node)| match &node.kind {
+            TreeKind::ValDef(def) if def.metadata.visibility.is_some() => node.position,
+            _ => None,
+        })
+        .unwrap();
+    let before = store.checkpoint();
+    let mut packages = Packages::new();
+    let NamingOutcome::Rejected { diagnostics } = name_compilation_unit_with_diagnostics(
         &parsed.ast,
         parsed.root,
         source,
         "Color.scala",
+        SourceParseStatus::Clean,
         &mut store,
         &mut packages,
     )
-    .expect_err("the enum case parameter boundary is not resolved yet");
-
-    assert!(
-        matches!(
-            error,
-            NamerError::InvalidVisibilityQualifier {
-                position: Some(_),
-                protected: false,
-                qualifier,
-                ..
-            } if store.names.resolve(qualifier.text()) == "Color"
-        ),
-        "unexpected error: {error:?}"
+    .unwrap() else {
+        panic!("expected a visibility diagnostic")
+    };
+    assert_eq!(
+        diagnostics,
+        [NamerDiagnostic::error(
+            span,
+            NamerIssue::InvalidVisibilityQualifier {
+                access: VisibilityAccess::Private,
+                qualifier: "Missing".to_owned(),
+            }
+        )]
     );
-    assert_eq!(store.checkpoint(), checkpoint);
+    assert_eq!(store.checkpoint(), before);
+    assert_eq!(packages.mark(), 0);
 }
 
 #[test]
