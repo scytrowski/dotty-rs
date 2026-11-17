@@ -427,6 +427,9 @@ where
             {
                 return self.parse_lambda_indented_block_body();
             }
+            if self.context.location == Location::InBlock {
+                return self.parse_feedback_indented_block_preserving_block();
+            }
             return self.parse_feedback_indented_block();
         }
 
@@ -1289,6 +1292,49 @@ mod tests {
             parser.current().kind,
             TokenKind::Punctuation(Punctuation::RightBrace)
         );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn indented_single_expression_lambda_in_braces_preserves_the_body_block() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "{ x =>\n  x\n}",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+                token(TokenKind::Identifier, 2, 3),
+                token(TokenKind::Operator, 4, 6),
+                token(TokenKind::Indent, 9, 9),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Outdent, 11, 11),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 11, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+        let root = parser.simple_expr();
+        let TreeKind::Block(outer) = &parser.ast().get(root).kind else {
+            panic!("expected the braced block");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) =
+            &parser.ast().get(outer.expr).kind
+        else {
+            panic!("expected the lambda");
+        };
+        let body = parser.ast().get(function.body);
+        let TreeKind::Block(block) = &body.kind else {
+            panic!("expected the indented lambda body to retain its block");
+        };
+        assert!(block.stats.is_empty());
+        assert!(matches!(
+            parser.ast().get(block.expr).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(
+            body.position.unwrap().span().range(),
+            TextRange::new(9, 10).unwrap()
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
     }
 
