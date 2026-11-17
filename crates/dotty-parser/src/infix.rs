@@ -1,5 +1,7 @@
 use dotty_core::ast::{InfixOp, UntypedNode};
-use dotty_core::{Name, SourceSpan, Span, TextRange, TokenSource, TreeId, TreeKind, Untyped};
+use dotty_core::{
+    Name, Namespace, SourceSpan, Span, TextRange, TokenSource, TreeId, TreeKind, Untyped,
+};
 
 use crate::{ExpressionIssue, ParseIssue, ParseKind, Parser, PatternIssue, TypeIssue};
 
@@ -11,9 +13,13 @@ pub struct OpInfo {
     pub offset: u32,
 }
 
-/// Returns the Scala 3 operator precedence bucket for `operator`.
+/// Returns the Scala 3 precedence bucket for a term operator.
 pub fn precedence(operator: &str) -> u8 {
-    if is_assignment_operator(operator) {
+    precedence_in(operator, Namespace::Term)
+}
+
+fn precedence_in(operator: &str, namespace: Namespace) -> u8 {
+    if namespace == Namespace::Term && is_assignment_operator(operator) {
         return 0;
     }
 
@@ -37,9 +43,9 @@ pub fn is_right_associative(operator: &str) -> bool {
 }
 
 /// Returns whether two equal-precedence operators mix associativity.
-fn has_mixed_associativity(left: &str, right: &str) -> bool {
-    precedence(left) == precedence(right)
-        && is_right_associative(left) != is_right_associative(right)
+fn has_mixed_associativity(left: &str, right: &str, namespace: Namespace) -> bool {
+    is_right_associative(left) != is_right_associative(right)
+        && precedence_in(left, namespace) == precedence_in(right, namespace)
 }
 
 /// Returns whether `operator` is a Scala assignment operator.
@@ -63,12 +69,17 @@ impl<S: TokenSource> Parser<'_, '_, S> {
         kind: ParseKind,
     ) {
         let spelling = self.names.resolve(operator.text());
-        let incoming_precedence = precedence(spelling);
+        let namespace = operator.namespace();
+        let incoming_precedence = precedence_in(spelling, namespace);
         let left_associative = !is_right_associative(spelling);
 
         // Dotty checks associativity against the initial stack top before any reductions.
         if let Some(previous) = operators.last()
-            && has_mixed_associativity(self.names.resolve(previous.operator.text()), spelling)
+            && has_mixed_associativity(
+                self.names.resolve(previous.operator.text()),
+                spelling,
+                namespace,
+            )
         {
             let left = previous.operator;
             let right = operator;
@@ -90,7 +101,8 @@ impl<S: TokenSource> Parser<'_, '_, S> {
         }
 
         while let Some(previous) = operators.pop_if(|previous| {
-            let pending_precedence = precedence(self.names.resolve(previous.operator.text()));
+            let pending_precedence =
+                precedence_in(self.names.resolve(previous.operator.text()), namespace);
             pending_precedence > incoming_precedence
                 || left_associative && pending_precedence == incoming_precedence
         }) {
@@ -232,10 +244,14 @@ mod tests {
 
     #[test]
     fn detects_mixed_associativity_at_equal_precedence() {
-        assert!(has_mixed_associativity("+", "+:"));
-        assert!(has_mixed_associativity("+:", "+"));
-        assert!(!has_mixed_associativity("+", "-"));
-        assert!(!has_mixed_associativity("+", "*"));
+        for namespace in [Namespace::Term, Namespace::Type] {
+            assert!(has_mixed_associativity("+", "+:", namespace));
+            assert!(has_mixed_associativity("+:", "+", namespace));
+            assert!(!has_mixed_associativity("+", "-", namespace));
+            assert!(!has_mixed_associativity("+", "*", namespace));
+        }
+        assert!(has_mixed_associativity("+=", "+:", Namespace::Type));
+        assert!(!has_mixed_associativity("+=", "+:", Namespace::Term));
     }
 
     #[test]

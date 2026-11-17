@@ -9866,6 +9866,38 @@ mod tests {
     }
 
     #[test]
+    fn assignment_like_type_operator_can_conflict_with_right_associativity() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A +: B += C",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+
+        parser.type_expr();
+        let [diagnostic] = parser.diagnostics() else {
+            panic!("expected a single mixed-associativity diagnostic");
+        };
+        let ParseIssue::Type(TypeIssue::MixedAssociativityTypeOperators { left, right }) =
+            diagnostic.issue()
+        else {
+            panic!("expected a type associativity issue");
+        };
+        assert_eq!(diagnostic.span(), TextRange::new(7, 9).unwrap());
+        assert!(left.is_type() && right.is_type());
+        assert_eq!(parser.names.resolve(left.text()), "+:");
+        assert_eq!(parser.names.resolve(right.text()), "+=");
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn consumes_a_newline_after_an_identifier_type_operator() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
