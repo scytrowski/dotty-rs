@@ -1,0 +1,13 @@
+/** Decompiled from scala39/example/PairFactory.tasty */
+package example {
+  @scala.annotation.internal.SourceFile("ConditionalMutableReferenceAssignment.scala") class PairFactory() {
+    def create(firstSeed: scala.Int, secondSeed: scala.Int, chooseSecond: scala.Boolean, nextValue: scala.Int): example.Pair = {
+      val first: example.Counter = new example.Counter(firstSeed)
+      val second: example.Counter = new example.Counter(secondSeed)
+      var selected: example.Counter = first
+      if (chooseSecond) selected = second else selected = first
+      selected.set(nextValue)
+      new example.Pair(first, second)
+    }
+  }
+}
