@@ -189,6 +189,7 @@ impl SourceTyper<'_> {
                         context.owner,
                         name,
                         tree_index,
+                        enclosing_class,
                     )? {
                         combined.extend(outer_candidates);
                     }
@@ -710,6 +711,7 @@ impl SourceTyper<'_> {
         owner: SymbolId,
         name: dotty_core::Name,
         tree_index: u32,
+        enclosing_class: Option<SymbolId>,
     ) -> Result<Option<Vec<SymbolId>>, TyperError> {
         let contexts = self.source_context_chain(context, tree_index)?;
         let fallback_scope = self
@@ -741,6 +743,15 @@ impl SourceTyper<'_> {
                 .to_vec();
             if !candidates.is_empty() {
                 return Ok(Some(candidates));
+            }
+            if enclosing_class
+                .is_some_and(|class| self.source_class_is_enclosing(source_context.owner, class))
+            {
+                let parameters =
+                    self.source_private_constructor_parameters(source_context.owner, name);
+                if !parameters.is_empty() {
+                    return Ok(Some(parameters));
+                }
             }
             if context_position == 0
                 && let Some(scope) = fallback_scope

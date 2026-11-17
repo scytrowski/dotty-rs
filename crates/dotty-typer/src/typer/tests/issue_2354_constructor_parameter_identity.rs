@@ -376,3 +376,38 @@ fn duplicate_plain_constructor_parameter_names_remain_ambiguous() {
     assert_eq!(typer.source_typed_index().get(source, method), None);
     assert_eq!(typer.source_typed_index().get(source, ident), None);
 }
+
+#[test]
+fn local_imports_remain_ambiguous_with_plain_and_val_constructor_parameters() {
+    for (parameter, import) in [
+        ("xs: Int", "import Lib.xs"),
+        ("xs: Int", "import Lib.*"),
+        ("val xs: Int", "import Lib.xs"),
+        ("val xs: Int", "import Lib.*"),
+    ] {
+        let text = format!(
+            "object Lib {{ val xs: Int = 2 }}; class C({parameter}) {{ def read: Int = {{ {import}; xs }} }}"
+        );
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(&text);
+        let method = method_tree(&parsed, &store, "read");
+        let ident = ident_in_method(&parsed, method, "xs", &store);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        assert!(
+            matches!(
+                typer.type_method_definition(method),
+                Err(TyperError::AmbiguousTermReference { tree_index, .. })
+                    if tree_index == ident.index()
+            ),
+            "{parameter} with {import} must preserve local-import ambiguity"
+        );
+        assert_eq!(typer.source_typed_index().get(source, method), None);
+        assert_eq!(typer.source_typed_index().get(source, ident), None);
+    }
+}
