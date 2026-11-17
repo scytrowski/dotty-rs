@@ -624,13 +624,12 @@ impl<'source> RawLexer<'source> {
     fn scan_backquoted_identifier(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
         let _ = self.cursor.bump();
         let content_start = self.cursor.position();
-        let mut valid_escapes = true;
         while let Some(character) = self.cursor.peek() {
             if character == '`' || is_literal_line_terminator(character) {
                 break;
             }
             if character == '\\' {
-                valid_escapes &= self.scan_escape(self.cursor.position())?;
+                self.scan_escape(self.cursor.position())?;
             } else {
                 let _ = self.cursor.bump();
             }
@@ -658,20 +657,16 @@ impl<'source> RawLexer<'source> {
                 span,
             });
         }
-        let kind = if valid_escapes {
-            let issue = match dotty_core::source::decode_identifier_body(content).as_deref() {
-                Some("" | "_") => Some(LexerIssue::EmptyOrUnderscoreBackquotedIdentifier),
-                None => Some(LexerIssue::NonScalarBackquotedIdentifier),
-                Some(_) => None,
-            };
-            if let Some(issue) = issue {
-                self.report_issue(start, issue)?;
-                RawTokenKind::Error
-            } else {
-                RawTokenKind::BackquotedIdentifier
-            }
-        } else {
+        let issue = match dotty_core::source::decode_identifier_body(content).as_deref() {
+            Some("" | "_") => Some(LexerIssue::EmptyOrUnderscoreBackquotedIdentifier),
+            None => Some(LexerIssue::NonScalarBackquotedIdentifier),
+            Some(_) => None,
+        };
+        let kind = if let Some(issue) = issue {
+            self.report_issue(start, issue)?;
             RawTokenKind::Error
+        } else {
+            RawTokenKind::BackquotedIdentifier
         };
         Ok(RawToken { kind, span })
     }
@@ -2504,6 +2499,18 @@ mod tests {
         assert_eq!(
             diagnostics[0].issue(),
             &LexerIssue::UnterminatedBlockComment
+        );
+    }
+
+    #[test]
+    fn keeps_a_closed_backquoted_name_after_an_invalid_escape() {
+        let (items, diagnostics) = scan(r#"`a\q`"#);
+        assert_eq!(items[0], token(RawTokenKind::BackquotedIdentifier, 0, 5));
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].span(), TextRange::new(2, 4).unwrap());
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::Escape(EscapeIssue::InvalidEscapeCharacter { character: 'q' })
         );
     }
 
