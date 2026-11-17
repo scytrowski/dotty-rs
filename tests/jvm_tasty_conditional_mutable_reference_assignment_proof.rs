@@ -618,6 +618,38 @@ fn source_if_preserves_both_assignment_identities_and_records_first_paired_rejec
         .is_err()
     };
 
+    let TreeKind::Apply(pair_result_apply) = &parsed.ast.get(result).kind else {
+        unreachable!()
+    };
+    let TreeKind::Select(pair_result_select) = &parsed.ast.get(pair_result_apply.function).kind
+    else {
+        unreachable!()
+    };
+    let TreeKind::New(pair_result_new) = &parsed.ast.get(pair_result_select.qualifier).kind else {
+        unreachable!()
+    };
+    let TreeKind::Ident(pair_type_ident) = &parsed.ast.get(pair_result_new.tpt).kind else {
+        unreachable!()
+    };
+    let pair_type_name = pair_type_ident.name;
+    for (declaration_index, &declaration_tree) in stats.iter().take(3).enumerate() {
+        let TreeKind::ValDef(original_definition) = &parsed.ast.get(declaration_tree).kind else {
+            unreachable!()
+        };
+        let annotation_tree = original_definition.tpt;
+        let mut wrong_source_annotation = copy_untyped_arena(&parsed.ast);
+        let TreeKind::Ident(annotation) =
+            &mut wrong_source_annotation.get_mut(annotation_tree).kind
+        else {
+            unreachable!()
+        };
+        annotation.name = pair_type_name;
+        assert!(
+            reject_source(&wrong_source_annotation),
+            "source Counter declaration {declaration_index} must reject a Pair annotation"
+        );
+    }
+
     let mut source_without_var = copy_untyped_arena(&parsed.ast);
     let TreeKind::ValDef(selected_without_var) = &mut source_without_var.get_mut(stats[2]).kind
     else {
@@ -670,6 +702,17 @@ fn source_if_preserves_both_assignment_identities_and_records_first_paired_rejec
     assert!(
         reject_typed(&renamed_typed_selected),
         "typed selected declaration name must match its canonical selected symbol"
+    );
+
+    let mut renamed_typed_condition = copy_typed_arena(&typed_ast);
+    let TreeKind::Ident(condition) = &mut renamed_typed_condition.get_mut(typed_if.cond).kind
+    else {
+        unreachable!()
+    };
+    condition.name = store.symbols.get(local_symbols[0]).name;
+    assert!(
+        reject_typed(&renamed_typed_condition),
+        "typed If condition must retain the canonical Boolean formal name"
     );
 
     let mut renamed_typed_first = copy_typed_arena(&typed_ast);
@@ -787,6 +830,57 @@ fn source_if_preserves_both_assignment_identities_and_records_first_paired_rejec
 
         let mut typed_without_position = copy_typed_arena(&typed_ast);
         typed_without_position.get_mut(typed_reference).position = None;
+        assert!(
+            reject_typed(&typed_without_position),
+            "typed {description} must retain its exact mapped source position"
+        );
+    }
+
+    let mut local_provenance_trees = Vec::new();
+    for &declaration in stats.iter().take(2) {
+        let TreeKind::ValDef(local_definition) = &parsed.ast.get(declaration).kind else {
+            unreachable!()
+        };
+        let initializer = local_definition.rhs.unwrap();
+        let TreeKind::Apply(initializer_apply) = &parsed.ast.get(initializer).kind else {
+            unreachable!()
+        };
+        let TreeKind::Select(initializer_select) = &parsed.ast.get(initializer_apply.function).kind
+        else {
+            unreachable!()
+        };
+        let TreeKind::New(initializer_new) = &parsed.ast.get(initializer_select.qualifier).kind
+        else {
+            unreachable!()
+        };
+        local_provenance_trees.extend([
+            (declaration, "original Counter declaration"),
+            (local_definition.tpt, "original Counter annotation"),
+            (initializer, "original Counter initializer"),
+            (initializer_apply.function, "Counter constructor Select"),
+            (initializer_select.qualifier, "Counter constructor New"),
+            (initializer_new.tpt, "Counter constructor type tree"),
+            (initializer_apply.args[0], "Counter constructor argument"),
+        ]);
+    }
+    let TreeKind::ValDef(selected_source_definition) = &parsed.ast.get(stats[2]).kind else {
+        unreachable!()
+    };
+    local_provenance_trees.push((
+        selected_source_definition.tpt,
+        "selected Counter annotation",
+    ));
+    for (source_tree, description) in local_provenance_trees {
+        let typed_tree_id = typed_tree(&typed_bindings, source_id, source_tree);
+        let mut source_without_position = copy_untyped_arena(&parsed.ast);
+        source_without_position.get_mut(source_tree).position = None;
+        assert!(
+            reject_source(&source_without_position),
+            "source {description} must retain its original source position"
+        );
+
+        let mut typed_without_position = copy_typed_arena(&typed_ast);
+        typed_without_position.get_mut(typed_tree_id).position = None;
         assert!(
             reject_typed(&typed_without_position),
             "typed {description} must retain its exact mapped source position"

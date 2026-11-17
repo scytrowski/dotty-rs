@@ -505,6 +505,12 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
                 "original Counter declaration name must match its canonical local binding",
             ));
         }
+        if !matches!(source_ast.try_get(original.source_type_tree).map(|node| &node.kind), Some(TreeKind::Ident(ident)) if ident.name == store.symbols.get(counter).name)
+        {
+            return Err(src(
+                "original Counter annotation must retain its canonical source class reference",
+            ));
+        }
         let TreeKind::ValDef(typed_definition) = &typed_ast
             .try_get(original.typed_declaration)
             .ok_or_else(|| typed("typed original Counter declaration is stale"))?
@@ -579,12 +585,10 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
             "selected must be the original mutable Counter local in the method Block scope",
         ));
     }
-    if matches!(
-        source_ast.try_get(selected_def.tpt).map(|n| &n.kind),
-        Some(TreeKind::TypeTree(_))
-    ) {
+    if !matches!(source_ast.try_get(selected_def.tpt).map(|node| &node.kind), Some(TreeKind::Ident(ident)) if ident.name == store.symbols.get(counter).name)
+    {
         return Err(src(
-            "mutable selected local must retain its explicit Counter type",
+            "mutable selected local must retain its canonical source Counter reference",
         ));
     }
     let selected_initializer = selected_def
@@ -663,6 +667,7 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
         .ok_or_else(|| typed("If condition has no typed mapping"))?;
     if typed_if_node.cond != typed_condition
         || !matches!(store.types.try_get(typed_ast.try_get(typed_condition).ok_or_else(|| typed("typed condition is stale"))?.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == condition_formal)
+        || !matches!(typed_ast.try_get(typed_condition).map(|node| &node.kind), Some(TreeKind::Ident(ident)) if ident.name == store.symbols.get(condition_formal).name)
     {
         return Err(typed(
             "typed If must preserve its exact Boolean formal condition",
@@ -1065,6 +1070,11 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
         ),
         (block.expr, typed_pair, "Pair result"),
         (
+            selected_def.tpt,
+            typed_selected_type_tree,
+            "selected Counter annotation",
+        ),
+        (
             pair_apply.args[0],
             pair_typed_args[0],
             "first Pair argument",
@@ -1098,6 +1108,58 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
             typed_tree,
             description,
         )?;
+    }
+    for (index, original) in originals.iter().enumerate() {
+        for (source_tree, typed_tree, description) in [
+            (
+                original.declaration,
+                original.typed_declaration,
+                if index == 0 {
+                    "first Counter declaration"
+                } else {
+                    "second Counter declaration"
+                },
+            ),
+            (
+                original.source_type_tree,
+                original.typed_type_tree,
+                "Counter annotation",
+            ),
+            (
+                original.initializer,
+                original.typed_initializer,
+                "Counter initializer",
+            ),
+            (
+                original.source_select,
+                original.typed_select,
+                "Counter constructor Select",
+            ),
+            (
+                original.source_new,
+                original.typed_new,
+                "Counter constructor New",
+            ),
+            (
+                original.source_new_type_tree,
+                original.typed_new_type_tree,
+                "Counter constructor type tree",
+            ),
+            (
+                original.source_argument,
+                original.typed_argument,
+                "Counter constructor argument",
+            ),
+        ] {
+            require_matching_source_typed_positions(
+                source_ast,
+                typed_ast,
+                source_id,
+                source_tree,
+                typed_tree,
+                description,
+            )?;
+        }
     }
 
     Ok(ValidatedConditionalMutableReferenceAssignmentProof {
