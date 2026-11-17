@@ -1,0 +1,3 @@
+package foreignchain
+
+class ChainLeaf
