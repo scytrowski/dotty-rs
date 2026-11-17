@@ -154,7 +154,7 @@ where
             return self.parse_case_object_definition(location);
         }
         if self.current().kind == TokenKind::Keyword(HardKeyword::Package) {
-            return self.parse_package_definition(location);
+            return self.parse_package_definition(location, false);
         }
         if self.current().kind == TokenKind::Keyword(HardKeyword::Import) {
             return ParsedStatement::Many(self.parse_import_clause(location));
@@ -424,7 +424,15 @@ where
                 continue;
             }
             let checkpoint = self.cursor.checkpoint();
-            match self.parse_top_level_statement(location) {
+            let initial_package = boundary == StatementSequenceBoundary::CompilationUnit
+                && statements.is_empty()
+                && self.current().kind == TokenKind::Keyword(HardKeyword::Package);
+            let statement = if initial_package {
+                self.parse_package_definition(location, true)
+            } else {
+                self.parse_top_level_statement(location)
+            };
+            match statement {
                 ParsedStatement::Definition(tree) | ParsedStatement::Expression(tree) => {
                     statements.push(tree)
                 }

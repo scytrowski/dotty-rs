@@ -242,7 +242,10 @@ sees `[` or `(`.
 ```
 
 Package bodies may be braced, scanner-provided indented regions, or the
-unbraced outermost package form. Import and export clauses preserve source
+unbraced outermost package form. Consecutive unbraced package headers at the
+beginning of the file each require a statement separator before further
+definitions. Later package clauses require a braced or indented body.
+Import and export clauses preserve source
 order and expand comma-separated expressions into separate `Import` or
 `Export` statement trees. Their selectors retain aliases, wildcard selectors,
 backquoted source names, and the narrow `given T` type-bound form. Symbolic

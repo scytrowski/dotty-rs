@@ -10,7 +10,11 @@ impl<'src, 'names, S> Parser<'src, 'names, S>
 where
     S: dotty_core::TokenSource,
 {
-    pub(crate) fn parse_package_definition(&mut self, location: Location) -> ParsedStatement {
+    pub(crate) fn parse_package_definition(
+        &mut self,
+        location: Location,
+        allow_header: bool,
+    ) -> ParsedStatement {
         let mark = self.mark();
         let package_span = self.current_span();
         self.advance();
@@ -31,7 +35,7 @@ where
         }
 
         let name = self.parse_package_name();
-        let stats = self.parse_package_body();
+        let stats = self.parse_package_body(allow_header);
         ParsedStatement::Definition(
             self.alloc_from(mark, TreeKind::PackageDef(PackageDef { name, stats })),
         )
@@ -59,22 +63,53 @@ where
         }
     }
 
-    fn parse_package_body(&mut self) -> Vec<TreeId<Untyped>> {
-        if self.current().kind == TokenKind::Eof {
-            return Vec::new();
+    fn parse_package_body(&mut self, allow_header: bool) -> Vec<TreeId<Untyped>> {
+        if matches!(
+            self.current().kind,
+            TokenKind::ColonFollow | TokenKind::ColonOp
+        ) {
+            self.observe_colon_eol(true);
+        }
+        let has_colon = self.current().kind == TokenKind::ColonEol;
+        if has_colon {
+            self.observe_indented();
+            self.advance();
+        } else if self.current().kind == TokenKind::Newline
+            && self.cursor.lookahead(1).kind == TokenKind::Punctuation(Punctuation::LeftBrace)
+        {
+            self.advance();
         }
 
         let end = if self.accept(TokenKind::Punctuation(Punctuation::LeftBrace)) {
-            Some(TokenKind::Punctuation(Punctuation::RightBrace))
-        } else if self.accept_package_layout_start() {
-            Some(TokenKind::Outdent)
+            TokenKind::Punctuation(Punctuation::RightBrace)
+        } else if self.accept(TokenKind::Indent) {
+            TokenKind::Outdent
         } else {
-            None
-        };
-
-        let Some(end) = end else {
-            self.consume_package_separators();
-            return self.parse_unbraced_package_body();
+            if !allow_header || has_colon {
+                self.report_issue(ParseIssue::Package(PackageIssue::ExpectedBodyStart {
+                    found: self.current().kind,
+                }));
+                return Vec::new();
+            }
+            if self.current().kind == TokenKind::Eof {
+                return Vec::new();
+            }
+            if !matches!(
+                self.current().kind,
+                TokenKind::Newline
+                    | TokenKind::Newlines
+                    | TokenKind::Punctuation(Punctuation::Semicolon)
+            ) {
+                self.report_issue(ParseIssue::Layout(
+                    crate::LayoutIssue::ExpectedTopLevelSeparator {
+                        found: self.current().kind,
+                    },
+                ));
+            }
+            return self.parse_top_level_sequence(
+                StatementSequenceBoundary::CompilationUnit,
+                Location::InPackageBody,
+            );
         };
 
         let stats = self.with_location(Location::InPackageBody, |parser| {
@@ -97,40 +132,6 @@ where
         }
         stats
     }
-
-    fn parse_unbraced_package_body(&mut self) -> Vec<TreeId<Untyped>> {
-        self.parse_top_level_sequence(
-            StatementSequenceBoundary::CompilationUnit,
-            Location::InPackageBody,
-        )
-    }
-
-    fn accept_package_layout_start(&mut self) -> bool {
-        if matches!(
-            self.current().kind,
-            TokenKind::ColonFollow | TokenKind::ColonOp | TokenKind::ColonEol
-        ) {
-            if self.current().kind != TokenKind::ColonEol {
-                self.observe_colon_eol(false);
-            }
-            if self.current().kind == TokenKind::ColonEol {
-                self.observe_indented();
-                self.advance();
-            }
-        }
-        self.accept(TokenKind::Indent)
-    }
-
-    fn consume_package_separators(&mut self) {
-        while matches!(
-            self.current().kind,
-            TokenKind::Newline
-                | TokenKind::Newlines
-                | TokenKind::Punctuation(Punctuation::Semicolon)
-        ) {
-            self.advance();
-        }
-    }
 }
 
 #[cfg(test)]
@@ -152,7 +153,8 @@ mod tests {
             &mut names,
         );
 
-        let ParsedStatement::Definition(id) = parser.parse_package_definition(Location::Elsewhere)
+        let ParsedStatement::Definition(id) =
+            parser.parse_package_definition(Location::Elsewhere, true)
         else {
             panic!("expected package definition");
         };
@@ -188,7 +190,8 @@ mod tests {
             &mut names,
         );
 
-        let ParsedStatement::Definition(id) = parser.parse_package_definition(Location::Elsewhere)
+        let ParsedStatement::Definition(id) =
+            parser.parse_package_definition(Location::Elsewhere, true)
         else {
             panic!("expected package definition");
         };
@@ -223,7 +226,8 @@ mod tests {
             &mut names,
         );
 
-        let ParsedStatement::Definition(id) = parser.parse_package_definition(Location::Elsewhere)
+        let ParsedStatement::Definition(id) =
+            parser.parse_package_definition(Location::Elsewhere, true)
         else {
             panic!("expected outer package definition");
         };
@@ -255,7 +259,8 @@ mod tests {
             &mut names,
         );
 
-        let ParsedStatement::Definition(id) = parser.parse_package_definition(Location::Elsewhere)
+        let ParsedStatement::Definition(id) =
+            parser.parse_package_definition(Location::Elsewhere, true)
         else {
             panic!("expected package object definition");
         };
@@ -303,7 +308,8 @@ mod tests {
             &mut names,
         );
 
-        let ParsedStatement::Definition(id) = parser.parse_package_definition(Location::Elsewhere)
+        let ParsedStatement::Definition(id) =
+            parser.parse_package_definition(Location::Elsewhere, true)
         else {
             panic!("expected package object definition");
         };

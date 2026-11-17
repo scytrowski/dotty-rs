@@ -411,6 +411,8 @@ pub enum PackageIssue {
     ExpectedName { found: TokenKind },
     /// A dot in a package name is not followed by another name.
     ExpectedNameAfterDot { found: TokenKind },
+    /// A package clause requires a braced or indented body at this position.
+    ExpectedBodyStart { found: TokenKind },
     /// A delimited package body is missing its closing token.
     ExpectedBodyEnd {
         expected: TokenKind,
@@ -425,6 +427,7 @@ impl PackageIssue {
             Self::PackageObjectNotAllowedHere { .. } => ParseDiagnosticKind::UnsupportedSyntax,
             Self::ExpectedName { .. }
             | Self::ExpectedNameAfterDot { .. }
+            | Self::ExpectedBodyStart { .. }
             | Self::ExpectedBodyEnd { .. } => ParseDiagnosticKind::ExpectedToken,
         }
     }
@@ -434,6 +437,7 @@ impl PackageIssue {
             Self::PackageObjectNotAllowedHere { .. } => "parser.package.object_not_allowed_here",
             Self::ExpectedName { .. } => "parser.package.expected_name",
             Self::ExpectedNameAfterDot { .. } => "parser.package.expected_name_after_dot",
+            Self::ExpectedBodyStart { .. } => "parser.package.expected_body_start",
             Self::ExpectedBodyEnd { .. } => "parser.package.expected_body_end",
         }
     }
