@@ -36,3 +36,15 @@ fn repeated_method_bodies() {
         }
     }
 }
+
+#[test]
+#[ignore = "manual release-mode parser scaling benchmark"]
+fn adjacent_indented_templates() {
+    for count in [500, 1000, 2000, 4000] {
+        let mut source = String::new();
+        for i in 0..count {
+            writeln!(source, "object A{i}:\n  val x = 1").unwrap();
+        }
+        println!("{count} indented templates: {:?}", median_parse(&source));
+    }
+}

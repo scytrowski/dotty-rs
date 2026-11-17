@@ -664,24 +664,7 @@ impl ContextualScanner {
         let mut matching_indent_index = None;
         let mut closed_region_offset = None;
         if self.tokens[index].kind != TokenKind::Eof {
-            let mut closed_regions = 0usize;
-            let mut indent_index = None;
-            for (token_index, token) in self.tokens[..index].iter().enumerate().rev() {
-                match token.kind {
-                    TokenKind::Outdent => {
-                        closed_regions = closed_regions.saturating_add(1);
-                    }
-                    TokenKind::Indent
-                        if self.delimiter_closed_indents.contains(&token.span.start()) => {}
-                    TokenKind::Indent if closed_regions > 0 => closed_regions -= 1,
-                    TokenKind::Indent => {
-                        indent_index = Some(token_index);
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-            let Some(indent_index) = indent_index else {
+            let Some(indent_index) = self.innermost_open_indent_index(index) else {
                 return false;
             };
             let indent_offset = self.tokens[indent_index].span.start();
@@ -709,16 +692,19 @@ impl ContextualScanner {
             {
                 return false;
             }
-        }
-        let depth = self.tokens[..index]
-            .iter()
-            .fold(0usize, |depth, token| match token.kind {
-                TokenKind::Indent => depth.saturating_add(1),
-                TokenKind::Outdent => depth.saturating_sub(1),
-                _ => depth,
-            });
-        if depth == 0 {
-            return false;
+        } else {
+            // EOF can close any remaining physical indent, including one ended by
+            // a delimiter. Elsewhere the reverse lookup already proved positive depth.
+            let depth = self.tokens[..index]
+                .iter()
+                .fold(0usize, |depth, token| match token.kind {
+                    TokenKind::Indent => depth.saturating_add(1),
+                    TokenKind::Outdent => depth.saturating_sub(1),
+                    _ => depth,
+                });
+            if depth == 0 {
+                return false;
+            }
         }
         let offset = self.tokens[index].span.start();
         let closes_same_indent_else = self.current().kind == TokenKind::Keyword(HardKeyword::Else)
@@ -775,15 +761,20 @@ impl ContextualScanner {
     }
 
     fn innermost_open_indent_offset(&self, before: usize) -> Option<u32> {
+        self.innermost_open_indent_index(before)
+            .map(|index| self.tokens[index].span.start())
+    }
+
+    fn innermost_open_indent_index(&self, before: usize) -> Option<usize> {
         let mut closed_regions = 0usize;
-        for token in self.tokens[..before].iter().rev() {
+        for (index, token) in self.tokens[..before].iter().enumerate().rev() {
             match token.kind {
                 TokenKind::Outdent => closed_regions = closed_regions.saturating_add(1),
                 TokenKind::Indent
                     if self.delimiter_closed_indents.contains(&token.span.start()) => {}
                 TokenKind::Indent if closed_regions > 0 => closed_regions -= 1,
                 TokenKind::Indent => {
-                    return Some(token.span.start());
+                    return Some(index);
                 }
                 _ => {}
             }
