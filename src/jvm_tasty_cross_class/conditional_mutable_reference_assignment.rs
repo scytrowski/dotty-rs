@@ -505,6 +505,20 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
                 "original Counter declaration name must match its canonical local binding",
             ));
         }
+        let TreeKind::ValDef(typed_definition) = &typed_ast
+            .try_get(original.typed_declaration)
+            .ok_or_else(|| typed("typed original Counter declaration is stale"))?
+            .kind
+        else {
+            return Err(typed(
+                "typed original Counter declaration must remain a ValDef",
+            ));
+        };
+        if typed_definition.name.as_name() != &store.symbols.get(original.symbol).name {
+            return Err(typed(
+                "typed original Counter declaration name must match its canonical local binding",
+            ));
+        }
     }
     let semantic_first = if seed_formals[0] == formals[0] {
         originals[0].symbol
@@ -1034,7 +1048,32 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
         (source_rhss[0], typed_rhss[0], "THEN RHS"),
         (source_rhss[1], typed_rhss[1], "ELSE RHS"),
         (source_setter, typed_setter, "setter"),
+        (
+            setter_apply.function,
+            typed_setter_function,
+            "setter function",
+        ),
+        (
+            setter_select.qualifier,
+            typed_setter_receiver,
+            "setter receiver",
+        ),
+        (
+            setter_apply.args[0],
+            typed_setter_argument,
+            "setter argument",
+        ),
         (block.expr, typed_pair, "Pair result"),
+        (
+            pair_apply.args[0],
+            pair_typed_args[0],
+            "first Pair argument",
+        ),
+        (
+            pair_apply.args[1],
+            pair_typed_args[1],
+            "second Pair argument",
+        ),
         (
             pair_apply.function,
             typed_pair_function,

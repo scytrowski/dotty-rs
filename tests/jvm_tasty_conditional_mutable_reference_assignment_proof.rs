@@ -672,6 +672,32 @@ fn source_if_preserves_both_assignment_identities_and_records_first_paired_rejec
         "typed selected declaration name must match its canonical selected symbol"
     );
 
+    let mut renamed_typed_first = copy_typed_arena(&typed_ast);
+    let TreeKind::ValDef(typed_first) = &mut renamed_typed_first
+        .get_mut(local_typed_declarations[0])
+        .kind
+    else {
+        unreachable!()
+    };
+    typed_first.name = dotty_core::TermName::new(store.symbols.get(local_symbols[1]).name.text());
+    assert!(
+        reject_typed(&renamed_typed_first),
+        "typed first Counter declaration name must match its canonical local"
+    );
+
+    let mut renamed_typed_second = copy_typed_arena(&typed_ast);
+    let TreeKind::ValDef(typed_second) = &mut renamed_typed_second
+        .get_mut(local_typed_declarations[1])
+        .kind
+    else {
+        unreachable!()
+    };
+    typed_second.name = dotty_core::TermName::new(store.symbols.get(local_symbols[0]).name.text());
+    assert!(
+        reject_typed(&renamed_typed_second),
+        "typed second Counter declaration name must match its canonical local"
+    );
+
     let TreeKind::Apply(source_setter_apply) = &parsed.ast.get(stats[4]).kind else {
         unreachable!()
     };
@@ -719,6 +745,53 @@ fn source_if_preserves_both_assignment_identities_and_records_first_paired_rejec
         reject_source(&redirected_first_pair_argument),
         "first source Pair argument must retain the first canonical original local"
     );
+
+    let TreeKind::Select(source_setter_select) = &parsed.ast.get(source_setter_apply.function).kind
+    else {
+        unreachable!()
+    };
+    let reference_edges = [
+        (
+            source_setter_apply.function,
+            typed_tree(&typed_bindings, source_id, source_setter_apply.function),
+            "setter function",
+        ),
+        (
+            source_setter_select.qualifier,
+            typed_tree(&typed_bindings, source_id, source_setter_select.qualifier),
+            "setter receiver",
+        ),
+        (
+            source_setter_apply.args[0],
+            typed_tree(&typed_bindings, source_id, source_setter_apply.args[0]),
+            "setter argument",
+        ),
+        (
+            pair_apply.args[0],
+            typed_tree(&typed_bindings, source_id, pair_apply.args[0]),
+            "first Pair argument",
+        ),
+        (
+            pair_apply.args[1],
+            typed_tree(&typed_bindings, source_id, pair_apply.args[1]),
+            "second Pair argument",
+        ),
+    ];
+    for (source_reference, typed_reference, description) in reference_edges {
+        let mut source_without_position = copy_untyped_arena(&parsed.ast);
+        source_without_position.get_mut(source_reference).position = None;
+        assert!(
+            reject_source(&source_without_position),
+            "source {description} must retain its original source position"
+        );
+
+        let mut typed_without_position = copy_typed_arena(&typed_ast);
+        typed_without_position.get_mut(typed_reference).position = None;
+        assert!(
+            reject_typed(&typed_without_position),
+            "typed {description} must retain its exact mapped source position"
+        );
+    }
 
     // A source-to-typed table entry alone cannot authenticate a conditional
     // arm; the exact parent-child edge must agree as well.
