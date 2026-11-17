@@ -44,12 +44,35 @@ where
             );
         }
 
+        let delimiter = if self
+            .current_text()
+            .unwrap_or_default()
+            .starts_with("\"\"\"")
+        {
+            "\"\"\""
+        } else {
+            "\""
+        };
         let mut parts = Vec::new();
-        let mut first_part = true;
-        loop {
-            if self.current().kind == TokenKind::StringPart {
-                parts.push(self.parse_interpolated_part(first_part));
-                first_part = false;
+        while self.current().kind == TokenKind::StringPart {
+            // The scanner includes the splice dollar or the closing quotes
+            // in this token's span. The following token belongs to the
+            // enclosing grammar once the closing delimiter has been read.
+            let text = self.current_text().unwrap_or_default();
+            let has_splice = text.ends_with('$');
+            let start = self.current().span.start();
+            let content = if parts.is_empty() {
+                text.strip_prefix(delimiter).unwrap_or(text)
+            } else {
+                text
+            };
+            let content_start = start + (text.len() - content.len()) as u32;
+            let content = content
+                .strip_suffix(if has_splice { "$" } else { delimiter })
+                .unwrap_or(content);
+            parts.push(self.parse_interpolated_part(content, content_start));
+            if !has_splice {
+                break;
             }
 
             match self.current().kind {
@@ -91,7 +114,6 @@ where
                         parts.push(self.expr());
                     }
                 }
-                TokenKind::StringPart => continue,
                 _ => break,
             }
         }
@@ -105,35 +127,24 @@ where
         )
     }
 
-    fn parse_interpolated_part(&mut self, first: bool) -> TreeId<Untyped> {
-        let token = self.current().clone();
-        let source = self.current_text().unwrap_or_default();
-        let opening_delimiter_len = if source.starts_with("\"\"\"") { 3 } else { 1 };
-        let closing_delimiter_len = if source.ends_with("\"\"\"") { 3 } else { 1 };
-        let mut start = token.span.start();
-        let mut end = token.span.end();
-
-        if first {
-            start = start.saturating_add(opening_delimiter_len);
-        }
-        match self.cursor.lookahead(1).kind {
-            TokenKind::Identifier | TokenKind::Punctuation(Punctuation::LeftBrace) => {
-                end = end.saturating_sub(1);
+    fn parse_interpolated_part(&mut self, source: &str, start: u32) -> TreeId<Untyped> {
+        let value = interpolated_fragment_value(source);
+        let length = if value.len() == source.len() {
+            source.len()
+        } else {
+            // Dotty measures decoded length in UTF-16 from this fragment's start.
+            let mut remaining = value.encode_utf16().count();
+            let mut bytes = 0;
+            for ch in source.chars() {
+                if remaining == 0 {
+                    break;
+                }
+                bytes += ch.len_utf8();
+                remaining = remaining.saturating_sub(ch.len_utf16());
             }
-            TokenKind::StringPart => {}
-            _ => end = end.saturating_sub(closing_delimiter_len),
-        }
-        if end < start {
-            end = start;
-        }
-
-        let source_value = self
-            .source
-            .slice(TextRange::new(start, end).expect("interpolation span is ordered"))
-            .unwrap_or_default();
-        let value = interpolated_fragment_value(source_value);
-        let logical_length = value.encode_utf16().count();
-        end = source_byte_offset_at_utf16(self.source.as_str(), start, logical_length);
+            bytes
+        };
+        let end = start + length as u32;
         let range = TextRange::new(start, end).expect("interpolation span is ordered");
         self.advance();
         let value = self.names.intern(&value);
@@ -153,37 +164,16 @@ fn interpolated_fragment_value(source: &str) -> String {
     let mut value = String::with_capacity(source.len());
     let mut characters = source.chars().peekable();
     while let Some(character) = characters.next() {
-        if character == '$' && characters.peek() == Some(&'$') {
+        if character == '$'
+            && let Some(&escaped @ ('$' | '"')) = characters.peek()
+        {
             characters.next();
-            value.push('$');
+            value.push(escaped);
         } else {
             value.push(character);
         }
     }
     value
-}
-
-fn source_byte_offset_at_utf16(source: &str, start: u32, length: usize) -> u32 {
-    let requested_start = start as usize;
-    let prefix = source.get(..requested_start).unwrap_or(source);
-    let start = prefix.len();
-    let start_units = prefix.encode_utf16().count();
-    let target_units = start_units + length;
-    if target_units == start_units {
-        return start as u32;
-    }
-
-    let mut units = 0;
-    for (offset, character) in source.char_indices() {
-        if units >= target_units {
-            return offset as u32;
-        }
-        units += character.len_utf16();
-        if units >= target_units {
-            return (offset + character.len_utf8()) as u32;
-        }
-    }
-    source.len() as u32
 }
 
 #[cfg(test)]
@@ -340,6 +330,43 @@ mod tests {
     }
 
     #[test]
+    fn escaped_quote_after_a_supplementary_character_has_a_fragment_local_span() {
+        let mut names = NameInterner::new();
+        let source = r#"s"😀$"x""#;
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::InterpolationId, 0, 1),
+                token(TokenKind::StringPart, 1, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+        let root = parser.simple_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(interpolation)) =
+            &parser.ast().get(root).kind
+        else {
+            panic!("expected interpolation")
+        };
+        let [part] = interpolation.parts.as_slice() else {
+            panic!("expected one fragment")
+        };
+        let literal = parser.ast().get(*part);
+        let TreeKind::Literal(Literal {
+            value: Constant::String(value),
+        }) = literal.kind
+        else {
+            panic!("expected string literal");
+        };
+        assert_eq!(parser.names.resolve(value), "😀\"x");
+        assert_eq!(
+            literal.position.unwrap().span().range(),
+            TextRange::new(2, 8).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn uses_decoded_length_for_escaped_dollar_spans() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
@@ -410,7 +437,7 @@ mod tests {
             "s\"$this\"",
             vec![
                 token(TokenKind::InterpolationId, 0, 1),
-                token(TokenKind::StringPart, 1, 2),
+                token(TokenKind::StringPart, 1, 3),
                 token(TokenKind::Identifier, 3, 7),
                 token(TokenKind::StringPart, 7, 8),
                 token(TokenKind::Eof, 8, 8),

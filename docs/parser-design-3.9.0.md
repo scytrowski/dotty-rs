@@ -837,7 +837,9 @@ and the existing `InterpolatedString` node. Parts remain source-level literal,
 identifier, and braced `Block` trees in source order; semantic expansion to
 `StringContext` and interpolator-specific behavior are outside the parser.
 Literal-fragment spans follow Scala 3.9's decoded-length rule, including
-escaped dollars. In pattern context, a braced splice parses its contents with
+escaped dollars and escaped quotes. The final fragment includes the closing
+quote delimiter. A following operator or block belongs to the enclosing
+grammar. In pattern context, a braced splice parses its contents with
 the pattern grammar; a wildcard such as `${_}` therefore does not enter
 expression placeholder tracking.
 
