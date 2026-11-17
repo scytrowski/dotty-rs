@@ -250,6 +250,22 @@ impl fmt::Display for PoolRefError {
 
 impl std::error::Error for PoolRefError {}
 
+impl PoolRefError {
+    pub(crate) fn into_encode_error(self, pool: &ConstantPool) -> EncodeError {
+        match self {
+            Self::InvalidIndex { index } => EncodeError::InvalidIndex {
+                index: usize::from(index.0),
+                count: pool.entry_count(),
+            },
+            Self::WrongKind { index, .. } => EncodeError::InvalidReference {
+                index: usize::from(index.0),
+            },
+            Self::TooDeeplyNestedAttribute => EncodeError::TooDeeplyNestedAttribute,
+            Self::TooDeeplyNestedAnnotation => EncodeError::TooDeeplyNestedAnnotation,
+        }
+    }
+}
+
 impl ConstantPool {
     pub fn from_entries(entries: Vec<Option<ConstantPoolEntry>>) -> Self {
         Self { entries }

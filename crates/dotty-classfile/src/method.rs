@@ -19,7 +19,8 @@ impl<'a> MethodInfo<'a> {
     /// Encodes this `method_info` structure (JVMS §4.6), preserving its flags,
     /// constant-pool indices, and attribute order.
     pub fn encode(&self, constant_pool: &ConstantPool) -> Result<Vec<u8>, EncodeError> {
-        validate_encode_references(self, constant_pool)?;
+        self.validate_references(constant_pool)
+            .map_err(|error| error.into_encode_error(constant_pool))?;
 
         let attributes = crate::attribute::encode_attributes(&self.attributes, constant_pool)?;
         let mut writer = Writer::new();
@@ -62,25 +63,6 @@ impl<'a> MethodInfo<'a> {
         constant_pool.utf8(self.descriptor_index)?;
         validate_attributes(&self.attributes, constant_pool)
     }
-}
-
-fn validate_encode_references(
-    method: &MethodInfo<'_>,
-    constant_pool: &ConstantPool,
-) -> Result<(), EncodeError> {
-    method
-        .validate_references(constant_pool)
-        .map_err(|error| match error {
-            PoolRefError::InvalidIndex { index } => EncodeError::InvalidIndex {
-                index: usize::from(index.0),
-                count: constant_pool.entry_count(),
-            },
-            PoolRefError::WrongKind { index, .. } => EncodeError::InvalidReference {
-                index: usize::from(index.0),
-            },
-            PoolRefError::TooDeeplyNestedAttribute => EncodeError::TooDeeplyNestedAttribute,
-            PoolRefError::TooDeeplyNestedAnnotation => EncodeError::TooDeeplyNestedAnnotation,
-        })
 }
 
 #[cfg(test)]

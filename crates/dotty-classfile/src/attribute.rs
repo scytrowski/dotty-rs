@@ -848,20 +848,6 @@ fn validate_element_value_at_depth(
     }
 }
 
-fn encode_pool_ref_error(pool: &ConstantPool, error: PoolRefError) -> EncodeError {
-    match error {
-        PoolRefError::InvalidIndex { index } => EncodeError::InvalidIndex {
-            index: usize::from(index.0),
-            count: pool.entry_count(),
-        },
-        PoolRefError::WrongKind { index, .. } => EncodeError::InvalidReference {
-            index: usize::from(index.0),
-        },
-        PoolRefError::TooDeeplyNestedAttribute => EncodeError::TooDeeplyNestedAttribute,
-        PoolRefError::TooDeeplyNestedAnnotation => EncodeError::TooDeeplyNestedAnnotation,
-    }
-}
-
 fn attribute_name(attribute: &Attribute<'_>) -> Option<&'static str> {
     match attribute {
         Attribute::ConstantValue(_) => Some("ConstantValue"),
@@ -1398,14 +1384,14 @@ impl<'a> Attribute<'a> {
         let payload_length = encoded_payload_length(self, depth)?;
         let name_index = if let Some(name) = attribute_name(self) {
             validate_attribute(self, constant_pool)
-                .map_err(|error| encode_pool_ref_error(constant_pool, error))?;
+                .map_err(|error| error.into_encode_error(constant_pool))?;
             constant_pool
                 .find_utf8(name)
                 .ok_or(EncodeError::MissingAttributeName { name })?
         } else if let Attribute::Other(raw) = self {
             constant_pool
                 .utf8(raw.name_index)
-                .map_err(|error| encode_pool_ref_error(constant_pool, error))?;
+                .map_err(|error| error.into_encode_error(constant_pool))?;
             raw.name_index
         } else {
             return Err(EncodeError::UnsupportedAttribute);

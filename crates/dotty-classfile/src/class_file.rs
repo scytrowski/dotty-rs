@@ -321,7 +321,7 @@ impl<'a> ClassFile<'a> {
         crate::writer::checked_u16_len(self.fields.len())?;
         crate::writer::checked_u16_len(self.methods.len())?;
         self.validate_references()
-            .map_err(|error| encode_pool_ref_error(error, self.constant_pool.entry_count()))?;
+            .map_err(|error| error.into_encode_error(&self.constant_pool))?;
 
         // Prepare every fallible section before assembling the final bytes.
         let constant_pool = self.constant_pool.encode()?;
@@ -904,20 +904,6 @@ fn is_valid_package_name(name: &str) -> bool {
         && name.split('/').all(|part| {
             !part.is_empty() && !part.chars().any(|ch| matches!(ch, '.' | ';' | '[' | '/'))
         })
-}
-
-fn encode_pool_ref_error(error: PoolRefError, constant_pool_count: usize) -> EncodeError {
-    match error {
-        PoolRefError::InvalidIndex { index } => EncodeError::InvalidIndex {
-            index: usize::from(index.0),
-            count: constant_pool_count,
-        },
-        PoolRefError::WrongKind { index, .. } => EncodeError::InvalidReference {
-            index: usize::from(index.0),
-        },
-        PoolRefError::TooDeeplyNestedAttribute => EncodeError::TooDeeplyNestedAttribute,
-        PoolRefError::TooDeeplyNestedAnnotation => EncodeError::TooDeeplyNestedAnnotation,
-    }
 }
 
 fn tasty_link_payload<'a>(
