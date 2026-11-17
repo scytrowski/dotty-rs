@@ -1,9 +1,11 @@
-use dotty_core::ast::{Ident, InfixOp, PrefixOp, TypedExpr, UntypedNode};
-use dotty_core::{SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, TypeName, Untyped};
+use dotty_core::ast::{Ident, PrefixOp, TypedExpr, UntypedNode};
+use dotty_core::{
+    Name, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, TypeName, Untyped,
+};
 
 use super::simple::is_term_operator_identifier;
-use super::{PendingOperator, can_start_prefix_expr, is_numeric_literal};
-use crate::{ExpressionIssue, ParseIssue, Parser};
+use super::{can_start_prefix_expr, is_numeric_literal};
+use crate::{ExpressionIssue, ParseIssue, ParseKind, Parser};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -75,32 +77,12 @@ where
                     ));
                     break;
                 }
-                top = self.reduce_operator_stack(&mut operators, top, 0, true, None);
-                return self.alloc_postfix(top, operator.name);
+                top = self.finish_infix_operators(operators, top);
+                return self.alloc_postfix(top, operator);
             }
 
-            let operator_precedence = {
-                let spelling = self.names.resolve(operator.name.text());
-                crate::infix::precedence(spelling)
-            };
-            let operator_left_associative = {
-                let spelling = self.names.resolve(operator.name.text());
-                !crate::infix::is_right_associative(spelling)
-            };
-
-            top = self.reduce_operator_stack(
-                &mut operators,
-                top,
-                operator_precedence,
-                operator_left_associative,
-                Some(operator.name),
-            );
+            self.push_infix_operator(&mut operators, top, operator, ParseKind::Expr);
             self.advance();
-            operators.push(crate::OpInfo {
-                operand: top,
-                operator: operator.name,
-                offset: operator.offset,
-            });
             if self.current().kind == TokenKind::ColonFollow
                 && self.colon_followed_by_indented_lambda()
             {
@@ -127,7 +109,7 @@ where
             }
         }
 
-        let mut tree = self.reduce_operator_stack(&mut operators, top, 0, true, None);
+        let mut tree = self.finish_infix_operators(operators, top);
         loop {
             if self.current().kind != TokenKind::Keyword(dotty_core::HardKeyword::Match) {
                 let mut lookahead = 1;
@@ -211,7 +193,7 @@ where
         )
     }
 
-    pub(super) fn current_infix_operator(&mut self) -> Option<PendingOperator> {
+    pub(super) fn current_infix_operator(&mut self) -> Option<Name> {
         if !matches!(
             self.current().kind,
             TokenKind::Identifier
@@ -234,11 +216,7 @@ where
             return None;
         }
 
-        let name = *self.intern_current_term_name().ok()?.as_name();
-        Some(PendingOperator {
-            name,
-            offset: self.current().span.start(),
-        })
+        Some(*self.intern_current_term_name().ok()?.as_name())
     }
 
     fn consume_infix_newlines(&mut self) {
@@ -319,71 +297,6 @@ where
             }
             kind => can_start_prefix_expr(kind),
         }
-    }
-
-    fn reduce_operator_stack(
-        &mut self,
-        operators: &mut Vec<crate::OpInfo>,
-        mut top: TreeId<Untyped>,
-        precedence: u8,
-        left_associative: bool,
-        next_operator: Option<dotty_core::Name>,
-    ) -> TreeId<Untyped> {
-        if let (Some(stack_top), Some(next_operator)) = (operators.last(), next_operator) {
-            let stack_spelling = self.names.resolve(stack_top.operator.text());
-            let next_spelling = self.names.resolve(next_operator.text());
-            if crate::infix::has_mixed_associativity(stack_spelling, next_spelling) {
-                self.report_issue(ParseIssue::Expression(
-                    ExpressionIssue::MixedAssociativityOperators {
-                        left: stack_top.operator,
-                        right: next_operator,
-                    },
-                ));
-            }
-        }
-
-        while let Some(stack_top) = operators.last() {
-            let stack_spelling = self.names.resolve(stack_top.operator.text());
-            let stack_precedence = crate::infix::precedence(stack_spelling);
-            if !(precedence < stack_precedence
-                || left_associative && precedence == stack_precedence)
-            {
-                break;
-            }
-
-            let stack_top = operators.pop().expect("operator stack was non-empty");
-            top = self.alloc_infix(stack_top.operand, stack_top.operator, top);
-        }
-        top
-    }
-
-    pub(crate) fn alloc_infix(
-        &mut self,
-        left: TreeId<Untyped>,
-        operator: dotty_core::Name,
-        right: TreeId<Untyped>,
-    ) -> TreeId<Untyped> {
-        let start = self
-            .ast
-            .get(left)
-            .position
-            .map(|position| position.span().range().start())
-            .unwrap_or_else(|| self.mark().start());
-        let end = self
-            .ast
-            .get(right)
-            .position
-            .map(|position| position.span().range().end())
-            .unwrap_or(self.last_real_token_end);
-        let range = TextRange::new(start, end).expect("infix child spans are ordered");
-        self.alloc(
-            TreeKind::PhaseSpecific(UntypedNode::InfixOp(InfixOp {
-                left,
-                op: operator,
-                right,
-            })),
-            Some(SourceSpan::new(self.source_id, Span::without_point(range))),
-        )
     }
 
     fn alloc_postfix(

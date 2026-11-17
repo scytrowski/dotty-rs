@@ -1200,27 +1200,10 @@ where
         let mut top = self.parse_refined_type_inner(stop_at_legacy_with);
         let mut operators = Vec::new();
 
-        while let Some((operator, offset)) =
-            self.current_type_infix_operator(stop_at_context_bound_alias)
-        {
+        while let Some(operator) = self.current_type_infix_operator(stop_at_context_bound_alias) {
             let checkpoint = self.cursor.checkpoint();
-            let spelling = self.names.resolve(operator.text());
-            let operator_precedence = crate::infix::precedence(spelling);
-            let operator_left_associative = !crate::infix::is_right_associative(spelling);
-
-            top = self.reduce_type_operator_stack(
-                &mut operators,
-                top,
-                operator_precedence,
-                operator_left_associative,
-                Some(operator),
-            );
+            self.push_infix_operator(&mut operators, top, operator, ParseKind::Type);
             self.advance();
-            operators.push(crate::OpInfo {
-                operand: top,
-                operator,
-                offset,
-            });
             self.consume_type_infix_newlines();
 
             let operand_checkpoint = self.cursor.checkpoint();
@@ -1236,13 +1219,10 @@ where
             }
         }
 
-        self.reduce_type_operator_stack(&mut operators, top, 0, true, None)
+        self.finish_infix_operators(operators, top)
     }
 
-    fn current_type_infix_operator(
-        &mut self,
-        stop_at_context_bound_alias: bool,
-    ) -> Option<(Name, u32)> {
+    fn current_type_infix_operator(&mut self, stop_at_context_bound_alias: bool) -> Option<Name> {
         if !matches!(
             self.current().kind,
             TokenKind::Identifier
@@ -1269,8 +1249,7 @@ where
             return None;
         }
 
-        let operator = *self.intern_current_type_name().ok()?.as_name();
-        Some((operator, self.current().span.start()))
+        Some(*self.intern_current_type_name().ok()?.as_name())
     }
 
     fn current_is_parameter_vararg_marker(&mut self) -> bool {
@@ -1328,42 +1307,6 @@ where
                             | Punctuation::RightBrace
                     )
             )
-    }
-
-    fn reduce_type_operator_stack(
-        &mut self,
-        operators: &mut Vec<crate::OpInfo>,
-        mut top: TreeId<Untyped>,
-        precedence: u8,
-        left_associative: bool,
-        next_operator: Option<Name>,
-    ) -> TreeId<Untyped> {
-        if let (Some(stack_top), Some(next_operator)) = (operators.last(), next_operator) {
-            let stack_spelling = self.names.resolve(stack_top.operator.text());
-            let next_spelling = self.names.resolve(next_operator.text());
-            if crate::infix::has_mixed_associativity(stack_spelling, next_spelling) {
-                self.report_issue(ParseIssue::Type(
-                    TypeIssue::MixedAssociativityTypeOperators {
-                        left: stack_top.operator,
-                        right: next_operator,
-                    },
-                ));
-            }
-        }
-
-        while let Some(stack_top) = operators.last() {
-            let stack_spelling = self.names.resolve(stack_top.operator.text());
-            let stack_precedence = crate::infix::precedence(stack_spelling);
-            if !(precedence < stack_precedence
-                || left_associative && precedence == stack_precedence)
-            {
-                break;
-            }
-
-            let stack_top = operators.pop().expect("type operator stack was non-empty");
-            top = self.alloc_infix(stack_top.operand, stack_top.operator, top);
-        }
-        top
     }
 
     /// Parses `annotatedType` followed by zero or more refinement bodies.

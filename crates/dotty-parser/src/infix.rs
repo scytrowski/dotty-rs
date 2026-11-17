@@ -1,4 +1,7 @@
-use dotty_core::{Name, TreeId, Untyped};
+use dotty_core::ast::{InfixOp, UntypedNode};
+use dotty_core::{Name, SourceSpan, Span, TextRange, TokenSource, TreeId, TreeKind, Untyped};
+
+use crate::{ExpressionIssue, ParseIssue, ParseKind, Parser, PatternIssue, TypeIssue};
 
 /// Operand/operator state used by Dotty-style infix reduction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,6 +51,97 @@ pub fn is_assignment_operator(operator: &str) -> bool {
             .chars()
             .next()
             .is_some_and(dotty_core::token::is_operator_character)
+}
+
+impl<S: TokenSource> Parser<'_, '_, S> {
+    /// Reduces pending operators that bind before the current operator, then saves its left operand.
+    pub(crate) fn push_infix_operator(
+        &mut self,
+        operators: &mut Vec<OpInfo>,
+        mut left: TreeId<Untyped>,
+        operator: Name,
+        kind: ParseKind,
+    ) {
+        let spelling = self.names.resolve(operator.text());
+        let incoming_precedence = precedence(spelling);
+        let left_associative = !is_right_associative(spelling);
+
+        // Dotty checks associativity against the initial stack top before any reductions.
+        if let Some(previous) = operators.last()
+            && has_mixed_associativity(self.names.resolve(previous.operator.text()), spelling)
+        {
+            let left = previous.operator;
+            let right = operator;
+            let issue = match kind {
+                ParseKind::Expr => {
+                    ParseIssue::Expression(ExpressionIssue::MixedAssociativityOperators {
+                        left,
+                        right,
+                    })
+                }
+                ParseKind::Type => {
+                    ParseIssue::Type(TypeIssue::MixedAssociativityTypeOperators { left, right })
+                }
+                ParseKind::Pattern => {
+                    ParseIssue::Pattern(PatternIssue::MixedAssociativityOperators { left, right })
+                }
+            };
+            self.report_issue(issue);
+        }
+
+        while let Some(previous) = operators.pop_if(|previous| {
+            let pending_precedence = precedence(self.names.resolve(previous.operator.text()));
+            pending_precedence > incoming_precedence
+                || left_associative && pending_precedence == incoming_precedence
+        }) {
+            left = self.alloc_infix(previous.operand, previous.operator, left);
+        }
+        operators.push(OpInfo {
+            operand: left,
+            operator,
+            offset: self.current().span.start(),
+        });
+    }
+
+    pub(crate) fn finish_infix_operators(
+        &mut self,
+        operators: Vec<OpInfo>,
+        mut right: TreeId<Untyped>,
+    ) -> TreeId<Untyped> {
+        for previous in operators.into_iter().rev() {
+            right = self.alloc_infix(previous.operand, previous.operator, right);
+        }
+        right
+    }
+
+    pub(crate) fn alloc_infix(
+        &mut self,
+        left: TreeId<Untyped>,
+        operator: Name,
+        right: TreeId<Untyped>,
+    ) -> TreeId<Untyped> {
+        let start = self
+            .ast
+            .get(left)
+            .position
+            .map(|position| position.span().range().start())
+            .unwrap_or_else(|| self.mark().start());
+        let end = self
+            .ast
+            .get(right)
+            .position
+            .map(|position| position.span().range().end())
+            .unwrap_or(self.last_real_token_end);
+        let range = TextRange::new(start, end).expect("infix child spans are ordered");
+        self.alloc(
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(InfixOp {
+                left,
+                op: operator,
+                right,
+            })),
+            Some(SourceSpan::new(self.source_id, Span::without_point(range))),
+        )
+    }
 }
 
 #[cfg(test)]

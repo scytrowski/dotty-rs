@@ -515,12 +515,6 @@ fn is_assignable_lhs(kind: &TreeKind<Untyped>) -> bool {
     )
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PendingOperator {
-    name: dotty_core::Name,
-    offset: u32,
-}
-
 // A nested layout body can leave one or more outdents before its enclosing
 // `else`. The caller consumes these only when lookahead finds that `else`.
 const fn is_else_separator(kind: TokenKind) -> bool {
