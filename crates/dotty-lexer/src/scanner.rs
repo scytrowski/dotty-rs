@@ -1152,15 +1152,13 @@ fn build_tokens(
                                 && bracket_depth == *bracket_depth_at_brace
                         },
                     );
-                let leading_infix = is_leading_infix(
-                    source,
-                    items,
-                    item_index,
-                    previous_kind,
-                    has_blank_line,
-                    previous_end,
-                    &indentation_stack,
-                );
+                let infix_candidate = has_line_break
+                    && layout_enabled
+                    && !has_blank_line
+                    && can_end_statement(previous_kind)
+                    && has_leading_infix_operand(source, items, item_index, raw, &indentation);
+                let leading_infix = infix_candidate
+                    && infix_in_region(&previous_indentation, &indentation, &indentation_stack);
                 let starts_prefix_expression = raw.kind == RawTokenKind::Operator
                     && is_prefix_operator(source, raw.span)
                     && next_raw_token(items, item_index).is_some_and(|next| {
@@ -1205,6 +1203,19 @@ fn build_tokens(
                             },
                         )?;
                     }
+
+                    // An operator may continue the enclosing expression after its
+                    // indented operand closes. Recheck against the remaining region.
+                    let leading_infix = leading_infix
+                        || (infix_candidate
+                            && tokens
+                                .last()
+                                .is_some_and(|token| token.kind == TokenKind::Outdent)
+                            && infix_in_region(
+                                &previous_indentation,
+                                &indentation,
+                                &indentation_stack,
+                            ));
 
                     if closed_same_indent_case
                         && can_end_statement(previous_kind)
@@ -1710,10 +1721,7 @@ fn is_leading_infix_tokens(
     // operator when whitespace follows it. Without this check, a line such
     // as `!second` would be joined to the preceding expression instead of
     // starting a new expression with the prefix operator `!`.
-    if !source[current.span.end() as usize..next.span.start() as usize]
-        .chars()
-        .next()
-        .is_some_and(char::is_whitespace)
+    if !whitespace_follows_operator(source, current.span)
         || !(can_start_statement_kind(next.kind) || starts_prefix_rhs)
     {
         return false;
@@ -1816,21 +1824,13 @@ fn suppresses_statement_separator(kind: RawTokenKind) -> bool {
     )
 }
 
-fn is_leading_infix(
+fn has_leading_infix_operand(
     source: &str,
     items: &[RawItem],
     item_index: usize,
-    previous_kind: Option<TokenKind>,
-    blank_line: bool,
-    previous_end: u32,
-    layout_stack: &[LayoutRegion],
+    current: &RawToken,
+    operator_indent: &IndentWidth,
 ) -> bool {
-    if blank_line || !can_end_statement(previous_kind) {
-        return false;
-    }
-    let RawItem::Token(current) = &items[item_index] else {
-        return false;
-    };
     if !matches!(
         current.kind,
         RawTokenKind::Operator | RawTokenKind::BackquotedIdentifier
@@ -1851,45 +1851,42 @@ fn is_leading_infix(
         return false;
     }
 
-    let previous_indent = line_indentation(source, previous_end.saturating_sub(1));
-    let operator_indent = line_indentation(source, current.span.start());
-    // At or to the left of the previous operand's indentation, a tightly-bound
-    // prefix operator starts a new expression rather than continuing the
-    // preceding expression as an infix operator. This also handles a previous
-    // statement whose final expression was more deeply indented. Spaced
-    // leading operators remain eligible for Scala's multiline infix layout.
-    if is_prefix_operator(source, current.span)
-        && current.span.end() == next.span.start()
-        && can_start_simple_expr_raw(next.kind)
-        && operator_indent.is_prefix_of(&previous_indent)
-    {
-        return false;
-    }
+    whitespace_follows_operator(source, current.span)
+        && (!has_source_line_break(source, current.span.end(), next.span.start())
+            || operator_indent.is_prefix_of(&line_indentation(source, next.span.start())))
+}
+
+fn whitespace_follows_operator(source: &str, operator: TextRange) -> bool {
+    matches!(
+        source.as_bytes().get(operator.end() as usize),
+        Some(b' ' | b'\t' | b'\r' | b'\n')
+    )
+}
+
+fn infix_in_region(
+    previous_indent: &IndentWidth,
+    operator_indent: &IndentWidth,
+    layout_stack: &[LayoutRegion],
+) -> bool {
     let current_region = layout_stack
         .last()
         .filter(|region| region.owner != LayoutRegionOwner::MatchCases);
     let enclosing_region = layout_stack.iter().rev().nth(1);
-    let next_indent = line_indentation(source, next.span.start());
-    if has_source_line_break(source, current.span.end(), next.span.start())
-        && !operator_indent.is_prefix_of(&next_indent)
-    {
-        return false;
-    }
     // A leading operator can dedent from a multiline operand back to the
     // enclosing definition's indentation while remaining inside its body.
-    previous_indent.is_prefix_of(&operator_indent)
-        || current_region.is_some_and(|region| region.indentation.is_prefix_of(&operator_indent))
+    previous_indent.is_prefix_of(operator_indent)
+        || current_region.is_some_and(|region| region.indentation.is_prefix_of(operator_indent))
         || enclosing_region.is_some_and(|region| {
-            region.indentation.is_prefix_of(&operator_indent)
-                && region.indentation != operator_indent
+            region.indentation.is_prefix_of(operator_indent)
+                && &region.indentation != operator_indent
         })
         || layout_stack
             .iter()
             .rev()
             .find(|region| region.owner == LayoutRegionOwner::MatchCases)
             .is_some_and(|region| {
-                region.indentation.is_prefix_of(&operator_indent)
-                    && region.indentation != operator_indent
+                region.indentation.is_prefix_of(operator_indent)
+                    && &region.indentation != operator_indent
             })
 }
 
@@ -4235,6 +4232,39 @@ mod tests {
     }
 
     #[test]
+    fn separates_tightly_bound_calls_and_prefixes_at_a_deeper_indent() {
+        for (spelling, kind) in [
+            ("-two", TokenKind::Operator),
+            ("`f`(two)", TokenKind::BackquotedIdentifier),
+        ] {
+            let source = format!("{{\n  one\n    {spelling}\n}}");
+            let scanner = ContextualScanner::new(&source).unwrap();
+            assert_eq!(
+                scanner.tokens()[2],
+                Token::new(TokenKind::Newline, TextRange::new(7, 12).unwrap())
+            );
+            assert_eq!(scanner.tokens()[3].kind, kind);
+        }
+    }
+
+    #[test]
+    fn accepts_a_leading_infix_after_closing_an_indented_operand() {
+        assert_eq!(
+            kinds("value =\n  foo\n+ bar"),
+            [
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Outdent,
+                TokenKind::Operator,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
     fn keeps_a_leading_infix_operator_on_the_previous_statement() {
         assert_eq!(
             kinds("value\n  + other\n\nnext"),
@@ -6157,7 +6187,9 @@ mod tests {
         let operator_index = scanner
             .tokens
             .iter()
-            .position(|token| token.span.start() == operator_start)
+            .position(|token| {
+                token.kind == TokenKind::Operator && token.span.start() == operator_start
+            })
             .expect("operator token");
         let operator = scanner.tokens[operator_index].clone();
         let rhs = scanner
