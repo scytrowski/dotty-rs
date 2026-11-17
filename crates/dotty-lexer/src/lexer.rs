@@ -3,7 +3,7 @@ use core::fmt;
 use dotty_core::diagnostics::DiagnosticSeverity;
 use dotty_core::source::{SourceText, SourceTextError, TextRange, TextRangeError};
 
-use crate::identifier::{is_identifier_part, is_identifier_start, is_operator_character};
+use crate::identifier::{is_identifier_part, is_identifier_start};
 use crate::xml::XmlState;
 use crate::{Cursor, CursorError, HardKeyword, Punctuation, RawItem, RawToken, RawTokenKind};
 use crate::{
@@ -11,6 +11,7 @@ use crate::{
     NonIntegerLiteralKind, NumericComponent, NumericIssue,
 };
 use crate::{Trivia, TriviaKind};
+use dotty_core::token::is_operator_character;
 
 #[derive(Debug, Clone)]
 enum LexMode {

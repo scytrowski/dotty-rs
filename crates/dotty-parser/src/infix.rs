@@ -15,7 +15,7 @@ pub fn precedence(operator: &str) -> u8 {
     }
 
     match operator.chars().next() {
-        Some(first) if first.is_alphabetic() => 1,
+        Some(first) if first.is_alphabetic() || matches!(first, '_' | '$') => 1,
         Some('|') => 2,
         Some('^') => 3,
         Some('&') => 4,
@@ -41,7 +41,13 @@ pub(crate) fn has_mixed_associativity(left: &str, right: &str) -> bool {
 
 /// Returns whether `operator` is a Scala assignment operator.
 pub fn is_assignment_operator(operator: &str) -> bool {
-    operator.ends_with('=') && !matches!(operator, "==" | "!=" | "<=" | ">=")
+    operator.ends_with('=')
+        && !operator.starts_with('=')
+        && !matches!(operator, "!=" | "<=" | ">=")
+        && operator
+            .chars()
+            .next()
+            .is_some_and(dotty_core::token::is_operator_character)
 }
 
 #[cfg(test)]
@@ -52,7 +58,9 @@ mod tests {
 
     #[test]
     fn letter_operators_have_the_lowest_non_assignment_precedence() {
-        assert_eq!(precedence("foo"), 1);
+        for operator in ["foo", "foo=", "_op", "$op"] {
+            assert_eq!(precedence(operator), 1, "{operator}");
+        }
     }
 
     #[test]
@@ -72,7 +80,9 @@ mod tests {
 
     #[test]
     fn equals_and_bang_operators_have_precedence_five() {
-        assert_eq!(precedence("=="), 5);
+        for operator in ["=", "==", "===", "=:="] {
+            assert_eq!(precedence(operator), 5, "{operator}");
+        }
         assert_eq!(precedence("!"), 5);
     }
 
@@ -108,7 +118,7 @@ mod tests {
 
     #[test]
     fn assignment_operators_have_precedence_zero() {
-        for operator in ["=", "+=", "foo="] {
+        for operator in ["+=", "::=", "⇒=", "🂡="] {
             assert_eq!(precedence(operator), 0, "{operator}");
             assert!(is_assignment_operator(operator));
         }
@@ -116,7 +126,9 @@ mod tests {
 
     #[test]
     fn comparison_and_equality_operators_are_not_assignments() {
-        for operator in ["==", "!=", "<=", ">="] {
+        for operator in [
+            "=", "==", "===", "=:=", "!=", "<=", ">=", "foo=", "_=", "$=", "1=", ".=",
+        ] {
             assert!(!is_assignment_operator(operator), "{operator}");
         }
     }
