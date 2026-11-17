@@ -163,7 +163,10 @@ where
                 self.lookahead_is_arrow(1) || self.lookahead_is_context_arrow(1)
             }
             TokenKind::Punctuation(Punctuation::LeftParen) => {
-                self.lambda_arrow_after_parenthesized_params()
+                // A binding starts with a name. A second opening paren starts
+                // a grouped expression, which will check its own lambda head.
+                self.cursor.lookahead(1).kind != TokenKind::Punctuation(Punctuation::LeftParen)
+                    && self.lambda_arrow_after_parenthesized_params()
             }
             _ => false,
         }

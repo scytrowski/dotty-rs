@@ -2037,6 +2037,44 @@ fn recovers_from_missing_do_while_body_or_condition() {
 }
 
 #[test]
+fn nested_grouping_uses_a_linear_number_of_lookahead_reads() {
+    let depth = 32u32;
+    let source = format!(
+        "{}x{}",
+        "(".repeat(depth as usize),
+        ")".repeat(depth as usize)
+    );
+    let mut tokens: Vec<_> = (0..depth)
+        .map(|i| token(TokenKind::Punctuation(Punctuation::LeftParen), i, i + 1))
+        .collect();
+    tokens.push(token(TokenKind::Identifier, depth, depth + 1));
+    for i in depth + 1..2 * depth + 1 {
+        tokens.push(token(
+            TokenKind::Punctuation(Punctuation::RightParen),
+            i,
+            i + 1,
+        ));
+    }
+    let end = source.len() as u32;
+    tokens.push(token(TokenKind::Eof, end, end));
+
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(&source, tokens, &mut names);
+    parser.cursor.lookahead_budget = 16 * depth as usize;
+    let result = parser.parse_expression_fragment();
+    assert!(result.diagnostics.is_empty());
+    let mut tree = result.root;
+    for _ in 0..depth {
+        let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) = &result.ast.get(tree).kind
+        else {
+            panic!("expected grouping parentheses");
+        };
+        tree = parens.inner;
+    }
+    assert!(matches!(result.ast.get(tree).kind, TreeKind::Ident(_)));
+}
+
+#[test]
 fn parses_inline_if_and_preserves_its_marker_and_span() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
