@@ -721,10 +721,10 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         let result = if self.inject_semantic_late_failure {
             loader.load_semantic_class_with_tasty_unpickler_injected_failure(name)
         } else {
-            loader.load_semantic_class_with_tasty_unpickler(name)
+            loader.load_semantic_class_with_tasty_unpickler_without_chain(name)
         };
         #[cfg(not(test))]
-        let result = loader.load_semantic_class_with_tasty_unpickler(name);
+        let result = loader.load_semantic_class_with_tasty_unpickler_without_chain(name);
         for profile in loader.take_load_profiles() {
             self.collect_class_load_profile(&profile);
             self.load_profiles.push(profile);

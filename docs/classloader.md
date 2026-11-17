@@ -509,6 +509,14 @@ arity; each unsupported argument lowers to an explicit `Type::Error` rather
 than erasing the whole parent view. This preserves supported sibling
 arguments while keeping the unsupported slot observable.
 
+The crate-private semantic TASTy path also completes the pinned, parameter-
+free `convergence.ChainLeaf` → `ChainMiddle` → `ChainRoot` hierarchy from one
+request when the ordered classpath supplies all three matching TASTy units.
+It enters the canonical roots in one unpickler session, completes them in
+parent order, and retains each selected resource origin. A richer neighboring
+unit remains on the existing bounded loader path. Ordinary `load_class`
+behavior is unchanged.
+
 For `DefDef` methods, TASTy clause presence is retained independently of the
 flattened JVM parameter list. A definition with no clauses of either kind
 lowers as `Type::ByName` (TASTy's `ExprType`); a type-parameter-only
