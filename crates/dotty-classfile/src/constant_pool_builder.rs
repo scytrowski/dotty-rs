@@ -273,7 +273,7 @@ impl ConstantPoolBuilder {
     }
 
     fn intern_utf8(&mut self, value: &str) -> Result<ConstantPoolIndex, ConstantPoolBuildError> {
-        crate::modified_utf8::encode_modified_utf8(value)
+        crate::modified_utf8::modified_utf8_len(value)
             .map_err(ConstantPoolBuildError::InvalidUtf8)?;
         self.intern(
             ConstantKey::Utf8(value.to_owned()),

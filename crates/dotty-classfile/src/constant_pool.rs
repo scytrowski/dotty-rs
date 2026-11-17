@@ -328,10 +328,7 @@ impl ConstantPool {
             let Some(entry) = entry else { continue };
             match entry {
                 ConstantPoolEntry::Utf8(value) => {
-                    // Check the complete modified UTF-8 payload before output
-                    // is started; `Writer::write_modified_utf8` repeats this
-                    // while producing the final bytes.
-                    crate::modified_utf8::encode_modified_utf8(value)?;
+                    crate::modified_utf8::modified_utf8_len(value)?;
                 }
                 ConstantPoolEntry::Integer(_)
                 | ConstantPoolEntry::Float(_)
