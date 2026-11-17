@@ -106,6 +106,12 @@ class FocusedAuditWorkflowTests(unittest.TestCase):
         self.assertIn("--baseline-roots docs/typer-stdlib-acceptance-vi/roots.tsv", workflow)
         self.assertIn("--main-manifest docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv", workflow)
         self.assertIn("--analysis-manifest docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv", workflow)
+        target_step = workflow.split("- name: Type both original Acceptance VI roots in fresh sessions\n", 1)[1].split(
+            "\n      - name:", 1
+        )[0]
+        self.assertIn("SCALA39_CLASSPATH=", target_step)
+        self.assertIn("export SCALA39_CLASSPATH=", target_step)
+        self.assertIn("scala3-compiler_3-3.9.0.jar", target_step)
         self.assertIn("pull_request_number:", workflow)
         self.assertIn("gh api --paginate --slurp", workflow)
         self.assertIn('pr.get("base", {}).get("ref") != "main"', workflow)
