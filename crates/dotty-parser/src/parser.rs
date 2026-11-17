@@ -36,6 +36,8 @@ where
     pub(crate) diagnostics: Vec<ParseDiagnostic>,
     pub(crate) known_names: KnownNames,
     tree_nesting: usize,
+    /// End of a balanced parenthesized type region whose source contains no by-name arrow.
+    pub(crate) arrow_free_type_end: u32,
     pub(crate) next_wildcard_param: u32,
     pub(crate) next_wildcard_type_param: u32,
     pub(crate) wildcard_type_depth: u32,
@@ -116,6 +118,7 @@ where
             diagnostics: Vec::new(),
             known_names,
             tree_nesting: 0,
+            arrow_free_type_end: 0,
             next_wildcard_param: 0,
             next_wildcard_type_param: 0,
             wildcard_type_depth: 0,

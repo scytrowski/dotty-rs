@@ -642,23 +642,7 @@ where
             return None;
         }
 
-        let mut depth = 1usize;
-        let mut offset = 1usize;
-        loop {
-            let token = self.cursor.lookahead(offset).clone();
-            match token.kind {
-                TokenKind::Punctuation(Punctuation::LeftParen) => depth += 1,
-                TokenKind::Punctuation(Punctuation::RightParen) => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 {
-                        return self.lookahead_function_type_arrow(offset + 1);
-                    }
-                }
-                TokenKind::Eof => return None,
-                _ => {}
-            }
-            offset = offset.saturating_add(1);
-        }
+        self.arrow_after_type_parameter_parens()
     }
 
     /// Recognizes a parenthesized function parameter list containing a
@@ -668,7 +652,10 @@ where
     /// particular, `(A => B) => C` is an ordinary function type whose single
     /// parameter is itself a function type, not a by-name parameter list.
     fn unnamed_by_name_function_type_arrow(&mut self) -> Option<FunctionTypeArrow> {
-        if self.current().kind != TokenKind::Punctuation(Punctuation::LeftParen) {
+        let start = self.current().span.start();
+        if self.current().kind != TokenKind::Punctuation(Punctuation::LeftParen)
+            || start < self.arrow_free_type_end
+        {
             return None;
         }
 
@@ -676,12 +663,15 @@ where
         let mut bracket_depth = 0usize;
         let mut parameter_start = true;
         let mut has_by_name = false;
+        let mut nested = false;
         let mut offset = 1usize;
 
         loop {
-            let token = self.cursor.lookahead(offset).clone();
-            match token.kind {
+            let token = self.cursor.lookahead(offset);
+            let (kind, end) = (token.kind, token.span.start());
+            match kind {
                 TokenKind::Punctuation(Punctuation::LeftParen) => {
+                    nested = true;
                     paren_depth += 1;
                     parameter_start = false;
                 }
@@ -689,6 +679,17 @@ where
                     paren_depth = paren_depth.saturating_sub(1);
                     if paren_depth == 0 {
                         if !has_by_name {
+                            // Every inner group closes before this one. Without an arrow
+                            // spelling anywhere in the source, none can contain a by-name parameter.
+                            if nested
+                                && self
+                                    .source
+                                    .as_str()
+                                    .get(start as usize..end as usize)
+                                    .is_some_and(|text| !text.contains("=>") && !text.contains('⇒'))
+                            {
+                                self.arrow_free_type_end = end;
+                            }
                             return None;
                         }
                         return self.lookahead_function_type_arrow(offset + 1);
@@ -763,11 +764,14 @@ where
             return None;
         }
 
+        self.arrow_after_type_parameter_parens()
+    }
+
+    fn arrow_after_type_parameter_parens(&mut self) -> Option<FunctionTypeArrow> {
         let mut depth = 1usize;
         let mut offset = 1usize;
         loop {
-            let token = self.cursor.lookahead(offset).clone();
-            match token.kind {
+            match self.cursor.lookahead(offset).kind {
                 TokenKind::Punctuation(Punctuation::LeftParen) => depth += 1,
                 TokenKind::Punctuation(Punctuation::RightParen) => {
                     depth = depth.saturating_sub(1);
@@ -5911,6 +5915,39 @@ mod tests {
             parser.ast().get(id).position.unwrap().span().range(),
             TextRange::new(0, 6).unwrap()
         );
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn nested_type_grouping_uses_linear_lookahead() {
+        let depth = 40;
+        let source = format!("{}A{}", "(".repeat(depth), ")".repeat(depth));
+        let mut tokens: Vec<_> = source
+            .char_indices()
+            .map(|(i, ch)| {
+                let kind = match ch {
+                    '(' => TokenKind::Punctuation(Punctuation::LeftParen),
+                    ')' => TokenKind::Punctuation(Punctuation::RightParen),
+                    _ => TokenKind::Identifier,
+                };
+                token(kind, i as u32, i as u32 + 1)
+            })
+            .collect();
+        let end = source.len() as u32;
+        tokens.push(token(TokenKind::Eof, end, end));
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(&source, tokens, &mut names);
+        parser.cursor.lookahead_budget = 24 * depth;
+        let mut tree = parser.type_expr();
+        for _ in 0..depth {
+            let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) = &parser.ast().get(tree).kind
+            else {
+                panic!("expected a grouping parenthesis");
+            };
+            tree = parens.inner;
+        }
+        assert!(matches!(parser.ast().get(tree).kind, TreeKind::Ident(_)));
         assert!(parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
