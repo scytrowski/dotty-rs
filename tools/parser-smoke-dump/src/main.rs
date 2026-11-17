@@ -2310,15 +2310,7 @@ mod tests {
             scanner.tokens()[bang_index - 1].kind,
             dotty_core::TokenKind::Newline
         );
-        let newline = SOURCE.find("\n  val following").unwrap() as u32;
-        let separator_span = scanner
-            .tokens()
-            .iter()
-            .find(|token| {
-                token.kind == dotty_core::TokenKind::Newline && token.span.start() == newline
-            })
-            .expect("statement separator token")
-            .span;
+        let equals = SOURCE.find("= data").unwrap() as u32;
 
         let source_text = SourceText::new(SOURCE).expect("source should be valid");
         let mut names = NameInterner::new();
@@ -2338,10 +2330,13 @@ mod tests {
         assert_eq!(
             diagnostic.issue(),
             &ParseIssue::Expression(ExpressionIssue::UnassignableAssignmentTarget {
-                found: dotty_core::TokenKind::Newline,
+                found: dotty_core::TokenKind::Operator,
             })
         );
-        assert_eq!(diagnostic.span(), separator_span);
+        assert_eq!(
+            diagnostic.span(),
+            dotty_core::TextRange::new(equals, equals + 1).unwrap()
+        );
         let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
             panic!("expected package root");
         };

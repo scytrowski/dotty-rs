@@ -3922,7 +3922,16 @@ fn rejects_a_literal_assignment_target() {
 
     assert!(!matches!(parser.ast().get(id).kind, TreeKind::Assign(_)));
     assert_eq!(parser.current().kind, TokenKind::Eof);
-    assert!(!parser.diagnostics().is_empty());
+    let [diagnostic] = parser.diagnostics() else {
+        panic!("expected one assignment error")
+    };
+    assert_eq!(
+        diagnostic.issue(),
+        &ParseIssue::Expression(ExpressionIssue::UnassignableAssignmentTarget {
+            found: TokenKind::Operator
+        })
+    );
+    assert_eq!(diagnostic.span(), TextRange::new(2, 3).unwrap());
 }
 
 #[test]
@@ -3945,7 +3954,16 @@ fn rejects_an_infix_assignment_target() {
 
     assert!(!matches!(parser.ast().get(id).kind, TreeKind::Assign(_)));
     assert_eq!(parser.current().kind, TokenKind::Eof);
-    assert!(!parser.diagnostics().is_empty());
+    let [diagnostic] = parser.diagnostics() else {
+        panic!("expected one assignment error")
+    };
+    assert_eq!(
+        diagnostic.issue(),
+        &ParseIssue::Expression(ExpressionIssue::UnassignableAssignmentTarget {
+            found: TokenKind::Operator
+        })
+    );
+    assert_eq!(diagnostic.span(), TextRange::new(6, 7).unwrap());
 }
 
 #[test]

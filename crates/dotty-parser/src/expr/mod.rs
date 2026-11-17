@@ -213,6 +213,14 @@ where
 
     fn expr1_rest(&mut self, lhs: TreeId<Untyped>) -> TreeId<Untyped> {
         if self.current_is_bare_assignment() {
+            let assignable = is_assignable_lhs(&self.ast.get(lhs).kind);
+            if !assignable {
+                self.report_issue(ParseIssue::Expression(
+                    ExpressionIssue::UnassignableAssignmentTarget {
+                        found: self.current().kind,
+                    },
+                ));
+            }
             let assignment_end = self.current().span.end();
             let feedback_indent = self.observe_definition_rhs_indentation();
             self.advance();
@@ -250,19 +258,12 @@ where
             } else {
                 self.expr()
             };
-            if !is_assignable_lhs(&self.ast.get(lhs).kind) {
-                self.report_issue(ParseIssue::Expression(
-                    ExpressionIssue::UnassignableAssignmentTarget {
-                        found: self.current().kind,
-                    },
-                ));
-                self.last_advance_consumed_statement_separator |= consumed_statement_separator;
-                return lhs;
-            }
-
-            let assignment = self.alloc_assign(lhs, rhs);
             self.last_advance_consumed_statement_separator |= consumed_statement_separator;
-            return assignment;
+            return if assignable {
+                self.alloc_assign(lhs, rhs)
+            } else {
+                lhs
+            };
         }
 
         if self.current().kind == TokenKind::ColonFollow && self.colon_followed_by_indented_lambda()
