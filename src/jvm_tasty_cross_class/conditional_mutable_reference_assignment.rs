@@ -248,6 +248,13 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
             .symbol_at(source_id, *tree)
             .ok_or_else(|| sid("formal has no canonical symbol"))?;
         let expected = signature.params[index].ty;
+        let expected_type_symbol = match store.types.try_get(expected) {
+            Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            }) if store.symbols.contains(*symbol) => *symbol,
+            _ => return Err(sem("factory formal type must be a canonical named type")),
+        };
         if !store.symbols.contains(formal)
             || store.symbols.get(formal).kind != SymbolKind::Parameter
             || store.symbols.get(formal).owner != Some(method)
@@ -268,12 +275,73 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
                 "factory formals must preserve canonical ordered parameter identities",
             ));
         }
+        if def.name.as_name() != &store.symbols.get(formal).name
+            || !matches!(source_ast.try_get(def.tpt).map(|node| &node.kind), Some(TreeKind::Ident(ident)) if ident.name == store.symbols.get(expected_type_symbol).name)
+        {
+            return Err(src(
+                "factory formal source name and type must match its canonical ordered signature",
+            ));
+        }
         require_source_position(
             source_ast,
             source_id,
             *tree,
             "factory formal has a foreign source span",
         )?;
+        require_source_position(
+            source_ast,
+            source_id,
+            def.tpt,
+            "factory formal annotation has a foreign or missing source span",
+        )?;
+        if let Some(typed_formal_tree) = source_typed_index.get(source_id, *tree) {
+            let TreeKind::ValDef(typed_formal) = &typed_ast
+                .try_get(typed_formal_tree)
+                .ok_or_else(|| typed("typed factory formal is stale"))?
+                .kind
+            else {
+                return Err(typed("typed factory formal must remain a ValDef"));
+            };
+            let typed_formal_type = source_typed_index
+                .get(source_id, def.tpt)
+                .ok_or_else(|| typed("typed factory formal annotation has no mapping"))?;
+            if typed_formal.name.as_name() != &store.symbols.get(formal).name
+                || typed_formal.tpt != typed_formal_type
+                || typed_ast
+                    .try_get(typed_formal_type)
+                    .is_none_or(|node| node.ty != expected)
+            {
+                return Err(typed(
+                    "typed factory formal must preserve its canonical name and signature type",
+                ));
+            }
+            require_matching_source_typed_positions(
+                source_ast,
+                typed_ast,
+                source_id,
+                *tree,
+                typed_formal_tree,
+                "factory formal",
+            )?;
+        }
+        if let Some(typed_formal_type) = source_typed_index.get(source_id, def.tpt) {
+            if typed_ast
+                .try_get(typed_formal_type)
+                .is_none_or(|node| node.ty != expected)
+            {
+                return Err(typed(
+                    "typed factory formal annotation must retain its canonical signature type",
+                ));
+            }
+            require_matching_source_typed_positions(
+                source_ast,
+                typed_ast,
+                source_id,
+                def.tpt,
+                typed_formal_type,
+                "factory formal annotation",
+            )?;
+        }
         formals.push(formal);
     }
     let formals: [SymbolId; 4] = formals
@@ -509,6 +577,12 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
         {
             return Err(src(
                 "original Counter annotation must retain its canonical source class reference",
+            ));
+        }
+        if !matches!(source_ast.try_get(original.source_new_type_tree).map(|node| &node.kind), Some(TreeKind::Ident(ident)) if ident.name == store.symbols.get(counter).name)
+        {
+            return Err(src(
+                "original Counter allocation must retain its canonical source class reference",
             ));
         }
         let TreeKind::ValDef(typed_definition) = &typed_ast

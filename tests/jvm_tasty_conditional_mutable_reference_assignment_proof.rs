@@ -650,6 +650,60 @@ fn source_if_preserves_both_assignment_identities_and_records_first_paired_rejec
         );
     }
 
+    for (declaration_index, &declaration_tree) in stats.iter().take(2).enumerate() {
+        let TreeKind::ValDef(definition) = &parsed.ast.get(declaration_tree).kind else {
+            unreachable!()
+        };
+        let initializer = definition.rhs.unwrap();
+        let TreeKind::Apply(apply) = &parsed.ast.get(initializer).kind else {
+            unreachable!()
+        };
+        let TreeKind::Select(select) = &parsed.ast.get(apply.function).kind else {
+            unreachable!()
+        };
+        let TreeKind::New(new) = &parsed.ast.get(select.qualifier).kind else {
+            unreachable!()
+        };
+        let mut wrong_allocation_type = copy_untyped_arena(&parsed.ast);
+        let TreeKind::Ident(allocation_type) = &mut wrong_allocation_type.get_mut(new.tpt).kind
+        else {
+            unreachable!()
+        };
+        allocation_type.name = pair_type_name;
+        assert!(
+            reject_source(&wrong_allocation_type),
+            "original Counter initializer {declaration_index} must reject a Pair allocation"
+        );
+    }
+
+    for (formal_index, &formal_tree) in method_def.value_param_clauses[0].iter().enumerate() {
+        let TreeKind::ValDef(formal) = &parsed.ast.get(formal_tree).kind else {
+            unreachable!()
+        };
+        let formal_type_tree = formal.tpt;
+
+        let mut wrong_formal_name = copy_untyped_arena(&parsed.ast);
+        let TreeKind::ValDef(formal) = &mut wrong_formal_name.get_mut(formal_tree).kind else {
+            unreachable!()
+        };
+        formal.name = dotty_core::TermName::new(store.symbols.get(local_symbols[0]).name.text());
+        assert!(
+            reject_source(&wrong_formal_name),
+            "source formal {formal_index} must retain its canonical parameter name"
+        );
+
+        let mut wrong_formal_type = copy_untyped_arena(&parsed.ast);
+        let TreeKind::Ident(formal_type) = &mut wrong_formal_type.get_mut(formal_type_tree).kind
+        else {
+            unreachable!()
+        };
+        formal_type.name = pair_type_name;
+        assert!(
+            reject_source(&wrong_formal_type),
+            "source formal {formal_index} must retain its canonical signature type"
+        );
+    }
+
     let mut source_without_var = copy_untyped_arena(&parsed.ast);
     let TreeKind::ValDef(selected_without_var) = &mut source_without_var.get_mut(stats[2]).kind
     else {
