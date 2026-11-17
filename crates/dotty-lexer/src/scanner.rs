@@ -6293,7 +6293,7 @@ mod tests {
 
     #[test]
     fn forwards_mixed_raw_and_xml_diagnostics_in_source_order() {
-        let scanner = ContextualScanner::new("<root\0").expect("source scans");
+        let scanner = ContextualScanner::new("<root \0").expect("source scans");
 
         assert_eq!(scanner.diagnostics().len(), 2);
         assert_eq!(
@@ -6302,7 +6302,7 @@ mod tests {
         );
         assert_eq!(
             scanner.diagnostics()[0].span(),
-            TextRange::new(5, 6).unwrap()
+            TextRange::new(6, 7).unwrap()
         );
         assert_eq!(
             scanner.diagnostics()[0].severity(),
@@ -6314,7 +6314,7 @@ mod tests {
         );
         assert_eq!(
             scanner.diagnostics()[1].span(),
-            TextRange::new(6, 6).unwrap()
+            TextRange::new(7, 7).unwrap()
         );
         assert_eq!(
             scanner.diagnostics()[1].severity(),

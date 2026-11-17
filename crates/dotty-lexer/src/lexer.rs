@@ -147,13 +147,6 @@ impl<'source> RawLexer<'source> {
                 |character| character == '\t',
             )?)));
         }
-        if character.is_whitespace() && !is_lexical_line_break_char(character) {
-            return Ok(Some(RawItem::Trivia(self.scan_whitespace(
-                start,
-                TriviaKind::OtherWhitespace,
-                |character| character.is_whitespace() && !is_lexical_line_break_char(character),
-            )?)));
-        }
         if is_lexical_line_break_char(character) {
             return Ok(Some(RawItem::Trivia(self.scan_newline(start)?)));
         }
@@ -643,7 +636,12 @@ impl<'source> RawLexer<'source> {
     fn scan_identifier(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
         let _ = self.cursor.bump();
         while let Some(character) = self.cursor.peek() {
-            if character == '_' && self.cursor.peek_nth(1).is_some_and(is_operator_character) {
+            if character == '_'
+                && self
+                    .cursor
+                    .peek_nth(1)
+                    .is_some_and(|next| !is_identifier_part(next) && is_operator_character(next))
+            {
                 let _ = self.cursor.bump();
                 self.consume_operator_chars();
                 break;
@@ -1760,11 +1758,6 @@ mod tests {
         (classifies_spaces_as_trivia, " ", TriviaKind::Spaces),
         (classifies_tabs_as_trivia, "\t", TriviaKind::Tabs),
         (
-            classifies_other_whitespace_as_trivia,
-            "\u{000b}",
-            TriviaKind::OtherWhitespace
-        ),
-        (
             classifies_crlf_as_one_newline_trivia,
             "\r\n",
             TriviaKind::Newline
@@ -2059,6 +2052,59 @@ mod tests {
             ]
         );
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn applies_jdk_identifier_rules_at_token_boundaries() {
+        let (items, diagnostics) = scan("℘x x²");
+        assert_eq!(
+            items,
+            [
+                token(RawTokenKind::Identifier, 0, 4),
+                trivia(TriviaKind::Spaces, 4, 5),
+                token(RawTokenKind::Identifier, 5, 6),
+                token(RawTokenKind::Error, 6, 8),
+                token(RawTokenKind::Eof, 8, 8),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::UnsupportedSourceCharacter { character: '²' }
+        );
+        assert_eq!(diagnostics[0].span(), TextRange::new(6, 8).unwrap());
+        let (items, diagnostics) = scan("x_℘y");
+        assert_eq!(
+            items,
+            [
+                token(RawTokenKind::Identifier, 0, 6),
+                token(RawTokenKind::Eof, 6, 6)
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn reports_non_scala_whitespace_as_source_characters() {
+        for ch in ['\u{000b}', '\u{00a0}', '\u{2028}'] {
+            let source = format!("{ch}x");
+            let end = ch.len_utf8() as u32;
+            let (items, diagnostics) = scan(&source);
+            assert_eq!(
+                items,
+                [
+                    token(RawTokenKind::Error, 0, end),
+                    token(RawTokenKind::Identifier, end, end + 1),
+                    token(RawTokenKind::Eof, end + 1, end + 1)
+                ]
+            );
+            assert_eq!(diagnostics.len(), 1);
+            assert_eq!(
+                diagnostics[0].issue(),
+                &LexerIssue::UnsupportedSourceCharacter { character: ch }
+            );
+            assert_eq!(diagnostics[0].span(), TextRange::new(0, end).unwrap());
+        }
     }
 
     #[test]
