@@ -1,0 +1,29 @@
+[[syntax trees at end of                     typer]] // ConditionalMutableReferenceAssignment.scala
+package example {
+  class Counter(start: Int) extends Object() {
+    private[this] val start: Int
+    private[this] var current: Int = Counter.this.start
+    def get(): Int = this.current
+    def set(value: Int): Unit = this.current = value
+  }
+  class Pair(first: example.Counter, second: example.Counter) extends Object() {
+    private[this] val first: example.Counter
+    private[this] val second: example.Counter
+    private[this] val left: example.Counter = Pair.this.first
+    private[this] val right: example.Counter = Pair.this.second
+    def leftValue(): Int = this.left.get()
+    def rightValue(): Int = this.right.get()
+  }
+  class PairFactory() extends Object() {
+    def create(firstSeed: Int, secondSeed: Int, chooseSecond: Boolean,
+      nextValue: Int): example.Pair =
+      {
+        val first: example.Counter = new example.Counter(firstSeed)
+        val second: example.Counter = new example.Counter(secondSeed)
+        var selected: example.Counter = first
+        if chooseSecond then selected = second else selected = first
+        selected.set(nextValue)
+        new example.Pair(first, second)
+      }
+  }
+}
