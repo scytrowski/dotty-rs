@@ -100,6 +100,9 @@ impl SourceTyper<'_> {
                     {
                         return Some(immediate_owner);
                     }
+                    if let Some(class) = self.enclosing_source_class(immediate_owner) {
+                        return Some(class);
+                    }
 
                     // A one-parameter ordinary function literal is owned by
                     // its source method. Follow that single edge only when
@@ -114,18 +117,11 @@ impl SourceTyper<'_> {
                     {
                         return None;
                     }
-                    let class = self.store.symbols.get(immediate_owner).owner?;
-                    (self.store.symbols.contains(class)
-                        && matches!(
-                            self.store.symbols.get(class).kind,
-                            SymbolKind::Class | SymbolKind::Trait
-                        )
-                        && self.function_literals.can_capture_enclosing_this(
-                            self.store,
-                            context.owner,
-                            class,
-                        ))
-                    .then_some(class)
+                    let class_owner = self.store.symbols.get(immediate_owner).owner?;
+                    let class = self.enclosing_source_class(class_owner)?;
+                    self.function_literals
+                        .can_capture_enclosing_this(self.store, context.owner, class)
+                        .then_some(class)
                 }
             });
         let mut local_scope = context.local_scopes;
@@ -538,7 +534,81 @@ impl SourceTyper<'_> {
             .collect()
     }
 
+    fn source_object_module_class_owner(&self, module_class: SymbolId) -> Option<SymbolId> {
+        if !self.store.symbols.contains(module_class) {
+            return None;
+        }
+        let module_class_info = self.store.symbols.get(module_class);
+        if module_class_info.kind != SymbolKind::ModuleClass
+            || module_class_info.origin != SymbolOrigin::Source(self.source)
+            || self.index.scope_of(module_class).is_none()
+        {
+            return None;
+        }
+        let SourceDefinition::Derived { source, tree } = self.index.definition_of(module_class)?
+        else {
+            return None;
+        };
+        if source != self.source
+            || !matches!(
+                self.arena.try_get(tree)?.kind,
+                TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_))
+            )
+        {
+            return None;
+        }
+        let parent = module_class_info.owner?;
+        let object = self.index.symbol_at(source, tree)?;
+        if self.index.derived_symbol_at(parent, source, tree) != Some(module_class)
+            || !matches!(
+                self.index.definition_of(object),
+                Some(SourceDefinition::Canonical {
+                    source: object_source,
+                    tree: object_tree,
+                }) if object_source == source && object_tree == tree
+            )
+            || !self.store.symbols.contains(object)
+        {
+            return None;
+        }
+        let object_info = self.store.symbols.get(object);
+        (object_info.kind == SymbolKind::Object
+            && object_info.owner == Some(parent)
+            && object_info.origin == SymbolOrigin::Source(source))
+        .then_some(parent)
+    }
+
+    fn enclosing_source_class(&self, mut owner: SymbolId) -> Option<SymbolId> {
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            if !seen.insert(owner) || !self.store.symbols.contains(owner) {
+                return None;
+            }
+            match self.store.symbols.get(owner).kind {
+                SymbolKind::Class | SymbolKind::Trait => return Some(owner),
+                SymbolKind::ModuleClass => owner = self.source_object_module_class_owner(owner)?,
+                _ => return None,
+            }
+        }
+    }
+
     fn source_class_is_enclosing(&self, candidate: SymbolId, mut class: SymbolId) -> bool {
+        let candidate = match self.store.symbols.contains(candidate) {
+            true if matches!(
+                self.store.symbols.get(candidate).kind,
+                SymbolKind::Class | SymbolKind::Trait
+            ) =>
+            {
+                candidate
+            }
+            true if self.store.symbols.get(candidate).kind == SymbolKind::ModuleClass => {
+                let Some(owner) = self.enclosing_source_class(candidate) else {
+                    return false;
+                };
+                owner
+            }
+            _ => return false,
+        };
         let mut seen = std::collections::HashSet::new();
         loop {
             if candidate == class {
@@ -550,15 +620,19 @@ impl SourceTyper<'_> {
             let Some(owner) = self.store.symbols.get(class).owner else {
                 return false;
             };
-            if !self.store.symbols.contains(owner)
-                || !matches!(
-                    self.store.symbols.get(owner).kind,
-                    SymbolKind::Class | SymbolKind::Trait
-                )
-            {
+            if !self.store.symbols.contains(owner) {
                 return false;
             }
-            class = owner;
+            match self.store.symbols.get(owner).kind {
+                SymbolKind::Class | SymbolKind::Trait => class = owner,
+                SymbolKind::ModuleClass => {
+                    let Some(parent) = self.source_object_module_class_owner(owner) else {
+                        return false;
+                    };
+                    class = parent;
+                }
+                _ => return false,
+            }
         }
     }
 

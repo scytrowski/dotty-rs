@@ -411,3 +411,53 @@ fn local_imports_remain_ambiguous_with_plain_and_val_constructor_parameters() {
         assert_eq!(typer.source_typed_index().get(source, ident), None);
     }
 }
+
+#[test]
+fn enclosing_constructor_parameters_cross_nested_module_owners() {
+    for parameter in ["xs: Int", "val xs: Int"] {
+        let text = format!(
+            "class Outer({parameter}) {{ object Inner {{ def readObject: Int = xs; class Nested {{ def readNested: Int = xs }} }} }}"
+        );
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(&text);
+        let outer = class_symbol(&parsed, &store, &index, source, "Outer");
+        let parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::ValDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "xs"
+                        && index.symbol_at(source, tree).is_some_and(|symbol| {
+                            store.symbols.get(symbol).owner == Some(outer)
+                                && matches!(
+                                    store.symbols.get(symbol).kind,
+                                    SymbolKind::Parameter | SymbolKind::Field
+                                )
+                        }) =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("Outer constructor parameter");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        for method_name in ["readObject", "readNested"] {
+            let method = method_tree(&parsed, typer.store(), method_name);
+            let ident = ident_in_method(&parsed, method, "xs", typer.store());
+            typer
+                .type_method_definition(method)
+                .unwrap_or_else(|error| panic!("{parameter:?} in {method_name}: {error:?}"));
+            assert_eq!(
+                typed_ident_target(&typer, source, ident),
+                parameter,
+                "{method_name} must retain the canonical Outer parameter identity"
+            );
+        }
+    }
+}
