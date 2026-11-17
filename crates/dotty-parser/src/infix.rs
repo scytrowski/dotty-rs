@@ -37,7 +37,7 @@ pub fn is_right_associative(operator: &str) -> bool {
 }
 
 /// Returns whether two equal-precedence operators mix associativity.
-pub(crate) fn has_mixed_associativity(left: &str, right: &str) -> bool {
+fn has_mixed_associativity(left: &str, right: &str) -> bool {
     precedence(left) == precedence(right)
         && is_right_associative(left) != is_right_associative(right)
 }
@@ -94,7 +94,7 @@ impl<S: TokenSource> Parser<'_, '_, S> {
             pending_precedence > incoming_precedence
                 || left_associative && pending_precedence == incoming_precedence
         }) {
-            left = self.alloc_infix(previous.operand, previous.operator, left);
+            left = self.alloc_infix(previous, left);
         }
         operators.push(OpInfo {
             operand: left,
@@ -109,17 +109,13 @@ impl<S: TokenSource> Parser<'_, '_, S> {
         mut right: TreeId<Untyped>,
     ) -> TreeId<Untyped> {
         for previous in operators.into_iter().rev() {
-            right = self.alloc_infix(previous.operand, previous.operator, right);
+            right = self.alloc_infix(previous, right);
         }
         right
     }
 
-    pub(crate) fn alloc_infix(
-        &mut self,
-        left: TreeId<Untyped>,
-        operator: Name,
-        right: TreeId<Untyped>,
-    ) -> TreeId<Untyped> {
+    fn alloc_infix(&mut self, pending: OpInfo, right: TreeId<Untyped>) -> TreeId<Untyped> {
+        let left = pending.operand;
         let start = self
             .ast
             .get(left)
@@ -136,7 +132,7 @@ impl<S: TokenSource> Parser<'_, '_, S> {
         self.alloc(
             TreeKind::PhaseSpecific(UntypedNode::InfixOp(InfixOp {
                 left,
-                op: operator,
+                op: pending.operator,
                 right,
             })),
             Some(SourceSpan::new(self.source_id, Span::without_point(range))),
