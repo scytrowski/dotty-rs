@@ -70,7 +70,9 @@ text, application kind, operators, and child nodes. It does not use `Tree.show`,
 compiler presentation rather than a compatibility protocol.
 
 Compiler source offsets are UTF-16 code-unit offsets. Consumers comparing them
-with Rust source spans must convert them to UTF-8 byte offsets first.
+with Rust source spans must convert them to UTF-8 byte offsets first. A decoded
+interpolation fragment can end inside a surrogate pair. The comparison rounds
+that position up to the next scalar boundary for both the span and source slice.
 
 For application argument lists, the Scala 3.9 parser's generic comma-list
 helper creates a synthetic `???` placeholder spanning the trivia before `)`

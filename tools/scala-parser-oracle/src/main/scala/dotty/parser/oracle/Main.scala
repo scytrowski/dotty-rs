@@ -492,7 +492,10 @@ object Main:
     if !tree.span.exists then return ""
     val start = math.max(0, math.min(tree.span.start, source.length))
     val end = math.max(start, math.min(tree.span.end, source.length))
-    source.substring(start, end)
+    def boundary(index: Int): Int =
+      if index > 0 && index < source.length && Character.isSurrogatePair(source(index - 1), source(index))
+      then index + 1 else index
+    source.substring(boundary(start), boundary(end))
 
   // Dotty's generic commaSeparated helper parses one extra `???` tree when an
   // application ends in a trailing comma. Its span covers the trivia up to

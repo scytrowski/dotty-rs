@@ -24,9 +24,9 @@ def main() -> int:
     with source_path.open(encoding="utf-8", newline="") as source_file:
         source = source_file.read()
     oracle = normalize_oracle(
-        pathlib.Path(arguments[1]).read_text().splitlines(), source
+        pathlib.Path(arguments[1]).read_text(encoding="utf-8").split("\n"), source
     )
-    rust = normalize_rust(pathlib.Path(arguments[2]).read_text().splitlines())
+    rust = normalize_rust(pathlib.Path(arguments[2]).read_text(encoding="utf-8").split("\n"))
 
     if ignore_layout:
         oracle = [row for row in oracle if row[0] not in LAYOUT_KINDS]
