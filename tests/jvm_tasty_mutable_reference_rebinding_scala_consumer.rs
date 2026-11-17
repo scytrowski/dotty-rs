@@ -20,6 +20,9 @@ const SOURCE: &str =
     include_str!("fixtures/jvm_tasty_mutable_reference_rebinding/MutableReferenceRebinding.scala");
 const CLIENT: &str =
     include_str!("fixtures/jvm_tasty_mutable_reference_rebinding/ScalaConsumer.scala");
+const JAVA_CLIENT: &[u8] =
+    include_bytes!("fixtures/jvm_tasty_mutable_reference_rebinding/RustRuntimeProbe.java");
+const JAVA_CLIENT_SHA256: &str = "e0679bf4a786026af8dbefa4fbbbe33fc253749d81d81502cf7fcc66ba4bd238";
 const PATHS: [&str; 6] = [
     "example/Counter.class",
     "example/Counter.tasty",
@@ -320,9 +323,12 @@ fn scala39_consumes_original_rust_mutable_reference_rebinding_batch() {
     );
     let root = task_dir();
     let artifacts = root.join("rust-artifacts");
+    let java_client_out = root.join("java-client-classes");
     let client_out = root.join("scala-client-classes");
+    fs::create_dir_all(&java_client_out).unwrap();
     fs::create_dir_all(&client_out).unwrap();
     write_batch(&artifacts, &files);
+    let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
     for (path, expected) in receipt::ARTIFACT_SHA256 {
         assert_eq!(
             sha256(&artifacts.join(path)),
@@ -330,6 +336,114 @@ fn scala39_consumes_original_rust_mutable_reference_rebinding_batch() {
             "canonical Rust artifact {path}"
         );
     }
+    // Both independent clients consume this one physical producer directory.
+    // Keep their output directories disjoint and retain a hash snapshot across
+    // each client so equal bytes from a second emission cannot satisfy this
+    // shared-batch acceptance gate.
+    assert_eq!(
+        sha256(Path::new(
+            "tests/fixtures/jvm_tasty_mutable_reference_rebinding/RustRuntimeProbe.java"
+        )),
+        JAVA_CLIENT_SHA256
+    );
+    let java_source = root.join("RustRuntimeProbe.java");
+    fs::write(&java_source, JAVA_CLIENT).unwrap();
+    let java_client_hash = sha256(&java_source);
+    assert_eq!(java_client_hash, JAVA_CLIENT_SHA256);
+    let hashes_before_java =
+        receipt::ARTIFACT_SHA256.map(|(path, _)| (path.to_owned(), sha256(&artifacts.join(path))));
+    assert_eq!(
+        hashes_before_java,
+        receipt::ARTIFACT_SHA256.map(|(path, digest)| (path.to_owned(), digest.to_owned()))
+    );
+    output(
+        Command::new(java_home.join("bin/javac"))
+            .args(["--release", "21", "-classpath"])
+            .arg(&artifacts)
+            .arg("-d")
+            .arg(&java_client_out)
+            .arg(&java_source),
+    );
+    for forbidden in ["Counter.class", "Pair.class", "PairFactory.class"] {
+        assert!(
+            !java_client_out.join("example").join(forbidden).exists(),
+            "Java consumer compilation must not emit fallback producer class {forbidden}"
+        );
+    }
+    let javap = output(
+        Command::new(java_home.join("bin/javap"))
+            .args(["-v", "-c", "-p", "-classpath"])
+            .arg(&artifacts)
+            .arg("example.PairFactory"),
+    );
+    let javap = String::from_utf8_lossy(&javap.stdout);
+    assert!(javap.contains("major version: 65"), "{javap}");
+    let create_dump = javap
+        .split("public example.Pair create(")
+        .nth(1)
+        .expect("javap shows PairFactory.create")
+        .split("\n  public ")
+        .next()
+        .unwrap();
+    assert!(
+        create_dump.contains("descriptor: (III)Lexample/Pair;"),
+        "{create_dump}"
+    );
+    assert_eq!(
+        create_dump.matches("new           #").count(),
+        3,
+        "two Counter allocations and one Pair allocation:\n{create_dump}"
+    );
+    assert_eq!(
+        create_dump.matches("// class example/Counter").count(),
+        2,
+        "{create_dump}"
+    );
+    assert_eq!(
+        create_dump
+            .matches("// Method example/Counter.set:(I)V")
+            .count(),
+        1,
+        "{create_dump}"
+    );
+    for evidence in [
+        "astore        6",
+        "aload         6",
+        "aload         4",
+        "aload         5",
+    ] {
+        assert!(
+            create_dump.contains(evidence),
+            "javap omitted {evidence:?}:\n{create_dump}"
+        );
+    }
+    let mut java_run = Command::new(java_home.join("bin/java"));
+    java_run
+        .args(["-Xverify:all", "-ea", "-cp"])
+        .arg(format!(
+            "{}:{}",
+            java_client_out.display(),
+            artifacts.display()
+        ))
+        .arg("example.RustRuntimeProbe");
+    configure_jdk(
+        &mut java_run,
+        &java_home,
+        Path::new(&std::env::var("TMPDIR").unwrap()),
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output(&mut java_run).stdout).trim(),
+        "rust mutable rebinding: signed/equal seeds, original identities and independent mutation passed"
+    );
+    let hashes_between_clients =
+        receipt::ARTIFACT_SHA256.map(|(path, _)| (path.to_owned(), sha256(&artifacts.join(path))));
+    assert_eq!(hashes_between_clients, hashes_before_java);
+    eprintln!(
+        "SHARED_BATCH_JAVA_ACCEPTED directory={} client_sha256={} artifacts={hashes_between_clients:?}",
+        artifacts.display(),
+        java_client_hash
+    );
+
     let pinned = scala39_toolchain::from_environment(output, |command| {
         command.env(
             "JAVA_HOME",
@@ -382,13 +496,9 @@ fn scala39_consumes_original_rust_mutable_reference_rebinding_batch() {
         String::from_utf8_lossy(&output(&mut run).stdout).trim(),
         "scala39-rust-mutable-reference-rebinding=ok"
     );
-    for (path, expected) in receipt::ARTIFACT_SHA256 {
-        assert_eq!(
-            sha256(&artifacts.join(path)),
-            expected,
-            "Scala client leaves original {path} unchanged"
-        );
-    }
+    let hashes_after_scala_client =
+        receipt::ARTIFACT_SHA256.map(|(path, _)| (path.to_owned(), sha256(&artifacts.join(path))));
+    assert_eq!(hashes_after_scala_client, hashes_between_clients);
 
     let factory_tasty = artifacts.join("example/PairFactory.tasty");
     let printed = output(
@@ -770,5 +880,10 @@ fn scala39_consumes_original_rust_mutable_reference_rebinding_batch() {
             "positive canonical artifact remains unchanged: {path}"
         );
     }
+    assert_eq!(
+        receipt::ARTIFACT_SHA256.map(|(path, _)| (path.to_owned(), sha256(&artifacts.join(path)))),
+        hashes_after_scala_client,
+        "Scala reader and negative controls leave the shared Rust batch unchanged"
+    );
     fs::remove_dir_all(root).unwrap();
 }
