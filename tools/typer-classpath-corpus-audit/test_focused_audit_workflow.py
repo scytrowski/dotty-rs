@@ -94,6 +94,80 @@ class FocusedAuditWorkflowTests(unittest.TestCase):
         self.assertIn("--require-typed-cohort docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-analysis.tsv", workflow)
         self.assertIn("if-no-files-found: error", workflow)
 
+    def test_acceptance_vi_reuses_frozen_cohorts_and_closes_out_exact_reviewed_head(self) -> None:
+        repo = Path(__file__).resolve().parents[2]
+        workflow = (repo / ".github/workflows/typer-focused-audit.yml").read_text(encoding="utf-8")
+        verifier = (repo / "tools/typer-classpath-corpus-audit/verify_ordinary_cohort.py").read_text(encoding="utf-8")
+        self.assertIn("pull_request_review:\n    types: [submitted]", workflow)
+        self.assertIn("accepts_original_enumeration_hash_code_in_two_fresh_sessions", workflow)
+        self.assertIn("propimpl_clear_types_original_complete_method_in_two_fresh_sessions", workflow)
+        self.assertIn("propimpl_clear_rejects_bounded_negative_cases_and_retries_after_rollback", workflow)
+        self.assertIn("verify_ordinary_cohort.py acceptance-vi", workflow)
+        self.assertIn("--baseline-roots docs/typer-stdlib-acceptance-vi/roots.tsv", workflow)
+        self.assertIn("--main-manifest docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv", workflow)
+        self.assertIn("--analysis-manifest docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv", workflow)
+        target_step = workflow.split("- name: Type both original Acceptance VI roots in fresh sessions\n", 1)[1].split(
+            "\n      - name:", 1
+        )[0]
+        self.assertIn("SCALA39_CLASSPATH=", target_step)
+        self.assertIn("export SCALA39_CLASSPATH=", target_step)
+        self.assertIn("scala3-compiler_3-3.9.0.jar", target_step)
+        self.assertIn("pull_request_number:", workflow)
+        self.assertIn("gh api --paginate --slurp", workflow)
+        self.assertIn('pr.get("base", {}).get("ref") != "main"', workflow)
+        self.assertIn('pull-requests: read', workflow)
+        self.assertIn("--review-evidence", workflow)
+        self.assertIn("READY_FOR_MERGE", verifier)
+        self.assertNotIn("inputs.review_state", workflow)
+        self.assertIn('allowed_events=("pull_request", "pull_request_review", "workflow_dispatch")', verifier)
+        for gate in ("Enforce Stdlib Acceptance V release gate", "Enforce Stdlib Acceptance VI exact-root release gate"):
+            with self.subTest(gate=gate):
+                section = workflow.split(f"- name: {gate}\n", 1)[1].split("\n      - name:", 1)[0]
+                self.assertIn("$DOTTY_EXPECTED_SOURCE_SHA", section)
+        self.assertIn("ACCEPTANCE_VI_TARGETS", verifier)
+        self.assertIn("ACCEPTANCE_VI_JDK_RELEASE_SHA256", verifier)
+        self.assertIn("original-method receipts are missing or nondeterministic", verifier)
+        self.assertIn("approved independent review of this exact head is pending", verifier)
+
+    def test_dispatch_propagates_selected_pr_head_and_api_base_through_full_workflow(self) -> None:
+        repo = Path(__file__).resolve().parents[2]
+        workflow = (repo / ".github/workflows/typer-focused-audit.yml").read_text(encoding="utf-8")
+        head = "a" * 40
+        workflow_branch_sha = "b" * 40
+        dispatch_inputs = {"reviewed_head_sha": head}
+        resolved_head = dispatch_inputs["reviewed_head_sha"] or workflow_branch_sha
+        self.assertEqual(resolved_head, head)
+        self.assertNotEqual(resolved_head, workflow_branch_sha)
+        self.assertIn("inputs.reviewed_head_sha || github.sha", workflow)
+
+        fetch_start = workflow.index("- name: Fetch published pull request reviews for exact-head verification")
+        base_export = workflow.index('environment.write(f"DOTTY_EXPECTED_BASE_SHA={base_sha}\\n")')
+        environment_record = workflow.index("- name: Verify pinned inputs and record environment")
+        nested_receipts = workflow.index("- name: Verify nested recursive ADT execution receipts")
+        binary_receipts = workflow.index("- name: Verify binary recursive ADT receipts and revision pins")
+        cohort_receipts = workflow.index("- name: Verify strict recursive Expr receipts and pinned controls")
+        acceptance_v = workflow.index("- name: Enforce Stdlib Acceptance V release gate")
+        acceptance_vi = workflow.index("- name: Enforce Stdlib Acceptance VI exact-root release gate")
+        artifact = workflow.index("- name: Upload focused report, timings, and intermediates")
+        self.assertLess(fetch_start, base_export)
+        self.assertLess(base_export, environment_record)
+        self.assertLess(environment_record, nested_receipts)
+        self.assertLess(nested_receipts, binary_receipts)
+        self.assertLess(binary_receipts, cohort_receipts)
+        self.assertLess(cohort_receipts, acceptance_v)
+        self.assertLess(acceptance_v, acceptance_vi)
+        self.assertLess(acceptance_vi, artifact)
+        self.assertIn('printf \'pull_request_head_sha\\t%s\\n\' "$DOTTY_EXPECTED_SOURCE_SHA"', workflow)
+        self.assertIn('printf \'pull_request_base_sha\\t%s\\n\' "$DOTTY_EXPECTED_BASE_SHA"', workflow)
+        for evidence_arg in (
+            "--nested-pr-head-sha \"$DOTTY_EXPECTED_SOURCE_SHA\"",
+            "--expected-head-sha \"$DOTTY_EXPECTED_SOURCE_SHA\"",
+        ):
+            with self.subTest(evidence_arg=evidence_arg):
+                self.assertIn(evidence_arg, workflow)
+        self.assertNotIn("github.event.pull_request.head.sha || github.sha", workflow)
+        self.assertIn("name: typer-focused-audit-${{ github.event.pull_request.head.sha || inputs.reviewed_head_sha || github.sha }}", workflow)
+
     def test_sealed_rollback_outputs_are_verified_and_uploaded_from_runner_scratch(self) -> None:
         repo = Path(__file__).resolve().parents[2]
         workflow = (repo / ".github/workflows/typer-focused-audit.yml").read_text(encoding="utf-8")

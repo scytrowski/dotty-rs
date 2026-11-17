@@ -1,5 +1,7 @@
 import csv
 import contextlib
+import hashlib
+import json
 import importlib.util
 import io
 import os
@@ -766,6 +768,468 @@ class AcceptanceIVCloseoutTests(unittest.TestCase):
                 main_manifest_path=manifests["main"], analysis_manifest_path=manifests["analysis"],
             )
             self.assertTrue(any("#2183 integration attempts disagree" in failure for failure in failures))
+
+
+class AcceptanceVIGateTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.repo = MODULE_PATH.parents[2]
+        self.temporary = tempfile.TemporaryDirectory()
+        self.directory = Path(self.temporary.name)
+        self.main_first = self.directory / "main-first.tsv"
+        self.main_second = self.directory / "main-second.tsv"
+        self.analysis_first = self.directory / "analysis-first.tsv"
+        self.analysis_second = self.directory / "analysis-second.tsv"
+        self.main_manifest = self.repo / "docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv"
+        self.analysis_manifest = self.repo / "docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv"
+        self.baseline = self.repo / "docs/typer-stdlib-acceptance-vi/roots.tsv"
+        self.artifacts = self.repo / "crates/dotty-typer/tests/fixtures/lexical-closure-contract/scala-artifacts.sha256.tsv"
+        self.tested = "a" * 40
+        self.head = self.tested
+        self.pull_request_number = 2308
+        self.review_evidence = {
+            "pull_request": {
+                "number": self.pull_request_number,
+                "head": {"sha": self.head},
+                "base": {"ref": "main", "sha": "e" * 40},
+                "user": {"login": "pr-author"},
+            },
+            "reviews": [{
+                "id": 17,
+                "commit_id": self.head,
+                "state": "COMMENTED",
+                "body": (
+                    "<!-- agent-review:v1 verdict=READY_FOR_MERGE head=" + self.head + " -->\n"
+                    "## Review summary\nExact-head checks verified."
+                ),
+                "submitted_at": "2026-11-17T10:00:00Z",
+                "html_url": "https://github.com/scytrowski/dotty-rs/pull/2308#pullrequestreview-17",
+                "user": {"login": "independent-reviewer"},
+            }],
+        }
+        self.source_root = self.directory / "scala"
+        self.source_root.mkdir()
+        source_rows = []
+        target_overrides = {}
+        for cohort, target in MODULE.ACCEPTANCE_VI_TARGETS.items():
+            content = f"fixture source {cohort}".encode()
+            source = self.source_root / target["source"]
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_bytes(content)
+            digest = hashlib.sha256(content).hexdigest()
+            source_rows.append((target["source"], digest))
+            target_overrides[cohort] = {**target, "source_sha256": digest}
+        self.source_inputs = self.directory / "source-inputs.tsv"
+        self.source_inputs.write_text(
+            "source_path\tsha256\n" + "".join(f"{path}\t{digest}\n" for path, digest in source_rows),
+            encoding="utf-8",
+        )
+        self.hash_log_first = self.directory / "hash-first.log"
+        self.hash_log_second = self.directory / "hash-second.log"
+        self.prop_log_first = self.directory / "prop-first.log"
+        self.prop_log_second = self.directory / "prop-second.log"
+        self.write_receipts()
+        self.write_cohort("main", self.main_first)
+        self.main_second.write_bytes(self.main_first.read_bytes())
+        self.write_cohort("analysis", self.analysis_first)
+        self.analysis_second.write_bytes(self.analysis_first.read_bytes())
+        self.target_overrides = target_overrides
+        self.patches = (
+            mock.patch.object(MODULE, "ACCEPTANCE_VI_TARGETS", target_overrides),
+            mock.patch.object(
+                MODULE,
+                "ACCEPTANCE_VI_SOURCE_INPUTS_SHA256",
+                hashlib.sha256(self.source_inputs.read_bytes()).hexdigest(),
+            ),
+        )
+        for patcher in self.patches:
+            patcher.start()
+        self.addCleanup(self.temporary.cleanup)
+        for patcher in reversed(self.patches):
+            self.addCleanup(patcher.stop)
+
+    def write_receipts(self) -> None:
+        hash_body = "\n".join((
+            "root=library/src/scala/Enumeration.scala#tree=459 span=TextRange { start: 9430, end: 9466 } source=\"override def hashCode(): Int = id.##\"",
+            "owner=.scala.Enumeration.Value method=.scala.Enumeration.Value.hashCode owner_provenance=canonical-source",
+            "result=scala.Int typed_root_kind=DefDef typed_rhs_result=scala.Int source_to_typed_root=true",
+            "id_tree=457 span=TextRange { start: 9461, end: 9463 } symbol=.scala.Enumeration.Value.id provenance=canonical-source",
+            "selection_tree=458 span=TextRange { start: 9461, end: 9466 } typed_kind=Select member=Any.## provenance=Builtin signature=ByName[scala.Int] result=scala.Int",
+            "rollback=store,typed-arena,type-index,typed-index,source-to-typed-index restored; same-session retry=success",
+        ))
+        hash_log = (
+            "test result: ok. 1 passed; 0 failed\nENUMERATION_HASH_CODE_ACCEPTANCE_BEGIN\n"
+            + hash_body
+            + "\nENUMERATION_HASH_CODE_ACCEPTANCE_END\nDOTTY_TESTED_SHA="
+            + self.tested
+            + "\n"
+        )
+        prop_log = (
+            "test result: ok. 1 passed; 0 failed\n"
+            "root=library/src/scala/sys/PropImpl.scala#tree=99 span=1297..1334 owner=.scala.sys.PropImpl result=Unit rhs=1317..1334 operation=Shrinkable.-= operation_result=Shrinkable receiver=tree96 argument=tree97 adaptation=Block(statements=1,final=()) mappings=95:1310..1314,96:1317..1327,97:1331..1334,98:1317..1334,99:1297..1334\n"
+            "DOTTY_TESTED_SHA=" + self.tested + "\n"
+        )
+        for path in (self.hash_log_first, self.hash_log_second):
+            path.write_text(hash_log, encoding="utf-8")
+        for path in (self.prop_log_first, self.prop_log_second):
+            path.write_text(prop_log, encoding="utf-8")
+
+    def write_cohort(self, cohort: str, path: Path) -> None:
+        baseline_rows = MODULE.read_tsv(self.baseline)
+        rows = []
+        for item in baseline_rows:
+            if item["cohort"] != cohort:
+                continue
+            identity = item["identity"]
+            status = item["current_status"]
+            result = item["current_actual_result"] if status == "typed" else "not_available"
+            typed_tree = item["typed_tree"] if status == "typed" else "-"
+            target = MODULE.ACCEPTANCE_VI_TARGETS[cohort]
+            owner, method = item["owner"], item["method"]
+            if identity == target["identity"]:
+                status, result, typed_tree = "typed", target["result"], "900"
+                owner, method = target["owner"], target["method"]
+            rows.append([
+                identity, owner, method, item["line"], item["source_range"], "[]",
+                item["declared_result"], result, "1", status, item["source_tree"], typed_tree,
+            ])
+        typed = sum(row[9] == "typed" for row in rows)
+        blocked = sum(row[9].startswith("blocked::") for row in rows)
+        with path.open("w", encoding="utf-8", newline="") as output:
+            output.write(
+                "schema=1\n"
+                "pinned_scala_revision=777528f19a58e794c9954a42f433373472ec57f8\n"
+                "selected=25\nattempted=25\n"
+                f"typed={typed}\nblocked={blocked}\nexcluded=0\nnot_attempted=0\n"
+            )
+            writer = csv.writer(output, delimiter="\t", lineterminator="\n")
+            writer.writerow(MODULE.REPORT_COLUMNS)
+            writer.writerows(rows)
+
+    def verify(self, **overrides: object) -> tuple[list[str], list[dict[str, str]], bool]:
+        args = {
+            "main_first": self.main_first,
+            "main_second": self.main_second,
+            "analysis_first": self.analysis_first,
+            "analysis_second": self.analysis_second,
+            "baseline_roots_path": self.baseline,
+            "main_manifest_path": self.main_manifest,
+            "analysis_manifest_path": self.analysis_manifest,
+            "source_inputs_path": self.source_inputs,
+            "source_root": self.source_root,
+            "artifact_manifest_path": self.artifacts,
+            "main_receipt_logs": (self.hash_log_first, self.hash_log_second),
+            "analysis_receipt_logs": (self.prop_log_first, self.prop_log_second),
+            "tested_revision": self.tested,
+            "pr_head_sha": self.head,
+            "prior_checks_status": "success",
+            "hosted_run": "https://github.com/scytrowski/dotty-rs/actions/runs/123",
+            "artifact_reference": "typer-focused-audit-" + self.tested,
+            "reviewed_head_sha": self.head,
+            "review_state": "approved",
+            "review_evidence": self.review_evidence,
+            "pull_request_number": self.pull_request_number,
+            "jdk_version": "21.0.8",
+            "jdk_release_sha256": MODULE.ACCEPTANCE_VI_JDK_RELEASE_SHA256,
+            "java_binary_sha256": MODULE.ACCEPTANCE_VI_JAVA_SHA256,
+            "jdk_base_module_sha256": MODULE.ACCEPTANCE_VI_JDK_BASE_MODULE_SHA256,
+            "environment": {
+                "GITHUB_ACTIONS": "true",
+                "GITHUB_EVENT_NAME": "pull_request_review",
+                "GITHUB_RUN_ID": "123",
+                "GITHUB_SERVER_URL": "https://github.com",
+                "GITHUB_REPOSITORY": "scytrowski/dotty-rs",
+                "DOTTY_EXPECTED_SOURCE_SHA": self.tested,
+            },
+        }
+        args.update(overrides)
+        return MODULE.verify_acceptance_vi(**args)  # type: ignore[arg-type]
+
+    def test_accepts_exact_additive_targets_and_preserves_all_protected_results(self) -> None:
+        failures, rows, passed = self.verify()
+        self.assertEqual(failures, [])
+        self.assertTrue(passed)
+        self.assertEqual(len(rows), 50)
+        self.assertEqual(sum(row["cohort"] == "main" and row["status"] == "typed" for row in rows), 21)
+        self.assertEqual(sum(row["cohort"] == "analysis" and row["status"] == "typed" for row in rows), 17)
+
+    def test_approved_exact_head_passes_retained_v_provenance_then_vi(self) -> None:
+        environment = {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "GITHUB_RUN_ID": "123",
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_REPOSITORY": "scytrowski/dotty-rs",
+            "DOTTY_EXPECTED_SOURCE_SHA": self.tested,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "acceptance-v.tsv"
+            report = Path(temporary) / "acceptance-v.md"
+            args = [
+                "verify_ordinary_cohort.py", "acceptance-v",
+                "--main-first", str(self.main_first), "--main-second", str(self.main_second),
+                "--analysis-first", str(self.analysis_first), "--analysis-second", str(self.analysis_second),
+                "--protected-successes", str(self.baseline),
+                "--output", str(output), "--report", str(report),
+                "--tested-revision", self.tested, "--pr-head-sha", self.head,
+                "--prior-checks-status", "success",
+                "--hosted-run", "https://github.com/scytrowski/dotty-rs/actions/runs/123",
+            ]
+            with (
+                mock.patch.object(sys, "argv", args),
+                mock.patch.dict(os.environ, environment, clear=True),
+                mock.patch.object(MODULE, "verify_acceptance_v", return_value=([], [])),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                v_result = MODULE.main()
+            self.assertEqual(v_result, 0)
+            self.assertIn("Outcome: PASS", report.read_text(encoding="utf-8"))
+        failures, _, passed = self.verify(environment=environment)
+        self.assertEqual(failures, [])
+        self.assertTrue(passed)
+
+    def test_rejects_absent_stale_self_dismissed_and_changes_requested_review_evidence(self) -> None:
+        self_review = {
+            **self.review_evidence["reviews"][0],
+            "user": {"login": "pr-author"},
+            "body": "READY_FOR_MERGE",
+        }
+        cases = (
+            (None, "published pull request review evidence is missing"),
+            ({**self.review_evidence, "reviews": [{**self.review_evidence["reviews"][0], "commit_id": "b" * 40}]}, "no independent published review"),
+            ({**self.review_evidence, "reviews": [self_review]}, "no independent published review"),
+            ({**self.review_evidence, "reviews": [{**self.review_evidence["reviews"][0], "body": "READY_FOR_MERGE"}]}, "no independent exact-head APPROVED"),
+            ({**self.review_evidence, "reviews": [{**self.review_evidence["reviews"][0], "state": "DISMISSED"}]}, "dismissed or requests changes"),
+            ({**self.review_evidence, "reviews": [{**self.review_evidence["reviews"][0], "state": "CHANGES_REQUESTED"}]}, "dismissed or requests changes"),
+        )
+        for evidence, expected in cases:
+            with self.subTest(expected=expected):
+                failures, _, passed = self.verify(review_evidence=evidence)
+                self.assertFalse(passed)
+                self.assertTrue(any(expected in failure for failure in failures))
+
+        delegated_same_account = {
+            **self.review_evidence,
+            "reviews": [{
+                **self.review_evidence["reviews"][0],
+                "user": {"login": "pr-author"},
+                "body": "<!-- agent-review:v1 verdict=READY_FOR_MERGE head=" + self.head + " -->",
+            }],
+        }
+        failures, _, passed = self.verify(review_evidence=delegated_same_account)
+        self.assertEqual(failures, [])
+        self.assertTrue(passed)
+
+        failures, _, passed = self.verify(
+            environment={
+                "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "workflow_dispatch",
+                "GITHUB_RUN_ID": "123", "GITHUB_SERVER_URL": "https://github.com",
+                "GITHUB_REPOSITORY": "scytrowski/dotty-rs", "DOTTY_EXPECTED_SOURCE_SHA": self.tested,
+            },
+            review_evidence=None,
+            reviewed_head_sha=self.head,
+            review_state="approved",
+        )
+        self.assertFalse(passed)
+        self.assertTrue(any("published pull request review evidence is missing" in failure for failure in failures))
+
+    def test_rejects_target_source_span_or_method_identity_mutations_in_both_attempts(self) -> None:
+        identity = MODULE.ACCEPTANCE_VI_TARGETS["main"]["identity"]
+        for column, replacement, failure_fragment in (
+            (4, "1..2", "report range differs from frozen root baseline"),
+            (1, "scala.Enumeration.Value.forged", "report owner_path differs from frozen root baseline"),
+            (2, "forgedMethod", "report method_name differs from frozen root baseline"),
+        ):
+            self.write_cohort("main", self.main_first)
+            lines = self.main_first.read_text(encoding="utf-8").splitlines()
+            for index, line in enumerate(lines):
+                if line.startswith(identity + "\t"):
+                    fields = line.split("\t")
+                    fields[column] = replacement
+                    lines[index] = "\t".join(fields)
+                    break
+            forged = "\n".join(lines) + "\n"
+            self.main_first.write_text(forged, encoding="utf-8")
+            self.main_second.write_text(forged, encoding="utf-8")
+            failures, rows, passed = self.verify()
+            self.assertFalse(passed)
+            self.assertTrue(any(failure_fragment in failure for failure in failures))
+            target_row = next(row for row in rows if row["identity"] == identity)
+            if column == 4:
+                self.assertEqual(target_row["source_range"], "1..2")
+
+    def test_cli_writes_unmet_report_until_review_event_names_same_head(self) -> None:
+        output = self.directory / "acceptance-vi.tsv"
+        report = self.directory / "acceptance-vi.md"
+        review_evidence = self.directory / "reviews.json"
+        review_evidence.write_text(
+            json.dumps({"pull_request": self.review_evidence["pull_request"], "reviews": []}),
+            encoding="utf-8",
+        )
+        args = [
+            "verify_ordinary_cohort.py", "acceptance-vi",
+            "--main-first", str(self.main_first), "--main-second", str(self.main_second),
+            "--analysis-first", str(self.analysis_first), "--analysis-second", str(self.analysis_second),
+            "--baseline-roots", str(self.baseline),
+            "--main-manifest", str(self.main_manifest), "--analysis-manifest", str(self.analysis_manifest),
+            "--source-inputs", str(self.source_inputs), "--source-root", str(self.source_root),
+            "--artifact-manifest", str(self.artifacts),
+            "--main-receipt-first", str(self.hash_log_first), "--main-receipt-second", str(self.hash_log_second),
+            "--analysis-receipt-first", str(self.prop_log_first), "--analysis-receipt-second", str(self.prop_log_second),
+            "--output", str(output), "--report", str(report),
+            "--tested-revision", self.tested, "--pr-head-sha", self.head,
+            "--pull-request-number", str(self.pull_request_number),
+            "--review-evidence", str(review_evidence),
+            "--prior-checks-status", "success",
+            "--hosted-run", "https://github.com/scytrowski/dotty-rs/actions/runs/123",
+            "--artifact-reference", "typer-focused-audit-" + self.tested,
+            "--jdk-version", "21.0.8",
+            "--jdk-release-sha256", MODULE.ACCEPTANCE_VI_JDK_RELEASE_SHA256,
+            "--java-binary-sha256", MODULE.ACCEPTANCE_VI_JAVA_SHA256,
+            "--jdk-base-module-sha256", MODULE.ACCEPTANCE_VI_JDK_BASE_MODULE_SHA256,
+        ]
+        environment = {
+            "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "pull_request",
+            "GITHUB_RUN_ID": "123", "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_REPOSITORY": "scytrowski/dotty-rs", "DOTTY_EXPECTED_SOURCE_SHA": self.tested,
+        }
+        with mock.patch.object(sys, "argv", args), mock.patch.dict(os.environ, environment, clear=True):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                result = MODULE.main()
+        self.assertEqual(result, 0)
+        self.assertIn("Outcome: SPRINT GOAL UNMET", report.read_text(encoding="utf-8"))
+        self.assertEqual(len(MODULE.read_tsv(output)), 50)
+
+        review_evidence.write_text(json.dumps(self.review_evidence), encoding="utf-8")
+        environment["GITHUB_EVENT_NAME"] = "workflow_dispatch"
+        with mock.patch.object(sys, "argv", args), mock.patch.dict(os.environ, environment, clear=True):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                result = MODULE.main()
+        self.assertEqual(result, 0)
+        closeout = report.read_text(encoding="utf-8")
+        self.assertIn("Outcome: PASS", closeout)
+        self.assertIn(f"reviewed head: `{self.head}`; independent review: `READY_FOR_MERGE`", closeout)
+        self.assertIn("Published reviewer: `independent-reviewer`", closeout)
+
+    def test_rejects_changed_manifest_membership_and_denominator(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest = Path(temporary) / "main.tsv"
+            text = self.main_manifest.read_text(encoding="utf-8").replace(
+                MODULE.ACCEPTANCE_VI_TARGETS["main"]["identity"], "library/src/scala/Forged.scala#tree=1", 1
+            )
+            manifest.write_text(text, encoding="utf-8")
+            failures, _, _ = self.verify(main_manifest_path=manifest)
+            self.assertTrue(any("frozen 25-root manifest changed" in failure for failure in failures))
+            self.assertTrue(any("manifest membership/denominator" in failure for failure in failures))
+
+    def test_rejects_missing_or_duplicated_attempted_roots(self) -> None:
+        lines = self.main_first.read_text(encoding="utf-8").splitlines()
+        self.main_first.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")
+        self.main_second.write_bytes(self.main_first.read_bytes())
+        failures, _, _ = self.verify()
+        self.assertTrue(any("selected counter" in failure or "membership mismatch" in failure for failure in failures))
+
+        self.write_cohort("main", self.main_first)
+        lines = self.main_first.read_text(encoding="utf-8").splitlines()
+        self.main_first.write_text("\n".join(lines + [lines[-1]]) + "\n", encoding="utf-8")
+        self.main_second.write_bytes(self.main_first.read_bytes())
+        failures, _, _ = self.verify()
+        self.assertTrue(any("duplicate ordinary-method identity" in failure for failure in failures))
+
+    def test_rejects_forged_target_identity_owner_result_and_prepared_only_credit(self) -> None:
+        text = self.main_first.read_text(encoding="utf-8")
+        self.main_first.write_text(text.replace("scala.Enumeration.Value\thashCode\t", "scala.Enumeration.Val\thashCode\t", 1), encoding="utf-8")
+        self.main_second.write_bytes(self.main_first.read_bytes())
+        failures, _, _ = self.verify()
+        self.assertTrue(any("target source owner or method name changed" in failure for failure in failures))
+
+        self.write_cohort("main", self.main_first)
+        self.main_second.write_bytes(self.main_first.read_bytes())
+        lines = self.main_first.read_text(encoding="utf-8").splitlines()
+        for index, line in enumerate(lines):
+            if line.startswith(MODULE.ACCEPTANCE_VI_TARGETS["main"]["identity"] + "\t"):
+                columns = line.split("\t")
+                columns[10] = "460"
+                lines[index] = "\t".join(columns)
+                break
+        self.main_first.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.main_second.write_bytes(self.main_first.read_bytes())
+        failures, _, _ = self.verify()
+        self.assertTrue(any("invalid source-tree mapping" in failure for failure in failures))
+
+        self.write_cohort("main", self.main_first)
+        self.main_second.write_bytes(self.main_first.read_bytes())
+        text = self.main_first.read_text(encoding="utf-8")
+        self.main_first.write_text(text.replace("\tInt\tInt\t1\ttyped\t459\t900", "\tInt\tString\t1\ttyped\t459\t900", 1), encoding="utf-8")
+        self.main_second.write_bytes(self.main_first.read_bytes())
+        failures, _, _ = self.verify()
+        self.assertTrue(any("expected exact result Int" in failure for failure in failures))
+
+        self.write_cohort("main", self.main_first)
+        self.main_second.write_bytes(self.main_first.read_bytes())
+        receipt = self.hash_log_first.read_text(encoding="utf-8").replace(
+            "source_to_typed_root=true", "source_to_typed_root=false"
+        )
+        self.hash_log_first.write_text(receipt, encoding="utf-8")
+        self.hash_log_second.write_text(receipt, encoding="utf-8")
+        failures, _, _ = self.verify()
+        self.assertTrue(any("original-method receipt is missing exact evidence" in failure for failure in failures))
+
+    def test_rejects_protected_result_regressions(self) -> None:
+        text = self.main_first.read_text(encoding="utf-8")
+        identity = "library/src/scala/Option.scala#tree=122"
+        lines = text.splitlines()
+        for index, line in enumerate(lines):
+            if line.startswith(identity + "\t"):
+                columns = line.split("\t")
+                columns[9], columns[7], columns[11] = "blocked::Mutation", "not_available", "-"
+                lines[index] = "\t".join(columns)
+                break
+        typed_count = sum(line.split("\t")[9] == "typed" for line in lines if line.startswith("library/"))
+        lines = [line if not line.startswith("typed=") else f"typed={typed_count}" for line in lines]
+        lines = [line if not line.startswith("blocked=") else f"blocked={25-typed_count}" for line in lines]
+        lines = [line if not line.startswith("attempted=") else "attempted=25" for line in lines]
+        self.main_first.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.main_second.write_bytes(self.main_first.read_bytes())
+        failures, _, _ = self.verify()
+        self.assertTrue(any("protected #2297 typed root regressed" in failure for failure in failures))
+
+    def test_rejects_nondeterministic_double_audit_reports(self) -> None:
+        lines = self.main_second.read_text(encoding="utf-8").replace(
+            "typed=21", "typed=22", 1
+        )
+        self.main_second.write_text(lines, encoding="utf-8")
+        failures, _, _ = self.verify()
+        self.assertTrue(any("normalized complete-root double attempts differ" in failure for failure in failures))
+        self.assertTrue(any("report identities or normalized outcomes differ" in failure for failure in failures))
+
+    def test_rejects_mismatched_or_missing_original_test_sha_and_receipt(self) -> None:
+        text = self.hash_log_first.read_text(encoding="utf-8").replace(self.tested, "b" * 40)
+        self.hash_log_first.write_text(text, encoding="utf-8")
+        failures, _, _ = self.verify()
+        self.assertTrue(any("bound to another tested SHA" in failure for failure in failures))
+
+        self.write_receipts()
+        self.hash_log_first.write_text("test result: FAILED\nDOTTY_TESTED_SHA=" + self.tested + "\n", encoding="utf-8")
+        failures, _, _ = self.verify()
+        self.assertTrue(any("receipt markers are missing" in failure for failure in failures))
+
+    def test_rejects_nondeterministic_original_receipts_and_hosted_provenance(self) -> None:
+        self.hash_log_second.write_text(
+            self.hash_log_second.read_text(encoding="utf-8").replace("source_to_typed_root=true", "source_to_typed_root=false"),
+            encoding="utf-8",
+        )
+        failures, _, _ = self.verify()
+        self.assertTrue(any("receipts are missing or nondeterministic" in failure for failure in failures))
+
+        self.write_receipts()
+        failures, _, passed = self.verify(jdk_version="21.0.13")
+        self.assertFalse(passed)
+        self.assertTrue(any("pinned JDK must be 21.0.8" in failure for failure in failures))
+
+        failures, _, passed = self.verify(pr_head_sha="b" * 40)
+        self.assertFalse(passed)
+        self.assertTrue(any("does not equal the reviewed PR head" in failure for failure in failures))
 
 
 if __name__ == "__main__":
