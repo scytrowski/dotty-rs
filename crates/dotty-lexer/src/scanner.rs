@@ -1,5 +1,7 @@
 use dotty_core::diagnostics::DiagnosticSeverity;
-use dotty_core::source::{TextRange, TextRangeError, is_line_break_char};
+use dotty_core::source::{
+    LineIndex, SourceTextError, TextRange, TextRangeError, is_line_break_char,
+};
 use dotty_core::token::{HardKeyword, Punctuation, ScannerEvent, Token, TokenKind, TokenSource};
 
 use crate::xml::XmlState;
@@ -16,6 +18,7 @@ use crate::{
 #[derive(Debug)]
 pub struct ContextualScanner {
     source: String,
+    indentation: IndentationIndex,
     tokens: Vec<Token>,
     position: usize,
     diagnostics: Vec<LexerDiagnostic>,
@@ -64,9 +67,11 @@ impl ContextualScanner {
         }
 
         let mut diagnostics = raw_lexer.diagnostics().to_vec();
-        let tokens = build_tokens(source, &items, &mut diagnostics)?;
+        let indentation = IndentationIndex::new(source)?;
+        let tokens = build_tokens(source, &indentation, &items, &mut diagnostics)?;
         Ok(Self {
             source: source.to_owned(),
+            indentation,
             tokens,
             position: 0,
             diagnostics,
@@ -96,6 +101,10 @@ impl ContextualScanner {
         token
     }
 
+    fn indentation_at(&self, offset: u32) -> IndentWidth<'_> {
+        self.indentation.at(&self.source, offset)
+    }
+
     fn current_index(&self) -> usize {
         self.position.min(self.tokens.len().saturating_sub(1))
     }
@@ -118,8 +127,8 @@ impl ContextualScanner {
         if !has_source_line_break(&self.source, current_end, next.span.start()) {
             return false;
         }
-        let current_indent = line_indentation(&self.source, reference_offset);
-        let next_indent = line_indentation(&self.source, next.span.start());
+        let current_indent = self.indentation_at(reference_offset);
+        let next_indent = self.indentation_at(next.span.start());
         current_indent.is_prefix_of(&next_indent) && current_indent != next_indent
     }
 
@@ -171,8 +180,8 @@ impl ContextualScanner {
             return None;
         }
 
-        let current_indent = line_indentation(&self.source, current.span.start());
-        let body_indent = line_indentation(&self.source, body.span.start());
+        let current_indent = self.indentation_at(current.span.start());
+        let body_indent = self.indentation_at(body.span.start());
         if !current_indent.is_prefix_of(&body_indent) || current_indent == body_indent {
             return None;
         }
@@ -218,8 +227,8 @@ impl ContextualScanner {
             let current = &self.tokens[index];
             let has_line_break =
                 has_source_line_break(&self.source, current.span.end(), next.span.start());
-            let current_indent = line_indentation(&self.source, current.span.start());
-            let next_indent = line_indentation(&self.source, next.span.start());
+            let current_indent = self.indentation_at(current.span.start());
+            let next_indent = self.indentation_at(next.span.start());
             if next.kind == TokenKind::Indent
                 || next.kind == TokenKind::Eof
                 || !has_line_break
@@ -253,7 +262,7 @@ impl ContextualScanner {
             return false;
         }
 
-        let next_indent = line_indentation(&self.source, next.span.start());
+        let next_indent = self.indentation_at(next.span.start());
         self.active_layout_indent_before(current_index, &next_indent)
             .or_else(|| self.enclosing_brace_indent_before(current_index, &next_indent))
             .is_some_and(|outer_indent| outer_indent.ordering(&next_indent) == IndentOrdering::Less)
@@ -263,13 +272,13 @@ impl ContextualScanner {
         &self,
         index: usize,
         next_indent: &IndentWidth,
-    ) -> Option<IndentWidth> {
+    ) -> Option<IndentWidth<'_>> {
         let mut indentations = Vec::new();
         for token in &self.tokens[..index] {
             match token.kind {
                 TokenKind::Indent => {
                     if !self.delimiter_closed_indents.contains(&token.span.start()) {
-                        indentations.push(line_indentation(&self.source, token.span.start()));
+                        indentations.push(self.indentation_at(token.span.start()));
                     }
                 }
                 TokenKind::Outdent => {
@@ -288,12 +297,12 @@ impl ContextualScanner {
         &self,
         index: usize,
         next_indent: &IndentWidth,
-    ) -> Option<IndentWidth> {
+    ) -> Option<IndentWidth<'_>> {
         let mut indentations = Vec::new();
         for token in &self.tokens[..index] {
             match token.kind {
                 TokenKind::Punctuation(Punctuation::LeftBrace) => {
-                    indentations.push(line_indentation(&self.source, token.span.start()));
+                    indentations.push(self.indentation_at(token.span.start()));
                 }
                 TokenKind::Punctuation(Punctuation::RightBrace) => {
                     indentations.pop();
@@ -346,8 +355,9 @@ impl ContextualScanner {
         ) || !can_end_statement(Some(previous.kind))
             || !has_source_line_break(&self.source, previous.span.end(), current.span.start())
             || has_blank_line(&self.source, previous.span.end(), current.span.start())
-            || line_indentation(&self.source, current.span.start())
-                .ordering(&line_indentation(&self.source, case_indent_offset))
+            || self
+                .indentation_at(current.span.start())
+                .ordering(&self.indentation_at(case_indent_offset))
                 != IndentOrdering::Less
         {
             return;
@@ -422,8 +432,7 @@ impl ContextualScanner {
             || !can_end_statement(Some(previous.kind))
             || !has_source_line_break(&self.source, previous.span.end(), operator.span.start())
             || has_blank_line(&self.source, previous.span.end(), operator.span.start())
-            || line_indentation(&self.source, operator.span.start())
-                != line_indentation(&self.source, case_start)
+            || self.indentation_at(operator.span.start()) != self.indentation_at(case_start)
             || !self.can_start_case_guard_infix_operand(operator_index)
         {
             return;
@@ -508,8 +517,7 @@ impl ContextualScanner {
         next.kind == TokenKind::Keyword(HardKeyword::Case)
             && self.has_open_brace_before(current_index)
             && has_source_line_break(&self.source, current.span.end(), next.span.start())
-            && line_indentation(&self.source, current.span.start())
-                == line_indentation(&self.source, next.span.start())
+            && self.indentation_at(current.span.start()) == self.indentation_at(next.span.start())
     }
 
     fn has_open_brace_before(&self, index: usize) -> bool {
@@ -555,7 +563,7 @@ impl ContextualScanner {
         let Some(first_body_token) = self.tokens.get(body_index) else {
             return;
         };
-        let body_indent = line_indentation(&self.source, first_body_token.span.start());
+        let body_indent = self.indentation_at(first_body_token.span.start());
         let mut previous_index = body_index;
         let mut separators = Vec::new();
 
@@ -566,7 +574,7 @@ impl ContextualScanner {
                 continue;
             }
 
-            let current_indent = line_indentation(&self.source, current.span.start());
+            let current_indent = self.indentation_at(current.span.start());
             match current_indent.ordering(&body_indent) {
                 IndentOrdering::Less => break,
                 IndentOrdering::Equal => {}
@@ -603,6 +611,7 @@ impl ContextualScanner {
                 && !suppresses_statement_separator_kind(current.kind)
                 && !is_leading_infix_tokens(
                     &self.source,
+                    &self.indentation,
                     &self.tokens,
                     previous_index,
                     current_index,
@@ -686,14 +695,14 @@ impl ContextualScanner {
                     .unwrap_or(indent_offset)
             });
             closed_region_offset = Some(region_offset);
-            let region_indent = line_indentation(&self.source, region_offset);
+            let region_indent = self.indentation_at(region_offset);
             let current_offset = if is_layout_token(self.tokens[index].kind) {
                 next_real_token(&self.tokens, index)
                     .map_or(self.tokens[index].span.start(), |token| token.span.start())
             } else {
                 self.tokens[index].span.start()
             };
-            let current_indent = line_indentation(&self.source, current_offset);
+            let current_indent = self.indentation_at(current_offset);
             let ordering = current_indent.ordering(&region_indent);
             if !matches!(ordering, IndentOrdering::Less)
                 && !(allow_same_indent && ordering == IndentOrdering::Equal)
@@ -997,26 +1006,26 @@ impl TokenSource for ContextualScanner {
                     };
                     let previous = previous_real_token(&self.tokens, index);
                     let next = next_real_token(&self.tokens, operator_index);
-                    let is_dedented_infix_continuation =
-                        matches!(
-                            operator.kind,
-                            TokenKind::Operator | TokenKind::BackquotedIdentifier
-                        ) && previous.is_some_and(|previous| {
-                            can_end_statement(Some(previous.kind))
-                                && has_source_line_break(
-                                    &self.source,
-                                    previous.span.end(),
-                                    operator.span.start(),
-                                )
-                                && !has_blank_line(
-                                    &self.source,
-                                    previous.span.end(),
-                                    operator.span.start(),
-                                )
-                        }) && line_indentation(&self.source, operator.span.start())
-                            .ordering(&line_indentation(&self.source, indent_offset))
-                            == IndentOrdering::Less
-                            && next.is_some_and(|next| can_start_statement_kind(next.kind));
+                    let is_dedented_infix_continuation = matches!(
+                        operator.kind,
+                        TokenKind::Operator | TokenKind::BackquotedIdentifier
+                    ) && previous.is_some_and(|previous| {
+                        can_end_statement(Some(previous.kind))
+                            && has_source_line_break(
+                                &self.source,
+                                previous.span.end(),
+                                operator.span.start(),
+                            )
+                            && !has_blank_line(
+                                &self.source,
+                                previous.span.end(),
+                                operator.span.start(),
+                            )
+                    }) && self
+                        .indentation_at(operator.span.start())
+                        .ordering(&self.indentation_at(indent_offset))
+                        == IndentOrdering::Less
+                        && next.is_some_and(|next| can_start_statement_kind(next.kind));
 
                     if is_dedented_infix_continuation {
                         let separator_offset = operator.span.end();
@@ -1116,6 +1125,7 @@ impl TokenSource for ContextualScanner {
 
 fn build_tokens(
     source: &str,
+    lines: &IndentationIndex,
     items: &[RawItem],
     diagnostics: &mut Vec<LexerDiagnostic>,
 ) -> Result<Vec<Token>, RawLexerError> {
@@ -1138,8 +1148,14 @@ fn build_tokens(
                 let has_line_break = trivia_has_line_break(source, &trivia);
                 let blank_line = trivia_line_breaks(source, &trivia) > 1;
                 let has_blank_line = has_blank_line(source, previous_end, raw.span.start());
-                let indentation = line_indentation(source, raw.span.start());
-                let previous_indentation = line_indentation(source, previous_end.saturating_sub(1));
+                let (indentation, previous_indentation) = if has_line_break {
+                    (
+                        lines.at(source, raw.span.start()),
+                        lines.at(source, previous_end.saturating_sub(1)),
+                    )
+                } else {
+                    (IndentWidth::empty(), IndentWidth::empty())
+                };
                 let continues_previous_region = previous_opens_indentation
                     && (previous_kind == Some(TokenKind::Operator)
                         || (previous_kind != Some(TokenKind::Operator)
@@ -1156,7 +1172,14 @@ fn build_tokens(
                     && layout_enabled
                     && !has_blank_line
                     && can_end_statement(previous_kind)
-                    && has_leading_infix_operand(source, items, item_index, raw, &indentation);
+                    && has_leading_infix_operand(
+                        source,
+                        lines,
+                        items,
+                        item_index,
+                        raw,
+                        &indentation,
+                    );
                 let leading_infix = infix_candidate
                     && infix_in_region(&previous_indentation, &indentation, &indentation_stack);
                 let starts_prefix_expression = raw.kind == RawTokenKind::Operator
@@ -1181,7 +1204,7 @@ fn build_tokens(
                     let mut closed_same_indent_case = false;
                     if brace_depth == 0 {
                         if has_incomparable_indentation(&indentation_stack, &indentation) {
-                            let line_start = line_start_offset(source, raw.span.start());
+                            let line_start = lines.line_start(raw.span.start());
                             diagnostics.push(LexerDiagnostic::with_issue(
                                 DiagnosticSeverity::Error,
                                 TextRange::new(line_start, raw.span.start())?,
@@ -1192,7 +1215,7 @@ fn build_tokens(
                             &mut tokens,
                             &mut indentation_stack,
                             IndentationTransition {
-                                indentation: &indentation,
+                                indentation,
                                 previous_kind,
                                 previous_opens_indentation,
                                 current_kind: raw.kind,
@@ -1333,9 +1356,9 @@ enum LayoutRegionOwner {
     MatchCases,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct IndentWidth {
-    prefix: String,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IndentWidth<'source> {
+    prefix: &'source str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1346,25 +1369,21 @@ enum IndentOrdering {
     Incomparable,
 }
 
-impl IndentWidth {
+impl<'source> IndentWidth<'source> {
     fn empty() -> Self {
-        Self {
-            prefix: String::new(),
-        }
+        Self { prefix: "" }
     }
 
-    fn from_prefix(prefix: &str) -> Self {
-        Self {
-            prefix: prefix.to_owned(),
-        }
+    fn from_prefix(prefix: &'source str) -> Self {
+        Self { prefix }
     }
 
     fn ordering(&self, other: &Self) -> IndentOrdering {
         if self.prefix == other.prefix {
             IndentOrdering::Equal
-        } else if other.prefix.starts_with(&self.prefix) {
+        } else if other.prefix.starts_with(self.prefix) {
             IndentOrdering::Less
-        } else if self.prefix.starts_with(&other.prefix) {
+        } else if self.prefix.starts_with(other.prefix) {
             IndentOrdering::Greater
         } else {
             IndentOrdering::Incomparable
@@ -1380,12 +1399,12 @@ impl IndentWidth {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct LayoutRegion {
-    indentation: IndentWidth,
+struct LayoutRegion<'source> {
+    indentation: IndentWidth<'source>,
     owner: LayoutRegionOwner,
 }
 
-impl LayoutRegion {
+impl<'source> LayoutRegion<'source> {
     fn root() -> Self {
         Self {
             indentation: IndentWidth::empty(),
@@ -1393,23 +1412,23 @@ impl LayoutRegion {
         }
     }
 
-    fn implicit(indentation: &IndentWidth) -> Self {
+    fn implicit(indentation: &IndentWidth<'source>) -> Self {
         Self {
-            indentation: indentation.clone(),
+            indentation: *indentation,
             owner: LayoutRegionOwner::Implicit,
         }
     }
 
-    fn match_cases(indentation: &IndentWidth) -> Self {
+    fn match_cases(indentation: &IndentWidth<'source>) -> Self {
         Self {
-            indentation: indentation.clone(),
+            indentation: *indentation,
             owner: LayoutRegionOwner::MatchCases,
         }
     }
 }
 
 struct IndentationTransition<'a> {
-    indentation: &'a IndentWidth,
+    indentation: IndentWidth<'a>,
     previous_kind: Option<TokenKind>,
     previous_opens_indentation: bool,
     current_kind: RawTokenKind,
@@ -1419,13 +1438,13 @@ struct IndentationTransition<'a> {
     offset: u32,
 }
 
-fn adjust_indentation(
+fn adjust_indentation<'source>(
     tokens: &mut Vec<Token>,
-    stack: &mut Vec<LayoutRegion>,
-    transition: IndentationTransition<'_>,
+    stack: &mut Vec<LayoutRegion<'source>>,
+    transition: IndentationTransition<'source>,
 ) -> Result<bool, TextRangeError> {
     let IndentationTransition {
-        indentation,
+        ref indentation,
         previous_kind,
         previous_opens_indentation,
         current_kind,
@@ -1437,7 +1456,7 @@ fn adjust_indentation(
     let mut closed_same_indent_case = false;
     let current = stack
         .last()
-        .map(|region| region.indentation.clone())
+        .map(|region| region.indentation)
         .unwrap_or_else(IndentWidth::empty);
     if current == *indentation {
         if opens_match_case_region(previous_kind, current_kind) {
@@ -1485,7 +1504,7 @@ fn adjust_indentation(
     while stack.len() > 1 {
         let current = stack
             .last()
-            .map(|region| region.indentation.clone())
+            .map(|region| region.indentation)
             .unwrap_or_else(IndentWidth::empty);
         if current.is_prefix_of(indentation) {
             if current == *indentation
@@ -1693,6 +1712,7 @@ fn suppresses_statement_separator_kind(kind: TokenKind) -> bool {
 
 fn is_leading_infix_tokens(
     source: &str,
+    lines: &IndentationIndex,
     tokens: &[Token],
     previous_index: usize,
     current_index: usize,
@@ -1726,9 +1746,9 @@ fn is_leading_infix_tokens(
     {
         return false;
     }
-    let previous_indent = line_indentation(source, previous.span.end().saturating_sub(1));
-    let operator_indent = line_indentation(source, current.span.start());
-    let next_indent = line_indentation(source, next.span.start());
+    let previous_indent = lines.at(source, previous.span.end().saturating_sub(1));
+    let operator_indent = lines.at(source, current.span.start());
+    let next_indent = lines.at(source, next.span.start());
     if has_source_line_break(source, current.span.end(), next.span.start())
         && !operator_indent.is_prefix_of(&next_indent)
     {
@@ -1826,6 +1846,7 @@ fn suppresses_statement_separator(kind: RawTokenKind) -> bool {
 
 fn has_leading_infix_operand(
     source: &str,
+    lines: &IndentationIndex,
     items: &[RawItem],
     item_index: usize,
     current: &RawToken,
@@ -1853,7 +1874,7 @@ fn has_leading_infix_operand(
 
     whitespace_follows_operator(source, current.span)
         && (!has_source_line_break(source, current.span.end(), next.span.start())
-            || operator_indent.is_prefix_of(&line_indentation(source, next.span.start())))
+            || operator_indent.is_prefix_of(&lines.at(source, next.span.start())))
 }
 
 fn whitespace_follows_operator(source: &str, operator: TextRange) -> bool {
@@ -2118,27 +2139,54 @@ fn count_line_breaks(text: &str) -> usize {
     count
 }
 
-fn line_indentation(source: &str, offset: u32) -> IndentWidth {
-    let requested_offset = (offset as usize).min(source.len());
-    let safe_offset = (0..=requested_offset)
-        .rev()
-        .find(|candidate| source.is_char_boundary(*candidate))
-        .unwrap_or(0);
-    let line_start = line_start_offset(source, safe_offset as u32) as usize;
-    let prefix: String = source[line_start..safe_offset]
-        .chars()
-        .take_while(|character| matches!(character, ' ' | '\t'))
-        .collect();
-    IndentWidth::from_prefix(&prefix)
+/// Physical line starts and the end of each leading space/tab prefix.
+#[derive(Debug)]
+struct IndentationIndex {
+    lines: LineIndex,
+    prefix_ends: Vec<u32>,
 }
 
-fn line_start_offset(source: &str, offset: u32) -> u32 {
-    let bytes = source.as_bytes();
-    let mut line_start = offset as usize;
-    while line_start > 0 && !matches!(bytes[line_start - 1], b'\n' | b'\r' | 0x0c | 0x1a) {
-        line_start -= 1;
+impl IndentationIndex {
+    fn new(source: &str) -> Result<Self, SourceTextError> {
+        let lines = LineIndex::new(source)?;
+        let prefix_ends = (0..lines.line_count())
+            .map(|line| {
+                let start = lines.line_start(line).expect("indexed line");
+                let width = source.as_bytes()[start as usize..]
+                    .iter()
+                    .take_while(|byte| matches!(byte, b' ' | b'\t'))
+                    .count();
+                start + width as u32
+            })
+            .collect();
+        Ok(Self { lines, prefix_ends })
     }
-    line_start as u32
+
+    fn line_start(&self, offset: u32) -> u32 {
+        let line = self
+            .lines
+            .line_of_offset(offset)
+            .expect("source token offset");
+        self.lines.line_start(line).expect("indexed line")
+    }
+
+    fn at<'a>(&self, source: &'a str, offset: u32) -> IndentWidth<'a> {
+        let offset = offset.min(source.len() as u32);
+        // A feedback offset between CR and LF is already past the CR, but
+        // no bytes of the following line's indentation have been consumed.
+        if offset > 0 && source.as_bytes()[offset as usize - 1..].starts_with(b"\r\n") {
+            return IndentWidth::empty();
+        }
+        let line = self
+            .lines
+            .line_of_offset(offset)
+            .expect("clamped source offset");
+        let start = self.lines.line_start(line).expect("indexed line");
+        let end = self.prefix_ends[line].min(offset);
+        // Only ASCII whitespace lies between start and end, including when
+        // a caller supplies the final byte of a multibyte token.
+        IndentWidth::from_prefix(&source[start as usize..end as usize])
+    }
 }
 
 fn has_source_line_break(source: &str, start: u32, end: u32) -> bool {
@@ -2208,6 +2256,27 @@ mod tests {
             .iter()
             .map(|token| token.kind)
             .collect()
+    }
+
+    #[test]
+    fn indexed_indentation_preserves_prefixes_at_byte_offsets() {
+        let source = " \tλ\r\n\t x\u{000c}  z\r y\n";
+        let lines = IndentationIndex::new(source).unwrap();
+        for (offset, prefix) in [
+            (0, ""),
+            (1, " "),
+            (3, " \t"),
+            (5, ""),
+            (6, ""),
+            (7, "\t"),
+            (8, "\t "),
+            (10, ""),
+            (12, "  "),
+            (15, " "),
+            (u32::MAX, ""),
+        ] {
+            assert_eq!(lines.at(source, offset).prefix, prefix, "offset {offset}");
+        }
     }
 
     #[test]
@@ -4506,10 +4575,13 @@ mod tests {
             .expect("leading infix token exists");
         assert!(!is_leading_infix_tokens(
             source,
+            &scanner.indentation,
             scanner.tokens(),
             0,
             operator_index,
-            &line_indentation(source, scanner.tokens()[operator_index].span.start())
+            &scanner
+                .indentation
+                .at(source, scanner.tokens()[operator_index].span.start())
         ));
     }
 
