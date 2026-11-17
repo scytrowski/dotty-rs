@@ -1304,6 +1304,12 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         inject_late_failure: bool,
     ) -> Result<SymbolId, SemanticTastyLoadError> {
         let aliases_before = self.snapshot_open_builtin_aliases();
+        let resolved_before = self
+            .session
+            .resolved
+            .values()
+            .copied()
+            .collect::<HashSet<_>>();
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
         let object_before = self
@@ -1314,7 +1320,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let mut materialized_class = None;
         let mut materialized_generic_symbols = None;
         let result = self
-            .load_semantic_class_semantics(file, name, selection)
+            .load_semantic_class_semantics(file, name, selection, &resolved_before)
             .and_then(|(class, generic_symbols)| {
                 materialized_class = Some(class);
                 materialized_generic_symbols = generic_symbols;
@@ -3623,6 +3629,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         file: &dotty_tasty::tasty::TastyFile<'_>,
         name: &BinaryName,
         selection: &TastyTopLevelSelection,
+        resolved_before: &HashSet<SymbolId>,
     ) -> Result<(SymbolId, Option<SemanticTastyGenericSymbols>), SemanticTastyLoadError> {
         // Materialize the one external class the frozen fixture requires. The
         // borrowed classpath keeps resource precedence identical to the
@@ -3925,7 +3932,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                         Some(parent) if parent == self.definitions.object_class => true,
                         Some(parent) => {
                             let parent_symbol = self.store.symbols.get(parent);
-                            parent_symbol.kind == SymbolKind::Class
+                            parent != class
+                                && resolved_before.contains(&parent)
+                                && parent_symbol.kind == SymbolKind::Class
                                 && matches!(
                                     parent_symbol.info,
                                     SymbolInfo::Complete(parent_info)
@@ -3977,7 +3986,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         {
             self.remove_open_root_from_package_scope(class);
             return Err(SemanticTastyLoadError::UnsupportedShape(
-                "the indexed root or constructor has an unexpected identity or incomplete info",
+                "the selected class must have one Object or previously completed class parent",
             ));
         }
         Ok((class, generic_symbols))
@@ -22673,6 +22682,137 @@ mod tests {
             !malformed_loader
                 .semantic_tasty_loaded
                 .contains_key(&malformed_leaf)
+        );
+    }
+
+    #[test]
+    fn semantic_chain_self_parent_rejects_without_publishing_or_losing_preloads() {
+        use dotty_tasty::tasty::{RawTree, StandardSection, TYPEREF_TAG};
+
+        let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/semantic_chain_simple_3_9_0");
+        let leaf_bytes = fs::read(fixture_root.join("convergence/ChainLeaf.tasty"))
+            .expect("authentic Scala 3.9.0 ChainLeaf");
+        let file = tasty_symbol::parse_classloader_tasty(&leaf_bytes)
+            .expect("valid source-authentic ChainLeaf");
+        let parent = file
+            .ast_address_index()
+            .expect("AST address index")
+            .get_node(17)
+            .expect("direct parent reference at TYPEREF@17");
+        assert_eq!(parent.tag, TYPEREF_TAG);
+        let ast_offset = file
+            .section(StandardSection::Asts)
+            .expect("AST section")
+            .offset;
+        let ast_payload = file
+            .section(StandardSection::Asts)
+            .expect("AST section")
+            .payload;
+        let mut parent_reader =
+            dotty_tasty::tasty::Reader::with_range(ast_payload, parent.offset, ast_payload.len())
+                .expect("bounded direct parent tree");
+        let parent_tree = RawTree::decode(&mut parent_reader).expect("direct parent type tree");
+        assert!(matches!(
+            parent_tree,
+            RawTree::NatAst {
+                tag: TYPEREF_TAG,
+                value: 4,
+                ..
+            }
+        ));
+        let name_ref_offset = ast_offset + parent.offset + 1;
+        assert_eq!(leaf_bytes[name_ref_offset], 0x84, "name reference head");
+        assert_eq!(
+            leaf_bytes[name_ref_offset + 1],
+            0x40,
+            "parent qualifier tag"
+        );
+
+        let mut self_parent_bytes = leaf_bytes;
+        self_parent_bytes[name_ref_offset] = 0x82; // ChainLeaf, name index 2.
+        let self_parent_file =
+            tasty_symbol::parse_classloader_tasty(&self_parent_bytes).expect("valid mutated TASTy");
+        let mutated_parent = self_parent_file
+            .ast_address_index()
+            .expect("mutated AST address index")
+            .get_node(17)
+            .expect("mutated direct parent reference");
+        assert_eq!(mutated_parent.tag, TYPEREF_TAG);
+        let mutated_ast = self_parent_file
+            .section(StandardSection::Asts)
+            .expect("mutated AST section");
+        let mut mutated_parent_reader = dotty_tasty::tasty::Reader::with_range(
+            mutated_ast.payload,
+            parent.offset,
+            mutated_ast.payload.len(),
+        )
+        .expect("mutated direct parent tree bounds");
+        let mutated_parent_tree =
+            RawTree::decode(&mut mutated_parent_reader).expect("mutated direct parent tree");
+        assert!(matches!(
+            mutated_parent_tree,
+            RawTree::NatAst {
+                tag: TYPEREF_TAG,
+                value: 2,
+                ..
+            }
+        ));
+
+        let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+        let leaf_name = BinaryName::from_internal("convergence/ChainLeaf");
+        let root_name = BinaryName::from_internal("convergence/ChainRoot");
+        let middle_name = BinaryName::from_internal("convergence/ChainMiddle");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            CompositeClassPath::new(vec![
+                Box::new(InMemoryTastyClassPath(HashMap::from([(
+                    leaf_name.clone(),
+                    self_parent_bytes,
+                )]))),
+                Box::new(crate::class_path::DirectoryClassPath::new(
+                    fixture_root.clone(),
+                )),
+                Box::new(
+                    crate::jdk_class_path::JdkClassPath::new(java_home.join("jmods"))
+                        .expect("JDK 21 jmods"),
+                ),
+            ]),
+            &mut store,
+        );
+        let root = loader.load_class(&root_name).expect("preload ChainRoot");
+        let middle = loader
+            .load_class(&middle_name)
+            .expect("preload ChainMiddle");
+        assert_eq!(loader.session.resolved.get(&root_name), Some(&root));
+        assert_eq!(loader.session.resolved.get(&middle_name), Some(&middle));
+        let origins_before = loader.session.origins.clone();
+
+        assert!(matches!(
+            loader.load_semantic_class_with_tasty_unpickler(&leaf_name),
+            Err(SemanticTastyLoadError::UnsupportedShape(
+                "the selected class must have one Object or previously completed class parent"
+            ))
+        ));
+        assert!(!loader.semantic_tasty_loaded.contains_key(&leaf_name));
+        assert!(!loader.session.identified.contains_key(&leaf_name));
+        assert!(!loader.session.resolved.contains_key(&leaf_name));
+        assert_eq!(loader.session.origins, origins_before);
+        assert!(matches!(
+            loader.store.symbols.get(root).info,
+            SymbolInfo::Complete(_)
+        ));
+        assert!(matches!(
+            loader.store.symbols.get(middle).info,
+            SymbolInfo::Complete(_)
+        ));
+        assert_eq!(
+            loader.session.origins.get(&root),
+            Some(&ClassOrigin::Directory(fixture_root.clone()))
+        );
+        assert_eq!(
+            loader.session.origins.get(&middle),
+            Some(&ClassOrigin::Directory(fixture_root))
         );
     }
 }
