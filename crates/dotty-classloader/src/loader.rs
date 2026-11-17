@@ -22243,6 +22243,72 @@ mod tests {
             ]
         );
 
+        let normalize_type_ids = |message: &str| {
+            let mut normalized = String::new();
+            let mut remaining = message;
+            while let Some((prefix, suffix)) = remaining.split_once("TypeId(") {
+                normalized.push_str(prefix);
+                let (id, rest) = suffix
+                    .split_once(')')
+                    .expect("debug TypeId has a closing parenthesis");
+                assert!(!id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()));
+                normalized.push_str("TypeId(_)");
+                remaining = rest;
+            }
+            normalized.push_str(remaining);
+            normalized
+        };
+        let observe_selected_resolver = |root: PathBuf| {
+            let mut store = SemanticStore::new();
+            let definitions = Definitions::bootstrap(&mut store);
+            let mut resolver = crate::resolver::ClasspathSymbolResolver::new(
+                class_path(root, true),
+                definitions,
+                LoadingSession::new(),
+            );
+            let package = resolver
+                .resolve_package(&mut store, &["convergence"])
+                .expect("package resolution")
+                .expect("convergence package");
+            let request = MemberRequest {
+                prefix: store
+                    .types
+                    .alloc(Type::type_ref(definitions.no_prefix, package)),
+                name: Name::new(store.names.intern("ChainLeaf"), Namespace::Type),
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            };
+            let selected_name = BinaryName::from_internal("convergence/ChainLeaf");
+            let normalize_result =
+                |result: &Result<Option<SymbolId>, dotty_core::ResolutionError>| match result {
+                    Err(dotty_core::ResolutionError::Malformed { reason }) => {
+                        format!("requested={selected_name}; {}", normalize_type_ids(reason))
+                    }
+                    _ => format!("requested={selected_name}; unexpected={result:?}"),
+                };
+            let selected =
+                resolver.resolve_member_with_semantic_class(&mut store, &request, &selected_name);
+            let normalized = normalize_result(&selected);
+            let repeated =
+                resolver.resolve_member_with_semantic_class(&mut store, &request, &selected_name);
+            assert_eq!(normalized, normalize_result(&repeated));
+            normalized
+        };
+        let selected = observe_selected_resolver(simple_root.clone());
+        let selected_fresh = observe_selected_resolver(simple_root.clone());
+        let expected_selected = concat!(
+            "requested=convergence/ChainLeaf; ",
+            "semantic loading of convergence/ChainLeaf failed: ",
+            "Unpickle { address: 4, error: UnresolvedMember { address: 17, ",
+            "prefix: TypeId(_), space: None, name: \"ChainMiddle\", namespace: Type } }"
+        );
+        assert_eq!(selected, expected_selected);
+        assert_eq!(selected_fresh, expected_selected);
+        assert_eq!(
+            selected, selected_fresh,
+            "fresh resolver stores normalize equally"
+        );
+
         let mut resolver_store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut resolver_store);
         let mut resolver = crate::resolver::ClasspathSymbolResolver::new(
@@ -22262,17 +22328,6 @@ mod tests {
             selector: MemberSelector::Unique,
             space: MemberSpace::Prefix,
         };
-        let selected = resolver.resolve_member_with_semantic_class(
-            &mut resolver_store,
-            &request,
-            &BinaryName::from_internal("convergence/ChainLeaf"),
-        );
-        println!("SELECTED_RESOLVER ChainLeaf: {selected:?}");
-        assert!(matches!(
-            &selected,
-            Err(dotty_core::ResolutionError::Malformed { reason })
-                if reason.contains("UnresolvedMember") && reason.contains("ChainMiddle")
-        ));
         let legacy = resolver.resolve_member(&mut resolver_store, &request);
         println!("LEGACY_RESOLVER ChainLeaf: {legacy:?}");
         let legacy_symbol = legacy

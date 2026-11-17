@@ -103,12 +103,20 @@ single-class semantic loader stops at the additional declaration shape gate.
 This is why the separately compiled no-method cohort is used to measure B1/B2;
 the original inputs were retained unchanged.
 
-The selected resolver request for `convergence.ChainLeaf` on the simple cohort
-returns `ResolutionError::Malformed`, retaining the inner typed
-`Unpickle::UnresolvedMember` for `ChainMiddle` at address 17. Repeats and two
-newly bootstrapped stores produce identical normalized results for each unit;
-normalization compares the error variant, TASTy address, namespace and source
-name, excluding arena IDs.
+The loader observations above and the selected resolver observations below
+are measured separately. The selected resolver is invoked twice in one
+resolver session and twice again in an independently bootstrapped store. The
+normalized result pins both the requested binary name and the outer/inner error
+addresses, namespace and name while replacing only the arena-dependent
+`TypeId`:
+
+| Request | First result and same-session repeat | Independent fresh resolver store |
+| --- | --- | --- |
+| `convergence/ChainLeaf` | `ResolutionError::Malformed`: `Unpickle@4` wrapping `UnresolvedMember@17`, namespace `Type`, name `ChainMiddle` | Same normalized result |
+
+Normalization compares the complete error rendering, including the selected
+binary name and `space: None`, after substituting `TypeId(_)` for its
+allocation-dependent number.
 
 Controls establish that the result is specific to the selected semantic
 projection. The ordinary resolver returns a complete `ChainLeaf` `ClassInfo`
@@ -128,9 +136,14 @@ method type.
 
 | Boundary | Evidence | Verdict |
 | --- | --- | --- |
-| B1 — direct class-to-class edge | `ChainMiddle` stops at typed `UnresolvedMember@23` for `ChainRoot`; the trait root stops at the semantic loader's class-template shape gate. | `BLOCKED_PREREQUISITE` |
-| B2 — transitive completion from leaf only | The simpler `ChainLeaf` stops at typed `UnresolvedMember@17` for `ChainMiddle`. | `BLOCKED_PREREQUISITE` |
-| B3 — selected resolver class request | Selected `ChainLeaf` resolution returns `ResolutionError::Malformed` wrapping that exact typed unresolved parent. | `BLOCKED_PREREQUISITE` |
+| B1 — direct class-to-class edge | The simple `ChainLeaf` class request stops at `UnresolvedMember@17` for its direct class parent `ChainMiddle`. | `BLOCKED_PREREQUISITE` |
+| B2 — transitive completion from leaf only | The leaf-only request cannot complete the chain because its direct `ChainMiddle` parent is unresolved; transitive loading is therefore blocked at that edge. | `BLOCKED_PREREQUISITE` |
+| B3 — selected resolver class request | Exact selected result is `convergence/ChainLeaf`, outer `Unpickle@4`, inner `UnresolvedMember@17`, namespace `Type`, name `ChainMiddle`; same-session repeats and two fresh resolver stores normalize identically. | `BLOCKED_PREREQUISITE` |
+
+Separate prerequisite evidence: `ChainRoot` is a trait, and a direct semantic
+request for it stops at the class-template shape gate. The `ChainMiddle`
+request reports `UnresolvedMember@23` for that trait parent. These findings do
+not relabel either edge as class-to-class and remain separate from B1.
 
 The legacy/unselected route has complete hierarchy information for this cohort;
 that does not make the selected semantic class request supported. This evidence
@@ -146,7 +159,7 @@ Historical convergence fixtures and comparator inputs remain unchanged:
 
 Validation on the final implementation:
 
-- `cargo test -p dotty-classloader --locked`: passed, 576 passed and 5 ignored.
+- `cargo test -p dotty-classloader -p dotty-tasty-unpickler --locked`: passed.
 - `cargo test --workspace --all-targets --locked`: passed.
 - Strict JDK 21 classfile/JVM gate from `AGENTS.md`: passed using Temurin
   JDK 21.0.13 and `DOTTY_CLASSFILE_REQUIRE_JDK=1`.
@@ -155,7 +168,8 @@ Validation on the final implementation:
 - `cargo fmt --all -- --check`, `python3 tools/check-frontend-boundaries.py`,
   and `git diff --check`: passed.
 
-The audited branch is based on
-`ab25b31acf4cc1d2307220bbe72d5133334190be`; its published candidate HEAD is
-verified in the associated pull request. No historical comparator input was
-regenerated.
+The audit began at integration base
+`ab25b31acf4cc1d2307220bbe72d5133334190be`. The PR branch incorporates current
+`main` at `bdc41b213bd94cdeb239fa7f58fb5ec412cd46ca` so the hosted focused gate
+can validate its ancestry. The updated published candidate HEAD is verified in
+the associated pull request. No historical comparator input was regenerated.
