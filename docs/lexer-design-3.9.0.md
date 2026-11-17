@@ -583,9 +583,9 @@ real Scala sources under both `tools/scala-lexer-oracle/src/main/scala` and
 `tools/tasty-baseline/src/main/scala`. Run the real-source corpus with
 `bash tools/scala-lexer-oracle/check-corpus.sh`. Corpus comparison ignores
 layout tokens because the raw dump does not provide parser feedback events;
-focused scanner tests cover those layout decisions separately. The normalizer
-has its own Python unit tests for UTF-16 offsets, interpolation boundaries,
-wildcards, and parser-facing colon protocol normalization.
+focused scanner tests cover those layout decisions separately. The oracle exposes the compiler token ID classification and interpolation context
+for tokens with shared display names. Python tests cover UTF-16 offsets,
+wildcards, and parser-facing colon normalization.
 
 Numeric recovery currently keeps malformed numeric text as one raw literal while
 reporting a typed diagnostic. Missing digits after a base prefix and invalid

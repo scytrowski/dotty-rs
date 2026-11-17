@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import pathlib
-import re
 import sys
 
 
@@ -54,214 +53,38 @@ LAYOUT_KINDS = {"end of statement", "indent", "unindent"}
 
 def normalize_oracle(lines: list[str], source: str) -> list[tuple[str, int]]:
     rows: list[tuple[str, int]] = []
-    interpolation_ranges = find_interpolation_ranges(source)
+    # Scala's offsets count UTF-16 code units. The intermediate surrogate
+    # position rounds up to the next UTF-8 boundary as in the scanner dump.
+    byte_offsets = [0]
+    for character in source:
+        end = byte_offsets[-1] + len(character.encode("utf-8"))
+        byte_offsets.append(end)
+        if ord(character) > 0xFFFF:
+            byte_offsets.append(end)
     for line in lines:
         fields = line.split("\t")
-        if len(fields) < 6 or fields[0] == "token":
+        if len(fields) != 8 or fields[0] == "token":
             continue
-        try:
-            start = utf16_to_utf8_offset(source, int(fields[1]))
-            end = utf16_to_utf8_offset(source, int(fields[2]))
-        except ValueError:
-            continue
-        token, _, _, _, name, *_ = fields
-        spelling = source.encode("utf-8")[start:end].decode("utf-8", errors="replace")
-        in_interpolation = any(
-            range_start <= start < range_end
-            and not is_in_interpolation_expression(source, range_start, start)
-            for range_start, range_end in interpolation_ranges
-        )
-        rows.append((oracle_kind(token, name, spelling, in_interpolation), start))
+        token, start, _, _, _, _, _, lexical_kind = fields
+        offset = int(start)
+        if not 0 <= offset < len(byte_offsets):
+            raise ValueError(f"invalid oracle UTF-16 offset {offset}")
+        rows.append((lexical_kind or oracle_kind(token), byte_offsets[offset]))
     if not rows:
         raise ValueError("oracle output did not contain token rows")
     return rows
 
 
-def oracle_kind(token: str, name: str, spelling: str, in_interpolation: bool) -> str:
+def oracle_kind(token: str) -> str:
     if token == "erroneous token":
         return "error"
     if token == "_":
-        # Scala exposes wildcard underscore as a dedicated raw token; the
-        # current shared token surface represents it as an identifier.
         return "identifier"
     if token == "$XMLSTART$<":
         return token
-    if token == "string literal" and in_interpolation:
-        return "string part"
-    if token == "number literal with exponent":
-        return "exponent literal"
-    if token == "number literal":
-        if "." in spelling:
-            return "decimal literal"
-        if "e" in spelling.lower():
-            return "exponent literal"
-        return "integer literal"
-    if token == "identifier" and spelling.startswith("`"):
-        return "backquoted identifier"
-    if token == "identifier" and name and not is_identifier_name(name):
-        return "operator"
     if token and not token[0].isalnum() and not token.startswith("'"):
         return "operator"
     return token
-
-
-def find_interpolation_ranges(source: str) -> list[tuple[int, int]]:
-    return [
-        (start, end)
-        for start, end, _ in find_interpolation_ranges_with_quotes(source)
-    ]
-
-
-def find_interpolation_ranges_with_quotes(
-    source: str,
-) -> list[tuple[int, int, str]]:
-    ranges: list[tuple[int, int, str]] = []
-    pattern = re.compile(r'(?<![\w$])(?:[A-Za-z_][A-Za-z0-9_]*)("""|")')
-    for match in pattern.finditer(source):
-        if is_inside_string_literal(source, match.start()):
-            continue
-        quote = match.group(1)
-        content_start = match.end()
-        closing = find_interpolation_end(source, content_start, quote)
-        if closing is None:
-            continue
-        content = source[content_start:closing]
-        if quote == '"' and ("\n" in content or "\r" in content):
-            continue
-        if has_invalid_simple_splice(content):
-            continue
-        start = len(source[:content_start - len(quote)].encode("utf-8"))
-        end = len(source[: closing + len(quote)].encode("utf-8"))
-        ranges.append((start, end, quote))
-    return ranges
-
-
-def find_interpolation_end(source: str, content_start: int, quote: str) -> int | None:
-    index = content_start
-    brace_depth = 0
-    while index < len(source):
-        if brace_depth:
-            if source.startswith('"""', index):
-                end = source.find('"""', index + 3)
-                if end < 0:
-                    return None
-                index = end + 3
-                continue
-            if source[index] == '"':
-                end = index + 1
-                while end < len(source):
-                    if source[end] == "\\":
-                        end += 2
-                    elif source[end] == '"':
-                        break
-                    else:
-                        end += 1
-                index = end + 1
-                continue
-            if source[index] == "{":
-                brace_depth += 1
-            elif source[index] == "}":
-                brace_depth -= 1
-            index += 1
-            continue
-
-        if source.startswith(quote, index):
-            return index
-        if source.startswith("${", index):
-            brace_depth = 1
-            index += 2
-        elif source[index] == "\\":
-            index += 2
-        else:
-            index += 1
-    return None
-
-
-def is_inside_string_literal(source: str, offset: int) -> bool:
-    """Reject interpolator-looking text that is itself inside a string."""
-    index = 0
-    in_string: str | None = None
-    while index < offset:
-        if in_string is None:
-            if source.startswith('"""', index):
-                in_string = '"""'
-                index += 3
-                continue
-            if source[index] == '"':
-                in_string = '"'
-            index += 1
-            continue
-
-        if source.startswith(in_string, index):
-            if in_string == '"""':
-                while index < offset and source[index] == '"':
-                    index += 1
-            else:
-                index += len(in_string)
-            in_string = None
-        elif source[index] == "\\" and in_string == '"':
-            index += 2
-        else:
-            index += 1
-    return in_string is not None
-
-
-def is_in_interpolation_expression(source: str, range_start: int, offset: int) -> bool:
-    quote = source.find('"', range_start, offset)
-    if quote < 0:
-        return False
-    content_start = quote + (3 if source.startswith('"""', quote) else 1)
-    depth = 0
-    index = content_start
-    while index < offset:
-        if source[index] == "\\":
-            index += 2
-            continue
-        if source[index] == "{" and index > 0 and source[index - 1] == "$":
-            depth += 1
-        elif source[index] == "}" and depth:
-            depth -= 1
-        index += 1
-    return depth > 0
-
-
-def has_invalid_simple_splice(content: str) -> bool:
-    index = 0
-    while index < len(content):
-        character = content[index]
-        if character != "$":
-            index += 1
-            continue
-        next_character = content[index + 1] if index + 1 < len(content) else None
-        if next_character in {"$", '"', "{"}:
-            index += 2
-            continue
-        if next_character is not None and (
-            next_character == "_"
-            or next_character == "$"
-            or next_character.isalpha()
-        ):
-            index += 2
-            continue
-        return True
-    return False
-
-
-def is_identifier_name(name: str) -> bool:
-    first = name[0]
-    return first == "_" or first.isalpha() or first.isdigit() or first in "$"
-
-
-def utf16_to_utf8_offset(source: str, offset: int) -> int:
-    """Convert a Scala UTF-16 source offset to a Rust UTF-8 byte offset."""
-    utf16_units = 0
-    utf8_bytes = 0
-    for character in source:
-        if utf16_units >= offset:
-            break
-        utf16_units += len(character.encode("utf-16-le")) // 2
-        utf8_bytes += len(character.encode("utf-8"))
-    return utf8_bytes
 
 
 def normalize_rust(lines: list[str]) -> list[tuple[str, int]]:
