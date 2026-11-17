@@ -273,59 +273,10 @@ fn decode_char_literal(text: &str) -> Option<u16> {
 }
 
 fn decode_literal_body(body: &str, raw: bool) -> Option<DecodedString> {
-    let characters: Vec<char> = body.chars().collect();
-    let mut units = Vec::new();
-    let mut index = 0;
-
-    while index < characters.len() {
-        let character = characters[index];
-        index += 1;
-        if raw || character != '\\' {
-            let mut encoded = [0; 2];
-            units.extend(character.encode_utf16(&mut encoded).iter().copied());
-            continue;
-        }
-
-        let escaped = *characters.get(index)?;
-        index += 1;
-        match escaped {
-            'b' => units.push('\u{0008}' as u16),
-            't' => units.push('\t' as u16),
-            'n' => units.push('\n' as u16),
-            'f' => units.push('\u{000c}' as u16),
-            'r' => units.push('\r' as u16),
-            '\\' => units.push('\\' as u16),
-            '"' => units.push('"' as u16),
-            '\'' => units.push('\'' as u16),
-            'u' | 'U' => {
-                while characters
-                    .get(index)
-                    .is_some_and(|character| matches!(character, 'u' | 'U'))
-                {
-                    index += 1;
-                }
-                let digits: String = characters.get(index..index + 4)?.iter().collect();
-                let code_unit = u16::from_str_radix(&digits, 16).ok()?;
-                units.push(code_unit);
-                index += 4;
-            }
-            '0'..='7' => {
-                let mut digits = String::from(escaped);
-                while digits.len() < 3
-                    && characters
-                        .get(index)
-                        .is_some_and(|character| ('0'..='7').contains(character))
-                {
-                    digits.push(characters[index]);
-                    index += 1;
-                }
-                let code_unit = u16::from_str_radix(&digits, 8).ok()?;
-                units.push(code_unit);
-            }
-            _ => return None,
-        }
+    if raw || !body.contains('\\') {
+        return Some(DecodedString::Scalar(body.to_owned()));
     }
-
+    let units = dotty_core::source::decode_literal_units(body)?;
     Some(match String::from_utf16(&units) {
         Ok(value) => DecodedString::Scalar(value),
         Err(_) => DecodedString::Utf16(units),

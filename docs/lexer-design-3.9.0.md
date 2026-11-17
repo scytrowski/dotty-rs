@@ -299,6 +299,12 @@ Raw token values should normally be represented by source ranges. If cooked
 data is needed for a backquoted identifier or literal, retain the raw spelling
 as well as the cooked value.
 
+Backquoted identifiers retain their full token span. The parser interns the
+decoded spelling, so `Ab` and the backquoted spelling containing `A\u0062`
+refer to the same name. A pair of escaped UTF-16 surrogates denotes one
+supplementary character. An unpaired surrogate receives a lexer diagnostic
+because the name interner stores UTF-8.
+
 Malformed input produces diagnostics and, where recovery is possible, an
 error/raw item that permits scanning to continue. The raw lexer must not panic,
 hang, or silently discard source text.

@@ -650,7 +650,9 @@ where
             return self.cursor.progressed_since(checkpoint);
         }
 
-        let target_text = self.marker_target_text(target_kind, self.current().span);
+        let target_text = self
+            .name_text(target_kind, self.current().span)
+            .unwrap_or_default();
         let matching_tree = last.and_then(|tree| {
             self.end_marker_owner(tree, target_kind, &target_text, marker.start(), false)
         });
@@ -694,7 +696,7 @@ where
         let target = self.cursor.lookahead(1);
         let target_kind = target.kind;
         let target_span = target.span;
-        let target_text = self.marker_target_text(target_kind, target_span);
+        let target_text = self.name_text(target_kind, target_span).unwrap_or_default();
         let owner = self.end_marker_owner(
             tree,
             target_kind,
@@ -728,7 +730,7 @@ where
             return false;
         }
         let target = self.cursor.lookahead(offset + 1).clone();
-        let target_text = self.marker_target_text(target.kind, target.span);
+        let target_text = self.name_text(target.kind, target.span).unwrap_or_default();
         self.end_marker_owner(tree, target.kind, &target_text, marker.span.start(), false)
             .is_some()
     }
@@ -901,18 +903,6 @@ where
             .is_some_and(|position| position.span().range().end() <= marker_start)
             && (include_marked || !self.end_marked_trees.contains(&tree))
             && self.end_marker_matches(tree, target_kind, target_text)
-    }
-
-    pub(crate) fn marker_target_text(&self, kind: TokenKind, span: TextRange) -> String {
-        let text = self.source.slice(span).unwrap_or_default();
-        if kind == TokenKind::BackquotedIdentifier {
-            text.strip_prefix('`')
-                .and_then(|text| text.strip_suffix('`'))
-                .unwrap_or(text)
-                .to_owned()
-        } else {
-            text.to_owned()
-        }
     }
 
     fn end_marker_matches(

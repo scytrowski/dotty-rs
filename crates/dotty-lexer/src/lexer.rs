@@ -678,15 +678,16 @@ impl<'source> RawLexer<'source> {
     fn scan_backquoted_identifier(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
         let _ = self.cursor.bump();
         let content_start = self.cursor.position();
-
+        let mut valid_escapes = true;
         while let Some(character) = self.cursor.peek() {
-            if character == '`' {
+            if character == '`' || is_literal_line_terminator(character) {
                 break;
             }
-            if is_literal_line_terminator(character) {
-                break;
+            if character == '\\' {
+                valid_escapes &= self.scan_escape(self.cursor.position())?;
+            } else {
+                let _ = self.cursor.bump();
             }
-            let _ = self.cursor.bump();
         }
 
         let closed = self.cursor.eat_if('`');
@@ -711,22 +712,22 @@ impl<'source> RawLexer<'source> {
                 span,
             });
         }
-        if content.is_empty() || content == "_" {
-            self.diagnostics.push(LexerDiagnostic::with_issue(
-                DiagnosticSeverity::Error,
-                span,
-                LexerIssue::EmptyOrUnderscoreBackquotedIdentifier,
-            ));
-            return Ok(RawToken {
-                kind: RawTokenKind::Error,
-                span,
-            });
-        }
-
-        Ok(RawToken {
-            kind: RawTokenKind::BackquotedIdentifier,
-            span,
-        })
+        let kind = if valid_escapes {
+            let issue = match dotty_core::source::decode_identifier_body(content).as_deref() {
+                Some("" | "_") => Some(LexerIssue::EmptyOrUnderscoreBackquotedIdentifier),
+                None => Some(LexerIssue::NonScalarBackquotedIdentifier),
+                Some(_) => None,
+            };
+            if let Some(issue) = issue {
+                self.report_issue(start, issue)?;
+                RawTokenKind::Error
+            } else {
+                RawTokenKind::BackquotedIdentifier
+            }
+        } else {
+            RawTokenKind::Error
+        };
+        Ok(RawToken { kind, span })
     }
 
     fn scan_operator(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
@@ -1193,14 +1194,17 @@ impl<'source> RawLexer<'source> {
 
     fn scan_octal_escape(&mut self, start: u32) -> Result<bool, RawLexerError> {
         let mut digits = String::new();
-        let mut count = 0;
-        while count < 3 {
+        let max_digits = if matches!(self.cursor.peek(), Some('0'..='3')) {
+            3
+        } else {
+            2
+        };
+        while digits.len() < max_digits {
             let Some(character @ '0'..='7') = self.cursor.peek() else {
                 break;
             };
             digits.push(character);
             let _ = self.cursor.bump();
-            count += 1;
         }
         self.report_issue(
             start,
@@ -2554,6 +2558,26 @@ mod tests {
         assert_eq!(
             diagnostics[0].issue(),
             &LexerIssue::UnterminatedBlockComment
+        );
+    }
+
+    #[test]
+    fn validates_the_decoded_spelling_of_backquoted_names() {
+        let (items, diagnostics) = scan(r#"`\u005f`"#);
+        assert_eq!(items[0], token(RawTokenKind::Error, 0, 8));
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::EmptyOrUnderscoreBackquotedIdentifier
+        );
+        assert_eq!(
+            scan(r#"`\uD83D\uDE00`"#).0[0],
+            token(RawTokenKind::BackquotedIdentifier, 0, 14)
+        );
+        let (items, diagnostics) = scan(r#"`\uD800`"#);
+        assert_eq!(items[0], token(RawTokenKind::Error, 0, 8));
+        assert_eq!(
+            diagnostics[0].issue().code(),
+            "lexer.non_scalar_backquoted_identifier"
         );
     }
 
