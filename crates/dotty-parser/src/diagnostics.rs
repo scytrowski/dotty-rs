@@ -1052,6 +1052,8 @@ pub enum ExpressionIssue {
     InvalidPolyFunctionBody { found: TokenKind },
     /// An interpolated identifier is not followed by a string part.
     ExpectedInterpolatedStringPart { found: TokenKind },
+    /// The numeric token cannot be represented at its required precision.
+    InvalidNumericLiteral { found: TokenKind },
     /// A simple interpolation needs an identifier, `this`, or a pattern wildcard.
     InvalidSimpleInterpolationSplice { found: TokenKind },
     /// An interpolated pattern splice is missing its closing brace.
@@ -1121,6 +1123,7 @@ impl ExpressionIssue {
             | Self::ExpectedLambdaParameter { .. }
             | Self::ExpectedLambdaParameterName { .. }
             | Self::ExpectedLambdaBody { .. }
+            | Self::InvalidNumericLiteral { .. }
             | Self::InvalidSimpleInterpolationSplice { .. }
             | Self::ExpectedInterpolatedStringPart { .. } => {
                 ParseDiagnosticKind::ExpectedExpression
@@ -1311,6 +1314,7 @@ impl ExpressionIssue {
                 "parser.expression.expected_poly_function_arrow"
             }
             Self::InvalidPolyFunctionBody { .. } => "parser.expression.invalid_poly_function_body",
+            Self::InvalidNumericLiteral { .. } => "parser.expression.invalid_numeric_literal",
             Self::InvalidSimpleInterpolationSplice { .. } => {
                 "parser.expression.invalid_simple_interpolation_splice"
             }

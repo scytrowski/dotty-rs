@@ -27,7 +27,7 @@ where
             Err(_) => return self.unexpected_expression(),
         };
         let Some(value) = numeric_constant(token_kind, spelling) else {
-            return self.unexpected_expression();
+            return self.invalid_numeric_literal();
         };
         self.advance();
         self.alloc_from(mark, TreeKind::Literal(Literal { value }))
@@ -41,7 +41,7 @@ where
         };
         let spelling = format!("-{token_spelling}");
         let Some(value) = numeric_constant(token_kind, &spelling) else {
-            return self.unexpected_expression();
+            return self.invalid_numeric_literal();
         };
         self.advance();
         self.alloc_from(mark, TreeKind::Literal(Literal { value }))
@@ -66,7 +66,7 @@ where
         let kind = match token_kind {
             TokenKind::LongLiteral => {
                 let Some(value) = parse_long_literal(spelling) else {
-                    return self.unexpected_expression();
+                    return self.invalid_numeric_literal();
                 };
                 self.advance();
                 return self.alloc_from(
@@ -78,7 +78,7 @@ where
             }
             TokenKind::FloatLiteral => {
                 let Some(value) = parse_float_literal(spelling) else {
-                    return self.unexpected_expression();
+                    return self.invalid_numeric_literal();
                 };
                 self.advance();
                 return self.alloc_from(
@@ -90,7 +90,7 @@ where
             }
             TokenKind::DoubleLiteral => {
                 let Some(value) = parse_double_literal(spelling) else {
-                    return self.unexpected_expression();
+                    return self.invalid_numeric_literal();
                 };
                 self.advance();
                 return self.alloc_from(
@@ -111,6 +111,17 @@ where
             mark,
             TreeKind::PhaseSpecific(UntypedNode::Number(NumberLiteral { text, kind })),
         )
+    }
+
+    fn invalid_numeric_literal(&mut self) -> TreeId<Untyped> {
+        let position = self.current_span();
+        self.report_issue(crate::ParseIssue::Expression(
+            crate::ExpressionIssue::InvalidNumericLiteral {
+                found: self.current().kind,
+            },
+        ));
+        self.advance();
+        self.error_expr(position)
     }
 
     pub(crate) fn parse_string(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
@@ -185,19 +196,25 @@ fn non_decimal_digits(spelling: &str) -> Option<(&str, u32, bool)> {
 }
 
 fn parse_float_literal(spelling: &str) -> Option<f32> {
-    spelling
-        .strip_suffix(['f', 'F'])?
-        .replace('_', "")
-        .parse()
-        .ok()
+    let digits = spelling.strip_suffix(['f', 'F'])?.replace('_', "");
+    let value: f32 = digits.parse().ok()?;
+    representable_float(&digits, f64::from(value)).then_some(value)
 }
 
 fn parse_double_literal(spelling: &str) -> Option<f64> {
-    spelling
-        .strip_suffix(['d', 'D'])?
-        .replace('_', "")
-        .parse()
-        .ok()
+    decimal_constant(spelling.strip_suffix(['d', 'D'])?)
+}
+
+fn decimal_constant(spelling: &str) -> Option<f64> {
+    let digits = spelling.replace('_', "");
+    let value: f64 = digits.parse().ok()?;
+    representable_float(&digits, value).then_some(value)
+}
+
+fn representable_float(spelling: &str, value: f64) -> bool {
+    let mantissa = spelling.split(['e', 'E']).next().unwrap_or(spelling);
+    value.is_finite()
+        && (value != 0.0 || !mantissa.bytes().any(|digit| matches!(digit, b'1'..=b'9')))
 }
 
 fn numeric_constant(token_kind: TokenKind, spelling: &str) -> Option<Constant> {
@@ -205,7 +222,7 @@ fn numeric_constant(token_kind: TokenKind, spelling: &str) -> Option<Constant> {
         TokenKind::IntegerLiteral => parse_integer_literal(spelling).map(Constant::Int),
         TokenKind::LongLiteral => parse_long_literal(spelling).map(Constant::Long),
         TokenKind::DecimalLiteral | TokenKind::ExponentLiteral => {
-            spelling.replace('_', "").parse().ok().map(Constant::double)
+            decimal_constant(spelling).map(Constant::double)
         }
         TokenKind::FloatLiteral => parse_float_literal(spelling).map(Constant::float),
         TokenKind::DoubleLiteral => parse_double_literal(spelling).map(Constant::double),
@@ -475,6 +492,47 @@ mod tests {
     #[test]
     fn decodes_the_non_decimal_long_sign_bit_boundary() {
         assert_eq!(parse_long_literal("0x8000000000000000L"), Some(i64::MIN));
+    }
+
+    #[test]
+    fn diagnoses_out_of_range_floating_constants_at_the_literal() {
+        for (spelling, kind) in [
+            ("1e999F", TokenKind::FloatLiteral),
+            ("1e-999F", TokenKind::FloatLiteral),
+            ("1e999D", TokenKind::DoubleLiteral),
+            ("1e-999D", TokenKind::DoubleLiteral),
+            ("1e999", TokenKind::ExponentLiteral),
+        ] {
+            let end = spelling.len() as u32;
+            let mut names = NameInterner::new();
+            let mut parser = parser_for(
+                spelling,
+                vec![token(kind, 0, end), token(TokenKind::Eof, end, end)],
+                &mut names,
+            );
+            let mark = parser.mark();
+            if kind == TokenKind::ExponentLiteral {
+                parser.parse_number_constant(mark);
+            } else {
+                parser.parse_number(mark);
+            }
+            assert_eq!(parser.diagnostics().len(), 1, "{spelling}");
+            assert_eq!(
+                parser.diagnostics()[0].issue().code(),
+                "parser.expression.invalid_numeric_literal"
+            );
+            assert_eq!(
+                parser.diagnostics()[0].span(),
+                dotty_core::TextRange::new(0, end).unwrap()
+            );
+            assert_eq!(parser.current().kind, TokenKind::Eof);
+        }
+        assert_eq!(parse_float_literal("0.000e-999F"), Some(0.0));
+        assert_eq!(
+            parse_double_literal("-0e999D").unwrap().to_bits(),
+            (-0.0_f64).to_bits()
+        );
+        assert_eq!(parse_float_literal("1.4e-45F"), Some(f32::from_bits(1)));
     }
 
     #[test]
