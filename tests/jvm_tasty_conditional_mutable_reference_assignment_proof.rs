@@ -618,6 +618,45 @@ fn source_if_preserves_both_assignment_identities_and_records_first_paired_rejec
         .is_err()
     };
 
+    let mut renamed_source_method = copy_untyped_arena(&parsed.ast);
+    let TreeKind::DefDef(source_method) = &mut renamed_source_method.get_mut(method_tree).kind
+    else {
+        unreachable!()
+    };
+    source_method.name = dotty_core::TermName::new(store.symbols.get(local_symbols[0]).name.text());
+    assert!(
+        reject_source(&renamed_source_method),
+        "source factory method name must match its canonical method symbol"
+    );
+
+    let TreeKind::ValDef(first_formal) = &parsed.ast.get(method_def.value_param_clauses[0][0]).kind
+    else {
+        unreachable!()
+    };
+    let TreeKind::Ident(first_formal_type) = &parsed.ast.get(first_formal.tpt).kind else {
+        unreachable!()
+    };
+    let mut wrong_source_result_type = copy_untyped_arena(&parsed.ast);
+    let TreeKind::Ident(source_result_type) =
+        &mut wrong_source_result_type.get_mut(method_def.tpt).kind
+    else {
+        unreachable!()
+    };
+    source_result_type.name = first_formal_type.name;
+    assert!(
+        reject_source(&wrong_source_result_type),
+        "source factory result annotation must remain the canonical Pair type"
+    );
+
+    let mut missing_source_result_position = copy_untyped_arena(&parsed.ast);
+    missing_source_result_position
+        .get_mut(method_def.tpt)
+        .position = None;
+    assert!(
+        reject_source(&missing_source_result_position),
+        "source factory result annotation must retain its original source position"
+    );
+
     let TreeKind::Apply(pair_result_apply) = &parsed.ast.get(result).kind else {
         unreachable!()
     };

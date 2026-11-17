@@ -170,6 +170,7 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
         || !store.symbols.contains(method)
         || store.symbols.get(method).kind != SymbolKind::Method
         || !has_source_origin(store, method, source_id)
+        || method_def.name.as_name() != &store.symbols.get(method).name
         || store.names.resolve(store.symbols.get(method).name.text()) != "create"
     {
         return Err(sid(
@@ -217,6 +218,47 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
         return Err(src(
             "factory method must have ordered Int, Int, Boolean, Int formals",
         ));
+    }
+    let result_type_symbol = match store.types.try_get(signature.result) {
+        Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        }) if store.symbols.contains(*symbol) => *symbol,
+        _ => return Err(sem("factory result must be a canonical named class type")),
+    };
+    if store.symbols.get(result_type_symbol).kind != SymbolKind::Class
+        || !has_source_origin(store, result_type_symbol, source_id)
+        || source_index.definition_of(result_type_symbol).is_none_or(
+            |definition| !matches!(definition, SourceDefinition::Canonical { source, .. } if source == source_id),
+        )
+        || !matches!(source_ast.try_get(method_def.tpt).map(|node| &node.kind), Some(TreeKind::Ident(ident)) if ident.name == store.symbols.get(result_type_symbol).name)
+    {
+        return Err(src(
+            "factory result annotation must retain its canonical source class reference",
+        ));
+    }
+    require_source_position(
+        source_ast,
+        source_id,
+        method_def.tpt,
+        "factory result annotation has a foreign or missing source position",
+    )?;
+    if let Some(typed_result_type) = source_typed_index.get(source_id, method_def.tpt) {
+        if typed_ast.try_get(typed_result_type).is_none_or(|node| {
+            node.ty != signature.result || !matches!(&node.kind, TreeKind::TypeTree(_))
+        }) {
+            return Err(typed(
+                "typed factory result annotation must retain its canonical signature type",
+            ));
+        }
+        require_matching_source_typed_positions(
+            source_ast,
+            typed_ast,
+            source_id,
+            method_def.tpt,
+            typed_result_type,
+            "factory result annotation",
+        )?;
     }
     let method_scope = source_index
         .scope_of(method)
