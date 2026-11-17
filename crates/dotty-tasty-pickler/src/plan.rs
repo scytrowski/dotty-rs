@@ -428,6 +428,35 @@ pub struct ConditionalLocalReferenceSelectionBinding {
     pub local_type: TypeId,
 }
 
+/// Exact source and typed identities for the two ordered assignments of one
+/// mutable local inside the original Unit-valued conditional. This records
+/// provenance only and does not authorize serialization.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConditionalMutableReferenceAssignmentBinding {
+    pub source_id: SourceId,
+    pub owner: SymbolId,
+    pub method: SymbolId,
+    pub scope: dotty_core::ScopeId,
+    pub source_block: TreeId<Untyped>,
+    pub typed_block: TreeId<Typed>,
+    pub source_if: TreeId<Untyped>,
+    pub typed_if: TreeId<Typed>,
+    pub source_condition: TreeId<Untyped>,
+    pub typed_condition: TreeId<Typed>,
+    /// THEN assignment followed by ELSE assignment.
+    pub source_assignments: [TreeId<Untyped>; 2],
+    pub typed_assignments: [TreeId<Typed>; 2],
+    pub source_lhss: [TreeId<Untyped>; 2],
+    pub typed_lhss: [TreeId<Typed>; 2],
+    pub source_rhss: [TreeId<Untyped>; 2],
+    pub typed_rhss: [TreeId<Typed>; 2],
+    pub condition_formal: SymbolId,
+    pub local: SymbolId,
+    /// THEN RHS followed by ELSE RHS, retaining semantic identity order.
+    pub rhs_locals: [SymbolId; 2],
+    pub local_type: TypeId,
+}
+
 /// Exact source and typed roots plus the source-proven origin for one outer
 /// constructor argument.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

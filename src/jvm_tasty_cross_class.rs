@@ -17,12 +17,18 @@ use dotty_tasty_pickler::{ConditionalLocalReferenceSelectionBinding, LocalRefere
 use dotty_typer::{SourceTyper, TypedLocalBinding};
 
 mod conditional_local_reference;
+mod conditional_mutable_reference_assignment;
 mod local_receiver_call;
 mod mutable_local_reference_reassignment;
 pub use conditional_local_reference::{
     ImmutableLocalConditionalReferenceSelectionProofInput,
     ValidatedImmutableLocalConditionalReferenceSelectionProof,
     validate_immutable_local_conditional_reference_selection_proof,
+};
+pub use conditional_mutable_reference_assignment::{
+    ConditionalMutableReferenceAssignmentProofInput,
+    ValidatedConditionalMutableReferenceAssignmentProof,
+    validate_conditional_mutable_reference_assignment_proof,
 };
 pub use local_receiver_call::{
     ValidatedImmutableLocalCounterSetCallProof,
