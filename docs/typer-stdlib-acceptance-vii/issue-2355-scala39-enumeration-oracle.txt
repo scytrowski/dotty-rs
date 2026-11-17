@@ -1,0 +1,361 @@
+Option -Xprint is a deprecated alias: use -Vprint instead
+[[syntax trees at end of                     typer]] // /home/vdrake6/.cache/agent-worktrees/issue-2345-conditional-mutable-tmp-1fc30690/scala39-source/library/src/scala/Enumeration.scala
+package scala {
+  import scala.language.2.13
+  import scala.collection.{SpecificIterableFactory, StrictOptimizedIterableOps,
+    View, immutable, mutable}
+  import java.lang.reflect.{Field as JField, Method as JMethod}
+  import scala.annotation.{implicitNotFound, tailrec}
+  import scala.reflect.NameTransformer.*
+  import scala.util.matching.Regex
+  @SerialVersionUID(8476000850333817230L) abstract class Enumeration(
+    initial: Int) extends Object(), Serializable { thisenum: Enumeration =>
+    private[this] val initial: Int
+    def <init>(): Unit =
+      {
+        this(0)
+        ()
+      }
+    protected def readResolve(): AnyRef =
+      thisenum.getClass[Enumeration]().getField(
+        scala.reflect.NameTransformer.MODULE_INSTANCE_NAME).get(null)
+    override def toString(): String =
+      refArrayOps[String](
+        refArrayOps[String](
+          augmentString(
+            augmentString(this.getClass[Enumeration]().getName()).stripSuffix(
+              scala.reflect.NameTransformer.MODULE_SUFFIX_STRING)
+          ).split('.')
+        ).last.split(
+          scala.util.matching.Regex.quote(
+            scala.reflect.NameTransformer.NAME_JOIN_STRING)
+        )
+      ).last
+    private val vmap: scala.collection.mutable.Map[Int, Enumeration.this.Value]
+       = new scala.collection.mutable.HashMap[Int, Enumeration.this.Value]()
+    @transient private[this] var vset: Enumeration.this.ValueSet | Null = null
+    @volatile @transient private[this] var vsetDefined: Boolean = false
+    private[this] val nmap: scala.collection.mutable.Map[Int, String] =
+      new scala.collection.mutable.HashMap[Int, String]()
+    def values: Enumeration.this.ValueSet =
+      {
+        if this.vsetDefined.unary_! then
+          {
+            this.vset = (this.ValueSet.newBuilder ++= this.vmap.values).result()
+            this.vsetDefined = true
+          }
+         else ()
+        nn[Enumeration.this.ValueSet](this.vset)
+      }
+    protected var nextId: Int = Enumeration.this.initial
+    protected def nextId_=(x$1: Int): Unit = ()
+    protected var nextName: Iterator[String] = compiletime.uninitialized
+    protected def nextName_=(x$1: Iterator[String]): Unit = ()
+    private[this] def nextNameOrNull: String | Null =
+      if this.nextName != null && this.nextName.hasNext then
+        this.nextName.next() else null
+    private[this] var topId: Int = Enumeration.this.initial
+    private[this] var bottomId: Int =
+      if Enumeration.this.initial < 0 then Enumeration.this.initial else 0
+    final def maxId: Int = this.topId
+    final def apply(x: Int): Enumeration.this.Value = this.vmap.apply(x)
+    final def withName(s: String): Enumeration.this.Value =
+      this.values.byName.getOrElse[Enumeration.this.Value](s,
+        throw
+          new NoSuchElementException(
+            _root_.scala.StringContext.apply(
+              ["No value found for \'","\'" : String]*).s([s : Any]*)
+          )
+      )
+    protected final def Value: Enumeration.this.Value = this.Value(this.nextId)
+    protected final def Value(i: Int): Enumeration.this.Value =
+      this.Value(i, this.nextNameOrNull)
+    protected final def Value(name: String | Null): Enumeration.this.Value =
+      this.Value(this.nextId, name)
+    protected final def Value(i: Int, name: String | Null):
+      Enumeration.this.Value = new Enumeration.this.Val(i, name)
+    private[this] def populateNameMap(): Unit =
+      {
+        @tailrec def getFields(clazz: Class[? >: Nothing <: Any] | Null,
+          acc: Array[java.lang.reflect.Field]): Array[java.lang.reflect.Field]
+           =
+          {
+            if clazz == null then acc else
+              getFields(clazz.getSuperclass(),
+                if
+                  refArrayOps[java.lang.reflect.Field](clazz.getDeclaredFields()
+                    ).isEmpty
+                 then acc else
+                  refArrayOps[java.lang.reflect.Field](acc).++[
+                    java.lang.reflect.Field](clazz.getDeclaredFields())(
+                    scala.reflect.ClassTag.apply[java.lang.reflect.Field](
+                      classOf[java.lang.reflect.Field])
+                  )
+              )
+          }
+        val fields: Array[java.lang.reflect.Field] =
+          getFields(this.getClass[Enumeration]().getSuperclass(),
+            this.getClass[Enumeration]().getDeclaredFields())
+        def isValDef(m: java.lang.reflect.Method): Boolean =
+          refArrayOps[java.lang.reflect.Field](fields).exists((
+            fd: java.lang.reflect.Field) =>
+            fd.getName() == m.getName() && fd.getType() == m.getReturnType())
+        val methods: Array[java.lang.reflect.Method] =
+          refArrayOps[java.lang.reflect.Method](
+            this.getClass[Enumeration]().getMethods()).filter((
+            m: java.lang.reflect.Method) =>
+            refArrayOps[Class[?]](m.getParameterTypes()).isEmpty &&
+              classOf[Enumeration.this.Value].isAssignableFrom(m.getReturnType()
+                )
+             && m.getDeclaringClass() != classOf[Enumeration] && isValDef(m)
+          )
+        refArrayOps[java.lang.reflect.Method](methods).foreach[Unit]((
+          m: java.lang.reflect.Method) =>
+          {
+            val name: String = m.getName()
+            val value: Enumeration.this.Value =
+              m.invoke(this, [ : Object]*).asInstanceOf[Enumeration.this.Value]
+            if value.outerEnum eq thisenum then
+              {
+                val id: Int = value.id
+                {
+                  this.nmap += Tuple2.apply[Int, String](id, name)
+                  ()
+                }
+              }
+             else ()
+          }
+        )
+      }
+    private[this] def nameOf(i: Int): String =
+      this.synchronized[String](
+        {
+          this.nmap.getOrElse[String](i,
+            {
+              this.populateNameMap()
+              this.nmap.apply(i)
+            }
+          )
+        }
+      )
+    @SerialVersionUID(7091335633555234129L) abstract class Value() extends
+      Object(), Ordered[Enumeration.this.Value], Serializable {
+      def id: Int
+      private[Enumeration] val outerEnum: Enumeration = thisenum
+      override def compare(that: Enumeration.this.Value): Int =
+        if this.id < that.id then -1 else if this.id == that.id then 0 else 1
+      override def equals(other: Any): Boolean =
+        other match
+          {
+            case that @ _:Enumeration#Value =>
+              (this.outerEnum eq that.outerEnum) && this.id == that.id
+            case _ =>
+              false
+          }
+      override def hashCode(): Int = this.id.##
+      def +(v: Enumeration.this.Value): Enumeration.this.ValueSet =
+        Enumeration.this.ValueSet.apply([this,v : Enumeration.this.Value]*)
+    }
+    @SerialVersionUID(0 - 3501153230598116017L) protected class Val(i: Int,
+      name: String | Null) extends Enumeration.this.Value(), Serializable {
+      private[this] val i: Int
+      private[this] val name: String | Null
+      def <init>(i: Int): Unit =
+        {
+          this(i, Enumeration.this.nextNameOrNull)
+          ()
+        }
+      def <init>(name: String | Null): Unit =
+        {
+          this(Enumeration.this.nextId, name)
+          ()
+        }
+      def <init>(): Unit =
+        {
+          this(Enumeration.this.nextId)
+          ()
+        }
+      if Enumeration.this.vmap.isDefinedAt(Val.this.i).unary_!.unary_! then
+        scala.runtime.Scala3RunTime.assertFailed("Duplicate id: " + Val.this.i)
+         else ()
+      Enumeration.this.vmap.update(Val.this.i, this)
+      Enumeration.this.vsetDefined = false
+      Enumeration.this.nextId = Val.this.i + 1
+      if Enumeration.this.nextId > Enumeration.this.topId then
+        Enumeration.this.topId = Enumeration.this.nextId else ()
+      if Val.this.i < Enumeration.this.bottomId then
+        Enumeration.this.bottomId = Val.this.i else ()
+      def id: Int = Val.this.i
+      override def toString(): String =
+        if Val.this.name != null then Val.this.name else
+          try thisenum.nameOf(Val.this.i) catch
+            {
+              case _:NoSuchElementException =>
+                "<Invalid enum: no field for #" + Val.this.i + ">"
+            }
+      protected def readResolve(): AnyRef =
+        {
+          val enumeration: Enumeration =
+            thisenum.readResolve().asInstanceOf[Enumeration]
+          (if enumeration.vmap == null then this else
+            enumeration.vmap.apply(Val.this.i)):Enumeration#Value
+        }
+    }
+    final implicit lazy module val ValueOrdering: Enumeration.this.ValueOrdering
+       = new Enumeration.this.ValueOrdering()
+    final module class ValueOrdering() extends Object(), Ordering[
+      Enumeration.this.Value] { this: Enumeration.this.ValueOrdering.type =>
+      def compare(x: Enumeration.this.Value, y: Enumeration.this.Value): Int =
+        x.compare(y)
+    }
+    @SerialVersionUID(7229671200427364242L) class ValueSet private[ValueSet](
+      nnIds: scala.collection.immutable.BitSet) extends
+      scala.collection.immutable.AbstractSet[Enumeration.this.Value](),
+      scala.collection.immutable.SortedSet[Enumeration.this.Value],
+      scala.collection.immutable.SortedSetOps[Enumeration.this.Value,
+        scala.collection.immutable.SortedSet, Enumeration.this.ValueSet],
+      scala.collection.StrictOptimizedIterableOps[Enumeration.this.Value,
+        scala.collection.immutable.Set, Enumeration.this.ValueSet],
+    Serializable {
+      private var nnIds: scala.collection.immutable.BitSet
+      implicit def ordering: Ordering[Enumeration.this.Value] =
+        Enumeration.this.ValueOrdering
+      def rangeImpl(from: Option[Enumeration.this.Value],
+        until: Option[Enumeration.this.Value]): Enumeration.this.ValueSet =
+        new Enumeration.this.ValueSet(
+          ValueSet.this.nnIds.rangeImpl(
+            from.map[Int]((_$1: Enumeration.this.Value) =>
+              _$1.id - Enumeration.this.bottomId),
+            until.map[Int]((_$2: Enumeration.this.Value) =>
+              _$2.id - Enumeration.this.bottomId)
+          )
+        )
+      override def empty: Enumeration.this.ValueSet =
+        Enumeration.this.ValueSet.empty
+      override def knownSize: Int = ValueSet.this.nnIds.size
+      override def isEmpty: Boolean = ValueSet.this.nnIds.isEmpty
+      def contains(v: Enumeration.this.Value): Boolean =
+        ValueSet.this.nnIds.contains(v.id - Enumeration.this.bottomId)
+      def incl(value: Enumeration.this.Value): Enumeration.this.ValueSet =
+        new Enumeration.this.ValueSet(
+          ValueSet.this.nnIds + (value.id - Enumeration.this.bottomId))
+      def excl(value: Enumeration.this.Value): Enumeration.this.ValueSet =
+        new Enumeration.this.ValueSet(
+          ValueSet.this.nnIds - (value.id - Enumeration.this.bottomId))
+      def iterator: Iterator[Enumeration.this.Value] =
+        ValueSet.this.nnIds.iterator.map[Enumeration.this.Value]((id: Int) =>
+          thisenum.apply(Enumeration.this.bottomId + id))
+      override def iteratorFrom(start: Enumeration.this.Value):
+        Iterator[Enumeration.this.Value] =
+        ValueSet.this.nnIds.iteratorFrom(start.id).map[Enumeration.this.Value]((
+          id: Int) => thisenum.apply(Enumeration.this.bottomId + id))
+      override def className: String =
+        _root_.scala.StringContext.apply(["",".ValueSet" : String]*).s(
+          [thisenum : Any]*)
+      def toBitMask: Array[Long] = ValueSet.this.nnIds.toBitMask
+      protected override def fromSpecific(
+        coll: IterableOnce[Enumeration.this.Value]): Enumeration.this.ValueSet
+         = Enumeration.this.ValueSet.fromSpecific(coll)
+      protected override def newSpecificBuilder:
+        scala.collection.mutable.Builder[
+          Enumeration.this.Value @uncheckedVariance, Enumeration.this.ValueSet]
+         = Enumeration.this.ValueSet.newBuilder
+      def map(f: Enumeration.this.Value => Enumeration.this.Value):
+        Enumeration.this.ValueSet =
+        this.fromSpecific(
+          new scala.collection.View.Map[Enumeration.this.Value,
+            Enumeration.this.Value](this, f)
+        )
+      def flatMap(
+        f: Enumeration.this.Value => IterableOnce[Enumeration.this.Value]):
+        Enumeration.this.ValueSet =
+        this.fromSpecific(
+          new scala.collection.View.FlatMap[Enumeration.this.Value,
+            Enumeration.this.Value](this, f)
+        )
+      override def map[B >: Nothing <: Any](f: Enumeration.this.Value => B)(
+        @implicitNotFound(Enumeration.this.ValueSet.ordMsg) implicit ev:
+          Ordering[B]
+      ): scala.collection.immutable.SortedSet[B] =
+        super[SortedSet].map[B](f)(ev)
+      override def flatMap[B >: Nothing <: Any](
+        f: Enumeration.this.Value => IterableOnce[B])(
+        @implicitNotFound(Enumeration.this.ValueSet.ordMsg) implicit ev:
+          Ordering[B]
+      ): scala.collection.immutable.SortedSet[B] =
+        super[SortedSet].flatMap[B](f)(ev)
+      override def zip[B >: Nothing <: Any](that: IterableOnce[B])(
+        @implicitNotFound(Enumeration.this.ValueSet.zipOrdMsg) implicit ev:
+          Ordering[Tuple2[Enumeration.this.Value, B]]
+      ): scala.collection.immutable.SortedSet[Tuple2[Enumeration.this.Value, B]]
+         = super[SortedSet].zip[B](that)(ev)
+      override def collect[B >: Nothing <: Any](
+        pf: PartialFunction[Enumeration.this.Value, B])(
+        @implicitNotFound(Enumeration.this.ValueSet.ordMsg) implicit ev:
+          Ordering[B]
+      ): scala.collection.immutable.SortedSet[B] =
+        super[SortedSet].collect[B](pf)(ev)
+      @transient lazy private[Enumeration] val byName:
+        Map[String, Enumeration.this.Value] =
+        this.iterator.map[(String, Enumeration.this.Value)]((
+          v: Enumeration.this.Value) =>
+          ArrowAssoc[String](v.toString()).->[Enumeration.this.Value](v)).toMap[
+          String, Enumeration.this.Value](
+          <:<.refl[(String, Enumeration.this.Value)])
+    }
+    @SerialVersionUID(3L) final lazy module val ValueSet:
+      Enumeration.this.ValueSet = new Enumeration.this.ValueSet()
+    @SerialVersionUID(3L) final module class ValueSet() extends Object(),
+      scala.collection.SpecificIterableFactory[Enumeration.this.Value,
+      Enumeration.this.ValueSet] { this: Enumeration.this.ValueSet.type =>
+      private[this] final val ordMsg:
+        (
+          "No implicit Ordering[${B}] found to build a SortedSet[${B}]. You may want to upcast to a Set[Value] first by calling `unsorted`."
+           : String)
+       =
+        "No implicit Ordering[${B}] found to build a SortedSet[${B}]. You may want to upcast to a Set[Value] first by calling `unsorted`."
+      private[this] final val zipOrdMsg:
+        (
+          "No implicit Ordering[${B}] found to build a SortedSet[(Value, ${B})]. You may want to upcast to a Set[Value] first by calling `unsorted`."
+           : String)
+       =
+        "No implicit Ordering[${B}] found to build a SortedSet[(Value, ${B})]. You may want to upcast to a Set[Value] first by calling `unsorted`."
+      val empty: Enumeration.this.ValueSet =
+        new Enumeration.this.ValueSet(scala.collection.immutable.BitSet.empty)
+      def fromBitMask(elems: Array[Long]): Enumeration.this.ValueSet =
+        new Enumeration.this.ValueSet(
+          scala.collection.immutable.BitSet.fromBitMask(elems))
+      def newBuilder:
+        scala.collection.mutable.Builder[Enumeration.this.Value,
+          Enumeration.this.ValueSet]
+       =
+        {
+          final class $anon() extends Object(), scala.collection.mutable.Builder
+            [Enumeration.this.Value, Enumeration.this.ValueSet] {
+            private[this] val b: scala.collection.mutable.BitSet =
+              new scala.collection.mutable.BitSet()
+            def addOne(x: Enumeration.this.Value):
+              (this : Object with
+                scala.collection.mutable.Builder[Enumeration.this.Value,
+                  Enumeration.this.ValueSet]
+               {...})
+             =
+              {
+                this.b += x.id - Enumeration.this.bottomId
+                this
+              }
+            def clear(): Unit = this.b.clear()
+            def result(): Enumeration.this.ValueSet =
+              new Enumeration.this.ValueSet(this.b.toImmutable)
+          }
+          new $anon():
+            scala.collection.mutable.Builder[Enumeration.this.Value,
+              Enumeration.this.ValueSet]
+        }
+      def fromSpecific(it: IterableOnce[Enumeration.this.Value]):
+        Enumeration.this.ValueSet = this.newBuilder.addAll(it).result()
+    }
+  }
+}
+
+1 warning found
