@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use dotty_core::ast::{Block, InterpolatedString, Literal, This, UntypedNode};
 use dotty_core::{Constant, Punctuation, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped};
 
@@ -45,10 +47,19 @@ where
         }
 
         let mut parts = Vec::new();
+        let delimiter = if self.current_text().is_ok_and(|s| s.starts_with("\"\"\"")) {
+            "\"\"\""
+        } else {
+            "\""
+        };
         let mut first_part = true;
         loop {
             if self.current().kind == TokenKind::StringPart {
-                parts.push(self.parse_interpolated_part(first_part));
+                let (part, closed) = self.parse_interpolated_part(first_part, delimiter);
+                parts.push(part);
+                if closed {
+                    break;
+                }
                 first_part = false;
             }
 
@@ -105,39 +116,41 @@ where
         )
     }
 
-    fn parse_interpolated_part(&mut self, first: bool) -> TreeId<Untyped> {
-        let token = self.current().clone();
-        let source = self.current_text().unwrap_or_default();
-        let opening_delimiter_len = if source.starts_with("\"\"\"") { 3 } else { 1 };
-        let closing_delimiter_len = if source.ends_with("\"\"\"") { 3 } else { 1 };
-        let mut start = token.span.start();
-        let mut end = token.span.end();
-
-        if first {
-            start = start.saturating_add(opening_delimiter_len);
-        }
-        match self.cursor.lookahead(1).kind {
-            TokenKind::Identifier | TokenKind::Punctuation(Punctuation::LeftBrace) => {
-                end = end.saturating_sub(1);
-            }
-            TokenKind::StringPart => {}
-            _ => end = end.saturating_sub(closing_delimiter_len),
-        }
-        if end < start {
-            end = start;
-        }
-
-        let source_value = self
-            .source
-            .slice(TextRange::new(start, end).expect("interpolation span is ordered"))
-            .unwrap_or_default();
-        let value = interpolated_fragment_value(source_value);
-        let logical_length = value.encode_utf16().count();
-        end = source_byte_offset_at_utf16(self.source.as_str(), start, logical_length);
-        let range = TextRange::new(start, end).expect("interpolation span is ordered");
+    fn parse_interpolated_part(&mut self, first: bool, delimiter: &str) -> (TreeId<Untyped>, bool) {
+        let spelling = self.current_text().unwrap_or_default();
+        let body = if first {
+            spelling.strip_prefix(delimiter).unwrap_or(spelling)
+        } else {
+            spelling
+        };
+        let start = self.current().span.start() + (spelling.len() - body.len()) as u32;
+        let (body, closed) = match body.strip_suffix(delimiter) {
+            Some(final_part) => (final_part, true),
+            None => (body.strip_suffix('$').unwrap_or(body), false),
+        };
+        let value = interpolated_fragment_value(body);
+        // Dotty measures the source span using the decoded fragment's UTF-16 length.
+        // A logical end inside a surrogate pair rounds up to a Rust character boundary.
+        let byte_len = if value.len() == body.len() {
+            body.len()
+        } else {
+            let mut remaining = value.encode_utf16().count();
+            body.chars()
+                .take_while(|ch| {
+                    if remaining == 0 {
+                        return false;
+                    }
+                    remaining = remaining.saturating_sub(ch.len_utf16());
+                    true
+                })
+                .map(char::len_utf8)
+                .sum()
+        };
+        let range = TextRange::new(start, start + byte_len as u32)
+            .expect("fragment lies inside its source token");
         self.advance();
         let value = self.names.intern(&value);
-        self.alloc(
+        let part = self.alloc(
             TreeKind::Literal(Literal {
                 value: Constant::String(value),
             }),
@@ -145,45 +158,27 @@ where
                 self.source_id,
                 Span::without_point(range),
             )),
-        )
+        );
+        (part, closed)
     }
 }
 
-fn interpolated_fragment_value(source: &str) -> String {
+fn interpolated_fragment_value(source: &str) -> Cow<'_, str> {
+    if !source.contains('$') {
+        return Cow::Borrowed(source);
+    }
     let mut value = String::with_capacity(source.len());
-    let mut characters = source.chars().peekable();
-    while let Some(character) = characters.next() {
-        if character == '$' && characters.peek() == Some(&'$') {
-            characters.next();
-            value.push('$');
+    let mut chars = source.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '$'
+            && let Some(escaped) = chars.next_if(|ch| matches!(ch, '$' | '"'))
+        {
+            value.push(escaped);
         } else {
-            value.push(character);
+            value.push(ch);
         }
     }
-    value
-}
-
-fn source_byte_offset_at_utf16(source: &str, start: u32, length: usize) -> u32 {
-    let requested_start = start as usize;
-    let prefix = source.get(..requested_start).unwrap_or(source);
-    let start = prefix.len();
-    let start_units = prefix.encode_utf16().count();
-    let target_units = start_units + length;
-    if target_units == start_units {
-        return start as u32;
-    }
-
-    let mut units = 0;
-    for (offset, character) in source.char_indices() {
-        if units >= target_units {
-            return offset as u32;
-        }
-        units += character.len_utf16();
-        if units >= target_units {
-            return (offset + character.len_utf8()) as u32;
-        }
-    }
-    source.len() as u32
+    Cow::Owned(value)
 }
 
 #[cfg(test)]
@@ -401,6 +396,41 @@ mod tests {
 
         assert_eq!(parser.names.resolve(*value), "cost $5");
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn decodes_dollar_quote_and_maps_the_logical_span_within_the_fragment() {
+        let source = r#"s"🦋$"🎁""#;
+        let end = source.len() as u32;
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::InterpolationId, 0, 1),
+                token(TokenKind::StringPart, 1, end),
+                token(TokenKind::Eof, end, end),
+            ],
+            &mut names,
+        );
+        let tree = parser.simple_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(ref interpolation)) =
+            parser.ast().get(tree).kind
+        else {
+            panic!("expected interpolation")
+        };
+        let literal = parser.ast().get(interpolation.parts[0]);
+        let TreeKind::Literal(Literal {
+            value: Constant::String(value),
+        }) = literal.kind
+        else {
+            panic!("expected literal")
+        };
+        assert_eq!(parser.names.resolve(value), "🦋\"🎁");
+        // The logical UTF-16 end falls between the surrogates of the last emoji.
+        assert_eq!(
+            literal.position.unwrap().span().range(),
+            TextRange::new(2, end - 1).unwrap()
+        );
     }
 
     #[test]
