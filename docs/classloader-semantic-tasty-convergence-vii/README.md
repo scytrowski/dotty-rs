@@ -32,7 +32,11 @@ Frozen historical inputs were not rewritten:
 
 ## Executed acceptance
 
-All focused commands below ran successfully on the integrated base SHA above.
+The focused resolver tests passed on the integrated base SHA above and were
+also included in the full workspace suite on candidate SHA
+`8a6012dfcd7d5ce8f206dfa8c71a7b8d9db25647`. The comparator commands were
+rerun twice each on that candidate SHA. That candidate differs from the
+integrated base only by this documentation report.
 The resolver's positive test creates two independent stores and checks ordinary
 term-member resolution, canonical owner and method identity, completed type,
 parent application, resource origin, and repeated lookup. The ordering test
@@ -43,19 +47,27 @@ successful class, rollback, and same-session retry.
 
 The `semantic_tasty_member_completion` four-member comparator and
 `semantic_tasty_parity` 14-unit/126-field comparator each passed in two
-separate invocations. Both tests also compare their own fresh internal runs.
-`acceptance.tsv` records the concrete test names and results.
+separate invocations on candidate SHA `8a6012dfcd7d5ce8f206dfa8c71a7b8d9db25647`.
+Both tests also compare their own fresh internal runs. `acceptance.tsv` records
+the concrete test names and results.
+
+Hosted [CI run 44092249958](https://github.com/scytrowski/dotty-rs/actions/runs/44092249958)
+passed on candidate SHA `8a6012dfcd7d5ce8f206dfa8c71a7b8d9db25647`: the Rust
+checks and Classfile JVM encoder gate both succeeded. The JVM job used the
+required JDK 21 gate. The pinned Scala consumer workflow did not trigger for
+this documentation-only change; its shard and aggregate results remain
+unavailable.
 
 ### Status
 
-- **Functional: MET (local integrated tests).** The positive semantic proof,
+- **Functional: MET (local integrated tests and hosted Rust/JDK CI).** The positive semantic proof,
   both request orders, repeat lookups, negative controls, and rollback/retry
   all passed on the verified integration base. This does not claim that the
   hosted Definition of Done is complete.
 - **Telemetry: PARTIAL.** Local assertions observed fixture resource winners,
   `ClassOrigin`, normalized graphs, typed terminal failures, and rollback
-  state. The required hosted Rust/JDK 21 CI and pinned Scala 3.9 shard/aggregate
-  receipts have not yet been reconciled on a single SHA. The Scala workflow is
+  state. Hosted Rust/JDK 21 receipts are complete on the candidate SHA, but
+  pinned Scala 3.9 shard/aggregate receipts are missing. The Scala workflow is
   filtered out for these documentation-only paths. The connected GitHub tools
   available to this worker can read workflow runs but cannot dispatch one; the
   local `gh` CLI is unauthenticated. See the CI link/status column in
