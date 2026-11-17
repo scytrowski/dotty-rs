@@ -632,6 +632,32 @@ fn source_if_preserves_both_assignment_identities_and_records_first_paired_rejec
         "semantic mutability cannot substitute for source `var` metadata"
     );
 
+    let mut first_source_is_var = copy_untyped_arena(&parsed.ast);
+    let TreeKind::ValDef(first_with_var) = &mut first_source_is_var.get_mut(stats[0]).kind else {
+        unreachable!()
+    };
+    first_with_var
+        .metadata
+        .modifiers
+        .push(dotty_core::ast::Modifier::Var);
+    assert!(
+        reject_source(&first_source_is_var),
+        "the first original Counter local must remain immutable in source syntax"
+    );
+
+    let mut second_source_is_var = copy_untyped_arena(&parsed.ast);
+    let TreeKind::ValDef(second_with_var) = &mut second_source_is_var.get_mut(stats[1]).kind else {
+        unreachable!()
+    };
+    second_with_var
+        .metadata
+        .modifiers
+        .push(dotty_core::ast::Modifier::Var);
+    assert!(
+        reject_source(&second_source_is_var),
+        "the second original Counter local must remain immutable in source syntax"
+    );
+
     let mut renamed_typed_selected = copy_typed_arena(&typed_ast);
     let typed_selected = typed_tree(&typed_bindings, source_id, stats[2]);
     let TreeKind::ValDef(typed_selected_def) =
@@ -644,6 +670,54 @@ fn source_if_preserves_both_assignment_identities_and_records_first_paired_rejec
     assert!(
         reject_typed(&renamed_typed_selected),
         "typed selected declaration name must match its canonical selected symbol"
+    );
+
+    let TreeKind::Apply(source_setter_apply) = &parsed.ast.get(stats[4]).kind else {
+        unreachable!()
+    };
+    let mut renamed_source_setter = copy_untyped_arena(&parsed.ast);
+    let TreeKind::Select(source_setter_select) = &mut renamed_source_setter
+        .get_mut(source_setter_apply.function)
+        .kind
+    else {
+        unreachable!()
+    };
+    source_setter_select.name = store.symbols.get(local_symbols[0]).name;
+    assert!(
+        reject_source(&renamed_source_setter),
+        "source setter name must retain the canonical set method identity"
+    );
+
+    let mut redirected_source_setter = copy_untyped_arena(&parsed.ast);
+    let TreeKind::Select(source_setter_select) = &mut redirected_source_setter
+        .get_mut(source_setter_apply.function)
+        .kind
+    else {
+        unreachable!()
+    };
+    let TreeKind::Block(source_body) = &parsed.ast.get(method_def.rhs.unwrap()).kind else {
+        unreachable!()
+    };
+    let TreeKind::Apply(source_pair_apply) = &parsed.ast.get(source_body.expr).kind else {
+        unreachable!()
+    };
+    source_setter_select.qualifier = source_pair_apply.args[0];
+    assert!(
+        reject_source(&redirected_source_setter),
+        "source setter receiver must retain the canonical selected local identity"
+    );
+
+    let mut redirected_first_pair_argument = copy_untyped_arena(&parsed.ast);
+    let TreeKind::Apply(source_pair_apply) = &mut redirected_first_pair_argument
+        .get_mut(source_body.expr)
+        .kind
+    else {
+        unreachable!()
+    };
+    source_pair_apply.args[0] = source_pair_apply.args[1];
+    assert!(
+        reject_source(&redirected_first_pair_argument),
+        "first source Pair argument must retain the first canonical original local"
     );
 
     // A source-to-typed table entry alone cannot authenticate a conditional

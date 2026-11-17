@@ -483,6 +483,29 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
             "original Counter locals must be distinct initialized locals in one Block scope",
         ));
     }
+    for (index, original) in originals.iter().enumerate() {
+        let TreeKind::ValDef(source_definition) = &source_ast
+            .try_get(declarations[index])
+            .ok_or_else(|| src("original Counter declaration is stale"))?
+            .kind
+        else {
+            return Err(src("original Counter declarations must remain ValDefs"));
+        };
+        if source_definition
+            .metadata
+            .modifiers
+            .contains(&Modifier::Var)
+        {
+            return Err(src(
+                "original Counter declarations must retain immutable source syntax",
+            ));
+        }
+        if source_definition.name.as_name() != &store.symbols.get(original.symbol).name {
+            return Err(sid(
+                "original Counter declaration name must match its canonical local binding",
+            ));
+        }
+    }
     let semantic_first = if seed_formals[0] == formals[0] {
         originals[0].symbol
     } else {
@@ -710,6 +733,13 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
     else {
         return Err(src("setter must select set on the selected local"));
     };
+    if store.names.resolve(setter_select.name.text()) != "set"
+        || !matches!(source_ast.try_get(setter_select.qualifier).map(|node| &node.kind), Some(TreeKind::Ident(ident)) if ident.name == store.symbols.get(selected).name)
+    {
+        return Err(src(
+            "source setter must select set directly on the canonical selected local",
+        ));
+    }
     let typed_setter = source_typed_index
         .get(source_id, source_setter)
         .ok_or_else(|| typed("setter has no typed mapping"))?;
@@ -741,6 +771,7 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
         || typed_setter_select.qualifier != typed_setter_receiver
         || store.names.resolve(typed_setter_select.name.text()) != "set"
         || !matches!(store.types.try_get(typed_ast.try_get(typed_setter_receiver).ok_or_else(|| typed("typed setter receiver is stale"))?.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == selected)
+        || !matches!(typed_ast.try_get(typed_setter_receiver).map(|node| &node.kind), Some(TreeKind::Ident(ident)) if ident.name == store.symbols.get(selected).name)
         || !matches!(typed_ast.try_get(typed_setter_argument).map(|node| &node.kind), Some(TreeKind::Ident(ident)) if ident.name == store.symbols.get(formals[3]).name)
     {
         return Err(typed(
@@ -769,6 +800,8 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
             .names
             .resolve(store.symbols.get(setter_method).name.text())
             != "set"
+        || setter_select.name != store.symbols.get(setter_method).name
+        || typed_setter_select.name != store.symbols.get(setter_method).name
         || !has_source_origin(store, setter_method, source_id)
         || source_index.definition_of(setter_method).is_none_or(
             |definition| !matches!(definition, SourceDefinition::Canonical { source, .. } if source == source_id),
@@ -840,10 +873,13 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
         pair_typed_args[index] = source_typed_index
             .get(source_id, pair_apply.args[index])
             .ok_or_else(|| typed("Pair argument has no typed mapping"))?;
-        if !matches!(store.types.try_get(typed_ast.try_get(pair_typed_args[index]).ok_or_else(|| typed("typed Pair argument is stale"))?.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == [semantic_first, semantic_second][index])
+        let expected_local = [semantic_first, semantic_second][index];
+        if !matches!(source_ast.try_get(pair_apply.args[index]).map(|node| &node.kind), Some(TreeKind::Ident(ident)) if ident.name == store.symbols.get(expected_local).name)
+            || !matches!(typed_ast.try_get(pair_typed_args[index]).map(|node| &node.kind), Some(TreeKind::Ident(ident)) if ident.name == store.symbols.get(expected_local).name)
+            || !matches!(store.types.try_get(typed_ast.try_get(pair_typed_args[index]).ok_or_else(|| typed("typed Pair argument is stale"))?.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == expected_local)
         {
             return Err(typed(
-                "Pair arguments must preserve first then second original local identity",
+                "source and typed Pair arguments must preserve first then second original local identities",
             ));
         }
     }
