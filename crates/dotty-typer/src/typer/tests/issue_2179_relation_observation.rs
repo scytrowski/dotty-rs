@@ -2053,6 +2053,179 @@ fn acceptance_vi_hash_code_session_receipt() -> Vec<String> {
 
 #[test]
 #[ignore = "requires pinned Scala 3.9.0 sources, classpath jars, and JDK environment"]
+fn captures_acceptance_vii_charat_lookup_before_rollback() {
+    let scala_root = PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT"));
+    let revision = Command::new("git")
+        .args(["-C", scala_root.to_str().unwrap(), "rev-parse", "HEAD"])
+        .output()
+        .expect("git reads pinned Scala source revision");
+    assert!(revision.status.success());
+    assert_eq!(
+        String::from_utf8(revision.stdout).unwrap().trim(),
+        "777528f19a58e794c9954a42f433373472ec57f8"
+    );
+    let relative = "library/src/scala/Predef.scala";
+    let text = fs::read_to_string(scala_root.join(relative)).unwrap();
+    let source = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let scanner = ContextualScanner::new(&text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(&text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        relative,
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let (method_tree, method_node) = parsed
+        .ast
+        .iter()
+        .find(|(tree, node)| tree.index() == 614 && matches!(node.kind, TreeKind::DefDef(_)))
+        .unwrap();
+    let method = index.symbol_at(source, method_tree).unwrap();
+    let (param_tree, _) = parsed
+        .ast
+        .iter()
+        .find(|(tree, _)| tree.index() == 602)
+        .unwrap();
+    let parameter = index.symbol_at(source, param_tree).unwrap();
+    let (java_home, jars) = scala_classpath();
+    let mut entries: Vec<Box<dyn ClassPathEntry>> = vec![Box::new(
+        JdkClassPath::new(java_home.join("jmods")).unwrap(),
+    )];
+    for jar in jars {
+        entries.push(Box::new(JarClassPath::new(jar, 21).unwrap()));
+    }
+    let resolver = ClasspathSymbolResolver::new(
+        CompositeClassPath::new(entries),
+        definitions,
+        LoadingSession::with_packages(packages.snapshot()),
+    );
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(resolver));
+    let receipt = Rc::new(RefCell::new(None::<String>));
+    let captured = Rc::clone(&receipt);
+    let method_span = method_node.position.unwrap().span().range();
+    let parameter_source = text[19860..19910].to_owned();
+    typer.transaction_failure_error_observer = Some(Rc::new(move |typer, error| {
+        let TyperError::TermNameNotFound {
+            source: error_source,
+            tree_index,
+            name,
+            ..
+        } = error
+        else {
+            panic!("expected original charAt first failure: {error:?}")
+        };
+        assert_eq!(*error_source, source);
+        assert_eq!(*tree_index, 611);
+        assert_eq!(typer.store.names.resolve(name.text()), "sequenceOfChars");
+        let method_context = typer
+            .method_declaration_context(method)
+            .expect("charAt declaration context");
+        let chain = typer
+            .source_context_chain(method_context.lexical, *tree_index)
+            .unwrap();
+        let scopes_name = *name;
+        let live_expression_context = ExpressionContext {
+            local_scopes: typer
+                .expression_scopes
+                .len()
+                .checked_sub(1)
+                .map(|index| ExpressionScopeId::new(typer.expression_scope_owner, index)),
+            ..method_context
+        };
+        let mut lines = vec![
+            format!("root={relative}#tree=614 method_span={method_span:?}"),
+            format!("failure={error:?}"),
+            format!("declaration_context={method_context:?}"),
+            format!("live_expression_context={live_expression_context:?} lexical_chain={chain:?}"),
+            format!(
+                "canonical_parameter={parameter:?} path={} symbol={:?}",
+                observed_symbol_path(typer.store, parameter),
+                typer.store.symbols.get(parameter)
+            ),
+            format!("parameter_source_declaration={parameter_source:?}"),
+            format!(
+                "parameter_type_state={:?}",
+                typer.store.symbols.info(parameter)
+            ),
+        ];
+        for (depth, context) in chain.iter().enumerate() {
+            let lexical = typer.index.try_source_context(*context).unwrap();
+            let candidates = typer
+                .store
+                .scopes
+                .get(lexical.lexical_scope)
+                .lookup_all(&scopes_name);
+            lines.push(format!("lexical_scope depth={depth} context={context:?} owner={:?} scope={:?} import={:?} candidates={candidates:?}", lexical.owner, lexical.lexical_scope, lexical.import));
+        }
+        for (idx, frame) in typer.expression_scopes.iter().enumerate() {
+            let candidates = typer.store.scopes.get(frame.scope).lookup_all(&scopes_name);
+            lines.push(format!("local_scope frame={idx} id={:?} parent={:?} block={} case={} scope={:?} imports={} candidates={candidates:?}", ExpressionScopeId::new(typer.expression_scope_owner, idx), frame.parent, frame.is_block_scope, frame.is_case_scope, frame.scope, frame.imports.len()));
+        }
+        let visible = chain.iter().any(|context| {
+            let lexical = typer.index.try_source_context(*context).unwrap();
+            typer
+                .store
+                .scopes
+                .get(lexical.lexical_scope)
+                .lookup_all(&scopes_name)
+                .contains(&parameter)
+        }) || typer.expression_scopes.iter().any(|frame| {
+            typer
+                .store
+                .scopes
+                .get(frame.scope)
+                .lookup_all(&scopes_name)
+                .contains(&parameter)
+        });
+        lines.push(format!(
+            "canonical_parameter_visible_in_live_lookup_buckets={visible}"
+        ));
+        assert!(
+            !visible,
+            "receipt records the observed missing live candidate rather than inferring it after rollback"
+        );
+        *captured.borrow_mut() = Some(lines.join("\n"));
+    }));
+    let error = typer
+        .type_method_definition(method_tree)
+        .expect_err("original Predef charAt root remains blocked");
+    assert!(matches!(
+        error,
+        TyperError::TermNameNotFound {
+            tree_index: 611,
+            ..
+        }
+    ));
+    let receipt = receipt
+        .borrow()
+        .clone()
+        .expect("failure observer ran before rollback");
+    println!(
+        "ACCEPTANCE_VII_CHARAT_OBSERVATION_BEGIN\n{receipt}\nACCEPTANCE_VII_CHARAT_OBSERVATION_END"
+    );
+}
+
+#[test]
+#[ignore = "requires pinned Scala 3.9.0 sources, classpath jars, and JDK environment"]
 fn captures_acceptance_vi_prop_clear_before_rollback() {
     let scala_root = PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT"));
     let revision = Command::new("git")
