@@ -43,6 +43,16 @@ analysis. The manifests remain byte-for-byte unchanged:
 - Main: `59bb65f48e7d94423de0f0a00029b98a0b41583e601c700687311e9e17fc5244`
 - Analysis: `afa5a2064efd0bfcd31bb0bcb4fb08030db2d180a7619ac3a0843ebbe867f7bc`
 
+The unchanged root `Predef.scala#tree=614` now types deterministically on both
+passes with result `Char`, replacing its exact historical `TermNameNotFound`
+at tree 611. `ArrayBuffer.scala#tree=1537` advances past its historical
+`TermNameNotFound` at tree 1534, but remains `not_available`: both passes now
+stop at the same `MemberLookup(SourceClassCompletion)` error for the unresolved
+`scala.collection.mutable.IndexedSeq` TASTy supertype. This is blocker
+advancement, not a typed completion. The audit verifier recognizes only these
+two identity-specific measured movements while retaining the frozen receipt
+and all protected-success checks.
+
 This result does not change the baseline's `PROVISIONAL` qualification; the
 hosted Acceptance VI receipt remains unverified.
 
