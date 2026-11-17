@@ -76,3 +76,50 @@ java -cp "$COMPILER_CP" dotty.tools.dotc.Main -usejavacp:false \
 cohort's fixture directory. The simple and foreign-control sources were
 compiled with the same command and separate scratch output directories.
 SHA-256 values were computed over the copied `.tasty` bytes.
+
+## Checkpoint 2: measured boundaries
+
+The non-ignored unit regression
+`loader::tests::chain_hierarchy_audit_asserts_measured_boundaries_and_controls`
+uses the private semantic loader and selected resolver with the real
+`TastyUnpickler` path. The cohort fixture directory is first on the classpath,
+the separate foreign-control directory second, and the JDK 21 `jmods` last.
+For each requested original and simple unit, `find_class` returned TASTy from
+its own fixture directory (`ClassOrigin::Directory`). Failed semantic attempts
+do not publish a session origin or class identity.
+
+| Request | First semantic result | Repeat in same store |
+| --- | --- | --- |
+| Original `ChainRoot` (trait) | `UnsupportedShape("the requested top-level declaration must have a class template")` | Same typed error |
+| Original `ChainMiddle` | `Unpickle { address: 4, error: UnresolvedMember { address: 23, name: "ChainRoot", namespace: Type } }` | Same typed error |
+| Original `ChainLeaf` with `answer` | `UnsupportedShape("the class template must have no type parameters and one constructor declaration")` | Same typed error |
+| Simple `ChainLeaf` without `answer` | `Unpickle { address: 4, error: UnresolvedMember { address: 17, name: "ChainMiddle", namespace: Type } }` | Same typed error |
+
+The `ChainMiddle` request directly measures `ChainMiddle -> ChainRoot`. The
+simpler `ChainLeaf` request starts from the leaf alone and fails on its
+`ChainMiddle` parent before completing the transitive hierarchy. The original
+`answer` member remains in its source-authentic fixture at `DEFDEF@32`; the
+single-class semantic loader stops at the additional declaration shape gate.
+This is why the separately compiled no-method cohort is used to measure B1/B2;
+the original inputs were retained unchanged.
+
+The selected resolver request for `convergence.ChainLeaf` on the simple cohort
+returns `ResolutionError::Malformed`, retaining the inner typed
+`Unpickle::UnresolvedMember` for `ChainMiddle` at address 17. Repeats and two
+newly bootstrapped stores produce identical normalized results for each unit;
+normalization compares the error variant, TASTy address, namespace and source
+name, excluding arena IDs.
+
+Controls establish that the result is specific to the selected semantic
+projection. The ordinary resolver returns a complete `ChainLeaf` `ClassInfo`
+with direct parent `ChainMiddle`; that parent's complete `ClassInfo` has parents
+`Object` and `ChainRoot`. The ordinary classloader also returns a complete
+`ChainLeaf` with parent `ChainMiddle`; its `answer` member is complete and has
+canonical result `Int` (serialized as `ByName(Int)`). An independently compiled
+`foreignchain.ChainLeaf` completes through the semantic loader, retains its
+actual `foreignchain` package owner and `Directory` origin, and is not used as a
+name-based replacement for `convergence.ChainLeaf`.
+
+No production behavior was changed. A found symbol counts as complete in the
+controls only after checking `SymbolInfo::Complete`, parent relationships and
+method type.
