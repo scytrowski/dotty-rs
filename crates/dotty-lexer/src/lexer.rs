@@ -24,7 +24,6 @@ enum LexMode {
 struct StringState {
     part_start: u32,
     multiline: bool,
-    raw: bool,
     started: bool,
 }
 
@@ -448,11 +447,7 @@ impl<'source> RawLexer<'source> {
                 continue;
             }
 
-            if !state.multiline && !state.raw && self.cursor.peek() == Some('\\') {
-                let _ = self.scan_escape(state.part_start)?;
-            } else {
-                let _ = self.cursor.bump();
-            }
+            self.consume_interpolated_character(state.multiline);
         }
     }
 
@@ -506,11 +501,16 @@ impl<'source> RawLexer<'source> {
                 })));
             }
 
-            if !multiline && self.cursor.peek() == Some('\\') {
-                let _ = self.scan_escape(start)?;
-            } else {
-                let _ = self.cursor.bump();
-            }
+            self.consume_interpolated_character(multiline);
+        }
+    }
+
+    fn consume_interpolated_character(&mut self, multiline: bool) {
+        // Backslashes protect delimiters in single-line interpolation. The
+        // interpolator receives the original spelling and interprets escapes.
+        let ch = self.cursor.bump();
+        if !multiline && ch == Some('\\') && matches!(self.cursor.peek(), Some('"' | '\\')) {
+            let _ = self.cursor.bump();
         }
     }
 
@@ -666,7 +666,6 @@ impl<'source> RawLexer<'source> {
             self.modes.push(LexMode::InterpolatedString(StringState {
                 part_start: self.cursor.position(),
                 multiline,
-                raw: text == "raw",
                 started: false,
             }));
             RawTokenKind::InterpolationId
@@ -4735,15 +4734,24 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_interpolator_still_reports_invalid_escapes() {
-        let (_, diagnostics) = scan(r#"s"\d+""#);
-
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(
-            diagnostics[0].issue(),
-            &LexerIssue::Escape(EscapeIssue::InvalidEscapeCharacter { character: 'd' })
-        );
-        assert_eq!(diagnostics[0].span(), TextRange::new(1, 4).unwrap());
+    fn interpolated_backslashes_preserve_delimiters_and_custom_content() {
+        for (source, prefix_end) in [
+            (r#"raw"say \"hi\"""#, 3),
+            (r#"re"\d+""#, 2),
+            (r#"s"tail\\""#, 1),
+        ] {
+            let (items, diagnostics) = scan(source);
+            let end = source.len() as u32;
+            assert_eq!(
+                items,
+                [
+                    token(RawTokenKind::InterpolationId, 0, prefix_end),
+                    token(RawTokenKind::StringPart, prefix_end, end),
+                    token(RawTokenKind::Eof, end, end),
+                ]
+            );
+            assert!(diagnostics.is_empty());
+        }
     }
 
     #[test]

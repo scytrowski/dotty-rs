@@ -89,8 +89,9 @@ Implementation status on the current lexer branch:
   for trailing apostrophes; splice syntax remains the `$` plus `{` token
   sequence; a bare apostrophe that is not a character literal is emitted as
   `Quote`;
-- interpolation preserves escaped dollars as string content, supports
-  underscore and Unicode simple splices, multiline string parts, braced
+- single-line interpolation preserves backslashes for the interpolator and recognizes
+  escaped quotes and backslashes when locating delimiters. Interpolation preserves
+  escaped dollars as string content and supports underscore and Unicode simple splices, multiline string parts, braced
   expressions, and nested interpolators through explicit lexical modes; braced
   splice spans remain non-overlapping, and EOF recovery after expression
   tokens produces a bounded terminal error;
