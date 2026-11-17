@@ -10,8 +10,9 @@ use dotty_core::ast::{
 use dotty_core::{
     AstArena, GeneratedCaseClassMethodRole, Packages, Scope, ScopeId, SemanticStore, SourceContext,
     SourceContextId, SourceDefinition, SourceExportSite, SourceId, SourceSemanticIndex,
-    SourceSemanticIndexError, SourceSpan, Symbol, SymbolFlags, SymbolId, SymbolInfo, SymbolKind,
-    SymbolLinks, SymbolOrigin, TreeId, TreeKind, TypeName, Untyped, Visibility,
+    SourceSemanticIndexError, SourceSpan, StoreCheckpoint, Symbol, SymbolFlags, SymbolId,
+    SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, TreeId, TreeKind, TypeName, Untyped,
+    Visibility,
 };
 
 use crate::{NamerDiagnostic, NamerIssue, VisibilityAccess};
@@ -684,6 +685,7 @@ fn run_name_compilation_unit(
             packages,
             root,
             index: SourceSemanticIndex::new(),
+            checkpoint,
             scope_insertions: Vec::new(),
             companion_links: Vec::new(),
             package_private_boundary: None,
@@ -726,6 +728,7 @@ struct Namer<'a> {
     packages: &'a mut Packages,
     root: TreeId<Untyped>,
     index: SourceSemanticIndex,
+    checkpoint: StoreCheckpoint,
     scope_insertions: Vec<(ScopeId, SymbolId)>,
     companion_links: Vec<(SymbolId, SymbolId)>,
     package_private_boundary: Option<(SymbolId, SymbolId)>,
@@ -953,12 +956,7 @@ impl Namer<'_> {
             position: None,
             links: SymbolLinks::default(),
         });
-        self.store
-            .scopes
-            .get_mut(package_context.scope)
-            .enter(object_name, object_symbol);
-        self.scope_insertions
-            .push((package_context.scope, object_symbol));
+        self.enter_in_scope(package_context.scope, object_name, object_symbol);
 
         let module_class = self.store.symbols.alloc(Symbol {
             name: module_class_name,
@@ -972,12 +970,7 @@ impl Namer<'_> {
             position: None,
             links: SymbolLinks::default(),
         });
-        self.store
-            .scopes
-            .get_mut(package_context.scope)
-            .enter(module_class_name, module_class);
-        self.scope_insertions
-            .push((package_context.scope, module_class));
+        self.enter_in_scope(package_context.scope, module_class_name, module_class);
         let scope = self.store.scopes.alloc(Scope::new(Some(module_class)));
         self.index.record_scope(module_class, scope)?;
         self.source_package_wrappers
@@ -1340,11 +1333,7 @@ impl Namer<'_> {
             position: self.arena.get(tree).position,
             links: SymbolLinks::default(),
         });
-        self.store
-            .scopes
-            .get_mut(owner_context.scope)
-            .enter(name, symbol);
-        self.scope_insertions.push((owner_context.scope, symbol));
+        self.enter_in_scope(owner_context.scope, name, symbol);
         self.index.record_symbol(self.source, tree, symbol)?;
         self.index
             .record_declaration_context(symbol, owner_context.source_context)?;
@@ -1412,8 +1401,6 @@ impl Namer<'_> {
         )?;
         self.index
             .record_declaration_context(object_symbol, owner_context.source_context)?;
-        self.scope_insertions
-            .push((owner_context.scope, object_symbol));
         let symbol = self.store.symbols.alloc(Symbol {
             name: module_class_name,
             owner: Some(owner_context.owner),
@@ -1430,11 +1417,7 @@ impl Namer<'_> {
             .record_derived_symbol(owner_context.owner, self.source, tree, symbol)?;
         self.index
             .record_declaration_context(symbol, owner_context.source_context)?;
-        self.store
-            .scopes
-            .get_mut(owner_context.scope)
-            .enter(module_class_name, symbol);
-        self.scope_insertions.push((owner_context.scope, symbol));
+        self.enter_in_scope(owner_context.scope, module_class_name, symbol);
         let scope = self.store.scopes.alloc(Scope::new(Some(symbol)));
         self.index.record_scope(symbol, scope)?;
 
@@ -1915,11 +1898,7 @@ impl Namer<'_> {
                     position: self.arena.get(tree).position,
                     links: SymbolLinks::default(),
                 });
-                self.store
-                    .scopes
-                    .get_mut(owner_scope)
-                    .enter(term_name, object);
-                self.scope_insertions.push((owner_scope, object));
+                self.enter_in_scope(owner_scope, term_name, object);
                 let module_class = self.store.symbols.alloc(Symbol {
                     name: module_class_name,
                     owner: Some(owner),
@@ -1932,11 +1911,7 @@ impl Namer<'_> {
                     position: self.arena.get(tree).position,
                     links: SymbolLinks::default(),
                 });
-                self.store
-                    .scopes
-                    .get_mut(owner_scope)
-                    .enter(module_class_name, module_class);
-                self.scope_insertions.push((owner_scope, module_class));
+                self.enter_in_scope(owner_scope, module_class_name, module_class);
                 self.index
                     .record_derived_symbol(owner, self.source, tree, module_class)?;
                 let scope = self.store.scopes.alloc(Scope::new(Some(module_class)));
@@ -2604,11 +2579,7 @@ impl Namer<'_> {
                 visibility: self.store.symbols.get(class_symbol).visibility,
             },
         );
-        self.store
-            .scopes
-            .get_mut(companion_scope)
-            .enter(unapply_name, unapply);
-        self.scope_insertions.push((companion_scope, unapply));
+        self.enter_in_scope(companion_scope, unapply_name, unapply);
         self.index.record_generated_case_class_method(
             class_symbol,
             GeneratedCaseClassMethodRole::Unapply,
@@ -2732,11 +2703,7 @@ impl Namer<'_> {
             position: None,
             links: SymbolLinks::default(),
         });
-        self.store
-            .scopes
-            .get_mut(owner_scope)
-            .enter(term_name, object);
-        self.scope_insertions.push((owner_scope, object));
+        self.enter_in_scope(owner_scope, term_name, object);
 
         let module_class = self.store.symbols.alloc(Symbol {
             name: module_class_name,
@@ -2750,11 +2717,7 @@ impl Namer<'_> {
             position: None,
             links: SymbolLinks::default(),
         });
-        self.store
-            .scopes
-            .get_mut(owner_scope)
-            .enter(module_class_name, module_class);
-        self.scope_insertions.push((owner_scope, module_class));
+        self.enter_in_scope(owner_scope, module_class_name, module_class);
         let module_scope = self.store.scopes.alloc(Scope::new(Some(module_class)));
         self.index.record_scope(module_class, module_scope)?;
         self.index
@@ -3626,6 +3589,13 @@ impl Namer<'_> {
             })
     }
 
+    fn enter_in_scope(&mut self, scope: ScopeId, name: dotty_core::Name, symbol: SymbolId) {
+        self.store.scopes.get_mut(scope).enter(name, symbol);
+        if self.checkpoint.contains_scope(scope) {
+            self.scope_insertions.push((scope, symbol));
+        }
+    }
+
     fn enter_symbol(
         &mut self,
         tree: TreeId<Untyped>,
@@ -3634,20 +3604,8 @@ impl Namer<'_> {
         scope: ScopeId,
         spec: SymbolSpec,
     ) -> Result<SymbolId, NamerError> {
-        let symbol = self.store.symbols.alloc(Symbol {
-            name,
-            owner: Some(owner),
-            kind: spec.kind,
-            flags: spec.flags,
-            visibility: spec.visibility,
-            info: SymbolInfo::Missing,
-            origin: SymbolOrigin::Source(self.source),
-            annotations: Vec::new(),
-            position: self.arena.get(tree).position,
-            links: SymbolLinks::default(),
-        });
-        self.store.scopes.get_mut(scope).enter(name, symbol);
-        self.index.record_symbol(self.source, tree, symbol)?;
+        let symbol = self.record_unscoped_symbol(tree, name, owner, spec)?;
+        self.enter_in_scope(scope, name, symbol);
         Ok(symbol)
     }
 
@@ -3693,8 +3651,7 @@ impl Namer<'_> {
         spec: SymbolSpec,
     ) -> Result<SymbolId, NamerError> {
         let symbol = self.allocate_source_symbol(tree, name, owner, spec);
-        self.store.scopes.get_mut(scope).enter(name, symbol);
-        self.scope_insertions.push((scope, symbol));
+        self.enter_in_scope(scope, name, symbol);
         self.index
             .record_derived_symbol(owner, self.source, tree, symbol)?;
         Ok(symbol)
@@ -7748,6 +7705,44 @@ mod tests {
                 tree_index: name.index(),
                 expected: "Ident or qualified Select package name",
             }
+        );
+    }
+
+    #[test]
+    fn duplicate_object_tree_leaves_a_reused_package_scope_intact() {
+        let mut store = SemanticStore::new();
+        let mut packages = Packages::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let (prior, _, _) =
+            module_definition(&mut arena, &mut store, "Shared", vec![], None, vec![], None);
+        let first_root = package_with_stat(&mut arena, &mut store, "existing", vec![prior]);
+        name_package(&arena, first_root, 1, &mut store, &mut packages).unwrap();
+        let scope = packages.get(&["existing"]).unwrap().scope;
+        let name = *dotty_core::TermName::new(store.names.intern("Shared")).as_name();
+        let previous_entries = store.scopes.get(scope).lookup_all(&name).to_vec();
+        let before = store.checkpoint();
+
+        let (object, _, _) =
+            module_definition(&mut arena, &mut store, "Shared", vec![], None, vec![], None);
+        let root = package_with_stat(&mut arena, &mut store, "existing", vec![object, object]);
+        assert_eq!(
+            name_package(&arena, root, 2, &mut store, &mut packages).unwrap_err(),
+            NamerError::DuplicateSourceTreeSymbol {
+                source: SourceId::from_index(2),
+                tree_index: object.index()
+            }
+        );
+        assert_eq!(store.checkpoint(), before);
+        assert_eq!(store.scopes.get(scope).lookup_all(&name), previous_entries);
+        let TreeKind::PackageDef(package) = &mut arena.get_mut(root).kind else {
+            unreachable!()
+        };
+        package.stats.pop();
+        let index = name_package(&arena, root, 2, &mut store, &mut packages).unwrap();
+        let retried = index.symbol_at(SourceId::from_index(2), object).unwrap();
+        assert_eq!(
+            store.scopes.get(scope).lookup_all(&name),
+            &[previous_entries[0], retried]
         );
     }
 
