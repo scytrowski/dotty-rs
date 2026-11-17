@@ -7178,6 +7178,335 @@ mod tests {
     }
 
     #[test]
+    fn selected_info_pair_m_controls_preserve_namespace_package_and_owner() {
+        let (mut store, definitions, mut resolver, package) = selected_info_pair_context();
+        let class_request =
+            semantic_member_request(&mut store, package, definitions.no_prefix, "InfoWrapped");
+        let wrapped = resolver
+            .resolve_member_with_semantic_info_pair(&mut store, &class_request)
+            .unwrap()
+            .expect("the selected request loads the authentic pair");
+        let base = resolver.session.identified
+            [&BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase")];
+        let base_class_name = Name::new(store.names.intern("InfoBase"), Namespace::Type);
+        let method_name = Name::new(store.names.intern("m"), Namespace::Term);
+        let method_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, wrapped));
+        let method_request = MemberRequest {
+            prefix: method_prefix,
+            name: method_name,
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+        let method = resolver
+            .resolve_member(&mut store, &method_request)
+            .unwrap()
+            .expect("the canonical InfoWrapped owner exposes m");
+        let canonical = info_pair_observe_graph(
+            &store,
+            &resolver,
+            package,
+            base_class_name,
+            class_request.name,
+            method_name,
+        );
+        assert_eq!(method, canonical.identities.method);
+
+        let wrong_namespace = MemberRequest {
+            name: Name::new(store.names.intern("m"), Namespace::Type),
+            ..method_request.clone()
+        };
+        assert_eq!(
+            resolver.resolve_member(&mut store, &wrong_namespace),
+            Ok(None),
+            "m in the type namespace is an ordinary miss"
+        );
+        let unrelated_term = MemberRequest {
+            name: Name::new(store.names.intern("notM"), Namespace::Term),
+            ..method_request.clone()
+        };
+        assert_eq!(
+            resolver.resolve_member(&mut store, &unrelated_term),
+            Ok(None),
+            "an unrelated term is an ordinary miss"
+        );
+        let wrong_owner_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, base));
+        let wrong_owner = MemberRequest {
+            prefix: wrong_owner_prefix,
+            ..method_request.clone()
+        };
+        assert_eq!(
+            resolver.resolve_member(&mut store, &wrong_owner),
+            Ok(None),
+            "the direct member lookup does not inherit or substitute InfoBase.m"
+        );
+
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let wrong_package = MemberRequest {
+            prefix: package_prefix,
+            ..method_request.clone()
+        };
+        assert_eq!(
+            resolver.resolve_member(&mut store, &wrong_package),
+            Ok(None),
+            "a same-spelled package request does not select the class-owned method"
+        );
+
+        let foreign_owner_name = Name::new(store.names.intern("ForeignOwner"), Namespace::Type);
+        let foreign_owner = store.symbols.alloc(Symbol {
+            name: foreign_owner_name,
+            owner: Some(package),
+            kind: SymbolKind::Class,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: Default::default(),
+        });
+        let foreign_scope = store.scopes.alloc(Scope::new(Some(foreign_owner)));
+        let foreign_class_info = store.types.alloc(Type::ClassInfo(ClassInfo {
+            prefix: definitions.no_prefix,
+            class: foreign_owner,
+            parents: Vec::new(),
+            declarations: foreign_scope,
+            self_type: None,
+        }));
+        store.symbols.get_mut(foreign_owner).info = SymbolInfo::Complete(foreign_class_info);
+        let foreign_method_info = store.types.alloc(Type::Method(dotty_core::MethodType {
+            params: Vec::new(),
+            result: definitions.unit,
+            kind: MethodKind::Plain,
+        }));
+        let foreign_method = store.symbols.alloc(Symbol {
+            name: method_name,
+            owner: Some(foreign_owner),
+            kind: SymbolKind::Method,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Complete(foreign_method_info),
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: Default::default(),
+        });
+        store
+            .scopes
+            .get_mut(foreign_scope)
+            .enter(method_name, foreign_method);
+        let foreign_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, foreign_owner));
+        let foreign_method_request = MemberRequest {
+            prefix: foreign_prefix,
+            ..method_request.clone()
+        };
+        assert_eq!(
+            resolver.resolve_member(&mut store, &foreign_method_request),
+            Ok(Some(foreign_method)),
+            "a foreign same-spelled m resolves only to its actual owner"
+        );
+        assert_ne!(foreign_method, method);
+
+        let parent = resolver
+            .resolve_package(&mut store, &["me", "cytrowski", "tastyfixtures"])
+            .unwrap()
+            .expect("fixture parent package");
+        let foreign_package = store.symbols.alloc(Symbol {
+            name: Name::new(store.names.intern("semantic"), Namespace::Term),
+            owner: Some(parent),
+            kind: SymbolKind::Package,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: Default::default(),
+        });
+        let invalid_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, foreign_package));
+        let invalid_selected_request = MemberRequest {
+            prefix: invalid_prefix,
+            ..class_request
+        };
+        assert!(matches!(
+            resolver.resolve_member_with_semantic_info_pair(&mut store, &invalid_selected_request),
+            Err(ResolutionError::Malformed { .. })
+        ));
+        assert_eq!(
+            resolver.resolve_member(&mut store, &method_request),
+            Ok(Some(method)),
+            "unselected controls leave the authentic InfoWrapped.m available"
+        );
+        let after = info_pair_observe_graph(
+            &store,
+            &resolver,
+            package,
+            base_class_name,
+            class_request.name,
+            method_name,
+        );
+        assert_eq!(after.identities, canonical.identities);
+        assert_eq!(after.normalized_graph, canonical.normalized_graph);
+    }
+
+    #[test]
+    fn selected_info_pair_m_outer_rollback_restores_graph_and_same_session_retry() {
+        let base_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
+        let wrapped_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
+        let (mut store, definitions, mut resolver, package) = selected_info_pair_context();
+        let control_name = BinaryName::from_internal("java/lang/String");
+        let control = resolver
+            .load_class(&mut store, &control_name)
+            .expect("an unrelated class commits before the selected operation");
+        let package_scope = resolver.session.packages.scope_of(package).unwrap();
+        let base_type = Name::new(store.names.intern("InfoBase"), Namespace::Type);
+        let wrapped_type = Name::new(store.names.intern("InfoWrapped"), Namespace::Type);
+        let store_before = store.checkpoint();
+        let resolver_before = resolver.checkpoint();
+        let session_before = resolver.session.checkpoint();
+        let object_before = store.symbols.get(definitions.object_class).clone();
+        let unit_before = store.types.get(definitions.unit).clone();
+        let request =
+            semantic_member_request(&mut store, package, definitions.no_prefix, "InfoWrapped");
+
+        let wrapped = resolver
+            .resolve_member_with_semantic_info_pair(&mut store, &request)
+            .expect("the authentic selected pair commits successfully")
+            .expect("InfoWrapped is selected");
+        let base = resolver.session.identified[&base_name];
+        let wrapped_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, wrapped));
+        let method_request = MemberRequest {
+            prefix: wrapped_prefix,
+            name: Name::new(store.names.intern("m"), Namespace::Term),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+        let method = resolver
+            .resolve_member(&mut store, &method_request)
+            .expect("ordinary m lookup succeeds after canonical owner completion")
+            .expect("InfoWrapped declares m");
+        let completed_graph = info_pair_observe_graph(
+            &store,
+            &resolver,
+            package,
+            base_type,
+            wrapped_type,
+            method_request.name,
+        );
+        assert_eq!(completed_graph.identities.base, base);
+        assert_eq!(completed_graph.identities.wrapped, wrapped);
+        assert_eq!(completed_graph.identities.method, method);
+        assert!(matches!(
+            store.symbols.get(method).info,
+            SymbolInfo::Complete(_)
+        ));
+        assert_eq!(
+            store.scopes.get(package_scope).lookup_all(&base_type),
+            [base]
+        );
+        assert_eq!(
+            store.scopes.get(package_scope).lookup_all(&wrapped_type),
+            [wrapped]
+        );
+
+        resolver.rollback_to(&mut store, resolver_before);
+        store.rollback_to(store_before);
+        assert_eq!(resolver.session.checkpoint(), session_before);
+        assert_eq!(store.symbols.get(definitions.object_class), &object_before);
+        assert_eq!(store.types.get(definitions.unit), &unit_before);
+        assert!(!resolver.semantic_info_pair_loaded);
+        assert!(resolver.session.identified.contains_key(&control_name));
+        assert!(resolver.session.resolved.contains_key(&control_name));
+        assert!(resolver.session.origins.contains_key(&control));
+        assert!(!resolver.session.identified.contains_key(&base_name));
+        assert!(!resolver.session.identified.contains_key(&wrapped_name));
+        assert!(!resolver.session.resolved.contains_key(&base_name));
+        assert!(!resolver.session.resolved.contains_key(&wrapped_name));
+        assert!(!resolver.session.origins.contains_key(&base));
+        assert!(!resolver.session.origins.contains_key(&wrapped));
+        assert!(!store.symbols.contains(base));
+        assert!(!store.symbols.contains(wrapped));
+        assert!(!store.symbols.contains(method));
+        assert_eq!(store.scopes.get(package_scope).lookup_all(&base_type), []);
+        assert_eq!(
+            store.scopes.get(package_scope).lookup_all(&wrapped_type),
+            []
+        );
+        assert_eq!(store.checkpoint(), store_before);
+        assert_eq!(
+            resolver
+                .load_class(&mut store, &control_name)
+                .expect("the earlier committed class remains usable"),
+            control,
+            "the earlier committed class remains usable"
+        );
+
+        let retry_class_request =
+            semantic_member_request(&mut store, package, definitions.no_prefix, "InfoWrapped");
+        let retry = resolver
+            .resolve_member_with_semantic_info_pair(&mut store, &retry_class_request)
+            .expect("same-session pair retry after rollback succeeds")
+            .expect("retry restores InfoWrapped");
+        let retry_base = resolver.session.identified[&base_name];
+        let retry_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, retry));
+        let retry_method_request = MemberRequest {
+            prefix: retry_prefix,
+            name: method_request.name,
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+        let retry_base_type = Name::new(store.names.intern("InfoBase"), Namespace::Type);
+        let retry_wrapped_type = Name::new(store.names.intern("InfoWrapped"), Namespace::Type);
+        let retry_method = resolver
+            .resolve_member(&mut store, &retry_method_request)
+            .expect("m lookup succeeds after retry")
+            .expect("the retried canonical owner contains m");
+        let retried_graph = info_pair_observe_graph(
+            &store,
+            &resolver,
+            package,
+            retry_base_type,
+            retry_wrapped_type,
+            retry_method_request.name,
+        );
+        assert_eq!(retried_graph.identities.base, retry_base);
+        assert_eq!(retried_graph.identities.wrapped, retry);
+        assert_eq!(retried_graph.identities.method, retry_method);
+        assert_eq!(
+            retried_graph.normalized_graph,
+            completed_graph.normalized_graph
+        );
+        assert_eq!(
+            store
+                .scopes
+                .get(retried_graph.identities.wrapped_declarations)
+                .lookup_all(&retry_method_request.name),
+            [retry_method],
+            "retry leaves one genuine m declaration"
+        );
+        assert_eq!(
+            resolver.resolve_member(&mut store, &retry_method_request),
+            Ok(Some(retry_method)),
+            "repeat m lookup retains the retried declaration"
+        );
+        assert_eq!(resolver.session.identified[&control_name], control);
+    }
+
+    #[test]
     fn explicit_info_pair_requests_select_both_roots_in_both_orders() {
         let package_path = ["me", "cytrowski", "tastyfixtures", "semantic"];
         let base_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
@@ -8011,10 +8340,14 @@ mod tests {
         let base_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
         let wrapped_name =
             BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
-        let control_name = BinaryName::from_internal("java/lang/String");
         let missing_resource = Arc::new(Mutex::new(None));
         let class_path = SelectedResourceControl {
-            inner: CompositeClassPath::new(vec![Box::new(info_pair_audit_class_path())]),
+            inner: CompositeClassPath::new(vec![
+                Box::new(info_pair_audit_class_path()),
+                Box::new(DirectoryClassPath::new(fixture_path(
+                    "tests/fixtures/tasty_visibility",
+                ))),
+            ]),
             selected_name: "me/cytrowski/tastyfixtures/semantic/InfoBase",
             selected: missing_resource,
         };
@@ -8022,9 +8355,10 @@ mod tests {
         let definitions = Definitions::bootstrap(&mut store);
         let mut resolver =
             ClasspathSymbolResolver::new(class_path, definitions, LoadingSession::new());
+        let control_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Open");
         let committed_control = resolver
             .load_class(&mut store, &control_name)
-            .expect("the control class commits before the bounded failure");
+            .expect("the genuine Open class commits before the bounded failure");
         let store_before = store.checkpoint();
         let session_before = resolver.session.checkpoint();
 
@@ -8110,7 +8444,12 @@ mod tests {
         ] {
             let selected = Arc::new(Mutex::new(selected));
             let class_path = SelectedResourceControl {
-                inner: CompositeClassPath::new(vec![Box::new(info_pair_audit_class_path())]),
+                inner: CompositeClassPath::new(vec![
+                    Box::new(info_pair_audit_class_path()),
+                    Box::new(DirectoryClassPath::new(fixture_path(
+                        "tests/fixtures/tasty_visibility",
+                    ))),
+                ]),
                 selected_name,
                 selected: selected.clone(),
             };
@@ -8125,10 +8464,11 @@ mod tests {
                 )
                 .unwrap()
                 .expect("semantic fixture package");
+            let control_name =
+                BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Open");
             let committed = resolver
-                .load_class(&mut store, &BinaryName::from_internal("java/lang/String"))
-                .expect("the earlier control class commits");
-            let control_name = BinaryName::from_internal("java/lang/String");
+                .load_class(&mut store, &control_name)
+                .expect("the genuine Open control class commits");
             let object_before = store.symbols.get(definitions.object_class).clone();
             let request =
                 semantic_member_request(&mut store, package, definitions.no_prefix, request_root);
@@ -8566,7 +8906,12 @@ mod tests {
                 controlled_origin.clone(),
             ))));
             let class_path = SelectedResourceControl {
-                inner: CompositeClassPath::new(vec![Box::new(info_pair_audit_class_path())]),
+                inner: CompositeClassPath::new(vec![
+                    Box::new(info_pair_audit_class_path()),
+                    Box::new(DirectoryClassPath::new(fixture_path(
+                        "tests/fixtures/tasty_visibility",
+                    ))),
+                ]),
                 selected_name,
                 selected: selected.clone(),
             };
@@ -8574,10 +8919,11 @@ mod tests {
             let definitions = Definitions::bootstrap(&mut store);
             let mut resolver =
                 ClasspathSymbolResolver::new(class_path, definitions, LoadingSession::new());
-            let control_name = BinaryName::from_internal("java/lang/String");
+            let control_name =
+                BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Open");
             let committed = resolver
                 .load_class(&mut store, &control_name)
-                .expect("the committed control loads before the selected pair");
+                .expect("the genuine Open control loads before the selected pair");
             let package = resolver
                 .resolve_package(
                     &mut store,
@@ -8700,6 +9046,40 @@ mod tests {
             };
             assert_eq!(resolver.session.origins[&base], base_origin);
             assert_eq!(resolver.session.origins[&wrapped], wrapped_origin);
+            let method_prefix = store
+                .types
+                .alloc(Type::type_ref(definitions.no_prefix, wrapped));
+            let method_request = MemberRequest {
+                prefix: method_prefix,
+                name: Name::new(store.names.intern("m"), Namespace::Term),
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            };
+            let method = resolver
+                .resolve_member(&mut store, &method_request)
+                .expect("ordinary m lookup succeeds after restoring the selected resources")
+                .expect("the genuine InfoWrapped owner declares m");
+            assert_eq!(store.symbols.get(method).owner, Some(wrapped));
+            assert_eq!(store.symbols.get(method).kind, SymbolKind::Method);
+            let SymbolInfo::Complete(method_type) = store.symbols.get(method).info else {
+                panic!("retried InfoWrapped.m has a complete signature");
+            };
+            assert!(matches!(store.types.get(method_type), Type::ByName { .. }));
+            let wrapped_info = match store.symbols.get(wrapped).info {
+                SymbolInfo::Complete(info) => match store.types.get(info) {
+                    Type::ClassInfo(info) => info,
+                    _ => panic!("retried InfoWrapped has ClassInfo"),
+                },
+                _ => panic!("retried InfoWrapped is complete"),
+            };
+            assert_eq!(
+                store
+                    .scopes
+                    .get(wrapped_info.declarations)
+                    .lookup_all(&method_request.name),
+                [method],
+                "retry leaves the single original direct m declaration"
+            );
             assert_eq!(
                 resolver.session.resolved.get(&control_name),
                 Some(&committed)
