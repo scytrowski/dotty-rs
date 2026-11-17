@@ -2,9 +2,11 @@
 
 ## Pinned input and cohort membership
 
-The tested dotty-rs commit is `19df8dbeefee0b768d063afd1a9de4c7b76b087d`
-(tree `3180e295cf5a3264e51ffbd14b0b7c6ed20b239b`). The Scala source checkout
-is revision `777528f19a58e794c9954a42f433373472ec57f8`; the unchanged
+The current-behavior and cohort audit used integration base
+`19df8dbeefee0b768d063afd1a9de4c7b76b087d` (tree
+`3180e295cf5a3264e51ffbd14b0b7c6ed20b239b`). The focused regression is
+committed separately in this PR. The Scala source checkout is revision
+`777528f19a58e794c9954a42f433373472ec57f8`; the unchanged
 `library/src/scala/Enumeration.scala` SHA-256 is
 `7370a0d85123fd15c9b75c132a38b911ad71f2a41e851e3121b5a6253939c1e8`.
 
@@ -102,7 +104,7 @@ The focused two-session test also types the unchanged
 the shared member name under a different owner.
 
 Both unchanged frozen 25-root manifests ran twice with determinism verification
-on the tested SHA:
+on the integration base:
 
 | Cohort | Attempts | Typed | Blocked | Normalized report SHA-256 |
 | --- | ---: | ---: | ---: | --- |
