@@ -94,6 +94,13 @@ impl<'a> Reader<'a> {
         usize::from(count).min(self.remaining() / min_row_bytes)
     }
 
+    /// Reserve short lists exactly. Child payload bytes are part of the
+    /// remaining input at every level, so larger recursive lists grow as
+    /// entries are decoded.
+    pub(crate) fn nested_table_capacity(&self, count: u16, min_row_bytes: usize) -> usize {
+        self.table_capacity(count.min(8), min_row_bytes)
+    }
+
     pub fn is_at_end(&self) -> bool {
         self.offset == self.limit
     }
@@ -309,6 +316,15 @@ mod tests {
         assert_eq!(reader.table_capacity(1, 3), 1);
         reader.read_bytes(5).unwrap();
         assert_eq!(reader.table_capacity(u16::MAX, 3), 0);
+    }
+
+    #[test]
+    fn nested_tables_reserve_short_lists_exactly_and_bound_large_counts() {
+        let reader = Reader::new(&[0; 64]);
+        assert_eq!(reader.nested_table_capacity(1, 6), 1);
+        assert_eq!(reader.nested_table_capacity(2, 6), 2);
+        assert_eq!(reader.nested_table_capacity(u16::MAX, 6), 8);
+        assert_eq!(Reader::new(&[]).nested_table_capacity(u16::MAX, 6), 0);
     }
 
     #[test]

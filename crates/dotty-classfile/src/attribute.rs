@@ -519,7 +519,7 @@ fn read_element_value(
                 return Err(AttributeError::TooDeeplyNestedAnnotation);
             }
             let count = reader.read_u16()?;
-            let mut values = Vec::new();
+            let mut values = Vec::with_capacity(reader.nested_table_capacity(count, 3));
             for _ in 0..count {
                 values.push(read_element_value(reader, depth + 1)?);
             }
@@ -532,7 +532,7 @@ fn read_element_value(
 fn read_annotation(reader: &mut Reader<'_>, depth: usize) -> Result<Annotation, AttributeError> {
     let type_index = read_index(reader)?;
     let count = reader.read_u16()?;
-    let mut element_value_pairs = Vec::new();
+    let mut element_value_pairs = Vec::with_capacity(reader.nested_table_capacity(count, 5));
     for _ in 0..count {
         let element_name_index = read_index(reader)?;
         let value = read_element_value(reader, depth)?;
@@ -546,7 +546,7 @@ fn read_annotation(reader: &mut Reader<'_>, depth: usize) -> Result<Annotation, 
 
 fn read_annotations(reader: &mut Reader<'_>) -> Result<Vec<Annotation>, AttributeError> {
     let count = reader.read_u16()?;
-    let mut annotations = Vec::new();
+    let mut annotations = Vec::with_capacity(reader.nested_table_capacity(count, 4));
     for _ in 0..count {
         annotations.push(read_annotation(reader, 0)?);
     }
@@ -607,9 +607,7 @@ fn decode_attributes_at_depth<'a>(
     depth: usize,
 ) -> Result<Vec<Attribute<'a>>, AttributeError> {
     let count = reader.read_u16()?;
-    // Grow recursive tables as rows are decoded. Their remaining bytes
-    // include child payloads that could otherwise back reservations at every level.
-    let mut attributes = Vec::new();
+    let mut attributes = Vec::with_capacity(reader.nested_table_capacity(count, 6));
     for _ in 0..count {
         attributes.push(Attribute::decode_at_depth(reader, constant_pool, depth)?);
     }
@@ -622,7 +620,7 @@ fn read_record_components<'a>(
     depth: usize,
 ) -> Result<Vec<RecordComponentInfo<'a>>, AttributeError> {
     let count = reader.read_u16()?;
-    let mut components = Vec::new();
+    let mut components = Vec::with_capacity(reader.nested_table_capacity(count, 6));
     for _ in 0..count {
         let name_index = read_index(reader)?;
         let descriptor_index = read_index(reader)?;
