@@ -120,40 +120,19 @@ where
     }
 
     fn parse_type_definition_name(&mut self) -> TypeName {
-        match self.current().kind {
-            TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
-                match self.intern_current_type_name() {
-                    Ok(name) => {
-                        self.advance();
-                        name
-                    }
-                    Err(_) => self.missing_type_definition_name(),
-                }
+        if self.current_is_type_reference_name() {
+            if let Ok(name) = self.intern_current_type_name() {
+                self.advance();
+                return name;
             }
-            TokenKind::Operator | TokenKind::ColonOp
-                if ![
-                    "=", "=>", "=>>", "<-", "<:", "<%", ">:", "?=>", ":", "@", "#",
-                ]
-                .iter()
-                .any(|reserved| self.current_text_is(reserved)) =>
-            {
-                match self.intern_current_type_name() {
-                    Ok(name) => {
-                        self.advance();
-                        name
-                    }
-                    Err(_) => self.missing_type_definition_name(),
-                }
-            }
-            _ => {
-                self.report_issue(ParseIssue::TypeDefinition(
-                    TypeDefinitionIssue::ExpectedName {
-                        found: self.current().kind,
-                    },
-                ));
-                self.missing_type_definition_name()
-            }
+        } else {
+            self.report_issue(ParseIssue::TypeDefinition(
+                TypeDefinitionIssue::ExpectedName {
+                    found: self.current().kind,
+                },
+            ));
         }
+        self.missing_type_definition_name()
     }
 
     fn missing_type_definition_name(&mut self) -> TypeName {

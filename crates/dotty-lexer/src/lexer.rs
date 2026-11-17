@@ -729,7 +729,11 @@ impl<'source> RawLexer<'source> {
     }
 
     fn scan_operator(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
-        self.consume_operator_chars();
+        if matches!(self.cursor.peek(), Some('⇒' | '←')) {
+            let _ = self.cursor.bump();
+        } else {
+            self.consume_operator_chars();
+        }
         let span = self.span(start)?;
         let kind = if self.source.slice(span)? == ":" && !self.xml.is_xml_name_separator() {
             RawTokenKind::Punctuation(Punctuation::Colon)
@@ -1889,6 +1893,20 @@ mod tests {
             ]
         );
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn unicode_arrows_at_token_start_leave_an_adjacent_prefix_operator() {
+        for arrow in ["⇒", "←"] {
+            let (items, diagnostics) = scan(&format!("{arrow}-x"));
+            assert_eq!(items[0], token(RawTokenKind::Operator, 0, 3));
+            assert_eq!(items[1], token(RawTokenKind::Operator, 3, 4));
+            assert_eq!(
+                scan(&format!("+{arrow}")).0[0],
+                token(RawTokenKind::Operator, 0, 4)
+            );
+            assert!(diagnostics.is_empty());
+        }
     }
 
     #[test]

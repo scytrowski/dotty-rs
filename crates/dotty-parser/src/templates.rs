@@ -504,7 +504,7 @@ where
         !self.is_arrow_token(token)
             && !matches!(
                 self.source.slice(token.span).ok(),
-                Some("=" | "<-" | "->" | "?=>" | "?->" | ":" | "<:" | ">:" | "#" | "^")
+                Some("=" | "<-" | "←" | "->" | "?=>" | "?->" | ":" | "<:" | ">:" | "#" | "^")
             )
     }
 

@@ -691,7 +691,7 @@ where
         self.current().kind == TokenKind::Operator
             && (self.current_is_arrow()
                 || self.current_is_context_arrow()
-                || matches!(self.current_text().ok(), Some("=" | "<-")))
+                || matches!(self.current_text().ok(), Some("=" | "<-" | "←")))
     }
 
     fn current_name_text(&self) -> Result<&'src str, SourceTextError> {

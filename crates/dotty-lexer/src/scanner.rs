@@ -439,7 +439,7 @@ impl ContextualScanner {
         }
 
         let spelling = &self.source[operator.span.start() as usize..operator.span.end() as usize];
-        if matches!(spelling, "=" | "=>") {
+        if matches!(spelling, "=" | "=>" | "⇒") {
             return;
         }
 
@@ -818,7 +818,7 @@ impl ContextualScanner {
             && self
                 .source
                 .get(current.span.start() as usize..current.span.end() as usize)
-                .is_some_and(|spelling| matches!(spelling, "=>" | "?=>"))
+                .is_some_and(|spelling| matches!(spelling, "=>" | "⇒" | "?=>"))
     }
 
     fn is_at_line_end(&self, index: usize) -> bool {
@@ -1207,7 +1207,10 @@ fn build_tokens(
                         .is_some_and(|region| region.owner == LayoutRegionOwner::MatchCases)
                     && !current_case_has_arrow(source, &tokens);
                 let case_arrow_candidate = raw.kind == RawTokenKind::Operator
-                    && source.get(raw.span.start() as usize..raw.span.end() as usize) == Some("=>")
+                    && matches!(
+                        source.get(raw.span.start() as usize..raw.span.end() as usize),
+                        Some("=>" | "⇒")
+                    )
                     && indentation_stack
                         .last()
                         .is_some_and(|region| region.owner == LayoutRegionOwner::MatchCases)
@@ -1571,7 +1574,10 @@ fn current_case_has_arrow(source: &str, tokens: &[Token]) -> bool {
 
     tokens[case_index + 1..].iter().any(|token| {
         token.kind == TokenKind::Operator
-            && source.get(token.span.start() as usize..token.span.end() as usize) == Some("=>")
+            && matches!(
+                source.get(token.span.start() as usize..token.span.end() as usize),
+                Some("=>" | "⇒")
+            )
     })
 }
 
@@ -1629,7 +1635,7 @@ fn opens_indentation(kind: Option<TokenKind>, operator: bool) -> bool {
 }
 
 fn is_layout_operator(kind: TokenKind, spelling: &str) -> bool {
-    matches!(kind, TokenKind::Operator) && matches!(spelling, "=" | "=>" | "<-")
+    matches!(kind, TokenKind::Operator) && matches!(spelling, "=" | "=>" | "⇒" | "<-" | "←")
 }
 
 fn can_end_statement(kind: Option<TokenKind>) -> bool {

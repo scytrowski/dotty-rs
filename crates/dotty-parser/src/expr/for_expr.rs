@@ -157,7 +157,7 @@ where
 
         let mark = self.mark();
         let pattern = self.parse_pattern1_for_enumerator();
-        if self.current_is_operator("<-") {
+        if self.current_is_generator_arrow() {
             self.advance();
             let expr = self.parse_enumerator_rhs();
             return (
@@ -209,7 +209,7 @@ where
     fn parse_generator(&mut self, check_mode: GenCheckMode) -> TreeId<Untyped> {
         let mark = self.mark();
         let pattern = self.parse_pattern1_for_enumerator();
-        if !self.current_is_operator("<-") {
+        if !self.current_is_generator_arrow() {
             self.report_issue(ParseIssue::Expression(
                 ExpressionIssue::ExpectedCaseGeneratorOperator {
                     found: self.current().kind,
@@ -318,7 +318,7 @@ where
                 .source
                 .slice(operator.span)
                 .ok()
-                .is_some_and(|spelling| matches!(spelling, "<-" | "="))
+                .is_some_and(|spelling| matches!(spelling, "<-" | "←" | "="))
     }
 
     fn parse_for_body(&mut self, feedback_opened: bool) -> TreeId<Untyped> {
@@ -402,6 +402,11 @@ where
         consumed
     }
 
+    fn current_is_generator_arrow(&self) -> bool {
+        self.current().kind == TokenKind::Operator
+            && matches!(self.current_text().ok(), Some("<-" | "←"))
+    }
+
     fn current_is_operator(&mut self, spelling: &str) -> bool {
         self.current().kind == TokenKind::Operator && self.current_text_is(spelling)
     }
@@ -421,7 +426,7 @@ where
                                 .source
                                 .slice(next.span)
                                 .ok()
-                                .is_some_and(|text| matches!(text, "<-" | "=")));
+                                .is_some_and(|text| matches!(text, "<-" | "←" | "=")));
                     }
                 }
                 TokenKind::Eof => return true,
