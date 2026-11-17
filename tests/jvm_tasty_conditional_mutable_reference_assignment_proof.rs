@@ -1155,6 +1155,31 @@ fn source_if_preserves_both_assignment_identities_and_records_first_paired_rejec
         "the original If must have canonical Unit type"
     );
 
+    let typed_block = typed_tree(&typed_bindings, source_id, method_def.rhs.unwrap());
+    let mut wrong_block_type = copy_typed_arena(&typed_ast);
+    wrong_block_type.get_mut(typed_block).ty = definitions.int;
+    assert!(
+        reject_typed(&wrong_block_type),
+        "typed Block must retain the canonical factory result type"
+    );
+
+    let mut wrong_setter_type = copy_typed_arena(&typed_ast);
+    wrong_setter_type.get_mut(typed_setter).ty = definitions.int;
+    assert!(
+        reject_typed(&wrong_setter_type),
+        "typed setter Apply must retain canonical Unit type"
+    );
+
+    let mut wrong_setter_kind = copy_typed_arena(&typed_ast);
+    let TreeKind::Apply(setter_apply) = &mut wrong_setter_kind.get_mut(typed_setter).kind else {
+        unreachable!()
+    };
+    setter_apply.kind = dotty_core::ast::ApplyKind::Using;
+    assert!(
+        reject_typed(&wrong_setter_kind),
+        "typed setter Apply must preserve the source Regular call kind"
+    );
+
     let mut duplicate_arm_source = copy_untyped_arena(&parsed.ast);
     let TreeKind::If(duplicate_arm_if) = &mut duplicate_arm_source.get_mut(stats[3]).kind else {
         unreachable!()

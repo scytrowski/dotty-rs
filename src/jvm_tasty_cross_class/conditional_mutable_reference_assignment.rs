@@ -467,9 +467,10 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
             typed_setter,
         ]
         || typed_block_node.expr != typed_pair_result
+        || !matches!(typed_ast.try_get(typed_block).and_then(|node| store.types.try_get(node.ty)), Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }) if *symbol == result_type_symbol)
     {
         return Err(typed(
-            "typed Block must preserve exact ordered source-stat and Pair mappings",
+            "typed Block must preserve exact ordered source-stat and method result class identities",
         ));
     }
     let TreeKind::If(typed_if_node) = &typed_ast
@@ -902,7 +903,12 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
         return Err(typed("typed setter must remain Select"));
     };
     if typed_setter_node.function != typed_setter_function
+        || typed_setter_node.kind != setter_apply.kind
+        || typed_setter_node.kind != ApplyKind::Regular
         || typed_setter_node.args.as_slice() != [typed_setter_argument]
+        || typed_ast
+            .try_get(typed_setter)
+            .is_none_or(|node| node.ty != definitions.unit)
         || typed_setter_select.qualifier != typed_setter_receiver
         || store.names.resolve(typed_setter_select.name.text()) != "set"
         || !matches!(store.types.try_get(typed_ast.try_get(typed_setter_receiver).ok_or_else(|| typed("typed setter receiver is stale"))?.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == selected)
