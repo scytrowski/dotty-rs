@@ -100,6 +100,9 @@ impl SourceTyper<'_> {
                     {
                         return Some(immediate_owner);
                     }
+                    if let Some(class) = self.enclosing_source_class(immediate_owner) {
+                        return Some(class);
+                    }
 
                     // A one-parameter ordinary function literal is owned by
                     // its source method. Follow that single edge only when
@@ -114,18 +117,11 @@ impl SourceTyper<'_> {
                     {
                         return None;
                     }
-                    let class = self.store.symbols.get(immediate_owner).owner?;
-                    (self.store.symbols.contains(class)
-                        && matches!(
-                            self.store.symbols.get(class).kind,
-                            SymbolKind::Class | SymbolKind::Trait
-                        )
-                        && self.function_literals.can_capture_enclosing_this(
-                            self.store,
-                            context.owner,
-                            class,
-                        ))
-                    .then_some(class)
+                    let class_owner = self.store.symbols.get(immediate_owner).owner?;
+                    let class = self.enclosing_source_class(class_owner)?;
+                    self.function_literals
+                        .can_capture_enclosing_this(self.store, context.owner, class)
+                        .then_some(class)
                 }
             });
         let mut local_scope = context.local_scopes;
@@ -189,6 +185,7 @@ impl SourceTyper<'_> {
                         context.owner,
                         name,
                         tree_index,
+                        enclosing_class,
                     )? {
                         combined.extend(outer_candidates);
                     }
@@ -239,6 +236,15 @@ impl SourceTyper<'_> {
                 .to_vec();
             if !candidates.is_empty() {
                 return Ok(candidates);
+            }
+            if enclosing_class
+                .is_some_and(|class| self.source_class_is_enclosing(source_context.owner, class))
+            {
+                let parameters =
+                    self.source_private_constructor_parameters(source_context.owner, name);
+                if !parameters.is_empty() {
+                    return Ok(parameters);
+                }
             }
             // Top-level source methods are owned by their synthetic package
             // module class, while their recorded lexical context is the
@@ -440,6 +446,213 @@ impl SourceTyper<'_> {
         })
     }
 
+    /// Returns canonical plain primary-constructor parameters for the source
+    /// class that owns the current method context. These parameters are
+    /// intentionally absent from the class member scope: they are visible to
+    /// methods declared in the same class without becoming public accessors.
+    pub(super) fn source_private_constructor_parameters(
+        &self,
+        class: SymbolId,
+        name: dotty_core::Name,
+    ) -> Vec<SymbolId> {
+        if !self.store.symbols.contains(class) {
+            return Vec::new();
+        }
+        let class_symbol = self.store.symbols.get(class);
+        if !matches!(class_symbol.kind, SymbolKind::Class | SymbolKind::Trait)
+            || class_symbol.origin != SymbolOrigin::Source(self.source)
+        {
+            return Vec::new();
+        }
+        let Some(SourceDefinition::Canonical { source, tree }) = self.index.definition_of(class)
+        else {
+            return Vec::new();
+        };
+        if source != self.source || self.index.symbol_at(source, tree) != Some(class) {
+            return Vec::new();
+        }
+        let Some(class_node) = self.arena.try_get(tree) else {
+            return Vec::new();
+        };
+        let TreeKind::TypeDef(definition) = &class_node.kind else {
+            return Vec::new();
+        };
+        let Some(template_node) = self.arena.try_get(definition.rhs) else {
+            return Vec::new();
+        };
+        let TreeKind::Template(template) = &template_node.kind else {
+            return Vec::new();
+        };
+        let Some(constructor_node) = self.arena.try_get(template.constructor) else {
+            return Vec::new();
+        };
+        let TreeKind::DefDef(constructor) = &constructor_node.kind else {
+            return Vec::new();
+        };
+
+        constructor
+            .value_param_clauses
+            .iter()
+            .flatten()
+            .filter_map(|parameter_tree| {
+                let TreeKind::ValDef(parameter) = &self.arena.try_get(*parameter_tree)?.kind else {
+                    return None;
+                };
+                if *parameter.name.as_name() != name
+                    || !parameter
+                        .metadata
+                        .modifiers
+                        .contains(&dotty_core::ast::Modifier::ParamAccessor)
+                    || !parameter
+                        .metadata
+                        .modifiers
+                        .contains(&dotty_core::ast::Modifier::PrivateLocal)
+                {
+                    return None;
+                }
+                let symbol = self.index.symbol_at(source, *parameter_tree)?;
+                if !self.store.symbols.contains(symbol) {
+                    return None;
+                }
+                let canonical = matches!(
+                    self.index.definition_of(symbol),
+                    Some(SourceDefinition::Canonical {
+                        source: symbol_source,
+                        tree: symbol_tree,
+                    }) if symbol_source == source
+                        && symbol_tree == *parameter_tree
+                        && self.index.symbol_at(symbol_source, symbol_tree) == Some(symbol)
+                );
+                let semantic = self.store.symbols.get(symbol);
+                (canonical
+                    && semantic.kind == SymbolKind::Parameter
+                    && semantic.owner == Some(class)
+                    && semantic.origin == SymbolOrigin::Source(source)
+                    && semantic.visibility == dotty_core::symbols::Visibility::Private)
+                    .then_some(symbol)
+            })
+            .collect()
+    }
+
+    fn source_object_module_class_owner(&self, module_class: SymbolId) -> Option<SymbolId> {
+        if !self.store.symbols.contains(module_class) {
+            return None;
+        }
+        let module_class_info = self.store.symbols.get(module_class);
+        if module_class_info.kind != SymbolKind::ModuleClass
+            || module_class_info.origin != SymbolOrigin::Source(self.source)
+            || self.index.scope_of(module_class).is_none()
+        {
+            return None;
+        }
+        let SourceDefinition::Derived { source, tree } = self.index.definition_of(module_class)?
+        else {
+            return None;
+        };
+        if source != self.source
+            || !matches!(
+                self.arena.try_get(tree)?.kind,
+                TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_))
+            )
+        {
+            return None;
+        }
+        let parent = module_class_info.owner?;
+        let object = self.index.symbol_at(source, tree)?;
+        if self.index.derived_symbol_at(parent, source, tree) != Some(module_class)
+            || !matches!(
+                self.index.definition_of(object),
+                Some(SourceDefinition::Canonical {
+                    source: object_source,
+                    tree: object_tree,
+                }) if object_source == source && object_tree == tree
+            )
+            || !self.store.symbols.contains(object)
+        {
+            return None;
+        }
+        let object_info = self.store.symbols.get(object);
+        (object_info.kind == SymbolKind::Object
+            && object_info.owner == Some(parent)
+            && object_info.origin == SymbolOrigin::Source(source))
+        .then_some(parent)
+    }
+
+    fn enclosing_source_class(&self, mut owner: SymbolId) -> Option<SymbolId> {
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            if !seen.insert(owner) || !self.store.symbols.contains(owner) {
+                return None;
+            }
+            match self.store.symbols.get(owner).kind {
+                SymbolKind::Class | SymbolKind::Trait => return Some(owner),
+                SymbolKind::ModuleClass => owner = self.source_object_module_class_owner(owner)?,
+                _ => return None,
+            }
+        }
+    }
+
+    fn source_class_is_enclosing(&self, candidate: SymbolId, mut class: SymbolId) -> bool {
+        let candidate = match self.store.symbols.contains(candidate) {
+            true if matches!(
+                self.store.symbols.get(candidate).kind,
+                SymbolKind::Class | SymbolKind::Trait
+            ) =>
+            {
+                candidate
+            }
+            true if self.store.symbols.get(candidate).kind == SymbolKind::ModuleClass => {
+                let Some(owner) = self.enclosing_source_class(candidate) else {
+                    return false;
+                };
+                owner
+            }
+            _ => return false,
+        };
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            if candidate == class {
+                return true;
+            }
+            if !seen.insert(class) || !self.store.symbols.contains(class) {
+                return false;
+            }
+            let Some(owner) = self.store.symbols.get(class).owner else {
+                return false;
+            };
+            if !self.store.symbols.contains(owner) {
+                return false;
+            }
+            match self.store.symbols.get(owner).kind {
+                SymbolKind::Class | SymbolKind::Trait => class = owner,
+                SymbolKind::ModuleClass => {
+                    let Some(parent) = self.source_object_module_class_owner(owner) else {
+                        return false;
+                    };
+                    class = parent;
+                }
+                _ => return false,
+            }
+        }
+    }
+
+    pub(in crate::typer) fn is_source_private_constructor_parameter(
+        &self,
+        symbol: SymbolId,
+    ) -> bool {
+        if !self.store.symbols.contains(symbol) {
+            return false;
+        }
+        let declaration = self.store.symbols.get(symbol);
+        let Some(owner) = declaration.owner else {
+            return false;
+        };
+        declaration.kind == SymbolKind::Parameter
+            && self
+                .source_private_constructor_parameters(owner, declaration.name)
+                .contains(&symbol)
+    }
+
     fn single_direct_source_parent(
         &mut self,
         child: SymbolId,
@@ -572,6 +785,7 @@ impl SourceTyper<'_> {
         owner: SymbolId,
         name: dotty_core::Name,
         tree_index: u32,
+        enclosing_class: Option<SymbolId>,
     ) -> Result<Option<Vec<SymbolId>>, TyperError> {
         let contexts = self.source_context_chain(context, tree_index)?;
         let fallback_scope = self
@@ -603,6 +817,15 @@ impl SourceTyper<'_> {
                 .to_vec();
             if !candidates.is_empty() {
                 return Ok(Some(candidates));
+            }
+            if enclosing_class
+                .is_some_and(|class| self.source_class_is_enclosing(source_context.owner, class))
+            {
+                let parameters =
+                    self.source_private_constructor_parameters(source_context.owner, name);
+                if !parameters.is_empty() {
+                    return Ok(Some(parameters));
+                }
             }
             if context_position == 0
                 && let Some(scope) = fallback_scope

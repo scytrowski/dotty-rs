@@ -6464,6 +6464,11 @@ mod tests {
             Some(constructor_symbol)
         );
         assert_eq!(
+            index.declaration_context_of(parameter_symbol),
+            index.declaration_context_of(derived_parameter),
+            "canonical and derived identities retain the established declaration context"
+        );
+        assert_eq!(
             term_symbol(&mut store, constructor_scope, "x"),
             Some(derived_parameter)
         );
