@@ -170,6 +170,6 @@ Validation on the final implementation:
 
 The audit began at integration base
 `ab25b31acf4cc1d2307220bbe72d5133334190be`. The PR branch incorporates current
-`main` at `bdc41b213bd94cdeb239fa7f58fb5ec412cd46ca` so the hosted focused gate
+`main` at `94cba0df6077c1196b055f441eca471326d6ae27` so the hosted focused gate
 can validate its ancestry. The updated published candidate HEAD is verified in
 the associated pull request. No historical comparator input was regenerated.
