@@ -22468,24 +22468,24 @@ public final class ConditionalMutableCounterHarness {
     const INVALID_SOURCE_ID: SourceId = SourceId::from_index(23472);
     for (name, source, expected) in [
         (
-            "immutable-selected",
+            "conditional-invalid-immutable-selected",
             CONDITIONAL_MUTABLE_REFERENCE_REBINDING_SOURCE.replace("var selected", "val selected"),
             InvalidSourceCase::Immutable,
         ),
         (
-            "incompatible-reference",
+            "conditional-invalid-incompatible-reference",
             CONDITIONAL_MUTABLE_REFERENCE_REBINDING_SOURCE
                 .replace("selected = second", "selected = new Pair(first, second)"),
             InvalidSourceCase::TypeMismatch,
         ),
         (
-            "immutable-parameter-target",
+            "conditional-invalid-immutable-parameter-target",
             CONDITIONAL_MUTABLE_REFERENCE_REBINDING_SOURCE
                 .replace("selected = second", "nextValue = firstSeed"),
             InvalidSourceCase::Immutable,
         ),
         (
-            "uninitialized-reference",
+            "conditional-invalid-uninitialized-reference",
             CONDITIONAL_MUTABLE_REFERENCE_REBINDING_SOURCE
                 .replace("var selected: Counter = first", "var selected: Counter"),
             InvalidSourceCase::MissingInitializer,
