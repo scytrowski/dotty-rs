@@ -690,10 +690,11 @@ fn run_name_compilation_unit(
             companion_links: Vec::new(),
             package_private_boundary: None,
             source_package_wrappers: HashMap::new(),
+            wrapped_type_names: HashMap::new(),
             source_diagnostics_allowed,
             source_diagnostic: None,
         };
-        let result = namer.index(root).map(|()| namer.index);
+        let result = namer.index().map(|()| namer.index);
         (
             result,
             namer.scope_insertions,
@@ -733,6 +734,7 @@ struct Namer<'a> {
     companion_links: Vec<(SymbolId, SymbolId)>,
     package_private_boundary: Option<(SymbolId, SymbolId)>,
     source_package_wrappers: HashMap<SymbolId, (SymbolId, ScopeId)>,
+    wrapped_type_names: HashMap<Vec<String>, HashSet<TypeName>>,
     source_diagnostics_allowed: bool,
     source_diagnostic: Option<NamerDiagnostic>,
 }
@@ -755,28 +757,19 @@ impl Namer<'_> {
         Ok(())
     }
 
-    fn index(&mut self, tree: TreeId<Untyped>) -> Result<(), NamerError> {
-        self.expand(tree, &[], true)
-    }
-
-    /// Source expansion hook. Package headers perform their stats partition
-    /// and create the synthetic wrapper before entering any declarations.
-    fn expand(
-        &mut self,
-        tree: TreeId<Untyped>,
-        enclosing_package: &[String],
-        source_root: bool,
-    ) -> Result<(), NamerError> {
-        self.index_expanded(tree, enclosing_package, source_root)
+    fn index(&mut self) -> Result<(), NamerError> {
+        let Some(root) = self.enter_package_header(self.root, &[], true, None)? else {
+            return Ok(());
+        };
+        self.collect_wrapped_type_names()?;
+        self.scan_entered_header(root)
     }
 
     fn partition_package_stats(
         &mut self,
         stats: &[TreeId<Untyped>],
         context: &NamingContext,
-    ) -> Result<PackageStatPartition, NamerError> {
-        let wrapped_type_names = self.wrapped_type_names_for_package_path(&context.package_path)?;
-
+    ) -> PackageStatPartition {
         let mut top_stats = Vec::new();
         let mut wrapped_stats = Vec::new();
         let mut active_context = context.source_context;
@@ -788,23 +781,19 @@ impl Namer<'_> {
             let wrapped = match &self.arena.get(*tree).kind {
                 TreeKind::PackageDef(_) => false,
                 TreeKind::ValDef(_) | TreeKind::DefDef(_) | TreeKind::Export(_) => true,
-                TreeKind::TypeDef(definition) => {
-                    let class_like =
-                        matches!(self.arena.get(definition.rhs).kind, TreeKind::Template(_));
-                    let given_or_implicit =
-                        definition.metadata.modifiers.iter().any(|modifier| {
-                            matches!(modifier, Modifier::Given | Modifier::Implicit)
-                        });
-                    !class_like || given_or_implicit
-                }
+                TreeKind::TypeDef(definition) => self.is_wrapped_type(definition),
                 TreeKind::PhaseSpecific(UntypedNode::ModuleDef(definition)) => {
                     let given_or_implicit =
                         definition.metadata.modifiers.iter().any(|modifier| {
                             matches!(modifier, Modifier::Given | Modifier::Implicit)
                         });
                     given_or_implicit
-                        || wrapped_type_names
-                            .contains(self.store.names.resolve(definition.name.as_name().text()))
+                        || self
+                            .wrapped_type_names
+                            .get(&context.package_path)
+                            .is_some_and(|names| {
+                                names.contains(&TypeName::new(definition.name.as_name().text()))
+                            })
                 }
                 TreeKind::PhaseSpecific(
                     UntypedNode::PatDef(_) | UntypedNode::ExtensionMethods(_),
@@ -821,10 +810,10 @@ impl Namer<'_> {
                 top_stats.push(stat);
             }
         }
-        Ok(PackageStatPartition {
+        PackageStatPartition {
             top_stats,
             wrapped_stats,
-        })
+        }
     }
 
     fn context_after_import(
@@ -855,62 +844,47 @@ impl Namer<'_> {
         })
     }
 
-    fn wrapped_type_names_for_package_path(
-        &self,
-        package_path: &[String],
-    ) -> Result<HashSet<String>, NamerError> {
-        fn collect(
-            namer: &Namer<'_>,
-            tree: TreeId<Untyped>,
-            enclosing_package: &[String],
-            source_root: bool,
-            package_path: &[String],
-            names: &mut HashSet<String>,
-        ) -> Result<(), NamerError> {
-            let TreeKind::PackageDef(package) = &namer.arena.get(tree).kind else {
-                return Ok(());
-            };
-            let segments = if source_root && namer.is_empty_package_sentinel(package.name) {
-                Vec::new()
-            } else {
-                namer.flatten_package_name(package.name)?
-            };
-            let mut current_path = enclosing_package.to_vec();
-            current_path.extend(segments);
+    fn is_wrapped_type(&self, definition: &dotty_core::ast::TypeDef<Untyped>) -> bool {
+        !matches!(self.arena.get(definition.rhs).kind, TreeKind::Template(_))
+            || definition
+                .metadata
+                .modifiers
+                .iter()
+                .any(|modifier| matches!(modifier, Modifier::Given | Modifier::Implicit))
+    }
 
-            if current_path == package_path {
-                for stat in &package.stats {
-                    if let TreeKind::TypeDef(definition) = &namer.arena.get(*stat).kind {
-                        let class_like =
-                            matches!(namer.arena.get(definition.rhs).kind, TreeKind::Template(_));
-                        let given_or_implicit =
-                            definition.metadata.modifiers.iter().any(|modifier| {
-                                matches!(modifier, Modifier::Given | Modifier::Implicit)
-                            });
-                        if !class_like || given_or_implicit {
-                            names.insert(
-                                namer
-                                    .store
-                                    .names
-                                    .resolve(definition.name.as_name().text())
-                                    .to_owned(),
-                            );
-                        }
+    /// Collect names once per unit so an object can precede the wrapped type
+    /// in a different clause of the same package.
+    fn collect_wrapped_type_names(&mut self) -> Result<(), NamerError> {
+        let mut pending = vec![(self.root, Vec::new())];
+        let mut seen = HashSet::new();
+        while let Some((tree, mut path)) = pending.pop() {
+            if !seen.insert(tree) {
+                return Err(NamerError::DuplicateSourceTreeSymbol {
+                    source: self.source,
+                    tree_index: tree.index(),
+                });
+            }
+            let TreeKind::PackageDef(package) = &self.arena.get(tree).kind else {
+                unreachable!("only package headers are collected")
+            };
+            if tree != self.root || !self.is_empty_package_sentinel(package.name) {
+                path.extend(self.flatten_package_name(package.name)?);
+            }
+            for stat in package.stats.iter().rev() {
+                match &self.arena.get(*stat).kind {
+                    TreeKind::PackageDef(_) => pending.push((*stat, path.clone())),
+                    TreeKind::TypeDef(definition) if self.is_wrapped_type(definition) => {
+                        self.wrapped_type_names
+                            .entry(path.clone())
+                            .or_default()
+                            .insert(definition.name);
                     }
+                    _ => {}
                 }
             }
-
-            for stat in &package.stats {
-                if matches!(namer.arena.get(*stat).kind, TreeKind::PackageDef(_)) {
-                    collect(namer, *stat, &current_path, false, package_path, names)?;
-                }
-            }
-            Ok(())
         }
-
-        let mut names = HashSet::new();
-        collect(self, self.root, &[], true, package_path, &mut names)?;
-        Ok(names)
+        Ok(())
     }
 
     fn enter_source_package_wrapper(
@@ -1214,19 +1188,6 @@ impl Namer<'_> {
         Ok(headers)
     }
 
-    fn index_expanded(
-        &mut self,
-        tree: TreeId<Untyped>,
-        enclosing_package: &[String],
-        source_root: bool,
-    ) -> Result<(), NamerError> {
-        let Some(header) = self.enter_package_header(tree, enclosing_package, source_root, None)?
-        else {
-            return Ok(());
-        };
-        self.scan_entered_header(header)
-    }
-
     fn enter_package_header(
         &mut self,
         tree: TreeId<Untyped>,
@@ -1462,7 +1423,7 @@ impl Namer<'_> {
                     return Ok(());
                 };
                 let stats = package.stats.clone();
-                let partition = self.partition_package_stats(&stats, &context)?;
+                let partition = self.partition_package_stats(&stats, &context);
                 let mut headers = Vec::new();
                 for stat in partition.top_stats {
                     let mut stat_context = context.clone();

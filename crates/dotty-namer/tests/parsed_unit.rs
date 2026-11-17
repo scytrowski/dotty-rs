@@ -4190,6 +4190,38 @@ fn enum_case_pattern_definition_is_deferred_instead_of_named_as_fields() {
 }
 
 #[test]
+fn wrapper_partition_uses_the_full_package_path_across_clauses() {
+    let named = named_source(
+        "package a.b { object Shared }\npackage a { package b { type Shared = Int } }\npackage other.b { object Shared }",
+        220,
+    );
+    let first_stat = |clause| {
+        let TreeKind::PackageDef(package) = &named.parsed.ast.get(clause).kind else {
+            panic!("expected a package clause");
+        };
+        package.stats[0]
+    };
+    let owner_of = |tree| {
+        let symbol = named.index.symbol_at(named.source, tree).unwrap();
+        named.store.symbols.get(symbol).owner.unwrap()
+    };
+    let [qualified, nested, unrelated] = package_stat_trees(&named) else {
+        panic!("expected three package clauses");
+    };
+    let wrapped = owner_of(first_stat(*qualified));
+    assert_eq!(
+        named.store.symbols.get(wrapped).kind,
+        SymbolKind::ModuleClass
+    );
+    assert_eq!(owner_of(first_stat(first_stat(*nested))), wrapped);
+    let ordinary = owner_of(first_stat(*unrelated));
+    assert_eq!(
+        Some(ordinary),
+        named.index.symbol_at(named.source, *unrelated)
+    );
+}
+
+#[test]
 fn source_wrappers_keep_distinct_file_stems_in_a_shared_package() {
     use dotty_core::TermName;
     use dotty_lexer::ContextualScanner;
