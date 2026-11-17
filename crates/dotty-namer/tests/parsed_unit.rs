@@ -175,6 +175,58 @@ fn flagged_product_selectors_have_independent_class_owned_provenance() {
 }
 
 #[test]
+fn product_selectors_reuse_their_own_field_and_coexist_with_an_overload() {
+    let named = named_source(
+        "case class C(_1: Int, other: Int) { def _2(index: Int): Int = other + index }",
+        1965,
+    );
+    let parts = primary_constructor_parts(&named);
+    let class = named
+        .index
+        .symbol_at(named.source, parts.class_tree)
+        .unwrap();
+    let [first, second] = parts.value_param_clauses[0].as_slice() else {
+        unreachable!()
+    };
+    let field = named.index.symbol_at(named.source, *first).unwrap();
+    let scope = named.store.scopes.get(named.index.scope_of(class).unwrap());
+    assert_eq!(
+        named.index.derived_symbol_at(class, named.source, *first),
+        None
+    );
+    assert_eq!(
+        scope.lookup_all(&named.store.symbols.get(field).name),
+        &[field]
+    );
+    assert_eq!(named.store.symbols.get(field).kind, SymbolKind::Field);
+
+    let generated = named
+        .index
+        .derived_symbol_at(class, named.source, *second)
+        .unwrap();
+    let overloads = scope.lookup_all(TermName::new(named.store.names.get("_2").unwrap()).as_name());
+    assert_eq!(overloads.len(), 2);
+    assert!(overloads.contains(&generated));
+    assert!(
+        named
+            .store
+            .symbols
+            .get(generated)
+            .flags
+            .contains(SymbolFlags::SYNTHETIC)
+    );
+    assert!(overloads.iter().any(|&id| {
+        named.store.symbols.get(id).kind == SymbolKind::Method
+            && !named
+                .store
+                .symbols
+                .get(id)
+                .flags
+                .contains(SymbolFlags::SYNTHETIC)
+    }));
+}
+
+#[test]
 fn flagged_selector_collision_skips_only_the_conflicting_identity() {
     let mut named = named_source(
         "case class Flagged(value: Int, enabled: Boolean) { def _1: String = \"explicit\" }",

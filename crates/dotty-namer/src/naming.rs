@@ -2278,12 +2278,20 @@ impl Namer<'_> {
                 continue;
             }
             let selector_text = format!("_{}", ordinal + 1);
+            if self.store.names.resolve(parameter.name.as_name().text()) == selector_text {
+                continue;
+            }
             let explicit_collision = template.body.iter().any(|tree| {
                 let Some(node) = self.arena.try_get(*tree) else {
                     return false;
                 };
                 let name = match &node.kind {
-                    TreeKind::DefDef(definition) => Some(definition.name.as_name()),
+                    TreeKind::DefDef(definition)
+                        if definition.type_params.is_empty()
+                            && definition.value_param_clauses.is_empty() =>
+                    {
+                        Some(definition.name.as_name())
+                    }
                     TreeKind::ValDef(definition) => Some(definition.name.as_name()),
                     _ => None,
                 };
