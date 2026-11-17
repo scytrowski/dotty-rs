@@ -2903,8 +2903,11 @@ impl Namer<'_> {
             Some(class_source_context),
         );
         for parameter in private_local_parameters {
+            // The canonical symbol belongs to the class body and its source
+            // type names class type parameters. The separate derived copy
+            // below retains the constructor's context for constructor typing.
             self.index
-                .record_declaration_context(parameter, constructor_context)?;
+                .record_declaration_context(parameter, class_source_context)?;
         }
 
         for parameter_tree in &constructor.type_params {
@@ -6459,9 +6462,20 @@ mod tests {
             store.symbols.get(parameter_symbol).visibility,
             Visibility::Private
         );
+        let canonical_context = index
+            .declaration_context_of(parameter_symbol)
+            .expect("canonical private parameter has its class-body type context");
+        assert_eq!(index.source_context(canonical_context).owner, class_symbol);
         assert_eq!(
             store.symbols.get(derived_parameter).owner,
             Some(constructor_symbol)
+        );
+        let derived_context = index
+            .declaration_context_of(derived_parameter)
+            .expect("derived constructor parameter retains its constructor context");
+        assert_eq!(
+            index.source_context(derived_context).owner,
+            constructor_symbol
         );
         assert_eq!(
             term_symbol(&mut store, constructor_scope, "x"),
