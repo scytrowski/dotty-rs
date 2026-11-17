@@ -309,7 +309,7 @@ pub(crate) fn read_index_list(
     reader: &mut Reader<'_>,
 ) -> Result<Vec<ConstantPoolIndex>, ReadError> {
     let count = reader.read_u16()?;
-    let mut indices = Vec::with_capacity(usize::from(count));
+    let mut indices = Vec::with_capacity(reader.table_capacity(count, 2));
     for _ in 0..count {
         indices.push(read_index(reader)?);
     }
@@ -339,15 +339,6 @@ fn validate_module_flags(
             flags: reserved,
         })
     }
-}
-
-fn read_module_index_list(reader: &mut Reader<'_>) -> Result<Vec<ConstantPoolIndex>, ReadError> {
-    let count = reader.read_u16()?;
-    let mut indices = Vec::new();
-    for _ in 0..count {
-        indices.push(read_index(reader)?);
-    }
-    Ok(indices)
 }
 
 fn read_module_attribute(reader: &mut Reader<'_>) -> Result<ModuleAttribute, AttributeError> {
@@ -391,7 +382,7 @@ fn read_module_attribute(reader: &mut Reader<'_>) -> Result<ModuleAttribute, Att
             exports_flags,
             MODULE_ACC_SYNTHETIC | MODULE_ACC_MANDATED,
         )?;
-        let exports_to = read_module_index_list(reader)?;
+        let exports_to = read_index_list(reader)?;
         exports.push(ModuleExport {
             exports_index,
             exports_flags,
@@ -409,7 +400,7 @@ fn read_module_attribute(reader: &mut Reader<'_>) -> Result<ModuleAttribute, Att
             opens_flags,
             MODULE_ACC_SYNTHETIC | MODULE_ACC_MANDATED,
         )?;
-        let opens_to = read_module_index_list(reader)?;
+        let opens_to = read_index_list(reader)?;
         opens.push(ModuleOpen {
             opens_index,
             opens_flags,
@@ -417,7 +408,7 @@ fn read_module_attribute(reader: &mut Reader<'_>) -> Result<ModuleAttribute, Att
         });
     }
 
-    let uses = read_module_index_list(reader)?;
+    let uses = read_index_list(reader)?;
     let provides_count = reader.read_u16()?;
     let mut provides = Vec::new();
     for _ in 0..provides_count {
@@ -450,7 +441,7 @@ fn read_module_attribute(reader: &mut Reader<'_>) -> Result<ModuleAttribute, Att
 
 fn read_bootstrap_methods(reader: &mut Reader<'_>) -> Result<Vec<BootstrapMethodEntry>, ReadError> {
     let count = reader.read_u16()?;
-    let mut methods = Vec::with_capacity(usize::from(count));
+    let mut methods = Vec::with_capacity(reader.table_capacity(count, 4));
     for _ in 0..count {
         let method_ref = read_index(reader)?;
         let arguments = read_index_list(reader)?;
@@ -464,7 +455,7 @@ fn read_bootstrap_methods(reader: &mut Reader<'_>) -> Result<Vec<BootstrapMethod
 
 fn read_inner_classes(reader: &mut Reader<'_>) -> Result<Vec<InnerClassEntry>, ReadError> {
     let count = reader.read_u16()?;
-    let mut classes = Vec::with_capacity(usize::from(count));
+    let mut classes = Vec::with_capacity(reader.table_capacity(count, 8));
     for _ in 0..count {
         let inner_class_info_index = read_index(reader)?;
         let outer_class_info_index = read_optional_index(reader)?;
@@ -482,7 +473,7 @@ fn read_inner_classes(reader: &mut Reader<'_>) -> Result<Vec<InnerClassEntry>, R
 
 fn read_method_parameters(reader: &mut Reader<'_>) -> Result<Vec<MethodParameterEntry>, ReadError> {
     let count = reader.read_u8()?;
-    let mut parameters = Vec::with_capacity(usize::from(count));
+    let mut parameters = Vec::with_capacity(reader.table_capacity(u16::from(count), 4));
     for _ in 0..count {
         let name_index = read_optional_index(reader)?;
         let access_flags = reader.read_u16()?;
@@ -528,7 +519,7 @@ fn read_element_value(
                 return Err(AttributeError::TooDeeplyNestedAnnotation);
             }
             let count = reader.read_u16()?;
-            let mut values = Vec::with_capacity(usize::from(count));
+            let mut values = Vec::new();
             for _ in 0..count {
                 values.push(read_element_value(reader, depth + 1)?);
             }
@@ -541,7 +532,7 @@ fn read_element_value(
 fn read_annotation(reader: &mut Reader<'_>, depth: usize) -> Result<Annotation, AttributeError> {
     let type_index = read_index(reader)?;
     let count = reader.read_u16()?;
-    let mut element_value_pairs = Vec::with_capacity(usize::from(count));
+    let mut element_value_pairs = Vec::new();
     for _ in 0..count {
         let element_name_index = read_index(reader)?;
         let value = read_element_value(reader, depth)?;
@@ -555,7 +546,7 @@ fn read_annotation(reader: &mut Reader<'_>, depth: usize) -> Result<Annotation, 
 
 fn read_annotations(reader: &mut Reader<'_>) -> Result<Vec<Annotation>, AttributeError> {
     let count = reader.read_u16()?;
-    let mut annotations = Vec::with_capacity(usize::from(count));
+    let mut annotations = Vec::new();
     for _ in 0..count {
         annotations.push(read_annotation(reader, 0)?);
     }
@@ -564,7 +555,7 @@ fn read_annotations(reader: &mut Reader<'_>) -> Result<Vec<Annotation>, Attribut
 
 fn read_exception_table(reader: &mut Reader<'_>) -> Result<Vec<ExceptionTableEntry>, ReadError> {
     let count = reader.read_u16()?;
-    let mut entries = Vec::with_capacity(usize::from(count));
+    let mut entries = Vec::with_capacity(reader.table_capacity(count, 8));
     for _ in 0..count {
         let start_pc = reader.read_u16()?;
         let end_pc = reader.read_u16()?;
@@ -616,7 +607,9 @@ fn decode_attributes_at_depth<'a>(
     depth: usize,
 ) -> Result<Vec<Attribute<'a>>, AttributeError> {
     let count = reader.read_u16()?;
-    let mut attributes = Vec::with_capacity(usize::from(count));
+    // Grow recursive tables as rows are decoded. Their remaining bytes
+    // include child payloads that could otherwise back reservations at every level.
+    let mut attributes = Vec::new();
     for _ in 0..count {
         attributes.push(Attribute::decode_at_depth(reader, constant_pool, depth)?);
     }
@@ -629,7 +622,7 @@ fn read_record_components<'a>(
     depth: usize,
 ) -> Result<Vec<RecordComponentInfo<'a>>, AttributeError> {
     let count = reader.read_u16()?;
-    let mut components = Vec::with_capacity(usize::from(count));
+    let mut components = Vec::new();
     for _ in 0..count {
         let name_index = read_index(reader)?;
         let descriptor_index = read_index(reader)?;

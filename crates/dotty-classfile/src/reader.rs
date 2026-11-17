@@ -88,6 +88,12 @@ impl<'a> Reader<'a> {
         self.limit - self.offset
     }
 
+    /// Bounds a table's initial reservation by the rows that can fit in this
+    /// reader. Reading the rows still reports the first malformed or missing field.
+    pub(crate) fn table_capacity(&self, count: u16, min_row_bytes: usize) -> usize {
+        usize::from(count).min(self.remaining() / min_row_bytes)
+    }
+
     pub fn is_at_end(&self) -> bool {
         self.offset == self.limit
     }
@@ -294,6 +300,15 @@ mod tests {
 
         assert_eq!(reader.read_bytes(2).unwrap(), &[0x20, 0x30]);
         assert_eq!(reader.position(), 3);
+    }
+
+    #[test]
+    fn table_reservations_use_only_the_remaining_bytes_of_the_sub_reader() {
+        let mut reader = Reader::with_range(&[0; 20], 5, 12).unwrap();
+        assert_eq!(reader.table_capacity(u16::MAX, 3), 2);
+        assert_eq!(reader.table_capacity(1, 3), 1);
+        reader.read_bytes(5).unwrap();
+        assert_eq!(reader.table_capacity(u16::MAX, 3), 0);
     }
 
     #[test]
