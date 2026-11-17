@@ -339,3 +339,52 @@ resolved the path-length failure. The sandbox then reported `EPERM` while
 binding the Unix socket; the same bounded build command completed under the
 host-approved execution. The Scala source revision, compiler dependencies,
 JDK 21, and Rust 1.98.1 pins were unchanged. This host setup issue is resolved.
+
+## Retry execution receipt
+
+This receipt records the fresh implementation attempt run
+`54ee5b42-3033-4701-b3ac-3142b3ddc45b`. Its strict local execution was run
+from checkpoint `549ea32bfa960e1ed7f3b36cffa1ff5412439f10`, on top of the
+frozen integration base `6afdb2dca88cf71a784aacf6bc895b58d7496a4f`. This
+attempt independently rebuilt the Scala distribution from a private copy of
+the attached source checkout. The checkout HEAD was
+`777528f19a58e794c9954a42f433373472ec57f8`; `sbt "dist/universal:stage"`
+reported sbt 1.12.1 and Temurin JDK 21.0.13+9. The staged compiler reported
+`3.9.0-bin-SNAPSHOT-git-777528f`; this build's `with_compiler.jar` SHA-256
+was `4651f59c224ac7cbf4aa72b3f949857d1dcefbdb9e11067f6f83fc1e7c6f9459`.
+The Java executable SHA-256 was
+`9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155`.
+
+On that execution, the strict
+`jvm_tasty_mutable_reference_rebinding_scala_consumer` target passed both
+integration tests. Its `SHARED_BATCH_JAVA_ACCEPTED` receipt confirms the
+independent Java probe ran against the single producer directory before the
+Scala client. The six Rust artifact hashes and UUIDs matched the table above
+before Java, between clients, and after Scala's runtime, reader, and negative
+controls. Java reported `rust mutable rebinding: signed/equal seeds, original
+identities and independent mutation passed`; Scala reported
+`scala39-rust-mutable-reference-rebinding=ok`. Official Scala `-print-tasty`,
+`-decompile`, and `-from-tasty` succeeded. The observed negative first
+failures included missing sidecar, UUID mismatch, stale ASSIGN left and right
+links (`TreeWithoutOwner`), immutable modifier (decompiled as `val selected`),
+and the wrong JVM descriptor (`NoSuchMethodError`).
+
+The local strict inventory validator accepted the current 29-target manifest
+and its four shard assignments. All 29 manifest targets passed with Rust
+1.98.1, the pinned Scala source compiler, and JDK 21. The four required
+follow-up gates passed: constructor-alias plan, secondary-constructor loader
+rollback, strict dual-reference reader, and the JDK 21 verifier/publisher
+suite. `aggregate_strict_tasty_shards.py --report` reported all four shards
+and follow-up gates successful. The workspace checks also passed:
+`cargo +1.98.1 fmt --all -- --check`, the frontend boundary guard, Clippy with
+`-D warnings`, rustdoc with `-D warnings`, `git diff --check`, and
+`cargo +1.98.1 test --workspace --all-targets --locked` with Temurin 21 on
+`PATH` and `DOTTY_CLASSFILE_REQUIRE_JDK=1`. The first workspace test
+invocation omitted the JDK from `PATH` and failed when an existing test tried
+to launch `javac`; the corrected invocation above passed.
+
+The execution SHA above is the code-and-test checkpoint used for this local
+receipt. The final acceptance PR head and its hosted CI run URLs are tracked
+separately in the PR so that the published checks correspond to the reviewed
+head; predecessor workflow runs in the preceding table are not represented as
+this attempt's checks.
