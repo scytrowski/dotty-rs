@@ -211,15 +211,8 @@ impl<'source> RawLexer<'source> {
                 self.scan_backquoted_identifier(start)?,
             )));
         }
-        if character == ':' && self.cursor.peek_nth(1).is_some_and(is_operator_character) {
+        if character == ':' {
             return Ok(Some(RawItem::Token(self.scan_operator(start)?)));
-        }
-        if character == ':' && self.xml.is_xml_name_separator() {
-            let _ = self.cursor.bump();
-            let kind = RawTokenKind::Operator;
-            let span = self.span(start)?;
-            self.update_xml_token(kind, span)?;
-            return Ok(Some(RawItem::Token(RawToken { kind, span })));
         }
         if let Some(punctuation) = punctuation(character) {
             let _ = self.cursor.bump();
@@ -737,12 +730,14 @@ impl<'source> RawLexer<'source> {
 
     fn scan_operator(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
         self.consume_operator_chars();
-        let token = RawToken {
-            kind: RawTokenKind::Operator,
-            span: self.span(start)?,
+        let span = self.span(start)?;
+        let kind = if self.source.slice(span)? == ":" && !self.xml.is_xml_name_separator() {
+            RawTokenKind::Punctuation(Punctuation::Colon)
+        } else {
+            RawTokenKind::Operator
         };
-        self.update_xml_token(token.kind, token.span)?;
-        Ok(token)
+        self.update_xml_token(kind, span)?;
+        Ok(RawToken { kind, span })
     }
 
     fn consume_operator_chars(&mut self) {
@@ -2605,6 +2600,19 @@ mod tests {
             ]
         );
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn standalone_colons_before_comments_keep_the_parser_colon_protocol() {
+        for source in ["x:/*doc*/T", "x://doc\n  y"] {
+            let (items, diagnostics) = scan(source);
+            assert_eq!(
+                items[1],
+                token(RawTokenKind::Punctuation(Punctuation::Colon), 1, 2)
+            );
+            assert!(diagnostics.is_empty());
+        }
+        assert_eq!(scan("x:/y").0[1], token(RawTokenKind::Operator, 1, 3));
     }
 
     #[test]
