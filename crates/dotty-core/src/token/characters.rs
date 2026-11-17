@@ -1,23 +1,33 @@
+//! Character classes shared by Scala tokenization and operator precedence.
+
 use unicode_general_category::{GeneralCategory::*, get_general_category};
 
-/// Letter categories and Other_ID_Start as used by JDK 25 Character.
-fn is_unicode_start(ch: char, category: unicode_general_category::GeneralCategory) -> bool {
+fn scala_letter_category(category: unicode_general_category::GeneralCategory) -> bool {
     matches!(
         category,
-        UppercaseLetter
-            | LowercaseLetter
-            | TitlecaseLetter
-            | ModifierLetter
-            | OtherLetter
-            | LetterNumber
-    ) || matches!(
-        ch,
-        '\u{1885}' | '\u{1886}' | '℘' | '℮' | '\u{309b}' | '\u{309c}'
+        UppercaseLetter | LowercaseLetter | TitlecaseLetter | OtherLetter | LetterNumber
     )
 }
 
+/// Returns whether Scala gives an operator starting with this character letter precedence.
+pub fn is_scala_letter(ch: char) -> bool {
+    if ch.is_ascii() {
+        return ch.is_ascii_alphabetic() || matches!(ch, '_' | '$');
+    }
+    scala_letter_category(get_general_category(ch))
+}
+
+fn is_unicode_start(ch: char, category: unicode_general_category::GeneralCategory) -> bool {
+    scala_letter_category(category)
+        || category == ModifierLetter
+        || matches!(
+            ch,
+            '\u{1885}' | '\u{1886}' | '℘' | '℮' | '\u{309b}' | '\u{309c}'
+        )
+}
+
 /// Returns whether a character may start a Scala identifier.
-pub(crate) fn is_identifier_start(ch: char) -> bool {
+pub fn is_identifier_start(ch: char) -> bool {
     if ch.is_ascii() {
         return ch.is_ascii_alphabetic() || matches!(ch, '_' | '$');
     }
@@ -25,7 +35,7 @@ pub(crate) fn is_identifier_start(ch: char) -> bool {
 }
 
 /// Returns whether a character may continue a Scala identifier.
-pub(crate) fn is_identifier_part(ch: char) -> bool {
+pub fn is_identifier_part(ch: char) -> bool {
     // Scala's scanner explicitly stops before SU even though the JDK
     // includes it among ignorable controls in a Unicode identifier.
     if ch.is_ascii() {
@@ -40,7 +50,7 @@ pub(crate) fn is_identifier_part(ch: char) -> bool {
 }
 
 /// Returns whether a character belongs to a Scala operator lexeme.
-pub(crate) fn is_operator_character(character: char) -> bool {
+pub fn is_operator_character(character: char) -> bool {
     matches!(
         character,
         '!' | '#'

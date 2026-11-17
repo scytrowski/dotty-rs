@@ -1,3 +1,4 @@
+use dotty_core::token::characters::{is_operator_character, is_scala_letter};
 use dotty_core::{Name, TreeId, Untyped};
 
 /// Operand/operator state used by Dotty-style infix reduction.
@@ -10,12 +11,9 @@ pub struct OpInfo {
 
 /// Returns the Scala 3 operator precedence bucket for `operator`.
 pub fn precedence(operator: &str) -> u8 {
-    if is_assignment_operator(operator) {
-        return 0;
-    }
-
     match operator.chars().next() {
-        Some(first) if first.is_alphabetic() => 1,
+        Some(first) if is_scala_letter(first) => 1,
+        _ if is_assignment_operator(operator) => 0,
         Some('|') => 2,
         Some('^') => 3,
         Some('&') => 4,
@@ -41,7 +39,10 @@ pub(crate) fn has_mixed_associativity(left: &str, right: &str) -> bool {
 
 /// Returns whether `operator` is a Scala assignment operator.
 pub fn is_assignment_operator(operator: &str) -> bool {
-    operator.ends_with('=') && !matches!(operator, "==" | "!=" | "<=" | ">=")
+    operator.ends_with('=')
+        && !operator.starts_with('=')
+        && !matches!(operator, "!=" | "<=" | ">=")
+        && operator.chars().next().is_some_and(is_operator_character)
 }
 
 #[cfg(test)]
@@ -52,7 +53,11 @@ mod tests {
 
     #[test]
     fn letter_operators_have_the_lowest_non_assignment_precedence() {
-        assert_eq!(precedence("foo"), 1);
+        for op in ["foo", "foo=", "_op", "$op", "Ⅳ"] {
+            assert_eq!(precedence(op), 1, "{op}");
+        }
+        assert_eq!(precedence("==="), 5);
+        assert_eq!(precedence("ʰ"), 10);
     }
 
     #[test]
@@ -108,7 +113,7 @@ mod tests {
 
     #[test]
     fn assignment_operators_have_precedence_zero() {
-        for operator in ["=", "+=", "foo="] {
+        for operator in ["+=", "!==", "⊕="] {
             assert_eq!(precedence(operator), 0, "{operator}");
             assert!(is_assignment_operator(operator));
         }
@@ -116,7 +121,7 @@ mod tests {
 
     #[test]
     fn comparison_and_equality_operators_are_not_assignments() {
-        for operator in ["==", "!=", "<=", ">="] {
+        for operator in ["=", "==", "===", "!=", "<=", ">=", "foo=", "_x=", ""] {
             assert!(!is_assignment_operator(operator), "{operator}");
         }
     }

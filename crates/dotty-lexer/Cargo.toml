@@ -5,5 +5,3 @@ edition = "2024"
 
 [dependencies]
 dotty-core = { path = "../dotty-core" }
-# JDK 25 uses Unicode 16.0 for Scala 3.9.0 identifiers and operators.
-unicode-general-category = "=1.1.0"

@@ -3,7 +3,6 @@ use core::fmt;
 use dotty_core::diagnostics::DiagnosticSeverity;
 use dotty_core::source::{SourceText, SourceTextError, TextRange, TextRangeError};
 
-use crate::identifier::{is_identifier_part, is_identifier_start, is_operator_character};
 use crate::xml::XmlState;
 use crate::{Cursor, CursorError, HardKeyword, Punctuation, RawItem, RawToken, RawTokenKind};
 use crate::{
@@ -11,6 +10,9 @@ use crate::{
     NonIntegerLiteralKind, NumericComponent, NumericIssue,
 };
 use crate::{Trivia, TriviaKind};
+use dotty_core::token::characters::{
+    is_identifier_part, is_identifier_start, is_operator_character,
+};
 
 #[derive(Debug, Clone)]
 enum LexMode {
@@ -250,9 +252,10 @@ impl<'source> RawLexer<'source> {
             .is_none_or(|character| matches!(character, ' ' | '\t' | '\n' | '{' | '(' | '>'));
 
         valid_context
-            && self.cursor.peek_nth(1).is_some_and(|next| {
-                crate::identifier::is_identifier_start(next) || next == '!' || next == '?'
-            })
+            && self
+                .cursor
+                .peek_nth(1)
+                .is_some_and(|next| is_identifier_start(next) || next == '!' || next == '?')
     }
 
     fn next_expression(&mut self) -> Result<Option<RawItem>, RawLexerError> {

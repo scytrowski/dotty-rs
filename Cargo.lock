@@ -55,6 +55,9 @@ dependencies = [
 [[package]]
 name = "dotty-core"
 version = "0.1.0"
+dependencies = [
+ "unicode-general-category",
+]
 
 [[package]]
 name = "dotty-jvm"
@@ -80,7 +83,6 @@ name = "dotty-lexer"
 version = "0.1.0"
 dependencies = [
  "dotty-core",
- "unicode-general-category",
 ]
 
 [[package]]
