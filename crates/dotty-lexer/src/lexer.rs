@@ -528,7 +528,18 @@ impl<'source> RawLexer<'source> {
             })));
         }
 
-        let token = self.scan_identifier_token(start, false, true)?;
+        let _ = self.cursor.bump();
+        while self
+            .cursor
+            .peek()
+            .is_some_and(|ch| ch != '$' && is_identifier_part(ch))
+        {
+            let _ = self.cursor.bump();
+        }
+        let token = RawToken {
+            kind: RawTokenKind::Identifier,
+            span: self.span(start)?,
+        };
         let _ = self.modes.pop();
         self.resume_string_after_expression();
         Ok(Some(RawItem::Token(token)))
@@ -630,28 +641,11 @@ impl<'source> RawLexer<'source> {
     }
 
     fn scan_identifier(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
-        let token = self.scan_identifier_token(start, true, false)?;
-        self.update_xml_token(token.kind, token.span)?;
-        Ok(token)
-    }
-
-    fn scan_identifier_token(
-        &mut self,
-        start: u32,
-        allow_interpolation: bool,
-        stop_before_braced_splice: bool,
-    ) -> Result<RawToken, RawLexerError> {
         let _ = self.cursor.bump();
         while let Some(character) = self.cursor.peek() {
-            if stop_before_braced_splice && character == '$' && self.cursor.peek_nth(1) == Some('{')
-            {
-                break;
-            }
             if character == '_' && self.cursor.peek_nth(1).is_some_and(is_operator_character) {
                 let _ = self.cursor.bump();
-                while self.cursor.peek().is_some_and(is_operator_character) {
-                    let _ = self.cursor.bump();
-                }
+                self.consume_operator_chars();
                 break;
             }
             if is_identifier_part(character) {
@@ -663,17 +657,10 @@ impl<'source> RawLexer<'source> {
 
         let span = self.span(start)?;
         let text = self.source.slice(span)?;
-        let kind = if !allow_interpolation {
-            RawTokenKind::Identifier
-        } else {
-            classify_keyword(text)
-                .map(RawTokenKind::Keyword)
-                .unwrap_or(RawTokenKind::Identifier)
-        };
-        if allow_interpolation
-            && kind == RawTokenKind::Identifier
-            && self.cursor.peek() == Some('"')
-        {
+        let kind = classify_keyword(text)
+            .map(RawTokenKind::Keyword)
+            .unwrap_or(RawTokenKind::Identifier);
+        let kind = if kind == RawTokenKind::Identifier && self.cursor.peek() == Some('"') {
             let multiline =
                 self.cursor.peek_nth(1) == Some('"') && self.cursor.peek_nth(2) == Some('"');
             self.modes.push(LexMode::InterpolatedString(StringState {
@@ -682,11 +669,11 @@ impl<'source> RawLexer<'source> {
                 raw: text == "raw",
                 started: false,
             }));
-            return Ok(RawToken {
-                kind: RawTokenKind::InterpolationId,
-                span,
-            });
-        }
+            RawTokenKind::InterpolationId
+        } else {
+            kind
+        };
+        self.update_xml_token(kind, span)?;
         Ok(RawToken { kind, span })
     }
 
@@ -745,6 +732,16 @@ impl<'source> RawLexer<'source> {
     }
 
     fn scan_operator(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
+        self.consume_operator_chars();
+        let token = RawToken {
+            kind: RawTokenKind::Operator,
+            span: self.span(start)?,
+        };
+        self.update_xml_token(token.kind, token.span)?;
+        Ok(token)
+    }
+
+    fn consume_operator_chars(&mut self) {
         while let Some(character) = self.cursor.peek() {
             if character == '/' && matches!(self.cursor.peek_nth(1), Some('/') | Some('*')) {
                 break;
@@ -754,13 +751,6 @@ impl<'source> RawLexer<'source> {
             }
             let _ = self.cursor.bump();
         }
-
-        let token = RawToken {
-            kind: RawTokenKind::Operator,
-            span: self.span(start)?,
-        };
-        self.update_xml_token(token.kind, token.span)?;
-        Ok(token)
     }
 
     fn update_xml_token(
@@ -2620,6 +2610,44 @@ mod tests {
             vec![
                 token(RawTokenKind::Identifier, 0, 6),
                 token(RawTokenKind::Eof, 6, 6),
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn identifier_suffix_stops_before_comment_trivia() {
+        for (source, end, kind) in [
+            ("name_+/* msg */", 6, TriviaKind::BlockComment),
+            ("name_// msg", 5, TriviaKind::LineComment),
+        ] {
+            let (items, diagnostics) = scan(source);
+            let len = source.len() as u32;
+            assert_eq!(
+                items,
+                [
+                    token(RawTokenKind::Identifier, 0, end),
+                    trivia(kind, end, len),
+                    token(RawTokenKind::Eof, len, len),
+                ]
+            );
+            assert!(diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn simple_splices_stop_before_dollars_and_operator_suffixes() {
+        let (items, diagnostics) = scan(r#"s"$a$b_+""#);
+        assert_eq!(
+            items,
+            [
+                token(RawTokenKind::InterpolationId, 0, 1),
+                token(RawTokenKind::StringPart, 1, 3),
+                token(RawTokenKind::Identifier, 3, 4),
+                token(RawTokenKind::StringPart, 4, 5),
+                token(RawTokenKind::Identifier, 5, 7),
+                token(RawTokenKind::StringPart, 7, 9),
+                token(RawTokenKind::Eof, 9, 9),
             ]
         );
         assert!(diagnostics.is_empty());
