@@ -381,18 +381,15 @@ where
         }
 
         self.consume_control_newlines();
-        let case_handler = self.catch_keyword_is_followed_by_cases();
-        let first_body_token = self.first_catch_handler_token();
-        let requests_feedback_region = case_handler
-            && self.catch_has_multiple_unindented_cases()
-            && first_body_token.kind != TokenKind::Punctuation(Punctuation::LeftBrace)
-            && first_body_token.kind != TokenKind::Indent
-            && self
-                .has_physical_line_break(self.current().span.end(), first_body_token.span.start());
+        let first = self.first_catch_handler_token();
+        let (kind, start) = (first.kind, first.span.start());
+        let requests_feedback_region = kind == TokenKind::Keyword(dotty_core::HardKeyword::Case)
+            && self.has_physical_line_break(self.current().span.end(), start)
+            && self.catch_has_multiple_unindented_cases();
         let case_region = if requests_feedback_region {
             self.observe_match_cases_indented()
-        } else if first_body_token.kind == TokenKind::Indent {
-            Some((first_body_token.span.start(), false))
+        } else if kind == TokenKind::Indent {
+            Some((start, false))
         } else {
             None
         };
@@ -406,11 +403,11 @@ where
         let mut delimiter_depth = 0u32;
         let mut layout_depth = 0u32;
         let mut first_case_column = None;
-        let line_index = self.source.line_index().ok();
 
         loop {
-            let token = self.cursor.lookahead(offset).clone();
-            match token.kind {
+            let token = self.cursor.lookahead(offset);
+            let (kind, start) = (token.kind, token.span.start());
+            match kind {
                 TokenKind::Eof => return false,
                 TokenKind::Punctuation(Punctuation::RightBrace) if delimiter_depth == 0 => {
                     return false;
@@ -426,15 +423,14 @@ where
                 TokenKind::Keyword(dotty_core::HardKeyword::Case)
                     if delimiter_depth == 0 && layout_depth == 0 =>
                 {
-                    if let Some(line_index) = &line_index {
-                        let column = line_index
-                            .utf8_column(self.source.as_str(), token.span.start())
-                            .ok();
-                        if first_case_column.is_some_and(|first| column == Some(first)) {
-                            return true;
-                        }
-                        first_case_column.get_or_insert(column.unwrap_or_default());
+                    let Some(prefix) = self.line_prefix_at(start) else {
+                        return false;
+                    };
+                    let column = prefix.chars().count();
+                    if first_case_column == Some(column) {
+                        return true;
                     }
+                    first_case_column.get_or_insert(column);
                 }
                 _ => {}
             }
@@ -442,7 +438,7 @@ where
         }
     }
 
-    fn first_catch_handler_token(&mut self) -> dotty_core::Token {
+    fn first_catch_handler_token(&mut self) -> &dotty_core::Token {
         let mut offset = 1;
         while matches!(
             self.cursor.lookahead(offset).kind,
@@ -450,38 +446,7 @@ where
         ) {
             offset += 1;
         }
-        self.cursor.lookahead(offset).clone()
-    }
-
-    fn catch_keyword_is_followed_by_cases(&mut self) -> bool {
-        let first = self.first_catch_handler_token();
-        match first.kind {
-            TokenKind::Keyword(dotty_core::HardKeyword::Case) => true,
-            TokenKind::Indent | TokenKind::Punctuation(Punctuation::LeftBrace) => {
-                let mut offset = 1;
-                while matches!(
-                    self.cursor.lookahead(offset).kind,
-                    TokenKind::Newline | TokenKind::Newlines
-                ) {
-                    offset += 1;
-                }
-                if matches!(
-                    self.cursor.lookahead(offset).kind,
-                    TokenKind::Indent | TokenKind::Punctuation(Punctuation::LeftBrace)
-                ) {
-                    offset += 1;
-                }
-                while matches!(
-                    self.cursor.lookahead(offset).kind,
-                    TokenKind::Newline | TokenKind::Newlines
-                ) {
-                    offset += 1;
-                }
-                self.cursor.lookahead(offset).kind
-                    == TokenKind::Keyword(dotty_core::HardKeyword::Case)
-            }
-            _ => false,
-        }
+        self.cursor.lookahead(offset)
     }
 
     fn catch_starts_case_handler(&mut self) -> bool {
@@ -1930,6 +1895,31 @@ mod tests {
             TreeKind::CaseDef(_)
         ));
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn braced_catch_does_not_scan_its_handler_to_decide_layout() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "catch { case e => f }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Catch), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 6, 7),
+                token(TokenKind::Keyword(HardKeyword::Case), 8, 12),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::Operator, 15, 17),
+                token(TokenKind::Identifier, 18, 19),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 20, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+        parser.cursor.lookahead_budget = 6;
+        assert_eq!(parser.accept_catch_keyword(), Some(None));
+        assert_eq!(
+            parser.current().kind,
+            TokenKind::Punctuation(Punctuation::LeftBrace)
+        );
     }
 
     #[test]
