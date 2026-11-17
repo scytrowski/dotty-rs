@@ -1116,43 +1116,66 @@ impl Namer<'_> {
     ) -> Vec<(TreeId<Untyped>, dotty_core::Name)> {
         let mut bindings = Vec::new();
         let mut names = HashSet::new();
-        let mut pending = patterns.iter().rev().copied().collect::<Vec<_>>();
-        while let Some(tree) = pending.pop() {
-            match &self.arena.get(tree).kind {
-                TreeKind::Ident(ident) => {
-                    let text = self.store.names.resolve(ident.name.text());
-                    if text != "_" && names.insert(text.to_owned()) {
-                        bindings.push((tree, ident.name));
+        let mut pending = Vec::new();
+        for &root in patterns {
+            // A direct (possibly typed) identifier in a val/var declaration
+            // declares its name even when capitalized or backquoted.
+            let direct_ident = match &self.arena.get(root).kind {
+                TreeKind::Typed(typed) => typed.expr,
+                _ => root,
+            };
+            pending.push(root);
+            while let Some(tree) = pending.pop() {
+                match &self.arena.get(tree).kind {
+                    TreeKind::Ident(ident) => {
+                        let text = self.store.names.resolve(ident.name.text());
+                        let binds = if tree == direct_ident {
+                            text != "_"
+                        } else {
+                            !ident.backquoted && dotty_core::names::is_variable_pattern_name(text)
+                        };
+                        if binds && ident.name.is_term() && names.insert(ident.name) {
+                            bindings.push((tree, ident.name));
+                        }
                     }
-                }
-                TreeKind::Bind(binding) => {
-                    let text = self.store.names.resolve(binding.name.text());
-                    if text != "_" && names.insert(text.to_owned()) {
-                        bindings.push((tree, binding.name));
+                    TreeKind::Bind(binding) => {
+                        if binding.name.is_term()
+                            && self.store.names.resolve(binding.name.text()) != "_"
+                            && names.insert(binding.name)
+                        {
+                            bindings.push((tree, binding.name));
+                        }
+                        pending.push(binding.body);
                     }
-                    pending.push(binding.body);
-                }
-                TreeKind::Typed(typed) => pending.push(typed.expr),
-                TreeKind::Apply(application) => {
-                    pending.extend(application.args.iter().rev().copied());
-                }
-                TreeKind::Alternative(alternative) => {
-                    if let Some(first) = alternative.alternatives.first() {
-                        pending.push(*first);
+                    TreeKind::NamedArg(arg) => pending.push(arg.arg),
+                    TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(string)) => {
+                        pending.extend(string.parts.iter().rev().copied());
                     }
+                    TreeKind::Block(block) if block.stats.is_empty() => pending.push(block.expr),
+                    TreeKind::Typed(typed) => pending.push(typed.expr),
+                    TreeKind::Apply(application) => {
+                        pending.extend(application.args.iter().rev().copied());
+                    }
+                    TreeKind::Alternative(alternative) => {
+                        if let Some(first) = alternative.alternatives.first() {
+                            pending.push(*first);
+                        }
+                    }
+                    TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => {
+                        pending.push(parens.inner)
+                    }
+                    TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) => {
+                        pending.extend(tuple.elements.iter().rev().copied());
+                    }
+                    TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => {
+                        pending.push(infix.right);
+                        pending.push(infix.left);
+                    }
+                    TreeKind::UnApply(unapply) => {
+                        pending.extend(unapply.patterns.iter().rev().copied());
+                    }
+                    _ => {}
                 }
-                TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => pending.push(parens.inner),
-                TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) => {
-                    pending.extend(tuple.elements.iter().rev().copied());
-                }
-                TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => {
-                    pending.push(infix.right);
-                    pending.push(infix.left);
-                }
-                TreeKind::UnApply(unapply) => {
-                    pending.extend(unapply.patterns.iter().rev().copied());
-                }
-                _ => {}
             }
         }
         bindings

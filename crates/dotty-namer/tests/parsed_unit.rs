@@ -3480,6 +3480,66 @@ fn duplicate_textual_bindings_in_one_class_pattern_create_one_field() {
 }
 
 #[test]
+fn stable_identifiers_in_a_tuple_pattern_do_not_declare_fields() {
+    let named = named_source(
+        "val Upper = 1\nval fixed = 2\nval (Upper, `fixed`, żółty, _tail) = (1, 2, 3, 4)",
+        217,
+    );
+    let stats = package_stat_trees(&named);
+    let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::PatDef(pat)) =
+        &named.parsed.ast.get(stats[2]).kind
+    else {
+        panic!("expected a pattern definition")
+    };
+    let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::Tuple(tuple)) =
+        &named.parsed.ast.get(pat.patterns[0]).kind
+    else {
+        panic!("expected a tuple pattern")
+    };
+    let first = named.index.symbol_at(named.source, stats[0]).unwrap();
+    let owner = named.store.symbols.get(first).owner.unwrap();
+    let scope = named.store.scopes.get(named.index.scope_of(owner).unwrap());
+    for (&element, &original) in tuple.elements[..2].iter().zip(&stats[..2]) {
+        let original = named.index.symbol_at(named.source, original).unwrap();
+        assert_eq!(named.index.symbol_at(named.source, element), None);
+        assert_eq!(
+            scope.lookup_all(&named.store.symbols.get(original).name),
+            &[original]
+        );
+    }
+    for (&element, expected) in tuple.elements[2..].iter().zip(["żółty", "_tail"]) {
+        assert_eq!(named_source_tree_name(&named, element), expected);
+    }
+}
+
+#[test]
+fn standalone_pattern_definition_names_keep_their_declared_spelling() {
+    let named = named_source("val Upper, `quoted` = 1", 218);
+    let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::PatDef(pat)) =
+        &named.parsed.ast.get(package_stat_trees(&named)[0]).kind
+    else {
+        panic!("expected a pattern definition")
+    };
+    assert_eq!(named_source_tree_name(&named, pat.patterns[0]), "Upper");
+    assert_eq!(named_source_tree_name(&named, pat.patterns[1]), "quoted");
+}
+
+#[test]
+fn pattern_fields_include_named_extractor_arguments_and_interpolation_holes() {
+    let named = named_source(
+        "val Extract(label = captured) = value\nval s\"prefix ${part}\" = input",
+        219,
+    );
+    for expected in ["captured", "part"] {
+        let trees: Vec<_> = named.parsed.ast.iter().filter_map(|(id, node)| {
+            matches!(&node.kind, TreeKind::Ident(ident) if named.store.names.resolve(ident.name.text()) == expected).then_some(id)
+        }).collect();
+        assert_eq!(trees.len(), 1);
+        assert_eq!(named_source_tree_name(&named, trees[0]), expected);
+    }
+}
+
+#[test]
 fn wildcard_only_class_pattern_introduces_no_field() {
     let named = named_source("class C:\n  val Some(_) = value", 217);
     let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {

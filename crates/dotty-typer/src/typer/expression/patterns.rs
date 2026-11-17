@@ -2717,14 +2717,7 @@ impl SourceTyper<'_> {
 /// Mirrors the parser's pattern-variable first-character rule. Backquotes are
 /// checked by the caller; literal keywords and the wildcard are never binders.
 pub(super) fn is_variable_pattern_name(store: &SemanticStore, name: Name) -> bool {
-    let spelling = store.names.resolve(name.text());
-    if matches!(spelling, "_" | "false" | "true" | "null") {
-        return false;
-    }
-    spelling
-        .chars()
-        .next()
-        .is_some_and(|first| first == '_' || (first.is_alphabetic() && first.is_lowercase()))
+    dotty_core::names::is_variable_pattern_name(store.names.resolve(name.text()))
 }
 
 #[cfg(test)]
