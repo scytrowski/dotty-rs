@@ -635,24 +635,7 @@ impl<'source> RawLexer<'source> {
 
     fn scan_identifier(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
         let _ = self.cursor.bump();
-        while let Some(character) = self.cursor.peek() {
-            if character == '_'
-                && self
-                    .cursor
-                    .peek_nth(1)
-                    .is_some_and(|next| !is_identifier_part(next) && is_operator_character(next))
-            {
-                let _ = self.cursor.bump();
-                self.consume_operator_chars();
-                break;
-            }
-            if is_identifier_part(character) {
-                let _ = self.cursor.bump();
-            } else {
-                break;
-            }
-        }
-
+        self.consume_identifier_rest();
         let span = self.span(start)?;
         let text = self.source.slice(span)?;
         let kind = classify_keyword(text)
@@ -672,6 +655,26 @@ impl<'source> RawLexer<'source> {
         };
         self.update_xml_token(kind, span)?;
         Ok(RawToken { kind, span })
+    }
+
+    fn consume_identifier_rest(&mut self) {
+        while let Some(character) = self.cursor.peek() {
+            if character == '_'
+                && self
+                    .cursor
+                    .peek_nth(1)
+                    .is_some_and(|next| !is_identifier_part(next) && is_operator_character(next))
+            {
+                let _ = self.cursor.bump();
+                self.consume_operator_chars();
+                break;
+            }
+            if is_identifier_part(character) {
+                let _ = self.cursor.bump();
+            } else {
+                break;
+            }
+        }
     }
 
     fn scan_backquoted_identifier(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
@@ -764,26 +767,9 @@ impl<'source> RawLexer<'source> {
     }
 
     fn looks_like_quote_id(&self) -> bool {
-        if !self
-            .cursor
-            .peek_nth(1)
-            .is_some_and(crate::identifier::is_identifier_start)
-        {
-            return false;
-        }
-
-        let mut lookahead = 2;
-        while self
-            .cursor
-            .peek_nth(lookahead)
-            .is_some_and(crate::identifier::is_identifier_part)
-        {
-            lookahead += 1;
-        }
-
-        let has_additional_identifier_start = (2..lookahead)
-            .any(|index| self.cursor.peek_nth(index).is_some_and(is_identifier_start));
-        self.cursor.peek_nth(lookahead) != Some('\'') || has_additional_identifier_start
+        self.cursor.peek_nth(1).is_some_and(|first| {
+            is_identifier_start(first) || (first != '\\' && is_operator_character(first))
+        }) && self.cursor.peek_nth(2) != Some('\'')
     }
 
     fn looks_like_char_literal(&self) -> bool {
@@ -809,14 +795,12 @@ impl<'source> RawLexer<'source> {
     }
 
     fn scan_quote_id(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
-        let _ = self.cursor.bump();
-        let _ = self.cursor.bump();
-        while self
-            .cursor
-            .peek()
-            .is_some_and(crate::identifier::is_identifier_part)
-        {
-            let _ = self.cursor.bump();
+        let _ = self.cursor.bump(); // apostrophe
+        let first = self.cursor.bump().expect("quote-id start was checked");
+        if is_identifier_start(first) {
+            self.consume_identifier_rest();
+        } else {
+            self.consume_operator_chars();
         }
         Ok(RawToken {
             kind: RawTokenKind::QuoteId,
@@ -3214,6 +3198,24 @@ mod tests {
     }
 
     #[test]
+    fn distinguishes_quoted_operators_from_single_character_literals() {
+        for (source, kind) in [
+            ("'++", RawTokenKind::QuoteId),
+            ("'+", RawTokenKind::QuoteId),
+            ("'foo_+", RawTokenKind::QuoteId),
+            ("'+'", RawTokenKind::CharLiteral),
+        ] {
+            let end = source.len() as u32;
+            let (items, diagnostics) = scan(source);
+            assert_eq!(
+                items,
+                [token(kind, 0, end), token(RawTokenKind::Eof, end, end)]
+            );
+            assert!(diagnostics.is_empty());
+        }
+    }
+
+    #[test]
     fn recognizes_a_legacy_quoted_identifier() {
         let (items, diagnostics) = scan("'foo");
         let kinds: Vec<_> = items
@@ -4432,22 +4434,25 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_combining_mark_as_an_extra_character() {
-        let source = "'á'";
-        let (items, diagnostics) = scan(source);
-
-        assert_eq!(
-            items,
-            vec![
-                token(RawTokenKind::Error, 0, source.len() as u32),
-                token(RawTokenKind::Eof, source.len() as u32, source.len() as u32),
-            ]
-        );
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(
-            diagnostics[0].issue(),
-            &LexerIssue::Literal(LiteralIssue::MultipleCharacters)
-        );
+    fn leaves_a_trailing_quote_after_an_identifier_with_digits_or_marks() {
+        for source in ["'x1'", "'a\u{301}'"] {
+            let end = source.len() as u32;
+            let (items, diagnostics) = scan(source);
+            assert_eq!(
+                items,
+                [
+                    token(RawTokenKind::QuoteId, 0, end - 1),
+                    token(RawTokenKind::Error, end - 1, end),
+                    token(RawTokenKind::Eof, end, end),
+                ]
+            );
+            assert_eq!(diagnostics.len(), 1);
+            assert_eq!(
+                diagnostics[0].issue(),
+                &LexerIssue::Literal(LiteralIssue::UnterminatedCharacter)
+            );
+            assert_eq!(diagnostics[0].span(), TextRange::new(end - 1, end).unwrap());
+        }
     }
 
     #[test]

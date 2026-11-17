@@ -85,7 +85,7 @@ Implementation status on the current lexer branch:
   transitions preserve the scanner's exact `INDENT`/`OUTDENT`/`NEWLINE` order;
 - incomparable space/tab indentation prefixes produce recoverable diagnostics;
 - quote markers and legacy quoted identifiers are emitted as `Quote` and
-  `QuoteId`, including adjacent quote-id forms and the Scala recovery boundary
+  `QuoteId`, including symbolic names, adjacent quote-id forms, and the Scala recovery boundary
   for trailing apostrophes; splice syntax remains the `$` plus `{` token
   sequence; a bare apostrophe that is not a character literal is emitted as
   `Quote`;
