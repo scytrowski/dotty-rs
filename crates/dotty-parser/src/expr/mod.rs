@@ -130,8 +130,8 @@ where
                 TokenKind::Keyword(dotty_core::HardKeyword::Match) if nesting == [0, 0, 0] => {
                     return true;
                 }
-                TokenKind::Eof
-                | TokenKind::Newline
+                TokenKind::Eof => return false,
+                TokenKind::Newline
                 | TokenKind::Newlines
                 | TokenKind::Indent
                 | TokenKind::Outdent

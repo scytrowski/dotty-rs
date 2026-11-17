@@ -2121,6 +2121,29 @@ fn parses_inline_match_and_preserves_its_marker_and_cases() {
 }
 
 #[test]
+fn inline_match_lookahead_stops_at_eof_in_each_delimiter() {
+    for (source, delimiter) in [
+        ("inline(", Punctuation::LeftParen),
+        ("inline[", Punctuation::LeftBracket),
+        ("inline{", Punctuation::LeftBrace),
+    ] {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::Identifier, 0, 6),
+                token(TokenKind::Punctuation(delimiter), 6, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
+        parser.cursor.lookahead_budget = 2;
+        assert!(!parser.starts_inline_match());
+        assert_eq!(parser.current().kind, TokenKind::Identifier);
+    }
+}
+
+#[test]
 fn keeps_inline_as_an_identifier_without_an_inline_expression_form() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
