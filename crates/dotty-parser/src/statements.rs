@@ -660,21 +660,12 @@ where
 
         let target_text = self.marker_target_text(target_kind, self.current().span);
         let matching_tree = last.and_then(|tree| {
-            self.end_marker_owner(tree, target_kind, &target_text, marker.start(), false)
+            self.end_marker_owner(tree, target_kind, target_text, marker.start(), false)
         });
-        if let Some(tree) = matching_tree {
-            if let Some(last) = last {
-                if tree == last {
-                    if !self.has_marked_nested_end_marker_owner(last) {
-                        self.end_marked_trees.insert(tree);
-                    }
-                } else {
-                    self.mark_nested_end_marker_owner_path(last, tree, true);
-                }
-                self.extend_end_marker_owner_path(last, tree, target_end);
-            }
+        if let (Some(root), Some(owner)) = (last, matching_tree) {
+            self.close_end_marker_path(root, owner, target_end);
         } else if last.is_some_and(|tree| {
-            self.end_marker_owner(tree, target_kind, &target_text, marker.start(), true)
+            self.end_marker_owner(tree, target_kind, target_text, marker.start(), true)
                 .is_some()
         }) {
             self.report_issue_at(
@@ -706,7 +697,7 @@ where
         let owner = self.end_marker_owner(
             tree,
             target_kind,
-            &target_text,
+            target_text,
             self.current().span.start(),
             false,
         );
@@ -737,7 +728,7 @@ where
         }
         let target = self.cursor.lookahead(offset + 1).clone();
         let target_text = self.marker_target_text(target.kind, target.span);
-        self.end_marker_owner(tree, target.kind, &target_text, marker.span.start(), false)
+        self.end_marker_owner(tree, target.kind, target_text, marker.span.start(), false)
             .is_some()
     }
 
@@ -754,7 +745,7 @@ where
                 if target != TokenKind::Keyword(*active_target) {
                     return false;
                 }
-                marker_indent.starts_with(&self.source_line_indent_prefix(*owner_start))
+                marker_indent.starts_with(self.source_line_indent_prefix(*owner_start))
             })
     }
 
@@ -770,66 +761,34 @@ where
         marker_start: u32,
         include_marked: bool,
     ) -> Option<TreeId<Untyped>> {
-        if let Some(nested) = self.last_nested_end_marker_owner(tree)
-            && let Some(owner) = self.end_marker_owner(
-                nested,
-                target_kind,
-                target_text,
-                marker_start,
-                include_marked,
-            )
-        {
-            return Some(owner);
-        }
+        let marker_indent = self.source_line_indent_prefix(marker_start);
+        self.end_marker_path(tree)
+            .filter(|&candidate| {
+                let Some(position) = self.ast.get(candidate).position else {
+                    return false;
+                };
+                if position.span().range().end() > marker_start
+                    || !include_marked && self.end_marked_trees.contains(&candidate)
+                    || !self.end_marker_matches(candidate, target_kind, target_text)
+                {
+                    return false;
+                }
+                let Some(prefix) = self.line_prefix_at(position.span().range().start()) else {
+                    return false;
+                };
+                if matches!(self.ast.get(candidate).kind, TreeKind::If(_))
+                    && prefix.trim_end().ends_with("else")
+                {
+                    return false;
+                }
+                !prefix.trim_start_matches([' ', '\t']).is_empty()
+                    || marker_indent.starts_with(prefix)
+            })
+            .last()
+    }
 
-        let owner_is_inline_else_if = self.ast.get(tree).position.is_some_and(|position| {
-            let owner_start = position.span().range().start();
-            let source_before_owner = &self.source.as_str()[..owner_start as usize];
-            let owner_line_start = source_before_owner
-                .rfind(['\n', '\r', '\u{000c}', '\u{001a}'])
-                .map_or(0, |index| index + 1);
-            let prefix = &source_before_owner[owner_line_start..];
-            matches!(self.ast.get(tree).kind, TreeKind::If(_))
-                && !prefix.trim().is_empty()
-                && prefix.trim_end().ends_with("else")
-        });
-        let indentation_allows_owner = self.ast.get(tree).position.is_some_and(|position| {
-            let owner_start = position.span().range().start();
-            let owner_indent = self.source_line_indent_prefix(owner_start);
-            let source_before_owner = &self.source.as_str()[..owner_start as usize];
-            let owner_line_start = source_before_owner
-                .rfind(['\n', '\r', '\u{000c}', '\u{001a}'])
-                .map_or(0, |index| index + 1);
-            let owner_starts_after_only_indentation =
-                owner_start as usize - owner_line_start == owner_indent.len();
-            let marker_indent = self.source_line_indent_prefix(marker_start);
-
-            !owner_starts_after_only_indentation || marker_indent.starts_with(owner_indent.as_str())
-        });
-        if !owner_is_inline_else_if
-            && indentation_allows_owner
-            && self.end_marker_matches(tree, target_kind, target_text)
-        {
-            return self
-                .end_marker_is_eligible(
-                    tree,
-                    target_kind,
-                    target_text,
-                    marker_start,
-                    include_marked,
-                )
-                .then_some(tree);
-        }
-
-        let precedes_marker = self
-            .ast
-            .get(tree)
-            .position
-            .is_some_and(|position| position.span().range().end() <= marker_start);
-        if !precedes_marker {
-            return None;
-        }
-        None
+    fn end_marker_path(&self, root: TreeId<Untyped>) -> impl Iterator<Item = TreeId<Untyped>> + '_ {
+        std::iter::successors(Some(root), |&tree| self.last_nested_end_marker_owner(tree))
     }
 
     fn last_nested_end_marker_owner(&self, tree: TreeId<Untyped>) -> Option<TreeId<Untyped>> {
@@ -848,86 +807,36 @@ where
         }
     }
 
-    fn mark_nested_end_marker_owner_path(
-        &mut self,
-        root: TreeId<Untyped>,
-        owner: TreeId<Untyped>,
-        direct_statement: bool,
-    ) -> bool {
-        if root == owner {
-            self.end_marked_trees.insert(root);
-            return true;
+    fn close_end_marker_path(&mut self, root: TreeId<Untyped>, owner: TreeId<Untyped>, end: u32) {
+        // An enclosing statement can still receive its own marker after a nested marker.
+        let mark_root = root == owner
+            && !self
+                .end_marker_path(root)
+                .skip(1)
+                .any(|tree| self.end_marked_trees.contains(&tree));
+        let mut current = root;
+        loop {
+            if current != root || mark_root {
+                self.end_marked_trees.insert(current);
+            }
+            self.extend_tree_end(current, end);
+            if current == owner {
+                break;
+            }
+            current = self
+                .last_nested_end_marker_owner(current)
+                .expect("owner is on the selected end marker path");
         }
-
-        let Some(nested) = self.last_nested_end_marker_owner(root) else {
-            return false;
-        };
-        if !self.mark_nested_end_marker_owner_path(nested, owner, false) {
-            return false;
-        }
-        // The sequence's direct statement is still eligible for a later
-        // matching marker. Intermediate nested constructs have already
-        // received their marker through this owner's path.
-        if !direct_statement {
-            self.end_marked_trees.insert(root);
-        }
-        true
     }
 
-    fn has_marked_nested_end_marker_owner(&self, tree: TreeId<Untyped>) -> bool {
-        let Some(nested) = self.last_nested_end_marker_owner(tree) else {
-            return false;
-        };
-        self.end_marked_trees.contains(&nested) || self.has_marked_nested_end_marker_owner(nested)
-    }
-
-    fn extend_end_marker_owner_path(
-        &mut self,
-        root: TreeId<Untyped>,
-        owner: TreeId<Untyped>,
-        end: u32,
-    ) -> bool {
-        if root == owner {
-            self.extend_tree_end(root, end);
-            return true;
-        }
-
-        let Some(nested) = self.last_nested_end_marker_owner(root) else {
-            return false;
-        };
-        if !self.extend_end_marker_owner_path(nested, owner, end) {
-            return false;
-        }
-
-        self.extend_tree_end(root, end);
-        true
-    }
-
-    fn end_marker_is_eligible(
-        &self,
-        tree: TreeId<Untyped>,
-        target_kind: TokenKind,
-        target_text: &str,
-        marker_start: u32,
-        include_marked: bool,
-    ) -> bool {
-        self.ast
-            .get(tree)
-            .position
-            .is_some_and(|position| position.span().range().end() <= marker_start)
-            && (include_marked || !self.end_marked_trees.contains(&tree))
-            && self.end_marker_matches(tree, target_kind, target_text)
-    }
-
-    pub(crate) fn marker_target_text(&self, kind: TokenKind, span: TextRange) -> String {
+    pub(crate) fn marker_target_text(&self, kind: TokenKind, span: TextRange) -> &'src str {
         let text = self.source.slice(span).unwrap_or_default();
         if kind == TokenKind::BackquotedIdentifier {
             text.strip_prefix('`')
                 .and_then(|text| text.strip_suffix('`'))
                 .unwrap_or(text)
-                .to_owned()
         } else {
-            text.to_owned()
+            text
         }
     }
 
@@ -1432,6 +1341,34 @@ mod tests {
                 .range(),
             TextRange::new(0, 1).unwrap(),
             "the unmatched rhs template is not itself extended"
+        );
+    }
+
+    #[test]
+    fn an_end_marker_closes_the_nested_owner_through_a_long_block_path() {
+        let mut names = NameInterner::new();
+        let mut parser = nested_end_marker_parser(&mut names, false);
+        let (mut root, _, owner, rhs) = nested_module_with_final_type(&mut parser);
+        let position = parser.ast.get(root).position;
+        for _ in 0..2048 {
+            root = parser.alloc(
+                TreeKind::Block(dotty_core::ast::Block {
+                    stats: Vec::new(),
+                    expr: root,
+                }),
+                position,
+            );
+        }
+        parser.advance();
+        assert!(parser.consume_end_marker(Some(root)));
+        assert!(parser.diagnostics.is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.end_marked_trees.contains(&owner));
+        assert!(!parser.end_marked_trees.contains(&root));
+        assert!(!parser.end_marked_trees.contains(&rhs));
+        assert_eq!(
+            parser.ast.get(root).position.unwrap().span().range().end(),
+            11
         );
     }
 

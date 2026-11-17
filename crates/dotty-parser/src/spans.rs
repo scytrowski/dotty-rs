@@ -11,6 +11,16 @@ impl<'src, S: TokenSource> Parser<'src, '_, S> {
             .rsplit(dotty_core::is_line_break_char)
             .next()
     }
+
+    pub(crate) fn source_line_indent_prefix(&self, offset: u32) -> &'src str {
+        let prefix = self
+            .line_prefix_at(offset.min(self.source.len_bytes()))
+            .unwrap_or_default();
+        let end = prefix
+            .find(|ch| !matches!(ch, ' ' | '\t'))
+            .unwrap_or(prefix.len());
+        &prefix[..end]
+    }
 }
 
 /// A parser position used to build a source span after consuming tokens.

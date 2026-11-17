@@ -72,7 +72,7 @@ where
             let else_indent = self.source_line_indent_prefix(token.span.start());
             if self.context.block_end != Some(TokenKind::Punctuation(Punctuation::RightBrace))
                 && else_indent.len() < if_indent.len()
-                && if_indent.starts_with(&else_indent)
+                && if_indent.starts_with(else_indent)
             {
                 return None;
             }
