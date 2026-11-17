@@ -77,7 +77,7 @@ Implementation status on the current lexer branch:
   logical statement at a line break; layout operators such as `=>`, `=`, and
   `<-` remain body triggers, including when assignment or for-enumerator
   bodies begin on the following line;
-- same-line `CASECLASS`/`CASEOBJECT` fusion and basic line-start end-marker
+- `CASECLASS`/`CASEOBJECT` fusion across whitespace and comments and basic line-start end-marker
   recognition are now part of scanner post-processing, including
   `new`/`this`/`given`/`val` targets, comment boundaries, and explicit braces;
 - dedented closing delimiters close implicit regions after `)`, `]`, or `}`;
@@ -534,7 +534,7 @@ outdent rules remain next.
 ### Increment 8 — End markers and post-processing
 
 Implement contextual `END`, `CASECLASS`, `CASEOBJECT`, grammar-driven region
-closures, and exact EOF behavior. The current increment covers same-line token
+closures, and exact EOF behavior. The current increment covers declaration-token
 fusion,
 basic end-marker recognition, line-start markers, non-panicking EOF
 classification, `new`/`this`/`given`/`val` targets, and closure of implicit

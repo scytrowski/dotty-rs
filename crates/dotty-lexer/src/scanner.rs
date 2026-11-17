@@ -1145,7 +1145,20 @@ fn build_tokens(
         match item {
             RawItem::Trivia(current) => trivia.push(current),
             RawItem::Token(raw) => {
-                let has_line_break = trivia_has_line_break(source, &trivia);
+                let declaration = match (previous_kind, raw.kind) {
+                    (
+                        Some(TokenKind::Keyword(HardKeyword::Case)),
+                        RawTokenKind::Keyword(HardKeyword::Class),
+                    ) => Some(TokenKind::CaseClass),
+                    (
+                        Some(TokenKind::Keyword(HardKeyword::Case)),
+                        RawTokenKind::Keyword(HardKeyword::Object),
+                    ) => Some(TokenKind::CaseObject),
+                    _ => None,
+                };
+                // Trivia inside a fused declaration cannot close the region between its keywords.
+                let has_line_break =
+                    declaration.is_none() && trivia_has_line_break(source, &trivia);
                 let blank_line = trivia_line_breaks(source, &trivia) > 1;
                 let has_blank_line = has_blank_line(source, previous_end, raw.span.start());
                 let (indentation, previous_indentation) = if has_line_break {
@@ -1281,7 +1294,12 @@ fn build_tokens(
                     }
                 }
 
-                let token = Token::new(to_token_kind(raw.kind, previous_kind), raw.span);
+                let token = if let Some(kind) = declaration {
+                    let case = tokens.pop().expect("the previous case token was emitted");
+                    Token::new(kind, case.span.cover(raw.span))
+                } else {
+                    Token::new(to_token_kind(raw.kind, previous_kind), raw.span)
+                };
                 match raw.kind {
                     RawTokenKind::Punctuation(Punctuation::LeftBrace) => {
                         braced_layout_delimiters.push((paren_depth, bracket_depth));
@@ -1343,7 +1361,6 @@ fn build_tokens(
         }
     }
 
-    fuse_case_declarations(source, &mut tokens);
     classify_end_markers(source, &mut tokens);
 
     Ok(tokens)
@@ -1949,26 +1966,6 @@ fn next_real_token(tokens: &[Token], index: usize) -> Option<&Token> {
     tokens[index + 1..]
         .iter()
         .find(|token| !is_layout_token(token.kind))
-}
-
-fn fuse_case_declarations(source: &str, tokens: &mut Vec<Token>) {
-    // Compact in place. dedup_by passes the later token first and retains
-    // the earlier one when the pair is fused.
-    tokens.dedup_by(|current, previous| {
-        if previous.kind != TokenKind::Keyword(HardKeyword::Case) {
-            return false;
-        }
-        let kind = match current.kind {
-            TokenKind::Keyword(HardKeyword::Class) => TokenKind::CaseClass,
-            TokenKind::Keyword(HardKeyword::Object) => TokenKind::CaseObject,
-            _ => return false,
-        };
-        if has_source_line_break(source, previous.span.end(), current.span.start()) {
-            return false;
-        }
-        *previous = Token::new(kind, previous.span.cover(current.span));
-        true
-    });
 }
 
 fn classify_end_markers(source: &str, tokens: &mut [Token]) {
@@ -2724,48 +2721,32 @@ mod tests {
             [
                 (TokenKind::CaseClass, 0, 20),
                 (TokenKind::CaseObject, 23, 34),
-                (TokenKind::Keyword(HardKeyword::Case), 37, 41),
-                (TokenKind::Keyword(HardKeyword::Class), 42, 47),
+                (TokenKind::CaseClass, 37, 47),
             ]
         );
     }
 
     #[test]
-    fn does_not_fuse_case_and_class_across_a_line_break() {
+    fn fuses_case_and_class_across_a_line_break() {
         assert_eq!(
             kinds("case\nclass Foo"),
-            vec![
-                TokenKind::Keyword(HardKeyword::Case),
-                TokenKind::Keyword(HardKeyword::Class),
-                TokenKind::Identifier,
-                TokenKind::Eof,
-            ]
+            vec![TokenKind::CaseClass, TokenKind::Identifier, TokenKind::Eof,]
         );
     }
 
     #[test]
-    fn does_not_fuse_case_and_object_across_a_line_break() {
+    fn fuses_case_and_object_across_a_line_break() {
         assert_eq!(
             kinds("case\nobject Foo"),
-            vec![
-                TokenKind::Keyword(HardKeyword::Case),
-                TokenKind::Keyword(HardKeyword::Object),
-                TokenKind::Identifier,
-                TokenKind::Eof,
-            ]
+            vec![TokenKind::CaseObject, TokenKind::Identifier, TokenKind::Eof,]
         );
     }
 
     #[test]
-    fn does_not_fuse_case_and_class_across_a_multiline_comment() {
+    fn fuses_case_and_class_across_a_multiline_comment() {
         assert_eq!(
             kinds("case /* comment\n*/ class Foo"),
-            vec![
-                TokenKind::Keyword(HardKeyword::Case),
-                TokenKind::Keyword(HardKeyword::Class),
-                TokenKind::Identifier,
-                TokenKind::Eof,
-            ]
+            vec![TokenKind::CaseClass, TokenKind::Identifier, TokenKind::Eof,]
         );
     }
 
