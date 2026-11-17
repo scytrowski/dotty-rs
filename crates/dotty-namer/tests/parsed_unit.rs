@@ -1924,6 +1924,78 @@ fn parsed_secondary_constructor_is_rejected_in_a_method_parameter_default() {
 }
 
 #[test]
+fn duplicate_source_objects_leave_ordinary_companion_links_unset() {
+    for text in [
+        "class C\nobject C\nobject C",
+        "package p { class C; object C }\npackage p { object C }",
+        "package p { class C; object C }\npackage p { class C }",
+    ] {
+        let named = named_source(text, 310);
+        let mut declarations = 0;
+        for (tree, node) in named.parsed.ast.iter() {
+            let name = match &node.kind {
+                TreeKind::TypeDef(def) => def.name.as_name(),
+                TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(def)) => {
+                    def.name.as_name()
+                }
+                _ => continue,
+            };
+            if named.store.names.resolve(name.text()) == "C" {
+                let symbol = named.index.symbol_at(named.source, tree).unwrap();
+                assert_eq!(
+                    named.store.symbols.get(symbol).links.companion,
+                    None,
+                    "{text}"
+                );
+                declarations += 1;
+            }
+        }
+        assert_eq!(declarations, 3);
+    }
+}
+
+#[test]
+fn a_later_object_cannot_replace_a_synthesized_case_class_companion() {
+    let (parsed, source, mut store) = parsed_source(
+        "package p { case class C(x: Int) }\npackage p { object C }",
+        311,
+    );
+    let mut packages = Packages::new();
+    packages.enter(&mut store, dotty_core::SymbolOrigin::Builtin, &["p"]);
+    let before = store.checkpoint();
+    let result = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "C.scala",
+        &mut store,
+        &mut packages,
+    );
+    let TreeKind::PackageDef(root) = &parsed.ast.get(parsed.root).kind else {
+        unreachable!()
+    };
+    let TreeKind::PackageDef(clause) = &parsed.ast.get(root.stats[0]).kind else {
+        unreachable!()
+    };
+    assert_eq!(
+        result.unwrap_err(),
+        NamerError::MalformedAstShape {
+            tree_index: clause.stats[0].index(),
+            expected: "unique required companion pair",
+        }
+    );
+    assert_eq!(store.checkpoint(), before);
+    assert_eq!(
+        store
+            .scopes
+            .get(packages.get(&["p"]).unwrap().scope)
+            .entered_symbols()
+            .count(),
+        0
+    );
+}
+
+#[test]
 fn parsed_nested_object_creates_module_class_and_links_its_companion() {
     use dotty_core::SymbolKind;
     use dotty_lexer::ContextualScanner;

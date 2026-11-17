@@ -540,6 +540,13 @@ struct SourceModifierMapping {
     visibility: Visibility,
 }
 
+struct PendingCompanion {
+    class: SymbolId,
+    object: SymbolId,
+    scope: ScopeId,
+    required_by: Option<TreeId<Untyped>>,
+}
+
 /// A declaration identity entered before scanning its nested declarations.
 enum EnteredHeader {
     Package {
@@ -676,7 +683,7 @@ fn run_name_compilation_unit(
         && !arena
             .iter()
             .any(|(_, tree)| matches!(tree.kind, TreeKind::PhaseSpecific(UntypedNode::Error(_))));
-    let (result, scope_insertions, companion_links, source_diagnostic) = {
+    let (result, scope_insertions, source_diagnostic) = {
         let mut namer = Namer {
             arena,
             source,
@@ -695,21 +702,10 @@ fn run_name_compilation_unit(
             source_diagnostic: None,
         };
         let result = namer.index().map(|()| namer.index);
-        (
-            result,
-            namer.scope_insertions,
-            namer.companion_links,
-            namer.source_diagnostic,
-        )
+        (result, namer.scope_insertions, namer.source_diagnostic)
     };
     match result {
-        Ok(index) => {
-            for (class, object) in companion_links {
-                store.symbols.get_mut(class).links.companion = Some(object);
-                store.symbols.get_mut(object).links.companion = Some(class);
-            }
-            Ok((index, Vec::new()))
-        }
+        Ok(index) => Ok((index, Vec::new())),
         Err(error) => {
             for (scope, symbol) in scope_insertions.into_iter().rev() {
                 store.scopes.get_mut(scope).remove(symbol);
@@ -731,7 +727,7 @@ struct Namer<'a> {
     index: SourceSemanticIndex,
     checkpoint: StoreCheckpoint,
     scope_insertions: Vec<(ScopeId, SymbolId)>,
-    companion_links: Vec<(SymbolId, SymbolId)>,
+    companion_links: Vec<PendingCompanion>,
     package_private_boundary: Option<(SymbolId, SymbolId)>,
     source_package_wrappers: HashMap<SymbolId, (SymbolId, ScopeId)>,
     wrapped_type_names: HashMap<Vec<String>, HashSet<TypeName>>,
@@ -762,7 +758,8 @@ impl Namer<'_> {
             return Ok(());
         };
         self.collect_wrapped_type_names()?;
-        self.scan_entered_header(root)
+        self.scan_entered_header(root)?;
+        self.link_companions()
     }
 
     fn partition_package_stats(
@@ -1489,7 +1486,12 @@ impl Namer<'_> {
             } => {
                 let object_name = self.store.symbols.get(object_symbol).name;
                 if let Some(class) = self.source_companion_class(object_name, enclosing_scope) {
-                    self.queue_companion_link(class, object_symbol);
+                    self.companion_links.push(PendingCompanion {
+                        class,
+                        object: object_symbol,
+                        scope: enclosing_scope,
+                        required_by: None,
+                    });
                 }
                 return self.scan_template_body(
                     template,
@@ -1560,26 +1562,56 @@ impl Namer<'_> {
         enclosing_scope: ScopeId,
     ) -> Option<SymbolId> {
         let name = *TypeName::new(object_name.text()).as_name();
+        self.unique_companion_candidate(enclosing_scope, name, |kind| {
+            matches!(kind, SymbolKind::Class | SymbolKind::Trait)
+        })
+    }
+
+    fn unique_companion_candidate(
+        &self,
+        scope: ScopeId,
+        name: dotty_core::Name,
+        matches_kind: impl Fn(SymbolKind) -> bool,
+    ) -> Option<SymbolId> {
         let mut candidates = self
             .store
             .scopes
-            .get(enclosing_scope)
+            .get(scope)
             .lookup_all(&name)
             .iter()
             .copied()
-            .filter(|symbol| {
-                let symbol = self.store.symbols.get(*symbol);
-                matches!(symbol.kind, SymbolKind::Class | SymbolKind::Trait)
-                    && symbol.origin == SymbolOrigin::Source(self.source)
+            .filter(|id| {
+                matches_kind(self.store.symbols.get(*id).kind)
+                    && self.index.declaration_context_of(*id).is_some()
             });
         let candidate = candidates.next()?;
         candidates.next().is_none().then_some(candidate)
     }
 
-    fn queue_companion_link(&mut self, class: SymbolId, object: SymbolId) {
-        if !self.companion_links.contains(&(class, object)) {
-            self.companion_links.push((class, object));
+    /// Later clauses can add candidates to a shared package or wrapper scope.
+    /// Validate both endpoints before publishing any reciprocal links.
+    fn link_companions(&mut self) -> Result<(), NamerError> {
+        let mut pairs = Vec::new();
+        for link in &self.companion_links {
+            let name = self.store.symbols.get(link.object).name;
+            if self.source_companion_class(name, link.scope) == Some(link.class)
+                && self
+                    .unique_companion_candidate(link.scope, name, |kind| kind == SymbolKind::Object)
+                    == Some(link.object)
+            {
+                pairs.push((link.class, link.object));
+            } else if let Some(tree) = link.required_by {
+                return Err(NamerError::MalformedAstShape {
+                    tree_index: tree.index(),
+                    expected: "unique required companion pair",
+                });
+            }
         }
+        for (class, object) in pairs {
+            self.store.symbols.get_mut(class).links.companion = Some(object);
+            self.store.symbols.get_mut(object).links.companion = Some(class);
+        }
+        Ok(())
     }
 
     fn is_source_object_module_class(&self, symbol: SymbolId) -> bool {
@@ -1858,7 +1890,12 @@ impl Namer<'_> {
                         "explicit companion has no canonical module class",
                     ));
                 };
-                self.queue_companion_link(class_symbol, *object);
+                self.companion_links.push(PendingCompanion {
+                    class: class_symbol,
+                    object: *object,
+                    scope: owner_scope,
+                    required_by: Some(tree),
+                });
                 module_class
             }
             [] if term_candidates.is_empty()
@@ -1904,7 +1941,12 @@ impl Namer<'_> {
                     .record_declaration_context(object, declaration_context)?;
                 self.index
                     .record_declaration_context(module_class, declaration_context)?;
-                self.queue_companion_link(class_symbol, object);
+                self.companion_links.push(PendingCompanion {
+                    class: class_symbol,
+                    object,
+                    scope: owner_scope,
+                    required_by: Some(tree),
+                });
                 module_class
             }
             _ => {
@@ -2657,7 +2699,12 @@ impl Namer<'_> {
                         .lookup_all(&module_class_name)
                         .contains(&module_class)
             }) {
-                self.queue_companion_link(enum_symbol, *object);
+                self.companion_links.push(PendingCompanion {
+                    class: enum_symbol,
+                    object: *object,
+                    scope: owner_scope,
+                    required_by: Some(tree),
+                });
                 return Ok(());
             }
             return Err(NamerError::MalformedAstShape {
@@ -2708,7 +2755,12 @@ impl Namer<'_> {
             .record_declaration_context(object, declaration_context)?;
         self.index
             .record_declaration_context(module_class, declaration_context)?;
-        self.queue_companion_link(enum_symbol, object);
+        self.companion_links.push(PendingCompanion {
+            class: enum_symbol,
+            object,
+            scope: owner_scope,
+            required_by: Some(tree),
+        });
         Ok(())
     }
 
