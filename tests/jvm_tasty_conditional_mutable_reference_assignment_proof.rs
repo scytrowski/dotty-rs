@@ -13,74 +13,126 @@ use dotty_typer::{SourceTyper, TypedLocalBinding};
 const SOURCE: &str = include_str!(
     "fixtures/jvm_tasty_conditional_mutable_reference_assignment/ConditionalMutableReferenceAssignment.scala"
 );
-const CONTROLS: [(&str, &str); 11] = [
+#[derive(Clone, Copy)]
+enum ExpectedControlRejection {
+    SourceShape,
+    Diagnostic(&'static str),
+}
+
+const CONTROLS: [(&str, &str, ExpectedControlRejection); 11] = [
     (
         "renamed locals",
         include_str!(
             "fixtures/jvm_tasty_conditional_mutable_reference_assignment/controls/RenamedLocals.scala"
         ),
+        ExpectedControlRejection::SourceShape,
     ),
     (
         "reversed declarations",
         include_str!(
             "fixtures/jvm_tasty_conditional_mutable_reference_assignment/controls/ReversedDeclarations.scala"
         ),
+        ExpectedControlRejection::SourceShape,
     ),
     (
         "immutable target",
         include_str!(
             "fixtures/jvm_tasty_conditional_mutable_reference_assignment/controls/ImmutableSelected.scala"
         ),
+        ExpectedControlRejection::Diagnostic("AssignmentTargetImmutable"),
     ),
     (
         "foreign reference",
         include_str!(
             "fixtures/jvm_tasty_conditional_mutable_reference_assignment/controls/ForeignReference.scala"
         ),
+        ExpectedControlRejection::Diagnostic("TermNameNotFound"),
     ),
     (
         "uninitialized reference",
         include_str!(
             "fixtures/jvm_tasty_conditional_mutable_reference_assignment/controls/UninitializedReference.scala"
         ),
+        ExpectedControlRejection::Diagnostic("TermNameNotFound"),
     ),
     (
         "wrong type",
         include_str!(
             "fixtures/jvm_tasty_conditional_mutable_reference_assignment/controls/WrongType.scala"
         ),
+        ExpectedControlRejection::Diagnostic("ExpectedExpressionTypeMismatch"),
     ),
     (
         "extra assignment",
         include_str!(
             "fixtures/jvm_tasty_conditional_mutable_reference_assignment/controls/ExtraAssignment.scala"
         ),
+        ExpectedControlRejection::SourceShape,
     ),
     (
         "nested if",
         include_str!(
             "fixtures/jvm_tasty_conditional_mutable_reference_assignment/controls/NestedIf.scala"
         ),
+        ExpectedControlRejection::SourceShape,
     ),
     (
         "allocation in branch",
         include_str!(
             "fixtures/jvm_tasty_conditional_mutable_reference_assignment/controls/AllocationInBranch.scala"
         ),
+        ExpectedControlRejection::SourceShape,
     ),
     (
         "loop",
         include_str!(
             "fixtures/jvm_tasty_conditional_mutable_reference_assignment/controls/Loop.scala"
         ),
+        ExpectedControlRejection::SourceShape,
     ),
     (
         "missing else",
         include_str!(
             "fixtures/jvm_tasty_conditional_mutable_reference_assignment/controls/MissingElse.scala"
         ),
+        ExpectedControlRejection::SourceShape,
     ),
 ];
+
+const SOURCE_SHAPE_REJECTION: &str = "SourceShape(\"four-formal candidate requires two initialized locals, selected IF, one setter, then Pair\")";
+
+fn assert_control_diagnostic(
+    error: &PairedPlanError,
+    source_id: SourceId,
+    expected_diagnostic: &str,
+) {
+    let PairedPlanError::BatchClass {
+        class_index,
+        declaration_index,
+        phase,
+        reason,
+    } = error
+    else {
+        panic!("invalid control reaches method body typing: {error:?}");
+    };
+    assert_eq!(*class_index, 2, "the producer rejects PairFactory.create");
+    assert_eq!(
+        *declaration_index, 0,
+        "the producer rejects the first PairFactory declaration"
+    );
+    assert_eq!(*phase, "method body typing");
+
+    // BatchClass stores the TyperError debug form; pin its stable diagnostic and source while
+    // leaving allocation-sensitive tree, symbol, name, and type IDs unconstrained.
+    let (diagnostic, fields) = reason
+        .split_once(" {")
+        .unwrap_or_else(|| panic!("diagnostic has a structured payload: {reason}"));
+    assert_eq!(diagnostic, expected_diagnostic);
+    assert!(
+        fields.contains(&format!("source: {source_id:?}")),
+        "diagnostic belongs to this control source: {reason}"
+    );
+}
 
 fn referenced_symbol(
     store: &SemanticStore,
@@ -262,6 +314,11 @@ fn source_if_preserves_both_assignment_identities_and_records_first_paired_rejec
             panic!("both typed if arms remain assignments")
         };
         assert_eq!(
+            typed_branch,
+            typed_tree(&typed_bindings, source_id, source_branch),
+            "each source Assign has an exact SourceTypedIndex edge to its branch"
+        );
+        assert_eq!(
             typed_assign.lhs,
             typed_tree(&typed_bindings, source_id, source_lhs)
         );
@@ -315,13 +372,14 @@ fn source_if_preserves_both_assignment_identities_and_records_first_paired_rejec
         SourceId::from_index(23_451),
     )
     .expect_err("current paired producer must expose its measured first rejection");
-    eprintln!("FIRST_PAIRED_REJECTION={error:?}");
-    assert!(matches!(
-        error,
-        dotty::jvm_tasty_artifacts::PairedBatchArtifactError::Plan(
-            PairedPlanError::BatchUnit { .. }
-        )
-    ));
+    let dotty::jvm_tasty_artifacts::PairedBatchArtifactError::Plan(error) = error else {
+        panic!("canonical candidate is rejected by the paired planner: {error:?}");
+    };
+    let PairedPlanError::BatchUnit { phase, reason } = error else {
+        panic!("canonical candidate reaches a batch-unit rejection: {error:?}");
+    };
+    assert_eq!(phase, "cross-class constructor-call identity proof");
+    assert_eq!(reason, SOURCE_SHAPE_REJECTION);
 }
 
 #[test]
@@ -330,7 +388,7 @@ fn controls_classify_without_accepting_partial_paired_batches() {
         .split_once("class PairFactory:")
         .expect("canonical Counter/Pair support precedes PairFactory")
         .0;
-    for (index, (name, source)) in CONTROLS.into_iter().enumerate() {
+    for (index, (name, source, expectation)) in CONTROLS.into_iter().enumerate() {
         let source = format!(
             "{support}{}",
             source
@@ -345,32 +403,34 @@ fn controls_classify_without_accepting_partial_paired_batches() {
         let Err(error) = result else {
             panic!("control {name} unexpectedly returned a paired artifact batch")
         };
-        eprintln!("CONTROL_REJECTION[{name}]={error:?}");
-        if matches!(index, 0 | 1 | 6 | 7 | 8 | 9 | 10) {
-            assert!(
-                matches!(
-                    error,
-                    dotty::jvm_tasty_artifacts::PairedBatchArtifactError::Plan(
-                        PairedPlanError::BatchUnit {
-                            phase: "cross-class constructor-call identity proof",
-                            ..
-                        }
-                    )
-                ),
+        if let ExpectedControlRejection::SourceShape = expectation {
+            let dotty::jvm_tasty_artifacts::PairedBatchArtifactError::Plan(error) = error else {
+                panic!("Scala-valid deferred control {name} reaches the paired planner: {error:?}");
+            };
+            let PairedPlanError::BatchUnit { phase, reason } = error else {
+                panic!(
+                    "Scala-valid deferred control {name} reaches the batch-unit gate: {error:?}"
+                );
+            };
+            assert_eq!(
+                phase, "cross-class constructor-call identity proof",
+                "Scala-valid deferred control {name} reaches the measured stage"
+            );
+            assert_eq!(
+                reason, SOURCE_SHAPE_REJECTION,
                 "Scala-valid deferred control {name} reaches the measured source-shape rejection"
             );
         } else {
-            assert!(
-                matches!(
-                    error,
-                    dotty::jvm_tasty_artifacts::PairedBatchArtifactError::Plan(
-                        PairedPlanError::BatchClass {
-                            phase: "method body typing",
-                            ..
-                        }
-                    )
-                ),
-                "Scala-invalid control {name} is rejected during method body typing"
+            let dotty::jvm_tasty_artifacts::PairedBatchArtifactError::Plan(error) = error else {
+                panic!("Scala-invalid control {name} reaches the paired planner: {error:?}");
+            };
+            let ExpectedControlRejection::Diagnostic(expected_diagnostic) = expectation else {
+                unreachable!("handled source-shape rejection above")
+            };
+            assert_control_diagnostic(
+                &error,
+                SourceId::from_index(23_460 + index as u32),
+                expected_diagnostic,
             );
         }
     }
