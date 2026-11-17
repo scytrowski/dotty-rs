@@ -978,9 +978,9 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
     else {
         return Err(src("Block result must construct the original Pair"));
     };
-    if pair_apply.args.len() != 2 {
+    if pair_apply.kind != ApplyKind::Regular || pair_apply.args.len() != 2 {
         return Err(src(
-            "Pair construction must retain two ordered original locals",
+            "Pair construction must remain a regular Apply with two ordered original locals",
         ));
     }
     let TreeKind::Select(source_pair_select) = &source_ast
@@ -1034,9 +1034,12 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
     else {
         return Err(typed("Pair result must remain the original typed Apply"));
     };
-    if typed_pair_apply.args.as_slice() != pair_typed_args {
+    if typed_pair_apply.kind != pair_apply.kind
+        || typed_pair_apply.kind != ApplyKind::Regular
+        || typed_pair_apply.args.as_slice() != pair_typed_args
+    {
         return Err(typed(
-            "typed Pair must preserve exact ordered argument edges",
+            "typed Pair must preserve the regular source Apply and exact ordered argument edges",
         ));
     }
     let typed_pair_function = source_typed_index

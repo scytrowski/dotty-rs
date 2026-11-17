@@ -1069,6 +1069,26 @@ fn source_if_preserves_both_assignment_identities_and_records_first_paired_rejec
         "Pair arguments keep source identity order"
     );
 
+    let mut source_pair_using = copy_untyped_arena(&parsed.ast);
+    let TreeKind::Apply(source_pair_apply) = &mut source_pair_using.get_mut(result).kind else {
+        unreachable!()
+    };
+    source_pair_apply.kind = dotty_core::ast::ApplyKind::Using;
+    assert!(
+        reject_source(&source_pair_using),
+        "source Pair construction must remain a Regular Apply"
+    );
+
+    let mut typed_pair_using = copy_typed_arena(&typed_ast);
+    let TreeKind::Apply(typed_pair_apply) = &mut typed_pair_using.get_mut(typed_pair).kind else {
+        unreachable!()
+    };
+    typed_pair_apply.kind = dotty_core::ast::ApplyKind::Using;
+    assert!(
+        reject_typed(&typed_pair_using),
+        "typed Pair construction must match the Regular source Apply"
+    );
+
     let typed_pair_function = match &typed_ast.get(typed_pair).kind {
         TreeKind::Apply(apply) => apply.function,
         _ => unreachable!(),
