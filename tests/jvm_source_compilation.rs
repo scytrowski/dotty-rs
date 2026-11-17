@@ -21755,6 +21755,164 @@ fn mutable_counter_reference_rebinding_rejects_invalid_inputs_without_partial_ba
 }
 
 #[test]
+fn conditional_mutable_counter_plan_rejects_stale_local_bindings_and_foreign_owners() {
+    let source_id = SourceId::from_index(23473);
+
+    let stale_output = TestOutputDirectory::new("conditional-counter-stale-local-plan");
+    let stale_identity = RefCell::new(None);
+    let mut stale_local_plan = |_ast: &AstArena<Untyped>,
+                                _root: TreeId<Untyped>,
+                                _index: &SourceSemanticIndex,
+                                _typed_index: &SourceTypedIndex,
+                                unit: &mut JvmCompilationUnit<'_>,
+                                _definitions: &Definitions| {
+        let factory = audit_class_named(unit, "PairFactory");
+        let method = audit_method_named(unit, factory, "create").method;
+        let create = unit
+            .classes
+            .iter_mut()
+            .find(|class| class.class == factory)
+            .and_then(|class| {
+                class
+                    .methods
+                    .iter_mut()
+                    .find(|candidate| candidate.method == method)
+            })
+            .expect("create has its canonical JVM method plan");
+        let selected = create
+            .locals
+            .iter_mut()
+            .find(|local| local.mutable)
+            .expect("selected is the initialized mutable local");
+        let stale_declaration = create.body.expect("create has its original typed body");
+        selected.declaration = stale_declaration;
+        *stale_identity.borrow_mut() = Some((method, stale_declaration));
+    };
+    let stale_failure = compile_source_batch_with_source_observer(
+        CONDITIONAL_MUTABLE_REFERENCE_REBINDING_SOURCE,
+        "PairFactory.scala",
+        stale_output.path(),
+        source_id,
+        SourceUnitCardinality::AtLeastTwo,
+        &mut stale_local_plan,
+    )
+    .expect_err("a stale local binding in the conditional factory must fail plan validation");
+    let (stale_method, stale_declaration) = stale_identity
+        .borrow()
+        .as_ref()
+        .copied()
+        .expect("the source observer recorded the intentionally stale binding");
+    assert!(
+        matches!(stale_failure, PipelineFailure::Codegen(JvmCodegenError::InvalidLocalDeclaration { method, declaration }) if method == stale_method && declaration == stale_declaration),
+        "stale conditional local binding gets a contextual codegen error: {stale_failure:?}"
+    );
+    assert!(
+        stale_output.class_files().is_empty(),
+        "stale local input publishes no class artifacts"
+    );
+
+    let foreign_output = TestOutputDirectory::new("conditional-counter-foreign-local-owner");
+    let foreign_source_id = SourceId::from_index(23474);
+    let selected_symbol = RefCell::new(None);
+    let foreign_identity = RefCell::new(None);
+    let mut capture_selected = |ast: &AstArena<Untyped>,
+                                _root: TreeId<Untyped>,
+                                index: &SourceSemanticIndex,
+                                typer: &mut SourceTyper<'_>,
+                                _definitions: &Definitions| {
+        let (method_tree, method) = ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(method)
+                    if typer.store().names.resolve(method.name.as_name().text()) == "create" =>
+                {
+                    Some((tree, method))
+                }
+                _ => None,
+            })
+            .expect("the frozen create method is present");
+        let method_symbol = index.symbol_at(foreign_source_id, method_tree).unwrap();
+        let TreeKind::Block(body) = &ast.get(method.rhs.unwrap()).kind else {
+            panic!("create retains its source block")
+        };
+        let selected_tree = body
+            .stats
+            .iter()
+            .copied()
+            .find(|tree| {
+                matches!(&ast.get(*tree).kind, TreeKind::ValDef(local) if typer.store().names.resolve(local.name.as_name().text()) == "selected")
+            })
+            .expect("the frozen selected declaration is present");
+        let binding = typer
+            .typed_local_binding_at(foreign_source_id, selected_tree)
+            .expect("selected has a canonical typed local binding");
+        assert_eq!(
+            typer.store().symbols.get(binding.symbol()).owner,
+            Some(method_symbol)
+        );
+        *selected_symbol.borrow_mut() = Some(binding.symbol());
+    };
+    let mut move_selected_to_pair =
+        |ast: &AstArena<Untyped>,
+         source: SourceId,
+         index: &SourceSemanticIndex,
+         store: &mut SemanticStore| {
+            let selected = selected_symbol
+                .borrow()
+                .expect("typer observer captured selected's canonical local symbol");
+            let method = store.symbols.get(selected).owner.unwrap();
+            let pair = ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::TypeDef(definition)
+                        if store.names.resolve(definition.name.as_name().text()) == "Pair" =>
+                    {
+                        index.symbol_at(source, tree)
+                    }
+                    _ => None,
+                })
+                .expect("Pair has its canonical source symbol");
+            assert_ne!(method, pair);
+            store.symbols.get_mut(selected).owner = Some(pair);
+            *foreign_identity.borrow_mut() = Some((selected, method, pair));
+        };
+    let mut observe_unchanged_source =
+        |_ast: &AstArena<Untyped>,
+         _root: TreeId<Untyped>,
+         _index: &SourceSemanticIndex,
+         _typed_index: &SourceTypedIndex,
+         _unit: &mut JvmCompilationUnit<'_>,
+         _definitions: &Definitions| {};
+    let foreign_failure = compile_source_batch_with_typer_failure_observer(
+        CONDITIONAL_MUTABLE_REFERENCE_REBINDING_SOURCE,
+        "PairFactory.scala",
+        foreign_output.path(),
+        foreign_source_id,
+        SourceUnitCardinality::AtLeastTwo,
+        SourceBatchObservers {
+            source: Some(&mut observe_unchanged_source),
+            source_store_mutator: Some(&mut move_selected_to_pair),
+            typer: Some(&mut capture_selected),
+            ..SourceBatchObservers::default()
+        },
+    )
+    .expect_err("a conditional local with a foreign owner must fail before emission");
+    let (foreign_symbol, expected_owner, actual_owner) = foreign_identity
+        .borrow()
+        .as_ref()
+        .copied()
+        .expect("the source mutator recorded the foreign owner identities");
+    assert!(
+        matches!(foreign_failure, PipelineFailure::Codegen(JvmCodegenError::WrongOwner { symbol, expected, actual: Some(actual) }) if symbol == foreign_symbol && expected == expected_owner && actual == actual_owner),
+        "foreign local owner gets a contextual codegen error: {foreign_failure:?}"
+    );
+    assert!(
+        foreign_output.class_files().is_empty(),
+        "foreign-owner input publishes no class artifacts"
+    );
+}
+
+#[test]
 fn conditional_mutable_counter_assignment_reuses_one_local_and_verifies_on_jdk21() {
     let output = TestOutputDirectory::new("conditional-mutable-counter-assignment");
     let source_id = SourceId::from_index(23470);
@@ -22198,29 +22356,139 @@ public final class ConditionalMutableCounterHarness {
     assert!(disassembly.contains("descriptor: (IIZI)Lexample/Pair;"));
     assert!(disassembly.contains("Counter.set:(I)V"));
 
+    let factory_path = output.path().join("example/PairFactory.class");
+    let factory_bytes = fs::read(&factory_path).expect("read emitted PairFactory bytes");
+    let code_starts = factory_bytes
+        .windows(code.code.len())
+        .enumerate()
+        .filter_map(|(offset, window)| (window == code.code).then_some(offset))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        code_starts.len(),
+        1,
+        "the method code has one byte-level location"
+    );
+    let corrupt_code = |offset: usize, replacement: &[u8]| {
+        let mut corrupted = factory_bytes.clone();
+        corrupted[code_starts[0] + offset..code_starts[0] + offset + replacement.len()]
+            .copy_from_slice(replacement);
+        corrupted
+    };
+    let run_corrupted_artifact = |label: &str, bytes: &[u8], verifier_failure: bool| {
+        let corrupted_output = TestOutputDirectory::new(label);
+        for class_file in output.class_files() {
+            let relative = class_file.strip_prefix(output.path()).unwrap();
+            let destination = corrupted_output.path().join(relative);
+            fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            fs::copy(&class_file, destination).unwrap();
+        }
+        fs::write(
+            corrupted_output.path().join("example/PairFactory.class"),
+            bytes,
+        )
+        .expect("install test-only corrupted PairFactory artifact");
+        let java = Command::new("java")
+            .arg(format!("-Djava.io.tmpdir={}", java_tmp.display()))
+            .args([
+                "-Xverify:all",
+                "-ea",
+                "-classpath",
+                corrupted_output.path().to_str().unwrap(),
+                "ConditionalMutableCounterHarness",
+            ])
+            .output()
+            .expect("start JVM for corrupted conditional class");
+        assert!(
+            !java.status.success(),
+            "{label} corruption must be detected"
+        );
+        let diagnostic = format!(
+            "{}{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        if verifier_failure {
+            assert!(
+                diagnostic.contains("VerifyError") || diagnostic.contains("ClassFormatError"),
+                "{label} must fail during JVM verification/loading: {diagnostic}"
+            );
+        } else {
+            assert!(
+                diagnostic.contains("AssertionError"),
+                "{label} must fail the Java object identity/value assertions: {diagnostic}"
+            );
+        }
+    };
+
+    let setter_call = instructions
+        .iter()
+        .position(|(offset, opcode)| {
+            if *opcode != 0xb6 {
+                return false;
+            }
+            let cp = u16::from_be_bytes([code.code[*offset + 1], code.code[*offset + 2]]);
+            matches!(factory.constant_pool.get(ConstantPoolIndex(cp)), Some(ConstantPoolEntry::Methodref { class_index, name_and_type_index }) if factory.constant_pool.class_name(*class_index) == Ok("example/Counter") && factory.constant_pool.name_and_type(*name_and_type_index) == Ok(("set", "(I)V")))
+        })
+        .expect("one exact selected.set call exists");
+    let selected_receiver = instructions[setter_call - 2];
+    assert_eq!(selected_receiver.1, 0x19);
+    let wrong_receiver = corrupt_code(selected_receiver.0 + 1, &[first_slot as u8]);
+    run_corrupted_artifact("conditional-wrong-setter-receiver", &wrong_receiver, false);
+
+    let wrong_pair_identity = corrupt_code(instructions[pair_call - 2].0 + 1, &[second_slot as u8]);
+    let wrong_pair_identity = {
+        let mut bytes = wrong_pair_identity;
+        let argument = instructions[pair_call - 1];
+        bytes[code_starts[0] + argument.0 + 1] = first_slot as u8;
+        bytes
+    };
+    run_corrupted_artifact(
+        "conditional-swapped-pair-identity",
+        &wrong_pair_identity,
+        false,
+    );
+
+    let conditional_branch = instructions
+        .iter()
+        .find(|(_, opcode)| *opcode == 0x99)
+        .expect("the conditional branch instruction exists");
+    let wrong_branch_target = corrupt_code(conditional_branch.0 + 1, &[0x7f, 0xff]);
+    run_corrupted_artifact(
+        "conditional-invalid-branch-target",
+        &wrong_branch_target,
+        true,
+    );
+
+    #[derive(Clone, Copy)]
+    enum InvalidSourceCase {
+        Immutable,
+        TypeMismatch,
+        MissingInitializer,
+    }
+    const INVALID_SOURCE_ID: SourceId = SourceId::from_index(23472);
     for (name, source, expected) in [
         (
             "immutable-selected",
             CONDITIONAL_MUTABLE_REFERENCE_REBINDING_SOURCE.replace("var selected", "val selected"),
-            "AssignmentTargetImmutable",
+            InvalidSourceCase::Immutable,
         ),
         (
             "incompatible-reference",
             CONDITIONAL_MUTABLE_REFERENCE_REBINDING_SOURCE
                 .replace("selected = second", "selected = new Pair(first, second)"),
-            "ExpectedExpressionTypeMismatch",
+            InvalidSourceCase::TypeMismatch,
         ),
         (
-            "foreign-immutable-target",
+            "immutable-parameter-target",
             CONDITIONAL_MUTABLE_REFERENCE_REBINDING_SOURCE
-                .replace("selected = second", "first = second"),
-            "AssignmentTargetImmutable",
+                .replace("selected = second", "nextValue = firstSeed"),
+            InvalidSourceCase::Immutable,
         ),
         (
             "uninitialized-reference",
             CONDITIONAL_MUTABLE_REFERENCE_REBINDING_SOURCE
                 .replace("var selected: Counter = first", "var selected: Counter"),
-            "LocalValueRightHandSideMissing",
+            InvalidSourceCase::MissingInitializer,
         ),
     ] {
         let rejected = TestOutputDirectory::new(name);
@@ -22228,13 +22496,40 @@ public final class ConditionalMutableCounterHarness {
             &source,
             "PairFactory.scala",
             rejected.path(),
-            SourceId::from_index(23472),
+            INVALID_SOURCE_ID,
             SourceUnitCardinality::AtLeastTwo,
         )
         .expect_err("invalid local assignment must fail before publishing classes");
+        let contextual_error = match (expected, &failure) {
+            (
+                InvalidSourceCase::Immutable,
+                PipelineFailure::Typer(TyperError::AssignmentTargetImmutable {
+                    source,
+                    tree_index,
+                    ..
+                }),
+            ) => *source == INVALID_SOURCE_ID && *tree_index > 0,
+            (
+                InvalidSourceCase::TypeMismatch,
+                PipelineFailure::Typer(TyperError::ExpectedExpressionTypeMismatch {
+                    source,
+                    tree_index,
+                    actual,
+                    expected,
+                }),
+            ) => *source == INVALID_SOURCE_ID && *tree_index > 0 && actual != expected,
+            (
+                InvalidSourceCase::MissingInitializer,
+                PipelineFailure::Typer(TyperError::LocalValueRightHandSideMissing {
+                    source,
+                    tree_index,
+                }),
+            ) => *source == INVALID_SOURCE_ID && *tree_index > 0,
+            _ => false,
+        };
         assert!(
-            format!("{failure:?}").contains(expected),
-            "{name}: {failure:?}"
+            contextual_error,
+            "{name}: unexpected contextual typing error {failure:?}"
         );
         assert!(
             rejected.class_files().is_empty(),
