@@ -21,3 +21,4 @@ frozen analysis manifest	25 roots	afa5a2064efd0bfcd31bb0bcb4fb08030db2d180a7619a
 #2308 prior integration evidence	21/25 main; 17/25 analysis; hosted exact-head gate pending	f1dabaab0115b3be794adda2c17b6d2c674be0d8241cdab7296eee23ee0a29dd
 focused original-root observation log	fresh two-session run; first error TermNameNotFound	687371162dff07e0331c15fab31aa0d60a66bc504392d91eb30ff81cafdeb60b
 Scala source Predef.scala	official source file at pinned revision	c5c9114d681d87aed6867c2d00a2fefab91af9262d6191f295ffd8ca14cbd852
+charat-pre-rollback.txt	Test-only pre-rollback lookup receipt for original Predef.scala#tree=614	sha256:3f14d9e881b721ab79078825f11cda22fdeee52e02740c933ab1dd37579c1eb7

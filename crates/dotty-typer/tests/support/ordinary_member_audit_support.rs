@@ -700,7 +700,7 @@ pub(super) fn run() {
                 || identity == "library/src/scala/Tuple.scala#tree=23"
                 || identity == "library/src/scala/Predef.scala#tree=614"
             {
-                println!("TARGET_SOURCE_IDENTITY_BEGIN\t{identity}");
+                println!("PRE_ATTEMPT_SOURCE_IDENTITY_BEGIN\t{identity}");
                 println!("source\t{source:?}");
                 println!(
                     "method\t{method:?}\t{:?}",
@@ -743,7 +743,7 @@ pub(super) fn run() {
                         );
                     }
                 }
-                println!("TARGET_SOURCE_IDENTITY_END\t{identity}");
+                println!("PRE_ATTEMPT_SOURCE_IDENTITY_END\t{identity}");
             }
             let outcome = typer.type_method_definition(tree);
             let mut typed_tree_identity = String::new();

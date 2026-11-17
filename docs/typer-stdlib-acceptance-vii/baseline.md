@@ -38,18 +38,9 @@ tree 611, span `20074..20089`, before any `IndexedSeq.apply` lookup. The
 ordinary audit reports expected result `Char`, actual result unavailable, and
 no nested cause.
 
-The existing test-only semantic observation maps the owner to class tree 637
-and the plain constructor parameter to source tree 602, constructor tree 635,
-and a direct class-owned `Parameter` symbol. Its source declaration is
-`sequenceOfChars: scala.collection.IndexedSeq[Char]`; the indexed symbol has
-`Private` visibility and `SymbolInfo::Missing`. It is not a source `val`
-accessor. `charAt` is tree 614, with its canonical class owner. The failing
-expression is an `Apply` whose function is the bare identifier; there is no
-explicit receiver or selection tree at the failure point. Thus the first
-blocker is constructor-parameter term resolution, not external `apply`
-selection or result conformance. Numeric arena and symbol IDs are local to the
-observation session; stable source tree identities and the exact failure are
-recorded in [`first-blocker.tsv`](first-blocker.tsv).
+The audit runner prints a separately labeled **pre-attempt identity dump** mapping the owner to class tree 637 and the plain constructor parameter to source tree 602, constructor tree 635, and a direct class-owned `Parameter` symbol. Its source declaration is `sequenceOfChars: scala.collection.IndexedSeq[Char]`; the symbol has `Private` visibility and `SymbolInfo::Missing`, and is not a source `val` accessor. This pre-attempt dump is not evidence of lookup state at failure.
+
+A dedicated test-only `transaction_failure_error_observer` records the live state before rollback in [`charat-pre-rollback.txt`](charat-pre-rollback.txt). It asserts the unchanged `Predef.scala#tree=614` fails at tree 611/span `20074..20089` with `TermNameNotFound` for `sequenceOfChars`, records the `charAt` expression context and lexical context chain, and enumerates every active lexical and local scope bucket. The canonical constructor parameter is absent from all observed buckets; its source type is `scala.collection.IndexedSeq[Char]`, while its semantic `SymbolInfo` and type state are still `Missing` at failure. This directly places the blocker at constructor-parameter term resolution, before any `IndexedSeq.apply` lookup. It does not infer lookup cause from the error returned after rollback. The receipt and [`first-blocker.tsv`](first-blocker.tsv) preserve the observed state; numeric IDs are session-local, with source tree identities and spans as stable anchors.
 
 ## Scala 3.9.0 oracle and controls
 
@@ -104,9 +95,10 @@ java -cp "$SCALA39_CLASSPATH" dotty.tools.dotc.Main \
 ```
 
 No Typer semantic code, cohort manifests, CI workflow, or new audit harness was
-added. The only code diff adds diagnostic detail to the existing ordinary
-method audit test output so the preexisting root and accepted-root evidence
-includes canonical identities and signatures.
+added. The code adds diagnostic detail to the ordinary method audit output and a
+focused test-only transaction failure observer for the unchanged Predef charAt
+root. The observer records canonical identities, failure-time lookup buckets,
+and parameter type state before rollback.
 
 The final combined 50-root audit also ran the existing
 `pinned_scala39_ordinary_member_method_audit` test twice in fresh sessions and
