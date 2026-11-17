@@ -4777,11 +4777,19 @@ fn reports_mixed_associativity_at_equal_precedence() {
         parser.ast().get(id).kind,
         TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
     ));
-    assert_eq!(parser.diagnostics().len(), 1);
-    assert_eq!(
-        parser.diagnostics()[0].kind(),
-        crate::ParseDiagnosticKind::UnexpectedToken
-    );
+    let [diagnostic] = parser.diagnostics() else {
+        panic!("expected a single mixed-associativity diagnostic");
+    };
+    assert_eq!(diagnostic.kind(), ParseDiagnosticKind::UnexpectedToken);
+    assert_eq!(diagnostic.span(), TextRange::new(6, 8).unwrap());
+    let ParseIssue::Expression(ExpressionIssue::MixedAssociativityOperators { left, right }) =
+        diagnostic.issue()
+    else {
+        panic!("expected an expression associativity issue");
+    };
+    assert_eq!(parser.names.resolve(left.text()), "+");
+    assert_eq!(parser.names.resolve(right.text()), "+:");
+    assert_eq!(parser.current().kind, TokenKind::Eof);
 }
 
 #[test]
@@ -4819,6 +4827,55 @@ fn parses_a_postfix_operator_when_the_feature_is_enabled() {
     );
     drop(parser);
     assert_eq!(names.resolve(operator.text()), "reverse");
+}
+
+#[test]
+fn postfix_operator_applies_to_the_whole_pending_infix_chain() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "a += b * c reverse",
+        vec![
+            token(TokenKind::Identifier, 0, 1),
+            token(TokenKind::Operator, 2, 4),
+            token(TokenKind::Identifier, 5, 6),
+            token(TokenKind::Operator, 7, 8),
+            token(TokenKind::Identifier, 9, 10),
+            token(TokenKind::Identifier, 11, 18),
+            token(TokenKind::Eof, 18, 18),
+        ],
+        &mut names,
+    )
+    .with_features(crate::ParserFeatures {
+        postfix_ops: true,
+        ..crate::ParserFeatures::default()
+    });
+
+    let id = parser.postfix_expr();
+    let TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)) = parser.ast().get(id).kind else {
+        panic!("expected a postfix operator around the chain");
+    };
+    let operand = parser.ast().get(postfix.operand);
+    let TreeKind::PhaseSpecific(UntypedNode::InfixOp(assign)) = operand.kind else {
+        panic!("expected += as the postfix operand");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::InfixOp(product)) =
+        parser.ast().get(assign.right).kind
+    else {
+        panic!("expected the product on the right of +=");
+    };
+    assert_eq!(parser.names.resolve(postfix.op.text()), "reverse");
+    assert_eq!(parser.names.resolve(assign.op.text()), "+=");
+    assert_eq!(parser.names.resolve(product.op.text()), "*");
+    assert_eq!(
+        operand.position.unwrap().span().range(),
+        TextRange::new(0, 10).unwrap()
+    );
+    assert_eq!(
+        parser.ast().get(id).position.unwrap().span().range(),
+        TextRange::new(0, 18).unwrap()
+    );
+    assert!(parser.diagnostics().is_empty());
+    assert_eq!(parser.current().kind, TokenKind::Eof);
 }
 
 #[test]
