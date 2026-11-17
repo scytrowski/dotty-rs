@@ -1,0 +1,78 @@
+# Semantic TASTy Convergence VIII — Chain hierarchy audit
+
+## Checkpoint 1: authenticated inputs
+
+The integration base is `ab25b31acf4cc1d2307220bbe72d5133334190be`.
+Scala source provenance is revision
+`777528f19a58e794c9954a42f433373472ec57f8`; the local pinned source checkout
+reported that exact `HEAD`. The cached compiler reported `Scala compiler
+version 3.9.0`, and the generated files identify `Scala 3.9.0` in their TASTy
+tooling header. Generation ran on Temurin OpenJDK `21.0.8+9-LTS`.
+
+The original audit cohort is compiled from
+`crates/dotty-classloader/tests/fixtures/semantic_chain_3_9_0/ChainHierarchy.scala`:
+
+```scala
+package convergence
+
+trait ChainRoot
+class ChainMiddle extends ChainRoot
+class ChainLeaf extends ChainMiddle { def answer: Int = 42 }
+```
+
+These are three separate compiler-produced units. Their wire version is
+TASTy `28.9.0`; their original owner, parent/member addresses and SHA-256
+digests are:
+
+| Unit | Original indexed owner | Parent/member addresses | SHA-256 |
+| --- | --- | --- | --- |
+| `ChainRoot.tasty` | `TYPEDEF@4` | `<init>` `DEFDEF@13` | `4c5ab08bcd61019347716e88c5edb0a0f03fc07bb124ad063318809b389d41b3` |
+| `ChainMiddle.tasty` | `TYPEDEF@4` | source edge to `ChainRoot`; first unresolved type member at `23`; `<init>` `DEFDEF@27` | `b737055909e3839893f8e2bcaee0faa10aceac1260da01efa82e3e6864751d00` |
+| `ChainLeaf.tasty` | `TYPEDEF@4` | source edge to `ChainMiddle`; parent tree `@9` (tag `136`); `<init>` `DEFDEF@23`; `answer` `DEFDEF@32` | `8cefb2d2e8c74c6c65a9a9dce0df69f320ad7cae08f8b2c4af0679fbbcd72868` |
+
+The source type is a trait followed by two classes. The wire owners are all
+top-level `TYPEDEF` nodes; the parent types and member signatures remain
+serialized TASTy trees and are not replaced with guessed semantic owners.
+`ChainLeaf.answer` has source result type `Int` and is retained as generated
+even though the current single-class semantic loader rejects that extra member
+shape. The ordinary loader completes its serialized type as `ByName(Int)`. The simpler comparison cohort
+below was compiled separately after observing that boundary; it does not
+replace or rewrite these three original inputs.
+
+The simpler three-unit cohort is compiled from
+`crates/dotty-classloader/tests/fixtures/semantic_chain_simple_3_9_0/ChainHierarchySimple.scala`;
+it preserves the hierarchy and removes only `answer`. It uses the same source
+revision, compiler, JDK and TASTy wire version.
+
+| Unit | Original indexed owner | Parent/member addresses | SHA-256 |
+| --- | --- | --- | --- |
+| `ChainRoot.tasty` | `TYPEDEF@4` | `<init>` `DEFDEF@13` | `7cbca928d379b6593ca5c9360316ff5e02960e8a19f81696ff418c1da2cd762f` |
+| `ChainMiddle.tasty` | `TYPEDEF@4` | source edge to `ChainRoot`; first unresolved type member at `23`; `<init>` `DEFDEF@27` | `58e5dbb5914bd8b6406591be74152dc22adb5c320b80df632a84f611a1d15bac` |
+| `ChainLeaf.tasty` | `TYPEDEF@4` | source edge to `ChainMiddle`; parent tree `@9` (tag `136`); first unresolved type member at `17`; `<init>` `DEFDEF@23` | `cf64ad9429db6a20cfe1d36045a0d80655fd267ed98ed1fd4df7398a72ad3d57` |
+
+The foreign same-spelled control is the independently compiled
+`foreignchain.ChainLeaf` in
+`crates/dotty-classloader/tests/fixtures/semantic_chain_controls_3_9_0/ForeignChainLeaf.scala`
+(`class ChainLeaf`). Its TASTy is outside both three-unit cohorts and has
+SHA-256 `a4b475935a33a10ec139cac4b04c7db46fc8a53ed8f8959279fa29dd35ded5ba`.
+
+### Reproduction
+
+The compiler dependencies are the cached Maven artifacts for Scala 3.9.0:
+`scala3-compiler_3`, `scala3-interfaces`, `tasty-core_3`, and
+`scala3-library_3` version `3.9.0`; `scala-library` version `3.9.0`;
+`scala-asm` version `9.9.0-scala-1`; and `compiler-interface` version `1.12.0`.
+`COMPILER_CP` contains those seven jars in that order. `LIBRARY_CP` contains
+the Scala 3 library and Scala library jars in that order. For each source, run
+from its fixture directory:
+
+```sh
+java -cp "$COMPILER_CP" dotty.tools.dotc.Main -usejavacp:false \
+  -classpath "$LIBRARY_CP" -d "$TMPDIR/chain-compile-out" ChainHierarchy.scala
+```
+
+`TMPDIR` was the registered managed scratch directory. The resulting
+`convergence/*.tasty` files were copied without modification into that
+cohort's fixture directory. The simple and foreign-control sources were
+compiled with the same command and separate scratch output directories.
+SHA-256 values were computed over the copied `.tasty` bytes.
