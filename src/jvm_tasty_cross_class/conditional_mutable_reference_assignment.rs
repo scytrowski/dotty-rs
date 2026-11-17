@@ -3,6 +3,7 @@
 //! provenance only; it does not authorize JVM or TASTy emission.
 
 use super::*;
+use dotty_core::ast::Modifier;
 
 /// Inputs from one real frontend session for the frozen conditional Counter
 /// assignment body. Local bindings must come from that session's SourceTyper.
@@ -522,6 +523,8 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
             .flags
             .contains(SymbolFlags::MUTABLE)
         || !has_source_origin(store, selected, source_id)
+        || selected_def.name.as_name() != &store.symbols.get(selected).name
+        || !selected_def.metadata.modifiers.contains(&Modifier::Var)
         || source_typed_index.get(source_id, declarations[2])
             != Some(selected_binding.declaration())
         || selected_binding.scope() != originals[0].scope
@@ -587,6 +590,7 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
         .get(source_id, selected_def.tpt)
         .ok_or_else(|| typed("selected Counter annotation has no typed mapping"))?;
     if typed_selected_def.rhs != Some(typed_selected_initializer)
+        || typed_selected_def.name.as_name() != &store.symbols.get(selected).name
         || typed_selected_def.tpt != typed_selected_type_tree
         || !is_canonical_class_type_ref(
             store,
@@ -805,6 +809,32 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
             "Pair construction must retain two ordered original locals",
         ));
     }
+    let TreeKind::Select(source_pair_select) = &source_ast
+        .try_get(pair_apply.function)
+        .ok_or_else(|| src("Pair constructor selection is stale"))?
+        .kind
+    else {
+        return Err(src("Pair constructor must retain its source Select"));
+    };
+    let TreeKind::New(source_pair_new) = &source_ast
+        .try_get(source_pair_select.qualifier)
+        .ok_or_else(|| src("Pair allocation is stale"))?
+        .kind
+    else {
+        return Err(src("Pair constructor selection must target the source New"));
+    };
+    if store.names.resolve(source_pair_select.name.text()) != "<init>"
+        || !matches!(
+            source_ast
+                .try_get(source_pair_new.tpt)
+                .map(|node| &node.kind),
+            Some(TreeKind::Ident(ident)) if store.names.resolve(ident.name.text()) == "Pair"
+        )
+    {
+        return Err(src(
+            "Pair construction must retain its constructor name and class type tree",
+        ));
+    }
     let mut pair_typed_args = [typed_pair_result; 2];
     for index in 0..2 {
         pair_typed_args[index] = source_typed_index
@@ -842,6 +872,35 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
     else {
         return Err(typed("Pair constructor must retain its typed Select"));
     };
+    let typed_pair_new = source_typed_index
+        .get(source_id, source_pair_select.qualifier)
+        .ok_or_else(|| typed("Pair allocation has no typed mapping"))?;
+    let typed_pair_type_tree = source_typed_index
+        .get(source_id, source_pair_new.tpt)
+        .ok_or_else(|| typed("Pair type tree has no typed mapping"))?;
+    let TreeKind::New(typed_new) = &typed_ast
+        .try_get(typed_pair_new)
+        .ok_or_else(|| typed("typed Pair allocation is stale"))?
+        .kind
+    else {
+        return Err(typed(
+            "typed Pair constructor selection must target the typed New",
+        ));
+    };
+    if typed_pair_select.qualifier != typed_pair_new
+        || typed_new.tpt != typed_pair_type_tree
+        || !matches!(
+            typed_ast
+                .try_get(typed_pair_type_tree)
+                .map(|node| &node.kind),
+            Some(TreeKind::TypeTree(_))
+        )
+        || typed_pair_apply.function != typed_pair_function
+    {
+        return Err(typed(
+            "typed Pair must preserve the exact Select-to-New-to-type-tree edges",
+        ));
+    }
     let pair_constructor = match store.types.try_get(
         typed_ast
             .try_get(typed_pair_function)
@@ -884,6 +943,17 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
         || source_index.definition_of(pair_class).is_none_or(
             |definition| !matches!(definition, SourceDefinition::Canonical { source, .. } if source == source_id),
         )
+        || !matches!(store.types.try_get(typed_ast.try_get(typed_pair_type_tree).ok_or_else(|| typed("typed Pair type tree is stale"))?.ty), Some(Type::TypeRef { target: TypeRefTarget::Symbol(class), .. }) if *class == pair_class)
+        || !is_canonical_class_type_ref(
+            store,
+            typed_ast
+                .try_get(typed_pair_new)
+                .ok_or_else(|| typed("typed Pair allocation is stale"))?
+                .ty,
+            pair_class,
+            package,
+            definitions.no_prefix,
+        )
     {
         return Err(typed("Pair result must use the original Pair constructor and class"));
     }
@@ -904,11 +974,6 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
         || !matches!(store.types.try_get(signature.result), Some(Type::TypeRef { target: TypeRefTarget::Symbol(class), .. }) if *class == pair_class)
     {
         return Err(sem("Pair constructor and factory result must preserve the exact two-Counter Pair signature"));
-    }
-    if typed_pair_apply.function != typed_pair_function {
-        return Err(typed(
-            "typed Pair must retain the exact source-mapped constructor selection",
-        ));
     }
     // Every decisive tree identity is from the same source and keeps its exact
     // original span through the source-to-typed edge.
@@ -934,6 +999,21 @@ pub fn validate_conditional_mutable_reference_assignment_proof<'session>(
         (source_rhss[1], typed_rhss[1], "ELSE RHS"),
         (source_setter, typed_setter, "setter"),
         (block.expr, typed_pair, "Pair result"),
+        (
+            pair_apply.function,
+            typed_pair_function,
+            "Pair constructor Select",
+        ),
+        (
+            source_pair_select.qualifier,
+            typed_pair_new,
+            "Pair constructor New",
+        ),
+        (
+            source_pair_new.tpt,
+            typed_pair_type_tree,
+            "Pair constructor type tree",
+        ),
     ] {
         require_matching_source_typed_positions(
             source_ast,

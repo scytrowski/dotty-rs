@@ -594,6 +594,57 @@ fn source_if_preserves_both_assignment_identities_and_records_first_paired_rejec
         )
         .is_err()
     };
+    let reject_source = |candidate: &AstArena<Untyped>| {
+        let candidate_unit = dotty_jvm::JvmCompilationUnit {
+            store: &store,
+            typed_ast: &typed_ast,
+            classes: Vec::new(),
+        };
+        validate_conditional_mutable_reference_assignment_proof(
+            ConditionalMutableReferenceAssignmentProofInput {
+                source_id,
+                method_tree,
+                store: &store,
+                definitions: &definitions,
+                source_ast: candidate,
+                typed_ast: &typed_ast,
+                source_index: &source_index,
+                source_typed_index: &typed_bindings,
+                original_bindings: [Some(first), Some(second)],
+                selected_binding: Some(selected),
+                jvm_unit: &candidate_unit,
+            },
+        )
+        .is_err()
+    };
+
+    let mut source_without_var = copy_untyped_arena(&parsed.ast);
+    let TreeKind::ValDef(selected_without_var) = &mut source_without_var.get_mut(stats[2]).kind
+    else {
+        unreachable!()
+    };
+    selected_without_var
+        .metadata
+        .modifiers
+        .retain(|modifier| *modifier != dotty_core::ast::Modifier::Var);
+    assert!(
+        reject_source(&source_without_var),
+        "semantic mutability cannot substitute for source `var` metadata"
+    );
+
+    let mut renamed_typed_selected = copy_typed_arena(&typed_ast);
+    let typed_selected = typed_tree(&typed_bindings, source_id, stats[2]);
+    let TreeKind::ValDef(typed_selected_def) =
+        &mut renamed_typed_selected.get_mut(typed_selected).kind
+    else {
+        unreachable!()
+    };
+    typed_selected_def.name =
+        dotty_core::TermName::new(store.symbols.get(local_symbols[0]).name.text());
+    assert!(
+        reject_typed(&renamed_typed_selected),
+        "typed selected declaration name must match its canonical selected symbol"
+    );
 
     // A source-to-typed table entry alone cannot authenticate a conditional
     // arm; the exact parent-child edge must agree as well.
@@ -682,6 +733,61 @@ fn source_if_preserves_both_assignment_identities_and_records_first_paired_rejec
     assert!(
         reject_typed(&wrong_pair_ast),
         "Pair arguments keep source identity order"
+    );
+
+    let typed_pair_function = match &typed_ast.get(typed_pair).kind {
+        TreeKind::Apply(apply) => apply.function,
+        _ => unreachable!(),
+    };
+    let typed_pair_new = match &typed_ast.get(typed_pair_function).kind {
+        TreeKind::Select(select) => select.qualifier,
+        _ => unreachable!(),
+    };
+    let mut redirected_pair_qualifier = copy_typed_arena(&typed_ast);
+    let TreeKind::Select(pair_select) =
+        &mut redirected_pair_qualifier.get_mut(typed_pair_function).kind
+    else {
+        unreachable!()
+    };
+    pair_select.qualifier = typed_tree(&typed_bindings, source_id, pair_apply.args[0]);
+    assert!(
+        reject_typed(&redirected_pair_qualifier),
+        "typed Pair constructor selection cannot redirect its qualifier to a local receiver"
+    );
+
+    let mut redirected_pair_type = copy_typed_arena(&typed_ast);
+    let TreeKind::New(pair_new) = &mut redirected_pair_type.get_mut(typed_pair_new).kind else {
+        unreachable!()
+    };
+    pair_new.tpt = typed_tree(&typed_bindings, source_id, stats[2]);
+    assert!(
+        reject_typed(&redirected_pair_type),
+        "typed Pair allocation retains the exact source mapped Pair type tree"
+    );
+
+    let mut missing_pair_new_mapping = typed_bindings.clone();
+    let TreeKind::Select(source_pair_select) = &parsed.ast.get(pair_apply.function).kind else {
+        unreachable!()
+    };
+    missing_pair_new_mapping.remove(source_id, source_pair_select.qualifier);
+    assert!(
+        validate_conditional_mutable_reference_assignment_proof(
+            ConditionalMutableReferenceAssignmentProofInput {
+                source_id,
+                method_tree,
+                store: &store,
+                definitions: &definitions,
+                source_ast: &parsed.ast,
+                typed_ast: &typed_ast,
+                source_index: &source_index,
+                source_typed_index: &missing_pair_new_mapping,
+                original_bindings: [Some(first), Some(second)],
+                selected_binding: Some(selected),
+                jvm_unit: &jvm_unit,
+            },
+        )
+        .is_err(),
+        "Pair New requires its exact source-to-typed mapping"
     );
 
     let mut wrong_setter_ast = copy_typed_arena(&typed_ast);
