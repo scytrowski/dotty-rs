@@ -53,7 +53,8 @@ pub use error::{
 };
 pub use plan::{
     ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan,
-    ConditionalLocalReferenceSelectionBinding, DefaultConstructorPlan,
+    ConditionalLocalReferenceSelectionBinding, ConditionalMutableReferenceAssignmentBinding,
+    DefaultConstructorPlan,
     DirectFormalConstructorCallPairBinding, DistinctReferenceMethodParameter,
     DistinctReferenceMethodSignature, FormalLocalConstructorCallArgumentBinding,
     FormalLocalConstructorCallArgumentOrigin, FormalLocalConstructorCallPairBinding,
