@@ -123,3 +123,39 @@ name-based replacement for `convergence.ChainLeaf`.
 No production behavior was changed. A found symbol counts as complete in the
 controls only after checking `SymbolInfo::Complete`, parent relationships and
 method type.
+
+## Checkpoint 3: verdicts and validation
+
+| Boundary | Evidence | Verdict |
+| --- | --- | --- |
+| B1 — direct class-to-class edge | `ChainMiddle` stops at typed `UnresolvedMember@23` for `ChainRoot`; the trait root stops at the semantic loader's class-template shape gate. | `BLOCKED_PREREQUISITE` |
+| B2 — transitive completion from leaf only | The simpler `ChainLeaf` stops at typed `UnresolvedMember@17` for `ChainMiddle`. | `BLOCKED_PREREQUISITE` |
+| B3 — selected resolver class request | Selected `ChainLeaf` resolution returns `ResolutionError::Malformed` wrapping that exact typed unresolved parent. | `BLOCKED_PREREQUISITE` |
+
+The legacy/unselected route has complete hierarchy information for this cohort;
+that does not make the selected semantic class request supported. This evidence
+identifies downstream semantic work without making a production change in this
+fixtures/tests/docs audit.
+
+Historical convergence fixtures and comparator inputs remain unchanged:
+
+| Comparator input | Expected rows | SHA-256 |
+| --- | ---: | --- |
+| `docs/classloader-semantic-tasty-convergence/cohort.tsv` | 14 | `bfa365d830a627ce46bb5682a93cad90e26dbc9a90ead76bcaa65a48539a8a95` |
+| `docs/classloader-semantic-tasty-convergence-ii/member-completion.tsv` | 4 | `5bc658a2c13e35c7751b5ab3a29ed6f0c842b0d0ef1e7bb6468c141a7ad30c61` |
+
+Validation on the final implementation:
+
+- `cargo test -p dotty-classloader --locked`: passed, 576 passed and 5 ignored.
+- `cargo test --workspace --all-targets --locked`: passed.
+- Strict JDK 21 classfile/JVM gate from `AGENTS.md`: passed using Temurin
+  JDK 21.0.13 and `DOTTY_CLASSFILE_REQUIRE_JDK=1`.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: passed.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked`: passed.
+- `cargo fmt --all -- --check`, `python3 tools/check-frontend-boundaries.py`,
+  and `git diff --check`: passed.
+
+The audited branch is based on
+`ab25b31acf4cc1d2307220bbe72d5133334190be`; its published candidate HEAD is
+verified in the associated pull request. No historical comparator input was
+regenerated.
