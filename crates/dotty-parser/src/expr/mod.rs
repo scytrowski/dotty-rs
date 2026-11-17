@@ -21,6 +21,10 @@ where
 {
     /// Parses a complete expression at the `Expr` grammar boundary.
     pub(crate) fn expr(&mut self) -> TreeId<Untyped> {
+        self.with_tree_nesting(crate::ParseKind::Expr, Self::expr_inner)
+    }
+
+    fn expr_inner(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
         let saved_placeholders = std::mem::take(&mut self.placeholder_params);
         let tree = if self.starts_poly_function() {

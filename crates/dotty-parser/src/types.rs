@@ -60,7 +60,7 @@ where
     /// `simple_type` deliberately remains an atomic/applied type parser. The
     /// higher-level entries own function-arrow precedence.
     pub(crate) fn type_expr(&mut self) -> TreeId<Untyped> {
-        self.parse_function_type()
+        self.with_tree_nesting(ParseKind::Type, Self::parse_function_type)
     }
 
     /// Parses a formal parameter type, whose final `*` is the source-level

@@ -58,6 +58,10 @@ where
     }
 
     pub(crate) fn pattern(&mut self) -> TreeId<Untyped> {
+        self.with_tree_nesting(ParseKind::Pattern, Self::pattern_inner)
+    }
+
+    fn pattern_inner(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
         let first = self.pattern1();
         let Some(mut pipe_offset) = self.pattern_alternative_operator_offset() else {

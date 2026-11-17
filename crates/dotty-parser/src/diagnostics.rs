@@ -9,6 +9,7 @@ use crate::{Location, ParamOwner};
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParseDiagnosticKind {
+    NestingLimitExceeded,
     ExpectedToken,
     UnexpectedToken,
     ExpectedExpression,
@@ -1770,6 +1771,11 @@ impl CaseIssue {
 /// Structured parser issue data.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ParseIssue {
+    /// Nested grammar entries exhausted the parser's tree nesting budget.
+    NestingLimitExceeded {
+        kind: crate::ParseKind,
+        limit: usize,
+    },
     /// A required parser-facing token was absent.
     ExpectedToken {
         expected: TokenKind,
@@ -1828,6 +1834,7 @@ impl ParseIssue {
     #[cfg(test)]
     pub const fn kind(&self) -> ParseDiagnosticKind {
         match self {
+            Self::NestingLimitExceeded { .. } => ParseDiagnosticKind::NestingLimitExceeded,
             Self::ExpectedToken { .. } => ParseDiagnosticKind::ExpectedToken,
             Self::ExpectedExpression { .. } => ParseDiagnosticKind::ExpectedExpression,
             Self::ExpectedType { .. } => ParseDiagnosticKind::ExpectedType,
@@ -1858,6 +1865,7 @@ impl ParseIssue {
     /// Returns a stable, text-independent identifier for corpus reporting.
     pub const fn code(&self) -> &'static str {
         match self {
+            Self::NestingLimitExceeded { .. } => "parser.nesting_limit_exceeded",
             Self::ExpectedToken { .. } => "parser.expected_token",
             Self::ExpectedExpression { .. } => "parser.expected_expression",
             Self::ExpectedType { .. } => "parser.expected_type",
