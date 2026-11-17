@@ -40,6 +40,29 @@ ENUMERATION_HASH_CODE_HISTORICAL_BLOCKER = (
     "qualifier_type: TypeId(123) }"
 )
 ENUMERATION_HASH_CODE_LIVE_RESULT = "Int"
+PREDEF_CHAR_AT_IDENTITY = "library/src/scala/Predef.scala#tree=614"
+PREDEF_CHAR_AT_HISTORICAL_BLOCKER = (
+    "blocked::TermNameNotFound { source: SourceId(0), tree_index: 611, "
+    "name: Name { text: NameId(162), namespace: Term }, position: "
+    "Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 20074, end: 20089 }, point: None } }) }"
+)
+PREDEF_CHAR_AT_LIVE_RESULT = "Char"
+ARRAY_BUFFER_VIEW_APPLY_IDENTITY = "library/src/scala/collection/mutable/ArrayBuffer.scala#tree=1537"
+ARRAY_BUFFER_VIEW_APPLY_HISTORICAL_BLOCKER = (
+    "blocked::TermNameNotFound { source: SourceId(0), tree_index: 1534, "
+    "name: Name { text: NameId(224), namespace: Term }, position: "
+    "Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 15157, end: 15167 }, point: None } }) }"
+)
+ARRAY_BUFFER_VIEW_APPLY_LIVE_BLOCKER = (
+    'blocked::MemberLookup(SourceClassCompletion { symbol: SymbolId(43), '
+    'error: SymbolResolution { source: SourceId(0), tree_index: 43, error: Malformed { '
+    'reason: "class scala/collection/mutable/IndexedBuffer failed to load because '
+    'scala/collection/mutable/IndexedSeq failed: invalid .tasty file for '
+    'scala/collection/mutable/IndexedSeq: unresolved supertype reference at parent 2: '
+    'shape=applied, semantic_reference=true, reference_prefix=true, '
+    'names=[\\"IndexedSeq\\", \\"collection\\", \\"scala\\"], raw=AppliedType(tycon=NatAst(tag=113, '
+    'child=NatAst(tag=112, child=Leaf(tag=61))), arguments=1)" } } })'
+)
 PRODUCT2_FIXTURE = Path("crates/dotty-typer/tests/fixtures/source-case-class-product2-3.9.0")
 PRODUCT2_SOURCE_SHA256 = "4b144913df1d2021359c44633dc2a23f21bf6288bf2528c86cc6f53d79b8ee31"
 SCALA_MATRIX_CASES = {
@@ -1437,6 +1460,48 @@ def validate_cohorts(root: Path, reports: list[Path], output: Path, baseline_rec
                 and wanted["two_pass_equal"] == "true"
             )
             if completed and historical == found:
+                continue
+        if wanted["identity"] == PREDEF_CHAR_AT_IDENTITY:
+            # Preserve the frozen 25 + 25 receipt while recording the direct
+            # #2354 completion of SeqCharSequence.charAt's plain parameter.
+            historical = dict(wanted)
+            historical["first_status"] = PREDEF_CHAR_AT_HISTORICAL_BLOCKER
+            historical["second_status"] = PREDEF_CHAR_AT_HISTORICAL_BLOCKER
+            historical["actual_result"] = "not_available"
+            completed = (
+                wanted["cohort"] == "main"
+                and wanted["source_tree"] == "614"
+                and wanted["baseline_status"] == "blocked"
+                and wanted["gate"] == "observe"
+                and wanted["first_status"] == "typed"
+                and wanted["second_status"] == "typed"
+                and wanted["first_status"] == wanted["second_status"]
+                and wanted["actual_result"] == PREDEF_CHAR_AT_LIVE_RESULT
+                and wanted["protected_success"] == "false"
+                and wanted["two_pass_equal"] == "true"
+            )
+            if completed and historical == found:
+                continue
+        if wanted["identity"] == ARRAY_BUFFER_VIEW_APPLY_IDENTITY:
+            # This is blocker advancement, not method completion: #2354 lets
+            # ArrayBufferView.apply reach the parameter's call, then class
+            # completion stops at the frozen IndexedSeq TASTy hierarchy gap.
+            historical = dict(wanted)
+            historical["first_status"] = ARRAY_BUFFER_VIEW_APPLY_HISTORICAL_BLOCKER
+            historical["second_status"] = ARRAY_BUFFER_VIEW_APPLY_HISTORICAL_BLOCKER
+            historical["actual_result"] = "not_available"
+            advanced = (
+                wanted["cohort"] == "analysis"
+                and wanted["source_tree"] == "1537"
+                and wanted["baseline_status"] == "not_protected"
+                and wanted["gate"] == "observe"
+                and wanted["first_status"] == ARRAY_BUFFER_VIEW_APPLY_LIVE_BLOCKER
+                and wanted["second_status"] == ARRAY_BUFFER_VIEW_APPLY_LIVE_BLOCKER
+                and wanted["actual_result"] == "not_available"
+                and wanted["protected_success"] == "false"
+                and wanted["two_pass_equal"] == "true"
+            )
+            if advanced and historical == found:
                 continue
         differences.append((wanted, found))
     if differences:

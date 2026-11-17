@@ -1042,6 +1042,8 @@ mod tests {
     mod issue_2234_source_owner_preparation;
     #[path = "issue_2242_generic_product1.rs"]
     mod issue_2242_generic_product1;
+    #[path = "issue_2354_constructor_parameter_identity.rs"]
+    mod issue_2354_constructor_parameter_identity;
     use dotty_classloader::classloader::{
         ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError, ClassResource,
     };
