@@ -11,7 +11,7 @@ use crate::{
 };
 use crate::{Trivia, TriviaKind};
 use dotty_core::token::characters::{
-    is_identifier_part, is_identifier_start, is_operator_character,
+    is_identifier_part, is_identifier_start, is_operator_character, is_scala_letter,
 };
 
 #[derive(Debug, Clone)]
@@ -245,10 +245,11 @@ impl<'source> RawLexer<'source> {
             .is_none_or(|character| matches!(character, ' ' | '\t' | '\n' | '{' | '(' | '>'));
 
         valid_context
-            && self
-                .cursor
-                .peek_nth(1)
-                .is_some_and(|next| is_identifier_start(next) || next == '!' || next == '?')
+            && self.cursor.peek_nth(1).is_some_and(|next| {
+                // Scala's XML Utility.isNameStart tests one UTF-16 Char and excludes '$'.
+                matches!(next, '!' | '?')
+                    || (next.len_utf16() == 1 && next != '$' && is_scala_letter(next))
+            })
     }
 
     fn next_expression(&mut self) -> Result<Option<RawItem>, RawLexerError> {
@@ -1982,6 +1983,16 @@ mod tests {
             ]
         );
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn comparisons_with_scala_only_name_starts_do_not_open_xml_literals() {
+        for source in ["x <$limit", "x <ʰ", "x <𐐀"] {
+            let (items, diagnostics) = scan(source);
+            assert_eq!(items[2], token(RawTokenKind::Operator, 2, 3));
+            assert!(diagnostics.is_empty(), "{source}");
+        }
+        assert_eq!(scan("<_x/>").0[0], token(RawTokenKind::XmlStart, 0, 1));
     }
 
     #[test]
