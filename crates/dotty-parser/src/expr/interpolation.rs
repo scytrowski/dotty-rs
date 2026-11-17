@@ -64,12 +64,13 @@ where
             }
 
             match self.current().kind {
-                TokenKind::Identifier => {
-                    if self.current_text_is("this") {
-                        let position = self.current_span();
-                        self.advance();
-                        parts.push(self.alloc(TreeKind::This(This { qual: None }), Some(position)));
-                    } else if in_pattern {
+                TokenKind::Keyword(dotty_core::HardKeyword::This) => {
+                    let position = self.current_span();
+                    self.advance();
+                    parts.push(self.alloc(TreeKind::This(This { qual: None }), Some(position)));
+                }
+                TokenKind::Identifier if in_pattern || !self.current_text_is("_") => {
+                    if in_pattern {
                         parts.push(self.with_parse_kind(ParseKind::Pattern, |parser| {
                             parser.with_location(Location::InPattern, |parser| parser.pattern())
                         }));
@@ -101,6 +102,12 @@ where
                     } else {
                         parts.push(self.expr());
                     }
+                }
+                found @ (TokenKind::Keyword(_) | TokenKind::Identifier) => {
+                    self.report_issue(ParseIssue::Expression(
+                        ExpressionIssue::InvalidSimpleInterpolationSplice { found },
+                    ));
+                    self.advance();
                 }
                 TokenKind::StringPart => continue,
                 _ => break,
@@ -434,6 +441,41 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_keyword_splice_at_its_span_and_keeps_the_next_splice() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            r#"s"$if$x""#,
+            vec![
+                token(TokenKind::InterpolationId, 0, 1),
+                token(TokenKind::StringPart, 1, 3),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::If), 3, 5),
+                token(TokenKind::StringPart, 5, 6),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::StringPart, 7, 8),
+                token(TokenKind::Eof, 8, 8),
+            ],
+            &mut names,
+        );
+        let root = parser.simple_expr();
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(3, 5).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].issue().code(),
+            "parser.expression.invalid_simple_interpolation_splice"
+        );
+        let TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(ref tree)) =
+            parser.ast().get(root).kind
+        else {
+            panic!("expected interpolation")
+        };
+        assert!(tree.parts.iter().any(|part| matches!(&parser.ast().get(*part).kind, TreeKind::Ident(id) if parser.names.resolve(id.name.text()) == "x")));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn parses_this_as_the_special_simple_splice() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
@@ -441,7 +483,7 @@ mod tests {
             vec![
                 token(TokenKind::InterpolationId, 0, 1),
                 token(TokenKind::StringPart, 1, 2),
-                token(TokenKind::Identifier, 3, 7),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::This), 3, 7),
                 token(TokenKind::StringPart, 7, 8),
                 token(TokenKind::Eof, 8, 8),
             ],

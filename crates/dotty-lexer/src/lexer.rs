@@ -532,10 +532,11 @@ impl<'source> RawLexer<'source> {
         {
             let _ = self.cursor.bump();
         }
-        let token = RawToken {
-            kind: RawTokenKind::Identifier,
-            span: self.span(start)?,
-        };
+        let span = self.span(start)?;
+        let kind = classify_keyword(self.source.slice(span)?)
+            .filter(|keyword| *keyword != HardKeyword::End)
+            .map_or(RawTokenKind::Identifier, RawTokenKind::Keyword);
+        let token = RawToken { kind, span };
         let _ = self.modes.pop();
         self.resume_string_after_expression();
         Ok(Some(RawItem::Token(token)))
@@ -4958,26 +4959,17 @@ mod tests {
     }
 
     #[test]
-    fn keeps_simple_splice_names_as_identifiers_even_when_they_are_keywords() {
-        let (items, diagnostics) = scan("s\"$if\"");
-        let kinds: Vec<_> = items
-            .into_iter()
-            .filter_map(|item| match item {
-                RawItem::Token(token) => Some(token.kind),
-                RawItem::Trivia(_) => None,
-            })
-            .collect();
-
+    fn classifies_keywords_in_simple_splices_but_keeps_end_as_a_name() {
+        let (items, diagnostics) = scan(r#"s"$if$this$end""#);
         assert_eq!(
-            kinds,
-            vec![
-                RawTokenKind::InterpolationId,
-                RawTokenKind::StringPart,
-                RawTokenKind::Identifier,
-                RawTokenKind::StringPart,
-                RawTokenKind::Eof,
-            ]
+            items[2],
+            token(RawTokenKind::Keyword(HardKeyword::If), 3, 5)
         );
+        assert_eq!(
+            items[4],
+            token(RawTokenKind::Keyword(HardKeyword::This), 6, 10)
+        );
+        assert_eq!(items[6], token(RawTokenKind::Identifier, 11, 14));
         assert!(diagnostics.is_empty());
     }
 
