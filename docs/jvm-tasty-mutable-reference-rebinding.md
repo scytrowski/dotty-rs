@@ -254,7 +254,7 @@ assertion described above.
 
 | Acceptance evidence | Regression |
 | --- | --- |
-| Fresh-session determinism, ordered six paths, byte equality, UUID equality, staged-file and promotion faults | `tests/jvm_tasty_artifacts.rs`: `fresh_batch_sessions_produce_byte_identical_complete_manifests`, `mutable_reference_rebinding_batch_publishes_six_artifacts_atomically` |
+| Fresh-session determinism, ordered six paths, byte equality, UUID equality, six staging faults and two promotion faults | `tests/jvm_tasty_artifacts.rs`: `mutable_reference_rebinding_emits_the_exact_six_artifact_batch` |
 | Source/typed assignment provenance, immutable or foreign target, wrong RHS/local identity, stale edge, and unsupported extra effect | `tests/jvm_tasty_artifacts.rs`: `mutable_reference_rebinding_contract_rejects_semantic_corruption`; `tests/jvm_tasty_mutable_local_reference_reassignment_proof.rs` |
 | Decoded JVM allocation/store/load/setter/Pair identity, verifier-valid wrong receiver or Pair args, invalid frame, descriptor and missing class | `tests/jvm_tasty_artifacts.rs`: `mutable_reference_rebinding_java_21_consumes_original_rust_artifacts`; `tests/jvm_tasty_mutable_reference_rebinding_scala_consumer.rs` |
 | TASTy mutable VALDEF, ordered ASSIGN/TERMREF edges, setter and constructor links; stale LHS/RHS, modifier, sidecar, UUID and descriptor controls | `tests/jvm_tasty_mutable_reference_rebinding_scala_consumer.rs`: `scala39_consumes_original_rust_mutable_reference_rebinding_batch` |
@@ -387,4 +387,19 @@ The execution SHA above is the code-and-test checkpoint used for this local
 receipt. The final acceptance PR head and its hosted CI run URLs are tracked
 separately in the PR so that the published checks correspond to the reviewed
 head; predecessor workflow runs in the preceding table are not represented as
-this attempt's checks.
+this attempt's checks. Hosted checks for the final PR head are pending; no
+final-head CI run URLs or successful hosted aggregate are claimed by this
+receipt.
+
+The six-artifact regression can be selected with the exact command below. It
+must report exactly one passed test; Cargo's successful exit status alone is
+not sufficient because an unmatched exact filter exits successfully with zero
+tests. The final pipeline guard enforces the expected count:
+
+```sh
+set -o pipefail
+cargo +1.98.1 test --test jvm_tasty_artifacts \
+  mutable_reference_rebinding_emits_the_exact_six_artifact_batch \
+  --locked -- --exact --nocapture 2>&1 \
+  | python3 -c 'import re, sys; output=sys.stdin.read(); print(output, end=""); sys.exit(0 if re.search(r"test result: ok\. 1 passed; 0 failed;", output) else 1)'
+```
