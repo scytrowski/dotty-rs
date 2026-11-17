@@ -335,6 +335,7 @@ impl<'source> RawLexer<'source> {
             }
         }
 
+        let mut final_kind = RawTokenKind::StringPart;
         loop {
             if self.cursor.is_eof() {
                 let start = state.part_start;
@@ -382,7 +383,7 @@ impl<'source> RawLexer<'source> {
                 }
                 let _ = self.modes.pop();
                 return Ok(Some(RawItem::Token(RawToken {
-                    kind: RawTokenKind::StringPart,
+                    kind: final_kind,
                     span: self.span(state.part_start)?,
                 })));
             }
@@ -422,8 +423,7 @@ impl<'source> RawLexer<'source> {
                             || (!state.multiline
                                 && self.cursor.peek().is_some_and(is_literal_line_terminator))
                         {
-                            return self
-                                .recover_interpolated_string(state.part_start, state.multiline);
+                            continue;
                         }
                         self.report_issue(
                             state.part_start,
@@ -431,67 +431,13 @@ impl<'source> RawLexer<'source> {
                                 following_character: self.cursor.peek(),
                             }),
                         )?;
-                        return self.recover_interpolated_string(state.part_start, state.multiline);
+                        final_kind = RawTokenKind::StringLiteral;
                     }
                 }
                 continue;
             }
 
             self.consume_interpolated_character(state.multiline);
-        }
-    }
-
-    fn recover_interpolated_string(
-        &mut self,
-        start: u32,
-        multiline: bool,
-    ) -> Result<Option<RawItem>, RawLexerError> {
-        loop {
-            if self.cursor.is_eof() {
-                let _ = self.modes.pop();
-                self.report_issue(
-                    start,
-                    LexerIssue::Interpolation(InterpolationIssue::UnclosedString { multiline }),
-                )?;
-                return Ok(Some(RawItem::Token(RawToken {
-                    kind: RawTokenKind::Error,
-                    span: self.span(start)?,
-                })));
-            }
-
-            if (multiline
-                && self.cursor.peek() == Some('"')
-                && self.cursor.peek_nth(1) == Some('"')
-                && self.cursor.peek_nth(2) == Some('"'))
-                || (!multiline && self.cursor.peek() == Some('"'))
-            {
-                if multiline {
-                    self.consume_multiline_terminator();
-                } else {
-                    let _ = self.cursor.bump();
-                }
-                let _ = self.modes.pop();
-                return Ok(Some(RawItem::Token(RawToken {
-                    kind: RawTokenKind::StringLiteral,
-                    span: self.span(start)?,
-                })));
-            }
-
-            if self.cursor.peek().is_some_and(|character| {
-                is_substitute(character) || (!multiline && is_literal_line_terminator(character))
-            }) {
-                let _ = self.modes.pop();
-                self.report_issue(
-                    start,
-                    LexerIssue::Interpolation(InterpolationIssue::UnclosedString { multiline }),
-                )?;
-                return Ok(Some(RawItem::Token(RawToken {
-                    kind: RawTokenKind::Error,
-                    span: self.span(start)?,
-                })));
-            }
-
-            self.consume_interpolated_character(multiline);
         }
     }
 
@@ -5032,6 +4978,29 @@ mod tests {
         );
         assert_eq!(items[6], token(RawTokenKind::Identifier, 11, 14));
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn preserves_later_splices_after_an_invalid_dollar() {
+        let (items, diagnostics) = scan(r#"s"$! $x""#);
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::InterpolationId, 0, 1),
+                token(RawTokenKind::StringPart, 1, 6),
+                token(RawTokenKind::Identifier, 6, 7),
+                token(RawTokenKind::StringPart, 7, 8),
+                token(RawTokenKind::Eof, 8, 8),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::Interpolation(InterpolationIssue::InvalidSplice {
+                following_character: Some('!'),
+            })
+        );
+        assert_eq!(diagnostics[0].span(), TextRange::new(1, 3).unwrap());
     }
 
     #[test]
