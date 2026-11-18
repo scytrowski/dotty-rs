@@ -597,6 +597,12 @@ impl ValidatedClassStatePlan<'_, '_> {
             {
                 context.register_mutable_counter_assignment(symbol, assignment)?;
             }
+            if let Some(assignment) = p
+                .typed_bindings
+                .conditional_mutable_reference_assignment(p.source.id, symbol)
+            {
+                context.register_conditional_mutable_assignment(symbol, assignment)?;
+            }
             if let Some(planned_call) = p.typed_bindings.planned_call(p.source.id, symbol) {
                 context.register_planned_call(symbol, planned_call)?;
             }

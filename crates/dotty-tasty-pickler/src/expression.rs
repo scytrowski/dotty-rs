@@ -271,8 +271,26 @@ fn lower_expression_inner(
                             )
                         })
                 });
+        let conditional_mutable_assignment = context
+            .conditional_mutable_assignment(method, root)
+            .filter(|(binding, index)| {
+                binding.typed_lhss[*index] == assignment.lhs
+                    && binding.local == target
+                    && binding.typed_rhss[*index] == assignment.rhs
+                    && ast.try_get(assignment.rhs).is_some_and(|rhs| {
+                        matches!(
+                            store.types.try_get(rhs.ty),
+                            Some(Type::TermRef {
+                                target: TermRefTarget::Symbol(rhs_local),
+                                ..
+                            }) if *rhs_local == binding.rhs_locals[*index]
+                        )
+                    })
+            });
+        let authenticated_mutable_reference_assignment =
+            mutable_counter_assignment.is_some() || conditional_mutable_assignment.is_some();
         let lhs = match symbol.kind {
-            dotty_core::SymbolKind::Local if mutable_counter_assignment.is_some() => {
+            dotty_core::SymbolKind::Local if authenticated_mutable_reference_assignment => {
                 context.local_reference(target, None)?
             }
             dotty_core::SymbolKind::Local
