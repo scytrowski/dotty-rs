@@ -167,7 +167,14 @@ fn corrupt_conditional_tasty_branch_address(bytes: &[u8]) -> Vec<u8> {
     let mut corrupted = bytes.to_vec();
     corrupted[target_offset..target_offset + invalid_nat.as_slice().len()]
         .copy_from_slice(invalid_nat.as_slice());
-    let decoded = TastyFile::parse_and_validate_scala_3_9(&corrupted).unwrap();
+    let decoded = TastyFile::parse_scala_3_9(&corrupted).unwrap();
+    assert_eq!(
+        decoded.validate(),
+        Err(dotty_tasty::TastyFileError::InvalidAstNodeAddress {
+            context: "AST reference",
+            address: invalid_address,
+        })
+    );
     assert!(
         decoded
             .ast_address_index()

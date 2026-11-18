@@ -2073,19 +2073,18 @@ fn decisions_source_serializes_control_flow_and_runs_from_fresh_scala_class() {
         .find(|(name, _, _)| name == "stored")
         .unwrap();
     assert_eq!(stored.1.symbol, first.stored_method);
+    let ast_payload = file.section(StandardSection::Asts).unwrap().payload;
     let local_references = addresses
-        .iter()
-        .flat_map(|node| {
-            node.ast_refs()
-                .unwrap()
-                .into_iter()
-                .map(move |reference| (node.offset as u32, reference))
+        .iter_nodes_with_tag(TERMREFDIRECT_TAG)
+        .map(|node| {
+            let mut reader = dotty_tasty::Reader::new(&ast_payload[node.offset..]);
+            let reference = SimpleTerm::decode(&mut reader).unwrap().ast_ref().unwrap();
+            (node.offset as u32, reference)
         })
         .filter(|(_, reference)| {
-            reference.kind == AstRefKind::TermRefDirect
-                && addresses
-                    .get(reference.address)
-                    .is_some_and(|node| node.tag == VALDEF_TAG)
+            addresses
+                .get(reference.address)
+                .is_some_and(|node| node.tag == VALDEF_TAG)
         })
         .collect::<Vec<_>>();
     assert_eq!(local_references.len(), 1);
