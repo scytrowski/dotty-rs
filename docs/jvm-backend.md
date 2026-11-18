@@ -70,8 +70,12 @@ the planned method. The Typer source adapter obtains the tree identity from
 `SourceTypedIndex` and the symbol from `SourceTyper::local_symbol_at` through
 `typed_local_binding_at`; it does not search by a name, span, or tree order.
 The adapter records mutability from the symbol flags and orders bindings by
-typed declaration ID for deterministic plan validation. Bindings live only in
-their containing method plan. Validation rejects stale or non-`ValDef` trees,
+typed declaration ID for deterministic plan validation. A consumer building its plan after typing can use
+`SourceTyper::into_typed_output` to take the session arena, the source-to-typed
+index and all ordinary local bindings produced by that driver. The bindings
+carry distinct typed declarations, symbols and scopes for shadowed values.
+Group them by the symbol's method owner when building multi-method plans.
+Bindings live only in their containing method plan. Validation rejects stale or non-`ValDef` trees,
 foreign owners, duplicate declaration or symbol IDs, parameter reuse,
 incomplete types, type or mutability disagreement, and unsupported lazy,
 given, implicit, erased, or inline flags. The semantic store and typed arena

@@ -9,12 +9,12 @@ use std::path::Path;
 use std::process::Command;
 
 use dotty::core::{
-    AstArena, Definitions, Packages, SemanticStore, SourceId, SourceSemanticIndex, SymbolId,
-    SymbolInfo, TreeId, TreeKind, Untyped,
+    AstArena, Definitions, Packages, SemanticStore, SourceId, SourceSemanticIndex, SymbolFlags,
+    SymbolId, SymbolInfo, TreeId, TreeKind, Untyped,
 };
 use dotty::jvm::{
-    GeneratedClass, JvmClassInitializationPlan, JvmClassPlan, JvmCompilationUnit, JvmMethodPlan,
-    emit_class,
+    GeneratedClass, JvmClassInitializationPlan, JvmClassPlan, JvmCompilationUnit, JvmLocalBinding,
+    JvmMethodPlan, emit_class,
 };
 use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty::parser::ParseResult;
@@ -186,13 +186,13 @@ fn with_plan<R>(
             output,
         );
         let root = typer.type_method_definition(unit.method).unwrap();
-        let (arena, index) = typer.into_typed_ast_and_index();
-        output = arena;
-        typed_units.push((root, index));
+        let result = typer.into_typed_output();
+        output = result.typed_ast;
+        typed_units.push((root, result.source_typed_index, result.local_bindings));
     }
 
     let mut classes = Vec::new();
-    for (unit, (root, index)) in units.iter().zip(typed_units) {
+    for (unit, (root, index, bindings)) in units.iter().zip(typed_units) {
         let TreeKind::DefDef(method) = &unit.ast.get(unit.method).kind else {
             panic!("expected method")
         };
@@ -216,7 +216,18 @@ fn with_plan<R>(
                 method: unit.method_symbol(),
                 parameters,
                 body: Some(body),
-                locals: vec![],
+                locals: bindings
+                    .into_iter()
+                    .map(|binding| {
+                        let symbol = store.symbols.get(binding.symbol());
+                        assert_eq!(symbol.owner, Some(unit.method_symbol()));
+                        JvmLocalBinding {
+                            declaration: binding.declaration(),
+                            symbol: binding.symbol(),
+                            mutable: symbol.flags.contains(SymbolFlags::MUTABLE),
+                        }
+                    })
+                    .collect(),
             }],
         });
     }

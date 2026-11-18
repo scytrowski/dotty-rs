@@ -1,4 +1,4 @@
 package demo
 
 class A:
-  def get() = 7
+  def get() = { val value = 5; value + { val value = 2; value } }

@@ -195,6 +195,17 @@ impl ActiveLocalTypeScope {
     }
 }
 
+/// Owned results for consumers that plan code generation after typing several files.
+pub struct TypedSourceOutput {
+    /// Session arena, including all trees passed to `new_with_typed_ast`.
+    pub typed_ast: AstArena<Typed>,
+    /// Mappings produced while typing this source.
+    pub source_typed_index: SourceTypedIndex,
+    /// Ordinary local values from this source in typed declaration ID order.
+    /// The owning method of each symbol is available in the session store.
+    pub local_bindings: Vec<TypedLocalBinding>,
+}
+
 /// Canonical identity for one successfully typed ordinary local value.
 ///
 /// The declaration is the exact typed `ValDef` recorded for its source tree;
@@ -821,6 +832,22 @@ impl<'a> SourceTyper<'a> {
     /// The caller can retain the index while passing the arena to the next typer.
     pub fn into_typed_ast_and_index(self) -> (AstArena<Typed>, SourceTypedIndex) {
         (self.typed_arena, self.typed_index)
+    }
+
+    /// Moves the arena and index out of the driver and retains its ordinary
+    /// local bindings. Uses the same eligibility rules as [`Self::typed_local_binding_at`].
+    pub fn into_typed_output(self) -> TypedSourceOutput {
+        let mut local_bindings: Vec<_> = self
+            .local_symbols
+            .keys()
+            .filter_map(|&(source, tree)| self.typed_local_binding_at(source, tree))
+            .collect();
+        local_bindings.sort_unstable_by_key(|binding| binding.declaration().index());
+        TypedSourceOutput {
+            typed_ast: self.typed_arena,
+            source_typed_index: self.typed_index,
+            local_bindings,
+        }
     }
 
     /// Returns this driver's source type cache.
@@ -25968,6 +25995,24 @@ mod tests {
             typer.store().types.get(typer.typed_ast().get(typed_inner_ref).ty),
             Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == inner_local
         ));
+
+        let output = typer.into_typed_output();
+        let [outer, inner] = output.local_bindings.as_slice() else {
+            panic!("expected both nested local bindings");
+        };
+        assert_eq!((outer.symbol(), inner.symbol()), (outer_local, inner_local));
+        assert_ne!(outer.scope(), inner.scope());
+        for (tree, binding) in [(outer_local_tree, outer), (inner_local_tree, inner)] {
+            assert_eq!(
+                output.source_typed_index.get(source, tree),
+                Some(binding.declaration())
+            );
+            assert_eq!(store.symbols.get(binding.symbol()).owner, Some(method));
+            assert!(matches!(
+                output.typed_ast.get(binding.declaration()).kind,
+                TreeKind::ValDef(_)
+            ));
+        }
     }
 
     #[test]
