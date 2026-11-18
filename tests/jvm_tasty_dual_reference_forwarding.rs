@@ -581,7 +581,7 @@ fn source_variants_record_first_reachable_paired_stage_without_forging_ids() {
         ("swapped arguments", source.replace("new Pair(first, second)", "new Pair(second, first)"), "", ""),
         ("swapped formals", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(second: Counter, first: Counter)"), "", ""),
         ("third method formal", source.replace("second: Counter): Pair", "second: Counter, unused: Int): Pair"), "cross-class constructor-call identity proof", "SourceShape"),
-        ("contextual formal", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(first: Counter)(using second: Counter)"), "complete JVM unit validation", "ParameterCountMismatch"),
+        ("contextual formal", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(first: Counter)(using second: Counter)"), "cross-class constructor-call identity proof", "candidate method must have one plain formal clause and a concrete public body"),
         ("default formal", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(first: Counter, second: Counter = new Counter(0))"), "cross-class constructor-call identity proof", "factory formals cannot have default values"),
         ("generic method", source.replace("def wrap(", "def wrap[A]("), "member planning", "generic methods are unsupported"),
         ("erased formal used illegally", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(first: Counter, erased second: Counter)"), "parsing", "ExpectedParameterColonAndType"),

@@ -130,6 +130,12 @@ The reproducible control compiler is [`verify-controls.py`](../tests/fixtures/jv
 
 Valid Scala variations are not treated as invalid source merely because the Rust subset rejects or masks them. Invalid source controls are retained separately. The Rust test does not invent a foreign symbol or rewrite the canonical semantic index to manufacture a constructor target.
 
+The table above records the stages observed in the original audit. With
+curried contextual JVM methods, `wrap(first: Counter)(using second: Counter)`
+passes JVM descriptor validation. The paired constructor-call proof still
+requires one plain formal clause. It rejects this source before the batch
+callback can receive any classes or sidecars.
+
 ## Reproduction and validation
 
 Use the pinned Scala source checkout and JDK 21, and keep all task-local output outside crowded `/tmp`:
