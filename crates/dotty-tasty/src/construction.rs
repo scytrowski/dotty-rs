@@ -7,6 +7,7 @@
 //! callers remain responsible for the grammar of category-five payloads.
 
 use std::fmt;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::ast::*;
 use crate::term::{SimpleTerm, TermEncodeError, TermValue};
@@ -14,7 +15,10 @@ use crate::writer::{WriteError, Writer, nat_width};
 
 /// A reserved node in one [`AstBuilder`], independent of its final byte address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct AstLabel(usize);
+pub struct AstLabel {
+    owner: usize,
+    slot: usize,
+}
 
 /// One field in a length-delimited node's ordered wire payload.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,17 +149,28 @@ impl From<TermEncodeError> for AstBuildError {
 /// Owns flat wire nodes and symbolic references; contains no compiler semantics.
 #[derive(Debug)]
 pub struct AstBuilder {
+    owner: usize,
     nodes: Vec<Option<AstNode>>,
     limits: AstBuildLimits,
     items: usize,
 }
 
 /// Encoded fragment and final addresses of all labels in its builder.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct BuiltAst {
+    owner: usize,
     bytes: Vec<u8>,
     addresses: Vec<u32>,
 }
+
+// Fragment equality compares the encoded layout across independent builds.
+impl PartialEq for BuiltAst {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes == other.bytes && self.addresses == other.addresses
+    }
+}
+
+impl Eq for BuiltAst {}
 
 impl BuiltAst {
     /// Borrows fragment bytes. Addresses are relative to byte zero of this payload.
@@ -164,7 +179,10 @@ impl BuiltAst {
     }
     /// Resolves a label from the same builder.
     pub fn address(&self, label: AstLabel) -> Option<u32> {
-        self.addresses.get(label.0).copied()
+        if label.owner != self.owner {
+            return None;
+        }
+        self.addresses.get(label.slot).copied()
     }
 }
 
@@ -196,7 +214,12 @@ impl AstNode {
 impl AstBuilder {
     /// Creates a builder with explicit limits.
     pub fn new(limits: AstBuildLimits) -> Self {
+        static NEXT_OWNER: AtomicUsize = AtomicUsize::new(1);
+        let owner = NEXT_OWNER
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .unwrap_or(0);
         Self {
+            owner,
             nodes: vec![],
             limits,
             items: 0,
@@ -210,26 +233,36 @@ impl AstBuilder {
     }
     /// Reserves an unbound label, including forward declaration targets.
     pub fn reserve(&mut self) -> Result<AstLabel, AstBuildError> {
+        // Zero is reserved for exhaustion of the process-wide identity space.
+        if self.owner == 0 {
+            return Err(AstBuildError::Overflow);
+        }
         self.items = self.check_items(1)?;
-        let label = AstLabel(self.nodes.len());
+        let label = AstLabel {
+            owner: self.owner,
+            slot: self.nodes.len(),
+        };
         self.nodes.push(None);
         Ok(label)
     }
-    fn node(&self, label: AstLabel) -> Result<&AstNode, AstBuildError> {
+    fn slot(&self, label: AstLabel) -> Result<&Option<AstNode>, AstBuildError> {
+        if label.owner != self.owner {
+            return Err(AstBuildError::InvalidLabel(label));
+        }
         self.nodes
-            .get(label.0)
-            .ok_or(AstBuildError::InvalidLabel(label))?
+            .get(label.slot)
+            .ok_or(AstBuildError::InvalidLabel(label))
+    }
+
+    fn node(&self, label: AstLabel) -> Result<&AstNode, AstBuildError> {
+        self.slot(label)?
             .as_ref()
             .ok_or(AstBuildError::Unbound(label))
     }
+
     /// Binds a label exactly once. Validation failures do not change the builder.
     pub fn bind(&mut self, label: AstLabel, node: AstNode) -> Result<(), AstBuildError> {
-        if self
-            .nodes
-            .get(label.0)
-            .ok_or(AstBuildError::InvalidLabel(label))?
-            .is_some()
-        {
+        if self.slot(label)?.is_some() {
             return Err(AstBuildError::AlreadyBound(label));
         }
         let extra = match &node {
@@ -283,8 +316,21 @@ impl AstBuilder {
             }
             _ => {}
         }
+        for field in node.fields() {
+            if let AstField::Tree(child) = field {
+                self.slot(child)?;
+            }
+        }
+        if let AstNode::Reference { target, .. }
+        | AstNode::NatAst {
+            value: AstOperand::Reference(target),
+            ..
+        } = &node
+        {
+            self.slot(*target)?;
+        }
         self.items = items;
-        self.nodes[label.0] = Some(node);
+        self.nodes[label.slot] = Some(node);
         Ok(())
     }
     /// Allocates and binds one node. On failure no label is retained.
@@ -307,18 +353,18 @@ impl AstBuilder {
         while let Some((label, depth, exit)) = stack.pop() {
             let node = self.node(label)?;
             if exit {
-                state[label.0] = 2;
+                state[label.slot] = 2;
                 continue;
             }
             if depth > self.limits.max_depth {
                 return Err(AstBuildError::Limit("depth"));
             }
-            match state[label.0] {
+            match state[label.slot] {
                 1 => return Err(AstBuildError::Cycle(label)),
                 2 => return Err(AstBuildError::RepeatedNode(label)),
                 _ => {}
             }
-            state[label.0] = 1;
+            state[label.slot] = 1;
             order.push(label);
             stack.push((label, depth, true));
             for field in node.fields().rev() {
@@ -333,9 +379,13 @@ impl AstBuilder {
             }
         }
         for (i, seen) in state.into_iter().enumerate() {
-            self.node(AstLabel(i))?;
+            let label = AstLabel {
+                owner: self.owner,
+                slot: i,
+            };
+            self.node(label)?;
             if seen == 0 {
-                return Err(AstBuildError::UnusedNode(AstLabel(i)));
+                return Err(AstBuildError::UnusedNode(label));
             }
         }
         Ok(order)
@@ -358,7 +408,7 @@ impl AstBuilder {
     ) -> Result<(), AstBuildError> {
         let address = |target: AstLabel| {
             addresses
-                .get(target.0)
+                .get(target.slot)
                 .copied()
                 .ok_or(AstBuildError::InvalidLabel(target))
         };
@@ -389,13 +439,13 @@ impl AstBuilder {
         let mut unshared_tags = vec![0; self.nodes.len()];
         for &label in order {
             let node = self.node(label)?;
-            unshared_tags[label.0] = match node {
+            unshared_tags[label.slot] = match node {
                 AstNode::Reference {
                     tag: tag @ (SHAREDTERM_TAG | SHAREDTYPE_TAG),
                     target,
                 } => {
                     let tag_at_target = *unshared_tags
-                        .get(target.0)
+                        .get(target.slot)
                         .ok_or(AstBuildError::InvalidLabel(*target))?;
                     if tag_at_target == 0 {
                         return Err(AstBuildError::InvalidReference {
@@ -432,7 +482,7 @@ impl AstBuilder {
                     },
                 ) => {
                     matches!(fields.as_slice(), [AstField::Nat(_), AstField::Tree(bound), ..]
-                        if (unshared_tags[bound.0] == TYPEBOUNDS_TAG) == matches!(tag, TYPEREFDIRECT_TAG | TYPEREFSYMBOL_TAG))
+                        if (unshared_tags[bound.slot] == TYPEBOUNDS_TAG) == matches!(tag, TYPEREFDIRECT_TAG | TYPEREFSYMBOL_TAG))
                 }
                 (TYPEREFDIRECT_TAG | TYPEREFSYMBOL_TAG, _) => {
                     matches!(target_node.tag(), TYPEDEF_TAG | TYPEPARAM_TAG)
@@ -468,30 +518,30 @@ impl AstBuilder {
                     payload_size = self.add(
                         payload_size,
                         match field {
-                            AstField::Tree(child) => sizes[child.0],
+                            AstField::Tree(child) => sizes[child.slot],
                             AstField::Nat(n) => nat_width(n as usize),
                         },
                     )?;
                 }
                 scratch.clear();
                 Self::write_prefix(node, &addresses, payload_size, &mut scratch)?;
-                prefixes[label.0] = scratch.position();
-                sizes[label.0] = self.add(payload_size, scratch.position())?;
+                prefixes[label.slot] = scratch.position();
+                sizes[label.slot] = self.add(payload_size, scratch.position())?;
             }
             let mut end = 0;
             for root in roots {
-                next[root.0] = u32::try_from(end).map_err(|_| AstBuildError::Overflow)?;
-                end = self.add(end, sizes[root.0])?;
+                next[root.slot] = u32::try_from(end).map_err(|_| AstBuildError::Overflow)?;
+                end = self.add(end, sizes[root.slot])?;
             }
             for &label in &order {
                 let node = self.node(label)?;
-                let mut at = self.add(next[label.0] as usize, prefixes[label.0])?;
+                let mut at = self.add(next[label.slot] as usize, prefixes[label.slot])?;
                 for field in node.fields() {
                     let width = match field {
                         AstField::Tree(child) => {
-                            next[child.0] =
+                            next[child.slot] =
                                 u32::try_from(at).map_err(|_| AstBuildError::Overflow)?;
-                            sizes[child.0]
+                            sizes[child.slot]
                         }
                         AstField::Nat(n) => nat_width(n as usize),
                     };
@@ -513,7 +563,7 @@ impl AstBuilder {
                         Self::write_prefix(
                             node,
                             &addresses,
-                            sizes[l.0] - prefixes[l.0],
+                            sizes[l.slot] - prefixes[l.slot],
                             &mut writer,
                         )?;
                         stack.extend(node.fields().rev());
@@ -521,6 +571,7 @@ impl AstBuilder {
                 }
             }
             return Ok(BuiltAst {
+                owner: self.owner,
                 bytes: writer.into_inner(),
                 addresses,
             });

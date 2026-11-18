@@ -80,8 +80,8 @@ Each reserved node must be reachable and emitted exactly once. A reference does
 not emit its target. Shared references point backward; direct/symbol references
 must target a declaration tag of the corresponding namespace. Child cycles,
 unbound/duplicate/unused labels and invalid operands yield `AstBuildError`.
-Labels are relative to one builder; same-slot labels from another builder cannot
-be authenticated. The builder validates layout and these reference rules; the
+A label identifies its originating builder and slot. Binding and finishing
+reject foreign labels, and address lookup returns `None` for them. The builder validates layout and these reference rules; the
 caller still owns tag-specific payload grammar, names and full-file validation.
 
 Layout repeatedly sizes nodes using current address estimates, then assigns new

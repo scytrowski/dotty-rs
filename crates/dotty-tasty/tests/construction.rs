@@ -355,3 +355,51 @@ fn block_layout_matches_the_wire_encoder_for_mixed_width_constants() {
         assert_eq!(built.address(label), Some((prefix + offset) as u32));
     }
 }
+
+#[test]
+fn same_slot_labels_are_scoped_to_the_builder_and_its_finished_fragment() {
+    let mut other = AstBuilder::new(Default::default());
+    let foreign = other.push(leaf(UNITCONST_TAG, TermValue::Unit)).unwrap();
+    let mut builder = AstBuilder::new(Default::default());
+    let local = builder.reserve().unwrap();
+    assert_ne!(foreign, local);
+    assert_eq!(
+        builder.bind(foreign, leaf(UNITCONST_TAG, TermValue::Unit)),
+        Err(AstBuildError::InvalidLabel(foreign))
+    );
+    for node in [
+        AstNode::Ast {
+            tag: THIS_TAG,
+            child: foreign,
+        },
+        AstNode::Length {
+            tag: BLOCK_TAG,
+            fields: vec![AstField::Tree(foreign)],
+        },
+        AstNode::Reference {
+            tag: SHAREDTYPE_TAG,
+            target: foreign,
+        },
+        AstNode::NatAst {
+            tag: TERMREFSYMBOL_TAG,
+            value: AstOperand::Reference(foreign),
+            child: local,
+        },
+    ] {
+        assert_eq!(
+            builder.bind(local, node),
+            Err(AstBuildError::InvalidLabel(foreign))
+        );
+    }
+    builder
+        .bind(local, leaf(UNITCONST_TAG, TermValue::Unit))
+        .unwrap();
+    assert_eq!(
+        builder.finish(&[foreign]),
+        Err(AstBuildError::InvalidLabel(foreign))
+    );
+    let built = builder.finish(&[local]).unwrap();
+    assert_eq!(built.address(local), Some(0));
+    assert_eq!(built.address(foreign), None);
+    assert_eq!(built.bytes(), other.finish(&[foreign]).unwrap().bytes());
+}
