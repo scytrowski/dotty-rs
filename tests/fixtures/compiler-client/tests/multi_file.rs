@@ -1,20 +1,22 @@
 //! The consumer owns phase ordering, plans and output. Its two fixture classes
 //! each have a public no-arg constructor and a single method with an explicit result.
+#[path = "support/parsing.rs"]
+mod parsing;
+
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 
 use dotty::core::{
-    AstArena, Definitions, Packages, SemanticStore, SourceId, SourceSemanticIndex, SourceText,
-    SymbolId, TreeId, TreeKind, Untyped,
+    AstArena, Definitions, Packages, SemanticStore, SourceId, SourceSemanticIndex, SymbolId,
+    TreeId, TreeKind, Untyped,
 };
 use dotty::jvm::{
     GeneratedClass, JvmClassInitializationPlan, JvmClassPlan, JvmCompilationUnit, JvmMethodPlan,
     emit_class,
 };
-use dotty::lexer::ContextualScanner;
 use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
-use dotty::parser::parse_compilation_unit;
+use dotty::parser::ParseResult;
 use dotty::typer::SourceTyper;
 
 struct NamedUnit {
@@ -28,22 +30,10 @@ struct NamedUnit {
 fn enter(
     id: SourceId,
     name: &str,
-    text: &str,
+    parsed: ParseResult,
     store: &mut SemanticStore,
     packages: &mut Packages,
 ) -> NamedUnit {
-    let scanner = ContextualScanner::new(text).unwrap();
-    assert!(
-        scanner.diagnostics().is_empty(),
-        "{:?}",
-        scanner.diagnostics()
-    );
-    let parsed = parse_compilation_unit(
-        SourceText::new(text).unwrap(),
-        id,
-        scanner,
-        &mut store.names,
-    );
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let NamingOutcome::Named { index, diagnostics } = name_compilation_unit_with_diagnostics(
         &parsed.ast,
@@ -94,7 +84,11 @@ fn with_plan<R>(
     let mut packages = Packages::new();
     let units: Vec<_> = files
         .iter()
-        .map(|&(id, name, text)| enter(id, name, text, &mut store, &mut packages))
+        .zip(parsing::parse_files(files, 4))
+        .map(|(&(id, name, _), detached)| {
+            let parsed = detached.into_session(&mut store.names);
+            enter(id, name, parsed, &mut store, &mut packages)
+        })
         .collect();
 
     // Both signatures are available before a body can request another file's method.

@@ -14,6 +14,7 @@ mod compilation_unit;
 mod context;
 mod cursor;
 mod definitions;
+mod detached;
 mod diagnostics;
 mod expr;
 mod extensions;
@@ -39,6 +40,7 @@ mod types;
 pub use compilation_unit::{ParseResult, parse_compilation_unit, parse_expression_fragment};
 pub use context::{Location, ParamOwner, ParseContext, ParseKind, ParserFeatures};
 pub use cursor::{Cursor, CursorCheckpoint};
+pub use detached::DetachedParse;
 #[cfg(test)]
 pub use diagnostics::ParseDiagnosticKind;
 pub use diagnostics::{

@@ -1976,6 +1976,38 @@ impl ParseDiagnostic {
         }
     }
 
+    /// Translates the interned names carried by operator and modifier diagnostics.
+    pub(crate) fn remap_names(&mut self, map: impl Fn(Name) -> Name) {
+        let issue = match *self.issue() {
+            ParseIssue::Expression(ExpressionIssue::MixedAssociativityOperators {
+                left,
+                right,
+            }) => ParseIssue::Expression(ExpressionIssue::MixedAssociativityOperators {
+                left: map(left),
+                right: map(right),
+            }),
+            ParseIssue::Type(TypeIssue::MixedAssociativityTypeOperators { left, right }) => {
+                ParseIssue::Type(TypeIssue::MixedAssociativityTypeOperators {
+                    left: map(left),
+                    right: map(right),
+                })
+            }
+            ParseIssue::Pattern(PatternIssue::MixedAssociativityOperators { left, right }) => {
+                ParseIssue::Pattern(PatternIssue::MixedAssociativityOperators {
+                    left: map(left),
+                    right: map(right),
+                })
+            }
+            ParseIssue::Modifier(ModifierIssue::UnsupportedContextualModifier { name }) => {
+                ParseIssue::Modifier(ModifierIssue::UnsupportedContextualModifier {
+                    name: map(name),
+                })
+            }
+            _ => return,
+        };
+        self.diagnostic = Diagnostic::with_issue(self.severity(), self.span(), issue);
+    }
+
     /// Returns the structured parser issue payload.
     pub fn issue(&self) -> &ParseIssue {
         self.diagnostic.issue()

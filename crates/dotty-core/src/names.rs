@@ -115,6 +115,11 @@ impl NameInterner {
         id
     }
 
+    /// Iterates the distinct spellings in name ID order.
+    pub fn spellings(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.strings.iter().map(Box::as_ref)
+    }
+
     /// The id of `text` if it has been interned, without interning it.
     pub fn get(&self, text: &str) -> Option<NameId> {
         self.lookup.get(text).copied()

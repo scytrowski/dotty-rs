@@ -65,6 +65,11 @@ impl<P: AstPhase> AstArena<P> {
         &mut self.nodes[id.index() as usize]
     }
 
+    /// Mutates allocated nodes in place, preserving their tree IDs and order.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Tree<P>> {
+        self.nodes.iter_mut()
+    }
+
     /// Iterates over every allocated tree in stable arena order.
     pub fn iter(&self) -> impl Iterator<Item = (TreeId<P>, &Tree<P>)> + '_ {
         self.nodes
