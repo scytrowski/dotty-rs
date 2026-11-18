@@ -9818,6 +9818,7 @@ mod tests {
     mod lexical_closure_rollback;
     mod local_value_capture;
     mod method_parameter_capture;
+    mod nested_context_evidence;
 
     #[test]
     fn function1_expectation_infers_lambda_parameter_and_checks_body() {

@@ -1838,9 +1838,13 @@ a non-lambda body in a closure with fresh evidence parameters before typing
 the body. Two nested unary contextual expectations can introduce two synthetic
 methods at the same source expression. The source binding identifies the outer
 closure, and each typed closure links to its own definition and ordered formals.
-Deeper implicit abstractions remain unsupported. Captures requiring
-an environment are rejected explicitly; references to shared object-owned
-values do not count as closure captures. Failed lambda typing rolls back its
+In `Int ?=> (Boolean ?=> Int)`, a call requiring both types reads one
+parameter from each method. When both layers supply the same type, the
+inner parameter wins. The inner closure captures an outer parameter only
+when it uses it. An instance method call also captures the receiver, which
+the outer closure retains for constructing the inner closure. Shared
+object-owned values do not require a capture. Deeper implicit abstractions
+remain unsupported. Failed lambda typing rolls back its
 synthetic method, parameter symbols, scopes, typed nodes, and source mappings. The pinned
 Scala 3.9.0 typer and `lambdaLift` shapes, including source positions, are
 recorded in the [function-literal fixture](../crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.oracle.md).

@@ -40,6 +40,7 @@ struct FunctionLiteralDefinition {
     typed_definition: Option<TreeId<Typed>>,
     captures: Vec<(SymbolId, TreeId<Typed>)>,
     capture_enclosing_values: bool,
+    nested_context_parent: Option<SymbolId>,
 }
 
 impl FunctionLiteralIndex {
@@ -79,17 +80,27 @@ impl FunctionLiteralIndex {
 
     pub(in crate::typer) fn capture(
         &mut self,
+        store: &SemanticStore,
         method: SymbolId,
         symbol: SymbolId,
         value: TreeId<Typed>,
     ) {
-        if let Some(definition) = self.definitions.get_mut(&method)
-            && !definition
-                .captures
-                .iter()
-                .any(|(captured, _)| *captured == symbol)
-        {
-            definition.captures.push((symbol, value));
+        let outer = self
+            .definitions
+            .get(&method)
+            .and_then(|definition| definition.nested_context_parent);
+        // The outer closure constructs the inner one. Its own binder is already
+        // in scope there, while every other inner capture must be available to it.
+        let forward_to = outer.filter(|outer| store.symbols.owner(symbol) != Some(*outer));
+        for owner in [Some(method), forward_to].into_iter().flatten() {
+            if let Some(definition) = self.definitions.get_mut(&owner)
+                && !definition
+                    .captures
+                    .iter()
+                    .any(|(captured, _)| *captured == symbol)
+            {
+                definition.captures.push((symbol, value));
+            }
         }
     }
 
@@ -106,33 +117,49 @@ impl FunctionLiteralIndex {
             .unwrap_or_default()
     }
 
+    /// The enclosing source method and, for a nested context abstraction,
+    /// the synthetic method that constructs the current closure.
+    fn capture_owners(
+        &self,
+        store: &SemanticStore,
+        method: SymbolId,
+    ) -> Option<(SymbolId, Option<SymbolId>)> {
+        let definition = self.definitions.get(&method)?;
+        if !definition.capture_enclosing_values
+            || !store.symbols.contains(method)
+            || store.symbols.get(method).kind != SymbolKind::Method
+        {
+            return None;
+        }
+        let outer = definition.nested_context_parent.unwrap_or(method);
+        if outer != method
+            && (store.symbols.owner(method) != Some(outer)
+                || !self.is_method(outer)
+                || !store.symbols.contains(outer))
+        {
+            return None;
+        }
+        let source_method = store.symbols.owner(outer)?;
+        (store.symbols.contains(source_method)
+            && store.symbols.get(source_method).kind == SymbolKind::Method
+            && !self.is_method(source_method))
+        .then_some((source_method, definition.nested_context_parent))
+    }
+
     pub(in crate::typer) fn can_capture_enclosing_this(
         &self,
         store: &SemanticStore,
         method: SymbolId,
         class: SymbolId,
     ) -> bool {
-        if !self
-            .definitions
-            .get(&method)
-            .is_some_and(|definition| definition.capture_enclosing_values)
-            || !store.symbols.contains(method)
-            || !store.symbols.contains(class)
+        let Some((source_method, _)) = self.capture_owners(store, method) else {
+            return false;
+        };
+        if !store.symbols.contains(class)
             || !matches!(
                 store.symbols.get(class).kind,
                 SymbolKind::Class | SymbolKind::Trait
             )
-        {
-            return false;
-        }
-        let lambda = store.symbols.get(method);
-        let Some(source_method) = lambda.owner else {
-            return false;
-        };
-        if lambda.kind != SymbolKind::Method
-            || !store.symbols.contains(source_method)
-            || store.symbols.get(source_method).kind != SymbolKind::Method
-            || self.is_method(source_method)
         {
             return false;
         }
@@ -167,22 +194,8 @@ impl FunctionLiteralIndex {
         method: SymbolId,
         symbol: SymbolId,
     ) -> Option<SymbolId> {
-        if !self
-            .definitions
-            .get(&method)
-            .is_some_and(|definition| definition.capture_enclosing_values)
-            || !store.symbols.contains(method)
-            || !store.symbols.contains(symbol)
-        {
-            return None;
-        }
-        let lambda = store.symbols.get(method);
-        let source_method = lambda.owner?;
-        if lambda.kind != SymbolKind::Method
-            || !store.symbols.contains(source_method)
-            || store.symbols.get(source_method).kind != SymbolKind::Method
-            || self.is_method(source_method)
-        {
+        let (source_method, _) = self.capture_owners(store, method)?;
+        if !store.symbols.contains(symbol) {
             return None;
         }
         let owner = store.symbols.get(source_method).owner?;
@@ -246,26 +259,19 @@ impl FunctionLiteralIndex {
         method: SymbolId,
         symbol: SymbolId,
     ) -> bool {
-        if !self
-            .definitions
-            .get(&method)
-            .is_some_and(|definition| definition.capture_enclosing_values)
-        {
+        let Some((source_method, outer)) = self.capture_owners(store, method) else {
             return false;
-        }
+        };
         if !store.symbols.contains(symbol) {
             return false;
         }
         let parameter = store.symbols.get(symbol);
-        let Some(owner) = store.symbols.get(method).owner else {
-            return false;
-        };
-        if parameter.kind != SymbolKind::Parameter
-            || parameter.owner != Some(owner)
+        let in_scope = parameter
+            .owner
+            .is_some_and(|owner| owner == source_method || Some(owner) == outer);
+        if !in_scope
+            || parameter.kind != SymbolKind::Parameter
             || parameter.flags.contains(SymbolFlags::MUTABLE)
-            || !store.symbols.contains(owner)
-            || store.symbols.get(owner).kind != SymbolKind::Method
-            || self.is_method(owner)
         {
             return false;
         }
@@ -567,6 +573,7 @@ impl SourceTyper<'_> {
                 typed_definition: None,
                 captures: Vec::new(),
                 capture_enclosing_values: parameters.len() == 1,
+                nested_context_parent: nested.then_some(context.owner),
             },
         );
 

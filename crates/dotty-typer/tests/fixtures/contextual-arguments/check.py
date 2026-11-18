@@ -68,6 +68,15 @@ def main():
             ("OpaqueError.scala", 1, ("[E172]", "No given instance of type opaqueerror.Key[opaqueerror.Tokens.Token]")),
             ("Dependent.scala", 0, ("this.read(p)(p.member)", "this.read(using p)(p.member)",
                 "this.needs(dependentclauses.Witness.derive(p)(p.member))")),
+            ("NestedEvidence.scala", 0, (
+                "using contextual$2: Boolean) => this.read(contextual$1, contextual$2)",
+                "contextual$4: Int) => this.readOne(contextual$4)",
+                "contextual$5: Boolean) => (using contextual$6: Long) => x",
+            )),
+            ("NestedEvidenceMissing.scala", 1, (
+                "[E172]", "No given instance of type Long was found for parameter third of method read",
+                "this.read(contextual$3, contextual$4, third)", "1 error found",
+            )),
             ("Recursive.scala", 0, (
                 "final class $_lazy_implicit_$2() extends Object(), Serializable",
                 "recursivesearch.Evidence.loop(this.$_lazy_implicit_$1,",

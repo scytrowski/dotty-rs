@@ -857,7 +857,8 @@ impl SourceTyper<'_> {
         let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
             .this(this.qual, ty, position);
         if capture_this {
-            self.function_literals.capture(context.owner, class, typed);
+            self.function_literals
+                .capture(self.store, context.owner, class, typed);
         }
         Ok(typed)
     }
@@ -892,7 +893,8 @@ impl SourceTyper<'_> {
             position,
             ty,
         });
-        self.function_literals.capture(method, class, this);
+        self.function_literals
+            .capture(self.store, method, class, this);
         Ok(())
     }
 
@@ -1159,7 +1161,8 @@ impl SourceTyper<'_> {
             self.capture_implicit_enclosing_this(context.owner, class, tree_index, position)?;
         }
         if capture_parameter || capture_local {
-            self.function_literals.capture(context.owner, symbol, typed);
+            self.function_literals
+                .capture(self.store, context.owner, symbol, typed);
         }
         Ok(typed)
     }
