@@ -1,5 +1,6 @@
 use crate::reader::{ReadError, Reader};
 use crate::writer::{WriteError, Writer};
+use std::collections::{HashMap, hash_map::Entry};
 use std::fmt;
 
 /// Zero-based reference into a TASTy name table.
@@ -136,7 +137,7 @@ pub enum RawNameKind {
 /// References are [`NameRef`]s: the zero-based index of an entry in the name
 /// table, as in Scala 3.9.0 compiler output. Unknown entries
 /// retain their tag and bounded payload for forward-compatible round-trips.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RawName {
     /// Direct UTF-8 text.
     Utf8(String),
@@ -235,7 +236,7 @@ pub struct NameTable {
 /// Owned builder for a decoded or programmatically assembled name table.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NameTableBuilder {
-    entries: Vec<RawName>,
+    entries: HashMap<RawName, NameRef>,
 }
 
 /// Errors returned while decoding or validating a name table.
@@ -929,27 +930,25 @@ impl NameTableBuilder {
     ///
     /// An entry equal to an existing entry reuses that entry's reference.
     pub fn intern(&mut self, entry: RawName) -> Result<NameRef, NameTableError> {
-        if let Some(index) = self
-            .entries
-            .iter()
-            .position(|candidate| candidate == &entry)
-        {
-            return NameRef::try_from(index).map_err(|_| NameTableError::EntryOverflow {
-                entry_count: self.entries.len(),
-            });
+        let entry_count = self.entries.len();
+        match self.entries.entry(entry) {
+            Entry::Occupied(existing) => Ok(*existing.get()),
+            Entry::Vacant(slot) => {
+                let reference = NameRef::try_from(entry_count)
+                    .map_err(|_| NameTableError::EntryOverflow { entry_count })?;
+                slot.insert(reference);
+                Ok(reference)
+            }
         }
-
-        let reference =
-            NameRef::try_from(self.entries.len()).map_err(|_| NameTableError::EntryOverflow {
-                entry_count: self.entries.len(),
-            })?;
-        self.entries.push(entry);
-        Ok(reference)
     }
 
-    /// Validates the entries and returns the completed table.
+    /// Validates the entries and returns the completed table in first-seen order.
     pub fn finish(self) -> Result<NameTable, NameTableError> {
-        NameTable::from_entries(self.entries)
+        let mut entries = vec![RawName::Utf8(String::new()); self.entries.len()];
+        for (name, reference) in self.entries {
+            entries[reference as usize] = name;
+        }
+        NameTable::from_entries(entries)
     }
 
     /// Returns the number of entries currently interned.
