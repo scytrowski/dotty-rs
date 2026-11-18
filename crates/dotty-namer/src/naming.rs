@@ -2630,7 +2630,7 @@ impl Namer<'_> {
         // owner-specific derived identity keeps it separate from both the
         // constructor/apply field parameter and the generated method symbol.
         let input_name = *dotty_core::TermName::new(self.store.names.intern("x$1")).as_name();
-        self.enter_derived_symbol(
+        let input = self.enter_derived_symbol(
             class_tree,
             input_name,
             unapply,
@@ -2645,6 +2645,8 @@ impl Namer<'_> {
             self.child_source_context(unapply, unapply_scope, Some(declaration_context));
         self.index
             .record_declaration_context(unapply, unapply_context)?;
+        self.index
+            .record_declaration_context(input, unapply_context)?;
         Ok(())
     }
 
@@ -2883,6 +2885,13 @@ impl Namer<'_> {
                     )?;
                     self.index
                         .record_declaration_context(field, class_source_context)?;
+                    if let Some(selector) =
+                        self.index
+                            .derived_symbol_at(symbol, self.source, *parameter_tree)
+                    {
+                        self.index
+                            .record_declaration_context(selector, class_source_context)?;
+                    }
                 }
             }
         }

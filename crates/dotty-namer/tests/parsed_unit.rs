@@ -70,11 +70,11 @@ fn named_source_tree_name(
 fn flagged_product_selectors_have_independent_class_owned_provenance() {
     for (source_text, source_id) in [
         (
-            "package matching\ncase class Flagged(value: Int, enabled: Boolean)\ncase class Other(x: String)",
+            "package matching\nimport types.*\ncase class Flagged(value: Int, enabled: Boolean)\ncase class Other(x: String)",
             1962,
         ),
         (
-            "package matching\ncase class Other(x: String)\ncase class Flagged(value: Int, enabled: Boolean)",
+            "package matching\nimport types.*\ncase class Other(x: String)\ncase class Flagged(value: Int, enabled: Boolean)",
             1963,
         ),
     ] {
@@ -124,6 +124,13 @@ fn flagged_product_selectors_have_independent_class_owned_provenance() {
             assert_eq!(selector_symbol.kind, SymbolKind::Method);
             assert_eq!(selector_symbol.owner, Some(class_symbol));
             assert!(selector_symbol.flags.contains(SymbolFlags::SYNTHETIC));
+            let context = named.index.declaration_context_of(selector).unwrap();
+            assert_eq!(named.index.declaration_context_of(field), Some(context));
+            let environment = named.index.source_context(context);
+            assert_eq!(environment.owner, class_symbol);
+            assert_eq!(environment.lexical_scope, class_scope);
+            let parent = named.index.source_context(environment.parent.unwrap());
+            assert_eq!(parent.import, Some(package.stats[0]));
             assert_ne!(field, selector);
             assert_eq!(
                 named.store.names.resolve(selector_symbol.name.text()),
@@ -7424,6 +7431,16 @@ fn generated_unapply_is_independent_of_case_class_companion_declaration_order() 
         assert_eq!(
             named.index.source_context(context).lexical_scope,
             unapply_scope
+        );
+        let input = named
+            .index
+            .derived_symbol_at(unapply, named.source, class_tree)
+            .expect("generated unapply should have an instance parameter");
+        assert_eq!(named.store.symbols.get(input).owner, Some(unapply));
+        assert_eq!(named.index.declaration_context_of(input), Some(context));
+        assert_eq!(
+            named.index.source_context(context).parent,
+            named.index.declaration_context_of(class)
         );
         assert_eq!(
             named

@@ -8,6 +8,8 @@ Namer publishes two synthetic public Method identities on the class. `_1` and
 source order. The existing `(owner, source, tree)` derived-symbol keys keep
 the selectors distinct from each other, the canonical class-owned Field
 symbols, and constructor/companion parameter copies. No `_3` is published.
+Each generated selector shares its constructor field's class-owned lexical
+context, including the enclosing declaration's imports.
 
 The existing one-field `Box(value: Int)` selector remains. Selector identities
 are published even when an explicit companion `unapply` replaces the generated
