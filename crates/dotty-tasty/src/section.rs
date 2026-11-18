@@ -901,7 +901,17 @@ impl EncodedAstSection {
         let mut address_map = BTreeMap::new();
 
         for iteration in 0..MAX_AST_RELOCATION_ITERATIONS {
-            let bytes = encode_structured_nodes(nodes, &address_map)?;
+            // Keep borrowed payloads on the first pass. Once a node moves,
+            // use the same encoding for every subsequent layout calculation.
+            let mut writer = if iteration == 0 {
+                Writer::new()
+            } else {
+                Writer::with_ast_address_map(address_map.clone())
+            };
+            for node in nodes {
+                node.encode(&mut writer)?;
+            }
+            let bytes = writer.into_inner();
             let (encoded_nodes, encoded_index) = ast_index_with_nodes(&bytes)?;
             let encoded_visible = encoded_index.iter_nodes().collect::<Vec<_>>();
 
@@ -1008,17 +1018,6 @@ impl EncodedAstSection {
 }
 
 const MAX_AST_RELOCATION_ITERATIONS: usize = 16;
-
-fn encode_structured_nodes(
-    nodes: &[StructuredNode<'_>],
-    address_map: &BTreeMap<u32, u32>,
-) -> Result<Vec<u8>, TermEncodeError> {
-    let mut writer = Writer::with_ast_address_map(address_map.clone());
-    for node in nodes {
-        node.encode(&mut writer)?;
-    }
-    Ok(writer.into_inner())
-}
 
 fn ast_address_from_offset(offset: usize) -> Result<u32, TermEncodeError> {
     u32::try_from(offset).map_err(|_| {

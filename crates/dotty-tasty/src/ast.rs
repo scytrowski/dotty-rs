@@ -2503,13 +2503,6 @@ impl<'a> RawNode<'a> {
         &self,
         writer: &mut Writer,
     ) -> Result<(), TermEncodeError> {
-        let mut needs_relocation = false;
-        self.visit_ast_refs(&mut |reference| {
-            needs_relocation |= writer.relocated_ast_ref(reference.address) != reference.address;
-        })?;
-        if !needs_relocation {
-            return self.encode(writer).map_err(TermEncodeError::from);
-        }
         match self.decode_structured()? {
             StructuredNode::Raw(_) => self.encode(writer).map_err(TermEncodeError::from),
             structured => structured.encode(writer),

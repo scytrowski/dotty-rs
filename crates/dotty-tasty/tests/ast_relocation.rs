@@ -54,3 +54,45 @@ fn widening_the_package_name_preserves_nested_reference_targets() {
         assert_eq!(new.reference.address, old.reference.address + 1);
     }
 }
+
+#[test]
+fn relocation_converges_when_canonical_padding_cancels_an_edit() {
+    use dotty_tasty::{
+        APPLY_TAG, EncodedSection, INTCONST_TAG, RawNodes, Reader, SHAREDTERM_TAG, UNITCONST_TAG,
+    };
+
+    // The third root starts at 11. Growing the first literal by one byte
+    // moves it to 12 until the nested reference loses its single pad byte.
+    let bytes = [
+        APPLY_TAG,
+        0x82,
+        INTCONST_TAG,
+        0xbf,
+        APPLY_TAG,
+        0x85,
+        APPLY_TAG,
+        0x83,
+        SHAREDTERM_TAG,
+        0,
+        0x8b,
+        APPLY_TAG,
+        0x81,
+        UNITCONST_TAG,
+    ];
+    let parsed = RawNodes::decode(&mut Reader::new(&bytes)).unwrap();
+    let mut roots: Vec<_> = parsed
+        .iter()
+        .map(|n| n.decode_structured().unwrap())
+        .collect();
+    let StructuredNode::Apply(first) = &mut roots[0] else {
+        panic!("expected an application")
+    };
+    first.function = RawTree::leaf(INTCONST_TAG, TermValue::Int(64)).unwrap();
+
+    let relocated = EncodedSection::structured_asts_relocated(0, &bytes, &roots).unwrap();
+    assert_eq!(relocated.ast_addresses(), &[0, 5, 11]);
+    let nodes = RawNodes::decode(&mut Reader::new(relocated.payload())).unwrap();
+    let refs = nodes.get(1).unwrap().ast_refs().unwrap();
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].address as usize, nodes.get(2).unwrap().offset);
+}
