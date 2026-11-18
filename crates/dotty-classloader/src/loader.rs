@@ -1247,7 +1247,6 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         self.load_semantic_class_with_tasty_unpickler_injected(name, false)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn load_semantic_class_for_selected_member(
         &mut self,
         name: &BinaryName,
