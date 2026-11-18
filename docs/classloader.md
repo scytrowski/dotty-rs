@@ -509,11 +509,13 @@ arity; each unsupported argument lowers to an explicit `Type::Error` rather
 than erasing the whole parent view. This preserves supported sibling
 arguments while keeping the unsupported slot observable.
 
-The crate-private semantic TASTy path also completes the pinned, parameter-
-free `convergence.ChainLeaf` → `ChainMiddle` → `ChainRoot` hierarchy from one
-request when the ordered classpath supplies all three matching TASTy units.
-It enters the canonical roots in one unpickler session, completes them in
-parent order, and retains each selected resource origin. A richer neighboring
+The crate-private semantic TASTy path also completes the measured parameter-
+free linear hierarchy from one requested class by following its indexed
+parent references, selecting each unit through the ordered classpath, and
+stopping at `java.lang.Object` or a compatible completed canonical ancestor.
+The handoff is bounded to three units and one non-Object parent per unit; it
+enters new roots in one unpickler session and completes them in parent order.
+Existing ancestor identities and origins are preserved. A richer neighboring
 unit remains on the existing bounded loader path. Ordinary `load_class`
 behavior is unchanged.
 

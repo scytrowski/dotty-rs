@@ -1234,11 +1234,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         &mut self,
         name: &BinaryName,
     ) -> Result<SymbolId, SemanticTastyLoadError> {
-        if Self::is_semantic_chain_name(name)
-            && !self.semantic_chain_has_existing_identity()
-            && self.semantic_chain_candidate_is_supported()
-        {
-            return self.load_semantic_chain_with_tasty_unpickler(name);
+        if let Some(resource) = self.semantic_chain_candidate_resource(name) {
+            return self.load_semantic_chain_with_tasty_unpickler(name, resource);
         }
         self.load_semantic_class_with_tasty_unpickler_injected(name, false)
     }
@@ -1250,41 +1247,40 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         self.load_semantic_class_with_tasty_unpickler_injected(name, false)
     }
 
-    fn is_semantic_chain_name(name: &BinaryName) -> bool {
-        matches!(
-            name.as_internal(),
-            "convergence/ChainRoot" | "convergence/ChainMiddle" | "convergence/ChainLeaf"
-        )
-    }
-
-    fn semantic_chain_has_existing_identity(&mut self) -> bool {
-        [
-            "convergence/ChainRoot",
-            "convergence/ChainMiddle",
-            "convergence/ChainLeaf",
-        ]
-        .into_iter()
-        .map(BinaryName::from_internal)
-        .any(|name| {
-            self.session.identified.contains_key(&name)
-                || self.session.resolved.contains_key(&name)
-                || self.repository.get(&name).is_some()
-                || self.open_package_contains_type_declaration(&name)
-        })
-    }
-
-    fn semantic_chain_candidate_is_supported(&self) -> bool {
-        let leaf = BinaryName::from_internal("convergence/ChainLeaf");
-        let Ok(Some(resource)) = self.class_path.find_class(&leaf) else {
-            return false;
+    fn semantic_chain_candidate_resource(
+        &mut self,
+        requested: &BinaryName,
+    ) -> Option<ClassResource> {
+        if self.semantic_tasty_loaded.contains_key(requested)
+            || self.session.identified.contains_key(requested)
+            || self.session.resolved.contains_key(requested)
+            || self.repository.get(requested).is_some()
+            || self.open_package_contains_type_declaration(requested)
+        {
+            return None;
+        }
+        let Ok(Some(resource)) = self.class_path.find_class(requested) else {
+            return None;
         };
         if resource.format() != ClassFormat::Tasty {
-            return false;
+            return None;
         }
         let Ok(file) = tasty_symbol::parse_classloader_tasty(resource.bytes()) else {
-            return false;
+            return None;
         };
-        Self::validate_semantic_chain_unit_shape(&file, &leaf).is_ok()
+        let supported = Self::validate_semantic_chain_unit_shape(&file, requested).is_ok()
+            && Self::semantic_chain_source_parents(&file, requested).is_ok_and(|parents| {
+                parents.iter().all(|parent| {
+                    parent.as_internal() == "java/lang/Object"
+                        || parent.package_path() == requested.package_path()
+                }) && (parents
+                    .iter()
+                    .any(|parent| parent.as_internal() != "java/lang/Object")
+                    || (parents.len() == 1
+                        && parents[0].as_internal() == "java/lang/Object"
+                        && Self::semantic_chain_unit_is_trait(&file, requested)))
+            });
+        supported.then_some(resource)
     }
 
     /// Complete the one measured, authentic linear three-unit hierarchy.
@@ -1295,77 +1291,145 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     fn load_semantic_chain_with_tasty_unpickler(
         &mut self,
         requested: &BinaryName,
+        first_resource: ClassResource,
     ) -> Result<SymbolId, SemanticTastyLoadError> {
-        const CHAIN: [&str; 3] = [
-            "convergence/ChainRoot",
-            "convergence/ChainMiddle",
-            "convergence/ChainLeaf",
-        ];
+        const MAX_CHAIN_UNITS: usize = 3;
         if let Some(&symbol) = self.semantic_tasty_loaded.get(requested) {
             return Ok(symbol);
         }
-        let names = CHAIN.map(BinaryName::from_internal);
-        for name in &names {
-            if self.session.identified.contains_key(name)
-                || self.session.resolved.contains_key(name)
-                || self.repository.get(name).is_some()
-                || self.open_package_contains_type_declaration(name)
-            {
-                return Err(SemanticTastyLoadError::PairRootCollision {
-                    binary_name: name.clone(),
-                });
-            }
+        let mut names = vec![requested.clone()];
+        if first_resource.format() != ClassFormat::Tasty {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the selected chain resource must be TASTy",
+            ));
         }
-        let mut resources = Vec::with_capacity(names.len());
-        for name in &names {
-            let resource = self
-                .class_path
-                .find_class(name)
-                .map_err(|error| {
-                    SemanticTastyLoadError::ClassLoad(ClassLoadError::Io(
-                        name.clone(),
-                        Rc::new(error),
-                    ))
-                })?
-                .ok_or_else(|| {
-                    SemanticTastyLoadError::ClassLoad(ClassLoadError::NotFound(name.clone()))
+        let mut resources = vec![Some(first_resource)];
+        let mut existing_symbols = vec![None];
+        let mut source_parents = Vec::new();
+        let mut visited = HashSet::from([requested.clone()]);
+
+        loop {
+            let index = names.len() - 1;
+            let resource = resources[index]
+                .as_ref()
+                .expect("a selected source unit has a resource");
+            let file =
+                tasty_symbol::parse_classloader_tasty(resource.bytes()).map_err(|error| {
+                    SemanticTastyLoadError::for_pair_unit(
+                        &names[index],
+                        resource,
+                        SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                            names[index].clone(),
+                            error,
+                        )),
+                    )
                 })?;
-            if resource.format() != ClassFormat::Tasty {
+            Self::validate_semantic_chain_unit_shape(&file, &names[index]).map_err(|error| {
+                SemanticTastyLoadError::for_pair_unit(&names[index], resource, error)
+            })?;
+            let parents =
+                Self::semantic_chain_source_parents(&file, &names[index]).map_err(|error| {
+                    SemanticTastyLoadError::for_pair_unit(&names[index], resource, error)
+                })?;
+            if parents.iter().any(|parent| {
+                parent.as_internal() != "java/lang/Object"
+                    && parent.package_path() != requested.package_path()
+            }) {
                 return Err(SemanticTastyLoadError::for_pair_unit(
-                    name,
-                    &resource,
+                    &names[index],
+                    resource,
                     SemanticTastyLoadError::UnsupportedShape(
-                        "all selected chain resources must be TASTy",
+                        "bounded semantic chain parents must stay in the requested package",
                     ),
                 ));
             }
-            resources.push(resource);
+            let ancestors = parents
+                .iter()
+                .filter(|parent| parent.as_internal() != "java/lang/Object")
+                .cloned()
+                .collect::<Vec<_>>();
+            if ancestors.len() > 1 {
+                return Err(SemanticTastyLoadError::for_pair_unit(
+                    &names[index],
+                    resource,
+                    SemanticTastyLoadError::UnsupportedShape(
+                        "a bounded semantic chain unit must have at most one non-Object parent",
+                    ),
+                ));
+            }
+            source_parents.push(parents);
+            let Some(parent) = ancestors.into_iter().next() else {
+                break;
+            };
+            if !visited.insert(parent.clone()) {
+                return Err(SemanticTastyLoadError::for_pair_unit(
+                    &names[index],
+                    resource,
+                    SemanticTastyLoadError::UnsupportedShape(
+                        "a bounded semantic chain cannot repeat a source parent",
+                    ),
+                ));
+            }
+
+            if let Some(symbol) = self.semantic_chain_existing_symbol(&parent) {
+                if !self.semantic_chain_existing_class_is_complete(symbol) {
+                    return Err(SemanticTastyLoadError::PairRootCollision {
+                        binary_name: parent,
+                    });
+                }
+                names.push(parent);
+                resources.push(None);
+                existing_symbols.push(Some(symbol));
+                break;
+            }
+            if names.len() >= MAX_CHAIN_UNITS {
+                return Err(SemanticTastyLoadError::for_pair_unit(
+                    &names[index],
+                    resource,
+                    SemanticTastyLoadError::UnsupportedShape(
+                        "semantic parent discovery exceeded the three-unit chain bound",
+                    ),
+                ));
+            }
+            names.push(parent.clone());
+            resources.push(Some(self.find_semantic_chain_resource(&parent)?));
+            existing_symbols.push(None);
         }
+
         let files = names
             .iter()
             .zip(&resources)
             .map(|(name, resource)| {
-                let file =
-                    tasty_symbol::parse_classloader_tasty(resource.bytes()).map_err(|error| {
-                        SemanticTastyLoadError::for_pair_unit(
-                            name,
-                            resource,
-                            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
-                                name.clone(),
-                                error,
-                            )),
-                        )
-                    })?;
-                Self::validate_semantic_chain_unit_shape(&file, name).map_err(|error| {
-                    SemanticTastyLoadError::for_pair_unit(name, resource, error)
-                })?;
-                Ok(file)
+                resource
+                    .as_ref()
+                    .map(|resource| {
+                        let file = tasty_symbol::parse_classloader_tasty(resource.bytes())
+                            .map_err(|error| {
+                                SemanticTastyLoadError::for_pair_unit(
+                                    name,
+                                    resource,
+                                    SemanticTastyLoadError::ClassLoad(
+                                        ClassLoadError::InvalidTastyFile(name.clone(), error),
+                                    ),
+                                )
+                            })?;
+                        Self::validate_semantic_chain_unit_shape(&file, name).map_err(|error| {
+                            SemanticTastyLoadError::for_pair_unit(name, resource, error)
+                        })?;
+                        Ok(file)
+                    })
+                    .transpose()
             })
             .collect::<Result<Vec<_>, SemanticTastyLoadError>>()?;
 
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
-        let package_scope_before = self.snapshot_tasty_package_scope(&["convergence"]);
+        let package_segments = requested
+            .package_path()
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+        let package_scope_before = self.snapshot_tasty_package_scope(&package_segments);
         let aliases_before = self.snapshot_open_builtin_aliases();
         let object_before = self
             .store
@@ -1424,9 +1488,16 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
             let packages = self.session.packages.take_packages();
             let mut tasty_session = TastySession::with_packages(packages);
-            let mut indexes = HashMap::<BinaryName, TastySemanticIndex>::new();
-            let mut addresses = HashMap::<BinaryName, (u32, u32)>::new();
-            for ((name, resource), file) in names.iter().zip(&resources).zip(&files) {
+            let mut indexes = vec![None; names.len()];
+            let mut unit_symbols = existing_symbols.clone();
+            for position in 0..names.len() {
+                let Some(resource) = resources[position].as_ref() else {
+                    continue;
+                };
+                let file = files[position]
+                    .as_ref()
+                    .expect("selected resource parsed before transaction");
+                let name = &names[position];
                 let mut unpickler =
                     TastyUnpickler::with_session(file, self.store, self.definitions, tasty_session);
                 if let Err(error) = unpickler.enter_symbols() {
@@ -1448,17 +1519,24 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                         return Err(error);
                     }
                 };
-                addresses.insert(name.clone(), (root, constructor));
-                indexes.insert(name.clone(), index);
+                unit_symbols[position] = Some(index.symbol_at(root).expect("indexed root symbol"));
+                indexes[position] = Some((index, root, constructor));
                 tasty_session = session;
             }
 
-            // The fixed fixture is a linear chain. The source-indexed parent
-            // identities are checked below; this topological order does not
-            // schedule arbitrary graphs.
-            for ((name, resource), file) in names.iter().zip(&resources).zip(&files) {
-                let index = indexes.remove(name).expect("all chain units were entered");
-                let (root, constructor) = addresses[name];
+            // The discovered source path is leaf-to-root. Complete only its
+            // new units in reverse order; the fixed depth bound is not a
+            // general dependency scheduler.
+            for position in (0..names.len()).rev() {
+                let (Some(resource), Some(file)) =
+                    (resources[position].as_ref(), files[position].as_ref())
+                else {
+                    continue;
+                };
+                let name = &names[position];
+                let (index, root, constructor) = indexes[position]
+                    .take()
+                    .expect("every newly entered unit has its source index");
                 let mut unpickler = TastyUnpickler::with_session_and_index(
                     file,
                     self.store,
@@ -1481,7 +1559,12 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 tasty_session = session;
             }
             let (_, mut packages) = TastyUnpickler::with_session(
-                &files[2],
+                files
+                    .iter()
+                    .rev()
+                    .flatten()
+                    .next()
+                    .expect("a semantic chain contains at least one TASTy unit"),
                 self.store,
                 self.definitions,
                 tasty_session,
@@ -1491,11 +1574,15 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
             let symbols = names
                 .iter()
-                .map(|name| {
+                .enumerate()
+                .map(|(position, name)| {
+                    if let Some(symbol) = unit_symbols[position] {
+                        return Ok((name.clone(), symbol));
+                    }
                     let scope = self
                         .session
                         .packages
-                        .get(&["convergence"])
+                        .get(&package_segments)
                         .and_then(|package| self.session.packages.scope_of(package))
                         .ok_or(SemanticTastyLoadError::UnsupportedShape(
                             "the chain package has no canonical declaration scope",
@@ -1519,28 +1606,45 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     Ok((name.clone(), symbol))
                 })
                 .collect::<Result<Vec<_>, SemanticTastyLoadError>>()?;
-            let [(_, root), (_, middle), (_, leaf)] = symbols.as_slice() else {
-                unreachable!("the bounded chain contains exactly three units")
-            };
-            if self.store.symbols.get(*root).kind != SymbolKind::Trait
-                || self.store.symbols.get(*middle).kind != SymbolKind::Class
-                || self.store.symbols.get(*leaf).kind != SymbolKind::Class
-                || !self.semantic_chain_has_parents(*root, &[self.definitions.object_class])
-                || !self
-                    .semantic_chain_has_parents(*middle, &[self.definitions.object_class, *root])
-                || !self.semantic_chain_parent_is(*leaf, *middle)
-            {
-                return Err(SemanticTastyLoadError::UnsupportedShape(
-                    "the source-indexed ChainLeaf -> ChainMiddle -> ChainRoot parent shape changed",
-                ));
+            let symbol_by_name = symbols.iter().cloned().collect::<HashMap<_, _>>();
+            for (position, (name, symbol)) in symbols.iter().enumerate() {
+                if existing_symbols[position].is_some() {
+                    continue;
+                }
+                let expected_parents = source_parents[position]
+                    .iter()
+                    .map(|parent| {
+                        if parent.as_internal() == "java/lang/Object" {
+                            Some(self.definitions.object_class)
+                        } else {
+                            symbol_by_name.get(parent).copied()
+                        }
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                        "a source parent identity is outside the bounded chain",
+                    ))?;
+                if !self.semantic_chain_has_parents(*symbol, &expected_parents) {
+                    return Err(SemanticTastyLoadError::for_pair_unit(
+                        name,
+                        resources[position]
+                            .as_ref()
+                            .expect("only new units have a source parent edge"),
+                        SemanticTastyLoadError::UnsupportedShape(
+                            "completed class parents differ from the indexed source parents",
+                        ),
+                    ));
+                }
             }
             Ok(symbols)
         })();
         match result {
             Ok(symbols) => {
                 for ((name, symbol), resource) in symbols.into_iter().zip(resources) {
-                    self.session
-                        .record_origin(symbol, resource.origin().clone());
+                    if let Some(resource) = resource {
+                        self.session
+                            .record_origin(symbol, resource.origin().clone());
+                    }
                     self.session.cache_resolved(name.clone(), symbol);
                     self.repository.mark_loaded(name.clone(), symbol);
                     self.semantic_tasty_loaded.insert(name, symbol);
@@ -1561,8 +1665,173 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         }
     }
 
-    fn semantic_chain_parent_is(&self, class: SymbolId, parent: SymbolId) -> bool {
-        self.semantic_chain_has_parents(class, &[parent])
+    fn find_semantic_chain_resource(
+        &self,
+        name: &BinaryName,
+    ) -> Result<ClassResource, SemanticTastyLoadError> {
+        let resource = self
+            .class_path
+            .find_class(name)
+            .map_err(|error| {
+                SemanticTastyLoadError::ClassLoad(ClassLoadError::Io(name.clone(), Rc::new(error)))
+            })?
+            .ok_or_else(|| {
+                SemanticTastyLoadError::ClassLoad(ClassLoadError::NotFound(name.clone()))
+            })?;
+        if resource.format() != ClassFormat::Tasty {
+            return Err(SemanticTastyLoadError::for_pair_unit(
+                name,
+                &resource,
+                SemanticTastyLoadError::UnsupportedShape(
+                    "all selected chain resources must be TASTy",
+                ),
+            ));
+        }
+        Ok(resource)
+    }
+
+    fn semantic_chain_existing_symbol(&mut self, name: &BinaryName) -> Option<SymbolId> {
+        let cached = self
+            .session
+            .identified
+            .get(name)
+            .or_else(|| self.session.resolved.get(name))
+            .copied()
+            .or_else(|| self.repository.get(name).and_then(ClassEntry::symbol))
+            .or_else(|| self.open_package_type_symbol(name));
+        cached.filter(|symbol| self.store.symbols.contains(*symbol))
+    }
+
+    fn open_package_type_symbol(&mut self, name: &BinaryName) -> Option<SymbolId> {
+        let package_segments = name
+            .package_path()
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+        let package = self.session.packages.get(&package_segments)?;
+        let scope = self.session.packages.scope_of(package)?;
+        let type_name = Name::new(self.store.names.intern(name.simple_name()), Namespace::Type);
+        let symbols = self.store.scopes.get(scope).lookup_all(&type_name);
+        if symbols.len() == 1 {
+            symbols.first().copied()
+        } else {
+            None
+        }
+    }
+
+    fn semantic_chain_existing_class_is_complete(&self, symbol: SymbolId) -> bool {
+        let entry = self.store.symbols.get(symbol);
+        matches!(entry.kind, SymbolKind::Class | SymbolKind::Trait)
+            && matches!(entry.info, SymbolInfo::Complete(info)
+                if matches!(self.store.types.get(info), Type::ClassInfo(class_info)
+                    if class_info.class == symbol
+                        && self.store.scopes.contains(class_info.declarations)
+                        && self.store.scopes.get(class_info.declarations).owner == Some(symbol)))
+    }
+
+    fn semantic_chain_source_parents(
+        file: &dotty_tasty::tasty::TastyFile<'_>,
+        requested: &BinaryName,
+    ) -> Result<Vec<BinaryName>, SemanticTastyLoadError> {
+        use dotty_tasty::tasty::{
+            DEFDEF_TAG, IMPORT_TAG, PACKAGE_TAG, RawTree, SELFDEF_TAG, StandardSection,
+            TEMPLATE_TAG, TYPEDEF_TAG, VALDEF_TAG,
+        };
+
+        let index = file.ast_address_index().map_err(|_| {
+            SemanticTastyLoadError::UnsupportedShape(
+                "a chain unit must expose an indexed template and parent trees",
+            )
+        })?;
+        let root_address = index
+            .iter_nodes_with_tag(TYPEDEF_TAG)
+            .find_map(|node| {
+                let address = u32::try_from(node.offset).ok()?;
+                let raw = index.get(address)?;
+                let definition = raw.decode_definition().ok()?;
+                (file.names().get_utf8(definition.name()) == Some(requested.simple_name()))
+                    .then_some(address)
+            })
+            .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                "the requested source root is absent from its AST address index",
+            ))?;
+        let template_address = index
+            .children_of(root_address)
+            .find(|child| child.tag == TEMPLATE_TAG)
+            .and_then(|node| u32::try_from(node.offset).ok())
+            .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                "the requested source root has no indexed template",
+            ))?;
+        let asts =
+            file.section(StandardSection::Asts)
+                .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                    "a chain unit must contain its AST section",
+                ))?;
+        let mut parents = Vec::new();
+        for child in index.children_of(template_address) {
+            if matches!(
+                child.tag,
+                DEFDEF_TAG | VALDEF_TAG | TYPEDEF_TAG | IMPORT_TAG | PACKAGE_TAG
+            ) {
+                break;
+            }
+            if child.tag == SELFDEF_TAG {
+                continue;
+            }
+            let offset = child.offset;
+            let mut reader = asts.reader();
+            reader.read_bytes(offset).map_err(|_| {
+                SemanticTastyLoadError::UnsupportedShape(
+                    "an indexed parent tree has an invalid AST offset",
+                )
+            })?;
+            let tree = RawTree::decode(&mut reader).map_err(|_| {
+                SemanticTastyLoadError::UnsupportedShape(
+                    "an indexed parent tree has an invalid TASTy shape",
+                )
+            })?;
+            let parent = tasty_symbol::resolve_indexed_parent_name(
+                file,
+                &tree,
+                &requested.package_path().replace('/', "."),
+            )
+            .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                "a chain parent must be a source-indexed, resolvable class reference",
+            ))?;
+            parents.push(parent);
+        }
+        Ok(parents)
+    }
+
+    fn semantic_chain_unit_is_trait(
+        file: &dotty_tasty::tasty::TastyFile<'_>,
+        requested: &BinaryName,
+    ) -> bool {
+        use dotty_tasty::tasty::{DefinitionBody, DefinitionTail, TRAIT_TAG};
+
+        let Ok(asts) = file.asts() else {
+            return false;
+        };
+        let Some(package) = asts.get(0).and_then(|root| root.decode_package().ok()) else {
+            return false;
+        };
+        let Some(root) = package.stats.get(0) else {
+            return false;
+        };
+        if root
+            .decode_definition()
+            .ok()
+            .and_then(|definition| file.names().get_utf8(definition.name()).map(str::to_owned))
+            .as_deref()
+            != Some(requested.simple_name())
+        {
+            return false;
+        }
+        matches!(
+            root.decode_definition_body(),
+            Ok(DefinitionBody::TypeDef { tail, .. })
+                if tail.iter().any(|entry| matches!(entry, DefinitionTail::Modifier(tag) if *tag == TRAIT_TAG))
+        )
     }
 
     fn semantic_chain_has_parents(&self, class: SymbolId, parents: &[SymbolId]) -> bool {
@@ -1640,6 +1909,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         }
         let dotty_tasty::tasty::DefinitionBody::TypeDef {
             type_or_template: dotty_tasty::tasty::RawTree::LengthNode(template),
+            tail,
             ..
         } = root.decode_definition_body().map_err(|error| {
             SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
@@ -1652,6 +1922,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 "a chain unit must have a class template",
             ));
         };
+        if has_unsupported_class_annotations(file, &tail) {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "user annotations on the selected class are unsupported",
+            ));
+        }
         let template = template.decode_template_structure().map_err(|error| {
             SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
                 name.clone(),
@@ -22783,8 +23058,8 @@ mod tests {
         assert_eq!(
             original,
             [
-                "UnsupportedShape:the requested top-level declaration must have a class template",
-                "UnresolvedMember@23:Type:ChainRoot",
+                "Loaded",
+                "Loaded",
                 "UnsupportedShape:the class template must have no type parameters and one constructor declaration",
             ]
         );
@@ -23287,6 +23562,257 @@ mod tests {
     }
 
     #[test]
+    fn semantic_chain_leaf_reuses_root_loaded_through_ordinary_routing() {
+        let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/semantic_chain_simple_3_9_0");
+        let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+        let root_name = BinaryName::from_internal("convergence/ChainRoot");
+        let middle_name = BinaryName::from_internal("convergence/ChainMiddle");
+        let leaf_name = BinaryName::from_internal("convergence/ChainLeaf");
+
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            CompositeClassPath::new(vec![
+                Box::new(crate::class_path::DirectoryClassPath::new(
+                    fixture_root.clone(),
+                )),
+                Box::new(
+                    crate::jdk_class_path::JdkClassPath::new(java_home.join("jmods"))
+                        .expect("JDK 21 jmods"),
+                ),
+            ]),
+            &mut store,
+        );
+        let root = loader
+            .load_class(&root_name)
+            .expect("ordinary root preload");
+        let root_before = loader.store.symbols.get(root).clone();
+        let origin_before = loader.session.origins.get(&root).cloned();
+        let leaf = loader
+            .load_semantic_class_with_tasty_unpickler(&leaf_name)
+            .expect("the source-indexed chain reuses its completed root");
+        let middle = loader
+            .session
+            .identified
+            .get(&middle_name)
+            .copied()
+            .expect("the missing direct parent was entered");
+        assert_eq!(loader.session.identified.get(&root_name), Some(&root));
+        assert_eq!(loader.session.resolved.get(&root_name), Some(&root));
+        assert_eq!(loader.store.symbols.get(root), &root_before);
+        assert_eq!(loader.session.origins.get(&root), origin_before.as_ref());
+        assert_eq!(
+            parent_symbol(loader.store, class_info(loader.store, leaf).parents[0]),
+            middle
+        );
+        assert!(
+            class_info(loader.store, middle)
+                .parents
+                .iter()
+                .any(|parent| parent_symbol(loader.store, *parent) == root)
+        );
+
+        let normalized_graph = |store: &SemanticStore, symbols: [SymbolId; 3]| {
+            symbols
+                .into_iter()
+                .map(|symbol| {
+                    let entry = store.symbols.get(symbol);
+                    let SymbolInfo::Complete(info) = entry.info else {
+                        panic!("normalized chain symbols are complete")
+                    };
+                    let Type::ClassInfo(class_info) = store.types.get(info) else {
+                        panic!("normalized chain symbols have ClassInfo")
+                    };
+                    let mut parents = class_info
+                        .parents
+                        .iter()
+                        .map(|parent| {
+                            symbol_name(store, store.types.get(*parent).reference_symbol().unwrap())
+                                .to_owned()
+                        })
+                        .collect::<Vec<_>>();
+                    parents.sort();
+                    (
+                        symbol_name(store, entry.owner.unwrap()).to_owned(),
+                        symbol_name(store, symbol).to_owned(),
+                        parents,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let graph_after_root_preload = normalized_graph(loader.store, [root, middle, leaf]);
+
+        let mut fresh_store = SemanticStore::new();
+        let mut fresh_loader = ClassLoader::new(
+            CompositeClassPath::new(vec![
+                Box::new(crate::class_path::DirectoryClassPath::new(
+                    fixture_root.clone(),
+                )),
+                Box::new(
+                    crate::jdk_class_path::JdkClassPath::new(java_home.join("jmods"))
+                        .expect("JDK 21 jmods"),
+                ),
+            ]),
+            &mut fresh_store,
+        );
+        let fresh_leaf = fresh_loader
+            .load_semantic_class_with_tasty_unpickler(&leaf_name)
+            .expect("fresh source-indexed leaf request");
+        let fresh_middle = fresh_loader
+            .session
+            .identified
+            .get(&middle_name)
+            .copied()
+            .expect("fresh direct parent");
+        let fresh_root = fresh_loader
+            .session
+            .identified
+            .get(&root_name)
+            .copied()
+            .expect("fresh grandparent");
+        assert_eq!(
+            normalized_graph(fresh_loader.store, [fresh_root, fresh_middle, fresh_leaf]),
+            graph_after_root_preload,
+            "reusing an ordinary-loaded root preserves the fresh canonical graph"
+        );
+        assert_eq!(
+            loader.session.origins.get(&root),
+            Some(&ClassOrigin::Directory(fixture_root))
+        );
+    }
+
+    #[test]
+    fn semantic_chain_discovers_indexed_parent_names_and_stops_at_requested_ancestor() {
+        let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/semantic_chain_simple_3_9_0");
+        let source_names = ["ChainRoot", "ChainMiddle", "ChainLeaf"];
+        let target_names = ["RootClass", "BranchClass", "LeafClass"];
+        let resources = source_names
+            .iter()
+            .zip(target_names)
+            .map(|(source, target)| {
+                let mut bytes = fs::read(
+                    fixture_root
+                        .join("convergence")
+                        .join(format!("{source}.tasty")),
+                )
+                .expect("source fixture");
+                for (old, new) in source_names.into_iter().zip(target_names) {
+                    let matches = bytes
+                        .windows(old.len())
+                        .enumerate()
+                        .filter_map(|(offset, window)| (window == old.as_bytes()).then_some(offset))
+                        .collect::<Vec<_>>();
+                    if old == *source {
+                        assert!(!matches.is_empty(), "name {old} occurs in TASTy bytes");
+                    }
+                    for offset in matches {
+                        bytes[offset..offset + old.len()].copy_from_slice(new.as_bytes());
+                    }
+                }
+                (
+                    BinaryName::from_internal(format!("convergence/{target}")),
+                    bytes,
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+        let mut renamed_store = SemanticStore::new();
+        let mut renamed_loader = ClassLoader::new(
+            CompositeClassPath::new(vec![
+                Box::new(InMemoryTastyClassPath(resources)),
+                Box::new(
+                    crate::jdk_class_path::JdkClassPath::new(java_home.join("jmods"))
+                        .expect("JDK 21 jmods"),
+                ),
+            ]),
+            &mut renamed_store,
+        );
+        let renamed_leaf = BinaryName::from_internal("convergence/LeafClass");
+        let loaded = renamed_loader
+            .load_semantic_class_with_tasty_unpickler(&renamed_leaf)
+            .expect("indexed parent references drive equivalent names");
+        assert!(matches!(
+            renamed_loader.store.symbols.get(loaded).info,
+            SymbolInfo::Complete(_)
+        ));
+        assert!(
+            renamed_loader
+                .session
+                .identified
+                .contains_key(&BinaryName::from_internal("convergence/BranchClass"))
+        );
+        assert!(
+            renamed_loader
+                .session
+                .identified
+                .contains_key(&BinaryName::from_internal("convergence/RootClass"))
+        );
+
+        let root_and_middle = ["ChainRoot", "ChainMiddle"]
+            .into_iter()
+            .map(|name| {
+                let bytes = fs::read(
+                    fixture_root
+                        .join("convergence")
+                        .join(format!("{name}.tasty")),
+                )
+                .expect("authentic parent");
+                (
+                    BinaryName::from_internal(format!("convergence/{name}")),
+                    bytes,
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut ancestor_store = SemanticStore::new();
+        let mut ancestor_loader = ClassLoader::new(
+            CompositeClassPath::new(vec![
+                Box::new(InMemoryTastyClassPath(root_and_middle)),
+                Box::new(
+                    crate::jdk_class_path::JdkClassPath::new(java_home.join("jmods"))
+                        .expect("JDK 21 jmods"),
+                ),
+            ]),
+            &mut ancestor_store,
+        );
+        let middle = ancestor_loader
+            .load_semantic_class_with_tasty_unpickler(&BinaryName::from_internal(
+                "convergence/ChainMiddle",
+            ))
+            .expect("a middle request does not require the descendant leaf resource");
+        assert!(matches!(
+            ancestor_loader.store.symbols.get(middle).info,
+            SymbolInfo::Complete(_)
+        ));
+
+        let root_only_bytes = fs::read(fixture_root.join("convergence/ChainRoot.tasty"))
+            .expect("authentic root resource");
+        let mut root_store = SemanticStore::new();
+        let mut root_loader = ClassLoader::new(
+            CompositeClassPath::new(vec![
+                Box::new(InMemoryTastyClassPath(HashMap::from([(
+                    BinaryName::from_internal("convergence/ChainRoot"),
+                    root_only_bytes,
+                )]))),
+                Box::new(
+                    crate::jdk_class_path::JdkClassPath::new(java_home.join("jmods"))
+                        .expect("JDK 21 jmods"),
+                ),
+            ]),
+            &mut root_store,
+        );
+        let root = root_loader
+            .load_semantic_class_with_tasty_unpickler(&BinaryName::from_internal(
+                "convergence/ChainRoot",
+            ))
+            .expect("a root request completes without selecting a descendant");
+        assert!(matches!(
+            root_loader.store.symbols.get(root).info,
+            SymbolInfo::Complete(_)
+        ));
+    }
+
+    #[test]
     fn semantic_chain_transitive_completion_preserves_wrong_owner_and_malformed_controls() {
         let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/semantic_chain_simple_3_9_0");
@@ -23432,6 +23958,19 @@ mod tests {
             );
         }
 
+        let leaf_only = HashMap::from([(names[2].clone(), bytes[2].clone())]);
+        let mut direct_missing_store = SemanticStore::new();
+        let mut direct_missing_loader = ClassLoader::new(
+            CompositeClassPath::new(vec![Box::new(InMemoryTastyClassPath(leaf_only)), jdk()]),
+            &mut direct_missing_store,
+        );
+        assert!(matches!(
+            direct_missing_loader.load_semantic_class_with_tasty_unpickler(&names[2]),
+            Err(SemanticTastyLoadError::ClassLoad(ClassLoadError::NotFound(found)))
+                if found == names[1]
+        ));
+        assert!(direct_missing_loader.semantic_tasty_loaded.is_empty());
+
         // The higher-priority winner is valid TASTy, but its declared root
         // does not match ChainRoot. Selection fails on that source resource
         // instead of falling through to the later authentic fixture.
@@ -23490,9 +24029,10 @@ mod tests {
         );
         assert!(matches!(
             self_parent_loader.load_semantic_class_with_tasty_unpickler(&names[2]),
-            Err(SemanticTastyLoadError::UnsupportedShape(
-                "the source-indexed ChainLeaf -> ChainMiddle -> ChainRoot parent shape changed"
-            ))
+            Err(SemanticTastyLoadError::PairUnitFailure { cause, .. })
+                if matches!(*cause, SemanticTastyLoadError::UnsupportedShape(
+                    "a bounded semantic chain cannot repeat a source parent"
+                ))
         ));
         assert!(self_parent_loader.semantic_tasty_loaded.is_empty());
     }
@@ -23602,9 +24142,10 @@ mod tests {
 
         assert!(matches!(
             loader.load_semantic_class_with_tasty_unpickler(&leaf_name),
-            Err(SemanticTastyLoadError::UnsupportedShape(
-                "the selected class must have one Object or previously completed class parent"
-            ))
+            Err(SemanticTastyLoadError::PairUnitFailure { cause, .. })
+                if matches!(*cause, SemanticTastyLoadError::UnsupportedShape(
+                    "a bounded semantic chain cannot repeat a source parent"
+                ))
         ));
         assert!(!loader.semantic_tasty_loaded.contains_key(&leaf_name));
         assert!(!loader.session.identified.contains_key(&leaf_name));

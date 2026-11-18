@@ -3485,6 +3485,20 @@ fn resolve_reference_name_in_package(
     resolve_reference_name_at_depth(file, tree, current_package, 0)
 }
 
+/// Resolve one source-indexed class parent tree to its JVM binary name.
+/// Callers must obtain `tree` from the indexed parent edge, not from a
+/// name-table scan; unsupported or ambiguous parent syntax stays explicit.
+pub(crate) fn resolve_indexed_parent_name(
+    file: &TastyFile<'_>,
+    tree: &RawTree<'_>,
+    current_package: &str,
+) -> Option<BinaryName> {
+    match resolve_reference_name_in_package(file, tree, Some(current_package)) {
+        ReferenceResolution::Resolved(name) => Some(name),
+        ReferenceResolution::Unresolved | ReferenceResolution::NotAReference => None,
+    }
+}
+
 fn resolve_reference_name_at_depth(
     file: &TastyFile<'_>,
     tree: &RawTree<'_>,
