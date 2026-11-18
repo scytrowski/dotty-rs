@@ -89,6 +89,11 @@ tools/tasty-baseline/verify-roundtrip.sh \
   crates/dotty-tasty/tests/fixtures/scala3-library
 ```
 
+The same check runs the Rust `ast_relocation` regression on the Scala 3.9.0
+`Locals.tasty` fixture. After Rust swaps the two local definitions and checks
+their reference identities, Scala recompiles that file with `-from-tasty`.
+The JVM loads the rebuilt class and checks that `pick()` returns 41.
+
 Use `--classpath=...` when the inspected files require definitions from an
 external artifact. The script uses temporary SBT boot, global, Ivy, Coursier,
 and IPC directories, so it does not modify the user's SDKMAN or SBT state. The GitHub Actions workflow

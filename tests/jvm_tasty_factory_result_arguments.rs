@@ -1370,11 +1370,11 @@ fn scala39_factory_result_oracle_decodes_classes_and_both_factory_methods() {
         "makeCounter"
     );
     assert_eq!(factory.names().render(create.name).unwrap(), "create");
-    assert_eq!(make_counter.parameters.len(), 1);
+    assert_eq!(make_counter.parameters().count(), 1);
     assert_eq!(
         factory
             .names()
-            .render(make_counter.parameters[0].name())
+            .render(make_counter.parameters().next().unwrap().name())
             .unwrap(),
         "seed"
     );
@@ -1386,7 +1386,7 @@ fn scala39_factory_result_oracle_decodes_classes_and_both_factory_methods() {
             .into_iter()
             .map(|name| factory.names().render(name).unwrap())
             .collect::<Vec<_>>(),
-        ["Counter", "example"]
+        ["Counter", "Counter", "example"]
     );
     let make_counter_wire_nodes = [DEFDEF_TAG, APPLY_TAG, SELECTIN_TAG, PARAM_TAG]
         .into_iter()
@@ -1450,9 +1450,12 @@ fn scala39_factory_result_oracle_decodes_classes_and_both_factory_methods() {
     };
     assert_eq!(counter_seed_reference.kind, AstRefKind::TermRefDirect);
     assert_eq!(counter_seed_reference.address, make_counter_parameter);
-    assert_eq!(create.parameters.len(), 1);
+    assert_eq!(create.parameters().count(), 1);
     assert_eq!(
-        factory.names().render(create.parameters[0].name()).unwrap(),
+        factory
+            .names()
+            .render(create.parameters().next().unwrap().name())
+            .unwrap(),
         "seed"
     );
     assert_eq!(
@@ -1466,7 +1469,7 @@ fn scala39_factory_result_oracle_decodes_classes_and_both_factory_methods() {
             .into_iter()
             .map(|name| factory.names().render(name).unwrap())
             .collect::<Vec<_>>(),
-        ["CounterOwner"]
+        ["CounterOwner", "CounterOwner"]
     );
     let RawTree::LengthNode(apply) = create.rhs.unwrap() else {
         panic!("create body is an outer APPLY");

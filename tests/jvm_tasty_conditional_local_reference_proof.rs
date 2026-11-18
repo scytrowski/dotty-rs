@@ -532,9 +532,9 @@ fn corrupt_shared_branch_address(bytes: &[u8]) -> Vec<u8> {
     );
 
     let mut old_nat = TastyWriter::default();
-    old_nat.write_nat(old_address);
+    old_nat.write_nat(old_address).unwrap();
     let mut invalid_nat = TastyWriter::default();
-    invalid_nat.write_nat(invalid_address);
+    invalid_nat.write_nat(invalid_address).unwrap();
     assert_eq!(
         old_nat.as_slice().len(),
         invalid_nat.as_slice().len(),
@@ -549,8 +549,14 @@ fn corrupt_shared_branch_address(bytes: &[u8]) -> Vec<u8> {
     let mut corrupted = bytes.to_vec();
     corrupted[tasty_offset..tasty_offset + invalid_nat.as_slice().len()]
         .copy_from_slice(invalid_nat.as_slice());
-    let corrupted_file = TastyFile::parse_and_validate_scala_3_9(&corrupted)
-        .expect("shared-address mutation preserves the TASTy wire tree");
+    let corrupted_file = TastyFile::parse_scala_3_9(&corrupted).unwrap();
+    assert_eq!(
+        corrupted_file.validate(),
+        Err(dotty_tasty::TastyFileError::InvalidAstNodeAddress {
+            context: "AST reference",
+            address: invalid_address,
+        })
+    );
     let corrupted_index = corrupted_file.ast_address_index().unwrap();
     let corrupted_if = corrupted_index
         .get(if_node.offset as u32)

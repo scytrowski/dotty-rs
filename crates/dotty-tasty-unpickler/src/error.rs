@@ -1387,6 +1387,7 @@ fn ast_category(error: &AstError) -> UnpickleErrorCategory {
     use UnpickleErrorCategory::{InternalInvariant, MalformedInput, UnsupportedFeature};
     match error {
         AstError::UnsupportedCategory { .. }
+        | AstError::AmbiguousRelocation { .. }
         | AstError::UnsupportedRelocation { .. }
         | AstError::RecursionLimit { .. } => UnsupportedFeature,
         AstError::RelocationDidNotConverge { .. } => InternalInvariant,

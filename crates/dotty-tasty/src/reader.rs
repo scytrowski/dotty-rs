@@ -1,5 +1,7 @@
 use std::fmt;
 
+pub(crate) const MAX_NAT_GROUPS: usize = 9;
+
 /// Borrowed, bounded reader for TASTy primitive values.
 ///
 /// A reader never reads beyond its configured range and retains absolute
@@ -206,20 +208,19 @@ impl<'a> Reader<'a> {
         })
     }
 
-    /// Reads a TASTy natural number encoded in base 128.
+    /// Reads a nonnegative, 31-bit TASTy Nat.
     pub fn read_nat(&mut self) -> Result<u32, ReadError> {
-        let (value, _) = self.read_base128()?;
-        u32::try_from(value).map_err(|_| ReadError::IntegerOverflow {
-            offset: self.offset,
-        })
+        let start = self.position();
+        let value = self.read_long_nat()?;
+        i32::try_from(value)
+            .map(|n| n as u32)
+            .map_err(|_| ReadError::IntegerOverflow { offset: start })
     }
 
-    /// Reads a 64-bit TASTy natural number.
+    /// Reads a 63-bit TASTy LongNat, allowing at most nine base-128 groups.
     pub fn read_long_nat(&mut self) -> Result<u64, ReadError> {
-        let (value, _) = self.read_base128()?;
-        u64::try_from(value).map_err(|_| ReadError::IntegerOverflow {
-            offset: self.offset,
-        })
+        let (value, _) = self.read_base128(MAX_NAT_GROUPS)?;
+        Ok(value as u64)
     }
 
     /// Reads a signed TASTy integer.
@@ -245,11 +246,11 @@ impl<'a> Reader<'a> {
         String::from_utf8(bytes.to_vec()).map_err(|_| ReadError::InvalidUtf8 { offset: start })
     }
 
-    fn read_base128(&mut self) -> Result<(u128, usize), ReadError> {
+    fn read_base128(&mut self, max_groups: usize) -> Result<(u128, usize), ReadError> {
         let start = self.offset;
         let mut value = 0u128;
 
-        for group_count in 0..10 {
+        for group_count in 0..max_groups {
             let byte = match self.read_u8() {
                 Ok(byte) => byte,
                 Err(error) if group_count > 0 => {
@@ -275,7 +276,7 @@ impl<'a> Reader<'a> {
 
     fn read_signed(&mut self) -> Result<i64, ReadError> {
         let start = self.offset;
-        let (raw, group_count) = self.read_base128()?;
+        let (raw, group_count) = self.read_base128(10)?;
         let bit_count = group_count * 7;
         let sign_bit = 1u128 << (bit_count - 1);
         let signed = if raw & sign_bit != 0 {
@@ -343,7 +344,7 @@ mod tests {
             0x01, 0x80, // 128
             0x7f, 0xff, // 16_383
             0x01, 0x00, 0x80, // 16_384
-            0x0f, 0x7f, 0x7f, 0x7f, 0xff, // u32::MAX
+            0x07, 0x7f, 0x7f, 0x7f, 0xff, // i32::MAX as u32
         ]);
 
         assert_eq!(reader.read_nat().unwrap(), 0);
@@ -351,8 +352,26 @@ mod tests {
         assert_eq!(reader.read_nat().unwrap(), 128);
         assert_eq!(reader.read_nat().unwrap(), 16_383);
         assert_eq!(reader.read_nat().unwrap(), 16_384);
-        assert_eq!(reader.read_nat().unwrap(), u32::MAX);
+        assert_eq!(reader.read_nat().unwrap(), i32::MAX as u32);
         assert!(reader.is_at_end());
+    }
+
+    #[test]
+    fn enforces_scala_nat_limits_even_for_padded_values() {
+        let mut reader = Reader::new(&[0, 8, 0, 0, 0, 0x80]);
+        reader.read_u8().unwrap();
+        assert_eq!(
+            reader.read_nat(),
+            Err(ReadError::IntegerOverflow { offset: 1 })
+        );
+        let mut padded = [0; 10];
+        padded[9] = 0x81;
+        assert_eq!(Reader::new(&padded[1..]).read_nat(), Ok(1));
+        assert_eq!(
+            Reader::new(&padded).read_long_nat(),
+            Err(ReadError::IntegerOverflow { offset: 0 })
+        );
+        assert_eq!(Reader::new(&padded).read_long_int(), Ok(1));
     }
 
     #[test]
@@ -440,14 +459,14 @@ mod tests {
 
     #[test]
     fn rejects_a_maximal_length_prefix_when_the_payload_is_truncated() {
-        let mut reader = Reader::new(&[0x0f, 0x7f, 0x7f, 0x7f, 0xff]);
+        let mut reader = Reader::new(&[0x07, 0x7f, 0x7f, 0x7f, 0xff]);
         let length = reader.read_nat().unwrap() as usize;
 
         assert_eq!(
             reader.read_bytes(length),
             Err(ReadError::UnexpectedEof {
                 offset: 5,
-                needed: u32::MAX as usize,
+                needed: i32::MAX as usize,
                 remaining: 0,
             })
         );

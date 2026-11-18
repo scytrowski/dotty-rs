@@ -3,7 +3,7 @@ use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::reader::Reader as ClassReader;
 use dotty_core::SourceId;
 use dotty_tasty::ast::{DefinitionBody, IF_TAG, SELECTIN_TAG, VALDEF_TAG};
-use dotty_tasty::file::TastyFile;
+use dotty_tasty::file::{TastyFile, TastyFileError};
 use dotty_tasty::term::{AstRefKind, RawTree};
 use dotty_tasty::writer::Writer as TastyWriter;
 use std::fs;
@@ -128,9 +128,9 @@ fn corrupt_if_arm(bytes: &[u8]) -> Vec<u8> {
     let stale = old + 1;
     assert!(index.get_node(stale).is_none());
     let mut encoded_old = TastyWriter::default();
-    encoded_old.write_nat(old);
+    encoded_old.write_nat(old).unwrap();
     let mut encoded_stale = TastyWriter::default();
-    encoded_stale.write_nat(stale);
+    encoded_stale.write_nat(stale).unwrap();
     assert_eq!(encoded_old.as_slice().len(), encoded_stale.as_slice().len());
     let reference_offset = decoded_if.then_branch.nodes()[0].offset;
     let if_offset = raw_if.payload.as_ptr() as usize - asts.payload.as_ptr() as usize;
@@ -139,8 +139,15 @@ fn corrupt_if_arm(bytes: &[u8]) -> Vec<u8> {
     let mut corrupted = bytes.to_vec();
     corrupted[reference_file_offset..reference_file_offset + encoded_stale.as_slice().len()]
         .copy_from_slice(encoded_stale.as_slice());
-    TastyFile::parse_and_validate_scala_3_9(&corrupted)
-        .expect("stale arm retains valid TASTy framing");
+    let parsed =
+        TastyFile::parse_scala_3_9(&corrupted).expect("stale arm retains valid TASTy framing");
+    assert_eq!(
+        parsed.validate(),
+        Err(TastyFileError::InvalidAstNodeAddress {
+            context: "AST reference",
+            address: stale,
+        })
+    );
     corrupted
 }
 
@@ -174,9 +181,9 @@ fn corrupt_selected_valdef_reference(bytes: &[u8]) -> Vec<u8> {
     let invalid_address = old_address + 1;
     assert!(index.get_node(invalid_address).is_none());
     let mut encoded_old = TastyWriter::default();
-    encoded_old.write_nat(old_address);
+    encoded_old.write_nat(old_address).unwrap();
     let mut encoded_invalid = TastyWriter::default();
-    encoded_invalid.write_nat(invalid_address);
+    encoded_invalid.write_nat(invalid_address).unwrap();
     assert_eq!(
         encoded_old.as_slice().len(),
         encoded_invalid.as_slice().len()
@@ -212,8 +219,15 @@ fn corrupt_selected_valdef_reference(bytes: &[u8]) -> Vec<u8> {
     let mut corrupted = bytes.to_vec();
     corrupted[offset..offset + encoded_invalid.as_slice().len()]
         .copy_from_slice(encoded_invalid.as_slice());
-    TastyFile::parse_and_validate_scala_3_9(&corrupted)
+    let parsed = TastyFile::parse_scala_3_9(&corrupted)
         .expect("bad local reference preserves TASTy framing");
+    assert_eq!(
+        parsed.validate(),
+        Err(TastyFileError::InvalidAstNodeAddress {
+            context: "AST reference",
+            address: invalid_address,
+        })
+    );
     corrupted
 }
 

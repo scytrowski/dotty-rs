@@ -333,7 +333,7 @@ fn create_formal_addresses(tasty_bytes: &[u8]) -> (u32, u32) {
                 .then_some((node.offset as u32, body))
         })
         .expect("PairFactory TASTy declares wrap");
-    assert_eq!(body.parameters.len(), 2);
+    assert_eq!(body.parameters().count(), 2);
     let parameters = index
         .iter_nodes_with_tag(PARAM_TAG)
         .filter(|candidate| {
@@ -379,7 +379,7 @@ fn wrap_formal_count(tasty_bytes: &[u8]) -> usize {
 
 fn direct_termref_bytes(address: u32) -> Vec<u8> {
     let mut writer = Writer::default();
-    writer.write_nat(address);
+    writer.write_nat(address).unwrap();
     let mut bytes = vec![TERMREFDIRECT_TAG];
     bytes.extend(writer.into_inner());
     bytes
@@ -423,7 +423,7 @@ fn corrupt_factory_formal_target(tasty_bytes: &[u8]) -> Vec<u8> {
         .find(|address| index.get_node(*address).is_none())
         .expect("Factory TASTy has an unused one-byte AST address");
     let mut writer = Writer::default();
-    writer.write_nat(invalid);
+    writer.write_nat(invalid).unwrap();
     let encoded = writer.into_inner();
     assert_eq!(encoded.len(), reference.len() - 1);
     let asts = tasty.section(StandardSection::Asts).unwrap();

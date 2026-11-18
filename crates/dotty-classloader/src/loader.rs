@@ -1975,8 +1975,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 matches!(node.decode_structured(),
                     Ok(dotty_tasty::tasty::StructuredNode::DefDef(body))
                         if file.names().get_utf8(body.name) == Some("answer")
-                            && body.parameters.is_empty()
-                            && body.clauses.is_empty()
+                            && body.header_items.is_empty()
                             && body.rhs.is_some()
                             && !has_unsupported_class_annotations(file, &body.tail))
             });
@@ -2029,8 +2028,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 let is_answer = match node.decode_structured().ok()? {
                     dotty_tasty::tasty::StructuredNode::DefDef(body) => {
                         file.names().get_utf8(body.name) == Some("answer")
-                            && body.parameters.is_empty()
-                            && body.clauses.is_empty()
+                            && body.header_items.is_empty()
                             && body.rhs.is_some()
                             && !has_unsupported_class_annotations(file, &body.tail)
                     }
@@ -3532,7 +3530,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         name: &BinaryName,
     ) -> Result<TastyHeaderFieldSelection, SemanticTastyLoadError> {
         use dotty_tasty::tasty::{
-            DefDefHeaderItem, DefinitionBody, ParameterNode, RawTree, TEMPLATE_TAG, TYPEDEF_TAG,
+            DefinitionBody, ParameterNode, RawTree, TEMPLATE_TAG, TYPEDEF_TAG,
         };
 
         let asts = file.asts().map_err(|error| {
@@ -3663,22 +3661,24 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 tasty_symbol::TastyDecodeError::Ast(error),
             ))
         })?;
-        let [
-            ParameterNode::TermParam {
-                name: formal_name, ..
-            },
-        ] = constructor.parameters.as_slice()
+        let mut parameters = constructor.parameters();
+        let (
+            Some(
+                formal @ ParameterNode::TermParam {
+                    name: formal_name, ..
+                },
+            ),
+            None,
+        ) = (parameters.next(), parameters.next())
         else {
             return Err(SemanticTastyLoadError::UnsupportedShape(
                 "the field projection requires one ordinary constructor parameter",
             ));
         };
         if field_name != formal_name
-            || file.names().get_utf8(constructor.name) != Some("<init>")
             || constructor.header_items.len() != 1
-            || !matches!(constructor.header_items.first(), Some(DefDefHeaderItem::Parameter(ParameterNode::TermParam { name, .. })) if name == formal_name)
-            || !constructor.clauses.is_empty()
-            || !Self::constructor_parameter_is_ordinary(constructor.parameters.first())
+            || file.names().get_utf8(constructor.name) != Some("<init>")
+            || !Self::constructor_parameter_is_ordinary(Some(formal))
             || has_unsupported_definition_annotations(&constructor.tail)
         {
             return Err(SemanticTastyLoadError::UnsupportedShape(
@@ -3766,8 +3766,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .iter()
             .find(|node| {
                 node.tag == dotty_tasty::tasty::PARAM_TAG
-                    && node.payload.as_ptr() == constructor.parameters[0].payload().as_ptr()
-                    && node.payload.len() == constructor.parameters[0].payload().len()
+                    && node.payload.as_ptr() == formal.payload().as_ptr()
+                    && node.payload.len() == formal.payload().len()
                     && address_index.parent_of(node.offset as u32) == Some(constructor_tree_node)
             })
             .ok_or(SemanticTastyLoadError::UnsupportedShape(
@@ -4041,53 +4041,26 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                         ..
                     },
                 ] => {
-                    let term_parameter_is_valid = if has_class_type_parameter {
-                        matches!(
-                            constructor.parameters.as_slice(),
-                            [
-                                dotty_tasty::tasty::ParameterNode::TypeParam { .. },
-                                dotty_tasty::tasty::ParameterNode::TermParam {
-                                    name: constructor_parameter_name,
-                                    ..
-                                },
-                            ] if constructor_parameter_name == template_parameter_name
-                        ) && matches!(
-                            constructor.header_items.as_slice(),
-                            [
-                                dotty_tasty::tasty::DefDefHeaderItem::Parameter(
-                                    dotty_tasty::tasty::ParameterNode::TypeParam { .. }
-                                ),
-                                dotty_tasty::tasty::DefDefHeaderItem::Parameter(
-                                    dotty_tasty::tasty::ParameterNode::TermParam {
-                                        name: constructor_parameter_name,
-                                        ..
-                                    }
-                                ),
-                            ] if constructor_parameter_name == template_parameter_name
-                        ) && Self::constructor_parameter_is_ordinary(constructor.parameters.last())
-                    } else {
-                        matches!(
-                            constructor.parameters.as_slice(),
-                            [dotty_tasty::tasty::ParameterNode::TermParam {
-                                name: constructor_parameter_name,
-                                ..
-                            }] if constructor_parameter_name == template_parameter_name
-                        ) && constructor.header_items.len() == 1
-                            && matches!(
-                                &constructor.header_items[0],
-                                dotty_tasty::tasty::DefDefHeaderItem::Parameter(
-                                    dotty_tasty::tasty::ParameterNode::TermParam {
-                                        name: constructor_parameter_name,
-                                        ..
-                                    }
-                                ) if constructor_parameter_name == template_parameter_name
-                            )
-                            && Self::constructor_parameter_is_ordinary(
-                                constructor.parameters.first(),
-                            )
+                    use dotty_tasty::tasty::{
+                        DefDefHeaderItem::Parameter,
+                        ParameterNode::{TermParam, TypeParam},
                     };
-                    term_parameter_is_valid
-                        && constructor.clauses.is_empty()
+                    let formal = match (
+                        has_class_type_parameter,
+                        constructor.header_items.as_slice(),
+                    ) {
+                        (
+                            true,
+                            [
+                                Parameter(TypeParam { .. }),
+                                Parameter(formal @ TermParam { .. }),
+                            ],
+                        )
+                        | (false, [Parameter(formal @ TermParam { .. })]) => Some(formal),
+                        _ => None,
+                    };
+                    formal.is_some_and(|p| p.name() == *template_parameter_name)
+                        && Self::constructor_parameter_is_ordinary(formal)
                         && (header_field_selection.is_some()
                             || Self::template_parameter_is_plain(
                                 template_shape.term_params.first(),
@@ -4096,11 +4069,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 _ => false,
             }
         } else {
-            constructor.parameters.is_empty()
-                && constructor.header_items
-                    == [dotty_tasty::tasty::DefDefHeaderItem::Clause(
-                        dotty_tasty::tasty::EMPTYCLAUSE_TAG,
-                    )]
+            constructor.header_items
+                == [dotty_tasty::tasty::DefDefHeaderItem::Clause(
+                    dotty_tasty::tasty::EMPTYCLAUSE_TAG,
+                )]
         };
         if !valid_constructor_parameters {
             return Err(SemanticTastyLoadError::UnsupportedShape(
@@ -4108,13 +4080,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             ));
         }
         let constructor_parameter_address = if has_single_term_parameter {
-            let parameter = if has_class_type_parameter {
-                constructor.parameters.last()
-            } else {
-                constructor.parameters.first()
-            };
-            let Some(parameter) = parameter else {
-                unreachable!("supported constructor has one parameter")
+            let Some(parameter) = constructor.parameters().next_back() else {
+                unreachable!("supported constructor has one term parameter")
             };
             let Some(parameter_node) = address_index.iter().find(|node| {
                 node.tag == dotty_tasty::tasty::PARAM_TAG
@@ -4293,13 +4260,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 .ok_or(SemanticTastyLoadError::UnsupportedShape(
                     "the generic constructor formal is missing from the AST address index",
                 ))?;
-        let formal =
-            constructor
-                .parameters
-                .last()
-                .ok_or(SemanticTastyLoadError::UnsupportedShape(
-                    "the generic constructor requires one ordinary formal",
-                ))?;
+        let formal = constructor.parameters().next_back().ok_or(
+            SemanticTastyLoadError::UnsupportedShape(
+                "the generic constructor requires one ordinary formal",
+            ),
+        )?;
         if formal_tree_node.tag != dotty_tasty::tasty::PARAM_TAG
             || formal_node.payload.as_ptr() != formal.payload().as_ptr()
             || formal_node.payload.len() != formal.payload().len()

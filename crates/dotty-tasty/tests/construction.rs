@@ -245,3 +245,161 @@ fn method_type_fields_keep_name_nats_after_each_parameter_tree() {
     assert_eq!(method.type_names[0].name, 2);
     assert_eq!(method.modifiers, []);
 }
+
+#[test]
+fn bind_references_follow_the_namespace_of_the_unshared_type() {
+    for (bound_tag, ref_tag, shared, valid) in [
+        (TYPEBOUNDS_TAG, TYPEREFDIRECT_TAG, false, true),
+        (TYPEBOUNDS_TAG, TYPEREFSYMBOL_TAG, true, true),
+        (TYPEBOUNDS_TAG, TERMREFDIRECT_TAG, true, false),
+        (TYPEREFPKG_TAG, TERMREFSYMBOL_TAG, false, true),
+        (TYPEREFPKG_TAG, TYPEREFDIRECT_TAG, true, false),
+    ] {
+        let mut builder = AstBuilder::new(Default::default());
+        let tpe = builder
+            .push(leaf(TYPEREFPKG_TAG, TermValue::NameRef(1)))
+            .unwrap();
+        let mut bound = if bound_tag == TYPEBOUNDS_TAG {
+            builder
+                .push(AstNode::Length {
+                    tag: TYPEBOUNDS_TAG,
+                    fields: vec![AstField::Tree(tpe)],
+                })
+                .unwrap()
+        } else {
+            tpe
+        };
+        let mut roots = Vec::new();
+        if shared {
+            roots.push(bound);
+            bound = builder
+                .push(AstNode::Reference {
+                    tag: SHAREDTYPE_TAG,
+                    target: bound,
+                })
+                .unwrap();
+        }
+        let bind = builder
+            .push(AstNode::Length {
+                tag: BIND_TAG,
+                fields: vec![AstField::Nat(0), AstField::Tree(bound)],
+            })
+            .unwrap();
+        roots.push(bind);
+        let reference = if matches!(ref_tag, TYPEREFSYMBOL_TAG | TERMREFSYMBOL_TAG) {
+            let child = builder
+                .push(leaf(TYPEREFPKG_TAG, TermValue::NameRef(1)))
+                .unwrap();
+            AstNode::NatAst {
+                tag: ref_tag,
+                value: AstOperand::Reference(bind),
+                child,
+            }
+        } else {
+            AstNode::Reference {
+                tag: ref_tag,
+                target: bind,
+            }
+        };
+        let site = builder.push(reference).unwrap();
+        roots.push(site);
+        let built = builder.finish(&roots);
+        if valid {
+            let built = built.unwrap();
+            let mut reader =
+                Reader::new(&built.bytes()[built.address(site).unwrap() as usize + 1..]);
+            assert_eq!(reader.read_nat().unwrap(), built.address(bind).unwrap());
+        } else {
+            assert_eq!(
+                built,
+                Err(AstBuildError::InvalidReference {
+                    tag: ref_tag,
+                    target: bind
+                })
+            );
+        }
+    }
+}
+
+#[test]
+fn block_layout_matches_the_wire_encoder_for_mixed_width_constants() {
+    let mut builder = AstBuilder::new(Default::default());
+    let mut payload = Writer::new();
+    let mut fields = Vec::new();
+    let mut offsets = Vec::new();
+    for value in [i64::MIN, -65, -64, 63, 64, i64::MAX]
+        .into_iter()
+        .cycle()
+        .take(40)
+    {
+        let term = SimpleTerm::new(LONGCONST_TAG, TermValue::LongInt(value)).unwrap();
+        let label = builder.push(AstNode::Leaf(term.clone())).unwrap();
+        offsets.push((label, payload.position()));
+        term.encode(&mut payload).unwrap();
+        fields.push(AstField::Tree(label));
+    }
+    let block = builder
+        .push(AstNode::Length {
+            tag: BLOCK_TAG,
+            fields,
+        })
+        .unwrap();
+    let built = builder.finish(&[block]).unwrap();
+    let mut expected = Writer::new();
+    expected.write_u8(BLOCK_TAG);
+    expected.write_nat(payload.position() as u32).unwrap();
+    let prefix = expected.position();
+    expected.write_bytes(payload.as_slice());
+    assert_eq!(built.bytes(), expected.as_slice());
+    for (label, offset) in offsets {
+        assert_eq!(built.address(label), Some((prefix + offset) as u32));
+    }
+}
+
+#[test]
+fn same_slot_labels_are_scoped_to_the_builder_and_its_finished_fragment() {
+    let mut other = AstBuilder::new(Default::default());
+    let foreign = other.push(leaf(UNITCONST_TAG, TermValue::Unit)).unwrap();
+    let mut builder = AstBuilder::new(Default::default());
+    let local = builder.reserve().unwrap();
+    assert_ne!(foreign, local);
+    assert_eq!(
+        builder.bind(foreign, leaf(UNITCONST_TAG, TermValue::Unit)),
+        Err(AstBuildError::InvalidLabel(foreign))
+    );
+    for node in [
+        AstNode::Ast {
+            tag: THIS_TAG,
+            child: foreign,
+        },
+        AstNode::Length {
+            tag: BLOCK_TAG,
+            fields: vec![AstField::Tree(foreign)],
+        },
+        AstNode::Reference {
+            tag: SHAREDTYPE_TAG,
+            target: foreign,
+        },
+        AstNode::NatAst {
+            tag: TERMREFSYMBOL_TAG,
+            value: AstOperand::Reference(foreign),
+            child: local,
+        },
+    ] {
+        assert_eq!(
+            builder.bind(local, node),
+            Err(AstBuildError::InvalidLabel(foreign))
+        );
+    }
+    builder
+        .bind(local, leaf(UNITCONST_TAG, TermValue::Unit))
+        .unwrap();
+    assert_eq!(
+        builder.finish(&[foreign]),
+        Err(AstBuildError::InvalidLabel(foreign))
+    );
+    let built = builder.finish(&[local]).unwrap();
+    assert_eq!(built.address(local), Some(0));
+    assert_eq!(built.address(foreign), None);
+    assert_eq!(built.bytes(), other.finish(&[foreign]).unwrap().bytes());
+}

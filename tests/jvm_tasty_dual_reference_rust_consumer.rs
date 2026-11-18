@@ -417,10 +417,10 @@ fn corrupt_shared_type_target(tasty_bytes: &[u8], address: u32, expected_tag: u8
         .find(|address| index.get_node(*address).is_none())
         .expect("Pair TASTy has an unused one-byte AST address");
     let mut encoded_target = Writer::default();
-    encoded_target.write_nat(original_target);
+    encoded_target.write_nat(original_target).unwrap();
     let encoded_target = encoded_target.into_inner();
     let mut encoded_invalid_target = Writer::default();
-    encoded_invalid_target.write_nat(invalid_target);
+    encoded_invalid_target.write_nat(invalid_target).unwrap();
     let encoded_invalid_target = encoded_invalid_target.into_inner();
     assert_eq!(encoded_target.len(), encoded_invalid_target.len());
     let asts = tasty
@@ -474,10 +474,10 @@ fn corrupt_valdef_type_name_address(tasty_bytes: &[u8], address: u32) -> Vec<u8>
     let replacement_name = tasty.names().len() as u32;
     assert_ne!(original_name, replacement_name);
     let mut old = Writer::default();
-    old.write_nat(original_name);
+    old.write_nat(original_name).unwrap();
     let old = old.into_inner();
     let mut new = Writer::default();
-    new.write_nat(replacement_name);
+    new.write_nat(replacement_name).unwrap();
     let new = new.into_inner();
     assert_eq!(
         old.len(),

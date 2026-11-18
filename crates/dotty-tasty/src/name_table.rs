@@ -1,8 +1,9 @@
 use crate::reader::{ReadError, Reader};
 use crate::writer::{WriteError, Writer};
+use std::collections::{HashMap, hash_map::Entry};
 use std::fmt;
 
-/// One-based reference into a TASTy name table.
+/// Zero-based reference into a TASTy name table.
 pub type NameRef = u32;
 /// Raw signed parameter-signature value stored in a `SIGNED` name.
 pub type ParamSig = i32;
@@ -19,11 +20,11 @@ pub enum ParamSigValue {
 /// Interprets a raw `ParamSig` without changing its lossless representation.
 ///
 /// Negative values encode the length of a type-parameter section, while
-/// positive values encode a name-table reference for a term parameter. Zero
-/// and `i32::MIN` are invalid encodings and return `None`.
+/// nonnegative values encode a name-table reference for a term parameter.
+/// The unrepresentable section length `i32::MIN` returns `None`.
 pub fn interpret_param_sig(value: ParamSig) -> Option<ParamSigValue> {
     match value {
-        i32::MIN | 0 => None,
+        i32::MIN => None,
         value if value < 0 => Some(ParamSigValue::TypeParameterSectionLength(
             value.unsigned_abs(),
         )),
@@ -136,7 +137,7 @@ pub enum RawNameKind {
 /// References are [`NameRef`]s: the zero-based index of an entry in the name
 /// table, as in Scala 3.9.0 compiler output. Unknown entries
 /// retain their tag and bounded payload for forward-compatible round-trips.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RawName {
     /// Direct UTF-8 text.
     Utf8(String),
@@ -235,7 +236,7 @@ pub struct NameTable {
 /// Owned builder for a decoded or programmatically assembled name table.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NameTableBuilder {
-    entries: Vec<RawName>,
+    entries: HashMap<RawName, NameRef>,
 }
 
 /// Errors returned while decoding or validating a name table.
@@ -251,6 +252,20 @@ pub enum NameTableError {
         entry_index: usize,
         /// Number of entries in the table.
         entry_count: usize,
+    },
+    /// A Scala reader would encounter a dependency before its definition.
+    ForwardReference {
+        /// Referenced entry.
+        reference: NameRef,
+        /// Zero-based entry containing the reference.
+        entry_index: usize,
+    },
+    /// A constructed entry has a numeric field outside the 31-bit Nat range.
+    InvalidNat {
+        /// Value supplied by the caller.
+        value: u32,
+        /// Index of the entry containing the field.
+        entry_index: usize,
     },
     /// A signed-name parameter has an invalid raw value.
     InvalidParamSig {
@@ -296,6 +311,17 @@ impl fmt::Display for NameTableError {
             } => write!(
                 formatter,
                 "invalid name reference {reference} in entry {entry_index}; name table contains {entry_count} entries"
+            ),
+            Self::ForwardReference {
+                reference,
+                entry_index,
+            } => write!(
+                formatter,
+                "Scala name entry {entry_index} refers to later entry {reference}"
+            ),
+            Self::InvalidNat { value, entry_index } => write!(
+                formatter,
+                "value {value} in name entry {entry_index} exceeds a 31-bit Nat"
             ),
             Self::InvalidParamSig { value, entry_index } => write!(
                 formatter,
@@ -504,10 +530,12 @@ impl NameTable {
         reference: NameRef,
         include_signature_entries: bool,
     ) -> Result<String, NameRenderError> {
-        let root_index = usize::try_from(reference)
-            .ok()
-            .filter(|index| *index < self.entries.len())
+        let root = self
+            .get(reference)
             .ok_or(NameRenderError::InvalidReference { reference })?;
+        if let RawName::Utf8(value) = root {
+            return Ok(value.clone());
+        }
         let order = self
             .dependency_order(reference)
             .ok_or(NameRenderError::InvalidReference { reference })?;
@@ -516,66 +544,65 @@ impl NameTable {
         for current in order {
             let index = current as usize;
             let kind = self.entries[index].kind();
+            let dependency = |r| rendered_dependency(&rendered, r, current, kind);
+            let qualified = |prefix, separator: &str, selector| -> Result<_, NameRenderError> {
+                Ok(Spelling::qualified(
+                    &dependency(prefix)?.text,
+                    separator,
+                    &dependency(selector)?.text,
+                ))
+            };
             let value = match &self.entries[index] {
-                RawName::Utf8(value) => value.clone(),
-                RawName::Qualified { prefix, selector } => format!(
-                    "{}.{}",
-                    rendered_dependency(&rendered, *prefix, current, kind)?,
-                    rendered_dependency(&rendered, *selector, current, kind)?
-                ),
-                RawName::Expanded { prefix, selector } => format!(
-                    "{}$${}",
-                    rendered_dependency(&rendered, *prefix, current, kind)?,
-                    rendered_dependency(&rendered, *selector, current, kind)?
-                ),
-                RawName::ExpandPrefix { prefix, selector } => format!(
-                    "{}${}",
-                    rendered_dependency(&rendered, *prefix, current, kind)?,
-                    rendered_dependency(&rendered, *selector, current, kind)?
-                ),
+                RawName::Utf8(value) => Spelling::plain(value.clone()),
+                RawName::Qualified { prefix, selector } => qualified(*prefix, ".", *selector)?,
+                RawName::Expanded { prefix, selector } => qualified(*prefix, "$$", *selector)?,
+                RawName::ExpandPrefix { prefix, selector } => qualified(*prefix, "$", *selector)?,
                 RawName::Unique {
                     separator,
                     uniqid,
                     underlying,
                 } => {
-                    let separator = rendered_dependency(&rendered, *separator, current, kind)?;
-                    let underlying = underlying
-                        .map(|reference| rendered_dependency(&rendered, reference, current, kind))
+                    let separator = &dependency(*separator)?.text;
+                    let mut name = underlying
+                        .map(dependency)
                         .transpose()?
+                        .cloned()
                         .unwrap_or_default();
-                    if underlying.is_empty() && separator == "$" {
-                        format!("${uniqid}$")
+                    if name.text.is_empty() && separator == "$" {
+                        name.text = format!("${uniqid}$");
                     } else {
-                        format!("{underlying}{separator}{uniqid}")
+                        name.text.push_str(separator);
+                        name.text.push_str(&uniqid.to_string());
                     }
+                    name
                 }
-                RawName::DefaultGetter { underlying, index } => format!(
-                    "{}$default${}",
-                    rendered_dependency(&rendered, *underlying, current, kind)?,
-                    u64::from(*index) + 1
-                ),
-                RawName::SuperAccessor { underlying } => format!(
-                    "super${}",
-                    rendered_dependency(&rendered, *underlying, current, kind)?
-                ),
-                RawName::InlineAccessor { underlying } => format!(
-                    "inline${}",
-                    rendered_dependency(&rendered, *underlying, current, kind)?
-                ),
-                RawName::ObjectClass { underlying } => format!(
-                    "{}$",
-                    rendered_dependency(&rendered, *underlying, current, kind)?
-                ),
-                RawName::BodyRetainer { underlying } => format!(
-                    "{}$retainedBody",
-                    rendered_dependency(&rendered, *underlying, current, kind)?
-                ),
+                RawName::DefaultGetter { underlying, index } => {
+                    let mut name =
+                        if matches!(self.get_utf8(*underlying), Some("<init>" | "$init$")) {
+                            Spelling::plain("$lessinit$greater".into())
+                        } else {
+                            dependency(*underlying)?.clone()
+                        };
+                    name.text
+                        .push_str(&format!("$default${}", u64::from(*index) + 1));
+                    name
+                }
+                RawName::SuperAccessor { underlying } => {
+                    dependency(*underlying)?.decorated("super$", "")
+                }
+                RawName::InlineAccessor { underlying } => {
+                    dependency(*underlying)?.decorated("inline$", "")
+                }
+                RawName::ObjectClass { underlying } => dependency(*underlying)?.decorated("", "$"),
+                RawName::BodyRetainer { underlying } => {
+                    dependency(*underlying)?.decorated("", "$retainedBody")
+                }
                 RawName::Signed {
                     original,
                     result_signature,
                     parameter_signatures,
                 } if include_signature_entries => {
-                    let original = rendered_dependency(&rendered, *original, current, kind)?;
+                    let mut name = dependency(*original)?.clone();
                     let signature = rendered_signature_text(
                         &rendered,
                         *result_signature,
@@ -583,7 +610,8 @@ impl NameTable {
                         current,
                         kind,
                     )?;
-                    format!("{original}[with sig {signature}]")
+                    name.text.push_str(&format!("[with sig {signature}]"));
+                    name
                 }
                 RawName::TargetSigned {
                     original,
@@ -591,8 +619,8 @@ impl NameTable {
                     result_signature,
                     parameter_signatures,
                 } if include_signature_entries => {
-                    let original = rendered_dependency(&rendered, *original, current, kind)?;
-                    let target = rendered_dependency(&rendered, *target, current, kind)?;
+                    let mut name = dependency(*original)?.clone();
+                    let target = &dependency(*target)?.text;
                     let signature = rendered_signature_text(
                         &rendered,
                         *result_signature,
@@ -600,7 +628,9 @@ impl NameTable {
                         current,
                         kind,
                     )?;
-                    format!("{original}[with sig {signature} @ {target}]")
+                    name.text
+                        .push_str(&format!("[with sig {signature} @ {target}]"));
+                    name
                 }
                 RawName::Signed { .. } | RawName::TargetSigned { .. } | RawName::Unknown { .. } => {
                     return Err(NameRenderError::Unsupported {
@@ -612,8 +642,9 @@ impl NameTable {
             rendered[index] = Some(value);
         }
 
-        rendered[root_index]
-            .clone()
+        rendered[reference as usize]
+            .take()
+            .map(|name| name.text)
             .ok_or(NameRenderError::InvalidReference { reference })
     }
 
@@ -768,6 +799,24 @@ impl NameTable {
         Ok(name)
     }
 
+    pub(crate) fn validate_scala_order(&self) -> Result<(), NameTableError> {
+        for (entry_index, entry) in self.entries.iter().enumerate() {
+            let mut forward = None;
+            entry.visit_references(&mut |reference| {
+                if reference as usize >= entry_index {
+                    forward.get_or_insert(reference);
+                }
+            });
+            if let Some(reference) = forward {
+                return Err(NameTableError::ForwardReference {
+                    reference,
+                    entry_index,
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn validate_references(&self) -> Result<(), NameTableError> {
         for (entry_index, entry) in self.entries.iter().enumerate() {
             if let RawName::Unknown { tag, .. } = entry
@@ -779,6 +828,15 @@ impl NameTable {
                 });
             }
 
+            if let RawName::DefaultGetter { index: value, .. }
+            | RawName::Unique { uniqid: value, .. } = entry
+                && *value > i32::MAX as u32
+            {
+                return Err(NameTableError::InvalidNat {
+                    value: *value,
+                    entry_index,
+                });
+            }
             let parameter_signatures: &[ParamSig] = match entry {
                 RawName::Signed {
                     parameter_signatures,
@@ -824,17 +882,56 @@ impl NameTable {
     }
 }
 
+/// Byte offsets from the name structure keep literal dots and dollars in UTF-8
+/// selectors distinct from qualification separators.
+#[derive(Clone, Default)]
+struct Spelling {
+    text: String,
+    qualification: Option<(usize, usize)>,
+}
+
+impl Spelling {
+    fn plain(text: String) -> Self {
+        Self {
+            text,
+            qualification: None,
+        }
+    }
+
+    fn qualified(prefix: &str, separator: &str, selector: &str) -> Self {
+        Self {
+            text: format!("{prefix}{separator}{selector}"),
+            qualification: Some((prefix.len(), prefix.len() + separator.len())),
+        }
+    }
+
+    fn decorated(&self, before: &str, after: &str) -> Self {
+        let Some((prefix_end, start)) = self.qualification else {
+            return Self::plain(format!("{before}{}{after}", self.text));
+        };
+        let selector = &self.text[start..];
+        if prefix_end == 0 {
+            return Self::plain(format!("{before}{selector}{after}"));
+        }
+        let qualifier = &self.text[..start];
+        Self {
+            text: format!("{qualifier}{before}{selector}{after}").replace(['<', '>'], "$"),
+            qualification: self.qualification,
+        }
+    }
+}
+
 fn rendered_dependency(
-    rendered: &[Option<String>],
+    rendered: &[Option<Spelling>],
     reference: NameRef,
     owner: NameRef,
     owner_kind: RawNameKind,
-) -> Result<String, NameRenderError> {
+) -> Result<&Spelling, NameRenderError> {
     let index =
         usize::try_from(reference).map_err(|_| NameRenderError::InvalidReference { reference })?;
     rendered
         .get(index)
-        .and_then(Clone::clone)
+        .and_then(Option::as_ref)
         .ok_or(NameRenderError::Unsupported {
             reference: owner,
             kind: owner_kind,
@@ -842,14 +939,14 @@ fn rendered_dependency(
 }
 
 fn rendered_signature_text(
-    rendered: &[Option<String>],
+    rendered: &[Option<Spelling>],
     result: NameRef,
     parameters: &[ParamSig],
     owner: NameRef,
     owner_kind: RawNameKind,
 ) -> Result<String, NameRenderError> {
     let result = rendered_dependency(rendered, result, owner, owner_kind)?;
-    let mut text = result;
+    let mut text = result.text.clone();
     text.push('(');
 
     for (index, parameter) in parameters.iter().enumerate() {
@@ -864,9 +961,7 @@ fn rendered_signature_text(
                 text.push(')');
             }
             Some(ParamSigValue::TermParameter(reference)) => {
-                text.push_str(&rendered_dependency(
-                    rendered, reference, owner, owner_kind,
-                )?);
+                text.push_str(&rendered_dependency(rendered, reference, owner, owner_kind)?.text);
             }
             None => {
                 return Err(NameRenderError::Unsupported {
@@ -929,27 +1024,25 @@ impl NameTableBuilder {
     ///
     /// An entry equal to an existing entry reuses that entry's reference.
     pub fn intern(&mut self, entry: RawName) -> Result<NameRef, NameTableError> {
-        if let Some(index) = self
-            .entries
-            .iter()
-            .position(|candidate| candidate == &entry)
-        {
-            return NameRef::try_from(index).map_err(|_| NameTableError::EntryOverflow {
-                entry_count: self.entries.len(),
-            });
+        let entry_count = self.entries.len();
+        match self.entries.entry(entry) {
+            Entry::Occupied(existing) => Ok(*existing.get()),
+            Entry::Vacant(slot) => {
+                let reference = NameRef::try_from(entry_count)
+                    .map_err(|_| NameTableError::EntryOverflow { entry_count })?;
+                slot.insert(reference);
+                Ok(reference)
+            }
         }
-
-        let reference =
-            NameRef::try_from(self.entries.len()).map_err(|_| NameTableError::EntryOverflow {
-                entry_count: self.entries.len(),
-            })?;
-        self.entries.push(entry);
-        Ok(reference)
     }
 
-    /// Validates the entries and returns the completed table.
+    /// Validates the entries and returns the completed table in first-seen order.
     pub fn finish(self) -> Result<NameTable, NameTableError> {
-        NameTable::from_entries(self.entries)
+        let mut entries = vec![RawName::Utf8(String::new()); self.entries.len()];
+        for (name, reference) in self.entries {
+            entries[reference as usize] = name;
+        }
+        NameTable::from_entries(entries)
     }
 
     /// Returns the number of entries currently interned.
@@ -973,9 +1066,8 @@ fn encode_name(name: &RawName, writer: &mut Writer) -> Result<(), WriteError> {
             encode_composite(
                 2,
                 |payload| {
-                    payload.write_nat(*prefix);
-                    payload.write_nat(*selector);
-                    Ok(())
+                    payload.write_nat(*prefix)?;
+                    payload.write_nat(*selector)
                 },
                 writer,
             )?;
@@ -984,9 +1076,8 @@ fn encode_name(name: &RawName, writer: &mut Writer) -> Result<(), WriteError> {
             encode_composite(
                 3,
                 |payload| {
-                    payload.write_nat(*prefix);
-                    payload.write_nat(*selector);
-                    Ok(())
+                    payload.write_nat(*prefix)?;
+                    payload.write_nat(*selector)
                 },
                 writer,
             )?;
@@ -995,9 +1086,8 @@ fn encode_name(name: &RawName, writer: &mut Writer) -> Result<(), WriteError> {
             encode_composite(
                 4,
                 |payload| {
-                    payload.write_nat(*prefix);
-                    payload.write_nat(*selector);
-                    Ok(())
+                    payload.write_nat(*prefix)?;
+                    payload.write_nat(*selector)
                 },
                 writer,
             )?;
@@ -1010,10 +1100,10 @@ fn encode_name(name: &RawName, writer: &mut Writer) -> Result<(), WriteError> {
             encode_composite(
                 10,
                 |payload| {
-                    payload.write_nat(*separator);
-                    payload.write_nat(*uniqid);
+                    payload.write_nat(*separator)?;
+                    payload.write_nat(*uniqid)?;
                     if let Some(underlying) = underlying {
-                        payload.write_nat(*underlying);
+                        payload.write_nat(*underlying)?;
                     }
                     Ok(())
                 },
@@ -1024,45 +1114,24 @@ fn encode_name(name: &RawName, writer: &mut Writer) -> Result<(), WriteError> {
             encode_composite(
                 11,
                 |payload| {
-                    payload.write_nat(*underlying);
-                    payload.write_nat(*index);
-                    Ok(())
+                    payload.write_nat(*underlying)?;
+                    payload.write_nat(*index)
                 },
                 writer,
             )?;
         }
-        RawName::SuperAccessor { underlying } => encode_composite(
-            20,
-            |payload| {
-                payload.write_nat(*underlying);
-                Ok(())
-            },
-            writer,
-        )?,
-        RawName::InlineAccessor { underlying } => encode_composite(
-            21,
-            |payload| {
-                payload.write_nat(*underlying);
-                Ok(())
-            },
-            writer,
-        )?,
-        RawName::BodyRetainer { underlying } => encode_composite(
-            22,
-            |payload| {
-                payload.write_nat(*underlying);
-                Ok(())
-            },
-            writer,
-        )?,
-        RawName::ObjectClass { underlying } => encode_composite(
-            23,
-            |payload| {
-                payload.write_nat(*underlying);
-                Ok(())
-            },
-            writer,
-        )?,
+        RawName::SuperAccessor { underlying } => {
+            encode_composite(20, |payload| payload.write_nat(*underlying), writer)?
+        }
+        RawName::InlineAccessor { underlying } => {
+            encode_composite(21, |payload| payload.write_nat(*underlying), writer)?
+        }
+        RawName::BodyRetainer { underlying } => {
+            encode_composite(22, |payload| payload.write_nat(*underlying), writer)?
+        }
+        RawName::ObjectClass { underlying } => {
+            encode_composite(23, |payload| payload.write_nat(*underlying), writer)?
+        }
         RawName::Signed {
             original,
             result_signature,
@@ -1070,8 +1139,8 @@ fn encode_name(name: &RawName, writer: &mut Writer) -> Result<(), WriteError> {
         } => encode_composite(
             63,
             |payload| {
-                payload.write_nat(*original);
-                payload.write_nat(*result_signature);
+                payload.write_nat(*original)?;
+                payload.write_nat(*result_signature)?;
                 for signature in parameter_signatures {
                     payload.write_int(*signature);
                 }
@@ -1087,9 +1156,9 @@ fn encode_name(name: &RawName, writer: &mut Writer) -> Result<(), WriteError> {
         } => encode_composite(
             62,
             |payload| {
-                payload.write_nat(*original);
-                payload.write_nat(*target);
-                payload.write_nat(*result_signature);
+                payload.write_nat(*original)?;
+                payload.write_nat(*target)?;
+                payload.write_nat(*result_signature)?;
                 for signature in parameter_signatures {
                     payload.write_int(*signature);
                 }
@@ -1188,7 +1257,7 @@ impl RawName {
     /// Visits name-table references contained in this entry in wire order.
     ///
     /// This is useful for dependency inspection without allocating a
-    /// temporary collection. Positive `ParamSig` values are included because
+    /// temporary collection. Nonnegative `ParamSig` values are included because
     /// they are name references; negative values encode type-parameter
     /// section lengths and are therefore omitted.
     pub fn visit_references(&self, visitor: &mut impl FnMut(NameRef)) {
@@ -1273,6 +1342,36 @@ mod tests {
         interpret_param_sig,
     };
     use crate::reader::{ReadError, Reader};
+
+    #[test]
+    fn rejects_out_of_range_default_getter_and_unique_numbers() {
+        for entry in [
+            RawName::DefaultGetter {
+                underlying: 0,
+                index: 1 << 31,
+            },
+            RawName::Unique {
+                separator: 0,
+                uniqid: 1 << 31,
+                underlying: None,
+            },
+        ] {
+            assert_eq!(
+                NameTable::from_entries(vec![RawName::Utf8("x".into()), entry]),
+                Err(NameTableError::InvalidNat {
+                    entry_index: 1,
+                    value: 1 << 31
+                })
+            );
+        }
+        let bytes = [0x8b, 1, 0x81, b'x', 11, 0x86, 0x80, 8, 0, 0, 0, 0x80];
+        assert_eq!(
+            NameTable::decode(&mut Reader::new(&bytes)),
+            Err(NameTableError::Read(ReadError::IntegerOverflow {
+                offset: 7
+            }))
+        );
+    }
 
     #[test]
     fn decodes_names_from_a_fixture() {
@@ -1476,8 +1575,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_zero_as_a_parameter_signature() {
-        assert_eq!(interpret_param_sig(0), None);
+    fn zero_refers_to_the_first_parameter_type_name() {
+        assert_eq!(
+            interpret_param_sig(0),
+            Some(ParamSigValue::TermParameter(0))
+        );
     }
 
     #[test]
@@ -1562,7 +1664,7 @@ mod tests {
         let name = RawName::Signed {
             original: 1,
             result_signature: 1,
-            parameter_signatures: vec![0],
+            parameter_signatures: vec![i32::MIN],
         };
 
         assert_eq!(name.signed_name(), None);
@@ -1821,6 +1923,48 @@ mod tests {
     }
 
     #[test]
+    fn renders_constructor_default_getters() {
+        for constructor in ["<init>", "$init$"] {
+            let table = NameTable::from_entries(vec![
+                RawName::Utf8(constructor.into()),
+                RawName::DefaultGetter {
+                    underlying: 0,
+                    index: 1,
+                },
+            ])
+            .unwrap();
+            assert_eq!(table.render(1).unwrap(), "$lessinit$greater$default$2");
+        }
+    }
+
+    #[test]
+    fn decorates_the_structural_selector_and_sanitizes_qualified_spellings() {
+        let table = NameTable::from_entries(vec![
+            RawName::Utf8("p$kg".into()),
+            RawName::Utf8("é.<:<".into()),
+            RawName::Expanded {
+                prefix: 0,
+                selector: 1,
+            },
+            RawName::InlineAccessor { underlying: 2 },
+            RawName::SuperAccessor { underlying: 2 },
+            RawName::ObjectClass { underlying: 2 },
+            RawName::BodyRetainer { underlying: 2 },
+            RawName::ObjectClass { underlying: 1 },
+        ])
+        .unwrap();
+        for (id, expected) in [
+            (3, "p$kg$$inline$é.$:$"),
+            (4, "p$kg$$super$é.$:$"),
+            (5, "p$kg$$é.$:$$"),
+            (6, "p$kg$$é.$:$$retainedBody"),
+            (7, "é.<:<$"),
+        ] {
+            assert_eq!(table.render(id).unwrap(), expected);
+        }
+    }
+
+    #[test]
     fn renders_a_super_accessor_name() {
         let table = NameTable::from_entries(vec![
             RawName::Utf8("method".to_owned()),
@@ -1958,14 +2102,14 @@ mod tests {
 
     #[test]
     fn rejects_a_maximal_name_table_length_without_allocating_it() {
-        let bytes = [0x0f, 0x7f, 0x7f, 0x7f, 0xff];
+        let bytes = [0x07, 0x7f, 0x7f, 0x7f, 0xff];
         let mut reader = Reader::new(&bytes);
 
         assert_eq!(
             NameTable::decode(&mut reader),
             Err(NameTableError::Read(ReadError::UnexpectedEof {
                 offset: 5,
-                needed: u32::MAX as usize,
+                needed: i32::MAX as usize,
                 remaining: 0,
             }))
         );
@@ -2520,17 +2664,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_zero_parameter_signature_when_decoding() {
-        let bytes = [0x85, 63, 0x83, 0x81, 0x81, 0x80];
-        let mut reader = Reader::new(&bytes);
-
-        assert_eq!(
-            NameTable::decode(&mut reader),
-            Err(NameTableError::InvalidParamSig {
-                value: 0,
-                entry_index: 0,
-            })
-        );
+    fn decodes_a_signed_name_whose_parameter_type_is_the_first_entry() {
+        let bytes = [0x88, 1, 0x81, b'T', 63, 0x83, 0x80, 0x80, 0x80];
+        let table = NameTable::decode(&mut Reader::new(&bytes)).unwrap();
+        let name = table.get(1).unwrap();
+        assert_eq!(name.references(), vec![0, 0, 0]);
+        assert_eq!(table.get_utf8(0), Some("T"));
     }
 
     #[test]

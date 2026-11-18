@@ -131,9 +131,10 @@ fn plain_int_primary_constructor_preserves_both_parameter_identities_and_wire_sh
     );
     let constructor_node = addresses.get(constructor.address).unwrap();
     let constructor = constructor_node.decode_defdef_body().unwrap();
-    assert_eq!(constructor.parameters.len(), 1);
+    assert_eq!(constructor.parameters().count(), 1);
     assert_eq!(
-        file.render_name(constructor.parameters[0].name()).unwrap(),
+        file.render_name(constructor.parameters().next().unwrap().name())
+            .unwrap(),
         "start"
     );
     assert!(constructor.rhs.is_none());
@@ -3064,6 +3065,7 @@ fn multiple_literal_methods_and_empty_clause_match_the_scala_390_oracle() {
                 .decode_defdef_body()
                 .unwrap();
             let name = file.render_name(method.name).unwrap();
+            let clauses = method.clauses().collect::<Vec<_>>();
             let rhs = match method.rhs.unwrap() {
                 RawTree::Leaf(leaf) if leaf.tag == INTCONST_TAG => match leaf.value {
                     TermValue::Int(value) => value,
@@ -3071,7 +3073,7 @@ fn multiple_literal_methods_and_empty_clause_match_the_scala_390_oracle() {
                 },
                 other => panic!("unexpected literal body: {other:?}"),
             };
-            (name.to_owned(), method.clauses, rhs)
+            (name.to_owned(), clauses, rhs)
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -3135,11 +3137,10 @@ fn source_int_parameters_emit_ordered_canonical_param_declarations() {
         .unwrap()
         .decode_defdef_body()
         .unwrap();
-    assert!(method.clauses.is_empty());
+    assert!(method.clauses().next().is_none());
     assert_eq!(
         method
-            .parameters
-            .iter()
+            .parameters()
             .map(|parameter| file.render_name(parameter.name()).unwrap())
             .collect::<Vec<_>>(),
         ["first", "second"]

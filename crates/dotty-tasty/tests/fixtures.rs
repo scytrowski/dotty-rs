@@ -7,7 +7,7 @@ use dotty_tasty::tasty::{
     Writer,
 };
 
-const EXPECTED_FIXTURE_COUNT: usize = 43;
+const EXPECTED_FIXTURE_COUNT: usize = 44;
 const TASTY_MAGIC: [u8; 4] = [0x5c, 0xa1, 0xab, 0x1f];
 
 fn tasty_fixture_paths() -> Vec<PathBuf> {
@@ -760,6 +760,21 @@ fn all_tasty_fixture_name_reference_queries_match_the_complete_reference_list() 
 }
 
 #[test]
+fn scala_position_line_sizes_count_utf16_code_units() {
+    let source = include_str!("fixtures/scala3-parent-unicode/UnicodeParent.scala");
+    let file = TastyFile::parse(include_bytes!(
+        "fixtures/scala3-parent-unicode/review/Child.tasty"
+    ))
+    .unwrap();
+    let expected: Vec<_> = source
+        .split('\n')
+        .map(|line| line.encode_utf16().count() as u32)
+        .collect();
+    let positions = file.positions().unwrap().unwrap();
+    assert_eq!(positions.line_sizes, expected);
+}
+
+#[test]
 fn all_tasty_fixture_position_sections_resolve_without_overflow() {
     let mut section_count = 0;
 
@@ -1383,5 +1398,16 @@ fn all_tasty_fixture_standard_sections_round_trip_through_structured_encoders() 
                 path.display()
             );
         }
+    }
+}
+
+#[test]
+fn circle_distinguishes_synthetic_and_source_derived_spans_at_the_same_point() {
+    let file = TastyFile::parse(include_bytes!("fixtures/bounds/Circle.tasty")).unwrap();
+    let positions = file.positions().unwrap().unwrap();
+    for (address, is_synthetic) in [(7, true), (21, false)] {
+        let span = positions.resolved_association_at(address).unwrap().unwrap();
+        assert_eq!((span.start, span.end, span.point), (69, 74, 69));
+        assert_eq!(span.is_synthetic, is_synthetic);
     }
 }

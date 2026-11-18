@@ -7,8 +7,8 @@ use crate::name_table::{
 };
 use crate::reader::Reader;
 use crate::section::{
-    Attribute, Comment, EncodedSection, PositionSection, ResolvedPosition, Section, SectionError,
-    SectionTable, StandardSection,
+    AstNodeIdentityMap, Attribute, Comment, EncodedAstSection, EncodedSection, PositionSection,
+    ResolvedPosition, Section, SectionError, SectionTable, StandardSection,
 };
 use crate::term::{AstRef, AstTreeNode, TermEncodeError};
 use crate::writer::{WriteError, Writer};
@@ -20,12 +20,22 @@ use std::fmt;
 /// payloads, while structured queries allocate only the requested views. Use
 /// [`TastyFile::parse_and_validate_scala_3_9`] when the input should be
 /// checked before inspection.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct TastyFile<'a> {
     header: Header,
     names: NameTable,
     sections: SectionTable<'a>,
+    // The decoded model omits padding in wire integers.
+    original_bytes: Option<&'a [u8]>,
 }
+
+impl PartialEq for TastyFile<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.header == other.header && self.names == other.names && self.sections == other.sections
+    }
+}
+
+impl Eq for TastyFile<'_> {}
 
 /// Owned bytes produced by a TASTy encoder together with allocated AST addresses.
 ///
@@ -291,7 +301,7 @@ impl TastyFileBuilder {
     ) -> Result<(), TastyFileError> {
         let file = self.build()?;
         file.header.validate_scala_3_9()?;
-        file.validate_with_max_ast_index_depth(max_depth)
+        file.validate_scala_contents(max_depth)
     }
 
     /// Validate the file against a compiler version using TASTy's
@@ -417,6 +427,7 @@ impl<'a> TastyFile<'a> {
             header,
             names,
             sections,
+            original_bytes: None,
         })
     }
 
@@ -431,6 +442,7 @@ impl<'a> TastyFile<'a> {
             header,
             names,
             sections,
+            original_bytes: Some(bytes),
         })
     }
 
@@ -473,7 +485,7 @@ impl<'a> TastyFile<'a> {
         max_depth: usize,
     ) -> Result<Self, TastyFileError> {
         let file = Self::parse_scala_3_9(bytes)?;
-        file.validate_with_max_ast_index_depth(max_depth)?;
+        file.validate_scala_contents(max_depth)?;
         Ok(file)
     }
 
@@ -532,9 +544,12 @@ impl<'a> TastyFile<'a> {
     ) -> Result<(), TastyFileError> {
         self.validate_unique_standard_sections()?;
         self.validate_name_references()?;
-        self.validate_ast_reference_targets_with_max_depth(max_depth)?;
+        let index = self.ast_address_index_with_max_depth(max_depth)?;
+        self.validate_indexed_ast_references(&index)?;
         self.attributes()?;
-        self.comments()?;
+        if let Some(comments) = self.comments()? {
+            self.validate_comment_addresses(&comments, &index)?;
+        }
         self.positions()?;
         Ok(())
     }
@@ -568,6 +583,11 @@ impl<'a> TastyFile<'a> {
             compiler_minor,
             compiler_experimental,
         )?;
+        self.validate_scala_contents(max_depth)
+    }
+
+    fn validate_scala_contents(&self, max_depth: usize) -> Result<(), TastyFileError> {
+        self.names.validate_scala_order()?;
         self.validate_with_max_ast_index_depth(max_depth)
     }
 
@@ -585,8 +605,11 @@ impl<'a> TastyFile<'a> {
         Ok(())
     }
 
-    /// Encodes the borrowed file without additional validation.
+    /// Returns the original bytes of a parsed file or serializes a file built from parts.
     pub fn encode(&self) -> Result<Vec<u8>, TastyFileError> {
+        if let Some(bytes) = self.original_bytes {
+            return Ok(bytes.to_vec());
+        }
         let mut writer = Writer::new();
         self.header.encode(&mut writer)?;
         self.names.encode(&mut writer)?;
@@ -643,28 +666,20 @@ impl<'a> TastyFile<'a> {
         self.encode()
     }
 
-    /// Encodes the file while allocating addresses for top-level AST nodes.
+    /// Encodes the file and reports the top-level node offsets in its raw AST payload.
     pub fn encode_with_ast_addresses(&self) -> Result<EncodedTastyFile, TastyFileError> {
-        let mut writer = Writer::new();
-        self.header.encode(&mut writer)?;
-        self.names.encode(&mut writer)?;
         let mut ast_addresses = Vec::new();
-
         for section in self.sections.iter() {
-            writer.write_nat(section.name);
             if section.standard_kind(&self.names) == Some(StandardSection::Asts) {
-                let mut reader = section.reader();
-                let asts = RawNodes::decode(&mut reader)?;
-                let encoded_asts = asts.encode_with_addresses()?;
-                ast_addresses = encoded_asts.addresses().to_vec();
-                writer.write_length_prefixed_bytes(encoded_asts.as_slice())?;
-            } else {
-                writer.write_length_prefixed_bytes(section.payload)?;
+                ast_addresses.clear();
+                for node in RawNodes::decode(&mut section.reader())?.iter() {
+                    ast_addresses.push(crate::writer::ast_address_from_offset(node.offset)?);
+                }
             }
         }
 
         Ok(EncodedTastyFile {
-            bytes: writer.into_inner(),
+            bytes: self.encode()?,
             ast_addresses,
         })
     }
@@ -760,15 +775,37 @@ impl<'a> TastyFile<'a> {
         &self,
         nodes: &[StructuredNode<'a>],
     ) -> Result<Vec<u8>, TastyFileError> {
+        self.encode_relocated(nodes, None)
+    }
+
+    /// Relocates AST references, positions and comments according to the
+    /// caller's explicit identities, including reordered sibling subtrees.
+    /// The identities and all edited reference operands use original AST
+    /// addresses. A position without a visible identity cannot be translated
+    /// when the layout changes.
+    pub fn encode_structured_relocated_with_identities(
+        &self,
+        nodes: &[StructuredNode<'_>],
+        identities: &AstNodeIdentityMap,
+    ) -> Result<Vec<u8>, TastyFileError> {
+        self.encode_relocated(nodes, Some(identities))
+    }
+
+    fn encode_relocated(
+        &self,
+        nodes: &[StructuredNode<'_>],
+        identities: Option<&AstNodeIdentityMap>,
+    ) -> Result<Vec<u8>, TastyFileError> {
         let original_ast_section = self
             .section(StandardSection::Asts)
             .ok_or(TastyFileError::MissingSection(StandardSection::Asts))?;
-        let ast_section = EncodedSection::structured_asts_relocated(
+        let ast_section = EncodedAstSection::from_structured_relocated(
             original_ast_section.name,
             original_ast_section.payload,
             nodes,
+            identities,
         )?;
-        let ast_address_map = ast_section.ast_address_map().clone();
+        let ast_address_map = ast_section.ast_address_map();
 
         let mut builder = TastyFileBuilder::new(self.header.clone(), self.names.clone());
         for section in self.sections.iter() {
@@ -776,12 +813,24 @@ impl<'a> TastyFile<'a> {
                 Some(StandardSection::Asts) => ast_section.section().clone(),
                 Some(StandardSection::Comments) => {
                     let comments = section.decode_comments()?;
-                    let comments = Comment::relocate_ast_addresses(&comments, &ast_address_map);
+                    // A comment must already target a visible original node.
+                    if !comments.is_empty() {
+                        self.validate_comment_addresses(&comments, &self.ast_address_index()?)?;
+                    }
+                    let comments = Comment::relocate_ast_addresses(&comments, ast_address_map);
                     EncodedSection::comments(section.name, &comments)?
                 }
                 Some(StandardSection::Positions) => {
                     let positions = section.decode_positions()?;
-                    let positions = positions.relocate_ast_addresses(&ast_address_map)?;
+                    let positions = positions.relocate_ast_addresses(|address| {
+                        match ast_address_map.get(&address) {
+                            Some(&target) => Ok(target),
+                            None if identities.is_some() && !ast_address_map.is_empty() => {
+                                Err(SectionError::MissingPositionIdentity { address })
+                            }
+                            None => Ok(address),
+                        }
+                    })?;
                     EncodedSection::positions(section.name, &positions)?
                 }
                 _ => EncodedSection::raw(section.name, section.payload),
@@ -1038,6 +1087,13 @@ impl<'a> TastyFile<'a> {
         max_depth: usize,
     ) -> Result<(), TastyFileError> {
         let index = self.ast_address_index_with_max_depth(max_depth)?;
+        self.validate_indexed_ast_references(&index)
+    }
+
+    fn validate_indexed_ast_references(
+        &self,
+        index: &AstAddressIndex<'_>,
+    ) -> Result<(), TastyFileError> {
         for reference in self.ast_references()? {
             self.validate_ast_address("AST reference", i64::from(reference.reference.address))?;
             if index.resolve_node(reference.reference).is_none() {
@@ -1063,8 +1119,19 @@ impl<'a> TastyFile<'a> {
 
         if let Some(attributes) = &attributes {
             for attribute in attributes {
-                if let Attribute::SourceFile(reference) = attribute {
-                    self.resolve_source_file(*reference)?;
+                match attribute {
+                    Attribute::SourceFile(reference) => {
+                        self.resolve_source_file(*reference)?;
+                    }
+                    Attribute::StringExtension { reference, .. }
+                        if self.names.get_utf8(*reference).is_none() =>
+                    {
+                        return Err(TastyFileError::InvalidNameReference {
+                            context: "string extension attribute",
+                            reference: *reference,
+                        });
+                    }
+                    _ => {}
                 }
             }
         }
@@ -1142,7 +1209,7 @@ impl<'a> TastyFile<'a> {
     /// section.
     ///
     /// `None` means that the section is absent. The returned associations carry
-    /// the active source reference and omit standalone source-change events.
+    /// the source marker at their address and omit standalone source events.
     pub fn resolved_position_associations(
         &self,
     ) -> Result<Option<Vec<ResolvedPosition>>, TastyFileError> {
@@ -1295,6 +1362,23 @@ impl<'a> TastyFile<'a> {
         Ok(())
     }
 
+    fn validate_comment_addresses(
+        &self,
+        comments: &[Comment],
+        index: &AstAddressIndex<'_>,
+    ) -> Result<(), TastyFileError> {
+        for comment in comments {
+            self.validate_ast_address("comment", i64::from(comment.address))?;
+            if index.get_node(comment.address).is_none() {
+                return Err(TastyFileError::InvalidAstNodeAddress {
+                    context: "comment",
+                    address: comment.address,
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn validate_ast_address(
         &self,
         context: &'static str,
@@ -1418,6 +1502,46 @@ mod tests {
                 reference: 2,
             })
         );
+    }
+
+    #[test]
+    fn validates_string_extension_references_at_file_level() {
+        let header = TastyFile::parse(&compatible_file_bytes())
+            .unwrap()
+            .header()
+            .clone();
+        let names = NameTable::from_entries(vec![
+            crate::RawName::Utf8("ASTs".into()),
+            crate::RawName::Utf8("Attributes".into()),
+            crate::RawName::Qualified {
+                prefix: 0,
+                selector: 1,
+            },
+        ])
+        .unwrap();
+        for reference in [0, 2, 3] {
+            let attr = crate::Attribute::StringExtension {
+                tag: 130,
+                reference,
+            };
+            let builder = super::TastyFileBuilder::new(header.clone(), names.clone())
+                .with_section(EncodedSection::raw(0, []))
+                .with_section(EncodedSection::attributes(1, std::slice::from_ref(&attr)).unwrap());
+            if reference == 0 {
+                let bytes = builder.encode().unwrap();
+                let file = TastyFile::parse_and_validate_compatible_with(&bytes, 28, 9, 0).unwrap();
+                assert_eq!(file.attributes().unwrap(), Some(vec![attr]));
+                assert_eq!(file.source_file().unwrap(), None);
+            } else {
+                assert_eq!(
+                    builder.validate(),
+                    Err(TastyFileError::InvalidNameReference {
+                        context: "string extension attribute",
+                        reference
+                    })
+                );
+            }
+        }
     }
 
     #[test]
@@ -1704,12 +1828,17 @@ mod tests {
         let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
         let file = TastyFile::parse_scala_3_9(bytes).unwrap();
 
-        assert!(
-            !file
-                .resolved_position_associations()
-                .unwrap()
-                .unwrap()
-                .is_empty()
+        // Values reported by Scala 3.9's PositionUnpickler for this fixture.
+        let root = file.resolved_position_at(0).unwrap().unwrap();
+        assert_eq!((root.start, root.end, root.point), (0, 129, 21));
+        assert_eq!(
+            file.names().get_utf8(root.source.unwrap()),
+            file.source_file().unwrap()
+        );
+        let next = file.resolved_position_at(5).unwrap().unwrap();
+        assert_eq!(
+            (next.start, next.end, next.point, next.source),
+            (36, 36, 36, None)
         );
     }
 
@@ -2075,6 +2204,7 @@ mod tests {
     #[test]
     fn reports_a_missing_asts_section() {
         let file = TastyFile {
+            original_bytes: None,
             header: crate::header::Header {
                 major_version: 28,
                 minor_version: 9,
@@ -2179,7 +2309,7 @@ mod tests {
             EncodedSection::comments(
                 2,
                 &[crate::Comment {
-                    address: 1,
+                    address: 0,
                     text: "example".to_owned(),
                     coordinates: 0,
                 }],
@@ -2216,6 +2346,37 @@ mod tests {
         assert_eq!(
             file.encode_validated_compatible_with(28, 9, 0).unwrap(),
             bytes
+        );
+    }
+
+    #[test]
+    fn scala_validation_requires_name_dependencies_in_wire_order() {
+        let file = TastyFile::parse(include_bytes!(
+            "../tests/fixtures/simple_def/SimpleDef.tasty"
+        ))
+        .unwrap();
+        let names = NameTable::from_entries(vec![
+            crate::RawName::Utf8("ASTs".into()),
+            crate::RawName::ObjectClass { underlying: 2 },
+            crate::RawName::Utf8("Module".into()),
+        ])
+        .unwrap();
+        let builder = super::TastyFileBuilder::new(file.header().clone(), names)
+            .with_section(EncodedSection::raw(0, []));
+        let bytes = builder.encode().unwrap();
+        assert_eq!(TastyFile::parse(&bytes).unwrap().encode().unwrap(), bytes);
+        let error = TastyFileError::Names(crate::NameTableError::ForwardReference {
+            reference: 2,
+            entry_index: 1,
+        });
+        assert_eq!(builder.validate_scala_3_9(), Err(error.clone()));
+        assert_eq!(
+            builder.encode_validated_compatible_with(28, 9, 0),
+            Err(error.clone())
+        );
+        assert_eq!(
+            TastyFile::parse_and_validate_scala_3_9(&bytes).unwrap_err(),
+            error
         );
     }
 
@@ -2562,6 +2723,59 @@ mod tests {
     }
 
     #[test]
+    fn checks_comment_targets_in_the_original_ast_before_validation_and_relocation() {
+        let fixture = TastyFile::parse(include_bytes!(
+            "../tests/fixtures/simple_def/SimpleDef.tasty"
+        ))
+        .unwrap();
+        let names = NameTable::from_entries(vec![
+            crate::RawName::Utf8("ASTs".into()),
+            crate::RawName::Utf8("Comments".into()),
+        ])
+        .unwrap();
+        for (address, error) in [
+            (
+                1,
+                TastyFileError::InvalidAstNodeAddress {
+                    context: "comment",
+                    address: 1,
+                },
+            ),
+            (
+                4,
+                TastyFileError::InvalidAstAddress {
+                    context: "comment",
+                    address: 4,
+                    asts_length: 4,
+                },
+            ),
+        ] {
+            let builder = super::TastyFileBuilder::new(fixture.header().clone(), names.clone())
+                .with_section(EncodedSection::raw(
+                    0,
+                    [crate::VALDEF_TAG, 0x82, 0x80, crate::UNITCONST_TAG],
+                ))
+                .with_section(
+                    EncodedSection::comments(
+                        1,
+                        &[crate::Comment {
+                            address,
+                            text: "doc".into(),
+                            coordinates: 0,
+                        }],
+                    )
+                    .unwrap(),
+                );
+            let file = builder.build().unwrap();
+            assert_eq!(file.validate(), Err(error.clone()));
+            assert_eq!(
+                file.encode_structured_relocated(&file.structured_asts().unwrap()),
+                Err(error)
+            );
+        }
+    }
+
+    #[test]
     fn rejects_a_file_ast_reference_outside_the_asts_payload() {
         let names =
             crate::NameTable::from_entries(vec![crate::RawName::Utf8("ASTs".to_owned())]).unwrap();
@@ -2593,12 +2807,39 @@ mod tests {
     }
 
     #[test]
+    fn finds_nested_method_names_in_scala_generated_templates() {
+        let file = TastyFile::parse(include_bytes!(
+            "../tests/fixtures/simple_def/SimpleDef.tasty"
+        ))
+        .unwrap();
+        for name in ["identity", "add"] {
+            let reference = file.names().find_utf8(name).unwrap();
+            let sites = file.name_references_to(reference).unwrap();
+            assert_eq!(
+                sites,
+                [crate::NameReference {
+                    owner_address: 0,
+                    reference
+                }]
+            );
+        }
+    }
+
+    #[test]
     fn rejects_a_file_ast_name_reference_outside_the_name_table() {
         let names =
             crate::NameTable::from_entries(vec![crate::RawName::Utf8("ASTs".to_owned())]).unwrap();
         let sections = crate::SectionTable::from_sections(vec![crate::Section::new(
             0,
-            &[crate::APPLY_TAG, 0x82, crate::TERMREFPKG_TAG, 0x83],
+            &[
+                crate::BLOCK_TAG,
+                0x85,
+                crate::APPLY_TAG,
+                0x83,
+                crate::TYPEREF_TAG,
+                0x83,
+                crate::UNITCONST_TAG,
+            ],
         )]);
         let file = TastyFile::from_parts(
             crate::Header {

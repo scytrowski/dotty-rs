@@ -123,8 +123,8 @@ fn canonical_declarations_have_bound_addresses_and_explicitly_omitted_bodies() {
         .unwrap()
         .decode_defdef_body()
         .unwrap();
-    assert_eq!(ctor.clauses, [EMPTYCLAUSE_TAG]);
-    assert!(ctor.parameters.is_empty());
+    assert_eq!(ctor.clauses().collect::<Vec<_>>(), [EMPTYCLAUSE_TAG]);
+    assert!(ctor.parameters().next().is_none());
     assert!(ctor.rhs.is_none());
     assert_eq!(ctor.tail, [DefinitionTail::Modifier(STABLE_TAG)]);
     let method = index
@@ -132,8 +132,8 @@ fn canonical_declarations_have_bound_addresses_and_explicitly_omitted_bodies() {
         .unwrap()
         .decode_defdef_body()
         .unwrap();
-    assert!(method.clauses.is_empty());
-    assert!(method.parameters.is_empty());
+    assert!(method.clauses().next().is_none());
+    assert!(method.parameters().next().is_none());
     assert!(method.rhs.is_none());
     assert!(method.tail.is_empty());
     assert!(matches!(
@@ -163,12 +163,11 @@ fn ordinary_int_parameters_are_bound_ordered_declarations_owned_by_the_method() 
         .unwrap()
         .decode_defdef_body()
         .unwrap();
-    assert_eq!(definition.clauses, []);
-    assert_eq!(definition.parameters.len(), 2);
+    assert!(definition.clauses().next().is_none());
+    assert_eq!(definition.parameters().count(), 2);
     assert_eq!(
         definition
-            .parameters
-            .iter()
+            .parameters()
             .map(|parameter| file.render_name(parameter.name()).unwrap())
             .collect::<Vec<_>>(),
         ["first", "second"]
@@ -308,8 +307,8 @@ fn shape(file: &TastyFile<'_>, tree: RawTree<'_>, depth: usize) -> Shape {
                 DEFDEF_TAG => {
                     let definition = raw.decode_defdef_body().unwrap();
                     let name = file.render_name(definition.name).unwrap();
-                    assert!(definition.parameters.is_empty());
-                    for clause in definition.clauses {
+                    assert!(definition.parameters().next().is_none());
+                    for clause in definition.clauses() {
                         children.push(Shape {
                             tag: clause,
                             names: vec![],

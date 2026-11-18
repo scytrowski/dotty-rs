@@ -25,7 +25,7 @@ Important properties:
 
 - every grammar terminal is represented by a single byte;
 - names are interned in one name table;
-- name references are numbered from `1`;
+- name references are numbered from `0`;
 - section and node lengths are byte lengths;
 - terms and types share `Path` elements, but their interpretation depends on context;
 - name, AST, and attribute tags use separate numeric namespaces.
@@ -70,10 +70,16 @@ Examples for `Nat`:
 
 The decoder must reject:
 
-- encodings outside `u32`, `i32`, or `i64`;
+- `Nat` above 2³¹ − 1 or `LongNat` above 2⁶³ − 1;
+- unsigned encodings longer than nine groups, including leading zero groups;
+- signed encodings outside `i32` or `i64`;
 - unterminated numbers;
 - numbers extending beyond the bounded reader;
 - negative values decoded as `Nat`.
+
+The `Positions` line-size field also accepts the historical unsigned value
+`0xffffffff` for a missing line length. The structural API preserves that
+value as `u32::MAX`.
 
 ### 2.2. UTF-8
 
@@ -164,7 +170,7 @@ NameRef = Nat
 Utf8Ref = Nat
 ```
 
-A reference is the zero-based index of an entry in the name table: `0` is the first entry, which in emitted files is the name of the `ASTs` section. The same holds for every place a name is referenced: AST payloads, composite name entries, section names and the `SOURCEFILE` attribute. In Rust a reference indexes a `Vec<Name>` directly.
+A reference is the zero-based index of an entry in the name table: `0` is the first entry, which commonly names the `ASTs` section. The same holds for every place a name is referenced: AST payloads, composite name entries, section names and the `SOURCEFILE` attribute. In Rust a reference indexes a `Vec<Name>` directly.
 
 The Scala compiler's own format comment describes a `NameRef` as "starting from 1", but Scala 3.9.0 output is zero-based throughout (issue #9). Two things show it: a `SIGNED` entry's `original` names the entry just before the name it decorates (`<init>` is entry 14 and the signed constructor entry says `original: 14`), and read one-based, qualified names such as package paths are assembled from the wrong entries (`tastyfixtures.cytrowski.ASTs.me` instead of `me.cytrowski.tastyfixtures.semantic`). Every unit of the `scala3-library` corpus renders its qualified names without section names under the zero-based reading.
 
@@ -206,10 +212,10 @@ Tag meanings:
 
 ```text
 ParamSig < 0  =>  -ParamSig is the length of a type-parameter section
-ParamSig > 0  =>  ParamSig is a NameRef for a fully qualified term parameter name
+ParamSig >= 0 =>  ParamSig is a NameRef for a fully qualified term parameter name
 ```
 
-Zero is not a valid `ParamSig` (entry `0` is the `ASTs` section name, never a parameter name), and the minimum `i32` value is invalid because
+Zero refers to the first name in the table. The minimum `i32` value is invalid because
 its negation cannot represent the length of a type-parameter section.
 The Rust API keeps the raw `ParamSig` value for lossless encoding and exposes
 `interpret_param_sig()` as a typed view returning `ParamSigValue`.
@@ -225,7 +231,9 @@ form such as `name[with sig result()]`; this form is intended for inspection,
 not as a replacement for the raw signature fields.
 
 Name references are range-checked, and cyclic name-entry dependencies are
-rejected by the validated name-table model.
+rejected by the validated name-table model. Eager Scala compatibility validation
+also requires every dependency to precede its owning entry in wire order.
+Structural decoding and raw encoding preserve acyclic forward references.
 
 Unknown name tags are preserved as raw length-delimited entries. Programmatic
 construction rejects tags already assigned to a known name-entry grammar so
@@ -334,7 +342,7 @@ Term = Path
      | INLINED Length Term Term? ValOrDefDef*
      | LAMBDA Length Term Type?
      | IF Length INLINE? Term Term Term
-     | MATCH Length (IMPLICIT | INLINE? | SUBMATCH?) Term CaseDef*
+     | MATCH Length (IMPLICIT | (INLINE | SUBMATCH)? Term) CaseDef*
      | TRY Length Term CaseDef* Term?
      | RETURN Length ASTRef Term?
      | WHILE Length Term Term
@@ -458,10 +466,11 @@ for traversing those payloads.
 
 `SimpleTerm::name_ref()` and `RawTree::name_refs()` provide the analogous
 access to name-table references, including those nested in category-3 and
-category-4 wrappers. For category-4 trees, the traversal reports the direct
-name field of `IDENT`, `SELECT`, `SELFDEF`, and `NAMEDARG` forms, while AST
-reference fields remain AST references. Category-5 payloads remain opaque at
-this generic layer.
+category-4 wrappers. The category-4 forms with name operands are `IDENT`,
+`IDENTtpt`, `SELECT`, `SELECTtpt`, `TERMREF`, `TYPEREF`, `SELFDEF`, and
+`NAMEDARG`. Each operand contributes one reference in wire order. For
+example, an `IDENTtpt` containing a `TYPEREF` can use the same name twice.
+The generic traversal stops at category-5 payloads.
 
 When a caller already knows the absolute start of a bounded payload,
 `RawTree::decode_with_base_offset()` and
@@ -480,7 +489,9 @@ top-level node while retaining the original borrowed payloads.
 
 `RawNode::ast_refs()` and `RawNode::visit_ast_refs()` walk the child trees of
 all currently supported structured category-5 nodes, including nested package
-and template statements, as well as `ANNOTATION` payloads. Unknown category-5
+and template statements, as well as `ANNOTATION` payloads. They descend into
+known bounded children and include the declaration operands of `TERMREFsymbol`
+and `TYPEREFsymbol` before visiting the qualifier. Unknown category-5
 nodes remain opaque and produce no references from this convenience API.
 
 `RawTree::decode_structured()` provides the corresponding one-tree dispatcher.
@@ -498,16 +509,32 @@ that no longer target visible nodes after a size change. When a caller
 intentionally changes node sizes, `EncodedSection::structured_asts_relocated()`
 can relocate references from the original AST payload to the new layout. The
 relocation is iterative because changing the width of an address can move
-later nodes; opaque unknown nodes are rejected if their positions change.
+later nodes. Relocation requires the same parent/child topology and rejects
+moving opaque nodes. Without an explicit identity map, editing two siblings
+with the same tag can also mean swapping their reference targets. The encoder
+returns `AmbiguousRelocation` in that case. Padding alone does not count as an edit.
 `TastyFile::encode_structured_relocated()` applies the same mapping to the
 `Positions` and `Comments` sections and validates the complete resulting file.
+For sibling permutations, supply the original identities to
+`EncodedSection::structured_asts_relocated_with_identities()` or its file-level
+counterpart. The file encoder translates position and comment addresses with
+the same map as reference operands. A leading `SOURCE` for a moved first root
+attaches to that root’s first span. If the file contains only a source marker
+for that root, the encoder reports `UnanchoredPositionSource`. An association
+whose original address has no visible identity produces `MissingPositionIdentity`
+when the layout changes.
 Use the raw AST-section builders when exact bytes and original addresses must
 be preserved.
+
+A term `MATCH` preserves the order of inline `CASEDEF` and `SHAREDterm`
+case entries. The latter occupies its own AST address. Its operand targets a
+`CASEDEF` and is relocated along with other AST references.
 
 Structured definition bodies retain their leading `NameRef`. `DefinitionBody`
 and `DefDefBody` expose it through `name()` and can be re-encoded with
 `encode_self()`, so structural decoding no longer loses the definition name.
-`DefDefBody::header_items` additionally retains the wire order of parameter
+`DefDefBody::header_items` is the editable sequence behind the
+`parameters()` and `clauses()` iterators. It retains the wire order of parameter
 nodes and `EMPTYCLAUSE`/`SPLITCLAUSE` markers, which is required for lossless
 round-trips when clause markers occur between parameter groups.
 
@@ -819,7 +846,7 @@ Assoc      = Header Delta? Delta? Delta?
 Delta      = Int
 ```
 
-`LinesSizes` contains the number of lines followed by the size of each line excluding the trailing `\n`.
+`LinesSizes` contains the number of lines followed by the length of each line in UTF-16 code units, excluding the trailing `\n`.
 
 Each position entry starts with one signed `Int` header. The `SOURCE` entry is
 encoded as the reserved header value `SOURCE = 4`, followed by the source
@@ -844,12 +871,14 @@ together with the section boundary.
 `Section` view for assembling a `SectionTable`. `EncodedSection::raw()` covers
 unknown or application-specific sections without requiring a guessed grammar.
 `PositionSection::resolved_entries()` provides an ordered derived view that
-accumulates association deltas into absolute coordinates while retaining
+accumulates address, start and end deltas while retaining
 `SOURCE` events. The raw `PositionEntry` deltas remain authoritative for
-lossless re-encoding.
+lossless re-encoding. The point is the current start plus the optional point offset. Both resolved
+views expose `is_synthetic` so callers can distinguish an omitted offset from
+an explicit zero.
 `PositionSection::resolved_associations()` provides a smaller derived view
-that omits source-change events and attaches the currently active source
-`NameRef`—or `None` before the first source event—to each association. Use
+that omits source-change events and attaches the explicit source
+`NameRef` at the same AST address. Addresses without a marker carry `None`. Use
 `resolved_entries()` when source-event ordering itself is significant.
 `TastyFile::resolved_position_associations()` exposes the same view directly
 from a parsed file and returns `None` when the file has no `Positions` section.
@@ -900,7 +929,9 @@ Comment = ASTAddress Utf8 LongInt
 ASTAddress = Nat
 ```
 
-The first element identifies the AST definition carrying the comment. The
+The first element identifies the AST definition carrying the comment. Eager file
+validation checks that this address is a visible AST node start. Structured
+relocation checks the original target before mapping it to the new layout. The
 comment text is encoded as UTF-8, and the final element contains the comment
 coordinates.
 
@@ -934,6 +965,10 @@ Attributes:
 - must be ordered by tag number;
 - have no additional payload in range `1..32`;
 - have a `Utf8Ref` payload in range `129..160`.
+
+Unnamed boolean tags `7..=32` and string tags `130..=160` are retained as
+`BooleanExtension` and `StringExtension`. File validation checks each string
+extension’s zero-based UTF-8 reference.
 
 The Scala 3.9.0 compiler emits the `SOURCEFILEattr` `Utf8Ref` as a zero-based
 name-table index in the fixtures used by this project, despite the grammar's

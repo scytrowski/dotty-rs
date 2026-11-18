@@ -3,8 +3,8 @@ use crate::ast::{
 };
 use crate::name_table::NameRef;
 use crate::reader::{ReadError, Reader};
-use crate::term::TermEncodeError;
-use crate::writer::{WriteError, Writer};
+use crate::term::{AstTreeNode, RawTree, TermEncodeError};
+use crate::writer::{WriteError, Writer, ast_address_from_offset};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -48,6 +48,53 @@ pub struct EncodedAstSection {
     ast_address_map: BTreeMap<u32, u32>,
 }
 
+/// Original AST addresses in the wire order of the edited visible nodes.
+/// Each original node (including nested leaves) must occur exactly once.
+/// Start with [`AstAddressIndex::node_addresses`] and apply the same
+/// sibling-subtree permutations as the edit. Addresses in reference operands
+/// still refer to the original section. The encoder computes final addresses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AstNodeIdentityMap {
+    original_addresses: Vec<u32>,
+}
+
+impl AstNodeIdentityMap {
+    /// Associates each edited node, in increasing wire offset order, with
+    /// its original address. Relocation validates the map against both trees.
+    pub fn from_edited_order(addresses: impl IntoIterator<Item = u32>) -> Self {
+        Self {
+            original_addresses: addresses.into_iter().collect(),
+        }
+    }
+
+    fn original_nodes(
+        &self,
+        index: &AstAddressIndex<'_>,
+    ) -> Result<Vec<AstTreeNode>, TermEncodeError> {
+        let count = index.iter_nodes().count();
+        if self.original_addresses.len() != count {
+            return Err(AstError::AstNodeCountMismatch {
+                expected: count,
+                actual: self.original_addresses.len(),
+            }
+            .into());
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        self.original_addresses
+            .iter()
+            .map(|&address| {
+                let node = index
+                    .get_node(address)
+                    .ok_or(AstError::InvalidAstReference { address })?;
+                if !seen.insert(address) {
+                    return Err(TermEncodeError::DuplicateNodeIdentity { address });
+                }
+                Ok(node)
+            })
+            .collect()
+    }
+}
+
 /// Identifies one of the standard TASTy sections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StandardSection {
@@ -76,6 +123,9 @@ pub const OUTLINE_ATTR: u8 = 6;
 /// Attribute tag for the source-file name reference.
 pub const SOURCEFILE_ATTR: u8 = 129;
 
+const BOOLEAN_EXTENSION_TAGS: std::ops::RangeInclusive<u8> = 7..=32;
+const STRING_EXTENSION_TAGS: std::ops::RangeInclusive<u8> = 130..=160;
+
 /// Decoded standard TASTy file attribute.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Attribute {
@@ -93,6 +143,18 @@ pub enum Attribute {
     Outline,
     /// Raw zero-based name-table index emitted by Scala's `SOURCEFILEattr`.
     SourceFile(NameRef),
+    /// An unnamed boolean attribute in Scala's reserved boolean range.
+    BooleanExtension {
+        /// Wire tag in `7..=32`.
+        tag: u8,
+    },
+    /// An unnamed string attribute in Scala's reserved string range.
+    StringExtension {
+        /// Wire tag in `130..=160`.
+        tag: u8,
+        /// Zero-based UTF-8 name-table reference.
+        reference: NameRef,
+    },
 }
 
 /// A source comment associated with an AST address.
@@ -117,10 +179,10 @@ pub enum PositionEntry {
         start_delta: Option<i64>,
         /// Optional delta for the end coordinate.
         end_delta: Option<i64>,
-        /// Optional delta for the point coordinate.
+        /// Optional point offset from the current start coordinate.
         point_delta: Option<i64>,
     },
-    /// Changes the active source-file name reference.
+    /// Records the source-file name at the current AST address.
     Source(NameRef),
 }
 
@@ -140,7 +202,7 @@ pub enum PositionCoordinate {
 /// Position event after address and coordinate deltas are resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedPositionEntry {
-    /// Changes the active source-file name reference.
+    /// Records the source-file name at the current AST address.
     Source(NameRef),
     /// Absolute position association.
     Association {
@@ -152,13 +214,15 @@ pub enum ResolvedPositionEntry {
         end: i64,
         /// Absolute source point coordinate.
         point: i64,
+        /// True when the wire association omitted the point delta.
+        is_synthetic: bool,
     },
 }
 
-/// A resolved source position with the active source-file reference.
+/// A resolved source position with the source explicitly recorded at its AST address.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPosition {
-    /// Active source-file name reference, if a source event preceded it.
+    /// Source-file name explicitly recorded at this address, when present.
     pub source: Option<NameRef>,
     /// Absolute AST address.
     pub address: i64,
@@ -168,12 +232,15 @@ pub struct ResolvedPosition {
     pub end: i64,
     /// Absolute source point coordinate.
     pub point: i64,
+    /// True when the wire association omitted the point delta.
+    pub is_synthetic: bool,
 }
 
 /// Decoded source-position section.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PositionSection {
-    /// Size of each source line in bytes.
+    /// Length of each source line in UTF-16 code units, excluding the line feed.
+    /// Older Scala files can represent an unknown length with `u32::MAX`.
     pub line_sizes: Vec<u32>,
     /// Position events in wire order.
     pub entries: Vec<PositionEntry>,
@@ -197,16 +264,30 @@ impl Attribute {
         let mut previous = None;
         for attribute in attributes {
             let tag = attribute.tag();
-            if previous.is_some_and(|previous| tag <= previous) {
+            match attribute {
+                Self::BooleanExtension { .. } if !BOOLEAN_EXTENSION_TAGS.contains(&tag) => {
+                    return Err(WriteError::InvalidTag { tag });
+                }
+                Self::StringExtension { .. } if !STRING_EXTENSION_TAGS.contains(&tag) => {
+                    return Err(WriteError::InvalidTag { tag });
+                }
+                _ => {}
+            }
+            if let Some(previous) = previous
+                && tag <= previous
+            {
                 return Err(WriteError::AttributeOrder {
-                    previous: previous.unwrap(),
+                    previous,
                     current: tag,
                 });
             }
             previous = Some(tag);
-            writer.write_u8(tag);
-            if let Self::SourceFile(reference) = attribute {
-                writer.write_nat(*reference);
+        }
+        for attribute in attributes {
+            writer.write_u8(attribute.tag());
+            if let Self::SourceFile(reference) | Self::StringExtension { reference, .. } = attribute
+            {
+                writer.write_nat(*reference)?;
             }
         }
         Ok(())
@@ -221,6 +302,7 @@ impl Attribute {
             Self::Java => JAVA_ATTR,
             Self::Outline => OUTLINE_ATTR,
             Self::SourceFile(_) => SOURCEFILE_ATTR,
+            Self::BooleanExtension { tag } | Self::StringExtension { tag, .. } => *tag,
         }
     }
 }
@@ -229,7 +311,7 @@ impl Comment {
     /// Encodes comments in their supplied order.
     pub fn encode_all(comments: &[Self], writer: &mut Writer) -> Result<(), WriteError> {
         for comment in comments {
-            writer.write_nat(comment.address);
+            writer.write_nat(comment.address)?;
             writer.write_utf8(&comment.text)?;
             writer.write_long_int(comment.coordinates);
         }
@@ -261,9 +343,13 @@ impl PositionSection {
             WriteError::LengthOverflow {
                 length: self.line_sizes.len(),
             }
-        })?);
+        })?)?;
         for line_size in &self.line_sizes {
-            writer.write_nat(*line_size);
+            if *line_size == u32::MAX {
+                writer.write_long_nat(u64::from(*line_size))?;
+            } else {
+                writer.write_nat(*line_size)?;
+            }
         }
 
         for entry in &self.entries {
@@ -323,7 +409,6 @@ impl PositionSection {
         let mut address = 0;
         let mut start = 0;
         let mut end = 0;
-        let mut point = 0;
         let mut resolved = Vec::with_capacity(self.entries.len());
 
         for entry in &self.entries {
@@ -345,14 +430,17 @@ impl PositionSection {
                     if let Some(delta) = end_delta {
                         end = add_position_delta(end, *delta, PositionCoordinate::End)?;
                     }
-                    if let Some(delta) = point_delta {
-                        point = add_position_delta(point, *delta, PositionCoordinate::Point)?;
-                    }
+                    let point = add_position_delta(
+                        start,
+                        point_delta.unwrap_or(0),
+                        PositionCoordinate::Point,
+                    )?;
                     resolved.push(ResolvedPositionEntry::Association {
                         address,
                         start,
                         end,
                         point,
+                        is_synthetic: point_delta.is_none(),
                     });
                 }
             }
@@ -361,34 +449,40 @@ impl PositionSection {
         Ok(resolved)
     }
 
-    /// Resolves position deltas and returns only associations with their
-    /// currently active source reference.
-    ///
-    /// An association before the first `SOURCE` event has `source = None`.
-    /// Source-change events are omitted from this derived view; use
-    /// [`Self::resolved_entries`] when their ordering must be preserved.
+    /// Returns associations in wire order with the explicit source marker at
+    /// each address. Scala writes the marker after the associated span.
     pub fn resolved_associations(&self) -> Result<Vec<ResolvedPosition>, SectionError> {
-        let mut source = None;
+        let mut sources = BTreeMap::new();
+        let mut current_address = 0;
         let mut associations = Vec::new();
 
         for entry in self.resolved_entries()? {
             match entry {
-                ResolvedPositionEntry::Source(reference) => source = Some(reference),
+                ResolvedPositionEntry::Source(reference) => {
+                    sources.insert(current_address, reference);
+                }
                 ResolvedPositionEntry::Association {
                     address,
                     start,
                     end,
                     point,
-                } => associations.push(ResolvedPosition {
-                    source,
-                    address,
-                    start,
-                    end,
-                    point,
-                }),
+                    is_synthetic,
+                } => {
+                    current_address = address;
+                    associations.push(ResolvedPosition {
+                        source: None,
+                        address,
+                        start,
+                        end,
+                        point,
+                        is_synthetic,
+                    });
+                }
             }
         }
-
+        for association in &mut associations {
+            association.source = sources.get(&association.address).copied();
+        }
         Ok(associations)
     }
 
@@ -404,18 +498,30 @@ impl PositionSection {
             .find(|association| association.address == address))
     }
 
-    /// Rebuild address deltas after AST nodes have moved within the AST
-    /// section. Source and source-coordinate entries retain their wire order
-    /// and values; only association address deltas are changed.
+    /// Rebuild address deltas and keep source markers with their original
+    /// nodes, including markers at the implicit initial address zero.
     pub(crate) fn relocate_ast_addresses(
         &self,
-        address_map: &BTreeMap<u32, u32>,
+        relocate: impl Fn(u32) -> Result<u32, SectionError>,
     ) -> Result<Self, SectionError> {
         let mut old_address = 0i64;
         let mut new_address = 0i64;
         let mut entries = Vec::with_capacity(self.entries.len());
 
-        for entry in &self.entries {
+        // SOURCE has no address operand. If the first root moved, attach its
+        // leading markers to the first span for that root in the new layout.
+        let leading = self
+            .entries
+            .iter()
+            .take_while(|entry| matches!(entry, PositionEntry::Source(_)))
+            .count();
+        let deferred = if leading > 0 && relocate(0)? != 0 {
+            leading
+        } else {
+            0
+        };
+        let mut markers = &self.entries[..deferred];
+        for entry in &self.entries[deferred..] {
             match entry {
                 PositionEntry::Source(reference) => {
                     entries.push(PositionEntry::Source(*reference));
@@ -436,11 +542,7 @@ impl PositionSection {
                             address: old_address,
                         }
                     })?;
-                    let relocated = address_map
-                        .get(&old_address_u32)
-                        .copied()
-                        .unwrap_or(old_address_u32);
-                    let relocated = i64::from(relocated);
+                    let relocated = i64::from(relocate(old_address_u32)?);
                     let relocated_delta = relocated.checked_sub(new_address).ok_or(
                         SectionError::PositionOverflow {
                             coordinate: PositionCoordinate::Address,
@@ -449,14 +551,33 @@ impl PositionSection {
                         },
                     )?;
                     new_address = relocated;
+                    // A zero address delta with only a start delta spells
+                    // SOURCE on the wire. An explicit zero end delta preserves
+                    // the same span and synthetic-point flag.
+                    let end = if relocated_delta == 0
+                        && start_delta.is_some()
+                        && end_delta.is_none()
+                        && point_delta.is_none()
+                    {
+                        Some(0)
+                    } else {
+                        *end_delta
+                    };
                     entries.push(PositionEntry::Association {
                         address_delta: relocated_delta,
                         start_delta: *start_delta,
-                        end_delta: *end_delta,
+                        end_delta: end,
                         point_delta: *point_delta,
                     });
+                    if old_address == 0 && !markers.is_empty() {
+                        entries.extend_from_slice(markers);
+                        markers = &[];
+                    }
                 }
             }
+        }
+        if !markers.is_empty() {
+            return Err(SectionError::UnanchoredPositionSource);
         }
 
         Ok(Self {
@@ -510,6 +631,14 @@ pub enum SectionError {
         /// Delta that could not be added.
         delta: i64,
     },
+    /// An explicit relocation has no visible node for a position address.
+    MissingPositionIdentity {
+        /// Original position association address.
+        address: u32,
+    },
+    /// A source marker at the implicit initial address has no span to
+    /// attach to after the first root moves.
+    UnanchoredPositionSource,
     /// An AST address could not be represented as an unsigned address.
     InvalidAstAddress {
         /// Invalid absolute address.
@@ -553,6 +682,14 @@ impl fmt::Display for SectionError {
             } => write!(
                 formatter,
                 "position {coordinate:?} overflows when adding delta {delta} to {previous}"
+            ),
+            Self::MissingPositionIdentity { address } => write!(
+                formatter,
+                "no AST node identity for position at original address {address}"
+            ),
+            Self::UnanchoredPositionSource => write!(
+                formatter,
+                "cannot relocate leading SOURCE without a span for the original first root"
             ),
             Self::InvalidAstAddress { address } => {
                 write!(
@@ -628,6 +765,11 @@ impl<'a> Section<'a> {
                 JAVA_ATTR => Attribute::Java,
                 OUTLINE_ATTR => Attribute::Outline,
                 SOURCEFILE_ATTR => Attribute::SourceFile(reader.read_nat()?),
+                tag if BOOLEAN_EXTENSION_TAGS.contains(&tag) => Attribute::BooleanExtension { tag },
+                tag if STRING_EXTENSION_TAGS.contains(&tag) => Attribute::StringExtension {
+                    tag,
+                    reference: reader.read_nat()?,
+                },
                 _ => return Err(SectionError::InvalidAttributeTag { tag, offset }),
             };
             attributes.push(attribute);
@@ -671,7 +813,13 @@ impl<'a> Section<'a> {
 
         let mut line_sizes = Vec::with_capacity(line_count);
         for _ in 0..line_count {
-            line_sizes.push(reader.read_nat()?);
+            let offset = reader.position();
+            let size = reader.read_long_nat()?;
+            // Older Scala compilers emitted unsigned 0xffffffff for -1.
+            if size > i32::MAX as u64 && size != u64::from(u32::MAX) {
+                return Err(ReadError::IntegerOverflow { offset }.into());
+            }
+            line_sizes.push(size as u32);
         }
 
         let mut entries = Vec::new();
@@ -812,13 +960,33 @@ impl EncodedSection {
     /// Relocation is iterative because changing the width of an address can
     /// change the address of a later node. Opaque unknown nodes are rejected
     /// when their position changes because their hidden reference grammar is
-    /// not available to the structural encoder.
+    /// not available to the structural encoder. Edits must preserve tree
+    /// topology. Changing multiple siblings with the same tag is ambiguous
+    /// because structured trees do not carry stable identities.
     pub fn structured_asts_relocated(
         name: NameRef,
         original_payload: &[u8],
         nodes: &[StructuredNode<'_>],
     ) -> Result<EncodedAstSection, TermEncodeError> {
-        EncodedAstSection::from_structured_relocated(name, original_payload, nodes)
+        EncodedAstSection::from_structured_relocated(name, original_payload, nodes, None)
+    }
+
+    /// Relocates an edited AST section using the supplied node identities.
+    /// Nodes can change size and siblings can change order. Node tags and
+    /// original parent identities must match. A moved reference target
+    /// requires all potentially reference-bearing nodes to be understood.
+    pub fn structured_asts_relocated_with_identities(
+        name: NameRef,
+        original_payload: &[u8],
+        nodes: &[StructuredNode<'_>],
+        identities: &AstNodeIdentityMap,
+    ) -> Result<EncodedAstSection, TermEncodeError> {
+        EncodedAstSection::from_structured_relocated(
+            name,
+            original_payload,
+            nodes,
+            Some(identities),
+        )
     }
 
     /// Returns the zero-based section name index.
@@ -860,11 +1028,7 @@ impl EncodedAstSection {
         let mut ast_addresses = Vec::with_capacity(nodes.len());
 
         for node in nodes {
-            ast_addresses.push(u32::try_from(writer.position()).map_err(|_| {
-                WriteError::NatOverflow {
-                    value: writer.position() as u64,
-                }
-            })?);
+            ast_addresses.push(ast_address_from_offset(writer.position())?);
             node.encode(&mut writer)?;
         }
 
@@ -877,13 +1041,13 @@ impl EncodedAstSection {
         })
     }
 
-    fn from_structured_relocated(
+    pub(crate) fn from_structured_relocated(
         name: NameRef,
         original_payload: &[u8],
         nodes: &[StructuredNode<'_>],
+        identities: Option<&AstNodeIdentityMap>,
     ) -> Result<Self, TermEncodeError> {
-        let original_index = ast_index(original_payload)?;
-        let original_top_level = top_level_nodes(original_payload)?;
+        let (original_top_level, original_index) = ast_index_with_nodes(original_payload)?;
         if original_top_level.len() != nodes.len() {
             return Err(AstError::AstNodeCountMismatch {
                 expected: original_top_level.len(),
@@ -892,11 +1056,24 @@ impl EncodedAstSection {
             .into());
         }
 
-        let original_visible = original_index.iter_nodes().collect::<Vec<_>>();
+        let original_visible = match identities {
+            Some(map) => map.original_nodes(&original_index)?,
+            None => original_index.iter_nodes().collect(),
+        };
         let mut address_map = BTreeMap::new();
 
         for iteration in 0..MAX_AST_RELOCATION_ITERATIONS {
-            let bytes = encode_structured_nodes(nodes, &address_map)?;
+            // Keep borrowed payloads on the first pass. Once a node moves,
+            // use the same encoding for every subsequent layout calculation.
+            let mut writer = if iteration == 0 {
+                Writer::new()
+            } else {
+                Writer::with_ast_address_map(address_map.clone())
+            };
+            for node in nodes {
+                node.encode(&mut writer)?;
+            }
+            let bytes = writer.into_inner();
             let (encoded_nodes, encoded_index) = ast_index_with_nodes(&bytes)?;
             let encoded_visible = encoded_index.iter_nodes().collect::<Vec<_>>();
 
@@ -919,6 +1096,27 @@ impl EncodedAstSection {
                 }
             }
 
+            if iteration == 0 && identities.is_none() && original_payload != bytes {
+                let root = |node: &crate::RawNode<'_>| AstTreeNode {
+                    tag: node.tag,
+                    offset: node.offset,
+                };
+                let mut pending = changed_relocation_siblings(
+                    original_payload,
+                    original_top_level.iter().map(root),
+                    &bytes,
+                    encoded_nodes.iter().map(root),
+                )?;
+                while let Some((old, new)) = pending.pop() {
+                    pending.extend(changed_relocation_siblings(
+                        original_payload,
+                        original_index.children_of(ast_address_from_offset(old.offset)?),
+                        &bytes,
+                        encoded_index.children_of(ast_address_from_offset(new.offset)?),
+                    )?);
+                }
+            }
+
             let next_map = original_visible
                 .iter()
                 .zip(&encoded_visible)
@@ -930,10 +1128,33 @@ impl EncodedAstSection {
                 })
                 .collect::<Result<BTreeMap<_, _>, TermEncodeError>>()?;
 
+            if identities.is_some() && iteration == 0 {
+                // Edited reference operands are still in the original coordinate
+                // system. An invalid old operand could happen to be a new address.
+                validate_indexed_ast_references(&encoded_nodes, &original_index)?;
+            }
+            if identities.is_some() {
+                for (old, new) in original_visible.iter().zip(&encoded_visible) {
+                    let address = ast_address_from_offset(old.offset)?;
+                    let expected_parent = original_index.parent_of(address).map(|p| {
+                        let parent = p.offset as u32;
+                        next_map.get(&parent).copied().unwrap_or(parent)
+                    });
+                    let actual_parent =
+                        encoded_index.parent_of(ast_address_from_offset(new.offset)?);
+                    if expected_parent != actual_parent.map(|p| p.offset as u32) {
+                        return Err(TermEncodeError::RelocationParentMismatch { address });
+                    }
+                }
+            }
+
             for node in original_index.iter() {
                 let old_address = ast_address_from_offset(node.offset)?;
                 let new_address = next_map.get(&old_address).copied().unwrap_or(old_address);
-                if !node.is_known() && new_address != old_address {
+                if !node.is_known()
+                    && (new_address != old_address
+                        || (identities.is_some() && !next_map.is_empty()))
+                {
                     return Err(AstError::UnsupportedRelocation {
                         tag: node.tag,
                         offset: node.offset,
@@ -943,11 +1164,20 @@ impl EncodedAstSection {
             }
 
             if next_map == address_map {
-                validate_structured_ast_payload(&bytes)?;
+                validate_indexed_ast_references(&encoded_nodes, &encoded_index)?;
                 let ast_addresses = encoded_nodes
                     .iter()
                     .map(|node| ast_address_from_offset(node.offset))
                     .collect::<Result<Vec<_>, _>>()?;
+                // File metadata can target any visible node. In explicit mode
+                // preserve the full domain when movement requires translation.
+                if let Some(identities) = identities
+                    && !address_map.is_empty()
+                {
+                    for &address in &identities.original_addresses {
+                        address_map.entry(address).or_insert(address);
+                    }
+                }
                 return Ok(Self {
                     section: EncodedSection::raw(name, bytes),
                     ast_addresses,
@@ -1004,26 +1234,73 @@ impl EncodedAstSection {
 
 const MAX_AST_RELOCATION_ITERATIONS: usize = 16;
 
-fn encode_structured_nodes(
-    nodes: &[StructuredNode<'_>],
-    address_map: &BTreeMap<u32, u32>,
-) -> Result<Vec<u8>, TermEncodeError> {
-    let mut writer = Writer::with_ast_address_map(address_map.clone());
-    for node in nodes {
-        node.encode(&mut writer)?;
+// Compare before rewriting addresses. Rewritten operands are consequences
+// of relocation and must not be mistaken for edits to sibling identity.
+fn changed_relocation_siblings(
+    old_bytes: &[u8],
+    mut old: impl Iterator<Item = AstTreeNode>,
+    new_bytes: &[u8],
+    mut new: impl Iterator<Item = AstTreeNode>,
+) -> Result<Vec<(AstTreeNode, AstTreeNode)>, TermEncodeError> {
+    let mut changed = Vec::new();
+    loop {
+        let (before, after) = match (old.next(), new.next()) {
+            (None, None) => break,
+            (Some(before), Some(after)) if before.tag == after.tag => (before, after),
+            (Some(node), _) | (None, Some(node)) => {
+                return Err(AstError::AmbiguousRelocation {
+                    tag: node.tag,
+                    offset: node.offset,
+                }
+                .into());
+            }
+        };
+        let old_tree = relocation_tree_bytes(old_bytes, before)?;
+        let new_tree = relocation_tree_bytes(new_bytes, after)?;
+        if old_tree == new_tree {
+            continue;
+        }
+        changed.push((before, after, old_tree, new_tree));
     }
+
+    // A changed length prefix or padded operand can encode the same tree.
+    // Only pay for normalization when several siblings would be ambiguous.
+    let mut candidates = [0u8; 256];
+    for (node, ..) in &changed {
+        candidates[node.tag as usize] = candidates[node.tag as usize].saturating_add(1);
+    }
+    let mut edited = [false; 256];
+    for (node, _, old_tree, new_tree) in &changed {
+        let tag = node.tag as usize;
+        if candidates[tag] > 1
+            && canonical_relocation_tree(old_tree)? != canonical_relocation_tree(new_tree)?
+            && std::mem::replace(&mut edited[tag], true)
+        {
+            return Err(AstError::AmbiguousRelocation {
+                tag: node.tag,
+                offset: node.offset,
+            }
+            .into());
+        }
+    }
+    Ok(changed
+        .into_iter()
+        .map(|(old, new, _, _)| (old, new))
+        .collect())
+}
+
+fn relocation_tree_bytes(bytes: &[u8], node: AstTreeNode) -> Result<&[u8], TermEncodeError> {
+    let mut reader = Reader::new(&bytes[node.offset..]);
+    RawTree::decode(&mut reader).map_err(AstError::from)?;
+    Ok(&bytes[node.offset..node.offset + reader.position()])
+}
+
+fn canonical_relocation_tree(bytes: &[u8]) -> Result<Vec<u8>, TermEncodeError> {
+    let mut writer = Writer::with_ast_address_map(BTreeMap::new());
+    RawTree::decode(&mut Reader::new(bytes))
+        .map_err(AstError::from)?
+        .encode(&mut writer)?;
     Ok(writer.into_inner())
-}
-
-fn ast_address_from_offset(offset: usize) -> Result<u32, TermEncodeError> {
-    u32::try_from(offset).map_err(|_| {
-        let value = u64::try_from(offset).unwrap_or(u64::MAX);
-        WriteError::NatOverflow { value }.into()
-    })
-}
-
-fn ast_index<'a>(bytes: &'a [u8]) -> Result<AstAddressIndex<'a>, TermEncodeError> {
-    Ok(ast_index_with_nodes(bytes)?.1)
 }
 
 fn ast_index_with_nodes<'a>(
@@ -1043,16 +1320,15 @@ fn ast_index_with_nodes<'a>(
     Ok((nodes, index))
 }
 
-fn top_level_nodes<'a>(bytes: &'a [u8]) -> Result<RawNodes<'a>, TermEncodeError> {
-    Ok(ast_index_with_nodes(bytes)?.0)
+fn validate_structured_ast_payload(bytes: &[u8]) -> Result<(), TermEncodeError> {
+    let (nodes, index) = ast_index_with_nodes(bytes)?;
+    validate_indexed_ast_references(&nodes, &index)
 }
 
-fn validate_structured_ast_payload(bytes: &[u8]) -> Result<(), TermEncodeError> {
-    let mut reader = Reader::new(bytes);
-    let nodes = RawNodes::decode(&mut reader)?;
-    let index =
-        nodes.deep_address_index_with_source_and_max_depth(bytes, DEFAULT_MAX_AST_INDEX_DEPTH)?;
-
+fn validate_indexed_ast_references(
+    nodes: &RawNodes<'_>,
+    index: &AstAddressIndex<'_>,
+) -> Result<(), TermEncodeError> {
     for node in nodes.iter() {
         for reference in node.ast_refs()? {
             if index.resolve_node(reference).is_none() {
@@ -1146,7 +1422,7 @@ impl<'a> SectionTable<'a> {
     /// Encodes all sections in their current order.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), WriteError> {
         for section in &self.sections {
-            writer.write_nat(section.name);
+            writer.write_nat(section.name)?;
             writer.write_length_prefixed_bytes(section.payload)?;
         }
         Ok(())
@@ -1290,7 +1566,7 @@ mod tests {
                     address_delta: 3,
                     start_delta: None,
                     end_delta: Some(-1),
-                    point_delta: Some(7),
+                    point_delta: Some(1),
                 },
                 PositionEntry::Source(8),
             ],
@@ -1304,13 +1580,15 @@ mod tests {
                     address: 10,
                     start: 2,
                     end: 5,
-                    point: 0,
+                    point: 2,
+                    is_synthetic: true,
                 },
                 ResolvedPositionEntry::Association {
                     address: 13,
                     start: 2,
                     end: 4,
-                    point: 7,
+                    point: 3,
+                    is_synthetic: false,
                 },
                 ResolvedPositionEntry::Source(8),
             ])
@@ -1333,13 +1611,15 @@ mod tests {
                     address_delta: 3,
                     start_delta: Some(2),
                     end_delta: None,
-                    point_delta: Some(-1),
+                    point_delta: Some(1),
                 },
             ],
         };
         let address_map = BTreeMap::from([(10, 100), (13, 109)]);
 
-        let relocated = positions.relocate_ast_addresses(&address_map).unwrap();
+        let relocated = positions
+            .relocate_ast_addresses(|addr| Ok(address_map.get(&addr).copied().unwrap_or(addr)))
+            .unwrap();
 
         assert_eq!(
             relocated.entries,
@@ -1355,7 +1635,7 @@ mod tests {
                     address_delta: 9,
                     start_delta: Some(2),
                     end_delta: None,
-                    point_delta: Some(-1),
+                    point_delta: Some(1),
                 },
             ]
         );
@@ -1367,15 +1647,29 @@ mod tests {
                     address: 100,
                     start: 4,
                     end: 9,
-                    point: 0,
+                    point: 4,
+                    is_synthetic: true,
                 },
                 ResolvedPositionEntry::Association {
                     address: 109,
                     start: 6,
                     end: 9,
-                    point: -1,
+                    point: 7,
+                    is_synthetic: false,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn relocation_rejects_a_leading_source_with_no_span_for_its_moved_root() {
+        let positions = PositionSection {
+            line_sizes: vec![],
+            entries: vec![PositionEntry::Source(1)],
+        };
+        assert_eq!(
+            positions.relocate_ast_addresses(|_| Ok(3)),
+            Err(SectionError::UnanchoredPositionSource)
         );
     }
 
@@ -1413,7 +1707,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_position_associations_with_the_active_source() {
+    fn resolves_position_associations_with_the_marker_at_the_same_address() {
         let positions = PositionSection {
             line_sizes: vec![],
             entries: vec![
@@ -1429,7 +1723,7 @@ mod tests {
                     address_delta: 3,
                     start_delta: None,
                     end_delta: None,
-                    point_delta: Some(7),
+                    point_delta: Some(1),
                 },
             ],
         };
@@ -1438,18 +1732,20 @@ mod tests {
             positions.resolved_associations(),
             Ok(vec![
                 ResolvedPosition {
-                    source: Some(4),
+                    source: Some(8),
                     address: 10,
                     start: 2,
                     end: 5,
-                    point: 0,
+                    point: 2,
+                    is_synthetic: true,
                 },
                 ResolvedPosition {
-                    source: Some(8),
+                    source: None,
                     address: 13,
                     start: 2,
                     end: 5,
-                    point: 7,
+                    point: 3,
+                    is_synthetic: false,
                 },
             ])
         );
@@ -1475,6 +1771,7 @@ mod tests {
                 start: 0,
                 end: 0,
                 point: 0,
+                is_synthetic: true,
             }])
         );
     }
@@ -1494,7 +1791,7 @@ mod tests {
                     address_delta: 6,
                     start_delta: Some(4),
                     end_delta: Some(5),
-                    point_delta: Some(6),
+                    point_delta: Some(1),
                 },
             ],
         };
@@ -1506,7 +1803,8 @@ mod tests {
                 address: 10,
                 start: 5,
                 end: 8,
-                point: 8,
+                point: 6,
+                is_synthetic: false,
             }))
         );
     }
@@ -1557,15 +1855,37 @@ mod tests {
     }
 
     #[test]
+    fn preserves_the_legacy_negative_line_size_only_in_positions() {
+        let bytes = [0x81, 0x0f, 0x7f, 0x7f, 0x7f, 0xff];
+        let positions = Section::new(0, &bytes).decode_positions().unwrap();
+        assert_eq!(positions.line_sizes, [u32::MAX]);
+        let mut writer = Writer::new();
+        positions.encode(&mut writer).unwrap();
+        assert_eq!(writer.as_slice(), bytes);
+        assert_eq!(
+            Section::new(0, &[0x81, 8, 0, 0, 0, 0x80]).decode_positions(),
+            Err(SectionError::Read(ReadError::IntegerOverflow { offset: 1 }))
+        );
+        assert_eq!(
+            PositionSection {
+                line_sizes: vec![1 << 31],
+                entries: vec![]
+            }
+            .encode(&mut Writer::new()),
+            Err(WriteError::NatOverflow { value: 1 << 31 })
+        );
+    }
+
+    #[test]
     fn rejects_a_maximal_position_line_count_before_allocating_line_sizes() {
-        let bytes = [0x0f, 0x7f, 0x7f, 0x7f, 0xff];
+        let bytes = [0x07, 0x7f, 0x7f, 0x7f, 0xff];
         let section = Section::new(0, &bytes);
 
         assert_eq!(
             section.decode_positions(),
             Err(SectionError::Read(ReadError::UnexpectedEof {
                 offset: 5,
-                needed: u32::MAX as usize,
+                needed: i32::MAX as usize,
                 remaining: 0,
             }))
         );
@@ -1683,7 +2003,7 @@ mod tests {
     fn relocates_structured_ast_references_after_node_growth() {
         fn select_outer_tree(levels: u32) -> RawTree<'static> {
             let mut payload = Writer::new();
-            payload.write_nat(levels);
+            payload.write_nat(levels).unwrap();
             RawTree::leaf(crate::TERMREFPKG_TAG, TermValue::NameRef(1))
                 .unwrap()
                 .encode(&mut payload)
@@ -1949,18 +2269,76 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_attribute_tags() {
-        let section = Section {
-            name: 0,
-            offset: 0,
-            length: 0,
-            payload: &[7],
-        };
+    fn rejects_tags_outside_assigned_attribute_categories() {
+        for tag in [0, 33, 128, 161, 255] {
+            assert_eq!(
+                Section::new(0, &[tag]).decode_attributes(),
+                Err(SectionError::InvalidAttributeTag { tag, offset: 0 })
+            );
+        }
+    }
 
+    #[test]
+    fn preserves_the_tags_and_references_of_attribute_extensions() {
+        let payload = [6, 7, 32, 129, 0x81, 130, 0x80, 160, 1, 0x80];
+        let attributes = Section::new(0, &payload).decode_attributes().unwrap();
         assert_eq!(
-            section.decode_attributes(),
-            Err(SectionError::InvalidAttributeTag { tag: 7, offset: 0 })
+            attributes,
+            [
+                Attribute::Outline,
+                Attribute::BooleanExtension { tag: 7 },
+                Attribute::BooleanExtension { tag: 32 },
+                Attribute::SourceFile(1),
+                Attribute::StringExtension {
+                    tag: 130,
+                    reference: 0
+                },
+                Attribute::StringExtension {
+                    tag: 160,
+                    reference: 128
+                }
+            ]
         );
+        let mut writer = Writer::new();
+        Attribute::encode_all(&attributes, &mut writer).unwrap();
+        assert_eq!(writer.as_slice(), payload);
+        assert!(matches!(
+            Section::new(0, &[130]).decode_attributes(),
+            Err(SectionError::Read(_))
+        ));
+        assert_eq!(
+            Section::new(0, &[7, 7]).decode_attributes(),
+            Err(SectionError::AttributesNotOrdered {
+                previous: 7,
+                current: 7,
+                offset: 1
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_extension_variants_before_appending_to_the_writer() {
+        for attr in [
+            Attribute::BooleanExtension { tag: 6 },
+            Attribute::BooleanExtension { tag: 130 },
+            Attribute::StringExtension {
+                tag: 129,
+                reference: 0,
+            },
+            Attribute::StringExtension {
+                tag: 32,
+                reference: 0,
+            },
+        ] {
+            let tag = attr.tag();
+            let mut writer = Writer::new();
+            writer.write_u8(42);
+            assert_eq!(
+                Attribute::encode_all(&[Attribute::ExplicitNulls, attr], &mut writer),
+                Err(WriteError::InvalidTag { tag })
+            );
+            assert_eq!(writer.as_slice(), &[42]);
+        }
     }
 
     #[test]
