@@ -722,7 +722,11 @@ evidence retain their contracts.
    it), using identity shells for referenced classes, and resolve+enter
    its annotations (`.class` only, §3).
 9. Complete the class: build its `Type::ClassInfo` (parents + the
-   declarations `Scope`) and set `SymbolInfo::Complete` on it.
+   declarations `Scope`) and set `SymbolInfo::Complete` on it. A classfile
+   generic parent signature must match the identities and order in the erased
+   hierarchy. Its arguments refer to the class's entered type parameters.
+   This preserves parents such as `TC[Box[A]]` for separately compiled Scala
+   structural given implementations.
 10. Mark `Loaded`, return the symbol.
 
 ## 6. Key types
