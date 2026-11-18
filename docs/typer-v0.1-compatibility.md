@@ -30,19 +30,44 @@ of the binary evidence. Run them with `JAVA_HOME`, `SCALA39_ROOT` and
 `COURSIER_MAVEN_ROOT` as in the pickler oracle. The output contracts are documented in the
 [JVM backend](jvm-backend.md) and [semantic pickler](tasty-pickler-design.md#contextual-method-parameters).
 
-### Further compatibility increments
+### Further contextual semantics covered by regression tests
 
-The following cases require additional representation or typing work. Each
-row gives a boundary that can be exercised separately against the pinned compiler.
-
-| Increment | Implementation dependency | First acceptance test |
+| Increment | Supported behavior | Regression control |
 | --- | --- | --- |
-| Parameterized structural givens | Enter and link the term factory and its implementation class in the source semantic index. Complete the factory with its own type and evidence parameters. | An imported generic structural given produces a term application whose type arguments, receiver and selected method agree with Scala TASTy. |
-| Default contextual parameters | Index default getters and earlier parameter clauses. Reuse that identity after a missing-evidence search, preserving the receiver and argument evaluation order. | Supplied evidence wins over a default. A missing instance invokes the default once, and an ambiguity is diagnosed. |
-| Recursive by-name evidence | Represent the lazy dictionary and backreferences used by a successful recursive search. Include dictionary state in speculative rollback. | A recursive derivation crosses a by-name boundary and shares a dictionary. The strict version diverges and a failed alternative leaves no dictionary. |
-| More implicit scopes and dependent types | Extend the existing type relation, anchor collection and binder substitution to the relevant alias, opaque and dependent forms. | Two distinct stable paths with the same member spelling select their own evidence and preserve their different result types. |
-| Other implicit searches | Integrate the completed argument search with extension selection, contextual extractor clauses and conversion insertion one consumer at a time. | Establish separate positive, shadowing and ambiguity controls for each consumer before expanding classpath coverage. |
-| Wider producer coverage | Add pickler and JVM validation for each newly admitted curried, polymorphic or closure shape. | A standalone Scala client consumes each new TASTy shape and a JDK 21 harness executes each new JVM shape. |
+| Parameterized structural givens | A factory, its implementation class and its constructor have separately owned binders. The factory result retains the implementation type. | A client imports `Builders.given`, infers `boxes[Int]` and supplies its own leaf. Explicit selection of `.tag` works from source and from a Scala-generated TASTy/class-file pair. Type-only and contextual-only factories preserve their respective clauses. |
+| Contextual defaults | For source methods and conditional providers, a missing argument can invoke its indexed default getter. The getter receives the original receiver and earlier clauses. | Tests check the getter's parameter identity, supplied evidence, rejection of ambiguity, rejection of an ill-typed default, and single evaluation of effectful operands. |
+| Recursive by-name evidence | A successful recursive search across a by-name parameter creates a shared dictionary. Its synthetic definitions and references have canonical identities. | Two recursive dependencies refer to the same field. The strict variant diverges. Discarding a failed candidate rolls back its dictionary and symbols. |
+| Implicit scope and dependent types | Search can follow transparent aliases, use an opaque type's companion, and preserve the stable term prefix of a nested type. | `p.Item` and `q.Item` select evidence from their respective receivers. A later contextual clause and result can depend on a stable argument to an earlier clause. |
+| Other searches | A contextual receiver can provide an extension. A supported extractor can request trailing contextual clauses. Expected result and argument types can trigger a `scala.Conversion` instance or a unary monomorphic `implicit def`. | The contextual consumer fixtures check selected symbols, nested scopes, ambiguity, and the order of arguments passed to `unapply`. |
+| Output | The pickler and JVM backend accept selected curried contextual methods, polymorphic evidence identity methods, and methods returning a unary `Int ?=> Int` literal. | Scala 3.9 clients read the emitted TASTy. Separate JDK 21 harnesses verify and execute the emitted classes. |
+
+Dependent clause application substitutes stable argument paths. Within a
+simple source opaque alias's defining owner, contextual search can use its
+representation. Outside that owner it uses the nominal type and its companion.
+Higher-kinded inference and general proofs from opaque bounds remain open.
+
+Default-getter replay currently uses source declarations and their earlier
+written clauses. Combining a default with a synthesized context-bound clause
+still reports a typing error. Conversion insertion covers value adaptation to
+a known expected type. This includes ordinary method arguments. Searching for
+a conversion solely because a member is missing, and instantiating generic
+old-style conversion methods, remain outside that implementation.
+
+The frontend accepts a wider range of typed trees than either producer can emit.
+In particular, the recursive dictionary tests inspect typed declarations and
+references. The context-function producer tests exercise a method returning a
+literal, including a reference to an enclosing `Int` parameter. Other closure
+representations and the precise supported method signatures are described in the
+[JVM backend](jvm-backend.md) and [pickler contracts](tasty-pickler-design.md#contextual-method-parameters).
+
+To reproduce the Scala controls, run the two fixture drivers in the pinned
+pickler-oracle environment. The first driver also checks the bytes of the
+separate-compilation fixtures.
+
+```sh
+python3 crates/dotty-typer/tests/fixtures/contextual-arguments/check.py
+python3 crates/dotty-typer/tests/fixtures/contextual-consumers/check.py
+```
 
 ## Reproduction and oracle
 
@@ -934,8 +959,8 @@ resolution/classpath blockers before the declarations are typed. This focused
 change therefore has no measured corpus uplift; the full typer corpus result
 remains 0 / 3,297 fully typed local methods.
 
-Named local contextual values participate in omitted argument search. Implicit
-conversions and standard-library summon are separate surfaces. `inline val` declarations and lazy pattern
+Named local contextual values participate in omitted argument search, including
+lookup initiated by the supported library helpers and contextual consumers. `inline val` declarations and lazy pattern
 definitions remain deferred. Recursive inferred lazy initializers remain
 unsupported and report `RecursiveLazyLocalValueInitializer`; the acyclic
 forward-reference subset is described above.
