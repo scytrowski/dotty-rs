@@ -50,6 +50,12 @@ def main():
                 "final given def boxes[A",
                 "this.need(bound.Builders.boxes[Int](leaf))",
             )),
+            ("Recursive.scala", 0, (
+                "final class $_lazy_implicit_$2() extends Object(), Serializable",
+                "recursivesearch.Evidence.loop(this.$_lazy_implicit_$1,",
+                "this.$_lazy_implicit_$1)", "$_lazy_implicit_$3.$_lazy_implicit_$1",
+            )),
+            ("StrictRecursion.scala", 1, ("[E172]", "strictsearch.Evidence.loop(/* missing */summon[strictsearch.Evidence])")),
             ("Inherited.scala", 0, ("this.need(TC.instance[Int])",)),
             ("Invalid.scala", 1, (
                 "[E050]", "[E172]", "does not take more parameters",

@@ -797,7 +797,7 @@ fn applied_context_function_uses_its_instantiated_apply_signature() {
 
 #[test]
 fn by_name_contexts_search_the_result_type_without_eager_evaluation() {
-    let text = "class A; class B; object B { implicit def provide(implicit a: => A): B = new B }; class C { def read(using n: => A): A=n; def ask(using b:B):B=b; def forward(using a:A): A=read; def nested(using a:A): B=ask; def missing:B=ask }; class Loop; object Loop { implicit def cycle(implicit x: => Loop):Loop = x }; class D { def accept(using x:Loop):Loop=x; def cycleUse:Loop=accept }";
+    let text = "class A; class B; object B { implicit def provide(implicit a: => A): B = new B }; class C { def read(using n: => A): A=n; def ask(using b:B):B=b; def forward(using a:A): A=read; def nested(using a:A): B=ask; def missing:B=ask }";
     let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
     let mut typer = SourceTyper::new(
         &parsed.ast,
@@ -807,16 +807,9 @@ fn by_name_contexts_search_the_result_type_without_eager_evaluation() {
         definitions,
         &packages,
     );
-    for name in ["forward", "missing", "nested", "cycleUse"] {
+    for name in ["forward", "missing", "nested"] {
         let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
         let result = typer.type_method_definition(definition_tree(&index, method));
-        if name == "cycleUse" {
-            assert!(
-                matches!(result, Err(TyperError::UsingApplicationDeferred { .. })),
-                "{result:?}"
-            );
-            continue;
-        }
         if name == "missing" {
             assert!(
                 matches!(result, Err(TyperError::MissingContextualArgument { .. })),
@@ -1226,6 +1219,9 @@ fn structural_context_bound_owns_distinct_class_constructor_and_factory_witnesse
         method_parameter_symbol(&parsed, &index, source, method, 0)
     );
 }
+
+#[path = "recursive_dictionary.rs"]
+mod recursive_dictionary;
 
 #[test]
 fn defaults_use_original_receiver_and_earlier_arguments_only_after_missing_evidence() {

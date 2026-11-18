@@ -1510,8 +1510,14 @@ See the Scala 3.9 controls under `tests/fixtures/contextual-arguments` in the
 typer crate. Erased
 parameters remain unsupported for explicit application. A by-name contextual
 formal searches for evidence of its result type and keeps the argument
-expression under the by-name clause. Recursive by-name dictionaries remain
-explicitly deferred. Bounded by-name
+expression under the by-name clause. A recursive dependency crossing a by-name
+position can reference an enclosing goal. The outermost search emits a local
+holder class with one field for each linked goal and one allocated instance.
+Initializers select the fields on `this`; the result selects them on that
+instance. Strict cycles report divergence. A failed candidate restores the
+dictionary together with the semantic and typed arenas. The synthetic class
+uses the frontend's Object parent. Scala's JVM serialization marker and binary
+emission of these local classes are outside this typing contract. Bounded by-name
 formals use their result type for argument conformance and retain the source
 argument node in the typed `Apply`; polymorphic inference and overload sets
 containing by-name candidates remain deferred. The Scala

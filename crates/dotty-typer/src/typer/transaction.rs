@@ -29,14 +29,6 @@ impl SourceTyper<'_> {
         self.semantic_attempt(Some(&mut Vec::new()), operation)
     }
 
-    /// Probe eligibility without retaining any candidate-local allocations or completions.
-    pub(super) fn probe_contextual_candidate(
-        &mut self,
-        operation: impl FnOnce(&mut Self, &mut Vec<(SymbolId, SymbolInfo)>) -> Result<(), TyperError>,
-    ) -> Result<(), TyperError> {
-        self.semantic_attempt(None, operation)
-    }
-
     /// A single eligible head can keep its typed evidence on success. Propagate
     /// its info journal so that an enclosing failed call still rolls it back.
     pub(super) fn semantic_attempt<T>(

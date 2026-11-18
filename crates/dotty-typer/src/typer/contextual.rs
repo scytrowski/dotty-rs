@@ -2,6 +2,9 @@
 
 use super::*;
 
+mod dictionary;
+use dictionary::Dictionary;
+
 mod defaults;
 mod extension;
 
@@ -28,6 +31,7 @@ struct Provider {
 #[derive(Default)]
 struct SearchHistory {
     active: Vec<(ContextualRef, TypeId, usize)>,
+    dictionary: Dictionary,
     by_name_depth: usize,
     current_goal_by_name: bool,
     attempts: usize,
@@ -350,7 +354,10 @@ impl SourceTyper<'_> {
         tree_index: u32,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TreeId<Typed>, TyperError> {
-        self.contextual_parameter_value(parameter, context, tree_index, &mut SearchHistory::default(), journal)
+        let mut history = SearchHistory::default();
+        let value =
+            self.contextual_parameter_value(parameter, context, tree_index, &mut history, journal)?;
+        history.dictionary.emit(self, value, tree_index)
     }
 
     fn contextual_parameter_value(
@@ -387,16 +394,23 @@ impl SourceTyper<'_> {
         history: &mut SearchHistory,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TreeId<Typed>, TyperError> {
-        // A recursive by-name dependency needs a shared lazy dictionary.
-        // Preserve this boundary even if a competing candidate could succeed.
+        if let Some(reference) = history
+            .dictionary
+            .existing_reference(self, expected, tree_index, journal)?
+        {
+            return Ok(reference);
+        }
         for &(_, ancestor, depth) in history.active.iter().rev() {
             if history.by_name_depth > depth
                 && self.contextual_conforms(ancestor, expected, tree_index, journal)?
             {
-                return Err(TyperError::UsingApplicationDeferred {
-                    source: self.source,
+                return history.dictionary.backreference(
+                    self,
+                    ancestor,
+                    context.owner,
                     tree_index,
-                });
+                    journal,
+                );
             }
         }
         let divergences = history.divergences;
@@ -586,14 +600,10 @@ impl SourceTyper<'_> {
             // particular, an ambiguous nested search also yields NotGiven.value.
             // Operational limits and unsupported typing must remain observable.
             for provider in candidates {
-                match self.probe_contextual_candidate(|typer, nested| {
-                    typer
-                        .materialize_provider(
-                            &provider, expected, context, tree_index, history, nested,
-                        )
-                        .map(|_| ())
-                }) {
-                    Ok(()) => {}
+                match self.try_contextual_provider(
+                    &provider, expected, context, tree_index, history, None,
+                ) {
+                    Ok(_) => {}
                     Err(
                         TyperError::MissingContextualArgument { .. }
                         | TyperError::DivergentContextualArgument { .. }
@@ -640,14 +650,19 @@ impl SourceTyper<'_> {
                     .materialize_provider(provider, expected, context, tree_index, history, journal)
                     .map(Some);
             }
-            return match self.semantic_attempt(Some(journal), |typer, nested| {
-                typer.materialize_provider(provider, expected, context, tree_index, history, nested)
-            }) {
+            return match self.try_contextual_provider(
+                provider,
+                expected,
+                context,
+                tree_index,
+                history,
+                Some(journal),
+            ) {
                 Err(
                     TyperError::MissingContextualArgument { .. }
                     | TyperError::DivergentContextualArgument { .. },
                 ) => Ok(None),
-                other => other.map(Some),
+                other => other,
             };
         }
         let mut eligible = Vec::new();
@@ -656,25 +671,16 @@ impl SourceTyper<'_> {
                 self.store.types.try_get(provider.callable),
                 Some(Type::Method(_))
             ) {
-                let attempt = self.probe_contextual_candidate(|typer, probe_journal| {
-                    typer
-                        .materialize_provider(
-                            &provider,
-                            expected,
-                            context,
-                            tree_index,
-                            history,
-                            probe_journal,
-                        )
-                        .map(|_| ())
-                });
+                let attempt = self.try_contextual_provider(
+                    &provider, expected, context, tree_index, history, None,
+                );
                 match attempt {
                     Err(
                         TyperError::MissingContextualArgument { .. }
                         | TyperError::DivergentContextualArgument { .. },
                     ) => continue,
                     Err(error @ TyperError::AmbiguousContextualArgument { .. }) => Some(error),
-                    Ok(()) => None,
+                    Ok(_) => None,
                     Err(error) => return Err(error),
                 }
             } else {
@@ -829,6 +835,30 @@ impl SourceTyper<'_> {
         }))
     }
 
+    // A failed or speculative search must discard dictionary entries as well as
+    // store and tree allocations. The search-wide fuel and divergence counters
+    // keep counting work across unsuccessful alternatives.
+    #[allow(clippy::too_many_arguments)]
+    fn try_contextual_provider(
+        &mut self,
+        provider: &Provider,
+        expected: TypeId,
+        context: ExpressionContext,
+        tree_index: u32,
+        history: &mut SearchHistory,
+        journal: Option<&mut Vec<(SymbolId, SymbolInfo)>>,
+    ) -> Result<Option<TreeId<Typed>>, TyperError> {
+        let dictionary = history.dictionary.clone();
+        let probe = journal.is_none();
+        let result = self.semantic_attempt(journal, |typer, nested| {
+            typer.materialize_provider(provider, expected, context, tree_index, history, nested)
+        });
+        if probe || result.is_err() {
+            history.dictionary = dictionary;
+        }
+        result.map(|tree| (!probe).then_some(tree))
+    }
+
     fn materialize_provider(
         &mut self,
         provider: &Provider,
@@ -863,9 +893,12 @@ impl SourceTyper<'_> {
             expected,
             history.by_name_depth - usize::from(history.current_goal_by_name),
         ));
+        let first_use = history.dictionary.use_count();
         let result = self.build_provider(provider, context, tree_index, history, journal);
         history.active.pop();
-        result
+        history
+            .dictionary
+            .define(self, expected, result?, first_use, tree_index, journal)
     }
 
     fn build_provider(
