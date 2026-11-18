@@ -22,6 +22,7 @@ def main():
         for source, package, classes in (
             ("Evidence.scala", "evidence", ("Box.tasty", "TC.tasty")),
             ("Defaults.scala", "defaults", ("Reader.tasty",)),
+            ("PairReader.scala", "defaults", ("PairReader.tasty",)),
             ("Structural.scala", "structural", ("Box.tasty", "TC.tasty", "Builders.tasty", "Builders$boxes.class")),
         ):
             toolchain.compiler(["-sourceroot", ".", "-d", output, source], cwd=HERE)
@@ -98,7 +99,7 @@ def main():
         ):
             check_typer_output(toolchain, output, source, code, required, toolchain.classpath)
 
-        # Compile the client independently, with Reader available only on its classpath.
+        # Compile clients separately from the libraries providing the default getters.
         client_output = Path(output) / "client"
         client_output.mkdir()
         classpath = os.pathsep.join((output, toolchain.classpath))
@@ -107,6 +108,12 @@ def main():
             "reader.offset(x$1)(using reader.offset$default$2(x$1))",
             "reader.offset(this.next())(chosen)", "reader.offset(7)(using 9)",
             "reader.read(using reader.read$default$1)",
+        ), classpath)
+        check_typer_output(toolchain, client_output, "BinaryPairClient.scala", 0, (
+            "val $1$: defaults.PairReader = this.reader\n"
+            "        val x$1: Int = this.left()\n"
+            "        val y$1: Int = this.right()",
+            "$1$.pick(x$1, y$1)(using $1$.pick$default$3(x$1, y$1))",
         ), classpath)
         check_typer_output(toolchain, client_output, "BinaryDefaultsAmbiguous.scala", 1, (
             "[E172]", "Ambiguous given instances", "of parameter n of method offset",

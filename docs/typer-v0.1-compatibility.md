@@ -50,6 +50,13 @@ For a classpath method, replay uses the link between a defaulted parameter
 and its getter in the same TASTy template. The typer checks the copied clauses
 and the result type before accepting the default. The binary Reader fixture
 checks both a parameterless getter and a getter that reuses an earlier argument.
+For the separately compiled `PairReader.pick(x: Int, y: Int)(using n: Int = y)`,
+the typed client evaluates the parameterless method `reader`, then `left()`
+and `right()`, into three temporaries. Both `pick` and `pick$default$3`
+select the same receiver and take the same two argument symbols in source
+order. Calling `reader().pick(...)` when `reader` has an explicit empty
+clause still encounters the typer’s selection-prefix restriction for a
+method result whose class comes from TASTy.
 A legacy `implicit` clause also falls back only for missing evidence. Ambiguity
 retains both candidates and rolls back the failed application.
 Combining a default with a synthesized context-bound clause

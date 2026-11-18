@@ -561,3 +561,114 @@ fn binary_contextual_default_rejects_a_mismatched_getter_signature_before_insert
         .set_info(getter, SymbolInfo::Complete(original));
     typer.type_method_definition(fallback_tree).unwrap();
 }
+
+#[test]
+fn binary_pick_default_reuses_the_receiver_and_both_arguments_in_source_order() {
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(include_str!(
+        "../../../tests/fixtures/contextual-arguments/BinaryPairClient.scala"
+    ));
+    let (run, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "run");
+    let source_methods = ["reader", "left", "right"]
+        .map(|name| method_symbol(&parsed, &store, &index, source, name));
+    let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(run) else {
+        panic!("expected run definition")
+    };
+    let TreeKind::Apply(original) = &parsed.ast.get(rhs).kind else {
+        panic!("expected pick(left(), right())")
+    };
+    let TreeKind::Select(selected) = &parsed.ast.get(original.function).kind else {
+        panic!("expected reader.pick")
+    };
+    let [left, right] = original.args.as_slice() else {
+        panic!("expected two source arguments")
+    };
+    let source_operands = [selected.qualifier, *left, *right];
+    let resolver = contextual_fixture_resolver(defs, &packages);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages)
+        .with_resolver(Box::new(resolver));
+    typer.type_method_definition(tree).unwrap();
+    let ast = typer.typed_ast();
+    let store = typer.store();
+    let bindings = typer.source_typed_index();
+    let reference = |tree| {
+        store
+            .types
+            .get(ast.get(tree).ty)
+            .reference_symbol()
+            .unwrap()
+    };
+    let TreeKind::Block(block) = &ast.get(bindings.get(source, rhs).unwrap()).kind else {
+        panic!("expected shared operands")
+    };
+    let [receiver, left, right] = block.stats.as_slice() else {
+        panic!("expected exactly three operand definitions")
+    };
+    let [receiver_temp, left_temp, right_temp] =
+        [*receiver, *left, *right].map(|stat| bindings.synthetic_definition_symbol(stat).unwrap());
+    for ((stat, operand), method) in block.stats.iter().zip(source_operands).zip(source_methods) {
+        let TreeKind::ValDef(shared) = &ast.get(*stat).kind else {
+            panic!("expected temporary")
+        };
+        let init = shared.rhs.unwrap();
+        assert_eq!(bindings.get(source, operand), Some(init));
+        let function = if *stat == *receiver {
+            assert!(matches!(
+                ast.get(init).kind,
+                TreeKind::Ident(_) | TreeKind::Select(_)
+            ));
+            init
+        } else {
+            let TreeKind::Apply(call) = &ast.get(init).kind else {
+                panic!("expected argument method call")
+            };
+            assert!(call.args.is_empty());
+            call.function
+        };
+        assert_eq!(reference(function), method);
+    }
+    assert_ne!(left_temp, right_temp);
+    let TreeKind::Apply(contextual) = &ast.get(block.expr).kind else {
+        panic!("expected contextual application")
+    };
+    assert_eq!(contextual.kind, ApplyKind::Using);
+    let [getter_call] = contextual.args.as_slice() else {
+        panic!("expected the default getter")
+    };
+    let [target, getter] = [contextual.function, *getter_call].map(|root| {
+        let TreeKind::Apply(call) = &ast.get(root).kind else {
+            panic!("expected the ordinary parameter clause")
+        };
+        assert_eq!(call.kind, ApplyKind::Regular);
+        let [x, y] = call.args.as_slice() else {
+            panic!("expected both earlier arguments")
+        };
+        let TreeKind::Select(member) = &ast.get(call.function).kind else {
+            panic!("expected a member of the shared receiver")
+        };
+        for (operand, temporary) in [
+            (member.qualifier, receiver_temp),
+            (*x, left_temp),
+            (*y, right_temp),
+        ] {
+            assert!(matches!(ast.get(operand).kind, TreeKind::Ident(_)));
+            assert_eq!(reference(operand), temporary);
+        }
+        reference(call.function)
+    });
+    assert_eq!(store.default_getter(target, 2), Some(getter));
+    assert_eq!(store.default_getter_origin(getter), Some((target, 2)));
+    let symbol = store.symbols.get(getter);
+    assert!(matches!(symbol.origin, SymbolOrigin::Tasty(_)));
+    assert_eq!(store.symbols.get(target).origin, symbol.origin);
+    assert_eq!(
+        store.names.resolve(store.symbols.get(target).name.text()),
+        "pick"
+    );
+    assert_eq!(store.names.resolve(symbol.name.text()), "pick$default$3");
+    let SymbolInfo::Complete(qualified) = store.symbols.get(receiver_temp).info else {
+        panic!("expected typed receiver")
+    };
+    let owner = store.types.get(qualified).reference_symbol().unwrap();
+    assert_eq!(store.symbols.owner(target), Some(owner));
+    assert_eq!(symbol.owner, Some(owner));
+}
