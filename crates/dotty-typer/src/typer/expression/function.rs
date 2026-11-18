@@ -302,10 +302,35 @@ impl FunctionLiteralIndex {
 }
 
 impl SourceTyper<'_> {
+    pub(in crate::typer) fn literal_function_kind(
+        &self,
+        function: &Function,
+    ) -> SourceFunctionKind {
+        let first = function
+            .params
+            .first()
+            .and_then(|parameter| self.arena.try_get(*parameter));
+        if matches!(first.map(|tree| &tree.kind), Some(TreeKind::ValDef(parameter)) if parameter.metadata.modifiers == [Modifier::Given])
+        {
+            SourceFunctionKind::Contextual
+        } else {
+            SourceFunctionKind::Ordinary
+        }
+    }
+
     pub(in crate::typer) fn ordinary_function1_parts(
         &mut self,
         expected: TypeId,
         tree_index: u32,
+    ) -> Result<Option<(TypeId, TypeId)>, TyperError> {
+        self.function1_parts(expected, tree_index, SourceFunctionKind::Ordinary)
+    }
+
+    pub(in crate::typer) fn function1_parts(
+        &mut self,
+        expected: TypeId,
+        tree_index: u32,
+        kind: SourceFunctionKind,
     ) -> Result<Option<(TypeId, TypeId)>, TyperError> {
         let Some(Type::Applied { tycon, args }) = self.store.types.try_get(expected) else {
             return Ok(None);
@@ -323,7 +348,7 @@ impl SourceTyper<'_> {
         };
         let class = *class;
         let prefix = *prefix;
-        let canonical = self.source_function_class(SourceFunctionKind::Ordinary, 1, tree_index)?;
+        let canonical = self.source_function_class(kind, 1, tree_index)?;
         let canonical_package = self.store.symbols.get(canonical).owner;
         let canonical_prefix = canonical_package.is_some_and(|package| {
             matches!(
@@ -354,6 +379,9 @@ impl SourceTyper<'_> {
             expected_function1,
             poly_binder,
         } = typing_context;
+        let kind = self.literal_function_kind(&function);
+        let contextual = kind == SourceFunctionKind::Contextual;
+        let allowed_modifiers: &[Modifier] = if contextual { &[Modifier::Given] } else { &[] };
         let mut parameters = Vec::with_capacity(function.params.len());
         for parameter_tree in function.params.iter().copied() {
             let Some(parameter_node) = self.arena.try_get(parameter_tree).cloned() else {
@@ -370,7 +398,7 @@ impl SourceTyper<'_> {
                 });
             };
             if parameter.metadata.visibility.is_some()
-                || !parameter.metadata.modifiers.is_empty()
+                || parameter.metadata.modifiers.as_slice() != allowed_modifiers
                 || !parameter.metadata.annotations.is_empty()
             {
                 return Err(TyperError::UnsupportedFunctionLiteralParameter {
@@ -469,7 +497,11 @@ impl SourceTyper<'_> {
                 name,
                 owner: Some(method),
                 kind: SymbolKind::Parameter,
-                flags: SymbolFlags::EMPTY,
+                flags: if contextual {
+                    SymbolFlags::GIVEN
+                } else {
+                    SymbolFlags::EMPTY
+                },
                 visibility: Visibility::Public,
                 info: SymbolInfo::Complete(parameter_type),
                 origin: SymbolOrigin::Synthetic,
@@ -549,7 +581,11 @@ impl SourceTyper<'_> {
         let method_type = self.store.types.alloc(Type::Method(MethodType {
             params: method_parameters,
             result: function_result,
-            kind: MethodKind::Plain,
+            kind: if contextual {
+                MethodKind::Contextual
+            } else {
+                MethodKind::Plain
+            },
         }));
         self.store
             .symbols
@@ -586,11 +622,8 @@ impl SourceTyper<'_> {
         };
         definition.typed_definition = Some(typed_method);
 
-        let tycon = self.source_function_type_constructor(
-            SourceFunctionKind::Ordinary,
-            function.params.len(),
-            tree.index(),
-        )?;
+        let tycon =
+            self.source_function_type_constructor(kind, function.params.len(), tree.index())?;
         let mut args = function
             .params
             .iter()

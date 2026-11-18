@@ -672,3 +672,51 @@ fn expected_result_disambiguates_contextual_overloads_before_evidence_search() {
         }
     }
 }
+
+#[test]
+fn context_lambda_owns_the_evidence_used_by_its_body() {
+    let text = "package scala; class C { def need(using n: Int): Int = n; def make: Int ?=> Int = (n: Int) ?=> need; def inferred: Int ?=> Int = n ?=> need }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for name in ["make", "inferred"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        typer
+            .type_method_definition(definition_tree(&index, method))
+            .unwrap();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(f)) = &parsed.ast.get(rhs).kind else {
+            panic!()
+        };
+        let closure = typer.function_literals.method_at(source, rhs).unwrap();
+        let param = typer
+            .function_literals
+            .parameter_at(source, f.params[0])
+            .unwrap();
+        assert_eq!(typer.store.symbols.get(param).owner, Some(closure));
+        assert!(
+            typer
+                .store
+                .symbols
+                .get(param)
+                .flags
+                .contains(SymbolFlags::GIVEN)
+        );
+        assert!(
+            matches!(*typer.store.symbols.info(closure),SymbolInfo::Complete(ty) if matches!(typer.store.types.get(ty),Type::Method(m) if m.kind==MethodKind::Contextual && m.result==definitions.int))
+        );
+        let TreeKind::Apply(call) = &typer
+            .typed_ast()
+            .get(typer.typed_index.get(source, f.body).unwrap())
+            .kind
+        else {
+            panic!()
+        };
+        assert_eq!(reference(&typer, call.args[0]), param);
+    }
+}

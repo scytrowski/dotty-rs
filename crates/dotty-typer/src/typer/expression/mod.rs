@@ -635,7 +635,8 @@ impl SourceTyper<'_> {
                 // Keep both Function1 components available even when the
                 // lambda's input is explicitly annotated: the output may
                 // still be needed to type a nested function literal.
-                let expected_function1 = self.ordinary_function1_parts(expected, tree.index())?;
+                let kind = self.literal_function_kind(&function);
+                let expected_function1 = self.function1_parts(expected, tree.index(), kind)?;
                 let expected_function1 = if let Some((input, output)) = expected_function1 {
                     let output_contains_poly_parameter = match poly_binder {
                         Some(binder) => self.type_contains_param_ref(output, binder)?,
