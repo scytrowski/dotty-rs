@@ -624,22 +624,42 @@ where
         use dotty_core::Punctuation::*;
         let mut closing = Vec::new();
         loop {
+            // Feedback-opened indentation regions need parser feedback while
+            // skipping too, or the scanner can leave them open until EOF.
+            if let Some(&(TokenKind::Outdent, indent_offset)) = closing.last() {
+                let offset = if matches!(
+                    self.current().kind,
+                    TokenKind::Newline | TokenKind::Newlines
+                ) {
+                    self.cursor.lookahead(1).span.start()
+                } else {
+                    self.current().span.start()
+                };
+                if self.current().kind == TokenKind::Eof
+                    || !self
+                        .source_line_indent_prefix(offset)
+                        .starts_with(self.source_line_indent_prefix(indent_offset))
+                {
+                    self.observe_outdented_region(indent_offset);
+                }
+            }
             let kind = self.current().kind;
+            let start = self.current().span.start();
             match kind {
                 TokenKind::Eof => break,
                 TokenKind::Punctuation(LeftParen) => {
-                    closing.push(TokenKind::Punctuation(RightParen))
+                    closing.push((TokenKind::Punctuation(RightParen), start))
                 }
                 TokenKind::Punctuation(LeftBracket) => {
-                    closing.push(TokenKind::Punctuation(RightBracket))
+                    closing.push((TokenKind::Punctuation(RightBracket), start))
                 }
                 TokenKind::Punctuation(LeftBrace) => {
-                    closing.push(TokenKind::Punctuation(RightBrace))
+                    closing.push((TokenKind::Punctuation(RightBrace), start))
                 }
-                TokenKind::Indent => closing.push(TokenKind::Outdent),
+                TokenKind::Indent => closing.push((TokenKind::Outdent, start)),
                 TokenKind::Punctuation(RightParen | RightBracket | RightBrace)
                 | TokenKind::Outdent => {
-                    if closing.pop() != Some(kind) {
+                    if closing.pop().map(|(kind, _)| kind) != Some(kind) {
                         break;
                     }
                 }

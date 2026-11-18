@@ -1507,6 +1507,85 @@ mod tests {
     }
 
     #[test]
+    fn deeply_nested_templates_recover_with_the_contextual_scanner() {
+        for (indented, end_markers) in [(false, false), (true, false), (true, true)] {
+            let depth = 96;
+            let mut source = String::new();
+            if indented {
+                for layer in 0..depth {
+                    source.push_str(&format!("{}object O{layer}:\n", "  ".repeat(layer)));
+                }
+                source.push_str(&format!("{}val value = 1\n", "  ".repeat(depth)));
+                if end_markers {
+                    for layer in (1..depth).rev() {
+                        source.push_str(&format!("{}end O{layer}\n", "  ".repeat(layer)));
+                    }
+                }
+                source.push_str("  object S {}\n");
+                if end_markers {
+                    source.push_str("end O0\n");
+                }
+                source.push_str("object N {}\n");
+            } else {
+                source.push_str(&"object O {".repeat(depth));
+                source.push_str("val value = 1");
+                source.push_str(&"}".repeat(depth - 1));
+                source.push_str("; object S {}}; object N {}");
+            }
+            let scanner = ContextualScanner::new(&source).unwrap();
+            let mut names = NameInterner::new();
+            let result = parse_compilation_unit(
+                SourceText::new(&source).unwrap(),
+                SourceId::from_index(0),
+                scanner,
+                &mut names,
+            );
+            let [diagnostic] = result.diagnostics.as_slice() else {
+                panic!(
+                    "expected one nesting diagnostic, got {:?}",
+                    result.diagnostics
+                );
+            };
+            assert!(matches!(
+                diagnostic.issue(),
+                ParseIssue::NestingLimitExceeded {
+                    kind: dotty_parser::ParseKind::Expr,
+                    ..
+                }
+            ));
+            let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+                panic!("expected the source root");
+            };
+            assert_eq!(
+                package.stats.len(),
+                2,
+                "indented={indented}, end_markers={end_markers}"
+            );
+            let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(next)) =
+                &result.ast.get(package.stats[1]).kind
+            else {
+                panic!("expected the following object");
+            };
+            assert_eq!(names.resolve(next.name.as_name().text()), "N");
+            let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(outer)) =
+                &result.ast.get(package.stats[0]).kind
+            else {
+                panic!("expected the outer object");
+            };
+            let TreeKind::Template(template) = &result.ast.get(outer.template).kind else {
+                panic!("expected the outer template");
+            };
+            assert_eq!(template.body.len(), 2);
+            let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(sibling)) =
+                &result.ast.get(template.body[1]).kind
+            else {
+                panic!("expected the sibling member");
+            };
+            assert_eq!(names.resolve(sibling.name.as_name().text()), "S");
+        }
+    }
+
+    #[test]
     fn end_new_after_nested_method_body_matches_the_anonymous_new() {
         let fixture = concat!(
             env!("CARGO_MANIFEST_DIR"),

@@ -206,13 +206,17 @@ issue payload. `UnboundPlaceholderParameter` is reported when an expression
 placeholder reaches the end of a compilation unit or expression block without
 being captured by a complete expression.
 
-The expression, type, pattern, and type-parameter clause entry points share a
-limit of 64 active calls. Crossing it reports `parser.nesting_limit_exceeded`
-at the first rejected operand and inserts an error node of the corresponding kind.
+The expression, type, pattern, type-parameter clause, and template-body entry
+points share a limit of 64 active calls. Crossing it reports
+`parser.nesting_limit_exceeded` at the first rejected operand and inserts an
+error node of the corresponding kind.
 Recovery skips a delimited operand iteratively so the enclosing list can
 still parse subsequent elements. Siblings parsed in sequence reuse the budget.
 Higher-kinded parameter clauses use the type diagnostic category and retain
 an error type in the rejected parameter list.
+Template bodies retain an error expression as their sole member. Their rejected
+body is skipped as one delimited region, preserving enclosing members and
+following definitions.
 
 Reusable recovery sets cover statements, arguments, type arguments, case
 clauses, and for enumerators. Every recovery loop checks that the token source

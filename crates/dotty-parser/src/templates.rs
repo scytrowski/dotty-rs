@@ -56,6 +56,32 @@ where
         expected_end_marker: Option<Name>,
         delimiter_terminates: bool,
     ) -> TemplateBodyResult {
+        self.with_nesting(crate::ParseKind::Expr, |parser| {
+            parser.parse_template_body_inner(
+                body,
+                feedback_indent,
+                expected_end_marker,
+                delimiter_terminates,
+            )
+        })
+        .unwrap_or_else(|error| {
+            if let Some(indent_offset) = feedback_indent {
+                self.observe_outdented_region(indent_offset);
+            }
+            TemplateBodyResult {
+                self_val: None,
+                members: vec![error],
+            }
+        })
+    }
+
+    fn parse_template_body_inner(
+        &mut self,
+        body: TemplateBody,
+        feedback_indent: Option<u32>,
+        expected_end_marker: Option<Name>,
+        delimiter_terminates: bool,
+    ) -> TemplateBodyResult {
         let (opening, closing) = match body {
             TemplateBody::Braced => (
                 TokenKind::Punctuation(Punctuation::LeftBrace),
@@ -598,6 +624,123 @@ mod tests {
         HardKeyword, NameInterner, ScannerEvent, SourceId, SourceText, TextRange, Token,
         TokenSource, TreeKind,
     };
+
+    #[test]
+    fn nested_template_bodies_report_the_limit_and_preserve_following_definitions() {
+        use crate::parser::MAX_TREE_NESTING;
+        for depth in [MAX_TREE_NESTING, MAX_TREE_NESTING + 2] {
+            let source = format!(
+                "{}{}; object N {{}}",
+                "object O {".repeat(depth),
+                "}".repeat(depth)
+            );
+            let mut tokens = Vec::new();
+            for layer in 0..depth as u32 {
+                let start = layer * 10;
+                tokens.extend([
+                    token(TokenKind::Keyword(HardKeyword::Object), start, start + 6),
+                    token(TokenKind::Identifier, start + 7, start + 8),
+                    token(
+                        TokenKind::Punctuation(Punctuation::LeftBrace),
+                        start + 9,
+                        start + 10,
+                    ),
+                ]);
+            }
+            for offset in 10 * depth as u32..11 * depth as u32 {
+                tokens.push(token(
+                    TokenKind::Punctuation(Punctuation::RightBrace),
+                    offset,
+                    offset + 1,
+                ));
+            }
+            let start = 11 * depth as u32;
+            tokens.extend([
+                token(
+                    TokenKind::Punctuation(Punctuation::Semicolon),
+                    start,
+                    start + 1,
+                ),
+                token(
+                    TokenKind::Keyword(HardKeyword::Object),
+                    start + 2,
+                    start + 8,
+                ),
+                token(TokenKind::Identifier, start + 9, start + 10),
+                token(
+                    TokenKind::Punctuation(Punctuation::LeftBrace),
+                    start + 11,
+                    start + 12,
+                ),
+                token(
+                    TokenKind::Punctuation(Punctuation::RightBrace),
+                    start + 12,
+                    start + 13,
+                ),
+                token(TokenKind::Eof, start + 13, start + 13),
+            ]);
+            let mut names = NameInterner::new();
+            let result = parser_for(&source, tokens, &mut names).source_compilation_unit();
+            let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+                panic!("expected a compilation unit");
+            };
+            assert_eq!(package.stats.len(), 2);
+            let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(sibling)) =
+                &result.ast.get(package.stats[1]).kind
+            else {
+                panic!("expected the following object");
+            };
+            assert_eq!(names.resolve(sibling.name.as_name().text()), "N");
+            assert_eq!(
+                result
+                    .ast
+                    .get(package.stats[1])
+                    .position
+                    .unwrap()
+                    .span()
+                    .range(),
+                TextRange::new(start + 2, source.len() as u32).unwrap()
+            );
+            if depth <= MAX_TREE_NESTING {
+                assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+            } else {
+                let [diagnostic] = result.diagnostics.as_slice() else {
+                    panic!(
+                        "expected one nesting diagnostic, got {:?}",
+                        result.diagnostics
+                    );
+                };
+                assert_eq!(
+                    diagnostic.issue(),
+                    &ParseIssue::NestingLimitExceeded {
+                        kind: crate::ParseKind::Expr,
+                        limit: MAX_TREE_NESTING,
+                    }
+                );
+                let rejected_start = MAX_TREE_NESTING as u32 * 10 + 9;
+                assert_eq!(
+                    diagnostic.span(),
+                    TextRange::new(rejected_start, rejected_start + 1).unwrap()
+                );
+                let mut inner = package.stats[0];
+                while let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) =
+                    &result.ast.get(inner).kind
+                {
+                    let TreeKind::Template(template) = &result.ast.get(module.template).kind else {
+                        panic!("expected a module template");
+                    };
+                    assert_eq!(template.body.len(), 1);
+                    inner = template.body[0];
+                }
+                assert!(matches!(
+                    result.ast.get(inner).kind,
+                    TreeKind::PhaseSpecific(UntypedNode::Error(dotty_core::ast::ErrorNode {
+                        kind: dotty_core::ast::ErrorNodeKind::MissingExpression
+                    }))
+                ));
+            }
+        }
+    }
 
     struct YieldTemplateTokenSource {
         tokens: Vec<Token>,
