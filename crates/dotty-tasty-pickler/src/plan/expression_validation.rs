@@ -1735,7 +1735,13 @@ impl Validator<'_, '_> {
                 } else {
                     let parameter = target;
                     self.kind(*parameter, SymbolKind::Parameter)?;
-                    self.owner(*parameter, Some(method.symbol))?;
+                    let owner = self.symbol(method.symbol)?;
+                    // A validated closure plan lists its formal and its exact enclosing captures.
+                    if owner.origin != SymbolOrigin::Synthetic
+                        || self.symbol(*parameter)?.owner != owner.owner
+                    {
+                        self.owner(*parameter, Some(method.symbol))?;
+                    }
                     if !method
                         .parameter_clauses
                         .iter()

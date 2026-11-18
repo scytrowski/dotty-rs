@@ -889,3 +889,23 @@ exported. The type parameter has the default `Nothing` and `Any` bounds.
 Both type references point to the emitted type parameter, and the body
 refers directly to the evidence parameter owned by the same method.
 The Scala client checks independent `Int` and reference instantiations.
+
+### Returned unary context functions
+
+The method-only producer accepts an explicit `Int ?=> Int` result and an
+explicit contextual lambda. Its body can return an integer literal, its own
+parameter, an enclosing method's integer parameter, or one supported primitive
+integer operation on those leaves. Validation checks the source lambda and its
+parameter against the session's source-to-typed index. The generated method
+and parameter each require a synthetic definition receipt. Captured parameters
+must coincide with the closure environment in first-use order.
+
+The producer writes a `BLOCK` containing a `LAMBDA` whose direct method
+reference targets the block's synthetic `$anonfun` definition. References in
+that definition target its own `GIVEN` parameter or the enclosing method's
+formal declaration. The enclosing method carries Scala's
+`scala.annotation.internal.ContextResultCount(1)`, which tells erasure to append
+the context parameter to the method's JVM parameters. The focused
+`source_pipeline` oracle test reconstructs the library with Scala 3.9.0
+`-from-tasty`, compiles a separate client and executes both the capturing and
+non-capturing calls.

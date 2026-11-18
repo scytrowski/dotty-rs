@@ -1157,6 +1157,14 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
     );
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let mut packages = Packages::new();
+    if parsed.ast.iter().any(|(_, t)| {
+        matches!(
+            &t.kind,
+            TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_))
+        )
+    }) {
+        packages.enter(&mut store, SymbolOrigin::Synthetic, &["scala"]);
+    }
     let index = match name_compilation_unit_with_diagnostics(
         &parsed.ast,
         parsed.root,
@@ -1241,7 +1249,12 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
             definitions.int
         };
         let body = definition.rhs.map(|rhs| {
-            if !definition.type_params.is_empty() {
+            if !definition.type_params.is_empty()
+                || matches!(
+                    parsed.ast.get(definition.tpt).kind,
+                    TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_))
+                )
+            {
                 typer.type_method_definition(tree).unwrap();
                 typer.source_typed_index().get(source, rhs).unwrap()
             } else {
@@ -1293,14 +1306,14 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
         &mut typed_bindings,
         typer.store(),
     );
-    let bindings = |source, tree| typed_bindings.get(source, tree);
+
     let mut plan = PicklePlan {
         store: typer.store(),
         definitions: &definitions,
         typed_ast: &typed_ast,
         source_ast: &source_ast,
         source_index: &index,
-        typed_bindings: &bindings,
+        typed_bindings: &typed_bindings,
         source: SourceMetadata {
             id: source,
             name: source_name.into(),
@@ -1373,6 +1386,7 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
                 | TreeKind::Apply(_)
                 | TreeKind::If(_)
                 | TreeKind::Block(_)
+                | TreeKind::Closure(_)
         ));
     }
     let body = checked.plan().methods[0].body.unwrap();
@@ -1382,7 +1396,8 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
         | TreeKind::Select(_)
         | TreeKind::Apply(_)
         | TreeKind::If(_)
-        | TreeKind::Block(_) => None,
+        | TreeKind::Block(_)
+        | TreeKind::Closure(_) => None,
         other => panic!("unexpected typed method body: {other:?}"),
     };
     let output = checked.pickle_with_limits(pickle_limits)?;
@@ -4329,5 +4344,203 @@ fn mutable_local_assignments_reject_forged_flags_swapped_children_and_non_unit_r
     assert!(matches!(
         assignment_before_declaration,
         PickleError::Reference { .. }
+    ));
+}
+
+const CONTEXT_CLOSURES: &str = "package example; class Functions { def closure: Int ?=> Int = (n: Int) ?=> n; def capture(x: Int): Int ?=> Int = (n: Int) ?=> n + x; def twice(x: Int): Int ?=> Int = (n: Int) ?=> x + x; def constant: Int ?=> Int = (n: Int) ?=> 9 }";
+
+#[test]
+fn context_result_closures_preserve_identity_capture_and_scala_interoperability() {
+    let (_, first) = source_outputs_named(CONTEXT_CLOSURES, "Functions.scala", |_| {}).unwrap();
+    let (_, repeat) = source_outputs_named(CONTEXT_CLOSURES, "Functions.scala", |_| {}).unwrap();
+    assert_eq!(first.bytes(), repeat.bytes());
+    use dotty_tasty::tasty::*;
+    let file = TastyFile::parse_and_validate_scala_3_9(first.bytes()).unwrap();
+    let index = file.ast_address_index().unwrap();
+    for declaration in &first.declarations()[2..6] {
+        let method = index
+            .get(declaration.address)
+            .unwrap()
+            .decode_defdef_body()
+            .unwrap();
+        assert!(
+            matches!(&method.return_type,RawTree::LengthNode(applied) if applied.tag==APPLIEDTPT_TAG)
+        );
+        let [DefinitionTail::Annotation(annotation)] = method.tail.as_slice() else {
+            panic!("expected ContextResultCount")
+        };
+        let annotation = annotation.decode_annotation().unwrap();
+        let RawTree::NatAst { tag, value, .. } = annotation.tycon else {
+            panic!("expected annotation class")
+        };
+        assert_eq!(tag, TYPEREF_TAG);
+        assert_eq!(file.render_name(value).unwrap(), "ContextResultCount");
+        let RawTree::LengthNode(value) = annotation.full_annotation else {
+            panic!("expected the annotation constructor application");
+        };
+        let call = value.decode_apply().unwrap();
+        assert!(
+            matches!(call.arguments.as_slice(),[RawTree::Leaf(arg)] if arg.tag==INTCONST_TAG && arg.value==TermValue::Int(1))
+        );
+
+        let RawTree::LengthNode(block) = method.rhs.unwrap() else {
+            panic!("expected closure block")
+        };
+        let block = block.decode_block().unwrap();
+        let [RawTree::LengthNode(implementation)] = block.stats.as_slice() else {
+            panic!("expected synthetic definition")
+        };
+        let RawTree::LengthNode(lambda) = block.expression else {
+            panic!("expected lambda")
+        };
+        let RawTree::Leaf(target) = lambda.decode_lambda().unwrap().method else {
+            panic!("expected direct reference")
+        };
+        assert_eq!(target.tag, TERMREFDIRECT_TAG);
+        assert!(std::ptr::eq(
+            index
+                .get(target.ast_ref().unwrap().address)
+                .unwrap()
+                .payload,
+            implementation.payload
+        ));
+        let generated = implementation.decode_defdef_body().unwrap();
+        assert_eq!(file.render_name(generated.name).unwrap(), "$anonfun");
+        assert_eq!(
+            generated.tail,
+            [
+                DefinitionTail::Modifier(SYNTHETIC_TAG),
+                DefinitionTail::Modifier(ARTIFACT_TAG)
+            ]
+        );
+        assert_eq!(
+            generated.parameters[0].decode_body().unwrap().tail,
+            [DefinitionTail::Modifier(GIVEN_TAG)]
+        );
+    }
+    verify_contextual_client(
+        "Functions",
+        first.bytes(),
+        r#"val f = new example.Functions
+           assert(f.closure(using 17) == 17)
+           assert(f.capture(23)(using 7) == 30)
+           assert(f.twice(6)(using 5) == 12)
+           assert(f.constant(using 2) == 9)
+           assert(f.getClass.getDeclaredMethod("closure", classOf[Int]).getReturnType == classOf[Int])
+           assert(f.getClass.getDeclaredMethod("capture", classOf[Int], classOf[Int]).getReturnType == classOf[Int])"#,
+    );
+}
+
+#[test]
+fn context_result_closures_require_exact_capture_and_receipted_implementation() {
+    enum Mutation {
+        RemoveCapture,
+        SwapMethod,
+        CopyMethod,
+    }
+    for mutation in [
+        Mutation::RemoveCapture,
+        Mutation::SwapMethod,
+        Mutation::CopyMethod,
+    ] {
+        let error = source_outputs_named_with_tree_edits(
+            CONTEXT_CLOSURES,
+            "Functions.scala",
+            ValidationLimits::default(),
+            |_, ast, _, _| {
+                let mut closures = ast.iter().filter_map(|(tree, node)| {
+                    matches!(&node.kind, TreeKind::Closure(_)).then_some(tree)
+                });
+                let first = closures.next().unwrap();
+                let second = closures.next().unwrap();
+                drop(closures);
+                let TreeKind::Closure(first) = &ast.get(first).kind else {
+                    panic!()
+                };
+                let duplicate = first.implementation.clone();
+                let TreeKind::Closure(capture) = &ast.get(second).kind else {
+                    panic!()
+                };
+                let original = capture.implementation.as_ref().unwrap().definition;
+                let copied = ast.alloc(ast.get(original).clone());
+                let TreeKind::Closure(second) = &mut ast.get_mut(second).kind else {
+                    panic!()
+                };
+                match mutation {
+                    Mutation::SwapMethod => second.implementation = duplicate,
+                    Mutation::CopyMethod => {
+                        second.implementation.as_mut().unwrap().definition = copied
+                    }
+                    Mutation::RemoveCapture => {
+                        assert_eq!(second.env.len(), 1);
+                        second.env.clear();
+                    }
+                }
+            },
+            |_| {},
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                PickleError::Unsupported {
+                    feature: UnsupportedFeature::BodyExpression,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
+fn a_foreign_same_named_parameter_cannot_become_a_context_closure_capture() {
+    let text = "package example; class Shadow { def f(n: Int): Int ?=> Int = (n: Int) ?=> n; def original(n: Int): Int = n }";
+    // Forging a reference to another owner with the same spelling must not turn
+    // a contextual parameter access into a capture.
+    let error = source_outputs_named_with_tree_edits(
+        text,
+        "Shadow.scala",
+        ValidationLimits::default(),
+        |source, ast, bindings, _| {
+            let source_id = SourceId::from_index(7);
+            let (lambda, reference) = source
+                .iter()
+                .find_map(|(tree, node)| {
+                    let TreeKind::PhaseSpecific(UntypedNode::Function(lambda)) = &node.kind else {
+                        return None;
+                    };
+                    Some((
+                        bindings.get(source_id, tree).unwrap(),
+                        bindings.get(source_id, lambda.body).unwrap(),
+                    ))
+                })
+                .unwrap();
+            let original = source
+                .iter()
+                .find_map(|(_, node)| {
+                    let TreeKind::DefDef(method) = &node.kind else {
+                        return None;
+                    };
+                    let rhs = method.rhs?;
+                    matches!(&source.get(rhs).kind, TreeKind::Ident(_))
+                        .then(|| bindings.get(source_id, rhs).unwrap())
+                })
+                .unwrap();
+            ast.get_mut(reference).ty = ast.get(original).ty;
+            let TreeKind::Closure(closure) = &mut ast.get_mut(lambda).kind else {
+                panic!()
+            };
+            closure.env.push(reference);
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        PickleError::Unsupported {
+            feature: UnsupportedFeature::BodyExpression,
+            ..
+        }
     ));
 }

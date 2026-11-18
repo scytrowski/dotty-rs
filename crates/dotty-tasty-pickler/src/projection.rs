@@ -10,6 +10,7 @@ use crate::{
     ValidatedClassStatePlan, ValidatedPicklePlan, ValidatedSameBatchReferenceField,
 };
 
+mod contextual_closure;
 mod primitive_operator;
 
 /// Budgets for semantic projection; type and expression recursion have hard

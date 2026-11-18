@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 mod class_state;
+mod contextual_closure;
 mod contextual_poly;
 mod expression_validation;
 mod source_binding;
@@ -42,6 +43,11 @@ pub struct SourceMetadata {
 /// not a way to authenticate arbitrary arena-relative numeric IDs.
 pub trait SourceTypedBindings {
     fn typed_at(&self, source: SourceId, tree: TreeId<Untyped>) -> Option<TreeId<Typed>>;
+
+    /// The frontend's receipt for a generated method or parameter declaration.
+    fn synthetic_definition_symbol(&self, _tree: TreeId<Typed>) -> Option<SymbolId> {
+        None
+    }
 
     /// Canonical classes present in the complete source/JVM/TASTy batch, when
     /// the producer has such a batch plan. The pickler validates each listed
@@ -499,6 +505,15 @@ pub struct PlannedCallBinding {
     pub result_type: TypeId,
 }
 
+impl SourceTypedBindings for dotty_core::SourceTypedIndex {
+    fn typed_at(&self, source: SourceId, tree: TreeId<Untyped>) -> Option<TreeId<Typed>> {
+        self.get(source, tree)
+    }
+    fn synthetic_definition_symbol(&self, tree: TreeId<Typed>) -> Option<SymbolId> {
+        dotty_core::SourceTypedIndex::synthetic_definition_symbol(self, tree)
+    }
+}
+
 impl<F> SourceTypedBindings for F
 where
     F: Fn(SourceId, TreeId<Untyped>) -> Option<TreeId<Typed>>,
@@ -592,6 +607,7 @@ impl ValidationLimits {
 pub struct ValidatedPicklePlan<'p, 'a> {
     plan: &'p PicklePlan<'a>,
     package: SymbolId,
+    pub(crate) context_closures: HashMap<SymbolId, dotty_core::CheckedUnaryContextClosure>,
 }
 
 /// Validated input for the explicitly incomplete #2300 declaration fragment.
@@ -652,11 +668,13 @@ impl<'a> PicklePlan<'a> {
             seen_local_bindings: HashSet::new(),
             seen_local_symbols: HashSet::new(),
             visible_locals: HashSet::new(),
+            context_closures: HashMap::new(),
         };
         let package = validator.validate(None)?;
         Ok(ValidatedPicklePlan {
             plan: self,
             package,
+            context_closures: validator.context_closures,
         })
     }
 }
@@ -710,6 +728,7 @@ pub(crate) fn validate_class_state_method(
         seen_local_bindings: HashSet::new(),
         seen_local_symbols: HashSet::new(),
         visible_locals: HashSet::new(),
+        context_closures: HashMap::new(),
     };
     for binding in local_values {
         if validator
@@ -791,6 +810,7 @@ pub(crate) fn validate_class_state_mutable_declaration_fragment(
         seen_local_bindings: HashSet::new(),
         seen_local_symbols: HashSet::new(),
         visible_locals: HashSet::new(),
+        context_closures: HashMap::new(),
     };
     for local in &local_values {
         if validator
@@ -851,6 +871,7 @@ pub(crate) fn validate_class_state_mutable_reference_assignment_fragment(
         seen_local_bindings: HashSet::new(),
         seen_local_symbols: HashSet::new(),
         visible_locals: HashSet::new(),
+        context_closures: HashMap::new(),
     };
     for local in &local_values {
         if validator
@@ -882,6 +903,7 @@ struct Validator<'p, 'a> {
     seen_local_bindings: HashSet<TreeId<Untyped>>,
     seen_local_symbols: HashSet<SymbolId>,
     visible_locals: HashSet<SymbolId>,
+    context_closures: HashMap<SymbolId, dotty_core::CheckedUnaryContextClosure>,
 }
 
 impl<'a> Validator<'_, 'a> {
@@ -2336,9 +2358,6 @@ impl<'a> Validator<'_, 'a> {
             return Err(self.unsupported(UnsupportedFeature::ParameterClauses, Some(method.symbol)));
         }
         let ty = self.complete(method.symbol)?;
-        let TreeKind::Ident(result) = &self.source_tree(definition.tpt)?.kind else {
-            return Err(self.unsupported(UnsupportedFeature::ResultTypeSyntax, Some(method.symbol)));
-        };
         let int =
             self.ty(p.definitions.int)?
                 .reference_symbol()
@@ -2359,13 +2378,6 @@ impl<'a> Validator<'_, 'a> {
                     ty: p.definitions.unit,
                     role: TypeRole::Builtin(Builtin::Unit),
                 })?;
-        self.name(result.name)?;
-        let supports_result = |validator: &Self, result_ty| {
-            result_ty == p.definitions.int
-                || result_ty == p.definitions.boolean
-                || result_ty == p.definitions.unit
-                || validator.is_planned_sibling_class_type(result_ty, Some(result.name))
-        };
         let mut result_type = ty;
         for parameters in &method.parameter_clauses {
             let Type::Method(signature) = self.ty(result_type)? else {
@@ -2443,6 +2455,23 @@ impl<'a> Validator<'_, 'a> {
             }
             result_type = signature.result;
         }
+        if matches!(
+            self.source_tree(definition.tpt)?.kind,
+            TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_))
+        ) && self.class_members.is_none()
+        {
+            return self.context_result_closure(definition, method, result_type);
+        }
+        let TreeKind::Ident(result) = &self.source_tree(definition.tpt)?.kind else {
+            return Err(self.unsupported(UnsupportedFeature::ResultTypeSyntax, Some(method.symbol)));
+        };
+        self.name(result.name)?;
+        let supports_result = |validator: &Self, result_ty| {
+            result_ty == p.definitions.int
+                || result_ty == p.definitions.boolean
+                || result_ty == p.definitions.unit
+                || validator.is_planned_sibling_class_type(result_ty, Some(result.name))
+        };
         if !supports_result(self, result_type) {
             return Err(PickleError::MalformedType {
                 ty: result_type,

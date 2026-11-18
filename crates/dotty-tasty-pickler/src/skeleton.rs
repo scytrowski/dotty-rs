@@ -511,7 +511,10 @@ impl ValidatedPicklePlan<'_, '_> {
                     });
                 }
             };
-            let result = if let Some(tparam) = type_parameter {
+            let closure = self.context_closures.get(&method.symbol);
+            let result = if closure.is_some() {
+                context.context_function_int_syntax()?
+            } else if let Some(tparam) = type_parameter {
                 context.method_type_parameter_syntax(tparam)?
             } else {
                 let mut result_semantic_type = method_info;
@@ -534,21 +537,30 @@ impl ValidatedPicklePlan<'_, '_> {
                 let body = method.body.ok_or(PickleError::MissingBody {
                     method: method.symbol,
                 })?;
-                let parameters = method
+                let mut parameters = method
                     .parameter_clauses
                     .iter()
                     .flatten()
                     .copied()
                     .collect::<Vec<_>>();
-                fields.push(AstField::Tree(crate::expression::lower_expression(
-                    p.store,
-                    p.typed_ast,
-                    body,
-                    method.symbol,
-                    &parameters,
-                    limits,
-                    &mut context,
-                )?));
+                let encoded = if let Some(closure) = closure {
+                    parameters.push(closure.parameter);
+                    context.context_function_body(p.typed_ast, *closure, &parameters, limits)?
+                } else {
+                    crate::expression::lower_expression(
+                        p.store,
+                        p.typed_ast,
+                        body,
+                        method.symbol,
+                        &parameters,
+                        limits,
+                        &mut context,
+                    )?
+                };
+                fields.push(AstField::Tree(encoded));
+            }
+            if closure.is_some() {
+                fields.push(AstField::Tree(context.context_result_annotation()?));
             }
             context.bind_declaration(
                 method.symbol,
