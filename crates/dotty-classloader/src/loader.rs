@@ -5656,7 +5656,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         for field in &decoded.fields {
             let resolved_type = self
                 .lower_tasty_member_type(&identity.module_class_name, field.declared_type.as_ref());
-            self.enter_field(
+            let symbol = self.enter_field(
                 identity.module_class,
                 declarations,
                 &field.name,
@@ -5664,10 +5664,12 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 resolved_type,
                 origin,
             );
+            let flags = self.store.symbols.get(symbol).flags | field.contextual_flags;
+            self.store.symbols.get_mut(symbol).flags = flags;
         }
         for method in &decoded.methods {
             let resolved_type = self.lower_tasty_method(&identity.module_class_name, method);
-            self.enter_method(
+            let symbol = self.enter_method(
                 identity.module_class,
                 declarations,
                 &method.name,
@@ -5675,6 +5677,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 resolved_type,
                 origin,
             );
+            let flags = self.store.symbols.get(symbol).flags | method.contextual_flags;
+            self.store.symbols.get_mut(symbol).flags = flags;
         }
         if let Some(alias) = predef_string_alias {
             debug_assert_eq!(alias.address, 378);
@@ -7506,7 +7510,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 field.declared_type.as_ref(),
                 &class_type_parameters,
             );
-            self.enter_field(
+            let symbol = self.enter_field(
                 class_symbol,
                 declarations,
                 &field.name,
@@ -7514,11 +7518,13 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 resolved_type,
                 origin,
             );
+            let flags = self.store.symbols.get(symbol).flags | field.contextual_flags;
+            self.store.symbols.get_mut(symbol).flags = flags;
         }
         for method in &decoded.methods {
             let resolved_type =
                 self.lower_tasty_method_with_class_parameters(name, method, &class_type_parameters);
-            self.enter_method(
+            let symbol = self.enter_method(
                 class_symbol,
                 declarations,
                 &method.name,
@@ -7526,6 +7532,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 resolved_type,
                 origin,
             );
+            let flags = self.store.symbols.get(symbol).flags | method.contextual_flags;
+            self.store.symbols.get_mut(symbol).flags = flags;
         }
 
         self.complete_class_with_parent_types(class_symbol, declarations, parents);
@@ -7766,7 +7774,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             params.push(MethodParam {
                 name: TermName::new(text),
                 ty,
-                erased: false,
+                erased: parameter.erased,
                 varargs: false,
             });
         }
@@ -7782,7 +7790,22 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             )
         };
 
-        let method_type = if method.has_term_clause || method.name == "<init>" {
+        let method_type = if let Some(clauses) = &method.contextual_clauses {
+            if clauses.iter().map(|(_, n)| n).sum::<usize>() != params.len() {
+                self.unresolved_tasty_type("incomplete contextual parameter clause")
+            } else {
+                let mut inner = result;
+                for &(kind, count) in clauses.iter().rev() {
+                    let clause = params.split_off(params.len() - count);
+                    inner = self.store.types.alloc(Type::Method(MethodType {
+                        params: clause,
+                        result: inner,
+                        kind,
+                    }));
+                }
+                inner
+            }
+        } else if method.has_term_clause || method.name == "<init>" {
             self.store.types.alloc(Type::Method(MethodType {
                 params,
                 result,

@@ -208,7 +208,7 @@ impl SourceTyper<'_> {
                 return Ok(winner);
             }
         }
-        let companions = self.companion_refs(expected, journal)?;
+        let companions = self.companion_refs(expected, tree_index, journal)?;
         if let Some(winner) = self
             .choose_contextual_refs(companions, expected, context, tree_index, history, journal)?
         {
@@ -515,6 +515,7 @@ impl SourceTyper<'_> {
     fn companion_refs(
         &mut self,
         expected: TypeId,
+        tree_index: u32,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Vec<ContextualRef>, TyperError> {
         let mut pending = vec![expected];
@@ -554,6 +555,30 @@ impl SourceTyper<'_> {
                         .class_info(class, journal)
                         .map_err(|e| TyperError::MemberLookup(Box::new(e)))?;
                     pending.extend(info.parents);
+                    let entry = self.store.symbols.get(class);
+                    if entry.links.companion.is_none()
+                        && matches!(entry.origin, SymbolOrigin::Tasty(_))
+                        && let Some(package) = entry.owner
+                        && self.store.symbols.get(package).kind == SymbolKind::Package
+                    {
+                        // Loading the type alone may leave the object unentered.
+                        // Only the resolver can establish their canonical link.
+                        let name =
+                            dotty_core::Name::new(entry.name.text(), dotty_core::Namespace::Term);
+                        let request = MemberRequest {
+                            name,
+                            prefix: self.package_type_prefix(package),
+                            selector: MemberSelector::Unique,
+                            space: MemberSpace::Prefix,
+                        };
+                        self.resolver
+                            .resolve_member(self.store, &request)
+                            .map_err(|error| TyperError::SymbolResolution {
+                                source: self.source,
+                                tree_index,
+                                error,
+                            })?;
+                    }
                     let Some(object) = self.store.symbols.get(class).links.companion else {
                         continue;
                     };

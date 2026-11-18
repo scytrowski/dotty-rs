@@ -1010,3 +1010,14 @@ The historic #1342 root weights total 8,949, while their separate
 source-attribution sidecar totals 8,948; this mismatch is explicitly retained
 pending final reconciliation. The focused policy is not a new full-corpus
 measurement.
+
+
+### Contextual TASTy members
+
+The bounded TASTy class and module loader retains the `given` and `implicit`
+member flags. When a signature contains a contextual term clause, its method
+types preserve the term-clause boundaries and order. A separately compiled
+companion can therefore supply both a polymorphic conditional given and the
+evidence needed to apply it. The typer regression uses `Evidence.scala` and
+its two Scala 3.9 TASTy files in
+`crates/dotty-typer/tests/fixtures/contextual-arguments`.

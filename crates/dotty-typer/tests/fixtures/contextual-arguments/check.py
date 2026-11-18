@@ -12,6 +12,11 @@ ROOT = HERE.parents[4]
 def main():
     toolchain = runpy.run_path(str(ROOT / "tools/tasty-pickler-oracle/run.py"))["Toolchain"]()
     with tempfile.TemporaryDirectory() as output:
+        toolchain.compiler(["-sourceroot", ".", "-d", output, "Evidence.scala"], cwd=HERE)
+        for fixture in ("Box.tasty", "TC.tasty"):
+            generated = Path(output) / "evidence" / fixture
+            if generated.read_bytes() != (HERE / "binary/evidence" / fixture).read_bytes():
+                raise SystemExit(f"{fixture} differs from the pinned Scala compiler output")
         for source, code, required in (
             ("Calls.scala", 0, (
                 "def forward(using n: Int): Int = this.need(n)",

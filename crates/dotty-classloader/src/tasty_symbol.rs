@@ -307,6 +307,7 @@ pub(crate) enum DeclaredQualifier {
 pub(crate) struct DecodedTastyField {
     pub name: String,
     pub flags: FieldAccessFlags,
+    pub contextual_flags: SymbolFlags,
     /// `None` when [`resolve_parent_name_with_bare`] can't reduce the field's
     /// declared type tree to a name — see [`DecodedTastyClass`]'s doc
     /// comment.
@@ -318,6 +319,8 @@ pub(crate) struct DecodedTastyField {
 pub(crate) struct DecodedTastyMethod {
     pub name: String,
     pub flags: MethodAccessFlags,
+    pub contextual_flags: SymbolFlags,
+    pub contextual_clauses: Option<Vec<(dotty_core::MethodKind, usize)>>,
     /// Method-local type parameters, in their TASTy header order. Type
     /// references in the signature point back to these entries by AST
     /// address and are represented as indexed references, never by spelling.
@@ -384,6 +387,7 @@ pub(crate) struct DecodedTastyTypeParameter {
 #[derive(Debug, Clone)]
 pub(crate) struct DecodedTastyParameter {
     pub name: String,
+    pub erased: bool,
     pub declared_type: Option<DecodedTastyType>,
 }
 
@@ -2445,6 +2449,7 @@ fn decode_constructor_accessor_fields(
         fields.push(DecodedTastyField {
             name: field_name,
             flags: decode_field_flags(&body.tail),
+            contextual_flags: contextual_flags(&body.tail),
             declared_type: decode_tasty_member_type(
                 file,
                 &body.type_tree,
@@ -2918,6 +2923,47 @@ fn decode_tasty_type_parameter(
     Some(decoded)
 }
 
+fn contextual_flags(tail: &[DefinitionTail<'_>]) -> SymbolFlags {
+    symbol_flags(tail).intersection(SymbolFlags::GIVEN | SymbolFlags::IMPLICIT)
+}
+
+/// Preserve the wire order and boundaries whenever any clause supplies context.
+fn contextual_clauses(
+    items: &[dotty_tasty::tasty::DefDefHeaderItem<'_>],
+) -> Result<Option<Vec<(dotty_core::MethodKind, usize)>>, TastyDecodeError> {
+    use dotty_core::MethodKind;
+    use dotty_tasty::tasty::DefDefHeaderItem;
+    let mut clauses = Vec::new();
+    let mut open = false;
+    let mut contextual = false;
+    for item in items {
+        match item {
+            DefDefHeaderItem::Parameter(param @ ParameterNode::TermParam { .. }) => {
+                if !open {
+                    let flags = contextual_flags(&param.decode_body()?.tail);
+                    let kind = if flags.contains(SymbolFlags::IMPLICIT) {
+                        MethodKind::Implicit
+                    } else if flags.contains(SymbolFlags::GIVEN) {
+                        MethodKind::Contextual
+                    } else {
+                        MethodKind::Plain
+                    };
+                    contextual |= kind != MethodKind::Plain;
+                    clauses.push((kind, 0));
+                    open = true;
+                }
+                clauses.last_mut().expect("open term clause").1 += 1;
+            }
+            DefDefHeaderItem::Clause(EMPTYCLAUSE_TAG) => {
+                clauses.push((MethodKind::Plain, 0));
+                open = false;
+            }
+            _ => open = false,
+        }
+    }
+    Ok(contextual.then_some(clauses))
+}
+
 /// Reconstructs every `ValDef`/`DefDef` directly in `stats` (a class's
 /// `Template.stats`) into a [`DecodedTastyField`]/[`DecodedTastyMethod`].
 ///
@@ -2966,6 +3012,7 @@ fn decode_members(
                 fields.push(DecodedTastyField {
                     name: field_name,
                     flags: decode_field_flags(&tail),
+                    contextual_flags: contextual_flags(&tail),
                     declared_type: decode_tasty_member_type(
                         file,
                         &type_tree,
@@ -2982,6 +3029,7 @@ fn decode_members(
                     name,
                     parameters,
                     clauses,
+                    header_items,
                     return_type,
                     tail,
                     ..
@@ -3049,19 +3097,20 @@ fn decode_members(
                     let allow_selected_get_or_else_by_name = owner.as_internal() == "scala/Option"
                         && method_name == "getOrElse"
                         && parameter_name == "default";
-                    let declared_type = parameter.decode_body().ok().and_then(|body| {
-                        decode_tasty_member_parameter_type(
-                            file,
-                            &body.type_tree,
-                            package,
-                            &type_parameters_by_address,
-                            class_type_parameters,
-                            resolve_bare,
-                            allow_selected_get_or_else_by_name,
-                        )
-                    });
+                    let body = parameter.decode_body()?;
+                    let erased = has_modifier(&body.tail, dotty_tasty::tasty::ERASED_TAG);
+                    let declared_type = decode_tasty_member_parameter_type(
+                        file,
+                        &body.type_tree,
+                        package,
+                        &type_parameters_by_address,
+                        class_type_parameters,
+                        resolve_bare,
+                        allow_selected_get_or_else_by_name,
+                    );
                     decoded_parameters.push(DecodedTastyParameter {
                         name: parameter_name,
+                        erased,
                         declared_type,
                     });
                 }
@@ -3093,6 +3142,8 @@ fn decode_members(
                 methods.push(DecodedTastyMethod {
                     name: method_name,
                     flags: decode_method_flags(&tail),
+                    contextual_flags: contextual_flags(&tail),
+                    contextual_clauses: contextual_clauses(&header_items)?,
                     type_parameters,
                     parameters: decoded_parameters,
                     has_term_clause,
