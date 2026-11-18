@@ -29,7 +29,7 @@ struct PrimitiveSymbols {
 struct ReferenceContext<'a> {
     store: &'a SemanticStore,
     class_identities: &'a [JvmClassIdentity],
-    unit: Option<&'a crate::JvmCompilationUnit<'a>>,
+    unit: Option<crate::reference::ReferenceUnit<'a>>,
 }
 
 pub(super) fn method_descriptor(
@@ -47,7 +47,7 @@ pub(super) fn method_descriptor_with_class_identities(
     owner: SymbolId,
     definitions: &Definitions,
     class_identities: &[JvmClassIdentity],
-    unit: Option<&crate::JvmCompilationUnit<'_>>,
+    unit: Option<crate::reference::ReferenceUnit<'_>>,
 ) -> Result<JvmMethodDescriptor, JvmCodegenError> {
     descriptor_for_with_references(
         plan,
@@ -69,7 +69,7 @@ pub(super) fn constructor_descriptor_with_class_identities(
     owner: SymbolId,
     definitions: &Definitions,
     class_identities: &[JvmClassIdentity],
-    unit: Option<&crate::JvmCompilationUnit<'_>>,
+    unit: Option<crate::reference::ReferenceUnit<'_>>,
 ) -> Result<JvmMethodDescriptor, JvmCodegenError> {
     descriptor_for_with_references(
         plan,

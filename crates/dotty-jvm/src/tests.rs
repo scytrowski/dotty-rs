@@ -1225,16 +1225,22 @@ fn reference_projection_requires_the_complete_unit_proof_for_a_deep_class() {
     );
 
     let identities = crate::identity::unit_class_identities(&unit).unwrap();
-    assert_eq!(
-        crate::reference::project_method_signature_type(
-            &fixture.store,
-            third_type,
-            &fixture.definitions,
-            &identities,
-            Some(&unit),
-        ),
-        Ok(JvmType::Reference(fixture.third))
-    );
+    let hierarchy = unit.class_hierarchy(&fixture.definitions).unwrap();
+    for proof in [None, Some(&hierarchy)] {
+        assert_eq!(
+            crate::reference::project_method_signature_type(
+                &fixture.store,
+                third_type,
+                &fixture.definitions,
+                &identities,
+                Some(crate::reference::ReferenceUnit {
+                    unit: &unit,
+                    hierarchy: proof
+                }),
+            ),
+            Ok(JvmType::Reference(fixture.third))
+        );
+    }
     assert!(matches!(
         crate::reference::project_method_signature_type(
             &fixture.store,
@@ -2102,51 +2108,40 @@ fn method_signature_projection_requires_exact_class_and_package_identity() {
     let unit = fixture.unit();
     let identities = crate::identity::unit_class_identities(&unit).unwrap();
 
-    assert_eq!(
-        crate::reference::project_method_signature_type(
-            unit.store,
-            counter_signature,
-            &fixture.definitions,
-            &identities,
-            None,
-        ),
-        Ok(JvmType::Reference(counter))
-    );
-    assert_eq!(
-        crate::reference::project_method_signature_type(
-            unit.store,
-            wrong_prefix,
-            &fixture.definitions,
-            &identities,
-            None,
-        ),
-        Err(JvmCodegenError::UnsupportedJvmReferenceType {
-            ty: wrong_prefix,
-            kind: crate::UnsupportedJvmReferenceTypeKind::UnsupportedPrefix,
-        })
-    );
-    assert_eq!(
-        crate::reference::project_method_signature_type(
-            unit.store,
-            no_prefix_signature,
-            &fixture.definitions,
-            &identities,
-            None,
-        ),
-        Ok(JvmType::Reference(counter))
-    );
-    assert_eq!(
-        crate::reference::project_method_signature_type(
-            unit.store,
-            foreign_signature,
-            &fixture.definitions,
-            &identities,
-            None,
-        ),
-        Err(JvmCodegenError::ReferenceClassNotInJvmPlan {
-            class: foreign_counter,
-        })
-    );
+    let hierarchy = unit.class_hierarchy(&fixture.definitions).unwrap();
+    let prepared = crate::reference::ReferenceUnit {
+        unit: &unit,
+        hierarchy: Some(&hierarchy),
+    };
+    for scope in [None, Some(prepared)] {
+        let project = |ty| {
+            crate::reference::project_method_signature_type(
+                unit.store,
+                ty,
+                &fixture.definitions,
+                &identities,
+                scope,
+            )
+        };
+        assert_eq!(project(counter_signature), Ok(JvmType::Reference(counter)));
+        assert_eq!(
+            project(wrong_prefix),
+            Err(JvmCodegenError::UnsupportedJvmReferenceType {
+                ty: wrong_prefix,
+                kind: crate::UnsupportedJvmReferenceTypeKind::UnsupportedPrefix,
+            })
+        );
+        assert_eq!(
+            project(no_prefix_signature),
+            Ok(JvmType::Reference(counter))
+        );
+        assert_eq!(
+            project(foreign_signature),
+            Err(JvmCodegenError::ReferenceClassNotInJvmPlan {
+                class: foreign_counter
+            })
+        );
+    }
 }
 
 #[test]
@@ -7261,7 +7256,9 @@ fn reference_call_values_are_forwarded_and_used_as_receivers_once() {
     fixture.bodies.push(nested_receiver_body);
 
     let unit = fixture.unit();
+    let hierarchies = crate::identity::HIERARCHY_BUILDS.get();
     let prepared = unit.prepare_emission(&fixture.definitions).unwrap();
+    assert_eq!(crate::identity::HIERARCHY_BUILDS.get() - hierarchies, 1);
     let builds = crate::identity::METADATA_BUILDS.get();
     let generated = prepared
         .emit_class(fixture.class)

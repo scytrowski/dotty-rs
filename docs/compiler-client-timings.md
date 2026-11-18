@@ -151,7 +151,7 @@ hierarchy. The measured shares apply to the independent chains above. Measuring 
 attainable speedup would require running the same inputs with a backend that
 reuses the hierarchy.
 
-To reproduce the instrumented run, apply the archived probes to this revision,
+To reproduce the original instrumented run, check out `f71929570d`, apply the archived probes,
 run the release command above, then remove the probes. On this host each test
 run used `taskset -c 0-7`. The `prepare_probe` rows include the initial
 warm-ups. For measured samples the probe row immediately precedes the
@@ -165,3 +165,57 @@ taskset -c 0-7 cargo test --release --locked --manifest-path tests/fixtures/comp
   -- --ignored --nocapture
 git apply -R docs/compiler-client-timings/prepare-probes.patch
 ```
+
+## Reusing the hierarchy during reference projection
+
+The backend now passes the unit hierarchy built by `prepare_emission` to
+reference-type projection while building method, constructor and field metadata.
+Projection still checks symbol identity, plan membership and the path from the
+class to Object. Callers that supply only a compilation unit build a hierarchy
+when projection needs it. The standalone unit metadata API goes through the
+same metadata builder as emission preparation.
+
+We rebuilt the 16-, 64- and 256-file benchmarks from `f71929570d` and the
+changed backend with the same Rust 1.98.1 release toolchain. We then ran the
+binaries in baseline, changed, changed, baseline order, using CPU affinity
+0–7 on the same shared Ryzen 9 7940HS. Each binary invocation used the warm-up,
+rotating workload sizes and alternating worker counts described above. Each
+table entry is the median of 18 uninstrumented wall-clock samples in milliseconds.
+Speedups are ratios of the unrounded medians. [All 216 samples](compiler-client-timings/hierarchy-reuse-runs.csv)
+
+| Files | Workers | Prepare before (ms) | Prepare after (ms) | End to end before (ms) | End to end after (ms) | End-to-end speedup |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 | 1 | 1.872 | 0.127 | 4.64 | 2.84 | 1.63× |
+| 16 | 4 | 1.917 | 0.130 | 4.84 | 2.30 | 2.11× |
+| 64 | 1 | 31.356 | 0.455 | 47.14 | 16.70 | 2.82× |
+| 64 | 4 | 27.019 | 0.473 | 44.11 | 11.73 | 3.76× |
+| 256 | 1 | 518.275 | 2.312 | 827.48 | 249.66 | 3.31× |
+| 256 | 4 | 483.502 | 2.329 | 628.81 | 92.57 | 6.79× |
+
+For the original 64-file, four-worker case the middle 50% of preparation
+times was 21.19–35.37 ms before and 0.439–0.507 ms after (linearly
+interpolated quartiles). For 256 files with four workers, class emission
+now takes a median of 80.25 ms out of 92.57 ms end to end. Both absolute
+times and speedup ratios describe this source generator and host.
+
+A separate run compared the baseline and changed class files by internal
+name and exact contents. All 672 comparisons matched across the three sizes
+and two worker counts. The timed harness also compared every ordered batch
+against its own binary's one-worker reference outside the timed interval.
+
+Counters in separate release binaries covered the full `prepare_emission`
+call, including the initial hierarchy build. Both versions used the same
+probe. All 20 preparations per size and version (two warm-ups plus 18
+samples) recorded the counts below. The one remaining build performs the
+initial full-unit validation. [Count probe for either version](compiler-client-timings/hierarchy-reuse-counts.patch)
+
+| Files | Hierarchy builds before → after | Full-unit validations before → after |
+| ---: | ---: | ---: |
+| 16 | 97 → 1 | 97 → 1 |
+| 64 | 385 → 1 | 385 → 1 |
+| 256 | 1537 → 1 | 1537 → 1 |
+
+To repeat the latency comparison, run the release command at the top of this
+document on each revision with the same CPU affinity. To repeat the counts,
+apply `hierarchy-reuse-counts.patch` to each revision and rerun that command.
+The probe prints `prepare_counts,files,hierarchy_builds,unit_validations`.

@@ -705,7 +705,7 @@ fn parameter_value_type(
                 semantic_type,
                 context.definitions,
                 &class_identities,
-                Some(unit),
+                Some(unit.into()),
             )?
         }
         JvmType::Int | JvmType::Boolean | JvmType::Long => {
@@ -1248,7 +1248,7 @@ fn resolve_accessor(
                 })
                 .collect::<Vec<_>>(),
         ),
-        Some(unit),
+        Some(unit.into()),
     )?;
     if projected != accessor.value_type()
         || symbol

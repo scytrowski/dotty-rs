@@ -1303,7 +1303,7 @@ impl ConstructorInitializerContext<'_> {
                     self.current_field,
                     parameter_type,
                     Some(self.class_identities),
-                    Some(self.unit),
+                    Some(self.unit.into()),
                 );
             }
         }
@@ -1322,7 +1322,7 @@ impl ConstructorInitializerContext<'_> {
                     tree,
                     ty,
                     Some(self.class_identities),
-                    Some(self.unit),
+                    Some(self.unit.into()),
                 )
             }
             result => result,

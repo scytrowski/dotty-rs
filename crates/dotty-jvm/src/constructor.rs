@@ -1034,7 +1034,7 @@ impl JvmPrimaryConstructorPlan {
         owner: SymbolId,
         class_identities: Option<&[crate::JvmClassIdentity]>,
         superclass: Option<&crate::JvmSuperclassPlan>,
-        unit: Option<&crate::JvmCompilationUnit<'_>>,
+        unit: Option<crate::reference::ReferenceUnit<'_>>,
     ) -> Result<JvmConstructorMetadata, JvmCodegenError> {
         let fail = |issue| JvmCodegenError::InvalidPrimaryConstructor {
             constructor: self.constructor,
