@@ -8,7 +8,7 @@ impl EncodingContext<'_> {
         plan: &ValidatedPicklePlan<'_, '_>,
         default: ContextualDefault,
         method_name: NameRef,
-        previous_type: AstLabel,
+        previous_type: Option<AstLabel>,
         complete: bool,
         limits: ProjectionLimits,
     ) -> Result<AstLabel, PickleError> {
@@ -21,40 +21,41 @@ impl EncodingContext<'_> {
             SymbolKind::Method,
             SymbolFlags::SYNTHETIC,
         )?;
-        let copied = self.reserve_derived(
-            default.copied,
-            default.getter,
-            p.source.id,
-            default.previous_tree,
-            SymbolKind::Parameter,
-            SymbolFlags::EMPTY,
-        )?;
-        let name = self.intern_name(self.symbol(default.copied)?.name)?;
-        let tpt = self.wire_node(AstNode::Reference {
-            tag: SHAREDTERM_TAG,
-            target: previous_type,
-        })?;
-        self.bind_declaration(
-            default.copied,
-            AstNode::Length {
-                tag: PARAM_TAG,
-                fields: vec![AstField::Nat(name), AstField::Tree(tpt)],
-            },
-        )?;
-        let getter_name = self.intern(NameKey::DefaultGetter(method_name, 1))?;
-        let result = self.unchecked_int_result()?;
-        let mut fields = vec![
-            AstField::Nat(getter_name),
-            AstField::Tree(copied),
-            AstField::Tree(result),
-        ];
+        let getter_name = self.intern(NameKey::DefaultGetter(method_name, default.ordinal()))?;
+        let mut fields = vec![AstField::Nat(getter_name)];
+        if let Some(previous) = default.previous {
+            let copied = self.reserve_derived(
+                previous.copied,
+                default.getter,
+                p.source.id,
+                previous.source_tree,
+                SymbolKind::Parameter,
+                SymbolFlags::EMPTY,
+            )?;
+            let name = self.intern_name(self.symbol(previous.copied)?.name)?;
+            let tpt = self.wire_node(AstNode::Reference {
+                tag: SHAREDTERM_TAG,
+                target: previous_type.ok_or(PickleError::SourceDefinition {
+                    symbol: previous.copied,
+                })?,
+            })?;
+            self.bind_declaration(
+                previous.copied,
+                AstNode::Length {
+                    tag: PARAM_TAG,
+                    fields: vec![AstField::Nat(name), AstField::Tree(tpt)],
+                },
+            )?;
+            fields.push(AstField::Tree(copied));
+        }
+        fields.push(AstField::Tree(self.unchecked_int_result()?));
         if complete {
             let body = crate::expression::lower_expression(
                 p.store,
                 p.typed_ast,
                 default.body,
                 default.getter,
-                &[default.copied],
+                default.previous.map(|p| p.copied).as_slice(),
                 limits,
                 self,
             )?;

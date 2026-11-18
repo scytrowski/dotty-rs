@@ -4676,3 +4676,100 @@ fn contextual_default_getter_rejects_a_reference_to_the_original_same_named_para
         "{error:?}"
     );
 }
+
+const FIRST_CONTEXT_DEFAULT: &str = "package example; class LiteralReader { def read(using n: Int = 7): Int = n; def offset(x: Int)(using n: Int = x): Int = n }";
+
+#[test]
+fn first_contextual_default_getter_has_no_clause_and_a_literal_body() {
+    use dotty_tasty::tasty::*;
+    let (_, output) =
+        source_outputs_named(FIRST_CONTEXT_DEFAULT, "LiteralReader.scala", |_| {}).unwrap();
+    let (_, repeat) =
+        source_outputs_named(FIRST_CONTEXT_DEFAULT, "LiteralReader.scala", |_| {}).unwrap();
+    assert_eq!(output.bytes(), repeat.bytes());
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let addresses = file.ast_address_index().unwrap();
+    let member = |name: &str| {
+        addresses
+            .iter()
+            .filter(|node| node.tag == DEFDEF_TAG)
+            .map(|node| node.decode_defdef_body().unwrap())
+            .find(|method| file.render_name(method.name).unwrap() == name)
+            .unwrap()
+    };
+    let read = member("read");
+    assert_eq!(
+        read.parameters[0].decode_body().unwrap().tail,
+        [
+            DefinitionTail::Modifier(GIVEN_TAG),
+            DefinitionTail::Modifier(HASDEFAULT_TAG)
+        ]
+    );
+    let getter = member("read$default$1");
+    assert!(getter.header_items.is_empty());
+    assert!(
+        matches!(file.names().get(getter.name),Some(RawName::DefaultGetter{underlying,index:0}) if *underlying==read.name)
+    );
+    let RawTree::LengthNode(result) = getter.return_type else {
+        panic!("expected annotated Int")
+    };
+    let RawTree::Leaf(underlying) = result.decode_annotated().unwrap().underlying else {
+        panic!("expected shared Int")
+    };
+    assert_eq!(underlying.tag, SHAREDTYPE_TAG);
+    let shared = underlying.ast_ref().unwrap().address;
+    let RawTree::NatAst { child, .. } = read.return_type else {
+        panic!("expected Int syntax")
+    };
+    assert!(
+        matches!(*child,RawTree::Leaf(reference) if reference.tag==SHAREDTYPE_TAG && reference.ast_ref().unwrap().address==shared)
+    );
+    assert!(
+        matches!(getter.rhs,Some(RawTree::Leaf(literal)) if literal.tag==INTCONST_TAG && literal.value==TermValue::Int(7))
+    );
+    verify_contextual_client(
+        "LiteralReader",
+        output.bytes(),
+        r#"val reader = new example.LiteralReader
+        assert(reader.read == 7)
+        locally { given Int = 11; assert(reader.read == 11); assert(reader.read(using 9) == 9) }
+        assert(reader.offset(17) == 17)"#,
+    );
+}
+
+#[test]
+fn first_contextual_default_getter_rejects_a_substituted_literal_even_with_its_matching_type() {
+    let source = "package example; class LiteralReader { def read(using n: Int = 7): Int = n; def other: Int = 11 }";
+    let mut corrupted = None;
+    let error = source_outputs_named_with_tree_edits(
+        source,
+        "LiteralReader.scala",
+        ValidationLimits::default(),
+        |ast, typed, bindings, store| {
+            let id = SourceId::from_index(7);
+            let literal = |text: &str| {
+                ast.iter()
+                    .find_map(|(tree, node)| {
+                        let TreeKind::PhaseSpecific(UntypedNode::Number(number)) = &node.kind
+                        else {
+                            return None;
+                        };
+                        (store.names.resolve(number.text) == text).then_some(tree)
+                    })
+                    .unwrap()
+            };
+            let original = literal("7");
+            let body = bindings.get(id, original).unwrap();
+            let other = typed.get(bindings.get(id, literal("11")).unwrap()).clone();
+            typed.get_mut(body).kind = other.kind;
+            typed.get_mut(body).ty = other.ty;
+            corrupted = Some((original, body));
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error,PickleError::BodySourceValue{source_tree,typed_tree,expected:7,actual:11} if Some((source_tree,typed_tree))==corrupted),
+        "{error:?}"
+    );
+}

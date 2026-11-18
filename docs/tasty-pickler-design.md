@@ -910,7 +910,7 @@ the context parameter to the method's JVM parameters. The focused
 `-from-tasty`, compiles a separate client and executes both the capturing and
 non-capturing calls.
 
-### Defaults that refer to an earlier parameter
+### Integer defaults for contextual parameters
 
 The method-only producer supports `def offset(x: Int)(using n: Int = x): Int = n`.
 The frontend types the default expression in the scope of the generated
@@ -927,3 +927,12 @@ and has its own declaration address. Its result is annotated with
 declaration skeleton records both omitted bodies. The complete artifact
 retains both typed roots. The Scala client test compiles and executes a call
 using the default and a call supplying an explicit contextual argument.
+
+A sole contextual clause can default its one `Int` parameter to an integer
+literal, as in `def read(using n: Int = 7): Int = n`. Its getter uses
+`DEFAULTGETTER(read, 0)` and has no parameter or clause marker. Scala 3.9.0
+encodes the getter result as `Int @uncheckedVariance` and the body as
+`INTconst 7`. The pickler compares the typed constant and its singleton type
+to the source literal before emission. A separate Scala client exercises the
+fallback, a local given and an explicitly supplied argument on the same
+receiver.

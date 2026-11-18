@@ -470,7 +470,7 @@ impl ValidatedPicklePlan<'_, '_> {
                         } else {
                             method_type_syntax(self, &mut context, parameter_semantic_type)?
                         };
-                        if default.is_some() && index == 0 {
+                        if default.is_some_and(|d| d.previous.is_some()) && index == 0 {
                             previous_type = Some(parameter_type);
                         }
                         let mut parameter_fields = vec![
@@ -593,9 +593,6 @@ impl ValidatedPicklePlan<'_, '_> {
                 })?,
             ));
             if let Some(default) = default {
-                let previous_type = previous_type.ok_or(PickleError::SourceDefinition {
-                    symbol: default.copied,
-                })?;
                 let getter = context.contextual_default_getter(
                     self,
                     *default,
@@ -606,7 +603,8 @@ impl ValidatedPicklePlan<'_, '_> {
                 )?;
                 stats.push(AstField::Tree(getter));
                 bodies.push((default.getter, default.body));
-                getter_declarations.extend([default.getter, default.copied]);
+                getter_declarations.push(default.getter);
+                getter_declarations.extend(default.previous.map(|p| p.copied));
             }
         }
         // All supported semantic visibility/flags/annotations are public/empty,
