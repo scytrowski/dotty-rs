@@ -504,3 +504,83 @@ fn explicit_file_relocation_rejects_positions_with_no_original_node_identity() {
         ))
     );
 }
+
+#[test]
+fn reordered_scala_locals_keep_the_pick_result() {
+    use dotty_tasty::tasty::*;
+
+    let file = TastyFile::parse_and_validate_scala_3_9(include_bytes!(
+        "fixtures/reordered_locals/Locals.tasty"
+    ))
+    .unwrap();
+    let ast = file.section(StandardSection::Asts).unwrap().payload;
+    let index = file.ast_address_index().unwrap();
+    let locals: Vec<_> = index.iter().filter(|n| n.tag == VALDEF_TAG).collect();
+    let [a, b] = locals.as_slice() else {
+        panic!("expected the two locals in pick()")
+    };
+    let name = |file: &TastyFile<'_>, node: &RawNode<'_>| {
+        file.render_name(node.decode_definition_body().unwrap().name())
+            .unwrap()
+    };
+    assert_eq!(name(&file, a), "a");
+    assert_eq!(name(&file, b), "b");
+
+    let mut reader = Reader::with_range(ast, a.offset, ast.len()).unwrap();
+    RawTree::decode(&mut reader).unwrap();
+    assert_eq!(
+        reader.position(),
+        b.offset,
+        "a and b must be adjacent siblings"
+    );
+    RawTree::decode(&mut reader).unwrap();
+    let end = reader.position();
+    let mut edited = ast.to_vec();
+    edited[a.offset..end].rotate_left(b.offset - a.offset);
+    let mut order: Vec<_> = index.node_addresses().collect();
+    let first = order.partition_point(|&addr| (addr as usize) < a.offset);
+    let middle = order.partition_point(|&addr| (addr as usize) < b.offset);
+    let last = order.partition_point(|&addr| (addr as usize) < end);
+    order[first..last].rotate_left(middle - first);
+
+    let raw = RawNodes::decode(&mut Reader::new(&edited)).unwrap();
+    let roots: Vec<_> = raw.iter().map(|n| n.decode_structured().unwrap()).collect();
+    let bytes = file
+        .encode_structured_relocated_with_identities(
+            &roots,
+            &AstNodeIdentityMap::from_edited_order(order),
+        )
+        .unwrap();
+    let relocated = TastyFile::parse_and_validate_scala_3_9(&bytes).unwrap();
+    let moved = relocated.ast_address_index().unwrap();
+    let declarations: Vec<_> = moved.iter().filter(|n| n.tag == VALDEF_TAG).collect();
+    assert_eq!(
+        declarations
+            .iter()
+            .map(|n| name(&relocated, n))
+            .collect::<Vec<_>>(),
+        ["b", "a"]
+    );
+    let block = moved
+        .iter()
+        .find(|n| n.tag == BLOCK_TAG)
+        .unwrap()
+        .decode_block()
+        .unwrap();
+    let RawTree::LengthNode(result) = block.expression else {
+        panic!("expected the typed result of pick()")
+    };
+    let targets: Vec<_> = result
+        .ast_refs()
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.kind == AstRefKind::TermRefDirect)
+        .map(|r| r.address as usize)
+        .collect();
+    assert_eq!(targets, [declarations[1].offset]);
+
+    // The Scala compatibility suite recompiles exactly the bytes checked above.
+    if let Some(output) = std::env::var_os("DOTTY_RELOCATED_LOCALS_TASTY") {
+        std::fs::write(output, bytes).unwrap();
+    }
+}
