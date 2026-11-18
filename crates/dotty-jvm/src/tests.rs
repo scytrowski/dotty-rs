@@ -671,12 +671,20 @@ fn rejects_duplicate_method_plans_and_missing_or_unknown_body_roots() {
 
 #[test]
 fn rejects_duplicate_class_and_parameter_plans() {
-    let fixture = Fixture::new();
+    let mut fixture = Fixture::new();
+    let definitions = Definitions::bootstrap(&mut fixture.store);
     let mut unit = fixture.unit();
     unit.classes.push(unit.classes[0].clone());
     assert_eq!(
         unit.validate(),
         Err(JvmCodegenError::DuplicateClassPlan {
+            class: fixture.class
+        })
+    );
+
+    assert_eq!(
+        unit.prepare_emission(&definitions).err(),
+        Some(JvmCodegenError::DuplicateClassPlan {
             class: fixture.class
         })
     );

@@ -309,12 +309,11 @@ pub(super) fn lower_planned_method_body(
     unit: &JvmCompilationUnit<'_>,
     class: &JvmClassMetadata,
     definitions: &Definitions,
+    metadata: &[JvmClassMetadata],
     method: &JvmMethodMetadata,
     body: TreeId<Typed>,
 ) -> Result<CodeBuilder, JvmCodegenError> {
     let mut code = CodeBuilder::new();
-    unit.validate()?;
-    let metadata = unit.metadata(definitions)?;
     let class_symbol = class.identity().symbol();
     let class_plan = unit
         .classes
@@ -336,11 +335,11 @@ pub(super) fn lower_planned_method_body(
         method,
         method_plan.locals(),
         definitions,
-        &metadata,
+        metadata,
     )?;
     let mut context = JvmLoweringContext::new(unit.store, unit.typed_ast, definitions, method);
     context.local_layout = Some(&local_layout);
-    context.call_context = Some((unit, class, &metadata));
+    context.call_context = Some((unit, class, metadata));
     let flow = emit_expression_with_expected(
         &mut context,
         body,

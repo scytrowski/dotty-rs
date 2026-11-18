@@ -1229,3 +1229,35 @@ zero-partial-artifact checks for invalid batches. This does not add support for
 private cross-class access, inherited accessor call-site lowering,
 child-declared accessors above an accessor-bearing parent, traits, generics, or
 general combined Scala ABI/TASTy output outside the audited Counter pair path.
+
+## Emitting several classes from one unit
+
+Call `unit.prepare_emission(&definitions)` after building the complete unit.
+The returned `PreparedJvmEmission` borrows that unit and its definitions.
+Its `emit_class(symbol)` method reuses unit metadata, class identities and
+the verifier hierarchy across classes. Workers can share the prepared value by
+reference. Each call returns one owned artifact or a class-specific error.
+The caller chooses task order and decides when to publish a completed batch.
+Some expression-specific checks still query the unit during lowering.
+
+The standalone client compares single-class and concurrent prepared output
+byte for byte and executes a cross-file call on JDK 21. To measure the JVM
+phases independently of parsing, typing and filesystem output, run
+
+```sh
+cargo test --release --manifest-path tests/fixtures/compiler-client/Cargo.toml \
+  --target-dir target --locked measure_jvm_batch -- --ignored --nocapture
+```
+
+Local medians over five release-mode samples with Rust 1.98.1, in microseconds,
+for distinct Object-rooted classes with one integer-literal method each:
+
+| Classes | Validate | Metadata including validation | Original per-class API, full batch¹ | Prepare once | Emit prepared batch, one thread |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.26 | 2.48 | 14.8 | 2.29 | 6.32 |
+| 10 | 0.91 | 22.4 | 867 | 21.8 | 52.6 |
+| 100 | 8.62 | 305 | 95,734 | 369 | 797 |
+
+¹ Baseline at `8ea7c987d7` using the same client workload. Preparation includes
+validation and metadata projection. The last column starts after preparation.
+These numbers measure a simple method shape and exclude parallel scheduling.

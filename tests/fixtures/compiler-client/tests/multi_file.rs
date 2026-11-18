@@ -85,11 +85,17 @@ fn enter(
     }
 }
 
-fn compile(files: [(SourceId, &str, &str); 2]) -> Vec<GeneratedClass> {
+fn with_plan<R>(
+    files: &[(SourceId, &str, &str)],
+    run: impl FnOnce(&JvmCompilationUnit<'_>, &Definitions) -> R,
+) -> R {
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
     let mut packages = Packages::new();
-    let units = files.map(|(id, name, text)| enter(id, name, text, &mut store, &mut packages));
+    let units: Vec<_> = files
+        .iter()
+        .map(|&(id, name, text)| enter(id, name, text, &mut store, &mut packages))
+        .collect();
 
     // Both signatures are available before a body can request another file's method.
     for unit in &units {
@@ -159,10 +165,28 @@ fn compile(files: [(SourceId, &str, &str); 2]) -> Vec<GeneratedClass> {
         typed_ast: &output,
         classes,
     };
-    plan.classes
-        .iter()
-        .map(|c| emit_class(&plan, c.class, &definitions).unwrap())
-        .collect()
+    run(&plan, &definitions)
+}
+
+fn compile(files: [(SourceId, &str, &str); 2]) -> Vec<GeneratedClass> {
+    with_plan(&files, |plan, definitions| {
+        let prepared = plan.prepare_emission(definitions).unwrap();
+        let concurrent: Vec<_> = std::thread::scope(|scope| {
+            let workers: Vec<_> = plan
+                .classes
+                .iter()
+                .map(|c| scope.spawn(|| prepared.emit_class(c.class).unwrap()))
+                .collect();
+            workers.into_iter().map(|w| w.join().unwrap()).collect()
+        });
+        for (class, artifact) in plan.classes.iter().zip(&concurrent) {
+            assert_eq!(
+                &emit_class(plan, class.class, definitions).unwrap(),
+                artifact
+            );
+        }
+        concurrent
+    })
 }
 
 #[test]
@@ -222,4 +246,46 @@ fn separate_sources_compile_in_either_order_and_execute_on_jdk21() {
     );
     assert_eq!(String::from_utf8(java.stdout).unwrap().trim(), "7");
     fs::remove_dir_all(output).unwrap();
+}
+
+#[test]
+#[ignore = "release-mode JVM scaling measurement"]
+fn measure_jvm_batch() {
+    use std::{hint::black_box, time::Instant};
+    for count in [1, 10, 100] {
+        let sources: Vec<_> = (0..count)
+            .map(|i| format!("package demo\nclass C{i}:\n  def value(): Int = 7\n"))
+            .collect();
+        let files: Vec<_> = sources
+            .iter()
+            .enumerate()
+            .map(|(i, text)| (SourceId::from_index(i as u32), "Batch.scala", text.as_str()))
+            .collect();
+        with_plan(&files, |plan, defs| {
+            for _ in 0..5 {
+                let start = Instant::now();
+                plan.validate().unwrap();
+                let validated = Instant::now();
+                black_box(plan.metadata(defs).unwrap());
+                let projected = Instant::now();
+                for class in &plan.classes {
+                    black_box(emit_class(plan, class.class, defs).unwrap());
+                }
+                let emitted = Instant::now();
+                let prepared = plan.prepare_emission(defs).unwrap();
+                let ready = Instant::now();
+                for class in &plan.classes {
+                    black_box(prepared.emit_class(class.class).unwrap());
+                }
+                eprintln!(
+                    "classes={count} validate={:?} metadata_inclusive={:?} one_shot_batch={:?} prepare={:?} prepared_batch={:?}",
+                    validated - start,
+                    projected - validated,
+                    emitted - projected,
+                    ready - emitted,
+                    ready.elapsed()
+                );
+            }
+        });
+    }
 }

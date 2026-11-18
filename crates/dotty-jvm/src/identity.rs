@@ -1390,6 +1390,14 @@ pub(super) fn unit_metadata(
     definitions: &Definitions,
 ) -> Result<Vec<JvmClassMetadata>, JvmCodegenError> {
     let hierarchy = unit_hierarchy(unit, definitions)?;
+    metadata_with_hierarchy(unit, definitions, &hierarchy)
+}
+
+pub(super) fn metadata_with_hierarchy(
+    unit: &crate::JvmCompilationUnit<'_>,
+    definitions: &Definitions,
+    hierarchy: &crate::JvmClassHierarchy,
+) -> Result<Vec<JvmClassMetadata>, JvmCodegenError> {
     let class_identities = unit_class_identities(unit)?;
     let mut metadata = Vec::with_capacity(unit.classes.len());
     for class_plan in &unit.classes {

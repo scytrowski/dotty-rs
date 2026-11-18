@@ -334,16 +334,13 @@ impl JvmConstructorAccessorInitializer {
 
 pub(crate) fn append_direct_super_constructor_call(
     unit: &JvmCompilationUnit<'_>,
-    class: SymbolId,
+    class_plan: &crate::JvmClassPlan,
     definitions: &Definitions,
+    all_metadata: &[crate::JvmClassMetadata],
+    class_identities: &[JvmClassIdentity],
     code: &mut CodeBuilder,
 ) -> Result<bool, JvmCodegenError> {
-    unit.validate()?;
-    let class_plan = unit
-        .classes
-        .iter()
-        .find(|plan| plan.class == class)
-        .ok_or(JvmCodegenError::MissingClassPlan { class })?;
+    let class = class_plan.class;
     let proof = match &class_plan.initialization {
         JvmClassInitializationPlan::PrimaryConstructor(constructor) => {
             constructor.direct_super_constructor()
@@ -353,7 +350,6 @@ pub(crate) fn append_direct_super_constructor_call(
     let Some(proof) = proof else {
         return Ok(false);
     };
-    let all_metadata = unit.metadata(definitions)?;
     let child_metadata = all_metadata
         .iter()
         .find(|metadata| metadata.identity().symbol() == class)
@@ -386,16 +382,12 @@ pub(crate) fn append_direct_super_constructor_call(
             issue: crate::JvmSuperclassIssue::ParentConstructorUnavailable,
         });
     }
-    let class_identities = all_metadata
-        .iter()
-        .map(|metadata| metadata.identity().clone())
-        .collect::<Vec<_>>();
     let mut context = ConstructorInitializerContext {
         unit,
         store: unit.store,
         typed_ast: unit.typed_ast,
         definitions,
-        class_identities: &class_identities,
+        class_identities,
         class,
         constructor: Some(child_constructor),
         fields: &[],
@@ -556,6 +548,18 @@ pub(super) fn lower(
         .find(|plan| plan.class == class)
         .ok_or(JvmCodegenError::MissingClassPlan { class })?;
     let all_metadata = unit.metadata(definitions)?;
+    let identities: Vec<_> = all_metadata.iter().map(|m| m.identity().clone()).collect();
+    lower_with_metadata(unit, class_plan, definitions, &all_metadata, &identities)
+}
+
+pub(super) fn lower_with_metadata(
+    unit: &JvmCompilationUnit<'_>,
+    class_plan: &crate::JvmClassPlan,
+    definitions: &Definitions,
+    all_metadata: &[crate::JvmClassMetadata],
+    class_identities: &[JvmClassIdentity],
+) -> Result<JvmConstructorFieldInitializerPlan, JvmCodegenError> {
+    let class = class_plan.class;
     let metadata = all_metadata
         .iter()
         .find(|metadata| metadata.identity().symbol() == class)
@@ -648,16 +652,12 @@ pub(super) fn lower(
             }
         }
     }
-    let class_identities = all_metadata
-        .iter()
-        .map(|class| class.identity().clone())
-        .collect::<Vec<_>>();
     let mut context = ConstructorInitializerContext {
         unit,
         store: unit.store,
         typed_ast: unit.typed_ast,
         definitions,
-        class_identities: &class_identities,
+        class_identities,
         class,
         constructor: constructor.as_ref(),
         fields: &fields,

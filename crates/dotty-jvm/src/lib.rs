@@ -36,6 +36,7 @@ pub use constructor_initializers::{
     JvmConstructorInitializerInstruction,
 };
 mod emission;
+pub use emission::PreparedJvmEmission;
 mod expression;
 mod identity;
 mod locals;
@@ -2806,7 +2807,14 @@ impl JvmCompilationUnit<'_> {
         let body = method_plan
             .body
             .ok_or(JvmCodegenError::MissingTypedBody { method })?;
-        expression::lower_planned_method_body(self, metadata, definitions, method_metadata, body)
+        expression::lower_planned_method_body(
+            self,
+            metadata,
+            definitions,
+            &all_metadata,
+            method_metadata,
+            body,
+        )
     }
 
     /// Lowers checked private and public-body field initializers into
