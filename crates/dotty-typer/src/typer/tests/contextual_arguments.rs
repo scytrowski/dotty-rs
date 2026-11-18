@@ -498,3 +498,45 @@ fn context_bound_placement_precedes_a_dependent_clause_or_follows_plain_clauses(
         assert_eq!(next, definitions.int);
     }
 }
+
+#[test]
+fn inherited_contextual_members_remain_on_the_lexical_or_imported_receiver() {
+    let text = "trait Supplies { given supply: Int = 3 }; class Child extends Supplies { def ask(using n: Int): Int = n; def inside: Int = ask }; class Client { def read(c: Child): Int = { import c.given; c.ask } }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let (supply, _, _) = val_definition_and_rhs(&parsed, &store, &index, source, "supply");
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for name in ["inside", "read"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        typer
+            .type_method_definition(definition_tree(&index, method))
+            .unwrap();
+        let rhs = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(b) => b.expr,
+            _ => rhs,
+        };
+        let TreeKind::Apply(call) = &typer
+            .typed_ast()
+            .get(typer.typed_index.get(source, rhs).unwrap())
+            .kind
+        else {
+            panic!()
+        };
+        assert_eq!(reference(&typer, call.args[0]), supply);
+        if name == "read" {
+            let TreeKind::Select(s) = &typer.typed_ast().get(call.args[0]).kind else {
+                panic!()
+            };
+            assert_eq!(
+                reference(&typer, s.qualifier),
+                method_parameter_symbol(&parsed, &index, source, method, 0)
+            );
+        }
+    }
+}

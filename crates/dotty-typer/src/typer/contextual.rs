@@ -258,7 +258,7 @@ impl SourceTyper<'_> {
         }
         for ContextualScope { scope, imports } in scopes {
             let mut refs: Vec<_> = self
-                .contextual_symbols(scope)
+                .contextual_members(scope, journal)?
                 .into_iter()
                 .map(|symbol| ContextualRef {
                     symbol,
@@ -661,7 +661,7 @@ impl SourceTyper<'_> {
                         .class_info(module, journal)
                         .map_err(|e| TyperError::MemberLookup(Box::new(e)))?
                         .declarations;
-                    for symbol in self.contextual_symbols(scope) {
+                    for symbol in self.contextual_members(scope, journal)? {
                         if self.store.symbols.get(symbol).visibility == Visibility::Public {
                             let evidence = ContextualRef {
                                 symbol,
@@ -753,7 +753,7 @@ impl SourceTyper<'_> {
             }
         }
         for scope in scopes {
-            for symbol in self.contextual_symbols(scope) {
+            for symbol in self.contextual_members(scope, journal)? {
                 let entry = self.store.symbols.get(symbol);
                 if entry.visibility != Visibility::Public {
                     continue;
@@ -802,6 +802,64 @@ impl SourceTyper<'_> {
             }
         }
         Ok(())
+    }
+
+    fn contextual_members(
+        &mut self,
+        scope: ScopeId,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Vec<SymbolId>, TyperError> {
+        let mut symbols = self.contextual_symbols(scope);
+        let Some(class) = self.store.scopes.get(scope).owner else {
+            return Ok(symbols);
+        };
+        if !matches!(
+            self.store.symbols.get(class).kind,
+            SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+        ) {
+            return Ok(symbols);
+        }
+        let error = |e| TyperError::MemberLookup(Box::new(e));
+        let receiver = self.store.types.alloc(Type::ThisType { class });
+        let mut pending = self.class_info(class, journal).map_err(error)?.parents;
+        let mut seen = HashSet::from([class]);
+        let mut names = HashSet::new();
+        // Enumerate names on ancestors, then use ordinary member lookup so an
+        // overriding non-given member can hide its inherited namesake.
+        while let Some(parent) = pending.pop() {
+            let parent =
+                super::lookup::class_symbol_for_type(self.store, parent, true).map_err(error)?;
+            if !seen.insert(parent) || parent == self.definitions.object_class {
+                continue;
+            }
+            if seen.len() > MAX_TYPE_RELATION_VIEWS {
+                return Err(error(MemberLookupError::TooDeep));
+            }
+            let info = self.class_info(parent, journal).map_err(error)?;
+            for symbol in self.contextual_symbols(info.declarations) {
+                names.insert(self.store.symbols.get(symbol).name);
+            }
+            pending.extend(info.parents);
+        }
+        let mut names: Vec<_> = names.into_iter().collect();
+        names.sort_by_key(|name| self.store.names.resolve(name.text()));
+        for name in names {
+            for candidate in self
+                .lookup_members_journaled(receiver, name, journal)
+                .map_err(error)?
+            {
+                let entry = self.store.symbols.get(candidate.symbol);
+                if candidate.declaring_class != class
+                    && entry.visibility == Visibility::Public
+                    && (entry.flags.contains(SymbolFlags::GIVEN)
+                        || entry.flags.contains(SymbolFlags::IMPLICIT))
+                    && !symbols.contains(&candidate.symbol)
+                {
+                    symbols.push(candidate.symbol);
+                }
+            }
+        }
+        Ok(symbols)
     }
 
     fn contextual_symbols(&self, scope: ScopeId) -> Vec<SymbolId> {
