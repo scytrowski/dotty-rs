@@ -661,14 +661,16 @@ where
             return self.cursor.progressed_since(checkpoint);
         }
 
-        let target_text = self.marker_target_text(target_kind, self.current().span);
+        let target_text = self
+            .name_text(target_kind, self.current().span)
+            .unwrap_or_default();
         let matching_tree = last.and_then(|tree| {
-            self.end_marker_owner(tree, target_kind, target_text, marker.start(), false)
+            self.end_marker_owner(tree, target_kind, &target_text, marker.start(), false)
         });
         if let (Some(root), Some(owner)) = (last, matching_tree) {
             self.close_end_marker_path(root, owner, target_end);
         } else if last.is_some_and(|tree| {
-            self.end_marker_owner(tree, target_kind, target_text, marker.start(), true)
+            self.end_marker_owner(tree, target_kind, &target_text, marker.start(), true)
                 .is_some()
         }) {
             self.report_issue_at(
@@ -696,11 +698,11 @@ where
         let target = self.cursor.lookahead(1);
         let target_kind = target.kind;
         let target_span = target.span;
-        let target_text = self.marker_target_text(target_kind, target_span);
+        let target_text = self.name_text(target_kind, target_span).unwrap_or_default();
         let owner = self.end_marker_owner(
             tree,
             target_kind,
-            target_text,
+            &target_text,
             self.current().span.start(),
             false,
         );
@@ -730,8 +732,8 @@ where
             return false;
         }
         let target = self.cursor.lookahead(offset + 1).clone();
-        let target_text = self.marker_target_text(target.kind, target.span);
-        self.end_marker_owner(tree, target.kind, target_text, marker.span.start(), false)
+        let target_text = self.name_text(target.kind, target.span).unwrap_or_default();
+        self.end_marker_owner(tree, target.kind, &target_text, marker.span.start(), false)
             .is_some()
     }
 
@@ -829,17 +831,6 @@ where
             current = self
                 .last_nested_end_marker_owner(current)
                 .expect("owner is on the selected end marker path");
-        }
-    }
-
-    pub(crate) fn marker_target_text(&self, kind: TokenKind, span: TextRange) -> &'src str {
-        let text = self.source.slice(span).unwrap_or_default();
-        if kind == TokenKind::BackquotedIdentifier {
-            text.strip_prefix('`')
-                .and_then(|text| text.strip_suffix('`'))
-                .unwrap_or(text)
-        } else {
-            text
         }
     }
 

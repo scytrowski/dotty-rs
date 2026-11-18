@@ -155,7 +155,8 @@ where
         ) {
             return false;
         }
-        self.names.resolve(expected.text()) == self.marker_target_text(target.kind, target.span)
+        self.names.resolve(expected.text())
+            == self.name_text(target.kind, target.span).unwrap_or_default()
     }
 
     fn current_end_marker_matches_ancestor(&mut self) -> bool {
@@ -529,7 +530,7 @@ where
         !self.is_arrow_token(token)
             && !matches!(
                 self.source.slice(token.span).ok(),
-                Some("=" | "<-" | "->" | "?=>" | "?->" | ":" | "<:" | ">:" | "#" | "^")
+                Some("=" | "<-" | "←" | "->" | "?=>" | "?->" | ":" | "<:" | ">:" | "#" | "^")
             )
     }
 

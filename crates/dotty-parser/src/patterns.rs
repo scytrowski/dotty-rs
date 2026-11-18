@@ -709,7 +709,7 @@ fn symbolic_pattern_extractor_at<S: TokenSource>(
     };
     if matches!(
         spelling,
-        "=" | "=>" | "<-" | "<:" | ">:" | "<%" | "@" | "?=>" | "#" | "=>>" | "|" | ":"
+        "=" | "=>" | "⇒" | "<-" | "←" | "<:" | ">:" | "<%" | "@" | "?=>" | "#" | "=>>" | "|" | ":"
     ) {
         return false;
     }

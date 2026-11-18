@@ -3,7 +3,6 @@ use core::fmt;
 use dotty_core::diagnostics::DiagnosticSeverity;
 use dotty_core::source::{SourceText, SourceTextError, TextRange, TextRangeError};
 
-use crate::identifier::{is_identifier_part, is_identifier_start};
 use crate::xml::XmlState;
 use crate::{Cursor, CursorError, HardKeyword, Punctuation, RawItem, RawToken, RawTokenKind};
 use crate::{
@@ -11,7 +10,9 @@ use crate::{
     NonIntegerLiteralKind, NumericComponent, NumericIssue,
 };
 use crate::{Trivia, TriviaKind};
-use dotty_core::token::is_operator_character;
+use dotty_core::token::characters::{
+    is_identifier_part, is_identifier_start, is_operator_character, is_scala_letter,
+};
 
 #[derive(Debug, Clone)]
 enum LexMode {
@@ -25,7 +26,6 @@ enum LexMode {
 struct StringState {
     part_start: u32,
     multiline: bool,
-    raw: bool,
     started: bool,
 }
 
@@ -149,13 +149,6 @@ impl<'source> RawLexer<'source> {
                 |character| character == '\t',
             )?)));
         }
-        if character.is_whitespace() && !is_lexical_line_break_char(character) {
-            return Ok(Some(RawItem::Trivia(self.scan_whitespace(
-                start,
-                TriviaKind::OtherWhitespace,
-                |character| character.is_whitespace() && !is_lexical_line_break_char(character),
-            )?)));
-        }
         if is_lexical_line_break_char(character) {
             return Ok(Some(RawItem::Trivia(self.scan_newline(start)?)));
         }
@@ -218,15 +211,8 @@ impl<'source> RawLexer<'source> {
                 self.scan_backquoted_identifier(start)?,
             )));
         }
-        if character == ':' && self.cursor.peek_nth(1).is_some_and(is_operator_character) {
+        if character == ':' {
             return Ok(Some(RawItem::Token(self.scan_operator(start)?)));
-        }
-        if character == ':' && self.xml.is_xml_name_separator() {
-            let _ = self.cursor.bump();
-            let kind = RawTokenKind::Operator;
-            let span = self.span(start)?;
-            self.update_xml_token(kind, span)?;
-            return Ok(Some(RawItem::Token(RawToken { kind, span })));
         }
         if let Some(punctuation) = punctuation(character) {
             let _ = self.cursor.bump();
@@ -260,7 +246,9 @@ impl<'source> RawLexer<'source> {
 
         valid_context
             && self.cursor.peek_nth(1).is_some_and(|next| {
-                crate::identifier::is_identifier_start(next) || next == '!' || next == '?'
+                // Scala's XML Utility.isNameStart tests one UTF-16 Char and excludes '$'.
+                matches!(next, '!' | '?')
+                    || (next.len_utf16() == 1 && next != '$' && is_scala_letter(next))
             })
     }
 
@@ -347,6 +335,7 @@ impl<'source> RawLexer<'source> {
             }
         }
 
+        let mut final_kind = RawTokenKind::StringPart;
         loop {
             if self.cursor.is_eof() {
                 let start = state.part_start;
@@ -394,7 +383,7 @@ impl<'source> RawLexer<'source> {
                 }
                 let _ = self.modes.pop();
                 return Ok(Some(RawItem::Token(RawToken {
-                    kind: RawTokenKind::StringPart,
+                    kind: final_kind,
                     span: self.span(state.part_start)?,
                 })));
             }
@@ -434,8 +423,7 @@ impl<'source> RawLexer<'source> {
                             || (!state.multiline
                                 && self.cursor.peek().is_some_and(is_literal_line_terminator))
                         {
-                            return self
-                                .recover_interpolated_string(state.part_start, state.multiline);
+                            continue;
                         }
                         self.report_issue(
                             state.part_start,
@@ -443,75 +431,22 @@ impl<'source> RawLexer<'source> {
                                 following_character: self.cursor.peek(),
                             }),
                         )?;
-                        return self.recover_interpolated_string(state.part_start, state.multiline);
+                        final_kind = RawTokenKind::StringLiteral;
                     }
                 }
                 continue;
             }
 
-            if !state.multiline && !state.raw && self.cursor.peek() == Some('\\') {
-                let _ = self.scan_escape(state.part_start)?;
-            } else {
-                let _ = self.cursor.bump();
-            }
+            self.consume_interpolated_character(state.multiline);
         }
     }
 
-    fn recover_interpolated_string(
-        &mut self,
-        start: u32,
-        multiline: bool,
-    ) -> Result<Option<RawItem>, RawLexerError> {
-        loop {
-            if self.cursor.is_eof() {
-                let _ = self.modes.pop();
-                self.report_issue(
-                    start,
-                    LexerIssue::Interpolation(InterpolationIssue::UnclosedString { multiline }),
-                )?;
-                return Ok(Some(RawItem::Token(RawToken {
-                    kind: RawTokenKind::Error,
-                    span: self.span(start)?,
-                })));
-            }
-
-            if (multiline
-                && self.cursor.peek() == Some('"')
-                && self.cursor.peek_nth(1) == Some('"')
-                && self.cursor.peek_nth(2) == Some('"'))
-                || (!multiline && self.cursor.peek() == Some('"'))
-            {
-                if multiline {
-                    self.consume_multiline_terminator();
-                } else {
-                    let _ = self.cursor.bump();
-                }
-                let _ = self.modes.pop();
-                return Ok(Some(RawItem::Token(RawToken {
-                    kind: RawTokenKind::StringLiteral,
-                    span: self.span(start)?,
-                })));
-            }
-
-            if self.cursor.peek().is_some_and(|character| {
-                is_substitute(character) || (!multiline && is_literal_line_terminator(character))
-            }) {
-                let _ = self.modes.pop();
-                self.report_issue(
-                    start,
-                    LexerIssue::Interpolation(InterpolationIssue::UnclosedString { multiline }),
-                )?;
-                return Ok(Some(RawItem::Token(RawToken {
-                    kind: RawTokenKind::Error,
-                    span: self.span(start)?,
-                })));
-            }
-
-            if !multiline && self.cursor.peek() == Some('\\') {
-                let _ = self.scan_escape(start)?;
-            } else {
-                let _ = self.cursor.bump();
-            }
+    fn consume_interpolated_character(&mut self, multiline: bool) {
+        // Backslashes protect delimiters in single-line interpolation. The
+        // interpolator receives the original spelling and interprets escapes.
+        let ch = self.cursor.bump();
+        if !multiline && ch == Some('\\') && matches!(self.cursor.peek(), Some('"' | '\\')) {
+            let _ = self.cursor.bump();
         }
     }
 
@@ -529,7 +464,19 @@ impl<'source> RawLexer<'source> {
             })));
         }
 
-        let token = self.scan_identifier_token(start, false, true)?;
+        let _ = self.cursor.bump();
+        while self
+            .cursor
+            .peek()
+            .is_some_and(|ch| ch != '$' && is_identifier_part(ch))
+        {
+            let _ = self.cursor.bump();
+        }
+        let span = self.span(start)?;
+        let kind = classify_keyword(self.source.slice(span)?)
+            .filter(|keyword| *keyword != HardKeyword::End)
+            .map_or(RawTokenKind::Identifier, RawTokenKind::Keyword);
+        let token = RawToken { kind, span };
         let _ = self.modes.pop();
         self.resume_string_after_expression();
         Ok(Some(RawItem::Token(token)))
@@ -631,28 +578,39 @@ impl<'source> RawLexer<'source> {
     }
 
     fn scan_identifier(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
-        let token = self.scan_identifier_token(start, true, false)?;
-        self.update_xml_token(token.kind, token.span)?;
-        Ok(token)
+        let _ = self.cursor.bump();
+        self.consume_identifier_rest();
+        let span = self.span(start)?;
+        let text = self.source.slice(span)?;
+        let kind = classify_keyword(text)
+            .map(RawTokenKind::Keyword)
+            .unwrap_or(RawTokenKind::Identifier);
+        let kind = if kind == RawTokenKind::Identifier && self.cursor.peek() == Some('"') {
+            let multiline =
+                self.cursor.peek_nth(1) == Some('"') && self.cursor.peek_nth(2) == Some('"');
+            self.modes.push(LexMode::InterpolatedString(StringState {
+                part_start: self.cursor.position(),
+                multiline,
+                started: false,
+            }));
+            RawTokenKind::InterpolationId
+        } else {
+            kind
+        };
+        self.update_xml_token(kind, span)?;
+        Ok(RawToken { kind, span })
     }
 
-    fn scan_identifier_token(
-        &mut self,
-        start: u32,
-        allow_interpolation: bool,
-        stop_before_braced_splice: bool,
-    ) -> Result<RawToken, RawLexerError> {
-        let _ = self.cursor.bump();
+    fn consume_identifier_rest(&mut self) {
         while let Some(character) = self.cursor.peek() {
-            if stop_before_braced_splice && character == '$' && self.cursor.peek_nth(1) == Some('{')
+            if character == '_'
+                && self
+                    .cursor
+                    .peek_nth(1)
+                    .is_some_and(|next| !is_identifier_part(next) && is_operator_character(next))
             {
-                break;
-            }
-            if character == '_' && self.cursor.peek_nth(1).is_some_and(is_operator_character) {
                 let _ = self.cursor.bump();
-                while self.cursor.peek().is_some_and(is_operator_character) {
-                    let _ = self.cursor.bump();
-                }
+                self.consume_operator_chars();
                 break;
             }
             if is_identifier_part(character) {
@@ -661,48 +619,20 @@ impl<'source> RawLexer<'source> {
                 break;
             }
         }
-
-        let span = self.span(start)?;
-        let text = self.source.slice(span)?;
-        let kind = if !allow_interpolation {
-            RawTokenKind::Identifier
-        } else {
-            classify_keyword(text)
-                .map(RawTokenKind::Keyword)
-                .unwrap_or(RawTokenKind::Identifier)
-        };
-        if allow_interpolation
-            && kind == RawTokenKind::Identifier
-            && self.cursor.peek() == Some('"')
-        {
-            let multiline =
-                self.cursor.peek_nth(1) == Some('"') && self.cursor.peek_nth(2) == Some('"');
-            self.modes.push(LexMode::InterpolatedString(StringState {
-                part_start: self.cursor.position(),
-                multiline,
-                raw: text == "raw",
-                started: false,
-            }));
-            return Ok(RawToken {
-                kind: RawTokenKind::InterpolationId,
-                span,
-            });
-        }
-        Ok(RawToken { kind, span })
     }
 
     fn scan_backquoted_identifier(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
         let _ = self.cursor.bump();
         let content_start = self.cursor.position();
-
         while let Some(character) = self.cursor.peek() {
-            if character == '`' {
+            if character == '`' || is_literal_line_terminator(character) {
                 break;
             }
-            if is_literal_line_terminator(character) {
-                break;
+            if character == '\\' {
+                self.scan_escape(self.cursor.position())?;
+            } else {
+                let _ = self.cursor.bump();
             }
-            let _ = self.cursor.bump();
         }
 
         let closed = self.cursor.eat_if('`');
@@ -727,25 +657,37 @@ impl<'source> RawLexer<'source> {
                 span,
             });
         }
-        if content.is_empty() || content == "_" {
-            self.diagnostics.push(LexerDiagnostic::with_issue(
-                DiagnosticSeverity::Error,
-                span,
-                LexerIssue::EmptyOrUnderscoreBackquotedIdentifier,
-            ));
-            return Ok(RawToken {
-                kind: RawTokenKind::Error,
-                span,
-            });
-        }
-
-        Ok(RawToken {
-            kind: RawTokenKind::BackquotedIdentifier,
-            span,
-        })
+        let issue = match dotty_core::source::decode_identifier_body(content).as_deref() {
+            Some("" | "_") => Some(LexerIssue::EmptyOrUnderscoreBackquotedIdentifier),
+            None => Some(LexerIssue::NonScalarBackquotedIdentifier),
+            Some(_) => None,
+        };
+        let kind = if let Some(issue) = issue {
+            self.report_issue(start, issue)?;
+            RawTokenKind::Error
+        } else {
+            RawTokenKind::BackquotedIdentifier
+        };
+        Ok(RawToken { kind, span })
     }
 
     fn scan_operator(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
+        if matches!(self.cursor.peek(), Some('⇒' | '←')) {
+            let _ = self.cursor.bump();
+        } else {
+            self.consume_operator_chars();
+        }
+        let span = self.span(start)?;
+        let kind = if self.source.slice(span)? == ":" && !self.xml.is_xml_name_separator() {
+            RawTokenKind::Punctuation(Punctuation::Colon)
+        } else {
+            RawTokenKind::Operator
+        };
+        self.update_xml_token(kind, span)?;
+        Ok(RawToken { kind, span })
+    }
+
+    fn consume_operator_chars(&mut self) {
         while let Some(character) = self.cursor.peek() {
             if character == '/' && matches!(self.cursor.peek_nth(1), Some('/') | Some('*')) {
                 break;
@@ -755,13 +697,6 @@ impl<'source> RawLexer<'source> {
             }
             let _ = self.cursor.bump();
         }
-
-        let token = RawToken {
-            kind: RawTokenKind::Operator,
-            span: self.span(start)?,
-        };
-        self.update_xml_token(token.kind, token.span)?;
-        Ok(token)
     }
 
     fn update_xml_token(
@@ -778,26 +713,9 @@ impl<'source> RawLexer<'source> {
     }
 
     fn looks_like_quote_id(&self) -> bool {
-        if !self
-            .cursor
-            .peek_nth(1)
-            .is_some_and(crate::identifier::is_identifier_start)
-        {
-            return false;
-        }
-
-        let mut lookahead = 2;
-        while self
-            .cursor
-            .peek_nth(lookahead)
-            .is_some_and(crate::identifier::is_identifier_part)
-        {
-            lookahead += 1;
-        }
-
-        let has_additional_identifier_start = (2..lookahead)
-            .any(|index| self.cursor.peek_nth(index).is_some_and(is_identifier_start));
-        self.cursor.peek_nth(lookahead) != Some('\'') || has_additional_identifier_start
+        self.cursor.peek_nth(1).is_some_and(|first| {
+            is_identifier_start(first) || (first != '\\' && is_operator_character(first))
+        }) && self.cursor.peek_nth(2) != Some('\'')
     }
 
     fn looks_like_char_literal(&self) -> bool {
@@ -823,14 +741,12 @@ impl<'source> RawLexer<'source> {
     }
 
     fn scan_quote_id(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
-        let _ = self.cursor.bump();
-        let _ = self.cursor.bump();
-        while self
-            .cursor
-            .peek()
-            .is_some_and(crate::identifier::is_identifier_part)
-        {
-            let _ = self.cursor.bump();
+        let _ = self.cursor.bump(); // apostrophe
+        let first = self.cursor.bump().expect("quote-id start was checked");
+        if is_identifier_start(first) {
+            self.consume_identifier_rest();
+        } else {
+            self.consume_operator_chars();
         }
         Ok(RawToken {
             kind: RawTokenKind::QuoteId,
@@ -846,7 +762,7 @@ impl<'source> RawLexer<'source> {
         if self.cursor.peek() == Some('.') {
             let _ = self.cursor.bump();
             kind = RawTokenKind::DecimalLiteral;
-            self.scan_decimal_digits(start, NumericComponent::FractionalPart)?;
+            self.consume_digits(start, 10)?;
         } else {
             if self.cursor.peek() == Some('0')
                 && matches!(self.cursor.peek_nth(1), Some('x' | 'X' | 'b' | 'B'))
@@ -876,29 +792,29 @@ impl<'source> RawLexer<'source> {
             {
                 let _ = self.cursor.bump();
                 kind = RawTokenKind::DecimalLiteral;
-                self.scan_decimal_digits(start, NumericComponent::FractionalPart)?;
+                self.consume_digits(start, 10)?;
             }
+        }
 
-            if base == 10 && matches!(self.cursor.peek(), Some('e' | 'E')) {
+        if base == 10 && matches!(self.cursor.peek(), Some('e' | 'E')) {
+            let _ = self.cursor.bump();
+            kind = RawTokenKind::ExponentLiteral;
+            if matches!(self.cursor.peek(), Some('+' | '-')) {
                 let _ = self.cursor.bump();
-                kind = RawTokenKind::ExponentLiteral;
-                if matches!(self.cursor.peek(), Some('+' | '-')) {
-                    let _ = self.cursor.bump();
-                }
-                if !self
-                    .cursor
-                    .peek()
-                    .is_some_and(|character| character.is_ascii_digit())
-                {
-                    self.report_issue(
-                        start,
-                        LexerIssue::Numeric(NumericIssue::MissingDigits {
-                            component: NumericComponent::Exponent,
-                        }),
-                    )?;
-                } else {
-                    self.scan_decimal_digits(start, NumericComponent::Exponent)?;
-                }
+            }
+            if !self
+                .cursor
+                .peek()
+                .is_some_and(|character| character.is_ascii_digit())
+            {
+                self.report_issue(
+                    start,
+                    LexerIssue::Numeric(NumericIssue::MissingDigits {
+                        component: NumericComponent::Exponent,
+                    }),
+                )?;
+            } else {
+                self.consume_digits(start, 10)?;
             }
         }
 
@@ -950,31 +866,7 @@ impl<'source> RawLexer<'source> {
     }
 
     fn scan_based_digits(&mut self, start: u32, base: u32) -> Result<(), RawLexerError> {
-        let mut saw_digit = false;
-        let mut trailing_separator = false;
-
-        while let Some(character) = self.cursor.peek() {
-            if digit_value(character).is_some_and(|digit| digit < base) {
-                saw_digit = true;
-                trailing_separator = false;
-                let _ = self.cursor.bump();
-            } else if character == '_' {
-                if !saw_digit || trailing_separator {
-                    self.report_issue(
-                        start,
-                        LexerIssue::Numeric(NumericIssue::MisplacedSeparator),
-                    )?;
-                }
-                trailing_separator = true;
-                let _ = self.cursor.bump();
-            } else {
-                break;
-            }
-        }
-
-        if trailing_separator {
-            self.report_issue(start, LexerIssue::Numeric(NumericIssue::TrailingSeparator))?;
-        }
+        let saw_digit = self.consume_digits(start, base)?;
         let invalid_non_decimal_digit = base != 10
             && self.cursor.peek().is_some_and(|character| {
                 character.is_ascii_alphanumeric() && !(saw_digit && matches!(character, 'l' | 'L'))
@@ -998,26 +890,16 @@ impl<'source> RawLexer<'source> {
         Ok(())
     }
 
-    fn scan_decimal_digits(
-        &mut self,
-        start: u32,
-        component: NumericComponent,
-    ) -> Result<(), RawLexerError> {
+    fn consume_digits(&mut self, start: u32, base: u32) -> Result<bool, RawLexerError> {
         let mut saw_digit = false;
         let mut trailing_separator = false;
 
         while let Some(character) = self.cursor.peek() {
-            if character.is_ascii_digit() {
+            if digit_value(character).is_some_and(|digit| digit < base) {
                 saw_digit = true;
                 trailing_separator = false;
                 let _ = self.cursor.bump();
             } else if character == '_' {
-                if !saw_digit || trailing_separator {
-                    self.report_issue(
-                        start,
-                        LexerIssue::Numeric(NumericIssue::MisplacedSeparator),
-                    )?;
-                }
                 trailing_separator = true;
                 let _ = self.cursor.bump();
             } else {
@@ -1028,14 +910,7 @@ impl<'source> RawLexer<'source> {
         if trailing_separator {
             self.report_issue(start, LexerIssue::Numeric(NumericIssue::TrailingSeparator))?;
         }
-        if !saw_digit {
-            self.report_issue(
-                start,
-                LexerIssue::Numeric(NumericIssue::MissingDigits { component }),
-            )?;
-        }
-
-        Ok(())
+        Ok(saw_digit)
     }
 
     fn scan_char_literal(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
@@ -1260,14 +1135,17 @@ impl<'source> RawLexer<'source> {
 
     fn scan_octal_escape(&mut self, start: u32) -> Result<bool, RawLexerError> {
         let mut digits = String::new();
-        let mut count = 0;
-        while count < 3 {
+        let max_digits = if matches!(self.cursor.peek(), Some('0'..='3')) {
+            3
+        } else {
+            2
+        };
+        while digits.len() < max_digits {
             let Some(character @ '0'..='7') = self.cursor.peek() else {
                 break;
             };
             digits.push(character);
             let _ = self.cursor.bump();
-            count += 1;
         }
         self.report_issue(
             start,
@@ -1813,11 +1691,6 @@ mod tests {
         (classifies_spaces_as_trivia, " ", TriviaKind::Spaces),
         (classifies_tabs_as_trivia, "\t", TriviaKind::Tabs),
         (
-            classifies_other_whitespace_as_trivia,
-            "\u{000b}",
-            TriviaKind::OtherWhitespace
-        ),
-        (
             classifies_crlf_as_one_newline_trivia,
             "\r\n",
             TriviaKind::Newline
@@ -1969,6 +1842,20 @@ mod tests {
     }
 
     #[test]
+    fn unicode_arrows_at_token_start_leave_an_adjacent_prefix_operator() {
+        for arrow in ["⇒", "←"] {
+            let (items, diagnostics) = scan(&format!("{arrow}-x"));
+            assert_eq!(items[0], token(RawTokenKind::Operator, 0, 3));
+            assert_eq!(items[1], token(RawTokenKind::Operator, 3, 4));
+            assert_eq!(
+                scan(&format!("+{arrow}")).0[0],
+                token(RawTokenKind::Operator, 0, 4)
+            );
+            assert!(diagnostics.is_empty());
+        }
+    }
+
+    #[test]
     fn emits_a_unicode_operator_with_exact_span() {
         let (items, diagnostics) = scan("©");
 
@@ -2044,6 +1931,16 @@ mod tests {
     }
 
     #[test]
+    fn comparisons_with_scala_only_name_starts_do_not_open_xml_literals() {
+        for source in ["x <$limit", "x <ʰ", "x <𐐀"] {
+            let (items, diagnostics) = scan(source);
+            assert_eq!(items[2], token(RawTokenKind::Operator, 2, 3));
+            assert!(diagnostics.is_empty(), "{source}");
+        }
+        assert_eq!(scan("<_x/>").0[0], token(RawTokenKind::XmlStart, 0, 1));
+    }
+
+    #[test]
     fn recognizes_an_xml_processing_instruction_start() {
         let (items, _) = scan("<?xml version=\"1.0\"?>");
 
@@ -2112,6 +2009,59 @@ mod tests {
             ]
         );
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn applies_jdk_identifier_rules_at_token_boundaries() {
+        let (items, diagnostics) = scan("℘x x²");
+        assert_eq!(
+            items,
+            [
+                token(RawTokenKind::Identifier, 0, 4),
+                trivia(TriviaKind::Spaces, 4, 5),
+                token(RawTokenKind::Identifier, 5, 6),
+                token(RawTokenKind::Error, 6, 8),
+                token(RawTokenKind::Eof, 8, 8),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::UnsupportedSourceCharacter { character: '²' }
+        );
+        assert_eq!(diagnostics[0].span(), TextRange::new(6, 8).unwrap());
+        let (items, diagnostics) = scan("x_℘y");
+        assert_eq!(
+            items,
+            [
+                token(RawTokenKind::Identifier, 0, 6),
+                token(RawTokenKind::Eof, 6, 6)
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn reports_non_scala_whitespace_as_source_characters() {
+        for ch in ['\u{000b}', '\u{00a0}', '\u{2028}'] {
+            let source = format!("{ch}x");
+            let end = ch.len_utf8() as u32;
+            let (items, diagnostics) = scan(&source);
+            assert_eq!(
+                items,
+                [
+                    token(RawTokenKind::Error, 0, end),
+                    token(RawTokenKind::Identifier, end, end + 1),
+                    token(RawTokenKind::Eof, end + 1, end + 1)
+                ]
+            );
+            assert_eq!(diagnostics.len(), 1);
+            assert_eq!(
+                diagnostics[0].issue(),
+                &LexerIssue::UnsupportedSourceCharacter { character: ch }
+            );
+            assert_eq!(diagnostics[0].span(), TextRange::new(0, end).unwrap());
+        }
     }
 
     #[test]
@@ -2553,6 +2503,38 @@ mod tests {
     }
 
     #[test]
+    fn keeps_a_closed_backquoted_name_after_an_invalid_escape() {
+        let (items, diagnostics) = scan(r#"`a\q`"#);
+        assert_eq!(items[0], token(RawTokenKind::BackquotedIdentifier, 0, 5));
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].span(), TextRange::new(2, 4).unwrap());
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::Escape(EscapeIssue::InvalidEscapeCharacter { character: 'q' })
+        );
+    }
+
+    #[test]
+    fn validates_the_decoded_spelling_of_backquoted_names() {
+        let (items, diagnostics) = scan(r#"`\u005f`"#);
+        assert_eq!(items[0], token(RawTokenKind::Error, 0, 8));
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::EmptyOrUnderscoreBackquotedIdentifier
+        );
+        assert_eq!(
+            scan(r#"`\uD83D\uDE00`"#).0[0],
+            token(RawTokenKind::BackquotedIdentifier, 0, 14)
+        );
+        let (items, diagnostics) = scan(r#"`\uD800`"#);
+        assert_eq!(items[0], token(RawTokenKind::Error, 0, 8));
+        assert_eq!(
+            diagnostics[0].issue().code(),
+            "lexer.non_scalar_backquoted_identifier"
+        );
+    }
+
+    #[test]
     fn rejects_empty_and_underscore_backquoted_identifiers() {
         let (items, diagnostics) = scan("`` `_`");
         let errors: Vec<_> = items
@@ -2621,6 +2603,57 @@ mod tests {
             vec![
                 token(RawTokenKind::Identifier, 0, 6),
                 token(RawTokenKind::Eof, 6, 6),
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn standalone_colons_before_comments_keep_the_parser_colon_protocol() {
+        for source in ["x:/*doc*/T", "x://doc\n  y"] {
+            let (items, diagnostics) = scan(source);
+            assert_eq!(
+                items[1],
+                token(RawTokenKind::Punctuation(Punctuation::Colon), 1, 2)
+            );
+            assert!(diagnostics.is_empty());
+        }
+        assert_eq!(scan("x:/y").0[1], token(RawTokenKind::Operator, 1, 3));
+    }
+
+    #[test]
+    fn identifier_suffix_stops_before_comment_trivia() {
+        for (source, end, kind) in [
+            ("name_+/* msg */", 6, TriviaKind::BlockComment),
+            ("name_// msg", 5, TriviaKind::LineComment),
+        ] {
+            let (items, diagnostics) = scan(source);
+            let len = source.len() as u32;
+            assert_eq!(
+                items,
+                [
+                    token(RawTokenKind::Identifier, 0, end),
+                    trivia(kind, end, len),
+                    token(RawTokenKind::Eof, len, len),
+                ]
+            );
+            assert!(diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn simple_splices_stop_before_dollars_and_operator_suffixes() {
+        let (items, diagnostics) = scan(r#"s"$a$b_+""#);
+        assert_eq!(
+            items,
+            [
+                token(RawTokenKind::InterpolationId, 0, 1),
+                token(RawTokenKind::StringPart, 1, 3),
+                token(RawTokenKind::Identifier, 3, 4),
+                token(RawTokenKind::StringPart, 4, 5),
+                token(RawTokenKind::Identifier, 5, 7),
+                token(RawTokenKind::StringPart, 7, 9),
+                token(RawTokenKind::Eof, 9, 9),
             ]
         );
         assert!(diagnostics.is_empty());
@@ -2762,6 +2795,27 @@ mod tests {
     }
 
     #[test]
+    fn scans_leading_dot_exponents_and_permitted_digit_separators() {
+        for (source, kind) in [
+            (".5e2", RawTokenKind::ExponentLiteral),
+            (".5E-1f", RawTokenKind::FloatLiteral),
+            ("1__000", RawTokenKind::IntegerLiteral),
+            ("0x_FF", RawTokenKind::IntegerLiteral),
+            ("0b__10L", RawTokenKind::LongLiteral),
+            ("1.2__3e4__5", RawTokenKind::ExponentLiteral),
+        ] {
+            let end = source.len() as u32;
+            let (items, diagnostics) = scan(source);
+            assert_eq!(
+                items,
+                [token(kind, 0, end), token(RawTokenKind::Eof, end, end)],
+                "{source}"
+            );
+            assert!(diagnostics.is_empty(), "{source}: {diagnostics:?}");
+        }
+    }
+
+    #[test]
     fn diagnoses_malformed_numeric_separators() {
         let (items, diagnostics) = scan("1_ 0x_1 1.0_");
 
@@ -2772,7 +2826,7 @@ mod tests {
                 ..
             })
         )));
-        assert_eq!(diagnostics.len(), 3);
+        assert_eq!(diagnostics.len(), 2);
         assert_eq!(
             diagnostics
                 .iter()
@@ -2780,7 +2834,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 &LexerIssue::Numeric(NumericIssue::TrailingSeparator),
-                &LexerIssue::Numeric(NumericIssue::MisplacedSeparator),
                 &LexerIssue::Numeric(NumericIssue::TrailingSeparator),
             ]
         );
@@ -2791,7 +2844,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 TextRange::new(0, 2).unwrap(),
-                TextRange::new(3, 5).unwrap(),
                 TextRange::new(8, 12).unwrap(),
             ]
         );
@@ -3161,6 +3213,24 @@ mod tests {
             ]
         );
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn distinguishes_quoted_operators_from_single_character_literals() {
+        for (source, kind) in [
+            ("'++", RawTokenKind::QuoteId),
+            ("'+", RawTokenKind::QuoteId),
+            ("'foo_+", RawTokenKind::QuoteId),
+            ("'+'", RawTokenKind::CharLiteral),
+        ] {
+            let end = source.len() as u32;
+            let (items, diagnostics) = scan(source);
+            assert_eq!(
+                items,
+                [token(kind, 0, end), token(RawTokenKind::Eof, end, end)]
+            );
+            assert!(diagnostics.is_empty());
+        }
     }
 
     #[test]
@@ -4382,22 +4452,25 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_combining_mark_as_an_extra_character() {
-        let source = "'á'";
-        let (items, diagnostics) = scan(source);
-
-        assert_eq!(
-            items,
-            vec![
-                token(RawTokenKind::Error, 0, source.len() as u32),
-                token(RawTokenKind::Eof, source.len() as u32, source.len() as u32),
-            ]
-        );
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(
-            diagnostics[0].issue(),
-            &LexerIssue::Literal(LiteralIssue::MultipleCharacters)
-        );
+    fn leaves_a_trailing_quote_after_an_identifier_with_digits_or_marks() {
+        for source in ["'x1'", "'a\u{301}'"] {
+            let end = source.len() as u32;
+            let (items, diagnostics) = scan(source);
+            assert_eq!(
+                items,
+                [
+                    token(RawTokenKind::QuoteId, 0, end - 1),
+                    token(RawTokenKind::Error, end - 1, end),
+                    token(RawTokenKind::Eof, end, end),
+                ]
+            );
+            assert_eq!(diagnostics.len(), 1);
+            assert_eq!(
+                diagnostics[0].issue(),
+                &LexerIssue::Literal(LiteralIssue::UnterminatedCharacter)
+            );
+            assert_eq!(diagnostics[0].span(), TextRange::new(end - 1, end).unwrap());
+        }
     }
 
     #[test]
@@ -4708,15 +4781,24 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_interpolator_still_reports_invalid_escapes() {
-        let (_, diagnostics) = scan(r#"s"\d+""#);
-
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(
-            diagnostics[0].issue(),
-            &LexerIssue::Escape(EscapeIssue::InvalidEscapeCharacter { character: 'd' })
-        );
-        assert_eq!(diagnostics[0].span(), TextRange::new(1, 4).unwrap());
+    fn interpolated_backslashes_preserve_delimiters_and_custom_content() {
+        for (source, prefix_end) in [
+            (r#"raw"say \"hi\"""#, 3),
+            (r#"re"\d+""#, 2),
+            (r#"s"tail\\""#, 1),
+        ] {
+            let (items, diagnostics) = scan(source);
+            let end = source.len() as u32;
+            assert_eq!(
+                items,
+                [
+                    token(RawTokenKind::InterpolationId, 0, prefix_end),
+                    token(RawTokenKind::StringPart, prefix_end, end),
+                    token(RawTokenKind::Eof, end, end),
+                ]
+            );
+            assert!(diagnostics.is_empty());
+        }
     }
 
     #[test]
@@ -4891,27 +4973,41 @@ mod tests {
     }
 
     #[test]
-    fn keeps_simple_splice_names_as_identifiers_even_when_they_are_keywords() {
-        let (items, diagnostics) = scan("s\"$if\"");
-        let kinds: Vec<_> = items
-            .into_iter()
-            .filter_map(|item| match item {
-                RawItem::Token(token) => Some(token.kind),
-                RawItem::Trivia(_) => None,
-            })
-            .collect();
-
+    fn classifies_keywords_in_simple_splices_but_keeps_end_as_a_name() {
+        let (items, diagnostics) = scan(r#"s"$if$this$end""#);
         assert_eq!(
-            kinds,
+            items[2],
+            token(RawTokenKind::Keyword(HardKeyword::If), 3, 5)
+        );
+        assert_eq!(
+            items[4],
+            token(RawTokenKind::Keyword(HardKeyword::This), 6, 10)
+        );
+        assert_eq!(items[6], token(RawTokenKind::Identifier, 11, 14));
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn preserves_later_splices_after_an_invalid_dollar() {
+        let (items, diagnostics) = scan(r#"s"$! $x""#);
+        assert_eq!(
+            items,
             vec![
-                RawTokenKind::InterpolationId,
-                RawTokenKind::StringPart,
-                RawTokenKind::Identifier,
-                RawTokenKind::StringPart,
-                RawTokenKind::Eof,
+                token(RawTokenKind::InterpolationId, 0, 1),
+                token(RawTokenKind::StringPart, 1, 6),
+                token(RawTokenKind::Identifier, 6, 7),
+                token(RawTokenKind::StringPart, 7, 8),
+                token(RawTokenKind::Eof, 8, 8),
             ]
         );
-        assert!(diagnostics.is_empty());
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::Interpolation(InterpolationIssue::InvalidSplice {
+                following_character: Some('!'),
+            })
+        );
+        assert_eq!(diagnostics[0].span(), TextRange::new(1, 3).unwrap());
     }
 
     #[test]

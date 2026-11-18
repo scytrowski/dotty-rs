@@ -2053,6 +2053,127 @@ fn acceptance_vi_hash_code_session_receipt() -> Vec<String> {
 
 #[test]
 #[ignore = "requires pinned Scala 3.9.0 sources, classpath jars, and JDK environment"]
+fn captures_acceptance_vii_charat_lookup_before_rollback() {
+    let scala_root = PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT"));
+    let revision = Command::new("git")
+        .args(["-C", scala_root.to_str().unwrap(), "rev-parse", "HEAD"])
+        .output()
+        .expect("git reads pinned Scala source revision");
+    assert!(revision.status.success());
+    assert_eq!(
+        String::from_utf8(revision.stdout).unwrap().trim(),
+        "777528f19a58e794c9954a42f433373472ec57f8"
+    );
+    let relative = "library/src/scala/Predef.scala";
+    let text = fs::read_to_string(scala_root.join(relative)).unwrap();
+    let source = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let scanner = ContextualScanner::new(&text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(&text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        relative,
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let (method_tree, _) = parsed
+        .ast
+        .iter()
+        .find(|(tree, node)| tree.index() == 614 && matches!(node.kind, TreeKind::DefDef(_)))
+        .unwrap();
+    let (param_tree, _) = parsed
+        .ast
+        .iter()
+        .find(|(tree, _)| tree.index() == 602)
+        .unwrap();
+    let parameter = index.symbol_at(source, param_tree).unwrap();
+    let (java_home, jars) = scala_classpath();
+    let mut entries: Vec<Box<dyn ClassPathEntry>> = vec![Box::new(
+        JdkClassPath::new(java_home.join("jmods")).unwrap(),
+    )];
+    for jar in jars {
+        entries.push(Box::new(JarClassPath::new(jar, 21).unwrap()));
+    }
+    let resolver = ClasspathSymbolResolver::new(
+        CompositeClassPath::new(entries),
+        definitions,
+        LoadingSession::with_packages(packages.snapshot()),
+    );
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(resolver));
+    typer
+        .type_method_definition(method_tree)
+        .expect("parameter admission reaches the unchanged original charAt result");
+    let (reference_tree, _) = parsed
+        .ast
+        .iter()
+        .find(|(tree, node)| tree.index() == 611 && matches!(node.kind, TreeKind::Ident(_)))
+        .unwrap();
+    let typed_reference = typer
+        .source_typed_index()
+        .get(source, reference_tree)
+        .expect("original constructor parameter reference has a typed mapping");
+    assert!(matches!(
+        typer.store().types.get(typer.typed_ast().get(typed_reference).ty),
+        Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        } if *symbol == parameter
+    ));
+    let SymbolInfo::Complete(parameter_type) = *typer.store().symbols.info(parameter) else {
+        panic!("canonical source constructor parameter type completed");
+    };
+    let Type::Applied { tycon, args } = typer.store().types.get(parameter_type) else {
+        panic!("source IndexedSeq[Char] type remains applied");
+    };
+    let Type::TypeRef {
+        target: TypeRefTarget::Symbol(indexed_seq),
+        ..
+    } = typer.store().types.get(*tycon)
+    else {
+        panic!("IndexedSeq type constructor preserves canonical identity");
+    };
+    assert_eq!(
+        observed_symbol_path(typer.store(), *indexed_seq),
+        ".scala.collection.IndexedSeq"
+    );
+    assert_eq!(args.len(), 1);
+    let Type::TypeRef {
+        target: TypeRefTarget::Symbol(char),
+        ..
+    } = typer.store().types.get(args[0])
+    else {
+        panic!("Char argument preserves canonical identity");
+    };
+    assert_eq!(observed_symbol_path(typer.store(), *char), "Char");
+    assert_eq!(
+        typer.store().symbols.get(parameter).position,
+        Some(SourceSpan::new(
+            source,
+            parsed.ast.get(param_tree).position.unwrap().span(),
+        ))
+    );
+}
+
+#[test]
+#[ignore = "requires pinned Scala 3.9.0 sources, classpath jars, and JDK environment"]
 fn captures_acceptance_vi_prop_clear_before_rollback() {
     let scala_root = PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT"));
     let revision = Command::new("git")

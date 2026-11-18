@@ -35,6 +35,13 @@ pub struct StoreCheckpoint {
     annotations: usize,
 }
 
+impl StoreCheckpoint {
+    /// Whether a scope from the same store survives rollback to this checkpoint.
+    pub fn contains_scope(self, scope: crate::ScopeId) -> bool {
+        (scope.index() as usize) < self.scopes
+    }
+}
+
 impl SemanticStore {
     pub fn new() -> Self {
         Self::default()

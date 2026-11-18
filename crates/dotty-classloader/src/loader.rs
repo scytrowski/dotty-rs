@@ -1304,6 +1304,12 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         inject_late_failure: bool,
     ) -> Result<SymbolId, SemanticTastyLoadError> {
         let aliases_before = self.snapshot_open_builtin_aliases();
+        let resolved_before = self
+            .session
+            .resolved
+            .values()
+            .copied()
+            .collect::<HashSet<_>>();
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
         let object_before = self
@@ -1314,7 +1320,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let mut materialized_class = None;
         let mut materialized_generic_symbols = None;
         let result = self
-            .load_semantic_class_semantics(file, name, selection)
+            .load_semantic_class_semantics(file, name, selection, &resolved_before)
             .and_then(|(class, generic_symbols)| {
                 materialized_class = Some(class);
                 materialized_generic_symbols = generic_symbols;
@@ -3623,6 +3629,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         file: &dotty_tasty::tasty::TastyFile<'_>,
         name: &BinaryName,
         selection: &TastyTopLevelSelection,
+        resolved_before: &HashSet<SymbolId>,
     ) -> Result<(SymbolId, Option<SemanticTastyGenericSymbols>), SemanticTastyLoadError> {
         // Materialize the one external class the frozen fixture requires. The
         // borrowed classpath keeps resource precedence identical to the
@@ -3919,13 +3926,29 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             _ => false,
         };
         let supported_hierarchy = match class_symbol.info {
-            SymbolInfo::Complete(info) => matches!(
-                self.store.types.get(info),
-                Type::ClassInfo(class_info)
-                    if class_info.parents.len() == 1
-                        && type_ref_symbol(self.store, class_info.parents[0])
-                            == Some(self.definitions.object_class)
-            ),
+            SymbolInfo::Complete(info) => match self.store.types.get(info) {
+                Type::ClassInfo(class_info) if class_info.parents.len() == 1 => {
+                    match type_ref_symbol(self.store, class_info.parents[0]) {
+                        Some(parent) if parent == self.definitions.object_class => true,
+                        Some(parent) => {
+                            let parent_symbol = self.store.symbols.get(parent);
+                            parent != class
+                                && resolved_before.contains(&parent)
+                                && parent_symbol.kind == SymbolKind::Class
+                                && matches!(
+                                    parent_symbol.info,
+                                    SymbolInfo::Complete(parent_info)
+                                        if matches!(
+                                            self.store.types.get(parent_info),
+                                            Type::ClassInfo(_)
+                                        )
+                                )
+                        }
+                        None => false,
+                    }
+                }
+                _ => false,
+            },
             _ => false,
         };
         let supported_constructor = if selection.class_type_parameter.is_some() {
@@ -3963,7 +3986,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         {
             self.remove_open_root_from_package_scope(class);
             return Err(SemanticTastyLoadError::UnsupportedShape(
-                "the indexed root or constructor has an unexpected identity or incomplete info",
+                "the selected class must have one Object or previously completed class parent",
             ));
         }
         Ok((class, generic_symbols))
@@ -22079,5 +22102,717 @@ mod tests {
                 if found == missing_name
         ));
         assert!(missing_loader.semantic_tasty_loaded.is_empty());
+    }
+
+    #[test]
+    fn chain_hierarchy_audit_asserts_measured_boundaries_and_controls() {
+        let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let original_root = fixture_root.join("tests/fixtures/semantic_chain_3_9_0");
+        let simple_root = fixture_root.join("tests/fixtures/semantic_chain_simple_3_9_0");
+        let foreign_root = fixture_root.join("tests/fixtures/semantic_chain_controls_3_9_0");
+        let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+        let class_path = |root: PathBuf, include_foreign: bool| {
+            let mut entries: Vec<Box<dyn ClassPathEntry>> =
+                vec![Box::new(crate::class_path::DirectoryClassPath::new(root))];
+            if include_foreign {
+                entries.push(Box::new(crate::class_path::DirectoryClassPath::new(
+                    foreign_root.clone(),
+                )));
+            }
+            entries.push(Box::new(
+                crate::jdk_class_path::JdkClassPath::new(java_home.join("jmods"))
+                    .expect("JDK 21 jmods"),
+            ));
+            CompositeClassPath::new(entries)
+        };
+        let normalized_error = |result: &Result<SymbolId, SemanticTastyLoadError>| match result {
+            Err(SemanticTastyLoadError::UnsupportedShape(reason)) => {
+                format!("UnsupportedShape:{reason}")
+            }
+            Err(SemanticTastyLoadError::Unpickle {
+                error:
+                    UnpickleError::UnresolvedMember {
+                        address,
+                        name,
+                        namespace,
+                        ..
+                    },
+                ..
+            }) => format!("UnresolvedMember@{address}:{namespace:?}:{name}"),
+            Err(error) => format!("Other:{error:?}"),
+            Ok(_) => "Loaded".to_owned(),
+        };
+        let load_each = |root: PathBuf| {
+            ["ChainRoot", "ChainMiddle", "ChainLeaf"].map(|class| {
+                let name = BinaryName::from_internal(format!("convergence/{class}"));
+                let mut store = SemanticStore::new();
+                let mut loader = ClassLoader::new(class_path(root.clone(), false), &mut store);
+                let resource = loader.class_path.find_class(&name).unwrap().unwrap();
+                assert_eq!(resource.format(), ClassFormat::Tasty);
+                assert_eq!(resource.origin(), &ClassOrigin::Directory(root.clone()));
+                let outcome = loader.load_semantic_class_with_tasty_unpickler(&name);
+                let normalized = normalized_error(&outcome);
+                let repeated = loader.load_semantic_class_with_tasty_unpickler(&name);
+                assert_eq!(normalized, normalized_error(&repeated));
+                println!("SEMANTIC_LOAD {class}: {outcome:?}; repeat={repeated:?}");
+                normalized
+            })
+        };
+
+        for (root, classes) in [
+            (&original_root, ["ChainRoot", "ChainMiddle", "ChainLeaf"]),
+            (&simple_root, ["ChainRoot", "ChainMiddle", "ChainLeaf"]),
+        ] {
+            for class in classes {
+                let path = root.join("convergence").join(format!("{class}.tasty"));
+                let bytes = fs::read(&path).expect("Scala 3.9.0 Chain fixture");
+                let file = tasty_symbol::parse_classloader_tasty(&bytes).expect("valid TASTy");
+                let address_index = file.ast_address_index().expect("TASTy AST address index");
+                println!(
+                    "UNIT {root:?}/{class}: tasty={}.{}.{} tooling={}",
+                    file.header().major_version,
+                    file.header().minor_version,
+                    file.header().experimental_version,
+                    file.header().tooling_version
+                );
+                for node in address_index.iter() {
+                    let name = match node.decode_structured() {
+                        Ok(dotty_tasty::tasty::StructuredNode::TypeDef(
+                            dotty_tasty::tasty::DefinitionBody::TypeDef { name, .. },
+                        )) => file.names().get_utf8(name),
+                        Ok(dotty_tasty::tasty::StructuredNode::DefDef(body)) => {
+                            file.names().get_utf8(body.name)
+                        }
+                        _ => None,
+                    };
+                    if let Some(name) = name {
+                        println!(
+                            "  INDEX address={} tag={} name={} parent={:?}",
+                            node.offset,
+                            node.tag,
+                            name,
+                            address_index
+                                .parent_of(node.offset as u32)
+                                .map(|n| n.offset)
+                        );
+                    }
+                }
+                if class == "ChainLeaf" {
+                    let type_or_template = address_index
+                        .iter()
+                        .find_map(|node| match node.decode_structured().ok()? {
+                            dotty_tasty::tasty::StructuredNode::TypeDef(
+                                dotty_tasty::tasty::DefinitionBody::TypeDef {
+                                    name,
+                                    type_or_template,
+                                    ..
+                                },
+                            ) if file.names().get_utf8(name) == Some("ChainLeaf") => {
+                                Some(type_or_template)
+                            }
+                            _ => None,
+                        })
+                        .expect("indexed ChainLeaf definition");
+                    let dotty_tasty::tasty::RawTree::LengthNode(template) = type_or_template else {
+                        panic!("ChainLeaf has an indexed class template");
+                    };
+                    let template = template
+                        .decode_template_structure()
+                        .expect("ChainLeaf template structure");
+                    assert_eq!(template.parents.len(), 1);
+                    let dotty_tasty::tasty::RawTree::LengthNode(parent) = &template.parents[0]
+                    else {
+                        panic!("ChainLeaf parent has a bounded indexed type tree");
+                    };
+                    let parent = address_index
+                        .iter()
+                        .find(|node| {
+                            node.payload.as_ptr() == parent.payload.as_ptr()
+                                && node.payload.len() == parent.payload.len()
+                        })
+                        .expect("ChainLeaf parent in the original AST address index");
+                    println!(
+                        "  DIRECT_PARENT source=ChainMiddle address={} tag={}",
+                        parent.offset, parent.tag
+                    );
+                    assert_eq!(parent.offset, 9);
+                }
+            }
+        }
+
+        let original = load_each(original_root.clone());
+        let original_fresh = load_each(original_root.clone());
+        assert_eq!(
+            original, original_fresh,
+            "fresh-store outcomes are normalized"
+        );
+        assert_eq!(
+            original,
+            [
+                "UnsupportedShape:the requested top-level declaration must have a class template",
+                "UnresolvedMember@23:Type:ChainRoot",
+                "UnsupportedShape:the class template must have no type parameters and one constructor declaration",
+            ]
+        );
+        let simple = load_each(simple_root.clone());
+        let simple_fresh = load_each(simple_root.clone());
+        assert_eq!(simple, simple_fresh, "fresh-store outcomes are normalized");
+        assert_eq!(
+            simple,
+            [
+                "UnsupportedShape:the requested top-level declaration must have a class template",
+                "UnresolvedMember@23:Type:ChainRoot",
+                "UnresolvedMember@17:Type:ChainMiddle",
+            ]
+        );
+
+        let normalize_type_ids = |message: &str| {
+            let mut normalized = String::new();
+            let mut remaining = message;
+            while let Some((prefix, suffix)) = remaining.split_once("TypeId(") {
+                normalized.push_str(prefix);
+                let (id, rest) = suffix
+                    .split_once(')')
+                    .expect("debug TypeId has a closing parenthesis");
+                assert!(!id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()));
+                normalized.push_str("TypeId(_)");
+                remaining = rest;
+            }
+            normalized.push_str(remaining);
+            normalized
+        };
+        let observe_selected_resolver = |root: PathBuf| {
+            let mut store = SemanticStore::new();
+            let definitions = Definitions::bootstrap(&mut store);
+            let mut resolver = crate::resolver::ClasspathSymbolResolver::new(
+                class_path(root, true),
+                definitions,
+                LoadingSession::new(),
+            );
+            let package = resolver
+                .resolve_package(&mut store, &["convergence"])
+                .expect("package resolution")
+                .expect("convergence package");
+            let request = MemberRequest {
+                prefix: store
+                    .types
+                    .alloc(Type::type_ref(definitions.no_prefix, package)),
+                name: Name::new(store.names.intern("ChainLeaf"), Namespace::Type),
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            };
+            let selected_name = BinaryName::from_internal("convergence/ChainLeaf");
+            let normalize_result =
+                |result: &Result<Option<SymbolId>, dotty_core::ResolutionError>| match result {
+                    Err(dotty_core::ResolutionError::Malformed { reason }) => {
+                        format!("requested={selected_name}; {}", normalize_type_ids(reason))
+                    }
+                    _ => format!("requested={selected_name}; unexpected={result:?}"),
+                };
+            let selected =
+                resolver.resolve_member_with_semantic_class(&mut store, &request, &selected_name);
+            let normalized = normalize_result(&selected);
+            let repeated =
+                resolver.resolve_member_with_semantic_class(&mut store, &request, &selected_name);
+            assert_eq!(normalized, normalize_result(&repeated));
+            normalized
+        };
+        let selected = observe_selected_resolver(simple_root.clone());
+        let selected_fresh = observe_selected_resolver(simple_root.clone());
+        let expected_selected = concat!(
+            "requested=convergence/ChainLeaf; ",
+            "semantic loading of convergence/ChainLeaf failed: ",
+            "Unpickle { address: 4, error: UnresolvedMember { address: 17, ",
+            "prefix: TypeId(_), space: None, name: \"ChainMiddle\", namespace: Type } }"
+        );
+        assert_eq!(selected, expected_selected);
+        assert_eq!(selected_fresh, expected_selected);
+        assert_eq!(
+            selected, selected_fresh,
+            "fresh resolver stores normalize equally"
+        );
+
+        let mut resolver_store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut resolver_store);
+        let mut resolver = crate::resolver::ClasspathSymbolResolver::new(
+            class_path(simple_root.clone(), true),
+            definitions,
+            LoadingSession::new(),
+        );
+        let package = resolver
+            .resolve_package(&mut resolver_store, &["convergence"])
+            .expect("package resolution")
+            .expect("convergence package");
+        let request = MemberRequest {
+            prefix: resolver_store
+                .types
+                .alloc(Type::type_ref(definitions.no_prefix, package)),
+            name: Name::new(resolver_store.names.intern("ChainLeaf"), Namespace::Type),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+        let legacy = resolver.resolve_member(&mut resolver_store, &request);
+        println!("LEGACY_RESOLVER ChainLeaf: {legacy:?}");
+        let legacy_symbol = legacy
+            .expect("ordinary unselected resolver control")
+            .expect("ordinary resolver returns ChainLeaf");
+        assert_eq!(
+            resolver_store
+                .names
+                .resolve(resolver_store.symbols.get(legacy_symbol).name.text()),
+            "ChainLeaf"
+        );
+        assert!(matches!(
+            resolver_store.symbols.get(legacy_symbol).info,
+            SymbolInfo::Complete(_)
+        ));
+        let legacy_parent_names: Vec<_> = class_info(&resolver_store, legacy_symbol)
+            .parents
+            .iter()
+            .map(|parent| {
+                symbol_name(&resolver_store, parent_symbol(&resolver_store, *parent)).to_owned()
+            })
+            .collect();
+        println!("LEGACY_RESOLVER ChainLeaf parents={legacy_parent_names:?}");
+        assert_eq!(legacy_parent_names, ["ChainMiddle"]);
+        let legacy_parent = parent_symbol(
+            &resolver_store,
+            class_info(&resolver_store, legacy_symbol).parents[0],
+        );
+        println!(
+            "LEGACY_RESOLVER ChainMiddle info={:?}",
+            resolver_store.symbols.get(legacy_parent).info
+        );
+        assert!(matches!(
+            resolver_store.symbols.get(legacy_parent).info,
+            SymbolInfo::Complete(_)
+        ));
+        let legacy_grandparent_names: Vec<_> = class_info(&resolver_store, legacy_parent)
+            .parents
+            .iter()
+            .map(|parent| {
+                symbol_name(&resolver_store, parent_symbol(&resolver_store, *parent)).to_owned()
+            })
+            .collect();
+        println!("LEGACY_RESOLVER ChainMiddle parents={legacy_grandparent_names:?}");
+        assert_eq!(legacy_grandparent_names, ["Object", "ChainRoot"]);
+
+        let mut foreign_store = SemanticStore::new();
+        let mut foreign_loader =
+            ClassLoader::new(class_path(simple_root, true), &mut foreign_store);
+        let foreign = foreign_loader.load_semantic_class_with_tasty_unpickler(
+            &BinaryName::from_internal("foreignchain/ChainLeaf"),
+        );
+        println!("FOREIGN_SAME_SPELLED_OWNER: {foreign:?}");
+        let foreign_class = foreign.expect("authentic foreign same-spelled class");
+        assert_eq!(
+            foreign_loader
+                .store
+                .names
+                .resolve(foreign_loader.store.symbols.get(foreign_class).name.text()),
+            "ChainLeaf"
+        );
+        assert_eq!(
+            foreign_loader.store.symbols.get(foreign_class).owner,
+            foreign_loader.session.packages.get(&["foreignchain"])
+        );
+        assert_eq!(
+            foreign_loader.store.symbols.get(foreign_class).kind,
+            SymbolKind::Class
+        );
+        assert!(matches!(
+            foreign_loader.store.symbols.get(foreign_class).info,
+            SymbolInfo::Complete(_)
+        ));
+        assert_eq!(
+            foreign_loader.session.origins.get(&foreign_class),
+            Some(&ClassOrigin::Directory(foreign_root.clone()))
+        );
+
+        let mut legacy_store = SemanticStore::new();
+        let original_origin = ClassOrigin::Directory(original_root.clone());
+        let mut legacy_loader =
+            ClassLoader::new(class_path(original_root, false), &mut legacy_store);
+        let legacy_class =
+            legacy_loader.load_class(&BinaryName::from_internal("convergence/ChainLeaf"));
+        println!("LEGACY_CLASS_LOADER ChainLeaf: {legacy_class:?}");
+        let legacy_class = legacy_class.expect("ordinary classloader control");
+        let legacy_definitions = legacy_loader.definitions();
+        let legacy_session = legacy_loader.into_session();
+        assert_eq!(
+            legacy_session.origins.get(&legacy_class),
+            Some(&original_origin)
+        );
+        assert!(matches!(
+            legacy_store.symbols.get(legacy_class).info,
+            SymbolInfo::Complete(_)
+        ));
+        let legacy_parent_names: Vec<_> = class_info(&legacy_store, legacy_class)
+            .parents
+            .iter()
+            .map(|parent| {
+                symbol_name(&legacy_store, parent_symbol(&legacy_store, *parent)).to_owned()
+            })
+            .collect();
+        println!("LEGACY_CLASS_LOADER ChainLeaf parents={legacy_parent_names:?}");
+        assert_eq!(legacy_parent_names, ["ChainMiddle"]);
+        let answer_name = Name::new(legacy_store.names.intern("answer"), Namespace::Term);
+        let answer = legacy_store
+            .scopes
+            .get(class_info(&legacy_store, legacy_class).declarations)
+            .lookup(&answer_name)
+            .expect("ordinary legacy class loader declares answer");
+        println!(
+            "LEGACY_CLASS_LOADER answer info={:?}",
+            legacy_store.symbols.get(answer).info
+        );
+        let SymbolInfo::Complete(answer_type) = legacy_store.symbols.get(answer).info else {
+            panic!("the ordinary legacy loader completes answer");
+        };
+        println!(
+            "LEGACY_CLASS_LOADER answer type={:?}",
+            legacy_store.types.get(answer_type)
+        );
+        let answer_result_type = match legacy_store.types.get(answer_type) {
+            Type::Method(method) => method.result,
+            Type::ByName { result } => *result,
+            _ => answer_type,
+        };
+        assert_eq!(
+            type_ref_symbol(&legacy_store, answer_result_type),
+            type_ref_symbol(&legacy_store, legacy_definitions.int)
+        );
+    }
+
+    #[test]
+    fn semantic_chain_leaf_uses_preloaded_canonical_middle_parent() {
+        fn observe(root: &std::path::Path) -> Vec<String> {
+            let fixture_root = root.to_path_buf();
+            let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+            let mut store = SemanticStore::new();
+            let mut loader = ClassLoader::new(
+                CompositeClassPath::new(vec![
+                    Box::new(crate::class_path::DirectoryClassPath::new(
+                        fixture_root.clone(),
+                    )),
+                    Box::new(
+                        crate::jdk_class_path::JdkClassPath::new(java_home.join("jmods"))
+                            .expect("JDK 21 jmods"),
+                    ),
+                ]),
+                &mut store,
+            );
+            let root_name = BinaryName::from_internal("convergence/ChainRoot");
+            let middle_name = BinaryName::from_internal("convergence/ChainMiddle");
+            let leaf_name = BinaryName::from_internal("convergence/ChainLeaf");
+
+            let root = loader.load_class(&root_name).expect("preload ChainRoot");
+            let middle = loader
+                .load_class(&middle_name)
+                .expect("preload ChainMiddle");
+            assert!(matches!(
+                loader.store.symbols.get(root).info,
+                SymbolInfo::Complete(_)
+            ));
+            assert!(matches!(
+                loader.store.symbols.get(middle).info,
+                SymbolInfo::Complete(_)
+            ));
+
+            let leaf = loader
+                .load_semantic_class_with_tasty_unpickler(&leaf_name)
+                .expect("the selected semantic leaf completes against preloaded ChainMiddle");
+            assert_eq!(loader.semantic_tasty_loaded.get(&leaf_name), Some(&leaf));
+            assert_eq!(
+                parent_symbol(loader.store, class_info(loader.store, leaf).parents[0]),
+                middle
+            );
+            assert_eq!(
+                loader
+                    .load_semantic_class_with_tasty_unpickler(&leaf_name)
+                    .expect("repeat selected semantic leaf lookup"),
+                leaf,
+                "same-session leaf lookup reuses the selected class"
+            );
+            assert_eq!(
+                loader
+                    .load_class(&middle_name)
+                    .expect("explicit parent class request"),
+                middle,
+                "explicit parent class request reuses ChainMiddle"
+            );
+
+            [
+                ("ChainRoot", root),
+                ("ChainMiddle", middle),
+                ("ChainLeaf", leaf),
+            ]
+            .into_iter()
+            .map(|(role, symbol)| {
+                let info = loader.store.symbols.get(symbol);
+                let expected_kind = if role == "ChainRoot" {
+                    SymbolKind::Trait
+                } else {
+                    SymbolKind::Class
+                };
+                assert_eq!(info.kind, expected_kind);
+                assert!(matches!(info.info, SymbolInfo::Complete(_)));
+                let owner = info.owner.expect("class has its package owner");
+                let owner_name = symbol_name(loader.store, owner);
+                assert_eq!(owner_name, "convergence");
+                let origin = loader
+                    .session
+                    .origins
+                    .get(&symbol)
+                    .expect("loaded class retains resource provenance");
+                assert_eq!(origin, &ClassOrigin::Directory(fixture_root.clone()));
+                let parents = class_info(loader.store, symbol)
+                    .parents
+                    .iter()
+                    .map(|parent| {
+                        let parent = parent_symbol(loader.store, *parent);
+                        symbol_name(loader.store, parent).to_owned()
+                    })
+                    .collect::<Vec<_>>();
+                format!("{role}:{owner_name}:{parents:?}:{:?}:{origin:?}", info.kind)
+            })
+            .collect()
+        }
+
+        let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/semantic_chain_simple_3_9_0");
+        let first = observe(&fixture_root);
+        let second = observe(&fixture_root);
+        assert_eq!(first, second, "fresh stores have the same normalized graph");
+        assert!(first[0].starts_with("ChainRoot:convergence:[\"Object\"]:Trait:Directory("));
+        assert!(first[1].starts_with("ChainMiddle:convergence:["));
+        assert!(first[1].contains("ChainRoot"));
+        assert!(first[2].starts_with("ChainLeaf:convergence:[\"ChainMiddle\"]"));
+    }
+
+    #[test]
+    fn semantic_chain_direct_parent_rejects_missing_wrong_owner_and_malformed_inputs() {
+        let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/semantic_chain_simple_3_9_0");
+        let leaf_bytes = fs::read(fixture_root.join("convergence/ChainLeaf.tasty"))
+            .expect("authentic Scala 3.9.0 ChainLeaf");
+        let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+        let jdk = || {
+            Box::new(
+                crate::jdk_class_path::JdkClassPath::new(java_home.join("jmods"))
+                    .expect("JDK 21 jmods"),
+            ) as Box<dyn ClassPathEntry>
+        };
+
+        let mut missing_parent_store = SemanticStore::new();
+        let mut missing_parent_loader = ClassLoader::new(
+            CompositeClassPath::new(vec![
+                Box::new(crate::class_path::DirectoryClassPath::new(
+                    fixture_root.clone(),
+                )),
+                jdk(),
+            ]),
+            &mut missing_parent_store,
+        );
+        assert!(matches!(
+            missing_parent_loader.load_semantic_class_with_tasty_unpickler(
+                &BinaryName::from_internal("convergence/ChainLeaf")
+            ),
+            Err(SemanticTastyLoadError::Unpickle {
+                error: UnpickleError::UnresolvedMember {
+                    address: 17,
+                    name,
+                    namespace: Namespace::Type,
+                    ..
+                },
+                ..
+            }) if name == "ChainMiddle"
+        ));
+
+        let wrong_owner = BinaryName::from_internal("other/ChainLeaf");
+        let mut wrong_owner_store = SemanticStore::new();
+        let mut wrong_owner_loader = ClassLoader::new(
+            InMemoryTastyClassPath(HashMap::from([(wrong_owner.clone(), leaf_bytes.clone())])),
+            &mut wrong_owner_store,
+        );
+        assert!(matches!(
+            wrong_owner_loader.load_semantic_class_with_tasty_unpickler(&wrong_owner),
+            Err(SemanticTastyLoadError::UnsupportedShape(
+                "the TASTy package must match the requested binary name"
+            ))
+        ));
+        assert!(wrong_owner_loader.semantic_tasty_loaded.is_empty());
+
+        let malformed_leaf = BinaryName::from_internal("convergence/ChainLeaf");
+        let mut malformed_store = SemanticStore::new();
+        let mut malformed_loader = ClassLoader::new(
+            CompositeClassPath::new(vec![
+                Box::new(InMemoryTastyClassPath(HashMap::from([(
+                    malformed_leaf.clone(),
+                    leaf_bytes[..leaf_bytes.len() - 1].to_vec(),
+                )]))),
+                Box::new(crate::class_path::DirectoryClassPath::new(
+                    fixture_root.clone(),
+                )),
+                jdk(),
+            ]),
+            &mut malformed_store,
+        );
+        let root = malformed_loader
+            .load_class(&BinaryName::from_internal("convergence/ChainRoot"))
+            .expect("valid root remains loadable");
+        let middle = malformed_loader
+            .load_class(&BinaryName::from_internal("convergence/ChainMiddle"))
+            .expect("valid middle remains loadable");
+        assert!(matches!(
+            malformed_loader.load_semantic_class_with_tasty_unpickler(&malformed_leaf),
+            Err(SemanticTastyLoadError::ClassLoad(
+                ClassLoadError::InvalidTastyFile(_, _)
+            ))
+        ));
+        assert!(matches!(
+            malformed_loader.store.symbols.get(root).info,
+            SymbolInfo::Complete(_)
+        ));
+        assert!(matches!(
+            malformed_loader.store.symbols.get(middle).info,
+            SymbolInfo::Complete(_)
+        ));
+        assert!(
+            !malformed_loader
+                .semantic_tasty_loaded
+                .contains_key(&malformed_leaf)
+        );
+    }
+
+    #[test]
+    fn semantic_chain_self_parent_rejects_without_publishing_or_losing_preloads() {
+        use dotty_tasty::tasty::{RawTree, StandardSection, TYPEREF_TAG};
+
+        let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/semantic_chain_simple_3_9_0");
+        let leaf_bytes = fs::read(fixture_root.join("convergence/ChainLeaf.tasty"))
+            .expect("authentic Scala 3.9.0 ChainLeaf");
+        let file = tasty_symbol::parse_classloader_tasty(&leaf_bytes)
+            .expect("valid source-authentic ChainLeaf");
+        let parent = file
+            .ast_address_index()
+            .expect("AST address index")
+            .get_node(17)
+            .expect("direct parent reference at TYPEREF@17");
+        assert_eq!(parent.tag, TYPEREF_TAG);
+        let ast_offset = file
+            .section(StandardSection::Asts)
+            .expect("AST section")
+            .offset;
+        let ast_payload = file
+            .section(StandardSection::Asts)
+            .expect("AST section")
+            .payload;
+        let mut parent_reader =
+            dotty_tasty::tasty::Reader::with_range(ast_payload, parent.offset, ast_payload.len())
+                .expect("bounded direct parent tree");
+        let parent_tree = RawTree::decode(&mut parent_reader).expect("direct parent type tree");
+        assert!(matches!(
+            parent_tree,
+            RawTree::NatAst {
+                tag: TYPEREF_TAG,
+                value: 4,
+                ..
+            }
+        ));
+        let name_ref_offset = ast_offset + parent.offset + 1;
+        assert_eq!(leaf_bytes[name_ref_offset], 0x84, "name reference head");
+        assert_eq!(
+            leaf_bytes[name_ref_offset + 1],
+            0x40,
+            "parent qualifier tag"
+        );
+
+        let mut self_parent_bytes = leaf_bytes;
+        self_parent_bytes[name_ref_offset] = 0x82; // ChainLeaf, name index 2.
+        let self_parent_file =
+            tasty_symbol::parse_classloader_tasty(&self_parent_bytes).expect("valid mutated TASTy");
+        let mutated_parent = self_parent_file
+            .ast_address_index()
+            .expect("mutated AST address index")
+            .get_node(17)
+            .expect("mutated direct parent reference");
+        assert_eq!(mutated_parent.tag, TYPEREF_TAG);
+        let mutated_ast = self_parent_file
+            .section(StandardSection::Asts)
+            .expect("mutated AST section");
+        let mut mutated_parent_reader = dotty_tasty::tasty::Reader::with_range(
+            mutated_ast.payload,
+            parent.offset,
+            mutated_ast.payload.len(),
+        )
+        .expect("mutated direct parent tree bounds");
+        let mutated_parent_tree =
+            RawTree::decode(&mut mutated_parent_reader).expect("mutated direct parent tree");
+        assert!(matches!(
+            mutated_parent_tree,
+            RawTree::NatAst {
+                tag: TYPEREF_TAG,
+                value: 2,
+                ..
+            }
+        ));
+
+        let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+        let leaf_name = BinaryName::from_internal("convergence/ChainLeaf");
+        let root_name = BinaryName::from_internal("convergence/ChainRoot");
+        let middle_name = BinaryName::from_internal("convergence/ChainMiddle");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            CompositeClassPath::new(vec![
+                Box::new(InMemoryTastyClassPath(HashMap::from([(
+                    leaf_name.clone(),
+                    self_parent_bytes,
+                )]))),
+                Box::new(crate::class_path::DirectoryClassPath::new(
+                    fixture_root.clone(),
+                )),
+                Box::new(
+                    crate::jdk_class_path::JdkClassPath::new(java_home.join("jmods"))
+                        .expect("JDK 21 jmods"),
+                ),
+            ]),
+            &mut store,
+        );
+        let root = loader.load_class(&root_name).expect("preload ChainRoot");
+        let middle = loader
+            .load_class(&middle_name)
+            .expect("preload ChainMiddle");
+        assert_eq!(loader.session.resolved.get(&root_name), Some(&root));
+        assert_eq!(loader.session.resolved.get(&middle_name), Some(&middle));
+        let origins_before = loader.session.origins.clone();
+
+        assert!(matches!(
+            loader.load_semantic_class_with_tasty_unpickler(&leaf_name),
+            Err(SemanticTastyLoadError::UnsupportedShape(
+                "the selected class must have one Object or previously completed class parent"
+            ))
+        ));
+        assert!(!loader.semantic_tasty_loaded.contains_key(&leaf_name));
+        assert!(!loader.session.identified.contains_key(&leaf_name));
+        assert!(!loader.session.resolved.contains_key(&leaf_name));
+        assert_eq!(loader.session.origins, origins_before);
+        assert!(matches!(
+            loader.store.symbols.get(root).info,
+            SymbolInfo::Complete(_)
+        ));
+        assert!(matches!(
+            loader.store.symbols.get(middle).info,
+            SymbolInfo::Complete(_)
+        ));
+        assert_eq!(
+            loader.session.origins.get(&root),
+            Some(&ClassOrigin::Directory(fixture_root.clone()))
+        );
+        assert_eq!(
+            loader.session.origins.get(&middle),
+            Some(&ClassOrigin::Directory(fixture_root))
+        );
     }
 }

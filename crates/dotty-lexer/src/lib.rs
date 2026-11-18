@@ -2,10 +2,10 @@
 
 mod cursor;
 mod diagnostics;
-mod identifier;
 mod lexer;
 mod raw_token;
 mod scanner;
+mod token_buffer;
 mod trivia;
 mod xml;
 

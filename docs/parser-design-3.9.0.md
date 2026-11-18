@@ -119,6 +119,9 @@ region boundaries from outdents requested while parsing an individual case
 body. Indented `match` case regions also retain their ownership when opened by
 eager layout, so a same-indentation `catch` closes the match cases before the
 enclosing `try` parses its handler.
+A `catch` followed by a case on a later source line requests the same
+case-region feedback. This decision uses the first handler token and preserves
+the block body of a single multiline case, including before an argument closes.
 An indented case body nested in an argument can terminate directly at the
 enclosing `)` (or `}`); feedback-opened body regions are closed at that
 delimiter without requiring a parser-visible `Outdent` token.

@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use dotty_core::ast::{Block, InterpolatedString, Literal, This, UntypedNode};
 use dotty_core::{Constant, Punctuation, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped};
 
@@ -44,44 +46,31 @@ where
             );
         }
 
-        let delimiter = if self
-            .current_text()
-            .unwrap_or_default()
-            .starts_with("\"\"\"")
-        {
+        let mut parts = Vec::new();
+        let delimiter = if self.current_text().is_ok_and(|s| s.starts_with("\"\"\"")) {
             "\"\"\""
         } else {
             "\""
         };
-        let mut parts = Vec::new();
-        while self.current().kind == TokenKind::StringPart {
-            // The scanner includes the splice dollar or the closing quotes
-            // in this token's span. The following token belongs to the
-            // enclosing grammar once the closing delimiter has been read.
-            let text = self.current_text().unwrap_or_default();
-            let has_splice = text.ends_with('$');
-            let start = self.current().span.start();
-            let content = if parts.is_empty() {
-                text.strip_prefix(delimiter).unwrap_or(text)
-            } else {
-                text
-            };
-            let content_start = start + (text.len() - content.len()) as u32;
-            let content = content
-                .strip_suffix(if has_splice { "$" } else { delimiter })
-                .unwrap_or(content);
-            parts.push(self.parse_interpolated_part(content, content_start));
-            if !has_splice {
-                break;
+        let mut first_part = true;
+        loop {
+            if self.current().kind == TokenKind::StringPart {
+                let (part, closed) = self.parse_interpolated_part(first_part, delimiter);
+                parts.push(part);
+                if closed {
+                    break;
+                }
+                first_part = false;
             }
 
             match self.current().kind {
-                TokenKind::Identifier => {
-                    if self.current_text_is("this") {
-                        let position = self.current_span();
-                        self.advance();
-                        parts.push(self.alloc(TreeKind::This(This { qual: None }), Some(position)));
-                    } else if in_pattern {
+                TokenKind::Keyword(dotty_core::HardKeyword::This) => {
+                    let position = self.current_span();
+                    self.advance();
+                    parts.push(self.alloc(TreeKind::This(This { qual: None }), Some(position)));
+                }
+                TokenKind::Identifier if in_pattern || !self.current_text_is("_") => {
+                    if in_pattern {
                         parts.push(self.with_parse_kind(ParseKind::Pattern, |parser| {
                             parser.with_location(Location::InPattern, |parser| parser.pattern())
                         }));
@@ -114,6 +103,13 @@ where
                         parts.push(self.expr());
                     }
                 }
+                found @ (TokenKind::Keyword(_) | TokenKind::Identifier) => {
+                    self.report_issue(ParseIssue::Expression(
+                        ExpressionIssue::InvalidSimpleInterpolationSplice { found },
+                    ));
+                    self.advance();
+                }
+                TokenKind::StringPart => continue,
                 _ => break,
             }
         }
@@ -127,28 +123,41 @@ where
         )
     }
 
-    fn parse_interpolated_part(&mut self, source: &str, start: u32) -> TreeId<Untyped> {
-        let value = interpolated_fragment_value(source);
-        let length = if value.len() == source.len() {
-            source.len()
+    fn parse_interpolated_part(&mut self, first: bool, delimiter: &str) -> (TreeId<Untyped>, bool) {
+        let spelling = self.current_text().unwrap_or_default();
+        let body = if first {
+            spelling.strip_prefix(delimiter).unwrap_or(spelling)
         } else {
-            // Dotty measures decoded length in UTF-16 from this fragment's start.
-            let mut remaining = value.encode_utf16().count();
-            let mut bytes = 0;
-            for ch in source.chars() {
-                if remaining == 0 {
-                    break;
-                }
-                bytes += ch.len_utf8();
-                remaining = remaining.saturating_sub(ch.len_utf16());
-            }
-            bytes
+            spelling
         };
-        let end = start + length as u32;
-        let range = TextRange::new(start, end).expect("interpolation span is ordered");
+        let start = self.current().span.start() + (spelling.len() - body.len()) as u32;
+        let (body, closed) = match body.strip_suffix(delimiter) {
+            Some(final_part) => (final_part, true),
+            None => (body.strip_suffix('$').unwrap_or(body), false),
+        };
+        let value = interpolated_fragment_value(body);
+        // Dotty measures the source span using the decoded fragment's UTF-16 length.
+        // A logical end inside a surrogate pair rounds up to a Rust character boundary.
+        let byte_len = if value.len() == body.len() {
+            body.len()
+        } else {
+            let mut remaining = value.encode_utf16().count();
+            body.chars()
+                .take_while(|ch| {
+                    if remaining == 0 {
+                        return false;
+                    }
+                    remaining = remaining.saturating_sub(ch.len_utf16());
+                    true
+                })
+                .map(char::len_utf8)
+                .sum()
+        };
+        let range = TextRange::new(start, start + byte_len as u32)
+            .expect("fragment lies inside its source token");
         self.advance();
         let value = self.names.intern(&value);
-        self.alloc(
+        let part = self.alloc(
             TreeKind::Literal(Literal {
                 value: Constant::String(value),
             }),
@@ -156,24 +165,27 @@ where
                 self.source_id,
                 Span::without_point(range),
             )),
-        )
+        );
+        (part, closed)
     }
 }
 
-fn interpolated_fragment_value(source: &str) -> String {
+fn interpolated_fragment_value(source: &str) -> Cow<'_, str> {
+    if !source.contains('$') {
+        return Cow::Borrowed(source);
+    }
     let mut value = String::with_capacity(source.len());
-    let mut characters = source.chars().peekable();
-    while let Some(character) = characters.next() {
-        if character == '$'
-            && let Some(&escaped @ ('$' | '"')) = characters.peek()
+    let mut chars = source.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '$'
+            && let Some(escaped) = chars.next_if(|ch| matches!(ch, '$' | '"'))
         {
-            characters.next();
             value.push(escaped);
         } else {
-            value.push(character);
+            value.push(ch);
         }
     }
-    value
+    Cow::Owned(value)
 }
 
 #[cfg(test)]
@@ -431,14 +443,84 @@ mod tests {
     }
 
     #[test]
+    fn decodes_dollar_quote_and_maps_the_logical_span_within_the_fragment() {
+        let source = r#"s"🦋$"🎁""#;
+        let end = source.len() as u32;
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::InterpolationId, 0, 1),
+                token(TokenKind::StringPart, 1, end),
+                token(TokenKind::Eof, end, end),
+            ],
+            &mut names,
+        );
+        let tree = parser.simple_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(ref interpolation)) =
+            parser.ast().get(tree).kind
+        else {
+            panic!("expected interpolation")
+        };
+        let literal = parser.ast().get(interpolation.parts[0]);
+        let TreeKind::Literal(Literal {
+            value: Constant::String(value),
+        }) = literal.kind
+        else {
+            panic!("expected literal")
+        };
+        assert_eq!(parser.names.resolve(value), "🦋\"🎁");
+        // The logical UTF-16 end falls between the surrogates of the last emoji.
+        assert_eq!(
+            literal.position.unwrap().span().range(),
+            TextRange::new(2, end - 1).unwrap()
+        );
+    }
+
+    #[test]
+    fn rejects_a_keyword_splice_at_its_span_and_keeps_the_next_splice() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            r#"s"$if$x""#,
+            vec![
+                token(TokenKind::InterpolationId, 0, 1),
+                token(TokenKind::StringPart, 1, 3),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::If), 3, 5),
+                token(TokenKind::StringPart, 5, 6),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::StringPart, 7, 8),
+                token(TokenKind::Eof, 8, 8),
+            ],
+            &mut names,
+        );
+        let root = parser.simple_expr();
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(3, 5).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].issue().code(),
+            "parser.expression.invalid_simple_interpolation_splice"
+        );
+        let TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(ref tree)) =
+            parser.ast().get(root).kind
+        else {
+            panic!("expected interpolation")
+        };
+        assert!(tree.parts.iter().any(|part| matches!(&parser.ast().get(*part).kind, TreeKind::Ident(id) if parser.names.resolve(id.name.text()) == "x")));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn parses_this_as_the_special_simple_splice() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "s\"$this\"",
             vec![
                 token(TokenKind::InterpolationId, 0, 1),
-                token(TokenKind::StringPart, 1, 3),
-                token(TokenKind::Identifier, 3, 7),
+                token(TokenKind::StringPart, 1, 2),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::This), 3, 7),
                 token(TokenKind::StringPart, 7, 8),
                 token(TokenKind::Eof, 8, 8),
             ],

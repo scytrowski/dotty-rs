@@ -780,31 +780,36 @@ where
         self.current().kind == TokenKind::Operator
             && (self.current_is_arrow()
                 || self.current_is_context_arrow()
-                || matches!(self.current_text().ok(), Some("=" | "<-")))
+                || matches!(self.current_text().ok(), Some("=" | "<-" | "←")))
     }
 
-    fn current_name_text(&self) -> Result<&'src str, SourceTextError> {
-        let text = self.current_text()?;
-        if self.current().kind == TokenKind::BackquotedIdentifier {
-            Ok(text
+    pub(crate) fn name_text(
+        &self,
+        kind: TokenKind,
+        span: TextRange,
+    ) -> Result<std::borrow::Cow<'src, str>, SourceTextError> {
+        let text = self.source.slice(span)?;
+        if kind == TokenKind::BackquotedIdentifier
+            && let Some(body) = text
                 .strip_prefix('`')
                 .and_then(|text| text.strip_suffix('`'))
-                .unwrap_or(text))
-        } else {
-            Ok(text)
+        {
+            // The scanner already diagnoses invalid escapes and non-scalar names.
+            return Ok(dotty_core::source::decode_identifier_body(body).unwrap_or(body.into()));
         }
+        Ok(text.into())
     }
 
     /// Interns the current token spelling in the term namespace.
     pub fn intern_current_term_name(&mut self) -> Result<TermName, SourceTextError> {
-        let text = self.current_name_text()?;
-        Ok(TermName::new(self.names.intern(text)))
+        let text = self.name_text(self.current().kind, self.current().span)?;
+        Ok(TermName::new(self.names.intern(&text)))
     }
 
     /// Interns the current token spelling in the type namespace.
     pub fn intern_current_type_name(&mut self) -> Result<TypeName, SourceTextError> {
-        let text = self.current_name_text()?;
-        Ok(TypeName::new(self.names.intern(text)))
+        let text = self.name_text(self.current().kind, self.current().span)?;
+        Ok(TypeName::new(self.names.intern(&text)))
     }
 
     /// Allocates an untyped AST node with an optional source position.
@@ -1236,6 +1241,23 @@ mod tests {
 
         assert!(name.as_name().is_type());
         assert_eq!(names.resolve(name.as_name().text()), "Value");
+    }
+
+    #[test]
+    fn escaped_and_plain_term_names_share_the_same_identity() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_with_tokens(
+            r#"`\uD801\uDC00` 𐐀"#,
+            vec![
+                token(TokenKind::BackquotedIdentifier, 0, 14),
+                token(TokenKind::Identifier, 15, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+        let escaped = parser.intern_current_term_name().unwrap();
+        parser.advance();
+        assert_eq!(parser.intern_current_term_name().unwrap(), escaped);
     }
 
     #[test]

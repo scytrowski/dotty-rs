@@ -1,4 +1,5 @@
 use dotty_core::ast::{InfixOp, UntypedNode};
+use dotty_core::token::characters::{is_operator_character, is_scala_letter};
 use dotty_core::{
     Name, Namespace, SourceSpan, Span, TextRange, TokenSource, TreeId, TreeKind, Untyped,
 };
@@ -24,7 +25,7 @@ fn precedence_in(operator: &str, namespace: Namespace) -> u8 {
     }
 
     match operator.chars().next() {
-        Some(first) if first.is_alphabetic() || matches!(first, '_' | '$') => 1,
+        Some(first) if is_scala_letter(first) => 1,
         Some('|') => 2,
         Some('^') => 3,
         Some('&') => 4,
@@ -53,10 +54,7 @@ pub fn is_assignment_operator(operator: &str) -> bool {
     operator.ends_with('=')
         && !operator.starts_with('=')
         && !matches!(operator, "!=" | "<=" | ">=")
-        && operator
-            .chars()
-            .next()
-            .is_some_and(dotty_core::token::is_operator_character)
+        && operator.chars().next().is_some_and(is_operator_character)
 }
 
 impl<S: TokenSource> Parser<'_, '_, S> {
@@ -160,9 +158,11 @@ mod tests {
 
     #[test]
     fn letter_operators_have_the_lowest_non_assignment_precedence() {
-        for operator in ["foo", "foo=", "_op", "$op"] {
-            assert_eq!(precedence(operator), 1, "{operator}");
+        for op in ["foo", "foo=", "_op", "$op", "Ⅳ"] {
+            assert_eq!(precedence(op), 1, "{op}");
         }
+        assert_eq!(precedence("==="), 5);
+        assert_eq!(precedence("ʰ"), 10);
     }
 
     #[test]
@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn assignment_operators_have_precedence_zero() {
-        for operator in ["+=", "::=", "⇒=", "🂡="] {
+        for operator in ["+=", "::=", "⇒=", "🂡=", "!==", "⊕="] {
             assert_eq!(precedence(operator), 0, "{operator}");
             assert!(is_assignment_operator(operator));
         }
@@ -229,7 +229,7 @@ mod tests {
     #[test]
     fn comparison_and_equality_operators_are_not_assignments() {
         for operator in [
-            "=", "==", "===", "=:=", "!=", "<=", ">=", "foo=", "_=", "$=", "1=", ".=",
+            "=", "==", "===", "=:=", "!=", "<=", ">=", "foo=", "_=", "$=", "1=", ".=", "_x=", "",
         ] {
             assert!(!is_assignment_operator(operator), "{operator}");
         }
@@ -252,6 +252,62 @@ mod tests {
         }
         assert!(has_mixed_associativity("+=", "+:", Namespace::Type));
         assert!(!has_mixed_associativity("+=", "+:", Namespace::Term));
+    }
+
+    #[test]
+    fn shared_reduction_uses_scala_unicode_categories_in_every_grammar() {
+        use crate::compilation_unit::tests::{parser_for, token};
+        use dotty_core::TokenKind;
+
+        for kind in [ParseKind::Expr, ParseKind::Type, ParseKind::Pattern] {
+            for (operator, outer_name) in [("Ⅳ", "Ⅳ"), ("ʰ", "+")] {
+                let source = format!("a {operator} b + c");
+                let operator_end = 2 + operator.len() as u32;
+                let end = source.len() as u32;
+                let mut names = NameInterner::new();
+                let mut parser = parser_for(
+                    &source,
+                    vec![
+                        token(TokenKind::Identifier, 0, 1),
+                        token(TokenKind::Identifier, 2, operator_end),
+                        token(TokenKind::Identifier, operator_end + 1, operator_end + 2),
+                        token(TokenKind::Operator, operator_end + 3, operator_end + 4),
+                        token(TokenKind::Identifier, end - 1, end),
+                        token(TokenKind::Eof, end, end),
+                    ],
+                    &mut names,
+                );
+                let root = match kind {
+                    ParseKind::Expr => parser.expr(),
+                    ParseKind::Type => parser.type_expr(),
+                    ParseKind::Pattern => parser.pattern(),
+                };
+                let tree = parser.ast().get(root);
+                let TreeKind::PhaseSpecific(UntypedNode::InfixOp(outer)) = &tree.kind else {
+                    panic!("expected an infix tree for {kind:?} {source}");
+                };
+                assert_eq!(parser.names.resolve(outer.op.text()), outer_name);
+                assert_eq!(outer.op.is_type(), kind == ParseKind::Type);
+                assert_eq!(
+                    tree.position.unwrap().span().range(),
+                    TextRange::new(0, end).unwrap()
+                );
+                let (nested, inner_name) = if outer_name == operator {
+                    (outer.right, "+")
+                } else {
+                    (outer.left, operator)
+                };
+                let TreeKind::PhaseSpecific(UntypedNode::InfixOp(inner)) =
+                    &parser.ast().get(nested).kind
+                else {
+                    panic!("expected a nested infix tree for {kind:?} {source}");
+                };
+                assert_eq!(parser.names.resolve(inner.op.text()), inner_name);
+                assert_eq!(inner.op.is_type(), kind == ParseKind::Type);
+                assert_eq!(parser.current().kind, TokenKind::Eof);
+                assert!(parser.diagnostics().is_empty(), "{kind:?} {source}");
+            }
+        }
     }
 
     #[test]

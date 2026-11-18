@@ -1058,7 +1058,10 @@ where
 }
 
 pub(super) fn is_term_operator_identifier(spelling: &str) -> bool {
-    !matches!(spelling, "=" | "=>" | "=>>" | "?=>" | "<-" | "@" | "#")
+    !matches!(
+        spelling,
+        "=" | "=>" | "⇒" | "=>>" | "?=>" | "<-" | "←" | "@" | "#"
+    )
 }
 
 #[cfg(test)]

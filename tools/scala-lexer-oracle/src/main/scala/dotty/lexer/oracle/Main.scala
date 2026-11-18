@@ -17,7 +17,8 @@ object Main:
     val context = (new ContextBase).initialCtx
     val scanner = Scanners.Scanner(sourceFile)(using context)
 
-    println("token\tstart\tend\tline_start\tname\tstring_value\tbase")
+    println("token\tstart\tend\tline_start\tname\tstring_value\tbase\tlexical_kind")
+    var afterInterpolator = false
     var done = false
     while !done do
       val token = Tokens.tokenString(scanner.token)
@@ -33,6 +34,22 @@ object Main:
             "double literal" | "string literal" | "string part" |
             "interpolation id" => Option(scanner.strVal).getOrElse("")
         case _ => ""
+      // Several distinct compiler token IDs share a display name. Record the
+      // scanner's decision while the interpolation region is still current.
+      val lexicalKind = scanner.token match
+        case Tokens.STRINGPART => "string part"
+        case Tokens.STRINGLIT if scanner.errOffset < start &&
+            (afterInterpolator || scanner.currentRegion.isInstanceOf[Scanners.InString]) =>
+          "string part"
+        case Tokens.BACKQUOTED_IDENT => "backquoted identifier"
+        case Tokens.IDENTIFIER if name.nonEmpty =>
+          val first = name.codePointAt(0)
+          if first == '_' || first == '$' || Character.isUnicodeIdentifierStart(first)
+          then "identifier" else "operator"
+        case Tokens.DECILIT => "decimal literal"
+        case Tokens.EXPOLIT => "exponent literal"
+        case _ => ""
+      afterInterpolator = scanner.token == Tokens.INTERPOLATIONID
       val base = scanner.base
       scanner.nextToken()
       val end = scanner.offset
@@ -44,7 +61,8 @@ object Main:
           lineStart.toString,
           escape(name),
           escape(stringValue),
-          base.toString
+          base.toString,
+          lexicalKind
         ).mkString("\t")
       )
       done = token == Tokens.tokenString(Tokens.EOF)
