@@ -9757,6 +9757,7 @@ mod tests {
     }
 
     mod compose_conformance;
+    mod constructor_parameter_capture;
     mod enclosing_this_capture;
     mod issue_2282_generated_apply_inference;
     mod lexical_closure_contract;

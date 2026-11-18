@@ -302,6 +302,74 @@ impl FunctionLiteralIndex {
 }
 
 impl SourceTyper<'_> {
+    pub(in crate::typer) fn can_capture_constructor_parameter(
+        &self,
+        method: SymbolId,
+        symbol: SymbolId,
+    ) -> bool {
+        if !self
+            .function_literals
+            .definitions
+            .values()
+            .any(|definition| definition.method == method && definition.capture_enclosing_values)
+            || !self.store.symbols.contains(method)
+            || !self.is_source_private_constructor_parameter(symbol)
+        {
+            return false;
+        }
+        let lambda = self.store.symbols.get(method);
+        let Some(source_method) = lambda.owner else {
+            return false;
+        };
+        if lambda.kind != SymbolKind::Method
+            || !self.store.symbols.contains(source_method)
+            || self.store.symbols.get(source_method).kind != SymbolKind::Method
+            || self.function_literals.is_method(source_method)
+            || !self.is_current_source_symbol(source_method)
+        {
+            return false;
+        }
+        let Some(class) = self.store.symbols.get(source_method).owner else {
+            return false;
+        };
+        if !self.store.symbols.contains(class)
+            || self.store.symbols.get(class).kind != SymbolKind::Class
+        {
+            return false;
+        }
+        let parameter = self.store.symbols.get(symbol);
+        if parameter.owner != Some(class) || parameter.flags.contains(SymbolFlags::MUTABLE) {
+            return false;
+        }
+        let Some(SourceDefinition::Canonical { source, tree }) = self.index.definition_of(symbol)
+        else {
+            return false;
+        };
+        if source != self.source || self.index.symbol_at(source, tree) != Some(symbol) {
+            return false;
+        }
+        let Some(TreeKind::ValDef(parameter_tree)) =
+            self.arena.try_get(tree).map(|node| &node.kind)
+        else {
+            return false;
+        };
+        if parameter_tree.metadata.modifiers.contains(&Modifier::Var) {
+            return false;
+        }
+        let Some(type_tree) = self.arena.try_get(parameter_tree.tpt) else {
+            return false;
+        };
+        match &type_tree.kind {
+            TreeKind::ByNameTypeTree(_) => false,
+            TreeKind::PhaseSpecific(UntypedNode::PostfixOp(PostfixOp { op, .. }))
+                if self.store.names.resolve(op.text()) == "*" =>
+            {
+                false
+            }
+            _ => true,
+        }
+    }
+
     pub(in crate::typer) fn ordinary_function1_parts(
         &mut self,
         expected: TypeId,
