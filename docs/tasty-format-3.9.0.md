@@ -336,7 +336,7 @@ Term = Path
      | INLINED Length Term Term? ValOrDefDef*
      | LAMBDA Length Term Type?
      | IF Length INLINE? Term Term Term
-     | MATCH Length (IMPLICIT | INLINE? | SUBMATCH?) Term CaseDef*
+     | MATCH Length (IMPLICIT | (INLINE | SUBMATCH)? Term) CaseDef*
      | TRY Length Term CaseDef* Term?
      | RETURN Length ASTRef Term?
      | WHILE Length Term Term

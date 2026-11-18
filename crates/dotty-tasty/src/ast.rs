@@ -968,9 +968,25 @@ pub struct InlinedNode<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MatchSelector<'a> {
+    Implicit,
+    Plain(RawTree<'a>),
+    Inline(RawTree<'a>),
+    SubMatch(RawTree<'a>),
+}
+
+impl<'a> MatchSelector<'a> {
+    pub fn scrutinee(&self) -> Option<&RawTree<'a>> {
+        match self {
+            Self::Implicit => None,
+            Self::Plain(tree) | Self::Inline(tree) | Self::SubMatch(tree) => Some(tree),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatchNode<'a> {
-    pub modifiers: Vec<u8>,
-    pub scrutinee: RawTree<'a>,
+    pub selector: MatchSelector<'a>,
     pub cases: Vec<CaseDefNode<'a>>,
 }
 
@@ -2174,7 +2190,9 @@ fn collect_structured_nodes<'a>(
             }
         }
         StructuredNode::Match(match_node) => {
-            tree!(&match_node.scrutinee);
+            if let Some(tree) = match_node.selector.scrutinee() {
+                tree!(tree);
+            }
             case_defs!(&match_node.cases);
         }
         StructuredNode::Return(return_node) => {
@@ -3016,14 +3034,22 @@ impl<'a> RawNode<'a> {
         }
 
         let mut reader = self.reader();
-        let mut modifiers = Vec::new();
-        if !reader.is_at_end() {
-            match reader.peek_u8()? {
-                IMPLICIT_TAG | INLINE_TAG | SUBMATCH_TAG => modifiers.push(reader.read_u8()?),
-                _ => {}
+        let selector = match reader.peek_u8()? {
+            IMPLICIT_TAG => {
+                reader.read_u8()?;
+                MatchSelector::Implicit
             }
-        }
-        let scrutinee = RawTree::decode(&mut reader)?;
+            INLINE_TAG | SUBMATCH_TAG => {
+                let marker = reader.read_u8()?;
+                let tree = RawTree::decode(&mut reader)?;
+                if marker == INLINE_TAG {
+                    MatchSelector::Inline(tree)
+                } else {
+                    MatchSelector::SubMatch(tree)
+                }
+            }
+            _ => MatchSelector::Plain(RawTree::decode(&mut reader)?),
+        };
         let cases = read_case_defs(&mut reader)?;
         if !reader.is_at_end() {
             return Err(AstError::UnsupportedCategory {
@@ -3032,11 +3058,7 @@ impl<'a> RawNode<'a> {
             });
         }
 
-        Ok(MatchNode {
-            modifiers,
-            scrutinee,
-            cases,
-        })
+        Ok(MatchNode { selector, cases })
     }
 
     pub fn decode_try(&self) -> Result<TryNode<'a>, AstError> {
@@ -4357,13 +4379,18 @@ impl<'a> CaseDefNode<'a> {
 impl<'a> MatchNode<'a> {
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(MATCH_TAG, writer, |payload| {
-            for modifier in &self.modifiers {
-                if !matches!(*modifier, IMPLICIT_TAG | INLINE_TAG | SUBMATCH_TAG) {
-                    return Err(TermEncodeError::InvalidValue { tag: *modifier });
+            match &self.selector {
+                MatchSelector::Implicit => payload.write_u8(IMPLICIT_TAG),
+                MatchSelector::Plain(tree) => tree.encode(payload)?,
+                MatchSelector::Inline(tree) => {
+                    payload.write_u8(INLINE_TAG);
+                    tree.encode(payload)?;
                 }
-                payload.write_u8(*modifier);
+                MatchSelector::SubMatch(tree) => {
+                    payload.write_u8(SUBMATCH_TAG);
+                    tree.encode(payload)?;
+                }
             }
-            self.scrutinee.encode(payload)?;
             for case in &self.cases {
                 case.encode(payload)?;
             }
@@ -5280,7 +5307,9 @@ fn collect_structured_refs<'a>(
             }
         }
         StructuredNode::Match(match_node) => {
-            collect_tree_refs(&match_node.scrutinee, items);
+            if let Some(tree) = match_node.selector.scrutinee() {
+                collect_tree_refs(tree, items);
+            }
             collect_case_defs_refs(&match_node.cases, items);
         }
         StructuredNode::Return(return_node) => {
@@ -7877,7 +7906,7 @@ mod tests {
 
     #[test]
     fn decodes_match_with_a_modifier_and_case_definitions() {
-        for modifier in [IMPLICIT_TAG, INLINE_TAG, SUBMATCH_TAG] {
+        for modifier in [INLINE_TAG, SUBMATCH_TAG] {
             let bytes = [
                 MATCH_TAG,
                 0x89,
@@ -7895,11 +7924,40 @@ mod tests {
             let nodes = RawNodes::decode(&mut reader).unwrap();
             let matched = nodes.get(0).unwrap().decode_match().unwrap();
 
-            assert_eq!(matched.modifiers, vec![modifier]);
-            assert!(matches!(matched.scrutinee, RawTree::Leaf(_)));
+            assert_eq!(
+                matches!(matched.selector, super::MatchSelector::Inline(_)),
+                modifier == INLINE_TAG
+            );
+            assert!(matches!(
+                matched.selector.scrutinee(),
+                Some(RawTree::Leaf(_))
+            ));
             assert_eq!(matched.cases.len(), 1);
             assert!(matched.cases[0].guard.is_none());
         }
+    }
+
+    #[test]
+    fn implicit_match_round_trips_both_cases_without_a_selector() {
+        let bytes = [
+            MATCH_TAG,
+            0x89,
+            IMPLICIT_TAG,
+            CASEDEF_TAG,
+            0x82,
+            2,
+            3,
+            CASEDEF_TAG,
+            0x82,
+            3,
+            2,
+        ];
+        assert_structured_round_trip(&bytes, |raw, writer| {
+            let matched = raw.decode_match().unwrap();
+            assert!(matched.selector.scrutinee().is_none());
+            assert_eq!(matched.cases.len(), 2);
+            matched.encode(writer)
+        });
     }
 
     #[test]

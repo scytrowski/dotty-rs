@@ -597,7 +597,10 @@ fn match_fixture_has_three_cases_and_expected_results() {
             let StructuredNode::Match(matched) = node.decode_structured().unwrap() else {
                 panic!("describe RHS is not a Match");
             };
-            assert!(matched.modifiers.is_empty());
+            assert!(matches!(
+                matched.selector,
+                dotty_tasty::ast::MatchSelector::Plain(_)
+            ));
             assert_eq!(matched.cases.len(), 3);
             assert_int_constant(&matched.cases[0].pattern, 0);
             assert_int_constant(&matched.cases[1].pattern, 1);
