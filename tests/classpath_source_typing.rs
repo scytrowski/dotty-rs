@@ -2074,7 +2074,11 @@ fn failed_external_object_selection_rolls_back_and_can_be_retried() {
     let error = typer
         .type_expression(broken_rhs, broken_context)
         .expect_err("an absent external module member should fail typing");
-    assert!(matches!(error, TyperError::MemberNotFound { .. }));
+    assert!(
+        matches!(error, TyperError::MemberNotFound { source, tree_index, name, .. }
+        if source == unit.source && tree_index == broken_rhs.index() && typer.store().names.resolve(name.text()) == "missing"),
+        "{error:?}"
+    );
     assert_eq!(typer.store().checkpoint(), checkpoint);
     assert!(
         typer

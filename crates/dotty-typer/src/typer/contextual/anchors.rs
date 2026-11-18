@@ -87,6 +87,16 @@ impl SourceTyper<'_> {
         tree_index: u32,
     ) -> Result<Option<TypeId>, TyperError> {
         match self.store.types.try_get(prefix) {
+            // Classpath types may use a term reference for their package prefix.
+            // A package qualifies the type but contributes no instance members.
+            Some(Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            }) if self.store.symbols.contains(*symbol)
+                && self.store.symbols.get(*symbol).kind == SymbolKind::Package =>
+            {
+                Ok(None)
+            }
             Some(Type::TermRef { .. }) => {
                 self.require_stable_selection_prefix(prefix, tree_index)?;
                 Ok(Some(prefix))
