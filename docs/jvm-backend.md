@@ -1276,6 +1276,13 @@ temporary declarations reachable from the method body. For
 The JDK 21 test checks the call order, counters, and virtual dispatch to an
 overridden getter.
 
+For `def pick(x: Int, y: Int)(using n: Int = y): Int = n`, the emitted
+`pick$default$3(II)I` returns its second argument. The JDK 21 harness runs
+`choose(reader).pick(nextX(), nextY())` with overrides that record the
+evaluation order. The selected receiver gets both calls, and the getter and
+`pick(III)I` receive the same two values in source order. A local given and
+an explicit contextual argument each bypass the overridden getter.
+
 For a first contextual clause, `def read(using n: Int = 7): Int = n` emits
 `read(I)I` and the public instance method `read$default$1()I`. Scala 3.9
 and this backend invoke the latter with `invokevirtual` only when the caller

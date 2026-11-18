@@ -31989,6 +31989,101 @@ fn contextual_default_getter_reuses_the_evaluated_argument() {
 }
 
 #[test]
+fn two_argument_contextual_default_reuses_the_receiver_and_both_arguments_in_order() {
+    let source = r#"
+package example
+class Reader:
+  def pick(x: Int, y: Int)(using n: Int = y): Int = n
+class Caller:
+  def choose(reader: Reader): Reader = reader
+  def nextX(): Int = 0
+  def nextY(): Int = 0
+  def missing(reader: Reader): Int = choose(reader).pick(nextX(), nextY())
+  def local(reader: Reader): Int = { given evidence: Int = 41; reader.pick(13, 29) }
+  def explicit(reader: Reader): Int = reader.pick(13, 29)(using 59)
+"#;
+    let output = TestOutputDirectory::new("two-argument-contextual-default");
+    let artifacts = compile_source_classes(source, "Reader.scala", output.path()).unwrap();
+    let reader = decode_emitted_class_named(&artifacts, "example/Reader");
+    assert_opcode_sequence(
+        emitted_method_code(&reader, "pick$default$3"),
+        &[0x1c, 0xac],
+    );
+    let caller = decode_emitted_class_named(&artifacts, "example/Caller");
+    assert_invocation_sequence(
+        &caller,
+        emitted_method_code(&caller, "missing"),
+        &[
+            (
+                0xb6,
+                "example/Caller",
+                "choose",
+                "(Lexample/Reader;)Lexample/Reader;",
+            ),
+            (0xb6, "example/Caller", "nextX", "()I"),
+            (0xb6, "example/Caller", "nextY", "()I"),
+            (0xb6, "example/Reader", "pick$default$3", "(II)I"),
+            (0xb6, "example/Reader", "pick", "(III)I"),
+        ],
+    );
+    for name in ["local", "explicit"] {
+        assert_invocation_sequence(
+            &caller,
+            emitted_method_code(&caller, name),
+            &[(0xb6, "example/Reader", "pick", "(III)I")],
+        );
+    }
+    if require_jdk_or_skip() {
+        let harness = output.path().join("Run.java");
+        fs::write(
+            &harness,
+            r#"class Run {
+            static class Counted extends example.Reader {
+                int getterCalls;
+                @Override public int pick$default$3(int x, int y) {
+                    getterCalls++;
+                    if (x != 13 || y != 29) throw new AssertionError("getter arguments");
+                    return super.pick$default$3(x, y);
+                }
+                @Override public int pick(int x, int y, int n) {
+                    if (x != 13 || y != 29) throw new AssertionError("pick arguments");
+                    return super.pick(x, y, n);
+                }
+            }
+            public static void main(String[] args) {
+                var selected = new Counted();
+                var trace = new StringBuilder();
+                var caller = new example.Caller() {
+                    @Override public example.Reader choose(example.Reader ignored) {
+                        trace.append("r"); return selected;
+                    }
+                    @Override public int nextX() { trace.append("x"); return 13; }
+                    @Override public int nextY() { trace.append("y"); return 29; }
+                };
+                if (caller.missing(null) != 29 || selected.getterCalls != 1 ||
+                    !trace.toString().equals("rxy")) throw new AssertionError(trace);
+                if (caller.local(selected) != 41 || caller.explicit(selected) != 59 ||
+                    selected.getterCalls != 1) throw new AssertionError("evidence");
+            }
+        }"#,
+        )
+        .unwrap();
+        let result = Command::new("java")
+            .arg("-Xverify:all")
+            .arg("-classpath")
+            .arg(output.path())
+            .arg(harness)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+#[test]
 fn contextual_default_getter_rejects_the_original_methods_formal_in_its_plan() {
     let output = TestOutputDirectory::new("contextual-default-foreign-formal");
     let mut wrong_formal = None;
