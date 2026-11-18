@@ -8,28 +8,26 @@ import compare
 
 
 class NormalizationTests(unittest.TestCase):
-    def test_ignores_interpolator_shaped_text_inside_an_ordinary_string(self):
-        source = 'case "string interpolator"'
-
-        self.assertEqual(compare.find_interpolation_ranges(source), [])
-
-    def test_finds_the_outer_end_after_quotes_inside_a_braced_splice(self):
-        source = 's"${missing.mkString(", ")}"'
-
-        self.assertEqual(
-            compare.find_interpolation_ranges(source), [(1, len(source.encode()))]
-        )
-
-    def test_does_not_mark_a_string_inside_a_braced_splice_as_string_part(self):
-        source = 's"${missing.mkString(", ")}"'
-        inner_quote = source.index('"', source.index("mkString") + len("mkString"))
-
-        self.assertTrue(
-            compare.is_in_interpolation_expression(source, 1, inner_quote)
-        )
+    def test_classifies_nested_string_from_scanner_context_after_non_ascii(self):
+        source = '𐐀 s"${"x"}"'
+        lines = [
+            "identifier\t0\t3\t0\t𐐀\t\t0\tidentifier",
+            "string interpolator\t3\t4\t0\ts\t\t0\t",
+            "string literal\t4\t6\t0\t\t\t0\tstring part",
+            "'{'\t6\t7\t0\t\t\t0\t",
+            "string literal\t7\t10\t0\t\tx\t0\t",
+            "'}'\t10\t11\t0\t\t\t0\t",
+            "string literal\t11\t12\t0\t\t\t0\tstring part",
+            "eof\t12\t12\t0\t\t\t0\t",
+        ]
+        self.assertEqual(compare.normalize_oracle(lines, source), [
+            ("identifier", 0), ("string interpolator", 5), ("string part", 6),
+            ("'{'", 8), ("string literal", 9), ("'}'", 12),
+            ("string part", 13), ("eof", 14),
+        ])
 
     def test_maps_wildcard_oracle_token_to_the_shared_identifier_surface(self):
-        self.assertEqual(compare.oracle_kind("_", "_", "_", False), "identifier")
+        self.assertEqual(compare.oracle_kind("_"), "identifier")
 
     def test_maps_parser_colon_protocol_to_an_operator_for_raw_comparison(self):
         self.assertEqual(
@@ -37,39 +35,6 @@ class NormalizationTests(unittest.TestCase):
                 ["kind\tstart\tend", "':'\t8\t9"]
             ),
             [("operator", 8)],
-        )
-
-    def test_maps_multiline_oracle_string_literals_to_string_parts(self):
-        source = 's"""text $value"""'
-
-        self.assertEqual(
-            compare.normalize_oracle(
-                [
-                    "string interpolator\t0\t1\t0\ts\t\t",
-                    "string literal\t1\t10\t0\t\t\t",
-                    "identifier\t10\t16\t0\tvalue\t\t",
-                    "string literal\t16\t19\t0\t\t\t",
-                ],
-                source,
-            ),
-            [
-                ("string interpolator", 0),
-                ("string part", 1),
-                ("identifier", 10),
-                ("string part", 16),
-            ],
-        )
-
-    def test_marks_an_interpolated_string_body_as_string_part(self):
-        source = 's"hello $name"'
-        lines = [
-            "interpolation id\t0\t1\t0\ts\t\t",
-            "string literal\t1\t14\t0\t\t\t",
-        ]
-
-        self.assertEqual(
-            compare.normalize_oracle(lines, source),
-            [("interpolation id", 0), ("string part", 1)],
         )
 
 

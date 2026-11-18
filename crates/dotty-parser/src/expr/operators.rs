@@ -288,7 +288,7 @@ where
         }
 
         let spelling = self.source.slice(operator.span).unwrap_or_default();
-        if matches!(spelling, "=" | "=>") {
+        if matches!(spelling, "=" | "=>" | "⇒") {
             return;
         }
 

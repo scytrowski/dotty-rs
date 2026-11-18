@@ -55,6 +55,9 @@ dependencies = [
 [[package]]
 name = "dotty-core"
 version = "0.1.0"
+dependencies = [
+ "unicode-general-category",
+]
 
 [[package]]
 name = "dotty-jvm"
@@ -80,7 +83,6 @@ name = "dotty-lexer"
 version = "0.1.0"
 dependencies = [
  "dotty-core",
- "unicode-ident",
 ]
 
 [[package]]
@@ -262,6 +264,12 @@ dependencies = [
  "dotty-tasty",
  "serde_json",
 ]
+
+[[package]]
+name = "unicode-general-category"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b993bddc193ae5bd0d623b49ec06ac3e9312875fdae725a975c51db1cc1677f"
 
 [[package]]
 name = "unicode-ident"

@@ -166,8 +166,8 @@ val errorId = raw"E?(\d+)".r"#;
         2
     );
 
-    let ordinary = ContextualScanner::new(r#"s"\d+""#)
-        .expect("ordinary interpolated string scans with diagnostics");
+    let ordinary =
+        ContextualScanner::new(r#""\d+""#).expect("ordinary string scans with diagnostics");
     assert_eq!(ordinary.diagnostics().len(), 1);
     assert_eq!(
         ordinary.diagnostics()[0].issue(),

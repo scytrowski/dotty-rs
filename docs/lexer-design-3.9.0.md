@@ -77,7 +77,7 @@ Implementation status on the current lexer branch:
   logical statement at a line break; layout operators such as `=>`, `=`, and
   `<-` remain body triggers, including when assignment or for-enumerator
   bodies begin on the following line;
-- same-line `CASECLASS`/`CASEOBJECT` fusion and basic line-start end-marker
+- `CASECLASS`/`CASEOBJECT` fusion across whitespace and comments and basic line-start end-marker
   recognition are now part of scanner post-processing, including
   `new`/`this`/`given`/`val` targets, comment boundaries, and explicit braces;
 - dedented closing delimiters close implicit regions after `)`, `]`, or `}`;
@@ -85,12 +85,13 @@ Implementation status on the current lexer branch:
   transitions preserve the scanner's exact `INDENT`/`OUTDENT`/`NEWLINE` order;
 - incomparable space/tab indentation prefixes produce recoverable diagnostics;
 - quote markers and legacy quoted identifiers are emitted as `Quote` and
-  `QuoteId`, including adjacent quote-id forms and the Scala recovery boundary
+  `QuoteId`, including symbolic names, adjacent quote-id forms, and the Scala recovery boundary
   for trailing apostrophes; splice syntax remains the `$` plus `{` token
   sequence; a bare apostrophe that is not a character literal is emitted as
   `Quote`;
-- interpolation preserves escaped dollars as string content, supports
-  underscore and Unicode simple splices, multiline string parts, braced
+- single-line interpolation preserves backslashes for the interpolator and recognizes
+  escaped quotes and backslashes when locating delimiters. Interpolation preserves
+  escaped dollars as string content and supports underscore and Unicode simple splices, multiline string parts, braced
   expressions, and nested interpolators through explicit lexical modes; braced
   splice spans remain non-overlapping, and EOF recovery after expression
   tokens produces a bounded terminal error;
@@ -298,6 +299,12 @@ Raw token values should normally be represented by source ranges. If cooked
 data is needed for a backquoted identifier or literal, retain the raw spelling
 as well as the cooked value.
 
+Backquoted identifiers retain their full token span. The parser interns the
+decoded spelling, so `Ab` and the backquoted spelling containing `A\u0062`
+refer to the same name. A pair of escaped UTF-16 surrogates denotes one
+supplementary character. An unpaired surrogate receives a lexer diagnostic
+because the name interner stores UTF-8.
+
 Malformed input produces diagnostics and, where recovery is possible, an
 error/raw item that permits scanning to continue. The raw lexer must not panic,
 hang, or silently discard source text.
@@ -359,6 +366,17 @@ The first scanner implementation materializes the raw item stream while
 constructing `ContextualScanner`. This keeps the state machine small while the
 raw/scanner contract is still being stabilized. It can later be replaced by
 incremental buffering without changing parser-facing token kinds or ranges.
+
+Brace-depth queries for same-indent case regions use a lazy index keyed by
+source brace end offsets. Building the index takes one token traversal, and
+subsequent queries use binary search. Layout feedback preserves source braces,
+so inserted and removed layout tokens leave the index valid.
+
+Parser feedback edits a gap buffer, with the prefix in source order
+and the suffix in reverse order. Moving between edit positions transfers only
+the intervening tokens. Logical lookahead leaves the gap in place. The public
+`tokens()` accessor materializes and caches a contiguous snapshot after edits,
+and each subsequent edit invalidates that snapshot.
 
 The scanner must preserve source-token ordering, balance regions by EOF, and
 never underflow its region stack.
@@ -533,7 +551,7 @@ outdent rules remain next.
 ### Increment 8 — End markers and post-processing
 
 Implement contextual `END`, `CASECLASS`, `CASEOBJECT`, grammar-driven region
-closures, and exact EOF behavior. The current increment covers same-line token
+closures, and exact EOF behavior. The current increment covers declaration-token
 fusion,
 basic end-marker recognition, line-start markers, non-panicking EOF
 classification, `new`/`this`/`given`/`val` targets, and closure of implicit
@@ -582,9 +600,9 @@ real Scala sources under both `tools/scala-lexer-oracle/src/main/scala` and
 `tools/tasty-baseline/src/main/scala`. Run the real-source corpus with
 `bash tools/scala-lexer-oracle/check-corpus.sh`. Corpus comparison ignores
 layout tokens because the raw dump does not provide parser feedback events;
-focused scanner tests cover those layout decisions separately. The normalizer
-has its own Python unit tests for UTF-16 offsets, interpolation boundaries,
-wildcards, and parser-facing colon protocol normalization.
+focused scanner tests cover those layout decisions separately. The oracle exposes the compiler token ID classification and interpolation context
+for tokens with shared display names. Python tests cover UTF-16 offsets,
+wildcards, and parser-facing colon normalization.
 
 Numeric recovery currently keeps malformed numeric text as one raw literal while
 reporting a typed diagnostic. Missing digits after a base prefix and invalid

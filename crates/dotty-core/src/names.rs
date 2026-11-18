@@ -48,6 +48,15 @@ impl Name {
     }
 }
 
+/// Whether an unquoted identifier with this spelling binds a variable inside a pattern.
+pub fn is_variable_pattern_name(spelling: &str) -> bool {
+    !matches!(spelling, "_" | "false" | "true" | "null")
+        && spelling
+            .chars()
+            .next()
+            .is_some_and(|first| first == '_' || (first.is_alphabetic() && first.is_lowercase()))
+}
+
 /// A [`Name`] known to live in the term namespace.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TermName(Name);

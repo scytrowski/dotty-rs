@@ -1,5 +1,6 @@
 //! Parser-facing token contracts for the Dotty frontend.
 
+pub mod characters;
 mod kind;
 mod scanner_event;
 mod token_def;

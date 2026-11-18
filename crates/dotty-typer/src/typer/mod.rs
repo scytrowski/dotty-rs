@@ -1044,6 +1044,8 @@ mod tests {
     mod issue_2242_generic_product1;
     #[path = "issue_2354_constructor_parameter_identity.rs"]
     mod issue_2354_constructor_parameter_identity;
+    #[path = "issue_2355_enumeration_known_size.rs"]
+    mod issue_2355_enumeration_known_size;
     use dotty_classloader::classloader::{
         ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError, ClassResource,
     };

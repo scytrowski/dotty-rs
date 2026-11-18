@@ -4,3 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# JDK 25 uses Unicode 16.0 for Scala 3.9.0 identifiers and operators.
+unicode-general-category = "=1.1.0"

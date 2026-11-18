@@ -29,8 +29,9 @@ def main() -> int:
 
 
 def compare_one(source_path: pathlib.Path, scala: object, rust: object) -> int:
-    source = source_path.read_text(encoding="utf-8")
-    scala = convert_spans(scala, source)
+    with source_path.open(encoding="utf-8", newline="") as stream:
+        offsets = utf8_offsets(stream.read())
+    scala = convert_spans(scala, offsets)
     if scala == rust:
         return 0
 
@@ -47,8 +48,10 @@ def compare_batch(manifest_path: pathlib.Path, scala_path: pathlib.Path, rust_pa
             mode, path = line.split("\t", 1)
             entries.append((mode, pathlib.Path(path)))
 
-    scala_lines = scala_path.read_text(encoding="utf-8").splitlines()
-    rust_lines = rust_path.read_text(encoding="utf-8").splitlines()
+    with scala_path.open(encoding="utf-8") as stream:
+        scala_lines = list(stream)
+    with rust_path.open(encoding="utf-8") as stream:
+        rust_lines = list(stream)
     if len(scala_lines) != len(entries) or len(rust_lines) != len(entries):
         print(
             "oracle batch output count mismatch: "
@@ -81,33 +84,31 @@ def compare_batch(manifest_path: pathlib.Path, scala_path: pathlib.Path, rust_pa
     return 0
 
 
-def convert_spans(value: object, source: str) -> object:
+def utf8_offsets(source: str) -> list[int]:
+    offsets = [0]
+    for character in source:
+        end = offsets[-1] + len(character.encode("utf-8"))
+        offsets.append(end)
+        if ord(character) > 0xFFFF:
+            offsets.append(end)
+    return offsets
+
+
+def convert_spans(value: object, offsets: list[int]) -> object:
     if isinstance(value, list):
-        return [convert_spans(item, source) for item in value]
+        return [convert_spans(item, offsets) for item in value]
     if not isinstance(value, dict):
         return value
 
-    converted = {key: convert_spans(item, source) for key, item in value.items()}
+    converted = {key: convert_spans(item, offsets) for key, item in value.items()}
     span = value.get("span")
     if isinstance(span, dict) and {"start", "end"} <= span.keys():
-        converted["span"] = {
-            "start": utf16_to_utf8_offset(source, span["start"]),
-            "end": utf16_to_utf8_offset(source, span["end"]),
-        }
+        for field in ("start", "end"):
+            position = span[field]
+            if type(position) is not int or not 0 <= position < len(offsets):
+                raise ValueError(f"invalid UTF-16 offset: {position!r}")
+            converted["span"][field] = offsets[position]
     return converted
-
-
-def utf16_to_utf8_offset(source: str, offset: object) -> int:
-    if not isinstance(offset, int) or offset < 0:
-        raise ValueError(f"invalid UTF-16 offset: {offset!r}")
-    units = 0
-    for index, character in enumerate(source):
-        if units == offset:
-            return len(source[:index].encode("utf-8"))
-        units += len(character.encode("utf-16-le")) // 2
-    if units == offset:
-        return len(source.encode("utf-8"))
-    raise ValueError(f"UTF-16 offset {offset} is outside the source")
 
 
 if __name__ == "__main__":
