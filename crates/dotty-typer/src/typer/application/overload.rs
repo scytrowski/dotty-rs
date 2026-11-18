@@ -1121,6 +1121,9 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<Option<ResolvedApplicationFunction>, TyperError> {
+        if application_kind != ApplyKind::Regular {
+            return Ok(None);
+        }
         let names = match self.expression_term_candidates(
             selection.name,
             context,
@@ -1128,9 +1131,12 @@ impl SourceTyper<'_> {
             self.arena.get(function_tree).position,
         ) {
             Ok(names) => names,
-            Err(TyperError::TermNameNotFound { .. }) => return Ok(None),
+            Err(TyperError::TermNameNotFound { .. }) => Vec::new(),
             Err(error) => return Err(error),
         };
+        let receiver_own_type = self.typed_arena.get(qualifier).ty;
+        let receiver_widened_type =
+            self.widen_expression_type_journaled(receiver_own_type, info_journal, 0)?;
         let mut extensions = names.into_iter().filter(|symbol| {
             self.local_methods.contains_symbol(*symbol)
                 && self
@@ -1140,26 +1146,46 @@ impl SourceTyper<'_> {
                     .flags
                     .contains(SymbolFlags::EXTENSION)
         });
-        let Some(symbol) = extensions.next() else {
-            return Ok(None);
+        let (typed_function, signature) = if let Some(symbol) = extensions.next() {
+            if extensions.next().is_some() {
+                return Err(TyperError::OverloadedSelectionDeferred {
+                    source: self.source,
+                    tree_index: application_tree_index,
+                    name: selection.name,
+                });
+            }
+            let Some(clauses) = self.extension_prefix_clauses(symbol) else {
+                return Ok(None);
+            };
+            if clauses.len() != 1 || clauses[0].len() != 1 {
+                return Ok(None);
+            }
+            let signature = self.completed_expression_symbol_info(symbol, info_journal)?;
+            let reference = self.type_resolved_identifier_expression(
+                symbol,
+                Ident {
+                    name: selection.name,
+                    backquoted: selection.backquoted,
+                },
+                self.arena.get(function_tree).position,
+                context,
+                function_tree.index(),
+                info_journal,
+            )?;
+            (reference, signature)
+        } else {
+            let Some(selected) = self.contextual_extension(
+                selection.name,
+                receiver_widened_type,
+                context,
+                application_tree_index,
+                info_journal,
+            )?
+            else {
+                return Ok(None);
+            };
+            selected
         };
-        if extensions.next().is_some() {
-            return Err(TyperError::OverloadedSelectionDeferred {
-                source: self.source,
-                tree_index: application_tree_index,
-                name: selection.name,
-            });
-        }
-        let Some(prefix_clauses) = self.local_methods.extension_prefix_clauses(symbol) else {
-            return Ok(None);
-        };
-        if prefix_clauses.len() != 1 || prefix_clauses[0].len() != 1 {
-            return Ok(None);
-        }
-        if application_kind != ApplyKind::Regular {
-            return Ok(None);
-        }
-        let signature = self.completed_expression_symbol_info(symbol, info_journal)?;
         let Some(Type::Method(receiver_clause)) = self.store.types.try_get(signature).cloned()
         else {
             return Ok(None);
@@ -1173,18 +1199,13 @@ impl SourceTyper<'_> {
         };
         if !supported_override_signature(&method, self.store)
             || self.type_contains_param_ref(method.result, receiver_clause.result)?
-            || matches!(
-                self.store.types.try_get(method.result),
-                Some(Type::Method(_) | Type::Poly(_))
-            )
+            || matches!(self.store.types.try_get(method.result), Some(Type::Poly(_)))
+            || matches!(self.store.types.try_get(method.result), Some(Type::Method(next)) if next.kind==MethodKind::Plain)
             || argument_trees.len() != method.params.len()
         {
             return Ok(None);
         }
         let receiver_parameter = receiver_clause.params[0];
-        let receiver_own_type = self.typed_arena.get(qualifier).ty;
-        let receiver_widened_type =
-            self.widen_expression_type_journaled(receiver_own_type, info_journal, 0)?;
         match self.conforms(receiver_widened_type, receiver_parameter.ty) {
             Ok(true) => {}
             Ok(false) => return Ok(None),
@@ -1239,19 +1260,8 @@ impl SourceTyper<'_> {
                 }
             }
         }
-        let reference_type = self.store.types.alloc(Type::TermRef {
-            prefix: self.definitions.no_prefix,
-            target: TermRefTarget::Symbol(symbol),
-        });
-        let typed_ident = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
-            .ident_with_backquoted(
-                selection.name,
-                selection.backquoted,
-                reference_type,
-                self.arena.get(function_tree).position,
-            );
         let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply_with_kind(
-            typed_ident,
+            typed_function,
             vec![receiver.typed],
             ApplyKind::Regular,
             receiver_clause.result,

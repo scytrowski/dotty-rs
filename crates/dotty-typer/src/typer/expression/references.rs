@@ -1481,6 +1481,25 @@ impl SourceTyper<'_> {
         }
         let candidate = match candidates.as_slice() {
             [] => {
+                if !java_class_qualifier
+                    && let Some((extension, signature)) = self.contextual_extension(
+                        name,
+                        receiver,
+                        context,
+                        tree_index,
+                        info_journal,
+                    )?
+                    && let Some(Type::Method(clause)) = self.store.types.try_get(signature)
+                {
+                    return Ok(
+                        TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply(
+                            extension,
+                            vec![qualifier],
+                            clause.result,
+                            position,
+                        ),
+                    );
+                }
                 return Err(TyperError::MemberNotFound {
                     source: self.source,
                     tree_index,

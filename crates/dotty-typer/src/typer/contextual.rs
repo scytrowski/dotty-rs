@@ -2,6 +2,8 @@
 
 use super::*;
 
+mod extension;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ContextualRef {
     symbol: SymbolId,
@@ -377,6 +379,39 @@ impl SourceTyper<'_> {
             }
         }
         let divergences = history.divergences;
+        for level in self.contextual_scopes(context, tree_index)? {
+            let refs = self.contextual_scope_refs(level, tree_index, journal)?;
+            if let Some(winner) =
+                self.choose_contextual_refs(refs, expected, context, tree_index, history, journal)?
+            {
+                return Ok(winner);
+            }
+        }
+        let companions = self.companion_refs(expected, tree_index, journal)?;
+        if let Some(winner) = self
+            .choose_contextual_refs(companions, expected, context, tree_index, history, journal)?
+        {
+            return Ok(winner);
+        }
+        if history.divergences > divergences {
+            return Err(TyperError::DivergentContextualArgument {
+                source: self.source,
+                tree_index,
+                expected,
+            });
+        }
+        Err(TyperError::MissingContextualArgument {
+            source: self.source,
+            tree_index,
+            expected,
+        })
+    }
+
+    fn contextual_scopes(
+        &self,
+        context: ExpressionContext,
+        tree_index: u32,
+    ) -> Result<Vec<ContextualScope>, TyperError> {
         self.validate_expression_scope_stack(context.local_scopes)?;
         let mut scopes = Vec::new();
         let mut stack = context.local_scopes;
@@ -410,42 +445,28 @@ impl SourceTyper<'_> {
                 imports.insert(0, (tree, lexical.parent.unwrap_or(id)));
             }
         }
-        for ContextualScope { scope, imports } in scopes {
-            let mut refs: Vec<_> = self
-                .contextual_members(scope, journal)?
-                .into_iter()
-                .map(|symbol| ContextualRef {
-                    symbol,
-                    receiver: None,
-                })
-                .collect();
-            for (import, lexical) in imports {
-                self.contextual_import_refs(import, lexical, tree_index, journal, &mut refs)?;
-            }
-            if let Some(winner) =
-                self.choose_contextual_refs(refs, expected, context, tree_index, history, journal)?
-            {
-                return Ok(winner);
-            }
+        Ok(scopes)
+    }
+
+    fn contextual_scope_refs(
+        &mut self,
+        level: ContextualScope,
+        tree_index: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Vec<ContextualRef>, TyperError> {
+        let ContextualScope { scope, imports } = level;
+        let mut refs: Vec<_> = self
+            .contextual_members(scope, journal)?
+            .into_iter()
+            .map(|symbol| ContextualRef {
+                symbol,
+                receiver: None,
+            })
+            .collect();
+        for (import, lexical) in imports {
+            self.contextual_import_refs(import, lexical, tree_index, journal, &mut refs)?;
         }
-        let companions = self.companion_refs(expected, tree_index, journal)?;
-        if let Some(winner) = self
-            .choose_contextual_refs(companions, expected, context, tree_index, history, journal)?
-        {
-            return Ok(winner);
-        }
-        if history.divergences > divergences {
-            return Err(TyperError::DivergentContextualArgument {
-                source: self.source,
-                tree_index,
-                expected,
-            });
-        }
-        Err(TyperError::MissingContextualArgument {
-            source: self.source,
-            tree_index,
-            expected,
-        })
+        Ok(refs)
     }
 
     fn contextual_reference_signature(

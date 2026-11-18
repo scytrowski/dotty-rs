@@ -14,6 +14,8 @@ def main():
     toolchain = runpy.run_path(str(ROOT / "tools/tasty-pickler-oracle/run.py"))["Toolchain"]()
     with tempfile.TemporaryDirectory() as out:
         for sources, status, expected in [
+            (["Extensions.scala"], 0, "inner.render(box)(3)(fmt)"),
+            (["Extensions.scala", "ExtensionsAmbiguous.scala"], 1, "implicit extension methods cannot be applied because they are ambiguous"),
             (["Extractors.scala"], 0, "case contextualextractors.Allowed()(inner, mode)"),
             (["Extractors.scala", "ExtractorsAmbiguous.scala"], 1, "Ambiguous given instances"),
         ]:
