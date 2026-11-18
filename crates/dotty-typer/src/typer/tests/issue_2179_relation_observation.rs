@@ -2086,12 +2086,11 @@ fn captures_acceptance_vii_charat_lookup_before_rollback() {
         &mut packages,
     )
     .unwrap();
-    let (method_tree, method_node) = parsed
+    let (method_tree, _) = parsed
         .ast
         .iter()
         .find(|(tree, node)| tree.index() == 614 && matches!(node.kind, TreeKind::DefDef(_)))
         .unwrap();
-    let method = index.symbol_at(source, method_tree).unwrap();
     let (param_tree, _) = parsed
         .ast
         .iter()
@@ -2119,108 +2118,57 @@ fn captures_acceptance_vii_charat_lookup_before_rollback() {
         &packages,
     )
     .with_resolver(Box::new(resolver));
-    let receipt = Rc::new(RefCell::new(None::<String>));
-    let captured = Rc::clone(&receipt);
-    let method_span = method_node.position.unwrap().span().range();
-    let parameter_source = text[19860..19910].to_owned();
-    typer.transaction_failure_error_observer = Some(Rc::new(move |typer, error| {
-        let TyperError::TermNameNotFound {
-            source: error_source,
-            tree_index,
-            name,
-            ..
-        } = error
-        else {
-            panic!("expected original charAt first failure: {error:?}")
-        };
-        assert_eq!(*error_source, source);
-        assert_eq!(*tree_index, 611);
-        assert_eq!(typer.store.names.resolve(name.text()), "sequenceOfChars");
-        let method_context = typer
-            .method_declaration_context(method)
-            .expect("charAt declaration context");
-        let chain = typer
-            .source_context_chain(method_context.lexical, *tree_index)
-            .unwrap();
-        let scopes_name = *name;
-        let live_expression_context = ExpressionContext {
-            local_scopes: typer
-                .expression_scopes
-                .len()
-                .checked_sub(1)
-                .map(|index| ExpressionScopeId::new(typer.expression_scope_owner, index)),
-            ..method_context
-        };
-        let mut lines = vec![
-            format!("root={relative}#tree=614 method_span={method_span:?}"),
-            format!("failure={error:?}"),
-            format!("declaration_context={method_context:?}"),
-            format!("live_expression_context={live_expression_context:?} lexical_chain={chain:?}"),
-            format!(
-                "canonical_parameter={parameter:?} path={} symbol={:?}",
-                observed_symbol_path(typer.store, parameter),
-                typer.store.symbols.get(parameter)
-            ),
-            format!("parameter_source_declaration={parameter_source:?}"),
-            format!(
-                "parameter_type_state={:?}",
-                typer.store.symbols.info(parameter)
-            ),
-        ];
-        for (depth, context) in chain.iter().enumerate() {
-            let lexical = typer.index.try_source_context(*context).unwrap();
-            let candidates = typer
-                .store
-                .scopes
-                .get(lexical.lexical_scope)
-                .lookup_all(&scopes_name);
-            lines.push(format!("lexical_scope depth={depth} context={context:?} owner={:?} scope={:?} import={:?} candidates={candidates:?}", lexical.owner, lexical.lexical_scope, lexical.import));
-        }
-        for (idx, frame) in typer.expression_scopes.iter().enumerate() {
-            let candidates = typer.store.scopes.get(frame.scope).lookup_all(&scopes_name);
-            lines.push(format!("local_scope frame={idx} id={:?} parent={:?} block={} case={} scope={:?} imports={} candidates={candidates:?}", ExpressionScopeId::new(typer.expression_scope_owner, idx), frame.parent, frame.is_block_scope, frame.is_case_scope, frame.scope, frame.imports.len()));
-        }
-        let visible = chain.iter().any(|context| {
-            let lexical = typer.index.try_source_context(*context).unwrap();
-            typer
-                .store
-                .scopes
-                .get(lexical.lexical_scope)
-                .lookup_all(&scopes_name)
-                .contains(&parameter)
-        }) || typer.expression_scopes.iter().any(|frame| {
-            typer
-                .store
-                .scopes
-                .get(frame.scope)
-                .lookup_all(&scopes_name)
-                .contains(&parameter)
-        });
-        lines.push(format!(
-            "canonical_parameter_visible_in_live_lookup_buckets={visible}"
-        ));
-        assert!(
-            !visible,
-            "receipt records the observed missing live candidate rather than inferring it after rollback"
-        );
-        *captured.borrow_mut() = Some(lines.join("\n"));
-    }));
-    let error = typer
+    typer
         .type_method_definition(method_tree)
-        .expect_err("original Predef charAt root remains blocked");
+        .expect("parameter admission reaches the unchanged original charAt result");
+    let (reference_tree, _) = parsed
+        .ast
+        .iter()
+        .find(|(tree, node)| tree.index() == 611 && matches!(node.kind, TreeKind::Ident(_)))
+        .unwrap();
+    let typed_reference = typer
+        .source_typed_index()
+        .get(source, reference_tree)
+        .expect("original constructor parameter reference has a typed mapping");
     assert!(matches!(
-        error,
-        TyperError::TermNameNotFound {
-            tree_index: 611,
+        typer.store().types.get(typer.typed_ast().get(typed_reference).ty),
+        Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
             ..
-        }
+        } if *symbol == parameter
     ));
-    let receipt = receipt
-        .borrow()
-        .clone()
-        .expect("failure observer ran before rollback");
-    println!(
-        "ACCEPTANCE_VII_CHARAT_OBSERVATION_BEGIN\n{receipt}\nACCEPTANCE_VII_CHARAT_OBSERVATION_END"
+    let SymbolInfo::Complete(parameter_type) = *typer.store().symbols.info(parameter) else {
+        panic!("canonical source constructor parameter type completed");
+    };
+    let Type::Applied { tycon, args } = typer.store().types.get(parameter_type) else {
+        panic!("source IndexedSeq[Char] type remains applied");
+    };
+    let Type::TypeRef {
+        target: TypeRefTarget::Symbol(indexed_seq),
+        ..
+    } = typer.store().types.get(*tycon)
+    else {
+        panic!("IndexedSeq type constructor preserves canonical identity");
+    };
+    assert_eq!(
+        observed_symbol_path(typer.store(), *indexed_seq),
+        ".scala.collection.IndexedSeq"
+    );
+    assert_eq!(args.len(), 1);
+    let Type::TypeRef {
+        target: TypeRefTarget::Symbol(char),
+        ..
+    } = typer.store().types.get(args[0])
+    else {
+        panic!("Char argument preserves canonical identity");
+    };
+    assert_eq!(observed_symbol_path(typer.store(), *char), "Char");
+    assert_eq!(
+        typer.store().symbols.get(parameter).position,
+        Some(SourceSpan::new(
+            source,
+            parsed.ast.get(param_tree).position.unwrap().span(),
+        ))
     );
 }
 

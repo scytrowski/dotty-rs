@@ -70,11 +70,11 @@ fn named_source_tree_name(
 fn flagged_product_selectors_have_independent_class_owned_provenance() {
     for (source_text, source_id) in [
         (
-            "package matching\ncase class Flagged(value: Int, enabled: Boolean)\ncase class Other(x: String)",
+            "package matching\nimport types.*\ncase class Flagged(value: Int, enabled: Boolean)\ncase class Other(x: String)",
             1962,
         ),
         (
-            "package matching\ncase class Other(x: String)\ncase class Flagged(value: Int, enabled: Boolean)",
+            "package matching\nimport types.*\ncase class Other(x: String)\ncase class Flagged(value: Int, enabled: Boolean)",
             1963,
         ),
     ] {
@@ -124,6 +124,13 @@ fn flagged_product_selectors_have_independent_class_owned_provenance() {
             assert_eq!(selector_symbol.kind, SymbolKind::Method);
             assert_eq!(selector_symbol.owner, Some(class_symbol));
             assert!(selector_symbol.flags.contains(SymbolFlags::SYNTHETIC));
+            let context = named.index.declaration_context_of(selector).unwrap();
+            assert_eq!(named.index.declaration_context_of(field), Some(context));
+            let environment = named.index.source_context(context);
+            assert_eq!(environment.owner, class_symbol);
+            assert_eq!(environment.lexical_scope, class_scope);
+            let parent = named.index.source_context(environment.parent.unwrap());
+            assert_eq!(parent.import, Some(package.stats[0]));
             assert_ne!(field, selector);
             assert_eq!(
                 named.store.names.resolve(selector_symbol.name.text()),
@@ -172,6 +179,58 @@ fn flagged_product_selectors_have_independent_class_owned_provenance() {
             );
         }
     }
+}
+
+#[test]
+fn product_selectors_reuse_their_own_field_and_coexist_with_an_overload() {
+    let named = named_source(
+        "case class C(_1: Int, other: Int) { def _2(index: Int): Int = other + index }",
+        1965,
+    );
+    let parts = primary_constructor_parts(&named);
+    let class = named
+        .index
+        .symbol_at(named.source, parts.class_tree)
+        .unwrap();
+    let [first, second] = parts.value_param_clauses[0].as_slice() else {
+        unreachable!()
+    };
+    let field = named.index.symbol_at(named.source, *first).unwrap();
+    let scope = named.store.scopes.get(named.index.scope_of(class).unwrap());
+    assert_eq!(
+        named.index.derived_symbol_at(class, named.source, *first),
+        None
+    );
+    assert_eq!(
+        scope.lookup_all(&named.store.symbols.get(field).name),
+        &[field]
+    );
+    assert_eq!(named.store.symbols.get(field).kind, SymbolKind::Field);
+
+    let generated = named
+        .index
+        .derived_symbol_at(class, named.source, *second)
+        .unwrap();
+    let overloads = scope.lookup_all(TermName::new(named.store.names.get("_2").unwrap()).as_name());
+    assert_eq!(overloads.len(), 2);
+    assert!(overloads.contains(&generated));
+    assert!(
+        named
+            .store
+            .symbols
+            .get(generated)
+            .flags
+            .contains(SymbolFlags::SYNTHETIC)
+    );
+    assert!(overloads.iter().any(|&id| {
+        named.store.symbols.get(id).kind == SymbolKind::Method
+            && !named
+                .store
+                .symbols
+                .get(id)
+                .flags
+                .contains(SymbolFlags::SYNTHETIC)
+    }));
 }
 
 #[test]
@@ -301,6 +360,74 @@ fn source_pattern_bindings(
     }
     bindings.retain(|(_, name)| name != "_");
     bindings
+}
+
+#[test]
+fn deeply_applied_anonymous_given_keeps_its_complete_name() {
+    let source_text = format!("given F{} = impl", "[A]".repeat(2048));
+    let named = named_source(&source_text, 401);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        unreachable!()
+    };
+    assert_eq!(
+        named_source_tree_name(&named, package.stats[0]),
+        format!("given_F{}", "_A".repeat(2048))
+    );
+}
+
+#[test]
+fn cyclic_anonymous_given_type_rolls_back_and_can_be_repaired() {
+    let (mut parsed, source, mut store) = parsed_source("given Config = impl", 402);
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        unreachable!()
+    };
+    let given = package.stats[0];
+    let TreeKind::ValDef(definition) = &parsed.ast.get(given).kind else {
+        unreachable!()
+    };
+    let tpt = definition.tpt;
+    let original_kind = parsed.ast.get(tpt).kind.clone();
+    parsed.ast.get_mut(tpt).kind = TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::Parens(
+        dotty_core::ast::Parens { inner: tpt },
+    ));
+    let mut packages = Packages::new();
+    let checkpoint = store.checkpoint();
+    let mark = packages.mark();
+    assert_eq!(
+        name_compilation_unit(
+            &parsed.ast,
+            parsed.root,
+            source,
+            "Given.scala",
+            &mut store,
+            &mut packages,
+        )
+        .unwrap_err(),
+        NamerError::UnsupportedGivenNameShape {
+            tree_index: given.index(),
+            position: parsed.ast.get(given).position,
+            unsupported_tree_index: tpt.index(),
+            unsupported_kind: "cyclic type tree",
+        }
+    );
+    assert_eq!(store.checkpoint(), checkpoint);
+    assert_eq!(packages.mark(), mark);
+
+    parsed.ast.get_mut(tpt).kind = original_kind;
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Given.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let symbol = index.symbol_at(source, given).unwrap();
+    assert_eq!(
+        store.names.resolve(store.symbols.get(symbol).name.text()),
+        "given_Config"
+    );
 }
 
 #[test]
@@ -1924,6 +2051,78 @@ fn parsed_secondary_constructor_is_rejected_in_a_method_parameter_default() {
 }
 
 #[test]
+fn duplicate_source_objects_leave_ordinary_companion_links_unset() {
+    for text in [
+        "class C\nobject C\nobject C",
+        "package p { class C; object C }\npackage p { object C }",
+        "package p { class C; object C }\npackage p { class C }",
+    ] {
+        let named = named_source(text, 310);
+        let mut declarations = 0;
+        for (tree, node) in named.parsed.ast.iter() {
+            let name = match &node.kind {
+                TreeKind::TypeDef(def) => def.name.as_name(),
+                TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(def)) => {
+                    def.name.as_name()
+                }
+                _ => continue,
+            };
+            if named.store.names.resolve(name.text()) == "C" {
+                let symbol = named.index.symbol_at(named.source, tree).unwrap();
+                assert_eq!(
+                    named.store.symbols.get(symbol).links.companion,
+                    None,
+                    "{text}"
+                );
+                declarations += 1;
+            }
+        }
+        assert_eq!(declarations, 3);
+    }
+}
+
+#[test]
+fn a_later_object_cannot_replace_a_synthesized_case_class_companion() {
+    let (parsed, source, mut store) = parsed_source(
+        "package p { case class C(x: Int) }\npackage p { object C }",
+        311,
+    );
+    let mut packages = Packages::new();
+    packages.enter(&mut store, dotty_core::SymbolOrigin::Builtin, &["p"]);
+    let before = store.checkpoint();
+    let result = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "C.scala",
+        &mut store,
+        &mut packages,
+    );
+    let TreeKind::PackageDef(root) = &parsed.ast.get(parsed.root).kind else {
+        unreachable!()
+    };
+    let TreeKind::PackageDef(clause) = &parsed.ast.get(root.stats[0]).kind else {
+        unreachable!()
+    };
+    assert_eq!(
+        result.unwrap_err(),
+        NamerError::MalformedAstShape {
+            tree_index: clause.stats[0].index(),
+            expected: "unique required companion pair",
+        }
+    );
+    assert_eq!(store.checkpoint(), before);
+    assert_eq!(
+        store
+            .scopes
+            .get(packages.get(&["p"]).unwrap().scope)
+            .entered_symbols()
+            .count(),
+        0
+    );
+}
+
+#[test]
 fn parsed_nested_object_creates_module_class_and_links_its_companion() {
     use dotty_core::SymbolKind;
     use dotty_lexer::ContextualScanner;
@@ -3192,6 +3391,144 @@ fn enum_companions_do_not_cross_source_file_boundaries() {
 }
 
 #[test]
+fn cyclic_pattern_is_rejected_atomically_and_can_be_retried() {
+    use dotty_core::ast::{Parens, UntypedNode};
+    let (mut parsed, source, mut store) = parsed_source("val (a, b) = pair", 403);
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        unreachable!()
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) =
+        &parsed.ast.get(package.stats[0]).kind
+    else {
+        unreachable!()
+    };
+    let pattern = definition.patterns[0];
+    let original_kind = parsed.ast.get(pattern).kind.clone();
+    parsed.ast.get_mut(pattern).kind =
+        TreeKind::PhaseSpecific(UntypedNode::Parens(Parens { inner: pattern }));
+    let mut packages = Packages::new();
+    let checkpoint = store.checkpoint();
+    let mark = packages.mark();
+    assert_eq!(
+        name_compilation_unit(
+            &parsed.ast,
+            parsed.root,
+            source,
+            "Pattern.scala",
+            &mut store,
+            &mut packages,
+        )
+        .unwrap_err(),
+        NamerError::MalformedAstShape {
+            tree_index: pattern.index(),
+            expected: "acyclic pattern tree",
+        }
+    );
+    assert_eq!(store.checkpoint(), checkpoint);
+    assert_eq!(packages.mark(), mark);
+
+    parsed.ast.get_mut(pattern).kind = original_kind;
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Pattern.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) = &parsed.ast.get(pattern).kind else {
+        unreachable!()
+    };
+    let first = index.symbol_at(source, tuple.elements[0]).unwrap();
+    let second = index.symbol_at(source, tuple.elements[1]).unwrap();
+    assert_eq!(
+        store.symbols.get(first).owner,
+        store.symbols.get(second).owner
+    );
+    assert_eq!(
+        store.names.resolve(store.symbols.get(first).name.text()),
+        "a"
+    );
+    assert_eq!(
+        store.names.resolve(store.symbols.get(second).name.text()),
+        "b"
+    );
+}
+
+#[test]
+fn shared_pattern_subtrees_preserve_the_first_binding_identities() {
+    use dotty_core::ast::{Tuple, UntypedNode};
+    let (mut parsed, source, mut store) = parsed_source("val (a, b) = pair", 404);
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        unreachable!()
+    };
+    let declaration = package.stats[0];
+    let TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) =
+        &parsed.ast.get(declaration).kind
+    else {
+        unreachable!()
+    };
+    let mut pattern = definition.patterns[0];
+    let TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) = &parsed.ast.get(pattern).kind else {
+        unreachable!()
+    };
+    let bindings = tuple.elements.clone();
+    for _ in 0..64 {
+        pattern = parsed.ast.alloc(dotty_core::Tree {
+            kind: TreeKind::PhaseSpecific(UntypedNode::Tuple(Tuple {
+                elements: vec![pattern, pattern],
+            })),
+            position: None,
+            ty: (),
+        });
+    }
+    let TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) =
+        &mut parsed.ast.get_mut(declaration).kind
+    else {
+        unreachable!()
+    };
+    definition.patterns = vec![pattern];
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Pattern.scala",
+        &mut store,
+        &mut Packages::new(),
+    )
+    .unwrap();
+    let symbols: Vec<_> = bindings
+        .iter()
+        .map(|tree| index.symbol_at(source, *tree).unwrap())
+        .collect();
+    let owner = store.symbols.get(symbols[0]).owner.unwrap();
+    assert_eq!(
+        store
+            .scopes
+            .get(index.scope_of(owner).unwrap())
+            .entered_symbols()
+            .count(),
+        symbols.len()
+    );
+    for (symbol, name) in symbols.into_iter().zip(["a", "b"]) {
+        assert_eq!(store.symbols.get(symbol).owner, Some(owner));
+        assert_eq!(
+            store
+                .scopes
+                .get(index.scope_of(owner).unwrap())
+                .lookup(&store.symbols.get(symbol).name),
+            Some(symbol)
+        );
+        assert_eq!(
+            store.names.resolve(store.symbols.get(symbol).name.text()),
+            name
+        );
+        assert!(index.declaration_context_of(symbol).is_some());
+    }
+}
+
+#[test]
 fn parsed_pattern_val_binders_are_fields_of_the_source_wrapper() {
     use dotty_core::ast::UntypedNode;
     use dotty_core::{SymbolKind, TermName};
@@ -3477,6 +3814,66 @@ fn duplicate_textual_bindings_in_one_class_pattern_create_one_field() {
         .filter_map(|(tree, _)| named.index.symbol_at(named.source, *tree))
         .collect::<Vec<_>>();
     assert_eq!(fields.len(), 1);
+}
+
+#[test]
+fn stable_identifiers_in_a_tuple_pattern_do_not_declare_fields() {
+    let named = named_source(
+        "val Upper = 1\nval fixed = 2\nval (Upper, `fixed`, żółty, _tail) = (1, 2, 3, 4)",
+        217,
+    );
+    let stats = package_stat_trees(&named);
+    let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::PatDef(pat)) =
+        &named.parsed.ast.get(stats[2]).kind
+    else {
+        panic!("expected a pattern definition")
+    };
+    let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::Tuple(tuple)) =
+        &named.parsed.ast.get(pat.patterns[0]).kind
+    else {
+        panic!("expected a tuple pattern")
+    };
+    let first = named.index.symbol_at(named.source, stats[0]).unwrap();
+    let owner = named.store.symbols.get(first).owner.unwrap();
+    let scope = named.store.scopes.get(named.index.scope_of(owner).unwrap());
+    for (&element, &original) in tuple.elements[..2].iter().zip(&stats[..2]) {
+        let original = named.index.symbol_at(named.source, original).unwrap();
+        assert_eq!(named.index.symbol_at(named.source, element), None);
+        assert_eq!(
+            scope.lookup_all(&named.store.symbols.get(original).name),
+            &[original]
+        );
+    }
+    for (&element, expected) in tuple.elements[2..].iter().zip(["żółty", "_tail"]) {
+        assert_eq!(named_source_tree_name(&named, element), expected);
+    }
+}
+
+#[test]
+fn standalone_pattern_definition_names_keep_their_declared_spelling() {
+    let named = named_source("val Upper, `quoted` = 1", 218);
+    let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::PatDef(pat)) =
+        &named.parsed.ast.get(package_stat_trees(&named)[0]).kind
+    else {
+        panic!("expected a pattern definition")
+    };
+    assert_eq!(named_source_tree_name(&named, pat.patterns[0]), "Upper");
+    assert_eq!(named_source_tree_name(&named, pat.patterns[1]), "quoted");
+}
+
+#[test]
+fn pattern_fields_include_named_extractor_arguments_and_interpolation_holes() {
+    let named = named_source(
+        "val Extract(label = captured) = value\nval s\"prefix ${part}\" = input",
+        219,
+    );
+    for expected in ["captured", "part"] {
+        let trees: Vec<_> = named.parsed.ast.iter().filter_map(|(id, node)| {
+            matches!(&node.kind, TreeKind::Ident(ident) if named.store.names.resolve(ident.name.text()) == expected).then_some(id)
+        }).collect();
+        assert_eq!(trees.len(), 1);
+        assert_eq!(named_source_tree_name(&named, trees[0]), expected);
+    }
 }
 
 #[test]
@@ -4130,6 +4527,38 @@ fn enum_case_pattern_definition_is_deferred_instead_of_named_as_fields() {
 }
 
 #[test]
+fn wrapper_partition_uses_the_full_package_path_across_clauses() {
+    let named = named_source(
+        "package a.b { object Shared }\npackage a { package b { type Shared = Int } }\npackage other.b { object Shared }",
+        220,
+    );
+    let first_stat = |clause| {
+        let TreeKind::PackageDef(package) = &named.parsed.ast.get(clause).kind else {
+            panic!("expected a package clause");
+        };
+        package.stats[0]
+    };
+    let owner_of = |tree| {
+        let symbol = named.index.symbol_at(named.source, tree).unwrap();
+        named.store.symbols.get(symbol).owner.unwrap()
+    };
+    let [qualified, nested, unrelated] = package_stat_trees(&named) else {
+        panic!("expected three package clauses");
+    };
+    let wrapped = owner_of(first_stat(*qualified));
+    assert_eq!(
+        named.store.symbols.get(wrapped).kind,
+        SymbolKind::ModuleClass
+    );
+    assert_eq!(owner_of(first_stat(first_stat(*nested))), wrapped);
+    let ordinary = owner_of(first_stat(*unrelated));
+    assert_eq!(
+        Some(ordinary),
+        named.index.symbol_at(named.source, *unrelated)
+    );
+}
+
+#[test]
 fn source_wrappers_keep_distinct_file_stems_in_a_shared_package() {
     use dotty_core::TermName;
     use dotty_lexer::ContextualScanner;
@@ -4671,7 +5100,7 @@ fn diagnostic_aware_naming_rejects_confirmed_invalid_visibility_and_rolls_back()
 }
 
 #[test]
-fn diagnostic_aware_naming_keeps_recovered_and_enum_owner_failures_internal() {
+fn diagnostic_aware_naming_keeps_recovered_visibility_failures_internal() {
     let separator_text = "class Outer { private[Missing] val hidden = 1 val next = 2 }";
     let separator_source = SourceId::from_index(322);
     let mut separator_store = SemanticStore::new();
@@ -4729,29 +5158,6 @@ fn diagnostic_aware_naming_keeps_recovered_and_enum_owner_failures_internal() {
         &mut packages,
     )
     .expect_err("parser recovery must not be reported as a confirmed source issue");
-    assert!(matches!(
-        error,
-        NamerError::InvalidVisibilityQualifier { .. }
-    ));
-    assert_eq!(store.checkpoint(), checkpoint);
-    assert!(packages.is_empty());
-
-    let (enum_source, source, mut store) = parsed_source(
-        "enum Color { case Red(private[Color] val value: Int) }",
-        320,
-    );
-    let mut packages = Packages::new();
-    let checkpoint = store.checkpoint();
-    let error = name_compilation_unit_with_diagnostics(
-        &enum_source.ast,
-        enum_source.root,
-        source,
-        "Color.scala",
-        SourceParseStatus::Clean,
-        &mut store,
-        &mut packages,
-    )
-    .expect_err("the unresolved synthetic enum boundary is an internal naming limitation");
     assert!(matches!(
         error,
         NamerError::InvalidVisibilityQualifier { .. }
@@ -5179,35 +5585,80 @@ fn diagnostic_aware_naming_keeps_malformed_root_internal_and_rolls_back() {
 }
 
 #[test]
-fn valid_enum_case_parameter_visibility_exposes_an_unresolved_boundary() {
-    let source_text = "enum Color { case Red(private[Color] val value: Int) }";
-    let (parsed, source, mut store) = parsed_source(source_text, 316);
-    let checkpoint = store.checkpoint();
-    let mut packages = Packages::new();
+fn qualified_enum_case_fields_use_the_actual_companion_module_class() {
+    for (qualifier, companion) in [
+        ("private", ""),
+        ("protected", ""),
+        ("private", "\nobject Color"),
+        ("protected", "\nobject Color"),
+    ] {
+        let text =
+            format!("enum Color {{ case Red({qualifier}[Color] val value: Int) }}{companion}");
+        let named = named_source(&text, 316);
+        let (tree, _) = named.parsed.ast.iter().find(|(_, node)| {
+            matches!(&node.kind, TreeKind::ValDef(def) if named.store.names.resolve(def.name.as_name().text()) == "value")
+        }).unwrap();
+        let field = named
+            .store
+            .symbols
+            .get(named.index.symbol_at(named.source, tree).unwrap());
+        let case = named.store.symbols.get(field.owner.unwrap());
+        let module_class = case.owner.unwrap();
+        assert_eq!(
+            named.store.symbols.get(module_class).kind,
+            SymbolKind::ModuleClass
+        );
+        assert_eq!(
+            field.visibility,
+            if qualifier == "private" {
+                Visibility::PrivateWithin(module_class)
+            } else {
+                Visibility::ProtectedWithin(module_class)
+            }
+        );
+    }
+}
 
-    let error = name_compilation_unit(
+#[test]
+fn diagnostic_aware_naming_rejects_an_unknown_enum_case_boundary() {
+    let (parsed, source, mut store) = parsed_source(
+        "enum Color { case Red(private[Missing] val value: Int) }",
+        320,
+    );
+    let span = parsed
+        .ast
+        .iter()
+        .find_map(|(_, node)| match &node.kind {
+            TreeKind::ValDef(def) if def.metadata.visibility.is_some() => node.position,
+            _ => None,
+        })
+        .unwrap();
+    let before = store.checkpoint();
+    let mut packages = Packages::new();
+    let NamingOutcome::Rejected { diagnostics } = name_compilation_unit_with_diagnostics(
         &parsed.ast,
         parsed.root,
         source,
         "Color.scala",
+        SourceParseStatus::Clean,
         &mut store,
         &mut packages,
     )
-    .expect_err("the enum case parameter boundary is not resolved yet");
-
-    assert!(
-        matches!(
-            error,
-            NamerError::InvalidVisibilityQualifier {
-                position: Some(_),
-                protected: false,
-                qualifier,
-                ..
-            } if store.names.resolve(qualifier.text()) == "Color"
-        ),
-        "unexpected error: {error:?}"
+    .unwrap() else {
+        panic!("expected a visibility diagnostic")
+    };
+    assert_eq!(
+        diagnostics,
+        [NamerDiagnostic::error(
+            span,
+            NamerIssue::InvalidVisibilityQualifier {
+                access: VisibilityAccess::Private,
+                qualifier: "Missing".to_owned(),
+            }
+        )]
     );
-    assert_eq!(store.checkpoint(), checkpoint);
+    assert_eq!(store.checkpoint(), before);
+    assert_eq!(packages.mark(), 0);
 }
 
 #[test]
@@ -7186,6 +7637,16 @@ fn generated_unapply_is_independent_of_case_class_companion_declaration_order() 
         assert_eq!(
             named.index.source_context(context).lexical_scope,
             unapply_scope
+        );
+        let input = named
+            .index
+            .derived_symbol_at(unapply, named.source, class_tree)
+            .expect("generated unapply should have an instance parameter");
+        assert_eq!(named.store.symbols.get(input).owner, Some(unapply));
+        assert_eq!(named.index.declaration_context_of(input), Some(context));
+        assert_eq!(
+            named.index.source_context(context).parent,
+            named.index.declaration_context_of(class)
         );
         assert_eq!(
             named

@@ -1447,6 +1447,51 @@ mod tests {
     use dotty_core::{ScannerEvent, TokenKind, TokenSource};
     use dotty_parser::{ExpressionIssue, LayoutIssue, ParseIssue};
 
+    #[test]
+    fn multiline_single_catch_cases_keep_block_bodies_and_exact_spans() {
+        for source in [
+            "object A {\ndef f = try a catch\ncase e => b\n}",
+            "object A {\ndef f = try a catch\ncase e => b\ndef g = try c catch\ncase e => d\n}",
+            "object A {\ndef f = call(try a catch\n  case e => b)\n}",
+        ] {
+            let mut names = NameInterner::new();
+            let result = parse_compilation_unit(
+                SourceText::new(source).unwrap(),
+                SourceId::from_index(0),
+                ContextualScanner::new(source).unwrap(),
+                &mut names,
+            );
+            assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+            let cases: Vec<_> = result
+                .ast
+                .iter()
+                .filter_map(|(_, tree)| {
+                    if let TreeKind::CaseDef(case) = &tree.kind {
+                        Some(case)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(cases.len(), source.matches("case e").count());
+            for case in cases {
+                let body = result.ast.get(case.body);
+                let TreeKind::Block(block) = &body.kind else {
+                    panic!("expected a catch case Block for {source}");
+                };
+                assert!(block.stats.is_empty());
+                let expr = result.ast.get(block.expr);
+                assert!(matches!(expr.kind, TreeKind::Ident(_)));
+                let expr_span = expr.position.unwrap().span().range();
+                let arrow = source[..expr_span.start() as usize].rfind("=>").unwrap() as u32;
+                assert_eq!(
+                    body.position.unwrap().span().range(),
+                    dotty_core::TextRange::new(arrow, expr_span.end()).unwrap(),
+                );
+            }
+        }
+    }
+
     struct AdjacentEndMarkerSource(ContextualScanner);
 
     impl AdjacentEndMarkerSource {

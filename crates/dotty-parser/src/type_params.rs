@@ -190,9 +190,9 @@ where
         }
         let is_synthetic_wildcard_name = self.current().kind == TokenKind::BackquotedIdentifier
             && self
-                .current_text()
+                .name_text(self.current().kind, self.current().span)
                 .ok()
-                .is_some_and(|text| text.trim_matches('`').starts_with("$type_wildcard_"));
+                .is_some_and(|text| text.starts_with("$type_wildcard_"));
         if !is_synthetic_wildcard_name {
             metadata.modifiers.push(dotty_core::ast::Modifier::Param);
             if matches!(

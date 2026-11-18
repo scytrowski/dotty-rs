@@ -77,7 +77,7 @@ where
                 parser.with_block_end(Some(closing), |parser| {
                     parser.parse_template_members(
                         closing,
-                        &body_indent,
+                        body_indent,
                         expected_end_marker,
                         delimiter_terminates,
                     )
@@ -129,7 +129,8 @@ where
         ) {
             return false;
         }
-        self.names.resolve(expected.text()) == self.marker_target_text(target.kind, target.span)
+        self.names.resolve(expected.text())
+            == self.name_text(target.kind, target.span).unwrap_or_default()
     }
 
     fn current_end_marker_matches_ancestor(&mut self) -> bool {
@@ -504,7 +505,7 @@ where
         !self.is_arrow_token(token)
             && !matches!(
                 self.source.slice(token.span).ok(),
-                Some("=" | "<-" | "->" | "?=>" | "?->" | ":" | "<:" | ">:" | "#" | "^")
+                Some("=" | "<-" | "←" | "->" | "?=>" | "?->" | ":" | "<:" | ">:" | "#" | "^")
             )
     }
 
@@ -575,18 +576,6 @@ where
         {
             self.advance();
         }
-    }
-
-    pub(crate) fn source_line_indent_prefix(&self, offset: u32) -> String {
-        let source = self.source.as_str();
-        let end = (offset as usize).min(source.len());
-        let line_start = source[..end]
-            .rfind(['\n', '\r', '\u{000c}', '\u{001a}'])
-            .map_or(0, |index| index + 1);
-        source[line_start..end]
-            .chars()
-            .take_while(|character| matches!(character, ' ' | '\t'))
-            .collect()
     }
 }
 
@@ -1136,7 +1125,7 @@ mod tests {
         assert!(
             !parser
                 .source_line_indent_prefix(8)
-                .starts_with(parser.source_line_indent_prefix(1).as_str())
+                .starts_with(parser.source_line_indent_prefix(1))
         );
     }
 

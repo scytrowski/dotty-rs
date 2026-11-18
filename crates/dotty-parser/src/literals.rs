@@ -27,7 +27,7 @@ where
             Err(_) => return self.unexpected_expression(),
         };
         let Some(value) = numeric_constant(token_kind, spelling) else {
-            return self.unexpected_expression();
+            return self.invalid_numeric_literal();
         };
         self.advance();
         self.alloc_from(mark, TreeKind::Literal(Literal { value }))
@@ -41,7 +41,7 @@ where
         };
         let spelling = format!("-{token_spelling}");
         let Some(value) = numeric_constant(token_kind, &spelling) else {
-            return self.unexpected_expression();
+            return self.invalid_numeric_literal();
         };
         self.advance();
         self.alloc_from(mark, TreeKind::Literal(Literal { value }))
@@ -66,7 +66,7 @@ where
         let kind = match token_kind {
             TokenKind::LongLiteral => {
                 let Some(value) = parse_long_literal(spelling) else {
-                    return self.unexpected_expression();
+                    return self.invalid_numeric_literal();
                 };
                 self.advance();
                 return self.alloc_from(
@@ -78,7 +78,7 @@ where
             }
             TokenKind::FloatLiteral => {
                 let Some(value) = parse_float_literal(spelling) else {
-                    return self.unexpected_expression();
+                    return self.invalid_numeric_literal();
                 };
                 self.advance();
                 return self.alloc_from(
@@ -90,7 +90,7 @@ where
             }
             TokenKind::DoubleLiteral => {
                 let Some(value) = parse_double_literal(spelling) else {
-                    return self.unexpected_expression();
+                    return self.invalid_numeric_literal();
                 };
                 self.advance();
                 return self.alloc_from(
@@ -111,6 +111,17 @@ where
             mark,
             TreeKind::PhaseSpecific(UntypedNode::Number(NumberLiteral { text, kind })),
         )
+    }
+
+    fn invalid_numeric_literal(&mut self) -> TreeId<Untyped> {
+        let position = self.current_span();
+        self.report_issue(crate::ParseIssue::Expression(
+            crate::ExpressionIssue::InvalidNumericLiteral {
+                found: self.current().kind,
+            },
+        ));
+        self.advance();
+        self.error_expr(position)
     }
 
     pub(crate) fn parse_string(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
@@ -163,57 +174,47 @@ pub(crate) fn integer_radix(text: Option<&str>) -> u32 {
 }
 
 fn parse_long_literal(spelling: &str) -> Option<i64> {
-    let digits = spelling.strip_suffix(['l', 'L'])?.replace('_', "");
-    let (negative, digits) = if let Some(digits) = digits.strip_prefix('-') {
-        (true, digits)
-    } else if let Some(digits) = digits.strip_prefix('+') {
-        (false, digits)
-    } else {
-        (false, digits.as_str())
-    };
-    let radix = integer_radix(Some(digits));
-    let digits = digits
-        .strip_prefix("0x")
-        .or_else(|| digits.strip_prefix("0X"))
-        .or_else(|| digits.strip_prefix("0b"))
-        .or_else(|| digits.strip_prefix("0B"))
-        .unwrap_or(digits);
-    let value = u64::from_str_radix(digits, radix).ok()?;
-    if negative {
-        if radix != 10 {
-            // Non-decimal Long spellings represent a signed 64-bit bit
-            // pattern. Apply the source minus sign to that value with the
-            // same wrapping arithmetic used by the JVM Long representation.
-            Some((value as i64).wrapping_neg())
-        } else if value == 1_u64 << 63 {
-            Some(i64::MIN)
+    let spelling = spelling.strip_suffix(['l', 'L'])?.replace('_', "");
+    if let Some((digits, radix, negative)) = non_decimal_digits(&spelling) {
+        let value = u64::from_str_radix(digits, radix).ok()? as i64;
+        Some(if negative {
+            value.wrapping_neg()
         } else {
-            i64::try_from(value).ok()?.checked_neg()
-        }
-    } else if radix != 10 {
-        // Scala accepts a full-width non-decimal Long bit pattern and
-        // interprets it as a signed two's-complement value (e.g. the
-        // hexadecimal spelling 0xFFFFFFFFFFFFFFFFL denotes -1).
-        Some(value as i64)
+            value
+        })
     } else {
-        i64::try_from(value).ok()
+        spelling.parse().ok()
     }
 }
 
+/// Non-decimal Scala literals encode a bit pattern at the destination width.
+/// The optional unary sign applies after interpreting that pattern.
+fn non_decimal_digits(spelling: &str) -> Option<(&str, u32, bool)> {
+    let digits = spelling.strip_prefix(['-', '+']).unwrap_or(spelling);
+    let radix = integer_radix(Some(digits));
+    (radix != 10).then(|| (&digits[2..], radix, spelling.starts_with('-')))
+}
+
 fn parse_float_literal(spelling: &str) -> Option<f32> {
-    spelling
-        .strip_suffix(['f', 'F'])?
-        .replace('_', "")
-        .parse()
-        .ok()
+    let digits = spelling.strip_suffix(['f', 'F'])?.replace('_', "");
+    let value: f32 = digits.parse().ok()?;
+    representable_float(&digits, f64::from(value)).then_some(value)
 }
 
 fn parse_double_literal(spelling: &str) -> Option<f64> {
-    spelling
-        .strip_suffix(['d', 'D'])?
-        .replace('_', "")
-        .parse()
-        .ok()
+    decimal_constant(spelling.strip_suffix(['d', 'D'])?)
+}
+
+fn decimal_constant(spelling: &str) -> Option<f64> {
+    let digits = spelling.replace('_', "");
+    let value: f64 = digits.parse().ok()?;
+    representable_float(&digits, value).then_some(value)
+}
+
+fn representable_float(spelling: &str, value: f64) -> bool {
+    let mantissa = spelling.split(['e', 'E']).next().unwrap_or(spelling);
+    value.is_finite()
+        && (value != 0.0 || !mantissa.bytes().any(|digit| matches!(digit, b'1'..=b'9')))
 }
 
 fn numeric_constant(token_kind: TokenKind, spelling: &str) -> Option<Constant> {
@@ -221,7 +222,7 @@ fn numeric_constant(token_kind: TokenKind, spelling: &str) -> Option<Constant> {
         TokenKind::IntegerLiteral => parse_integer_literal(spelling).map(Constant::Int),
         TokenKind::LongLiteral => parse_long_literal(spelling).map(Constant::Long),
         TokenKind::DecimalLiteral | TokenKind::ExponentLiteral => {
-            spelling.replace('_', "").parse().ok().map(Constant::double)
+            decimal_constant(spelling).map(Constant::double)
         }
         TokenKind::FloatLiteral => parse_float_literal(spelling).map(Constant::float),
         TokenKind::DoubleLiteral => parse_double_literal(spelling).map(Constant::double),
@@ -230,30 +231,16 @@ fn numeric_constant(token_kind: TokenKind, spelling: &str) -> Option<Constant> {
 }
 
 fn parse_integer_literal(spelling: &str) -> Option<i32> {
-    let digits = spelling.replace('_', "");
-    let (negative, digits) = if let Some(digits) = digits.strip_prefix('-') {
-        (true, digits)
-    } else if let Some(digits) = digits.strip_prefix('+') {
-        (false, digits)
-    } else {
-        (false, digits.as_str())
-    };
-    let radix = integer_radix(Some(digits));
-    let digits = digits
-        .strip_prefix("0x")
-        .or_else(|| digits.strip_prefix("0X"))
-        .or_else(|| digits.strip_prefix("0b"))
-        .or_else(|| digits.strip_prefix("0B"))
-        .unwrap_or(digits);
-    let value = u64::from_str_radix(digits, radix).ok()?;
-    if negative {
-        if value == 1_u64 << 31 {
-            Some(i32::MIN)
+    let spelling = spelling.replace('_', "");
+    if let Some((digits, radix, negative)) = non_decimal_digits(&spelling) {
+        let value = u32::from_str_radix(digits, radix).ok()? as i32;
+        Some(if negative {
+            value.wrapping_neg()
         } else {
-            i32::try_from(value).ok()?.checked_neg()
-        }
+            value
+        })
     } else {
-        i32::try_from(value).ok()
+        spelling.parse().ok()
     }
 }
 
@@ -286,59 +273,10 @@ fn decode_char_literal(text: &str) -> Option<u16> {
 }
 
 fn decode_literal_body(body: &str, raw: bool) -> Option<DecodedString> {
-    let characters: Vec<char> = body.chars().collect();
-    let mut units = Vec::new();
-    let mut index = 0;
-
-    while index < characters.len() {
-        let character = characters[index];
-        index += 1;
-        if raw || character != '\\' {
-            let mut encoded = [0; 2];
-            units.extend(character.encode_utf16(&mut encoded).iter().copied());
-            continue;
-        }
-
-        let escaped = *characters.get(index)?;
-        index += 1;
-        match escaped {
-            'b' => units.push('\u{0008}' as u16),
-            't' => units.push('\t' as u16),
-            'n' => units.push('\n' as u16),
-            'f' => units.push('\u{000c}' as u16),
-            'r' => units.push('\r' as u16),
-            '\\' => units.push('\\' as u16),
-            '"' => units.push('"' as u16),
-            '\'' => units.push('\'' as u16),
-            'u' | 'U' => {
-                while characters
-                    .get(index)
-                    .is_some_and(|character| matches!(character, 'u' | 'U'))
-                {
-                    index += 1;
-                }
-                let digits: String = characters.get(index..index + 4)?.iter().collect();
-                let code_unit = u16::from_str_radix(&digits, 16).ok()?;
-                units.push(code_unit);
-                index += 4;
-            }
-            '0'..='7' => {
-                let mut digits = String::from(escaped);
-                while digits.len() < 3
-                    && characters
-                        .get(index)
-                        .is_some_and(|character| ('0'..='7').contains(character))
-                {
-                    digits.push(characters[index]);
-                    index += 1;
-                }
-                let code_unit = u16::from_str_radix(&digits, 8).ok()?;
-                units.push(code_unit);
-            }
-            _ => return None,
-        }
+    if raw || !body.contains('\\') {
+        return Some(DecodedString::Scalar(body.to_owned()));
     }
-
+    let units = dotty_core::source::decode_literal_units(body)?;
     Some(match String::from_utf16(&units) {
         Ok(value) => DecodedString::Scalar(value),
         Err(_) => DecodedString::Utf16(units),
@@ -460,6 +398,22 @@ mod tests {
     }
 
     #[test]
+    fn singleton_ints_use_32_bit_patterns_only_for_non_decimal_bases() {
+        for (spelling, expected) in [
+            ("0xFFFF_FFFF", Some(-1)),
+            ("-0xFFFFFFFF", Some(1)),
+            ("0b10000000000000000000000000000000", Some(i32::MIN)),
+            ("-0x80000000", Some(i32::MIN)),
+            ("0x1_0000_0000", None),
+            ("2147483648", None),
+            ("-2147483648", Some(i32::MIN)),
+            ("-2147483649", None),
+        ] {
+            assert_eq!(parse_integer_literal(spelling), expected, "{spelling}");
+        }
+    }
+
+    #[test]
     fn decodes_a_full_width_hexadecimal_long_as_a_signed_bit_pattern() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
@@ -489,6 +443,47 @@ mod tests {
     #[test]
     fn decodes_the_non_decimal_long_sign_bit_boundary() {
         assert_eq!(parse_long_literal("0x8000000000000000L"), Some(i64::MIN));
+    }
+
+    #[test]
+    fn diagnoses_out_of_range_floating_constants_at_the_literal() {
+        for (spelling, kind) in [
+            ("1e999F", TokenKind::FloatLiteral),
+            ("1e-999F", TokenKind::FloatLiteral),
+            ("1e999D", TokenKind::DoubleLiteral),
+            ("1e-999D", TokenKind::DoubleLiteral),
+            ("1e999", TokenKind::ExponentLiteral),
+        ] {
+            let end = spelling.len() as u32;
+            let mut names = NameInterner::new();
+            let mut parser = parser_for(
+                spelling,
+                vec![token(kind, 0, end), token(TokenKind::Eof, end, end)],
+                &mut names,
+            );
+            let mark = parser.mark();
+            if kind == TokenKind::ExponentLiteral {
+                parser.parse_number_constant(mark);
+            } else {
+                parser.parse_number(mark);
+            }
+            assert_eq!(parser.diagnostics().len(), 1, "{spelling}");
+            assert_eq!(
+                parser.diagnostics()[0].issue().code(),
+                "parser.expression.invalid_numeric_literal"
+            );
+            assert_eq!(
+                parser.diagnostics()[0].span(),
+                dotty_core::TextRange::new(0, end).unwrap()
+            );
+            assert_eq!(parser.current().kind, TokenKind::Eof);
+        }
+        assert_eq!(parse_float_literal("0.000e-999F"), Some(0.0));
+        assert_eq!(
+            parse_double_literal("-0e999D").unwrap().to_bits(),
+            (-0.0_f64).to_bits()
+        );
+        assert_eq!(parse_float_literal("1.4e-45F"), Some(f32::from_bits(1)));
     }
 
     #[test]

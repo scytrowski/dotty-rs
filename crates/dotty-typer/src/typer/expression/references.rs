@@ -545,6 +545,9 @@ impl SourceTyper<'_> {
         if self.store.symbols.get(symbol).kind == SymbolKind::Local {
             return Ok(self.definitions.no_prefix);
         }
+        if self.is_source_private_constructor_parameter(symbol) {
+            return Ok(self.definitions.no_prefix);
+        }
         let owner = self.store.symbols.get(symbol).owner;
         if !owner.is_some_and(|owner| {
             matches!(
