@@ -174,9 +174,9 @@ fn mutate_reference(bytes: &[u8], assignment_side: bool) -> Vec<u8> {
     let invalid = reference.address + 1;
     assert!(index.get_node(invalid).is_none());
     let mut old = TastyWriter::default();
-    old.write_nat(reference.address);
+    old.write_nat(reference.address).unwrap();
     let mut new = TastyWriter::default();
-    new.write_nat(invalid);
+    new.write_nat(invalid).unwrap();
     assert_eq!(old.as_slice().len(), new.as_slice().len());
     let tree_offset = tree.nodes().first().expect("reference node").offset;
     let file_offset = asts.payload.as_ptr() as usize - bytes.as_ptr() as usize

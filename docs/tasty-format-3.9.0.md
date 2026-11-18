@@ -70,10 +70,16 @@ Examples for `Nat`:
 
 The decoder must reject:
 
-- encodings outside `u32`, `i32`, or `i64`;
+- `Nat` above 2³¹ − 1 or `LongNat` above 2⁶³ − 1;
+- unsigned encodings longer than nine groups, including leading zero groups;
+- signed encodings outside `i32` or `i64`;
 - unterminated numbers;
 - numbers extending beyond the bounded reader;
 - negative values decoded as `Nat`.
+
+The `Positions` line-size field also accepts the historical unsigned value
+`0xffffffff` for a missing line length. The structural API preserves that
+value as `u32::MAX`.
 
 ### 2.2. UTF-8
 

@@ -155,9 +155,9 @@ fn corrupt_conditional_tasty_branch_address(bytes: &[u8]) -> Vec<u8> {
     let invalid_address = reference.address + 1;
     assert!(index.get_node(invalid_address).is_none());
     let mut old_nat = TastyWriter::default();
-    old_nat.write_nat(reference.address);
+    old_nat.write_nat(reference.address).unwrap();
     let mut invalid_nat = TastyWriter::default();
-    invalid_nat.write_nat(invalid_address);
+    invalid_nat.write_nat(invalid_address).unwrap();
     assert_eq!(old_nat.as_slice().len(), invalid_nat.as_slice().len());
     let reference_offset = selected_if.then_branch.nodes()[0].offset;
     let if_payload_offset = raw_if.payload.as_ptr() as usize - asts.payload.as_ptr() as usize;

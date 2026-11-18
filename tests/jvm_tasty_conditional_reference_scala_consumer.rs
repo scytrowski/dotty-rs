@@ -128,9 +128,9 @@ fn corrupt_if_arm(bytes: &[u8]) -> Vec<u8> {
     let stale = old + 1;
     assert!(index.get_node(stale).is_none());
     let mut encoded_old = TastyWriter::default();
-    encoded_old.write_nat(old);
+    encoded_old.write_nat(old).unwrap();
     let mut encoded_stale = TastyWriter::default();
-    encoded_stale.write_nat(stale);
+    encoded_stale.write_nat(stale).unwrap();
     assert_eq!(encoded_old.as_slice().len(), encoded_stale.as_slice().len());
     let reference_offset = decoded_if.then_branch.nodes()[0].offset;
     let if_offset = raw_if.payload.as_ptr() as usize - asts.payload.as_ptr() as usize;
@@ -174,9 +174,9 @@ fn corrupt_selected_valdef_reference(bytes: &[u8]) -> Vec<u8> {
     let invalid_address = old_address + 1;
     assert!(index.get_node(invalid_address).is_none());
     let mut encoded_old = TastyWriter::default();
-    encoded_old.write_nat(old_address);
+    encoded_old.write_nat(old_address).unwrap();
     let mut encoded_invalid = TastyWriter::default();
-    encoded_invalid.write_nat(invalid_address);
+    encoded_invalid.write_nat(invalid_address).unwrap();
     assert_eq!(
         encoded_old.as_slice().len(),
         encoded_invalid.as_slice().len()

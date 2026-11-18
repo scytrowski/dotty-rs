@@ -347,7 +347,7 @@ fn block_layout_matches_the_wire_encoder_for_mixed_width_constants() {
     let built = builder.finish(&[block]).unwrap();
     let mut expected = Writer::new();
     expected.write_u8(BLOCK_TAG);
-    expected.write_nat(payload.position() as u32);
+    expected.write_nat(payload.position() as u32).unwrap();
     let prefix = expected.position();
     expected.write_bytes(payload.as_slice());
     assert_eq!(built.bytes(), expected.as_slice());

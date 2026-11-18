@@ -532,9 +532,9 @@ fn corrupt_shared_branch_address(bytes: &[u8]) -> Vec<u8> {
     );
 
     let mut old_nat = TastyWriter::default();
-    old_nat.write_nat(old_address);
+    old_nat.write_nat(old_address).unwrap();
     let mut invalid_nat = TastyWriter::default();
-    invalid_nat.write_nat(invalid_address);
+    invalid_nat.write_nat(invalid_address).unwrap();
     assert_eq!(
         old_nat.as_slice().len(),
         invalid_nat.as_slice().len(),

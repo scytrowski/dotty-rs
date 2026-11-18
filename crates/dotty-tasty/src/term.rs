@@ -474,9 +474,9 @@ impl SimpleTerm {
             | (TermValue::Boolean(false), 3)
             | (TermValue::Boolean(true), 4)
             | (TermValue::Null, 5) => {}
-            (TermValue::AstRef(value), 60..=63 | 66) => writer.write_ast_ref(*value),
+            (TermValue::AstRef(value), 60..=63 | 66) => writer.write_ast_ref(*value)?,
             (TermValue::NameRef(value), 64..=65 | 74..=76) | (TermValue::Nat(value), 69) => {
-                writer.write_nat(*value)
+                writer.write_nat(*value)?
             }
             (TermValue::Int(value), 67 | 68 | 70 | 72) => writer.write_int(*value),
             (TermValue::LongInt(value), 71 | 73) => writer.write_long_int(*value),
@@ -512,7 +512,7 @@ impl ConstantValue {
             }
             Self::Char(value) => {
                 writer.write_u8(CHARCONST_TAG);
-                writer.write_nat(u32::from(*value));
+                writer.write_nat(u32::from(*value))?;
             }
             Self::Int(value) => {
                 writer.write_u8(INTCONST_TAG);
@@ -532,7 +532,7 @@ impl ConstantValue {
             }
             Self::String(reference) => {
                 writer.write_u8(STRINGCONST_TAG);
-                writer.write_nat(*reference);
+                writer.write_nat(*reference)?;
             }
         }
         Ok(())
@@ -841,7 +841,7 @@ impl<'a> RawTree<'a> {
                     return Err(TermEncodeError::InvalidTag { tag: *tag });
                 }
                 writer.write_u8(*tag);
-                writer.write_nat_ast_operand(*tag, *value);
+                writer.write_nat_ast_operand(*tag, *value)?;
                 child.encode(writer)
             }
             Self::LengthNode(node) if writer.has_ast_address_map() => {
@@ -1199,7 +1199,7 @@ mod tests {
     fn rejects_a_char_constant_outside_the_16_bit_range() {
         let mut writer = Writer::new();
         writer.write_u8(69);
-        writer.write_nat(0x1_0000);
+        writer.write_nat(0x1_0000).unwrap();
         let bytes = writer.into_inner();
         let mut reader = Reader::new(&bytes);
         let term = SimpleTerm::decode(&mut reader).unwrap();
@@ -1433,13 +1433,13 @@ mod tests {
 
     #[test]
     fn rejects_a_maximal_length_node_before_allocating_its_payload() {
-        let mut reader = Reader::new(&[128, 0x0f, 0x7f, 0x7f, 0x7f, 0xff]);
+        let mut reader = Reader::new(&[128, 0x07, 0x7f, 0x7f, 0x7f, 0xff]);
 
         assert_eq!(
             RawTree::decode(&mut reader),
             Err(TermError::Read(ReadError::UnexpectedEof {
                 offset: 6,
-                needed: u32::MAX as usize,
+                needed: i32::MAX as usize,
                 remaining: 0,
             }))
         );

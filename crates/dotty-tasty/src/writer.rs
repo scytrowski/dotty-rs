@@ -137,26 +137,36 @@ impl Writer {
         self.bytes.extend_from_slice(bytes);
     }
 
-    /// Writes a TASTy natural number.
-    pub fn write_nat(&mut self, value: u32) {
+    /// Writes a nonnegative, 31-bit TASTy Nat.
+    pub fn write_nat(&mut self, value: u32) -> Result<(), WriteError> {
+        if value > i32::MAX as u32 {
+            return Err(WriteError::NatOverflow {
+                value: value.into(),
+            });
+        }
         write_unsigned(&mut self.bytes, u64::from(value));
+        Ok(())
     }
 
-    pub(crate) fn write_ast_ref(&mut self, value: u32) {
-        self.write_nat(self.relocated_ast_ref(value));
+    pub(crate) fn write_ast_ref(&mut self, value: u32) -> Result<(), WriteError> {
+        self.write_nat(self.relocated_ast_ref(value))
     }
 
-    pub(crate) fn write_nat_ast_operand(&mut self, tag: u8, value: u32) {
+    pub(crate) fn write_nat_ast_operand(&mut self, tag: u8, value: u32) -> Result<(), WriteError> {
         if crate::AstRef::symbol_operand(tag, value).is_some() {
-            self.write_ast_ref(value);
+            self.write_ast_ref(value)
         } else {
-            self.write_nat(value);
+            self.write_nat(value)
         }
     }
 
-    /// Writes a 64-bit TASTy natural number.
-    pub fn write_long_nat(&mut self, value: u64) {
+    /// Writes a nonnegative, 63-bit TASTy LongNat.
+    pub fn write_long_nat(&mut self, value: u64) -> Result<(), WriteError> {
+        if value > i64::MAX as u64 {
+            return Err(WriteError::NatOverflow { value });
+        }
         write_unsigned(&mut self.bytes, value);
+        Ok(())
     }
 
     /// Writes a signed TASTy integer.
@@ -176,10 +186,10 @@ impl Writer {
 
     /// Writes a length-prefixed opaque byte payload.
     pub fn write_length_prefixed_bytes(&mut self, bytes: &[u8]) -> Result<(), WriteError> {
-        let length = u32::try_from(bytes.len()).map_err(|_| WriteError::LengthOverflow {
+        let length = i32::try_from(bytes.len()).map_err(|_| WriteError::LengthOverflow {
             length: bytes.len(),
         })?;
-        self.write_nat(length);
+        self.write_nat(length as u32)?;
         self.write_bytes(bytes);
         Ok(())
     }
@@ -193,6 +203,14 @@ impl Writer {
     pub fn as_slice(&self) -> &[u8] {
         &self.bytes
     }
+}
+
+pub(crate) fn ast_address_from_offset(offset: usize) -> Result<u32, WriteError> {
+    i32::try_from(offset)
+        .map(|value| value as u32)
+        .map_err(|_| WriteError::NatOverflow {
+            value: offset as u64,
+        })
 }
 
 pub(crate) fn nat_width(mut value: usize) -> usize {
@@ -271,15 +289,35 @@ mod tests {
 
     #[test]
     fn writes_natural_numbers_that_reader_can_decode() {
-        for value in [0, 1, 127, 128, 16_383, 16_384, u32::MAX] {
+        for value in [0, 1, 127, 128, 16_383, 16_384, i32::MAX as u32] {
             let mut writer = Writer::new();
-            writer.write_nat(value);
+            writer.write_nat(value).unwrap();
             let bytes = writer.into_inner();
             let mut reader = Reader::new(&bytes);
 
             assert_eq!(reader.read_nat().unwrap(), value);
             assert!(reader.is_at_end());
         }
+    }
+
+    #[test]
+    fn rejects_nats_outside_scala_ranges_before_writing() {
+        let mut writer = Writer::new();
+        assert_eq!(
+            writer.write_nat(1 << 31),
+            Err(WriteError::NatOverflow { value: 1 << 31 })
+        );
+        assert_eq!(
+            writer.write_long_nat(1 << 63),
+            Err(WriteError::NatOverflow { value: 1 << 63 })
+        );
+        assert!(writer.as_slice().is_empty());
+        writer.write_long_nat(i64::MAX as u64).unwrap();
+        assert_eq!(writer.position(), 9);
+        assert_eq!(
+            Reader::new(writer.as_slice()).read_long_nat(),
+            Ok(i64::MAX as u64)
+        );
     }
 
     #[test]
@@ -290,12 +328,12 @@ mod tests {
             (128, vec![0x01, 0x80]),
             (16_383, vec![0x7f, 0xff]),
             (16_384, vec![0x01, 0x00, 0x80]),
-            (u32::MAX, vec![0x0f, 0x7f, 0x7f, 0x7f, 0xff]),
+            (i32::MAX as u32, vec![0x07, 0x7f, 0x7f, 0x7f, 0xff]),
         ];
 
         for (value, expected) in cases {
             let mut writer = Writer::new();
-            writer.write_nat(value);
+            writer.write_nat(value).unwrap();
             assert_eq!(writer.into_inner(), expected, "value {value}");
         }
     }

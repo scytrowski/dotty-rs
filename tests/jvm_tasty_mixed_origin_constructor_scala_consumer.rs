@@ -510,7 +510,7 @@ fn formal_addresses(tasty_bytes: &[u8], method_name: &str) -> (u32, u32) {
 
 fn direct_termref_bytes(address: u32) -> Vec<u8> {
     let mut writer = Writer::default();
-    writer.write_nat(address);
+    writer.write_nat(address).unwrap();
     let mut bytes = vec![TERMREFDIRECT_TAG];
     bytes.extend(writer.into_inner());
     bytes
@@ -519,7 +519,7 @@ fn direct_termref_bytes(address: u32) -> Vec<u8> {
 fn change_formal_target(tasty_bytes: &[u8], target: u32, replacement: u32) -> Vec<u8> {
     let reference = direct_termref_bytes(target);
     let mut writer = Writer::default();
-    writer.write_nat(replacement);
+    writer.write_nat(replacement).unwrap();
     let replacement = writer.into_inner();
     assert_eq!(
         replacement.len(),

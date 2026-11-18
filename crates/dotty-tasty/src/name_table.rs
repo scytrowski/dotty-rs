@@ -260,6 +260,13 @@ pub enum NameTableError {
         /// Zero-based entry containing the reference.
         entry_index: usize,
     },
+    /// A constructed entry has a numeric field outside the 31-bit Nat range.
+    InvalidNat {
+        /// Value supplied by the caller.
+        value: u32,
+        /// Index of the entry containing the field.
+        entry_index: usize,
+    },
     /// A signed-name parameter has an invalid raw value.
     InvalidParamSig {
         /// Invalid raw parameter-signature value.
@@ -311,6 +318,10 @@ impl fmt::Display for NameTableError {
             } => write!(
                 formatter,
                 "Scala name entry {entry_index} refers to later entry {reference}"
+            ),
+            Self::InvalidNat { value, entry_index } => write!(
+                formatter,
+                "value {value} in name entry {entry_index} exceeds a 31-bit Nat"
             ),
             Self::InvalidParamSig { value, entry_index } => write!(
                 formatter,
@@ -817,6 +828,15 @@ impl NameTable {
                 });
             }
 
+            if let RawName::DefaultGetter { index: value, .. }
+            | RawName::Unique { uniqid: value, .. } = entry
+                && *value > i32::MAX as u32
+            {
+                return Err(NameTableError::InvalidNat {
+                    value: *value,
+                    entry_index,
+                });
+            }
             let parameter_signatures: &[ParamSig] = match entry {
                 RawName::Signed {
                     parameter_signatures,
@@ -1046,9 +1066,8 @@ fn encode_name(name: &RawName, writer: &mut Writer) -> Result<(), WriteError> {
             encode_composite(
                 2,
                 |payload| {
-                    payload.write_nat(*prefix);
-                    payload.write_nat(*selector);
-                    Ok(())
+                    payload.write_nat(*prefix)?;
+                    payload.write_nat(*selector)
                 },
                 writer,
             )?;
@@ -1057,9 +1076,8 @@ fn encode_name(name: &RawName, writer: &mut Writer) -> Result<(), WriteError> {
             encode_composite(
                 3,
                 |payload| {
-                    payload.write_nat(*prefix);
-                    payload.write_nat(*selector);
-                    Ok(())
+                    payload.write_nat(*prefix)?;
+                    payload.write_nat(*selector)
                 },
                 writer,
             )?;
@@ -1068,9 +1086,8 @@ fn encode_name(name: &RawName, writer: &mut Writer) -> Result<(), WriteError> {
             encode_composite(
                 4,
                 |payload| {
-                    payload.write_nat(*prefix);
-                    payload.write_nat(*selector);
-                    Ok(())
+                    payload.write_nat(*prefix)?;
+                    payload.write_nat(*selector)
                 },
                 writer,
             )?;
@@ -1083,10 +1100,10 @@ fn encode_name(name: &RawName, writer: &mut Writer) -> Result<(), WriteError> {
             encode_composite(
                 10,
                 |payload| {
-                    payload.write_nat(*separator);
-                    payload.write_nat(*uniqid);
+                    payload.write_nat(*separator)?;
+                    payload.write_nat(*uniqid)?;
                     if let Some(underlying) = underlying {
-                        payload.write_nat(*underlying);
+                        payload.write_nat(*underlying)?;
                     }
                     Ok(())
                 },
@@ -1097,45 +1114,24 @@ fn encode_name(name: &RawName, writer: &mut Writer) -> Result<(), WriteError> {
             encode_composite(
                 11,
                 |payload| {
-                    payload.write_nat(*underlying);
-                    payload.write_nat(*index);
-                    Ok(())
+                    payload.write_nat(*underlying)?;
+                    payload.write_nat(*index)
                 },
                 writer,
             )?;
         }
-        RawName::SuperAccessor { underlying } => encode_composite(
-            20,
-            |payload| {
-                payload.write_nat(*underlying);
-                Ok(())
-            },
-            writer,
-        )?,
-        RawName::InlineAccessor { underlying } => encode_composite(
-            21,
-            |payload| {
-                payload.write_nat(*underlying);
-                Ok(())
-            },
-            writer,
-        )?,
-        RawName::BodyRetainer { underlying } => encode_composite(
-            22,
-            |payload| {
-                payload.write_nat(*underlying);
-                Ok(())
-            },
-            writer,
-        )?,
-        RawName::ObjectClass { underlying } => encode_composite(
-            23,
-            |payload| {
-                payload.write_nat(*underlying);
-                Ok(())
-            },
-            writer,
-        )?,
+        RawName::SuperAccessor { underlying } => {
+            encode_composite(20, |payload| payload.write_nat(*underlying), writer)?
+        }
+        RawName::InlineAccessor { underlying } => {
+            encode_composite(21, |payload| payload.write_nat(*underlying), writer)?
+        }
+        RawName::BodyRetainer { underlying } => {
+            encode_composite(22, |payload| payload.write_nat(*underlying), writer)?
+        }
+        RawName::ObjectClass { underlying } => {
+            encode_composite(23, |payload| payload.write_nat(*underlying), writer)?
+        }
         RawName::Signed {
             original,
             result_signature,
@@ -1143,8 +1139,8 @@ fn encode_name(name: &RawName, writer: &mut Writer) -> Result<(), WriteError> {
         } => encode_composite(
             63,
             |payload| {
-                payload.write_nat(*original);
-                payload.write_nat(*result_signature);
+                payload.write_nat(*original)?;
+                payload.write_nat(*result_signature)?;
                 for signature in parameter_signatures {
                     payload.write_int(*signature);
                 }
@@ -1160,9 +1156,9 @@ fn encode_name(name: &RawName, writer: &mut Writer) -> Result<(), WriteError> {
         } => encode_composite(
             62,
             |payload| {
-                payload.write_nat(*original);
-                payload.write_nat(*target);
-                payload.write_nat(*result_signature);
+                payload.write_nat(*original)?;
+                payload.write_nat(*target)?;
+                payload.write_nat(*result_signature)?;
                 for signature in parameter_signatures {
                     payload.write_int(*signature);
                 }
@@ -1346,6 +1342,36 @@ mod tests {
         interpret_param_sig,
     };
     use crate::reader::{ReadError, Reader};
+
+    #[test]
+    fn rejects_out_of_range_default_getter_and_unique_numbers() {
+        for entry in [
+            RawName::DefaultGetter {
+                underlying: 0,
+                index: 1 << 31,
+            },
+            RawName::Unique {
+                separator: 0,
+                uniqid: 1 << 31,
+                underlying: None,
+            },
+        ] {
+            assert_eq!(
+                NameTable::from_entries(vec![RawName::Utf8("x".into()), entry]),
+                Err(NameTableError::InvalidNat {
+                    entry_index: 1,
+                    value: 1 << 31
+                })
+            );
+        }
+        let bytes = [0x8b, 1, 0x81, b'x', 11, 0x86, 0x80, 8, 0, 0, 0, 0x80];
+        assert_eq!(
+            NameTable::decode(&mut Reader::new(&bytes)),
+            Err(NameTableError::Read(ReadError::IntegerOverflow {
+                offset: 7
+            }))
+        );
+    }
 
     #[test]
     fn decodes_names_from_a_fixture() {
@@ -2076,14 +2102,14 @@ mod tests {
 
     #[test]
     fn rejects_a_maximal_name_table_length_without_allocating_it() {
-        let bytes = [0x0f, 0x7f, 0x7f, 0x7f, 0xff];
+        let bytes = [0x07, 0x7f, 0x7f, 0x7f, 0xff];
         let mut reader = Reader::new(&bytes);
 
         assert_eq!(
             NameTable::decode(&mut reader),
             Err(NameTableError::Read(ReadError::UnexpectedEof {
                 offset: 5,
-                needed: u32::MAX as usize,
+                needed: i32::MAX as usize,
                 remaining: 0,
             }))
         );

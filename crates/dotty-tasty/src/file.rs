@@ -673,11 +673,7 @@ impl<'a> TastyFile<'a> {
             if section.standard_kind(&self.names) == Some(StandardSection::Asts) {
                 ast_addresses.clear();
                 for node in RawNodes::decode(&mut section.reader())?.iter() {
-                    ast_addresses.push(u32::try_from(node.offset).map_err(|_| {
-                        WriteError::NatOverflow {
-                            value: node.offset as u64,
-                        }
-                    })?);
+                    ast_addresses.push(crate::writer::ast_address_from_offset(node.offset)?);
                 }
             }
         }

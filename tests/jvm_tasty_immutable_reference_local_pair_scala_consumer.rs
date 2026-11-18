@@ -415,7 +415,7 @@ fn block_address(tasty_bytes: &[u8], method_name: &str) -> u32 {
 
 fn direct_termref_bytes(address: u32) -> Vec<u8> {
     let mut writer = Writer::default();
-    writer.write_nat(address);
+    writer.write_nat(address).unwrap();
     let mut bytes = vec![TERMREFDIRECT_TAG];
     bytes.extend(writer.into_inner());
     bytes
@@ -429,7 +429,7 @@ fn change_termref_target(
 ) -> Vec<u8> {
     let reference = direct_termref_bytes(address);
     let mut writer = Writer::default();
-    writer.write_nat(replacement);
+    writer.write_nat(replacement).unwrap();
     let replacement = writer.into_inner();
     assert_eq!(
         reference.len() - 1,
@@ -504,9 +504,9 @@ fn change_local_type_ref(
         .get(reference_index)
         .unwrap_or_else(|| panic!("local VALDEF has Counter type reference #{reference_index}"));
     let mut original_encoded = Writer::default();
-    original_encoded.write_nat(original);
+    original_encoded.write_nat(original).unwrap();
     let mut replacement_encoded = Writer::default();
-    replacement_encoded.write_nat(replacement);
+    replacement_encoded.write_nat(replacement).unwrap();
     let original_encoded = original_encoded.into_inner();
     let replacement_encoded = replacement_encoded.into_inner();
     assert_eq!(
@@ -569,9 +569,9 @@ fn change_initializer_constructor(tasty_bytes: &[u8], method_name: &str) -> Vec<
         panic!("SHAREDTYPE carries an AST address")
     };
     let mut original_encoded = Writer::default();
-    original_encoded.write_nat(original);
+    original_encoded.write_nat(original).unwrap();
     let mut replacement_encoded = Writer::default();
-    replacement_encoded.write_nat(pair_type);
+    replacement_encoded.write_nat(pair_type).unwrap();
     let original_encoded = original_encoded.into_inner();
     let replacement_encoded = replacement_encoded.into_inner();
     assert_eq!(original_encoded.len(), replacement_encoded.len());
@@ -643,9 +643,9 @@ fn change_first_local_signed_constructor(tasty_bytes: &[u8]) -> Vec<u8> {
                 .contains("Signed Signature(List(example.Counter, example.Counter),example.Pair)")
     }));
     let mut original = Writer::default();
-    original.write_nat(selected.name);
+    original.write_nat(selected.name).unwrap();
     let mut replacement = Writer::default();
-    replacement.write_nat(20);
+    replacement.write_nat(20).unwrap();
     let original = original.into_inner();
     let replacement = replacement.into_inner();
     assert_eq!(
@@ -1550,10 +1550,10 @@ fn change_alias_initializer_target(tasty_bytes: &[u8], target: usize) -> Vec<u8>
         "alias initializer has one direct term reference"
     );
     let mut writer = Writer::default();
-    writer.write_nat(locals[target]);
+    writer.write_nat(locals[target]).unwrap();
     let replacement = writer.into_inner();
     let mut original = Writer::default();
-    original.write_nat(locals[0]);
+    original.write_nat(locals[0]).unwrap();
     let original = original.into_inner();
     assert_eq!(
         replacement.len(),
@@ -1618,11 +1618,13 @@ fn forge_alias_setter_name(tasty_bytes: &[u8]) -> Vec<u8> {
         .expect("first local initializer has its signed Counter constructor")
         .name;
     let mut replacement = Writer::default();
-    replacement.write_nat(constructor_name);
+    replacement.write_nat(constructor_name).unwrap();
     let replacement = replacement.into_inner();
     let raw = index.get(selected.offset as u32).unwrap();
     let mut original = Writer::default();
-    original.write_nat(raw.decode_select_in().unwrap().name);
+    original
+        .write_nat(raw.decode_select_in().unwrap().name)
+        .unwrap();
     let original = original.into_inner();
     assert_eq!(
         replacement.len(),

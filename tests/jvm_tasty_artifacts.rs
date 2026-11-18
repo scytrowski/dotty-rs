@@ -1791,12 +1791,12 @@ fn repoint_mutable_assignment_lhs_to_second(tasty_bytes: &mut Vec<u8>) {
         );
         let old_payload_len = node_reader.read_nat().unwrap() as usize;
         let mut old_prefix = TastyWriter::new();
-        old_prefix.write_nat(old_payload_len as u32);
+        old_prefix.write_nat(old_payload_len as u32).unwrap();
         let prefix_start = address as usize + 1;
         let old_prefix_end = prefix_start + old_prefix.as_slice().len();
         let updated_len = (old_payload_len as isize + delta) as u32;
         let mut new_prefix = TastyWriter::new();
-        new_prefix.write_nat(updated_len);
+        new_prefix.write_nat(updated_len).unwrap();
         rewritten_asts.splice(
             prefix_start..old_prefix_end,
             new_prefix.as_slice().iter().copied(),

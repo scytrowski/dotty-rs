@@ -1503,11 +1503,7 @@ impl<'a> RawNodes<'a> {
         let mut addresses = Vec::with_capacity(self.nodes.len());
 
         for node in &self.nodes {
-            addresses.push(u32::try_from(writer.position()).map_err(|_| {
-                WriteError::NatOverflow {
-                    value: writer.position() as u64,
-                }
-            })?);
+            addresses.push(crate::writer::ast_address_from_offset(writer.position())?);
             node.encode(&mut writer)?;
         }
 
@@ -1739,8 +1735,8 @@ fn raw_node_offset(source: &[u8], node: &RawNode<'_>) -> usize {
     let Some(payload_offset) = subslice_offset(source, node.payload) else {
         return node.offset;
     };
-    // A `u32` natural number is at most five bytes long.
-    for width in canonical..=canonical.max(5) {
+    // Scala permits leading zero groups up to the LongNat wire limit.
+    for width in canonical..=crate::reader::MAX_NAT_GROUPS {
         let Some(start) = payload_offset.checked_sub(1 + width) else {
             break;
         };
@@ -4090,11 +4086,11 @@ impl<'a> ImportExportNode<'a> {
                 match selector {
                     ImportSelector::Imported { name } => {
                         payload.write_u8(IMPORTED_TAG);
-                        payload.write_nat(*name);
+                        payload.write_nat(*name)?;
                     }
                     ImportSelector::Renamed { name } => {
                         payload.write_u8(RENAMED_TAG);
-                        payload.write_nat(*name);
+                        payload.write_nat(*name)?;
                     }
                     ImportSelector::Bounded { type_tree } => {
                         type_tree.encode_ast_child(BOUNDED_TAG, payload)?;
@@ -4114,7 +4110,7 @@ impl<'a> DefinitionNode<'a> {
             Self::TypeDef { .. } => TYPEDEF_TAG,
         };
         encode_length_node(tag, writer, |payload| {
-            payload.write_nat(self.name());
+            payload.write_nat(self.name())?;
             payload.write_bytes(self.body());
             Ok(())
         })
@@ -4175,7 +4171,7 @@ impl<'a> DefinitionBody<'a> {
             Self::TypeDef { .. } => TYPEDEF_TAG,
         };
         encode_length_node(tag, writer, |payload| {
-            payload.write_nat(name);
+            payload.write_nat(name)?;
             match self {
                 Self::ValDef {
                     type_tree,
@@ -4234,7 +4230,7 @@ impl<'a> DefDefBody<'a> {
 
     pub fn encode(&self, name: u32, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(DEFDEF_TAG, writer, |payload| {
-            payload.write_nat(name);
+            payload.write_nat(name)?;
             for item in &self.header_items {
                 match item {
                     DefDefHeaderItem::Parameter(parameter) => parameter.encode(payload)?,
@@ -4376,7 +4372,7 @@ impl<'a> RepeatedNode<'a> {
 impl<'a> SelectOuterNode<'a> {
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(SELECTOUTER_TAG, writer, |payload| {
-            payload.write_nat(self.levels);
+            payload.write_nat(self.levels)?;
             self.qualifier.encode(payload)?;
             self.underlying_type.encode(payload)
         })
@@ -4386,7 +4382,7 @@ impl<'a> SelectOuterNode<'a> {
 impl<'a> ReturnNode<'a> {
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(RETURN_TAG, writer, |payload| {
-            payload.write_ast_ref(self.target.address);
+            payload.write_ast_ref(self.target.address)?;
             if let Some(expression) = &self.expression {
                 expression.encode(payload)?;
             }
@@ -4437,7 +4433,7 @@ impl<'a> MatchNode<'a> {
                     MatchCase::Inline(case) => case.encode(payload)?,
                     MatchCase::Shared { address, .. } => {
                         payload.write_u8(SHAREDTERM_TAG);
-                        payload.write_ast_ref(*address);
+                        payload.write_ast_ref(*address)?;
                     }
                 }
             }
@@ -4602,8 +4598,8 @@ impl<'a> AnnotationNode<'a> {
 impl ParamTypeNode {
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(PARAMTYPE_TAG, writer, |payload| {
-            payload.write_ast_ref(self.binder.address);
-            payload.write_nat(self.parameter_number);
+            payload.write_ast_ref(self.binder.address)?;
+            payload.write_nat(self.parameter_number)?;
             Ok(())
         })
     }
@@ -4618,7 +4614,7 @@ impl<'a> PolyTypeNode<'a> {
             self.result_type.encode(payload)?;
             for type_name in &self.type_names {
                 type_name.type_or_bounds.encode(payload)?;
-                payload.write_nat(type_name.name);
+                payload.write_nat(type_name.name)?;
             }
             Ok(())
         })
@@ -4631,7 +4627,7 @@ impl<'a> MethodTypeNode<'a> {
             self.result_type.encode(payload)?;
             for type_name in &self.type_names {
                 type_name.type_or_bounds.encode(payload)?;
-                payload.write_nat(type_name.name);
+                payload.write_nat(type_name.name)?;
             }
             for modifier in &self.modifiers {
                 if !is_modifier_tag(*modifier) {
@@ -4650,7 +4646,7 @@ impl<'a> RefinedTypeNode<'a> {
             return Err(TermEncodeError::InvalidValue { tag: self.tag });
         }
         encode_length_node(self.tag, writer, |payload| {
-            payload.write_nat(self.name);
+            payload.write_nat(self.name)?;
             self.parent.encode(payload)?;
             self.refinement.encode(payload)
         })
@@ -4674,7 +4670,7 @@ impl<'a> ParameterNode<'a> {
         };
         let remap_ast_refs = writer.has_ast_address_map();
         encode_length_node(tag, writer, |payload| {
-            payload.write_nat(name);
+            payload.write_nat(name)?;
             if remap_ast_refs {
                 let body = self.decode_body()?;
                 body.type_tree.encode(payload)?;
@@ -4703,7 +4699,7 @@ impl<'a> LambdaTptNode<'a> {
 impl<'a> BindNode<'a> {
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(BIND_TAG, writer, |payload| {
-            payload.write_nat(self.name);
+            payload.write_nat(self.name)?;
             self.type_tree.encode(payload)?;
             match &self.body {
                 BindBody::Pattern(pattern) => pattern.encode(payload)?,
@@ -4722,7 +4718,7 @@ impl<'a> BindNode<'a> {
 impl<'a> HoleNode<'a> {
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(HOLE_TAG, writer, |payload| {
-            payload.write_nat(self.index);
+            payload.write_nat(self.index)?;
             self.type_tree.encode(payload)?;
             encode_trees(&self.arguments, payload)
         })
@@ -4802,7 +4798,7 @@ impl<'a> InReferenceNode<'a> {
             return Err(TermEncodeError::InvalidValue { tag: self.tag });
         }
         encode_length_node(self.tag, writer, |payload| {
-            payload.write_nat(self.name);
+            payload.write_nat(self.name)?;
             self.qualifier.encode(payload)?;
             self.underlying_type.encode(payload)
         })
@@ -4815,7 +4811,7 @@ impl<'a> SelectInNode<'a> {
             return Err(TermEncodeError::InvalidValue { tag: self.tag });
         }
         encode_length_node(self.tag, writer, |payload| {
-            payload.write_nat(self.name);
+            payload.write_nat(self.name)?;
             self.qualifier.encode(payload)?;
             self.underlying_type.encode(payload)
         })
@@ -5113,7 +5109,7 @@ impl<'a> ClassConstNode<'a> {
 impl<'a> NamedArgNode<'a> {
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         writer.write_u8(NAMEDARG_TAG);
-        writer.write_nat(self.name);
+        writer.write_nat(self.name)?;
         self.argument.encode(writer)
     }
 }
@@ -5124,7 +5120,7 @@ impl<'a> IdentNode<'a> {
             return Err(TermEncodeError::InvalidValue { tag: self.tag });
         }
         writer.write_u8(self.tag);
-        writer.write_nat(self.name);
+        writer.write_nat(self.name)?;
         self.type_tree.encode(writer)
     }
 }
@@ -5135,7 +5131,7 @@ impl<'a> SelectNode<'a> {
             return Err(TermEncodeError::InvalidValue { tag: self.tag });
         }
         writer.write_u8(self.tag);
-        writer.write_nat(self.name);
+        writer.write_nat(self.name)?;
         self.qualifier.encode(writer)
     }
 }
@@ -5149,7 +5145,7 @@ impl<'a> ReferenceNode<'a> {
             return Err(TermEncodeError::InvalidValue { tag: self.tag });
         }
         writer.write_u8(self.tag);
-        writer.write_nat_ast_operand(self.tag, self.reference);
+        writer.write_nat_ast_operand(self.tag, self.reference)?;
         self.qualifier.encode(writer)
     }
 }
@@ -5157,7 +5153,7 @@ impl<'a> ReferenceNode<'a> {
 impl<'a> SelfDefNode<'a> {
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         writer.write_u8(SELFDEF_TAG);
-        writer.write_nat(self.name);
+        writer.write_nat(self.name)?;
         self.type_tree.encode(writer)
     }
 }
@@ -9974,12 +9970,12 @@ mod tests {
     fn a_node_with_a_padded_length_prefix_is_located_at_its_tag() {
         let mut source = vec![7, 7];
         let start = source.len();
-        source.extend_from_slice(&[APPLIEDTYPE_TAG, 0, 0x80 | 125]);
+        source.extend_from_slice(&[APPLIEDTYPE_TAG, 0, 0, 0, 0, 0, 0, 0, 0, 0x80 | 125]);
         source.extend(std::iter::repeat_n(1, 125));
         let node = RawNode {
             tag: APPLIEDTYPE_TAG,
             offset: start,
-            payload: &source[start + 3..],
+            payload: &source[start + 10..],
         };
 
         assert_eq!(super::raw_node_offset(&source, &node), start);

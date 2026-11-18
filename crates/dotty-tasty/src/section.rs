@@ -4,7 +4,7 @@ use crate::ast::{
 use crate::name_table::NameRef;
 use crate::reader::{ReadError, Reader};
 use crate::term::{AstTreeNode, RawTree, TermEncodeError};
-use crate::writer::{WriteError, Writer};
+use crate::writer::{WriteError, Writer, ast_address_from_offset};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -193,6 +193,7 @@ pub struct ResolvedPosition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PositionSection {
     /// Length of each source line in UTF-16 code units, excluding the line feed.
+    /// Older Scala files can represent an unknown length with `u32::MAX`.
     pub line_sizes: Vec<u32>,
     /// Position events in wire order.
     pub entries: Vec<PositionEntry>,
@@ -239,7 +240,7 @@ impl Attribute {
             writer.write_u8(attribute.tag());
             if let Self::SourceFile(reference) | Self::StringExtension { reference, .. } = attribute
             {
-                writer.write_nat(*reference);
+                writer.write_nat(*reference)?;
             }
         }
         Ok(())
@@ -263,7 +264,7 @@ impl Comment {
     /// Encodes comments in their supplied order.
     pub fn encode_all(comments: &[Self], writer: &mut Writer) -> Result<(), WriteError> {
         for comment in comments {
-            writer.write_nat(comment.address);
+            writer.write_nat(comment.address)?;
             writer.write_utf8(&comment.text)?;
             writer.write_long_int(comment.coordinates);
         }
@@ -295,9 +296,13 @@ impl PositionSection {
             WriteError::LengthOverflow {
                 length: self.line_sizes.len(),
             }
-        })?);
+        })?)?;
         for line_size in &self.line_sizes {
-            writer.write_nat(*line_size);
+            if *line_size == u32::MAX {
+                writer.write_long_nat(u64::from(*line_size))?;
+            } else {
+                writer.write_nat(*line_size)?;
+            }
         }
 
         for entry in &self.entries {
@@ -718,7 +723,13 @@ impl<'a> Section<'a> {
 
         let mut line_sizes = Vec::with_capacity(line_count);
         for _ in 0..line_count {
-            line_sizes.push(reader.read_nat()?);
+            let offset = reader.position();
+            let size = reader.read_long_nat()?;
+            // Older Scala compilers emitted unsigned 0xffffffff for -1.
+            if size > i32::MAX as u64 && size != u64::from(u32::MAX) {
+                return Err(ReadError::IntegerOverflow { offset }.into());
+            }
+            line_sizes.push(size as u32);
         }
 
         let mut entries = Vec::new();
@@ -909,11 +920,7 @@ impl EncodedAstSection {
         let mut ast_addresses = Vec::with_capacity(nodes.len());
 
         for node in nodes {
-            ast_addresses.push(u32::try_from(writer.position()).map_err(|_| {
-                WriteError::NatOverflow {
-                    value: writer.position() as u64,
-                }
-            })?);
+            ast_addresses.push(ast_address_from_offset(writer.position())?);
             node.encode(&mut writer)?;
         }
 
@@ -1083,13 +1090,6 @@ impl EncodedAstSection {
 }
 
 const MAX_AST_RELOCATION_ITERATIONS: usize = 16;
-
-fn ast_address_from_offset(offset: usize) -> Result<u32, TermEncodeError> {
-    u32::try_from(offset).map_err(|_| {
-        let value = u64::try_from(offset).unwrap_or(u64::MAX);
-        WriteError::NatOverflow { value }.into()
-    })
-}
 
 // Compare before rewriting addresses. Rewritten operands are consequences
 // of relocation and must not be mistaken for edits to sibling identity.
@@ -1284,7 +1284,7 @@ impl<'a> SectionTable<'a> {
     /// Encodes all sections in their current order.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), WriteError> {
         for section in &self.sections {
-            writer.write_nat(section.name);
+            writer.write_nat(section.name)?;
             writer.write_length_prefixed_bytes(section.payload)?;
         }
         Ok(())
@@ -1703,15 +1703,37 @@ mod tests {
     }
 
     #[test]
+    fn preserves_the_legacy_negative_line_size_only_in_positions() {
+        let bytes = [0x81, 0x0f, 0x7f, 0x7f, 0x7f, 0xff];
+        let positions = Section::new(0, &bytes).decode_positions().unwrap();
+        assert_eq!(positions.line_sizes, [u32::MAX]);
+        let mut writer = Writer::new();
+        positions.encode(&mut writer).unwrap();
+        assert_eq!(writer.as_slice(), bytes);
+        assert_eq!(
+            Section::new(0, &[0x81, 8, 0, 0, 0, 0x80]).decode_positions(),
+            Err(SectionError::Read(ReadError::IntegerOverflow { offset: 1 }))
+        );
+        assert_eq!(
+            PositionSection {
+                line_sizes: vec![1 << 31],
+                entries: vec![]
+            }
+            .encode(&mut Writer::new()),
+            Err(WriteError::NatOverflow { value: 1 << 31 })
+        );
+    }
+
+    #[test]
     fn rejects_a_maximal_position_line_count_before_allocating_line_sizes() {
-        let bytes = [0x0f, 0x7f, 0x7f, 0x7f, 0xff];
+        let bytes = [0x07, 0x7f, 0x7f, 0x7f, 0xff];
         let section = Section::new(0, &bytes);
 
         assert_eq!(
             section.decode_positions(),
             Err(SectionError::Read(ReadError::UnexpectedEof {
                 offset: 5,
-                needed: u32::MAX as usize,
+                needed: i32::MAX as usize,
                 remaining: 0,
             }))
         );
@@ -1829,7 +1851,7 @@ mod tests {
     fn relocates_structured_ast_references_after_node_growth() {
         fn select_outer_tree(levels: u32) -> RawTree<'static> {
             let mut payload = Writer::new();
-            payload.write_nat(levels);
+            payload.write_nat(levels).unwrap();
             RawTree::leaf(crate::TERMREFPKG_TAG, TermValue::NameRef(1))
                 .unwrap()
                 .encode(&mut payload)

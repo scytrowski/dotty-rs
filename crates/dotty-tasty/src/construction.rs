@@ -140,6 +140,12 @@ impl std::error::Error for AstBuildError {
         }
     }
 }
+impl From<WriteError> for AstBuildError {
+    fn from(error: WriteError) -> Self {
+        Self::Write(error)
+    }
+}
+
 impl From<TermEncodeError> for AstBuildError {
     fn from(e: TermEncodeError) -> Self {
         Self::Term(e)
@@ -394,7 +400,7 @@ impl AstBuilder {
         if size > self.limits.max_bytes {
             return Err(AstBuildError::Limit("bytes"));
         }
-        u32::try_from(size).map_err(|_| AstBuildError::Overflow)?;
+        i32::try_from(size).map_err(|_| AstBuildError::Overflow)?;
         Ok(size)
     }
     fn add(&self, a: usize, b: usize) -> Result<usize, AstBuildError> {
@@ -423,11 +429,12 @@ impl AstBuilder {
                 writer.write_nat(match value {
                     AstOperand::Nat(n) => *n,
                     AstOperand::Reference(l) => address(*l)?,
-                });
+                })?;
             }
             AstNode::Length { tag, .. } => {
                 writer.write_u8(*tag);
-                writer.write_nat(u32::try_from(payload_size).map_err(|_| AstBuildError::Overflow)?);
+                writer
+                    .write_nat(u32::try_from(payload_size).map_err(|_| AstBuildError::Overflow)?)?;
             }
         }
         Ok(())
@@ -557,7 +564,7 @@ impl AstBuilder {
             let mut stack: Vec<_> = roots.iter().rev().map(|l| AstField::Tree(*l)).collect();
             while let Some(field) = stack.pop() {
                 match field {
-                    AstField::Nat(n) => writer.write_nat(n),
+                    AstField::Nat(n) => writer.write_nat(n)?,
                     AstField::Tree(l) => {
                         let node = self.node(l)?;
                         Self::write_prefix(
