@@ -15,11 +15,20 @@ pub use dotty_classfile::classfile;
 /// TASTy unpickler, and namer/typer.
 pub use dotty_core::core;
 
+/// Scala 3 source lexer and contextual scanner.
+pub use dotty_lexer as lexer;
+
 /// Scala 3.9.0 source parser infrastructure and parser-facing AST APIs.
 pub use dotty_parser as parser;
 
-/// Source declaration signature completion.
+/// Source declaration naming and semantic indexing.
+pub use dotty_namer as namer;
+
+/// Source signature completion and expression typing.
 pub use dotty_typer as typer;
+
+/// JVM class planning and emission from typed trees.
+pub use dotty_jvm as jvm;
 
 /// Classpath loading APIs, unifying TASTy and class file entries.
 pub use dotty_classloader::classloader;

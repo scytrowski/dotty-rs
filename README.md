@@ -108,10 +108,11 @@ revisions and are not measurements of the current checkout.
 | `dotty-jvm` | Typed-semantic plans to JVM class files |
 | `dotty` (root) | Selected public re-exports, bounded paired-plan/artifact coordination (including linked Counter/CounterOwner composition), and integration tests |
 
-The root facade does not re-export every workspace crate: use crates such as
-`dotty-lexer`, `dotty-namer`, `dotty-jvm`, and `dotty-tasty-pickler` directly when
-assembling a pipeline. Source frontend production dependencies remain independent
-of the JVM adapters; see the
+An external compiler can depend on `dotty` alone and assemble a source-to-JVM
+pipeline with `dotty::{core, lexer, parser, namer, typer, jvm}`. The caller owns
+the session stores, orders the phases and chooses where to write generated classes.
+For direct access to the semantic pickler, depend on `dotty-tasty-pickler`.
+Source frontend production dependencies remain independent of the JVM adapters. See the
 [frontend/platform boundaries](docs/frontend-platform-boundaries.md).
 
 ## Build and validate
