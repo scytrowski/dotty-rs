@@ -270,6 +270,29 @@ impl<'a> SourceTyper<'a> {
         definitions: Definitions,
         packages: &'a Packages,
     ) -> Self {
+        Self::new_with_typed_ast(
+            arena,
+            source,
+            index,
+            store,
+            definitions,
+            packages,
+            AstArena::new(),
+        )
+    }
+
+    /// Starts typing a fresh source unit, appending trees to the session's output arena.
+    /// All existing trees must belong to the same semantic store. Source indexes
+    /// and expression contexts remain local to this driver.
+    pub fn new_with_typed_ast(
+        arena: &'a AstArena<Untyped>,
+        source: SourceId,
+        index: &'a SourceSemanticIndex,
+        store: &'a mut SemanticStore,
+        definitions: Definitions,
+        packages: &'a Packages,
+        typed_arena: AstArena<Typed>,
+    ) -> Self {
         Self {
             arena,
             source,
@@ -301,7 +324,7 @@ impl<'a> SourceTyper<'a> {
             import_qualifier_cache: HashMap::new(),
             import_member_cache: HashMap::new(),
             semantic_transaction_depth: 0,
-            typed_arena: AstArena::new(),
+            typed_arena,
             typed_index: SourceTypedIndex::new(),
             function_literals: expression::FunctionLiteralIndex::default(),
             expression_scopes: Vec::new(),
@@ -786,6 +809,12 @@ impl<'a> SourceTyper<'a> {
             })?;
         new_mappings.push((self.source, tree));
         Ok(typed)
+    }
+
+    /// Releases the semantic store borrow and transfers the exact output arena
+    /// for backend use or for typing another source in the same session.
+    pub fn into_typed_ast(self) -> AstArena<Typed> {
+        self.typed_arena
     }
 
     /// Returns this driver's source type cache.
@@ -1457,6 +1486,56 @@ mod tests {
         )
         .unwrap();
         (parsed, index)
+    }
+
+    #[test]
+    fn appending_a_source_to_the_typed_arena_preserves_prior_roots_on_rollback() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let a = SourceId::from_index(1);
+        let b = SourceId::from_index(2);
+        let (first, ai) =
+            parse_and_name_unit("class A { def f(): Int = 1 }", a, &mut store, &mut packages);
+        let (second, bi) =
+            parse_and_name_unit("class B { def g(): Int = 2 }", b, &mut store, &mut packages);
+        let (f, a_rhs) = method_definition_and_rhs(&first, &store, &ai, a, "f");
+        let (g, b_rhs) = method_definition_and_rhs(&second, &store, &bi, b, "g");
+        assert_eq!(a_rhs, b_rhs); // Same slot in different input arenas.
+
+        let mut typer = SourceTyper::new(&first.ast, a, &ai, &mut store, definitions, &packages);
+        let context = typer.expression_context_for(f).unwrap();
+        let first_root = typer.type_expression(a_rhs, context).unwrap();
+        let output = typer.into_typed_ast();
+        let checkpoint = output.checkpoint();
+        let mut typer = SourceTyper::new_with_typed_ast(
+            &second.ast,
+            b,
+            &bi,
+            &mut store,
+            definitions,
+            &packages,
+            output,
+        );
+        let context = typer.expression_context_for(g).unwrap();
+        assert!(
+            matches!(typer.type_expression_expected(b_rhs, context, definitions.boolean),
+            Err(TyperError::ExpectedExpressionTypeMismatch { source, .. }) if source == b)
+        );
+        assert_eq!(typer.typed_ast().checkpoint(), checkpoint);
+        assert_eq!(typer.source_typed_index().get(b, b_rhs), None);
+
+        let second_root = typer.type_expression(b_rhs, context).unwrap();
+        assert_ne!(first_root, second_root);
+        let output = typer.into_typed_ast();
+        assert_eq!(
+            output.get(first_root).position,
+            first.ast.get(a_rhs).position
+        );
+        assert_eq!(
+            output.get(second_root).position,
+            second.ast.get(b_rhs).position
+        );
     }
 
     fn val_symbol(
