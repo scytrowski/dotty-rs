@@ -20680,6 +20680,8 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::TypeAscriptionTreeCannotBeReified { .. } => "TypeAscriptionTreeCannotBeReified",
         TyperError::ApplicationMethodKindMismatch { .. } => "ApplicationMethodKindMismatch",
         TyperError::UnsupportedApplicationMethodKind { .. } => "UnsupportedApplicationMethodKind",
+        TyperError::DivergentContextualArgument { .. } => "DivergentContextualArgument",
+        TyperError::ContextualSearchLimit { .. } => "ContextualSearchLimit",
         TyperError::MissingContextualArgument { .. } => "MissingContextualArgument",
         TyperError::AmbiguousContextualArgument { .. } => "AmbiguousContextualArgument",
         TyperError::UsingApplicationDeferred { .. } => "UsingApplicationDeferred",

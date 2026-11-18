@@ -304,3 +304,114 @@ fn applied_type_and_argument_companions_contribute_evidence() {
     };
     assert_eq!(reference(&typer, app.args[0]), boxed);
 }
+
+#[test]
+fn conditional_given_infers_its_binder_from_the_goal_and_solves_its_dependency() {
+    let text = concat!(
+        include_str!("../../../tests/fixtures/contextual-arguments/Evidence.scala"),
+        "\nclass Client { def ask(using t: TC[Box[Int]]): TC[Box[Int]] = t; def result: TC[Box[Int]] = ask }"
+    );
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "result");
+    let producer = method_symbol(&parsed, &store, &index, source, "boxes");
+    let (leaf, _, _) = val_definition_and_rhs(&parsed, &store, &index, source, "ints");
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    typer
+        .type_method_definition(definition_tree(&index, method))
+        .unwrap();
+    let rhs = typer.typed_index.get(source, rhs).unwrap();
+    let TreeKind::Apply(ask) = &typer.typed_ast().get(rhs).kind else {
+        panic!()
+    };
+    let TreeKind::Apply(boxes) = &typer.typed_ast().get(ask.args[0]).kind else {
+        panic!()
+    };
+    let TreeKind::TypeApply(tapp) = &typer.typed_ast().get(boxes.function).kind else {
+        panic!()
+    };
+    assert_eq!(reference(&typer, tapp.function), producer);
+    assert_eq!(typer.typed_ast().get(tapp.args[0]).ty, definitions.int);
+    assert_eq!(reference(&typer, boxes.args[0]), leaf);
+}
+
+#[test]
+fn recursive_search_rejects_an_ambiguous_dependency_and_retries_after_failure() {
+    let text = "class A; class B; object B { given fromA: A => B = new B }; class Use { def take(using b: B): B = b; def ambiguous(using a1: A, a2: A): B = take; def missing: B = take; def good(using a: A): B = take }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for name in ["missing", "ambiguous", "good"] {
+        let method = method_symbol(&parsed, typer.store(), &index, source, name);
+        let before = typer.store.checkpoint();
+        let result = typer.type_method_definition(definition_tree(&index, method));
+        match name {
+            "missing" => assert!(
+                matches!(result, Err(TyperError::MissingContextualArgument { .. })),
+                "{result:?}"
+            ),
+            "ambiguous" => assert!(
+                matches!(result, Err(TyperError::AmbiguousContextualArgument{ref candidates, ..}) if candidates.len() == 2),
+                "{result:?}"
+            ),
+            _ => {
+                result.unwrap();
+                continue;
+            }
+        }
+        assert_eq!(typer.store.checkpoint(), before);
+        assert!(typer.typed_index.is_empty());
+    }
+}
+
+#[test]
+fn cyclic_dependency_fails_locally_and_does_not_hide_a_valid_alternative() {
+    for (extra, succeeds) in [("", false), ("given direct: B = new B", true)] {
+        let text = format!(
+            "class B; object B {{ given loop: B => B = new B; {extra} }}; class C {{ def ask(using b: B): B = b; def call: B = ask }}"
+        );
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(&text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "call");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let result = typer.type_method_definition(definition_tree(&index, method));
+        if succeeds {
+            result.unwrap();
+            let call = typer.typed_index.get(source, rhs).unwrap();
+            let TreeKind::Apply(call) = &typer.typed_ast().get(call).kind else {
+                panic!()
+            };
+            let symbol = reference(&typer, call.args[0]);
+            assert_eq!(
+                typer
+                    .store
+                    .names
+                    .resolve(typer.store.symbols.get(symbol).name.text()),
+                "direct"
+            );
+        } else {
+            assert!(
+                matches!(result, Err(TyperError::DivergentContextualArgument { .. })),
+                "{result:?}"
+            );
+        }
+    }
+}

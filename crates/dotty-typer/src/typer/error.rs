@@ -1131,6 +1131,17 @@ pub enum TyperError {
         tree_index: u32,
         expected: TypeId,
     },
+    /// A recursive provider revisited the same goal.
+    DivergentContextualArgument {
+        source: SourceId,
+        tree_index: u32,
+        expected: TypeId,
+    },
+    /// Context argument search exceeded its nesting or work budget.
+    ContextualSearchLimit {
+        source: SourceId,
+        tree_index: u32,
+    },
     /// Multiple contextual values at the same priority conform to the formal.
     AmbiguousContextualArgument {
         source: SourceId,

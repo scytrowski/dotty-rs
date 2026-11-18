@@ -26,6 +26,24 @@ impl SourceTyper<'_> {
         &mut self,
         operation: impl FnOnce(&mut Self, &mut Vec<(SymbolId, SymbolInfo)>) -> Result<T, TyperError>,
     ) -> Result<T, TyperError> {
+        self.semantic_attempt(Some(&mut Vec::new()), operation)
+    }
+
+    /// Probe eligibility without retaining any candidate-local allocations or completions.
+    pub(super) fn probe_contextual_candidate(
+        &mut self,
+        operation: impl FnOnce(&mut Self, &mut Vec<(SymbolId, SymbolInfo)>) -> Result<(), TyperError>,
+    ) -> Result<(), TyperError> {
+        self.semantic_attempt(None, operation)
+    }
+
+    /// A single eligible head can keep its typed evidence on success. Propagate
+    /// its info journal so that an enclosing failed call still rolls it back.
+    pub(super) fn semantic_attempt<T>(
+        &mut self,
+        parent_journal: Option<&mut Vec<(SymbolId, SymbolInfo)>>,
+        operation: impl FnOnce(&mut Self, &mut Vec<(SymbolId, SymbolInfo)>) -> Result<T, TyperError>,
+    ) -> Result<T, TyperError> {
         let outermost_transaction = self.begin_semantic_transaction();
         let diagnostic_checkpoint = self.diagnostics.len();
         let checkpoint = self.store.checkpoint();
@@ -51,8 +69,8 @@ impl SourceTyper<'_> {
         let expression_scope_checkpoint = self.expression_scopes.clone();
         let mut info_journal = Vec::new();
         let result = operation(self, &mut info_journal);
-        let committed = result.is_ok();
-        if result.is_err() {
+        let committed = parent_journal.is_some() && result.is_ok();
+        if !committed {
             self.diagnostics.truncate(diagnostic_checkpoint);
             for (changed, previous) in info_journal.into_iter().rev() {
                 if self.store.symbols.contains(changed) {
@@ -79,6 +97,8 @@ impl SourceTyper<'_> {
             self.inferred_field_types_in_progress = inferred_field_types_checkpoint;
             self.inferred_method_results_in_progress = inferred_method_results_checkpoint;
             self.expression_scopes = expression_scope_checkpoint;
+        } else if let Some(journal) = parent_journal {
+            journal.extend(info_journal);
         }
         self.finish_semantic_transaction(outermost_transaction, committed);
         result

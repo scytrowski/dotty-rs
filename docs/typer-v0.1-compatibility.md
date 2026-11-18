@@ -1444,7 +1444,10 @@ imports, and unbounded or nominally bounded given selectors. Imported
 values retain their receiver in the typed selection. After lexical search finds
 no candidate, applied types contribute their constructor and argument anchors;
 nominal anchors contribute their linked companion and base classes. Candidates
-in these companions are ranked together.
+in these companions are ranked together. Conditional providers with inferable
+result-type binders build a typed type application and recursively supply their
+contextual clauses. Missing or cyclic dependencies can eliminate a candidate;
+ambiguity in a dependency propagates. Search has explicit depth and work limits.
 Each inserted ordinary typed application
 retains the exact selected parameter reference. Missing and ambiguous evidence
 report the expected type and source site. Explicit `using` keeps its own kind.
