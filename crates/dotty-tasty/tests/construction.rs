@@ -245,3 +245,78 @@ fn method_type_fields_keep_name_nats_after_each_parameter_tree() {
     assert_eq!(method.type_names[0].name, 2);
     assert_eq!(method.modifiers, []);
 }
+
+#[test]
+fn bind_references_follow_the_namespace_of_the_unshared_type() {
+    for (bound_tag, ref_tag, shared, valid) in [
+        (TYPEBOUNDS_TAG, TYPEREFDIRECT_TAG, false, true),
+        (TYPEBOUNDS_TAG, TYPEREFSYMBOL_TAG, true, true),
+        (TYPEBOUNDS_TAG, TERMREFDIRECT_TAG, true, false),
+        (TYPEREFPKG_TAG, TERMREFSYMBOL_TAG, false, true),
+        (TYPEREFPKG_TAG, TYPEREFDIRECT_TAG, true, false),
+    ] {
+        let mut builder = AstBuilder::new(Default::default());
+        let tpe = builder
+            .push(leaf(TYPEREFPKG_TAG, TermValue::NameRef(1)))
+            .unwrap();
+        let mut bound = if bound_tag == TYPEBOUNDS_TAG {
+            builder
+                .push(AstNode::Length {
+                    tag: TYPEBOUNDS_TAG,
+                    fields: vec![AstField::Tree(tpe)],
+                })
+                .unwrap()
+        } else {
+            tpe
+        };
+        let mut roots = Vec::new();
+        if shared {
+            roots.push(bound);
+            bound = builder
+                .push(AstNode::Reference {
+                    tag: SHAREDTYPE_TAG,
+                    target: bound,
+                })
+                .unwrap();
+        }
+        let bind = builder
+            .push(AstNode::Length {
+                tag: BIND_TAG,
+                fields: vec![AstField::Nat(0), AstField::Tree(bound)],
+            })
+            .unwrap();
+        roots.push(bind);
+        let reference = if matches!(ref_tag, TYPEREFSYMBOL_TAG | TERMREFSYMBOL_TAG) {
+            let child = builder
+                .push(leaf(TYPEREFPKG_TAG, TermValue::NameRef(1)))
+                .unwrap();
+            AstNode::NatAst {
+                tag: ref_tag,
+                value: AstOperand::Reference(bind),
+                child,
+            }
+        } else {
+            AstNode::Reference {
+                tag: ref_tag,
+                target: bind,
+            }
+        };
+        let site = builder.push(reference).unwrap();
+        roots.push(site);
+        let built = builder.finish(&roots);
+        if valid {
+            let built = built.unwrap();
+            let mut reader =
+                Reader::new(&built.bytes()[built.address(site).unwrap() as usize + 1..]);
+            assert_eq!(reader.read_nat().unwrap(), built.address(bind).unwrap());
+        } else {
+            assert_eq!(
+                built,
+                Err(AstBuildError::InvalidReference {
+                    tag: ref_tag,
+                    target: bind
+                })
+            );
+        }
+    }
+}

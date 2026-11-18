@@ -398,6 +398,73 @@ impl AstBuilder {
         }
         Ok(writer)
     }
+    fn validate_reference_targets(&self, order: &[AstLabel]) -> Result<(), AstBuildError> {
+        // Scala determines a BIND's namespace from its first tree, following
+        // shared references. Earlier nodes already have their unshared tag.
+        let mut unshared_tags = vec![0; self.nodes.len()];
+        for &label in order {
+            let node = self.node(label)?;
+            unshared_tags[label.0] = match node {
+                AstNode::Reference {
+                    tag: tag @ (SHAREDTERM_TAG | SHAREDTYPE_TAG),
+                    target,
+                } => {
+                    let tag_at_target = *unshared_tags
+                        .get(target.0)
+                        .ok_or(AstBuildError::InvalidLabel(*target))?;
+                    if tag_at_target == 0 {
+                        return Err(AstBuildError::InvalidReference {
+                            tag: *tag,
+                            target: *target,
+                        });
+                    }
+                    tag_at_target
+                }
+                _ => node.tag(),
+            };
+        }
+        for &label in order {
+            let (tag, target) = match self.node(label)? {
+                AstNode::Reference {
+                    tag: SHAREDTERM_TAG | SHAREDTYPE_TAG,
+                    ..
+                } => continue,
+                AstNode::Reference { tag, target }
+                | AstNode::NatAst {
+                    tag,
+                    value: AstOperand::Reference(target),
+                    ..
+                } => (*tag, *target),
+                _ => continue,
+            };
+            let target_node = self.node(target)?;
+            let valid = match (tag, target_node) {
+                (
+                    TYPEREFDIRECT_TAG | TYPEREFSYMBOL_TAG | TERMREFDIRECT_TAG | TERMREFSYMBOL_TAG,
+                    AstNode::Length {
+                        tag: BIND_TAG,
+                        fields,
+                    },
+                ) => {
+                    matches!(fields.as_slice(), [AstField::Nat(_), AstField::Tree(bound), ..]
+                        if (unshared_tags[bound.0] == TYPEBOUNDS_TAG) == matches!(tag, TYPEREFDIRECT_TAG | TYPEREFSYMBOL_TAG))
+                }
+                (TYPEREFDIRECT_TAG | TYPEREFSYMBOL_TAG, _) => {
+                    matches!(target_node.tag(), TYPEDEF_TAG | TYPEPARAM_TAG)
+                }
+                (TERMREFDIRECT_TAG | TERMREFSYMBOL_TAG, _) => {
+                    matches!(target_node.tag(), VALDEF_TAG | DEFDEF_TAG | PARAM_TAG)
+                }
+                (RECTHIS_TAG, _) => target_node.tag() == RECTYPE_TAG,
+                _ => false,
+            };
+            if !valid {
+                return Err(AstBuildError::InvalidReference { tag, target });
+            }
+        }
+        Ok(())
+    }
+
     /// Resolves all labels and emits a fresh fragment. Order comes only from roots
     /// and child fields. Shared references must point backward; direct/symbol
     /// references must target a declaration of the correct namespace.
@@ -469,34 +536,7 @@ impl AstBuilder {
                 addresses = next;
                 continue;
             }
-            for &label in &order {
-                let reference = match self.node(label)? {
-                    AstNode::Reference { tag, target } => Some((*tag, *target)),
-                    AstNode::NatAst {
-                        tag,
-                        value: AstOperand::Reference(target),
-                        ..
-                    } => Some((*tag, *target)),
-                    _ => None,
-                };
-                if let Some((tag, target)) = reference {
-                    let target_tag = self.node(target)?.tag();
-                    let valid = match tag {
-                        SHAREDTERM_TAG | SHAREDTYPE_TAG => addresses[target.0] < addresses[label.0],
-                        TYPEREFDIRECT_TAG | TYPEREFSYMBOL_TAG => {
-                            matches!(target_tag, TYPEDEF_TAG | TYPEPARAM_TAG)
-                        }
-                        TERMREFDIRECT_TAG | TERMREFSYMBOL_TAG => {
-                            matches!(target_tag, VALDEF_TAG | DEFDEF_TAG | PARAM_TAG | BIND_TAG)
-                        }
-                        RECTHIS_TAG => target_tag == RECTYPE_TAG,
-                        _ => false,
-                    };
-                    if !valid {
-                        return Err(AstBuildError::InvalidReference { tag, target });
-                    }
-                }
-            }
+            self.validate_reference_targets(&order)?;
             let mut writer = Writer::with_capacity(end);
             let mut stack: Vec<_> = roots.iter().rev().map(|l| AstField::Tree(*l)).collect();
             while let Some(field) = stack.pop() {
