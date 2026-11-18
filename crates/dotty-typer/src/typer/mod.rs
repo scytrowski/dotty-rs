@@ -38495,7 +38495,7 @@ mod tests {
     }
 
     #[test]
-    fn contextual_function_projection_does_not_insert_a_contextual_application() {
+    fn positional_context_function_call_searches_for_evidence_before_applying_the_result() {
         let source_text = "class C { def use(function: Int ?=> Int): Int = function(1) }";
         let (parsed, mut store, mut packages, definitions, index, source) =
             parse_and_name(source_text);
@@ -38513,7 +38513,7 @@ mod tests {
         let context = typer.expression_context_for(method).unwrap();
         let result = typer.type_expression(rhs, context);
         assert!(
-            matches!(&result, Err(TyperError::ApplicationCalleeNotMethod { .. })),
+            matches!(&result, Err(TyperError::MissingContextualArgument {expected,..}) if *expected==definitions.int),
             "{result:?}"
         );
     }

@@ -232,6 +232,21 @@ impl SourceTyper<'_> {
                 let function_type = self.typed_arena.get(function).ty;
                 let callable =
                     self.widen_expression_type_journaled(function_type, info_journal, 0)?;
+                // In f(x) a context function supplies its own arguments first.
+                // The written argument belongs to the resulting callable.
+                let (function, callable) = if application.kind == ApplyKind::Regular
+                    && self.is_applied_context_function(callable)
+                {
+                    let applied = self.apply_context_function_at_value(
+                        application.function,
+                        function,
+                        context,
+                        info_journal,
+                    )?;
+                    (applied, self.typed_arena.get(applied).ty)
+                } else {
+                    (function, callable)
+                };
                 let (function, callable) =
                     self.resolve_apply_function(function, callable, request, info_journal)?;
                 (function, callable, None, None)
