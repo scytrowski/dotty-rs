@@ -623,6 +623,24 @@ impl Validator<'_, '_> {
                         && initializers.iter().any(|initializer| initializer.local == first)
                         && initializers.iter().any(|initializer| initializer.local == second))
             });
+            let conditional_pair_matches_rhs_roles = !conditional_mutable_reassignment_shape
+                || conditional_assignment.is_some_and(|assignment| {
+                    pair.is_some_and(|pair| {
+                        let local_symbols = pair.arguments.map(|argument| match argument.origin {
+                            crate::FormalLocalConstructorCallArgumentOrigin::LocalValue {
+                                symbol,
+                                ..
+                            } => Some(symbol),
+                            crate::FormalLocalConstructorCallArgumentOrigin::Formal { .. } => None,
+                        });
+                        matches!(
+                            local_symbols,
+                            [Some(first), Some(second)]
+                                if first == assignment.rhs_locals[1]
+                                    && second == assignment.rhs_locals[0]
+                        )
+                    })
+                });
             let two_local_shape = (source_block.stats.len() == 2
                 || verified_call_stat_shape
                 || selected_local_shape
@@ -634,6 +652,7 @@ impl Validator<'_, '_> {
                     || conditional_mutable_reassignment_shape
                     || source_block.stats.len() == 2 + call_bindings.len())
                 && (call_bindings.is_empty() || distinct_local_pair_matches_initializers)
+                && conditional_pair_matches_rhs_roles
                 && local_argument_indices.len() == 2
                 && initializers.len() == 2
                 && initializers[0].local != initializers[1].local

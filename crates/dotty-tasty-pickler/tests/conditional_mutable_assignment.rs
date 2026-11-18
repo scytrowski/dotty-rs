@@ -125,13 +125,27 @@ fn raw_tag(tree: &RawTree<'_>) -> u8 {
 
 #[test]
 fn exact_conditional_receipt_emits_the_bounded_result_first_tasty_body() {
+    check_conditional_source(SOURCE, true);
+}
+
+#[test]
+fn reversed_conditional_pair_arguments_are_rejected_from_fresh_source() {
+    let reversed = SOURCE.replace("new Pair(first, second)", "new Pair(second, first)");
+    assert_ne!(
+        reversed, SOURCE,
+        "the regression source actually reverses Pair"
+    );
+    check_conditional_source(&reversed, false);
+}
+
+fn check_conditional_source(source: &str, should_emit: bool) {
     let source_id = SourceId::from_index(235_001);
-    let scanner = ContextualScanner::new(SOURCE).unwrap();
+    let scanner = ContextualScanner::new(source).unwrap();
     assert!(scanner.diagnostics().is_empty());
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
     let parsed = parse_compilation_unit(
-        SourceText::new(SOURCE).unwrap(),
+        SourceText::new(source).unwrap(),
         source_id,
         scanner,
         &mut store.names,
@@ -505,7 +519,15 @@ fn exact_conditional_receipt_emits_the_bounded_result_first_tasty_body() {
             members: &members,
         };
         let validated = plan.validate().unwrap();
-        validated.validate_method_bodies().unwrap();
+        let body_validation = validated.validate_method_bodies();
+        if !should_emit {
+            assert!(
+                body_validation.is_err(),
+                "fresh, fully typed reversed Pair arguments fail body validation"
+            );
+            return;
+        }
+        body_validation.unwrap();
         validated.pickle().unwrap().bytes().to_vec()
     };
     if let Ok(output_path) = env::var("DOTTY_CONDITIONAL_MUTABLE_TASTY_OUTPUT") {
