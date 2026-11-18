@@ -367,6 +367,12 @@ constructing `ContextualScanner`. This keeps the state machine small while the
 raw/scanner contract is still being stabilized. It can later be replaced by
 incremental buffering without changing parser-facing token kinds or ranges.
 
+Parser feedback edits a gap buffer, with the consumed prefix in source order
+and the suffix in reverse order. Moving between edit positions transfers only
+the intervening tokens. Logical lookahead leaves the gap in place. The public
+`tokens()` accessor materializes and caches a contiguous snapshot after edits,
+and each subsequent edit invalidates that snapshot.
+
 The scanner must preserve source-token ordering, balance regions by EOF, and
 never underflow its region stack.
 

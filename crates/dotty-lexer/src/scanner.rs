@@ -4,6 +4,7 @@ use dotty_core::source::{
 };
 use dotty_core::token::{HardKeyword, Punctuation, ScannerEvent, Token, TokenKind, TokenSource};
 
+use crate::token_buffer::TokenBuffer;
 use crate::xml::XmlState;
 use crate::{
     LexerDiagnostic, LexerIssue, RawItem, RawLexer, RawLexerError, RawToken, RawTokenKind, Trivia,
@@ -19,7 +20,7 @@ use crate::{
 pub struct ContextualScanner {
     source: String,
     indentation: IndentationIndex,
-    tokens: Vec<Token>,
+    tokens: TokenBuffer,
     position: usize,
     diagnostics: Vec<LexerDiagnostic>,
     feedback_regions: Vec<FeedbackRegion>,
@@ -88,7 +89,7 @@ impl ContextualScanner {
 
     /// Returns all tokens produced by this scan.
     pub fn tokens(&self) -> &[Token] {
-        &self.tokens
+        self.tokens.as_slice()
     }
 
     /// Returns the next token and advances the scanner.
@@ -274,7 +275,7 @@ impl ContextualScanner {
         next_indent: &IndentWidth,
     ) -> Option<IndentWidth<'_>> {
         let mut indentations = Vec::new();
-        for token in &self.tokens[..index] {
+        for token in self.tokens.range(0..index) {
             match token.kind {
                 TokenKind::Indent => {
                     if !self.delimiter_closed_indents.contains(&token.span.start()) {
@@ -299,7 +300,7 @@ impl ContextualScanner {
         next_indent: &IndentWidth,
     ) -> Option<IndentWidth<'_>> {
         let mut indentations = Vec::new();
-        for token in &self.tokens[..index] {
+        for token in self.tokens.range(0..index) {
             match token.kind {
                 TokenKind::Punctuation(Punctuation::LeftBrace) => {
                     indentations.push(self.indentation_at(token.span.start()));
@@ -521,8 +522,8 @@ impl ContextualScanner {
     }
 
     fn has_open_brace_before(&self, index: usize) -> bool {
-        self.tokens[..index]
-            .iter()
+        self.tokens
+            .range(0..index)
             .fold(0usize, |depth, token| match token.kind {
                 TokenKind::Punctuation(Punctuation::LeftBrace) => depth.saturating_add(1),
                 TokenKind::Punctuation(Punctuation::RightBrace) => depth.saturating_sub(1),
@@ -586,8 +587,9 @@ impl ContextualScanner {
 
             let has_line_break =
                 has_source_line_break(&self.source, previous.span.end(), current.span.start());
-            let has_separator = self.tokens[previous_index + 1..current_index]
-                .iter()
+            let has_separator = self
+                .tokens
+                .range(previous_index + 1..current_index)
                 .any(|token| matches!(token.kind, TokenKind::Newline | TokenKind::Newlines));
             let starts_unspaced_prefix_expr =
                 is_unspaced_prefix_expr(&self.source, &self.tokens, current_index);
@@ -695,8 +697,9 @@ impl ContextualScanner {
         } else {
             // EOF can close any remaining physical indent, including one ended by
             // a delimiter. Elsewhere the reverse lookup already proved positive depth.
-            let depth = self.tokens[..index]
-                .iter()
+            let depth = self
+                .tokens
+                .range(0..index)
                 .fold(0usize, |depth, token| match token.kind {
                     TokenKind::Indent => depth.saturating_add(1),
                     TokenKind::Outdent => depth.saturating_sub(1),
@@ -767,7 +770,7 @@ impl ContextualScanner {
 
     fn innermost_open_indent_index(&self, before: usize) -> Option<usize> {
         let mut closed_regions = 0usize;
-        for (index, token) in self.tokens[..before].iter().enumerate().rev() {
+        for (index, token) in self.tokens.range(0..before).enumerate().rev() {
             match token.kind {
                 TokenKind::Outdent => closed_regions = closed_regions.saturating_add(1),
                 TokenKind::Indent
@@ -1030,7 +1033,7 @@ impl TokenSource for ContextualScanner {
                         // body before its infix continuation; move that
                         // boundary past the operator so its RHS stays in the
                         // same expression.
-                        self.tokens.drain(index + 1..operator_index);
+                        self.tokens.remove_range(index + 1..operator_index);
                         self.tokens.insert(index + 2, separator);
                     }
 
@@ -1119,7 +1122,7 @@ fn build_tokens(
     lines: &IndentationIndex,
     items: &[RawItem],
     diagnostics: &mut Vec<LexerDiagnostic>,
-) -> Result<Vec<Token>, RawLexerError> {
+) -> Result<TokenBuffer, RawLexerError> {
     let mut tokens = Vec::new();
     let mut trivia = Vec::new();
     let mut previous_kind = None;
@@ -1355,6 +1358,7 @@ fn build_tokens(
         }
     }
 
+    let mut tokens = TokenBuffer::from(tokens);
     classify_end_markers(source, &mut tokens);
 
     Ok(tokens)
@@ -1727,7 +1731,7 @@ fn suppresses_statement_separator_kind(kind: TokenKind) -> bool {
 fn is_leading_infix_tokens(
     source: &str,
     lines: &IndentationIndex,
-    tokens: &[Token],
+    tokens: &TokenBuffer,
     previous_index: usize,
     current_index: usize,
     body_indent: &IndentWidth,
@@ -1771,7 +1775,7 @@ fn is_leading_infix_tokens(
     previous_indent.is_prefix_of(&operator_indent) || operator_indent == *body_indent
 }
 
-fn is_unspaced_prefix_expr(source: &str, tokens: &[Token], operator_index: usize) -> bool {
+fn is_unspaced_prefix_expr(source: &str, tokens: &TokenBuffer, operator_index: usize) -> bool {
     let operator = &tokens[operator_index];
     if operator.kind != TokenKind::Operator
         || !matches!(
@@ -1952,20 +1956,20 @@ fn is_layout_token(kind: TokenKind) -> bool {
     )
 }
 
-fn previous_real_token(tokens: &[Token], index: usize) -> Option<&Token> {
-    tokens[..index]
-        .iter()
+fn previous_real_token(tokens: &TokenBuffer, index: usize) -> Option<&Token> {
+    tokens
+        .range(0..index)
         .rev()
         .find(|token| !is_layout_token(token.kind))
 }
 
-fn next_real_token(tokens: &[Token], index: usize) -> Option<&Token> {
-    tokens[index + 1..]
-        .iter()
+fn next_real_token(tokens: &TokenBuffer, index: usize) -> Option<&Token> {
+    tokens
+        .range(index + 1..tokens.len())
         .find(|token| !is_layout_token(token.kind))
 }
 
-fn classify_end_markers(source: &str, tokens: &mut [Token]) {
+fn classify_end_markers(source: &str, tokens: &mut TokenBuffer) {
     for index in 0..tokens.len() {
         if tokens[index].kind != TokenKind::Keyword(HardKeyword::End) {
             continue;
@@ -2002,12 +2006,12 @@ fn classify_end_markers(source: &str, tokens: &mut [Token]) {
 }
 
 fn next_real_token_after<'tokens>(
-    tokens: &'tokens [Token],
+    tokens: &'tokens TokenBuffer,
     index: usize,
     token: &Token,
 ) -> Option<&'tokens Token> {
-    let token_index = tokens[index + 1..]
-        .iter()
+    let token_index = tokens
+        .range(index + 1..tokens.len())
         .position(|candidate| std::ptr::eq(candidate, token))?;
     next_real_token(tokens, index + 1 + token_index)
 }
@@ -2313,7 +2317,8 @@ mod tests {
                 TextRange::new(offset, offset).expect("synthetic range is valid"),
             )
         })
-        .collect();
+        .collect::<Vec<_>>()
+        .into();
         scanner.delimiter_closed_indents.push(4);
 
         assert_eq!(scanner.innermost_open_indent_offset(4), Some(0));
@@ -3212,6 +3217,55 @@ mod tests {
         assert_eq!(scanner.current().kind, TokenKind::Indent);
         scanner.advance();
         assert_eq!(scanner.current().kind, TokenKind::Keyword(HardKeyword::Val));
+    }
+
+    #[test]
+    fn speculative_feedback_updates_the_full_token_view_without_advancing() {
+        let source = "object A:\n  val x = 1\nobject B";
+        let mut scanner = ContextualScanner::new(source).unwrap();
+        let mut expected = scanner.tokens().to_vec();
+        let first = scanner.current().clone();
+        scanner.observe_at(2, ScannerEvent::ColonEol { in_template: true });
+        expected[2].kind = TokenKind::ColonEol;
+        assert_eq!(scanner.tokens(), expected);
+        scanner.observe_at(
+            2,
+            ScannerEvent::IndentedFrom {
+                reference_offset: 0,
+            },
+        );
+        let start = source.find("val").unwrap() as u32;
+        expected.insert(
+            3,
+            Token::new(TokenKind::Indent, TextRange::new(start, start).unwrap()),
+        );
+        assert_eq!(scanner.position(), 0);
+        assert_eq!(scanner.current(), &first);
+        assert_eq!(scanner.tokens(), expected);
+        assert_eq!(scanner.lookahead(3), &expected[3]);
+        assert_eq!(scanner.lookahead(usize::MAX).kind, TokenKind::Eof);
+        assert_eq!(scanner.tokens(), expected);
+
+        let next_object = source.find("object B").unwrap() as u32;
+        while scanner.current().span.start() < next_object {
+            scanner.advance();
+        }
+        let position = scanner.position();
+        scanner.observe(ScannerEvent::OutdentedRegion {
+            indent_offset: start,
+        });
+        expected.insert(
+            position,
+            Token::new(
+                TokenKind::Outdent,
+                TextRange::new(next_object, next_object).unwrap(),
+            ),
+        );
+        assert_eq!(scanner.position(), position);
+        assert_eq!(scanner.current(), &expected[position]);
+        assert_eq!(scanner.tokens(), expected);
+        assert_eq!(scanner.next(), Some(&expected[position]));
+        assert_eq!(scanner.current(), &expected[position + 1]);
     }
 
     #[test]
@@ -4571,7 +4625,7 @@ mod tests {
         assert!(!is_leading_infix_tokens(
             source,
             &scanner.indentation,
-            scanner.tokens(),
+            &scanner.tokens,
             0,
             operator_index,
             &scanner
@@ -5924,8 +5978,9 @@ mod tests {
                     == Some("yes")
             })
             .expect("then body token");
-        let indent_offset = scanner.tokens[..yes_index]
-            .iter()
+        let indent_offset = scanner
+            .tokens
+            .range(0..yes_index)
             .rev()
             .find(|token| token.kind == TokenKind::Indent)
             .expect("then body indent")
@@ -6291,7 +6346,8 @@ mod tests {
                 TokenKind::Eof,
                 TextRange::new(source.len() as u32, source.len() as u32).expect("empty EOF span"),
             ),
-        ];
+        ]
+        .into();
         scanner.position = 3;
         assert_eq!(
             scanner.innermost_open_indent_offset(scanner.position),
@@ -6306,7 +6362,7 @@ mod tests {
         assert_eq!(scanner.lookahead(3).kind, TokenKind::Identifier);
         assert!(
             scanner
-                .tokens
+                .tokens()
                 .windows(2)
                 .all(|pair| { pair[0].span.end() <= pair[1].span.start() })
         );
