@@ -544,9 +544,12 @@ impl<'a> TastyFile<'a> {
     ) -> Result<(), TastyFileError> {
         self.validate_unique_standard_sections()?;
         self.validate_name_references()?;
-        self.validate_ast_reference_targets_with_max_depth(max_depth)?;
+        let index = self.ast_address_index_with_max_depth(max_depth)?;
+        self.validate_indexed_ast_references(&index)?;
         self.attributes()?;
-        self.comments()?;
+        if let Some(comments) = self.comments()? {
+            self.validate_comment_addresses(&comments, &index)?;
+        }
         self.positions()?;
         Ok(())
     }
@@ -792,6 +795,11 @@ impl<'a> TastyFile<'a> {
                 Some(StandardSection::Asts) => ast_section.section().clone(),
                 Some(StandardSection::Comments) => {
                     let comments = section.decode_comments()?;
+                    // The relocation map contains only moved nodes. An absent
+                    // entry denotes an unchanged address only for an original node.
+                    if !comments.is_empty() {
+                        self.validate_comment_addresses(&comments, &self.ast_address_index()?)?;
+                    }
                     let comments = Comment::relocate_ast_addresses(&comments, &ast_address_map);
                     EncodedSection::comments(section.name, &comments)?
                 }
@@ -1054,6 +1062,13 @@ impl<'a> TastyFile<'a> {
         max_depth: usize,
     ) -> Result<(), TastyFileError> {
         let index = self.ast_address_index_with_max_depth(max_depth)?;
+        self.validate_indexed_ast_references(&index)
+    }
+
+    fn validate_indexed_ast_references(
+        &self,
+        index: &AstAddressIndex<'_>,
+    ) -> Result<(), TastyFileError> {
         for reference in self.ast_references()? {
             self.validate_ast_address("AST reference", i64::from(reference.reference.address))?;
             if index.resolve_node(reference.reference).is_none() {
@@ -1308,6 +1323,23 @@ impl<'a> TastyFile<'a> {
             first_indices[slot] = Some(index);
         }
 
+        Ok(())
+    }
+
+    fn validate_comment_addresses(
+        &self,
+        comments: &[Comment],
+        index: &AstAddressIndex<'_>,
+    ) -> Result<(), TastyFileError> {
+        for comment in comments {
+            self.validate_ast_address("comment", i64::from(comment.address))?;
+            if index.get_node(comment.address).is_none() {
+                return Err(TastyFileError::InvalidAstNodeAddress {
+                    context: "comment",
+                    address: comment.address,
+                });
+            }
+        }
         Ok(())
     }
 
@@ -2201,7 +2233,7 @@ mod tests {
             EncodedSection::comments(
                 2,
                 &[crate::Comment {
-                    address: 1,
+                    address: 0,
                     text: "example".to_owned(),
                     coordinates: 0,
                 }],
@@ -2612,6 +2644,59 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(file.name_references_to(u32::MAX).unwrap().is_empty());
+    }
+
+    #[test]
+    fn checks_comment_targets_in_the_original_ast_before_validation_and_relocation() {
+        let fixture = TastyFile::parse(include_bytes!(
+            "../tests/fixtures/simple_def/SimpleDef.tasty"
+        ))
+        .unwrap();
+        let names = NameTable::from_entries(vec![
+            crate::RawName::Utf8("ASTs".into()),
+            crate::RawName::Utf8("Comments".into()),
+        ])
+        .unwrap();
+        for (address, error) in [
+            (
+                1,
+                TastyFileError::InvalidAstNodeAddress {
+                    context: "comment",
+                    address: 1,
+                },
+            ),
+            (
+                4,
+                TastyFileError::InvalidAstAddress {
+                    context: "comment",
+                    address: 4,
+                    asts_length: 4,
+                },
+            ),
+        ] {
+            let builder = super::TastyFileBuilder::new(fixture.header().clone(), names.clone())
+                .with_section(EncodedSection::raw(
+                    0,
+                    [crate::VALDEF_TAG, 0x82, 0x80, crate::UNITCONST_TAG],
+                ))
+                .with_section(
+                    EncodedSection::comments(
+                        1,
+                        &[crate::Comment {
+                            address,
+                            text: "doc".into(),
+                            coordinates: 0,
+                        }],
+                    )
+                    .unwrap(),
+                );
+            let file = builder.build().unwrap();
+            assert_eq!(file.validate(), Err(error.clone()));
+            assert_eq!(
+                file.encode_structured_relocated(&file.structured_asts().unwrap()),
+                Err(error)
+            );
+        }
     }
 
     #[test]

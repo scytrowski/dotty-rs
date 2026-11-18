@@ -904,7 +904,9 @@ Comment = ASTAddress Utf8 LongInt
 ASTAddress = Nat
 ```
 
-The first element identifies the AST definition carrying the comment. The
+The first element identifies the AST definition carrying the comment. Eager file
+validation checks that this address is a visible AST node start. Structured
+relocation checks the original target before mapping it to the new layout. The
 comment text is encoded as UTF-8, and the final element contains the comment
 coordinates.
 
