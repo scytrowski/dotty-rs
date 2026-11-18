@@ -13,9 +13,9 @@ use dotty_tasty::ast::{
     APPLY_TAG, BLOCK_TAG, DEFDEF_TAG, PARAM_TAG, SELECTIN_TAG, SHAREDTYPE_TAG, TERMREFDIRECT_TAG,
     TYPEREF_TAG, VALDEF_TAG,
 };
+use dotty_tasty::file::{TastyFile, TastyFileError};
 use dotty_tasty::reader::Reader as TastyReader;
 use dotty_tasty::section::StandardSection;
-use dotty_tasty::tasty::TastyFile;
 use dotty_tasty::term::{AstTreeNode, RawTree, TermValue};
 use dotty_tasty::writer::Writer;
 use std::fs;
@@ -756,6 +756,14 @@ fn rust_two_local_graph(
 ) -> (u32, Vec<u32>, Vec<u32>) {
     let tasty = TastyFile::parse_and_validate_scala_3_9(tasty_bytes)
         .expect("Rust PairFactory TASTy is valid Scala 3.9 TASTy");
+    inspect_two_local_graph(&tasty, expected_names, expected_arg_ordinals)
+}
+
+fn inspect_two_local_graph(
+    tasty: &TastyFile<'_>,
+    expected_names: [&str; 2],
+    expected_arg_ordinals: Option<[usize; 2]>,
+) -> (u32, Vec<u32>, Vec<u32>) {
     let index = tasty
         .ast_address_index()
         .expect("PairFactory has AST index");
@@ -2462,15 +2470,29 @@ fn second_local_reference_negative_probes(
         fs::create_dir_all(&output_dir).unwrap();
         write_batch(&classes, batch);
         let changed_tasty = change_termref_target(factory.tasty_bytes(), locals[1], replacement, 0);
-        let (block, changed_locals, changed_arguments) = rust_two_local_graph(
-            &changed_tasty,
-            ["first", "second"],
-            (label != "dangling-second-local").then_some([0, 0]),
-        );
         if label == "dangling-second-local" {
+            let parsed = TastyFile::parse_scala_3_9(&changed_tasty).unwrap();
+            let asts_length = parsed.section(StandardSection::Asts).unwrap().payload.len();
+            let expected_error = if replacement as usize >= asts_length {
+                TastyFileError::InvalidAstAddress {
+                    context: "AST reference",
+                    address: i64::from(replacement),
+                    asts_length,
+                }
+            } else {
+                TastyFileError::InvalidAstNodeAddress {
+                    context: "AST reference",
+                    address: replacement,
+                }
+            };
+            assert_eq!(parsed.validate(), Err(expected_error));
+            let (_, changed_locals, changed_arguments) =
+                inspect_two_local_graph(&parsed, ["first", "second"], None);
             assert_eq!(changed_locals, locals);
-            assert_eq!(changed_arguments, [locals[0], 127]);
+            assert_eq!(changed_arguments, [locals[0], replacement]);
         } else {
+            let (block, changed_locals, changed_arguments) =
+                rust_two_local_graph(&changed_tasty, ["first", "second"], Some([0, 0]));
             assert_eq!(changed_locals, locals);
             assert_eq!(changed_arguments, [locals[0], locals[0]]);
             let contract_error = source_contract_result(
