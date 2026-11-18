@@ -3,7 +3,7 @@ use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::reader::Reader as ClassReader;
 use dotty_core::SourceId;
 use dotty_tasty::ast::{ASSIGN_TAG, DefinitionBody, MUTABLE_TAG, VALDEF_TAG};
-use dotty_tasty::file::TastyFile;
+use dotty_tasty::file::{TastyFile, TastyFileError};
 use dotty_tasty::writer::Writer as TastyWriter;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -185,8 +185,15 @@ fn mutate_reference(bytes: &[u8], assignment_side: bool) -> Vec<u8> {
         + 1;
     let mut corrupted = bytes.to_vec();
     corrupted[file_offset..file_offset + new.as_slice().len()].copy_from_slice(new.as_slice());
-    TastyFile::parse_and_validate_scala_3_9(&corrupted)
-        .expect("reference corruption preserves framing");
+    let parsed =
+        TastyFile::parse_scala_3_9(&corrupted).expect("reference corruption preserves framing");
+    assert_eq!(
+        parsed.validate(),
+        Err(TastyFileError::InvalidAstNodeAddress {
+            context: "AST reference",
+            address: invalid,
+        })
+    );
     corrupted
 }
 
