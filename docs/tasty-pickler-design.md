@@ -863,3 +863,13 @@ Named arguments and external calls remain deferred, as do multiple clauses,
 contextual clauses and non-Int types even where Scala accepts them. This audit
 freezes the inputs for implementation issues; it does not authorize a serializer
 implementation or production API changes.
+
+
+### Contextual method parameters
+
+A supported monomorphic method may declare a single contextual or legacy
+implicit parameter clause. Validation checks the modifier on each source
+parameter against its symbol and the kind of the completed method type.
+The writer emits the corresponding `GIVEN` or `IMPLICIT` modifier on each
+`PARAM`. A Scala 3.9 client compiles against this TASTy and executes both
+an inferred call and an explicit `using` call in the contextual-arguments oracle.

@@ -3,6 +3,9 @@
 from pathlib import Path
 import runpy
 import subprocess
+import shutil
+import os
+import sys
 import tempfile
 
 HERE = Path(__file__).resolve().parent
@@ -11,6 +14,9 @@ ROOT = HERE.parents[4]
 
 def main():
     toolchain = runpy.run_path(str(ROOT / "tools/tasty-pickler-oracle/run.py"))["Toolchain"]()
+    if len(sys.argv) == 2:
+        verify_rust_library(toolchain, Path(sys.argv[1]).resolve())
+        return
     with tempfile.TemporaryDirectory() as output:
         toolchain.compiler(["-sourceroot", ".", "-d", output, "Evidence.scala"], cwd=HERE)
         for fixture in ("Box.tasty", "TC.tasty"):
@@ -38,6 +44,25 @@ def main():
             )
             if result.returncode != code or any(item not in result.stdout for item in required):
                 raise SystemExit(f"{source} disagrees with Scala 3.9 controls\n{result.stdout}")
+
+
+def verify_rust_library(toolchain, candidate):
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        library = root / "library"
+        library.mkdir()
+        toolchain.compiler(["-from-tasty", "-d", library, candidate])
+        shutil.copyfile(candidate, library / "example/Evidence.tasty")
+        client = root / "Client.scala"
+        client.write_text(
+            "object Client { def main(args: Array[String]): Unit = { "
+            "given Int = 41; val lib = new example.Evidence; "
+            "assert(lib.read == 41); assert(lib.old(using 7) == 7) } }"
+        )
+        classpath = os.pathsep.join((str(library), toolchain.classpath))
+        toolchain.compiler(["-d", root, client], classpath=classpath)
+        subprocess.run([toolchain.java, "-Xverify:all", "-cp",
+                        os.pathsep.join((str(root), classpath)), "Client"], check=True)
 
 
 if __name__ == "__main__":

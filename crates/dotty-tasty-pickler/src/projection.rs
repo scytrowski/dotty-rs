@@ -844,6 +844,8 @@ impl<'a> EncodingContext<'a> {
         self.namespace(symbol, s.name.is_type())?;
         self.text(s.name.text())?;
         let flags_are_supported = s.flags.is_empty()
+            || (s.kind == SymbolKind::Parameter
+                && matches!(s.flags, SymbolFlags::GIVEN | SymbolFlags::IMPLICIT))
             || (s.flags == SymbolFlags::MUTABLE && self.local_value_symbols.contains(&symbol));
         if s.visibility != Visibility::Public || !flags_are_supported || !s.annotations.is_empty() {
             return Err(reference(symbol, ReferenceError::Metadata));

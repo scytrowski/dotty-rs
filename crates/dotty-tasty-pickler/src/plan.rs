@@ -1082,7 +1082,9 @@ impl<'a> Validator<'_, 'a> {
         }
         self.span(record.position)?;
         if record.visibility != Visibility::Public
-            || record.flags != SymbolFlags::EMPTY
+            || !(record.flags.is_empty()
+                || (kind == SymbolKind::Parameter
+                    && matches!(record.flags, SymbolFlags::GIVEN | SymbolFlags::IMPLICIT)))
             || !record.annotations.is_empty()
         {
             return Err(self.unsupported(UnsupportedFeature::SymbolMetadata, Some(symbol)));
@@ -1108,11 +1110,21 @@ impl<'a> Validator<'_, 'a> {
         self.charge(metadata.modifiers.len())?;
         self.charge(metadata.annotations.len())?;
         let mut saw_param = false;
+        let mut contextual = SymbolFlags::EMPTY;
         for modifier in &metadata.modifiers {
-            if *modifier != dotty_core::ast::Modifier::Param || saw_param {
-                return Err(self.unsupported(UnsupportedFeature::SourceMetadata, Some(symbol)));
+            match modifier {
+                dotty_core::ast::Modifier::Param if !saw_param => saw_param = true,
+                dotty_core::ast::Modifier::Given if contextual.is_empty() => {
+                    contextual = SymbolFlags::GIVEN
+                }
+                dotty_core::ast::Modifier::Implicit if contextual.is_empty() => {
+                    contextual = SymbolFlags::IMPLICIT
+                }
+                _ => return Err(self.unsupported(UnsupportedFeature::SourceMetadata, Some(symbol))),
             }
-            saw_param = true;
+        }
+        if self.symbol(symbol)?.flags != contextual {
+            return Err(self.unsupported(UnsupportedFeature::SymbolMetadata, Some(symbol)));
         }
         if metadata.visibility.is_some() || !metadata.annotations.is_empty() {
             return Err(self.unsupported(UnsupportedFeature::SourceMetadata, Some(symbol)));
@@ -2365,7 +2377,7 @@ impl<'a> Validator<'_, 'a> {
                         },
                     });
                 };
-                if signature.kind != MethodKind::Plain
+                if (clause.is_empty() && signature.kind != MethodKind::Plain)
                     || signature.params.len() != method.parameter_clauses[0].len()
                 {
                     return Err(PickleError::MalformedType {
@@ -2415,7 +2427,13 @@ impl<'a> Validator<'_, 'a> {
                 for (formal, &parameter) in
                     signature.params.iter().zip(&method.parameter_clauses[0])
                 {
-                    if formal.name.as_name() != &self.symbol(parameter)?.name
+                    let expected_kind = match self.symbol(parameter)?.flags {
+                        SymbolFlags::GIVEN => MethodKind::Contextual,
+                        SymbolFlags::IMPLICIT => MethodKind::Implicit,
+                        _ => MethodKind::Plain,
+                    };
+                    if signature.kind != expected_kind
+                        || formal.name.as_name() != &self.symbol(parameter)?.name
                         || (formal.ty != p.definitions.int
                             && formal.ty != p.definitions.boolean
                             && !self.is_planned_sibling_class_type(formal.ty, None))

@@ -433,14 +433,23 @@ impl ValidatedPicklePlan<'_, '_> {
                         };
                         let parameter_type =
                             method_type_syntax(self, &mut context, parameter_semantic_type)?;
+                        let mut parameter_fields = vec![
+                            AstField::Nat(parameter_name),
+                            AstField::Tree(parameter_type),
+                        ];
+                        let contextual_tag = match symbol(self, parameter)?.flags {
+                            dotty_core::SymbolFlags::GIVEN => Some(GIVEN_TAG),
+                            dotty_core::SymbolFlags::IMPLICIT => Some(IMPLICIT_TAG),
+                            _ => None,
+                        };
+                        if let Some(tag) = contextual_tag {
+                            parameter_fields.push(AstField::Tree(marker(&mut context, tag)?));
+                        }
                         context.bind_declaration(
                             parameter,
                             AstNode::Length {
                                 tag: PARAM_TAG,
-                                fields: vec![
-                                    AstField::Nat(parameter_name),
-                                    AstField::Tree(parameter_type),
-                                ],
+                                fields: parameter_fields,
                             },
                         )?;
                         fields.push(AstField::Tree(context.declaration_label(parameter).ok_or(

@@ -3320,26 +3320,67 @@ fn real_source_default_constructor_clauses_normalize_without_fabricating_method_
 }
 
 #[test]
-fn contextual_and_type_parameter_methods_remain_explicitly_unsupported() {
-    for (text, feature) in [
-        (
-            "package example; class Answer { def value(using x: Int): Int = x }",
-            UnsupportedFeature::SourceMetadata,
-        ),
-        (
-            "package example; class Answer { def value[A]: Int = 42 }",
-            UnsupportedFeature::TypeParameters,
-        ),
-    ] {
-        let result = source_plan(text, |_| {});
-        assert!(
-            matches!(
-                &result,
-                Err(PickleError::Unsupported { feature: actual, .. }) if *actual == feature
-            ),
-            "{text}: {result:?}"
+fn contextual_parameters_retain_their_wire_flags_and_reference_identity() {
+    use dotty_tasty::tasty::*;
+    let text = "package example; class Evidence { def read(using x: Int): Int = x; def old(implicit x: Int): Int = x }";
+    let (_, output) = source_outputs_named(text, "Evidence.scala", |_| {}).unwrap();
+    assert_eq!(
+        output.bytes(),
+        source_outputs_named(text, "Evidence.scala", |_| {})
+            .unwrap()
+            .1
+            .bytes()
+    );
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let index = file.ast_address_index().unwrap();
+    let mut counts = [0; 2];
+    for node in index.iter().filter(|node| node.tag == DEFDEF_TAG) {
+        let method = node.decode_defdef_body().unwrap();
+        let (tag, slot) = match file.render_name(method.name).unwrap().as_str() {
+            "read" => (GIVEN_TAG, 0),
+            "old" => (IMPLICIT_TAG, 1),
+            _ => continue,
+        };
+        let Some(RawTree::Leaf(reference)) = &method.rhs else {
+            panic!("expected a parameter reference")
+        };
+        assert_eq!(reference.tag, TERMREFDIRECT_TAG);
+        let target = index.get(reference.ast_ref().unwrap().address).unwrap();
+        assert!(std::ptr::eq(target.payload, method.parameters[0].payload()));
+        counts[slot] += 1;
+        assert_eq!(
+            method.parameters[0].decode_body().unwrap().tail,
+            [DefinitionTail::Modifier(tag)]
         );
     }
+    assert_eq!(counts, [1, 1]);
+    if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let directory = root.join("target/contextual-pickler/example");
+        std::fs::create_dir_all(&directory).unwrap();
+        let candidate = directory.join("Evidence.tasty");
+        std::fs::write(&candidate, output.bytes()).unwrap();
+        assert!(
+            Command::new("python3")
+                .arg(root.join("crates/dotty-typer/tests/fixtures/contextual-arguments/check.py"))
+                .arg(candidate)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+}
+
+#[test]
+fn type_parameter_methods_remain_explicitly_unsupported() {
+    let text = "package example; class Answer { def value[A]: Int = 42 }";
+    assert!(matches!(
+        source_plan(text, |_| {}),
+        Err(PickleError::Unsupported {
+            feature: UnsupportedFeature::TypeParameters,
+            ..
+        })
+    ));
 }
 
 #[test]
