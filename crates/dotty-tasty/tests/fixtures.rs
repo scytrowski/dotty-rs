@@ -1400,3 +1400,14 @@ fn all_tasty_fixture_standard_sections_round_trip_through_structured_encoders() 
         }
     }
 }
+
+#[test]
+fn circle_distinguishes_synthetic_and_source_derived_spans_at_the_same_point() {
+    let file = TastyFile::parse(include_bytes!("fixtures/bounds/Circle.tasty")).unwrap();
+    let positions = file.positions().unwrap().unwrap();
+    for (address, is_synthetic) in [(7, true), (21, false)] {
+        let span = positions.resolved_association_at(address).unwrap().unwrap();
+        assert_eq!((span.start, span.end, span.point), (69, 74, 69));
+        assert_eq!(span.is_synthetic, is_synthetic);
+    }
+}

@@ -851,7 +851,9 @@ unknown or application-specific sections without requiring a guessed grammar.
 `PositionSection::resolved_entries()` provides an ordered derived view that
 accumulates address, start and end deltas while retaining
 `SOURCE` events. The raw `PositionEntry` deltas remain authoritative for
-lossless re-encoding. The point is the current start plus the optional point offset.
+lossless re-encoding. The point is the current start plus the optional point offset. Both resolved
+views expose `is_synthetic` so callers can distinguish an omitted offset from
+an explicit zero.
 `PositionSection::resolved_associations()` provides a smaller derived view
 that omits source-change events and attaches the explicit source
 `NameRef` at the same AST address. Addresses without a marker carry `None`. Use

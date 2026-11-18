@@ -152,6 +152,8 @@ pub enum ResolvedPositionEntry {
         end: i64,
         /// Absolute source point coordinate.
         point: i64,
+        /// True when the wire association omitted the point delta.
+        is_synthetic: bool,
     },
 }
 
@@ -168,6 +170,8 @@ pub struct ResolvedPosition {
     pub end: i64,
     /// Absolute source point coordinate.
     pub point: i64,
+    /// True when the wire association omitted the point delta.
+    pub is_synthetic: bool,
 }
 
 /// Decoded source-position section.
@@ -354,6 +358,7 @@ impl PositionSection {
                         start,
                         end,
                         point,
+                        is_synthetic: point_delta.is_none(),
                     });
                 }
             }
@@ -379,6 +384,7 @@ impl PositionSection {
                     start,
                     end,
                     point,
+                    is_synthetic,
                 } => {
                     current_address = address;
                     associations.push(ResolvedPosition {
@@ -387,6 +393,7 @@ impl PositionSection {
                         start,
                         end,
                         point,
+                        is_synthetic,
                     });
                 }
             }
@@ -1309,12 +1316,14 @@ mod tests {
                     start: 2,
                     end: 5,
                     point: 2,
+                    is_synthetic: true,
                 },
                 ResolvedPositionEntry::Association {
                     address: 13,
                     start: 2,
                     end: 4,
                     point: 3,
+                    is_synthetic: false,
                 },
                 ResolvedPositionEntry::Source(8),
             ])
@@ -1372,12 +1381,14 @@ mod tests {
                     start: 4,
                     end: 9,
                     point: 4,
+                    is_synthetic: true,
                 },
                 ResolvedPositionEntry::Association {
                     address: 109,
                     start: 6,
                     end: 9,
                     point: 7,
+                    is_synthetic: false,
                 },
             ]
         );
@@ -1447,6 +1458,7 @@ mod tests {
                     start: 2,
                     end: 5,
                     point: 2,
+                    is_synthetic: true,
                 },
                 ResolvedPosition {
                     source: None,
@@ -1454,6 +1466,7 @@ mod tests {
                     start: 2,
                     end: 5,
                     point: 3,
+                    is_synthetic: false,
                 },
             ])
         );
@@ -1479,6 +1492,7 @@ mod tests {
                 start: 0,
                 end: 0,
                 point: 0,
+                is_synthetic: true,
             }])
         );
     }
@@ -1511,6 +1525,7 @@ mod tests {
                 start: 5,
                 end: 8,
                 point: 6,
+                is_synthetic: false,
             }))
         );
     }
