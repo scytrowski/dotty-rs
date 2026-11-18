@@ -2,7 +2,7 @@ use crate::reader::{ReadError, Reader};
 use crate::writer::{WriteError, Writer};
 use std::fmt;
 
-/// One-based reference into a TASTy name table.
+/// Zero-based reference into a TASTy name table.
 pub type NameRef = u32;
 /// Raw signed parameter-signature value stored in a `SIGNED` name.
 pub type ParamSig = i32;
@@ -19,11 +19,11 @@ pub enum ParamSigValue {
 /// Interprets a raw `ParamSig` without changing its lossless representation.
 ///
 /// Negative values encode the length of a type-parameter section, while
-/// positive values encode a name-table reference for a term parameter. Zero
-/// and `i32::MIN` are invalid encodings and return `None`.
+/// nonnegative values encode a name-table reference for a term parameter.
+/// The unrepresentable section length `i32::MIN` returns `None`.
 pub fn interpret_param_sig(value: ParamSig) -> Option<ParamSigValue> {
     match value {
-        i32::MIN | 0 => None,
+        i32::MIN => None,
         value if value < 0 => Some(ParamSigValue::TypeParameterSectionLength(
             value.unsigned_abs(),
         )),
@@ -1188,7 +1188,7 @@ impl RawName {
     /// Visits name-table references contained in this entry in wire order.
     ///
     /// This is useful for dependency inspection without allocating a
-    /// temporary collection. Positive `ParamSig` values are included because
+    /// temporary collection. Nonnegative `ParamSig` values are included because
     /// they are name references; negative values encode type-parameter
     /// section lengths and are therefore omitted.
     pub fn visit_references(&self, visitor: &mut impl FnMut(NameRef)) {
@@ -1476,8 +1476,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_zero_as_a_parameter_signature() {
-        assert_eq!(interpret_param_sig(0), None);
+    fn zero_refers_to_the_first_parameter_type_name() {
+        assert_eq!(
+            interpret_param_sig(0),
+            Some(ParamSigValue::TermParameter(0))
+        );
     }
 
     #[test]
@@ -1562,7 +1565,7 @@ mod tests {
         let name = RawName::Signed {
             original: 1,
             result_signature: 1,
-            parameter_signatures: vec![0],
+            parameter_signatures: vec![i32::MIN],
         };
 
         assert_eq!(name.signed_name(), None);
@@ -2520,17 +2523,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_zero_parameter_signature_when_decoding() {
-        let bytes = [0x85, 63, 0x83, 0x81, 0x81, 0x80];
-        let mut reader = Reader::new(&bytes);
-
-        assert_eq!(
-            NameTable::decode(&mut reader),
-            Err(NameTableError::InvalidParamSig {
-                value: 0,
-                entry_index: 0,
-            })
-        );
+    fn decodes_a_signed_name_whose_parameter_type_is_the_first_entry() {
+        let bytes = [0x88, 1, 0x81, b'T', 63, 0x83, 0x80, 0x80, 0x80];
+        let table = NameTable::decode(&mut Reader::new(&bytes)).unwrap();
+        let name = table.get(1).unwrap();
+        assert_eq!(name.references(), vec![0, 0, 0]);
+        assert_eq!(table.get_utf8(0), Some("T"));
     }
 
     #[test]

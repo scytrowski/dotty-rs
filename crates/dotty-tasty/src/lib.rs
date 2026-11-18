@@ -24,7 +24,7 @@ pub mod construction;
 pub mod file;
 /// TASTy header parsing and version validation.
 pub mod header;
-/// One-based TASTy names, compound names, and name-table builders.
+/// Zero-based TASTy names, compound names, and name-table builders.
 pub mod name_table;
 /// Bounded zero-copy readers for TASTy binary values.
 pub mod reader;

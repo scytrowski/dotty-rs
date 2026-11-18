@@ -25,7 +25,7 @@ Important properties:
 
 - every grammar terminal is represented by a single byte;
 - names are interned in one name table;
-- name references are numbered from `1`;
+- name references are numbered from `0`;
 - section and node lengths are byte lengths;
 - terms and types share `Path` elements, but their interpretation depends on context;
 - name, AST, and attribute tags use separate numeric namespaces.
@@ -164,7 +164,7 @@ NameRef = Nat
 Utf8Ref = Nat
 ```
 
-A reference is the zero-based index of an entry in the name table: `0` is the first entry, which in emitted files is the name of the `ASTs` section. The same holds for every place a name is referenced: AST payloads, composite name entries, section names and the `SOURCEFILE` attribute. In Rust a reference indexes a `Vec<Name>` directly.
+A reference is the zero-based index of an entry in the name table: `0` is the first entry, which commonly names the `ASTs` section. The same holds for every place a name is referenced: AST payloads, composite name entries, section names and the `SOURCEFILE` attribute. In Rust a reference indexes a `Vec<Name>` directly.
 
 The Scala compiler's own format comment describes a `NameRef` as "starting from 1", but Scala 3.9.0 output is zero-based throughout (issue #9). Two things show it: a `SIGNED` entry's `original` names the entry just before the name it decorates (`<init>` is entry 14 and the signed constructor entry says `original: 14`), and read one-based, qualified names such as package paths are assembled from the wrong entries (`tastyfixtures.cytrowski.ASTs.me` instead of `me.cytrowski.tastyfixtures.semantic`). Every unit of the `scala3-library` corpus renders its qualified names without section names under the zero-based reading.
 
@@ -206,10 +206,10 @@ Tag meanings:
 
 ```text
 ParamSig < 0  =>  -ParamSig is the length of a type-parameter section
-ParamSig > 0  =>  ParamSig is a NameRef for a fully qualified term parameter name
+ParamSig >= 0 =>  ParamSig is a NameRef for a fully qualified term parameter name
 ```
 
-Zero is not a valid `ParamSig` (entry `0` is the `ASTs` section name, never a parameter name), and the minimum `i32` value is invalid because
+Zero refers to the first name in the table. The minimum `i32` value is invalid because
 its negation cannot represent the length of a type-parameter section.
 The Rust API keeps the raw `ParamSig` value for lossless encoding and exposes
 `interpret_param_sig()` as a typed view returning `ParamSigValue`.

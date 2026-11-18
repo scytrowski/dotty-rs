@@ -379,7 +379,7 @@ pub struct AstReference {
 pub struct NameReference {
     /// Address of the top-level AST node that owns this reference.
     pub owner_address: u32,
-    /// One-based name-table reference.
+    /// Zero-based name-table reference.
     pub reference: NameRef,
 }
 
