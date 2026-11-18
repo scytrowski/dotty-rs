@@ -1839,6 +1839,7 @@ enum PairedBlockShape {
     ThreeLocalsOneCall,
     ThreeLocalsConditionalSelection,
     ThreeLocalsMutableReassignmentOneCall,
+    ThreeLocalsConditionalMutableAssignmentOneCall,
     ReceiptMismatch,
     Unclassified,
 }
@@ -1848,6 +1849,7 @@ enum PairedStatementKind {
     ValDef,
     Apply,
     Assign,
+    If,
     Other,
 }
 
@@ -1862,6 +1864,7 @@ fn paired_statement_kinds<P: AstPhase>(
                 TreeKind::ValDef(_) => PairedStatementKind::ValDef,
                 TreeKind::Apply(_) => PairedStatementKind::Apply,
                 TreeKind::Assign(_) => PairedStatementKind::Assign,
+                TreeKind::If(_) => PairedStatementKind::If,
                 _ => PairedStatementKind::Other,
             })
         })
@@ -1876,33 +1879,60 @@ fn classify_paired_block_shape(
     has_alias_receipt: bool,
     has_conditional_selection_receipt: bool,
     has_mutable_reassignment_receipt: bool,
+    has_conditional_mutable_assignment_receipt: bool,
 ) -> PairedBlockShape {
     if source_kinds.len() != typed_kinds.len() {
         return PairedBlockShape::ReceiptMismatch;
     }
 
     let has_expected_receipts = match source_kinds.len() {
-        2 => !has_one_call_receipt && !has_two_call_receipt && !has_conditional_selection_receipt,
-        3 => has_one_call_receipt && !has_two_call_receipt && !has_conditional_selection_receipt,
+        2 => {
+            !has_one_call_receipt
+                && !has_two_call_receipt
+                && !has_conditional_selection_receipt
+                && !has_mutable_reassignment_receipt
+                && !has_conditional_mutable_assignment_receipt
+        }
+        3 => {
+            has_one_call_receipt
+                && !has_two_call_receipt
+                && !has_conditional_selection_receipt
+                && !has_mutable_reassignment_receipt
+                && !has_conditional_mutable_assignment_receipt
+        }
         4 => {
             (has_one_call_receipt
                 && !has_two_call_receipt
                 && !has_alias_receipt
-                && has_conditional_selection_receipt)
+                && has_conditional_selection_receipt
+                && !has_mutable_reassignment_receipt
+                && !has_conditional_mutable_assignment_receipt)
                 || (!has_one_call_receipt
                     && has_two_call_receipt
-                    && !has_conditional_selection_receipt)
+                    && !has_alias_receipt
+                    && !has_conditional_selection_receipt
+                    && !has_mutable_reassignment_receipt
+                    && !has_conditional_mutable_assignment_receipt)
         }
         5 => {
             (!has_one_call_receipt
                 && has_two_call_receipt
                 && has_alias_receipt
-                && !has_conditional_selection_receipt)
+                && !has_conditional_selection_receipt
+                && !has_mutable_reassignment_receipt
+                && !has_conditional_mutable_assignment_receipt)
                 || (has_mutable_reassignment_receipt
                     && has_one_call_receipt
                     && !has_two_call_receipt
                     && !has_alias_receipt
-                    && !has_conditional_selection_receipt)
+                    && !has_conditional_selection_receipt
+                    && !has_conditional_mutable_assignment_receipt)
+                || (has_conditional_mutable_assignment_receipt
+                    && has_one_call_receipt
+                    && !has_two_call_receipt
+                    && !has_alias_receipt
+                    && !has_conditional_selection_receipt
+                    && !has_mutable_reassignment_receipt)
         }
         _ => false,
     };
@@ -1956,6 +1986,19 @@ fn classify_paired_block_shape(
             && !has_conditional_selection_receipt =>
         {
             PairedBlockShape::ThreeLocalsMutableReassignmentOneCall
+        }
+        5 if source_kinds[..3] == [PairedStatementKind::ValDef; 3]
+            && typed_kinds[..3] == [PairedStatementKind::ValDef; 3]
+            && source_kinds[3..] == [PairedStatementKind::If, PairedStatementKind::Apply]
+            && typed_kinds[3..] == [PairedStatementKind::If, PairedStatementKind::Apply]
+            && has_conditional_mutable_assignment_receipt
+            && has_one_call_receipt
+            && !has_two_call_receipt
+            && !has_alias_receipt
+            && !has_conditional_selection_receipt
+            && !has_mutable_reassignment_receipt =>
+        {
+            PairedBlockShape::ThreeLocalsConditionalMutableAssignmentOneCall
         }
         _ => PairedBlockShape::Unclassified,
     }
@@ -2027,6 +2070,7 @@ fn validate_two_local_constructor_pair(
                 .typed_bindings
                 .mutable_counter_reference_assignment(source_id, caller)
                 .is_some(),
+            false,
         ),
         _ => PairedBlockShape::Unclassified,
     };
@@ -7027,7 +7071,9 @@ mod paired_block_shape_tests {
         two_calls: bool,
         alias: bool,
     ) -> PairedBlockShape {
-        classify_paired_block_shape(source, typed, one_call, two_calls, alias, false, false)
+        classify_paired_block_shape(
+            source, typed, one_call, two_calls, alias, false, false, false,
+        )
     }
 
     #[test]
@@ -7089,6 +7135,7 @@ mod paired_block_shape_tests {
                 false,
                 true,
                 false,
+                false,
             ),
             PairedBlockShape::ThreeLocalsConditionalSelection
         );
@@ -7100,6 +7147,7 @@ mod paired_block_shape_tests {
                 false,
                 false,
                 true,
+                false,
                 false,
             ),
             PairedBlockShape::ReceiptMismatch
@@ -7177,6 +7225,7 @@ mod paired_block_shape_tests {
                 false,
                 false,
                 true,
+                false,
             ),
             PairedBlockShape::ThreeLocalsMutableReassignmentOneCall
         );
@@ -7189,6 +7238,7 @@ mod paired_block_shape_tests {
                 false,
                 false,
                 false,
+                false,
             ),
             PairedBlockShape::ReceiptMismatch
         );
@@ -7197,6 +7247,59 @@ mod paired_block_shape_tests {
                 &[ValDef, ValDef, ValDef, Assign, Apply],
                 &[ValDef, ValDef, ValDef, Apply, Assign],
                 true,
+                false,
+                false,
+                false,
+                true,
+                false,
+            ),
+            PairedBlockShape::Unclassified
+        );
+    }
+
+    #[test]
+    fn recognizes_conditional_mutable_assignment_only_with_its_proof_receipt() {
+        let shape = [ValDef, ValDef, ValDef, PairedStatementKind::If, Apply];
+        assert_eq!(
+            classify_paired_block_shape(&shape, &shape, true, false, false, false, false, true,),
+            PairedBlockShape::ThreeLocalsConditionalMutableAssignmentOneCall
+        );
+        for (source, typed, one_call, conditional_receipt) in [
+            (&shape[..], &shape[..], false, true),
+            (&shape[..], &shape[..], true, false),
+            (
+                &[ValDef, ValDef, ValDef, Assign, Apply][..],
+                &[ValDef, ValDef, ValDef, Assign, Apply][..],
+                true,
+                true,
+            ),
+            (
+                &[ValDef, ValDef, ValDef, PairedStatementKind::If, Assign][..],
+                &[ValDef, ValDef, ValDef, PairedStatementKind::If, Assign][..],
+                true,
+                true,
+            ),
+        ] {
+            assert_ne!(
+                classify_paired_block_shape(
+                    source,
+                    typed,
+                    one_call,
+                    false,
+                    false,
+                    false,
+                    false,
+                    conditional_receipt,
+                ),
+                PairedBlockShape::ThreeLocalsConditionalMutableAssignmentOneCall
+            );
+        }
+        assert_eq!(
+            classify_paired_block_shape(
+                &shape,
+                &[ValDef, ValDef, ValDef, PairedStatementKind::Other, Apply],
+                true,
+                false,
                 false,
                 false,
                 false,
