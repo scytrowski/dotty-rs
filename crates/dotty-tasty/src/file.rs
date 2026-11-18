@@ -20,12 +20,22 @@ use std::fmt;
 /// payloads, while structured queries allocate only the requested views. Use
 /// [`TastyFile::parse_and_validate_scala_3_9`] when the input should be
 /// checked before inspection.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct TastyFile<'a> {
     header: Header,
     names: NameTable,
     sections: SectionTable<'a>,
+    // The decoded model omits padding in wire integers.
+    original_bytes: Option<&'a [u8]>,
 }
+
+impl PartialEq for TastyFile<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.header == other.header && self.names == other.names && self.sections == other.sections
+    }
+}
+
+impl Eq for TastyFile<'_> {}
 
 /// Owned bytes produced by a TASTy encoder together with allocated AST addresses.
 ///
@@ -417,6 +427,7 @@ impl<'a> TastyFile<'a> {
             header,
             names,
             sections,
+            original_bytes: None,
         })
     }
 
@@ -431,6 +442,7 @@ impl<'a> TastyFile<'a> {
             header,
             names,
             sections,
+            original_bytes: Some(bytes),
         })
     }
 
@@ -585,8 +597,11 @@ impl<'a> TastyFile<'a> {
         Ok(())
     }
 
-    /// Encodes the borrowed file without additional validation.
+    /// Returns the original bytes of a parsed file or serializes a file built from parts.
     pub fn encode(&self) -> Result<Vec<u8>, TastyFileError> {
+        if let Some(bytes) = self.original_bytes {
+            return Ok(bytes.to_vec());
+        }
         let mut writer = Writer::new();
         self.header.encode(&mut writer)?;
         self.names.encode(&mut writer)?;
@@ -643,28 +658,24 @@ impl<'a> TastyFile<'a> {
         self.encode()
     }
 
-    /// Encodes the file while allocating addresses for top-level AST nodes.
+    /// Encodes the file and reports the top-level node offsets in its raw AST payload.
     pub fn encode_with_ast_addresses(&self) -> Result<EncodedTastyFile, TastyFileError> {
-        let mut writer = Writer::new();
-        self.header.encode(&mut writer)?;
-        self.names.encode(&mut writer)?;
         let mut ast_addresses = Vec::new();
-
         for section in self.sections.iter() {
-            writer.write_nat(section.name);
             if section.standard_kind(&self.names) == Some(StandardSection::Asts) {
-                let mut reader = section.reader();
-                let asts = RawNodes::decode(&mut reader)?;
-                let encoded_asts = asts.encode_with_addresses()?;
-                ast_addresses = encoded_asts.addresses().to_vec();
-                writer.write_length_prefixed_bytes(encoded_asts.as_slice())?;
-            } else {
-                writer.write_length_prefixed_bytes(section.payload)?;
+                ast_addresses.clear();
+                for node in RawNodes::decode(&mut section.reader())?.iter() {
+                    ast_addresses.push(u32::try_from(node.offset).map_err(|_| {
+                        WriteError::NatOverflow {
+                            value: node.offset as u64,
+                        }
+                    })?);
+                }
             }
         }
 
         Ok(EncodedTastyFile {
-            bytes: writer.into_inner(),
+            bytes: self.encode()?,
             ast_addresses,
         })
     }
@@ -2075,6 +2086,7 @@ mod tests {
     #[test]
     fn reports_a_missing_asts_section() {
         let file = TastyFile {
+            original_bytes: None,
             header: crate::header::Header {
                 major_version: 28,
                 minor_version: 9,
