@@ -20,7 +20,7 @@ use crate::term::WireReference;
 use crate::term::{
     AstRef, AstRefKind, AstTreeNode, ConstantValue, RawTree, SimpleTerm, TermEncodeError, TermError,
 };
-use crate::writer::{WriteError, Writer};
+use crate::writer::{WriteError, Writer, nat_width};
 use std::cell::{Cell, RefCell};
 use std::fmt;
 
@@ -1684,15 +1684,6 @@ fn raw_payload_base(source: &[u8], node: &RawNode<'_>, base: usize) -> usize {
         return fallback;
     };
     base.saturating_add(relative)
-}
-
-fn nat_width(mut value: usize) -> usize {
-    let mut width = 1;
-    while value >= 128 {
-        value >>= 7;
-        width += 1;
-    }
-    width
 }
 
 fn subslice_offset(source: &[u8], subslice: &[u8]) -> Option<usize> {

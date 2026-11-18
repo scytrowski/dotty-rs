@@ -10,14 +10,14 @@ use std::fmt;
 
 use crate::ast::*;
 use crate::term::{SimpleTerm, TermEncodeError, TermValue};
-use crate::writer::{WriteError, Writer};
+use crate::writer::{WriteError, Writer, nat_width};
 
 /// A reserved node in one [`AstBuilder`], independent of its final byte address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct AstLabel(usize);
 
 /// One field in a length-delimited node's ordered wire payload.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AstField {
     /// An emitted child tree.
     Tree(AstLabel),
@@ -169,19 +169,18 @@ impl BuiltAst {
 }
 
 impl AstNode {
-    fn children(&self) -> Vec<AstLabel> {
-        match self {
-            Self::Ast { child, .. } | Self::NatAst { child, .. } => vec![*child],
-            Self::Length { fields, .. } => fields
-                .iter()
-                .filter_map(|f| match f {
-                    AstField::Tree(l) => Some(*l),
-                    _ => None,
-                })
-                .collect(),
-            _ => vec![],
-        }
+    fn fields(&self) -> impl DoubleEndedIterator<Item = AstField> {
+        let (child, fields): (_, &[AstField]) = match self {
+            Self::Ast { child, .. } | Self::NatAst { child, .. } => (Some(*child), &[]),
+            Self::Length { fields, .. } => (None, fields),
+            _ => (None, &[]),
+        };
+        child
+            .into_iter()
+            .map(AstField::Tree)
+            .chain(fields.iter().copied())
     }
+
     /// Returns the node's TASTy tag.
     pub fn tag(&self) -> u8 {
         match self {
@@ -322,7 +321,10 @@ impl AstBuilder {
             state[label.0] = 1;
             order.push(label);
             stack.push((label, depth, true));
-            for child in node.children().into_iter().rev() {
+            for field in node.fields().rev() {
+                let AstField::Tree(child) = field else {
+                    continue;
+                };
                 stack.push((
                     child,
                     depth.checked_add(1).ok_or(AstBuildError::Overflow)?,
@@ -338,11 +340,6 @@ impl AstBuilder {
         }
         Ok(order)
     }
-    fn nat_size(value: u32) -> usize {
-        let mut w = Writer::new();
-        w.write_nat(value);
-        w.position()
-    }
     fn bounded(&self, size: usize) -> Result<usize, AstBuildError> {
         if size > self.limits.max_bytes {
             return Err(AstBuildError::Limit("bytes"));
@@ -353,13 +350,12 @@ impl AstBuilder {
     fn add(&self, a: usize, b: usize) -> Result<usize, AstBuildError> {
         self.bounded(a.checked_add(b).ok_or(AstBuildError::Overflow)?)
     }
-    fn prefix(
-        &self,
+    fn write_prefix(
         node: &AstNode,
         addresses: &[u32],
-        sizes: &[usize],
-    ) -> Result<Writer, AstBuildError> {
-        let mut writer = Writer::new();
+        payload_size: usize,
+        writer: &mut Writer,
+    ) -> Result<(), AstBuildError> {
         let address = |target: AstLabel| {
             addresses
                 .get(target.0)
@@ -367,9 +363,9 @@ impl AstBuilder {
                 .ok_or(AstBuildError::InvalidLabel(target))
         };
         match node {
-            AstNode::Leaf(leaf) => leaf.encode(&mut writer)?,
+            AstNode::Leaf(leaf) => leaf.encode(writer)?,
             AstNode::Reference { tag, target } => {
-                SimpleTerm::new(*tag, TermValue::AstRef(address(*target)?))?.encode(&mut writer)?
+                SimpleTerm::new(*tag, TermValue::AstRef(address(*target)?))?.encode(writer)?
             }
             AstNode::Ast { tag, .. } => writer.write_u8(*tag),
             AstNode::NatAst { tag, value, .. } => {
@@ -379,25 +375,14 @@ impl AstBuilder {
                     AstOperand::Reference(l) => address(*l)?,
                 });
             }
-            AstNode::Length { tag, fields } => {
-                let mut size = 0;
-                for field in fields {
-                    size = self.add(
-                        size,
-                        match field {
-                            AstField::Tree(l) => {
-                                *sizes.get(l.0).ok_or(AstBuildError::InvalidLabel(*l))?
-                            }
-                            AstField::Nat(n) => Self::nat_size(*n),
-                        },
-                    )?;
-                }
+            AstNode::Length { tag, .. } => {
                 writer.write_u8(*tag);
-                writer.write_nat(u32::try_from(size).map_err(|_| AstBuildError::Overflow)?);
+                writer.write_nat(u32::try_from(payload_size).map_err(|_| AstBuildError::Overflow)?);
             }
         }
-        Ok(writer)
+        Ok(())
     }
+
     fn validate_reference_targets(&self, order: &[AstLabel]) -> Result<(), AstBuildError> {
         // Scala determines a BIND's namespace from its first tree, following
         // shared references. Earlier nodes already have their unshared tag.
@@ -472,31 +457,27 @@ impl AstBuilder {
         let order = self.order(roots)?;
         let mut addresses = vec![0; self.nodes.len()];
         let mut sizes = vec![0; self.nodes.len()];
+        let mut prefixes = vec![0; self.nodes.len()];
+        let mut next = vec![0; self.nodes.len()];
+        let mut scratch = Writer::new();
         for _ in 0..self.limits.max_layout_passes {
             for &label in order.iter().rev() {
                 let node = self.node(label)?;
-                let mut size = self.prefix(node, &addresses, &sizes)?.position();
-                match node {
-                    AstNode::Length { fields, .. } => {
-                        for f in fields {
-                            size = self.add(
-                                size,
-                                match f {
-                                    AstField::Tree(l) => sizes[l.0],
-                                    AstField::Nat(n) => Self::nat_size(*n),
-                                },
-                            )?;
-                        }
-                    }
-                    _ => {
-                        for child in node.children() {
-                            size = self.add(size, sizes[child.0])?;
-                        }
-                    }
+                let mut payload_size = 0;
+                for field in node.fields() {
+                    payload_size = self.add(
+                        payload_size,
+                        match field {
+                            AstField::Tree(child) => sizes[child.0],
+                            AstField::Nat(n) => nat_width(n as usize),
+                        },
+                    )?;
                 }
-                sizes[label.0] = self.bounded(size)?;
+                scratch.clear();
+                Self::write_prefix(node, &addresses, payload_size, &mut scratch)?;
+                prefixes[label.0] = scratch.position();
+                sizes[label.0] = self.add(payload_size, scratch.position())?;
             }
-            let mut next = vec![0; self.nodes.len()];
             let mut end = 0;
             for root in roots {
                 next[root.0] = u32::try_from(end).map_err(|_| AstBuildError::Overflow)?;
@@ -504,36 +485,21 @@ impl AstBuilder {
             }
             for &label in &order {
                 let node = self.node(label)?;
-                let mut at = self.add(
-                    next[label.0] as usize,
-                    self.prefix(node, &addresses, &sizes)?.position(),
-                )?;
-                match node {
-                    AstNode::Length { fields, .. } => {
-                        for field in fields {
-                            match field {
-                                AstField::Tree(l) => {
-                                    next[l.0] =
-                                        u32::try_from(at).map_err(|_| AstBuildError::Overflow)?;
-                                    at = self.add(at, sizes[l.0])?;
-                                }
-                                AstField::Nat(n) => {
-                                    at = self.add(at, Self::nat_size(*n))?;
-                                }
-                            }
-                        }
-                    }
-                    _ => {
-                        for child in node.children() {
+                let mut at = self.add(next[label.0] as usize, prefixes[label.0])?;
+                for field in node.fields() {
+                    let width = match field {
+                        AstField::Tree(child) => {
                             next[child.0] =
                                 u32::try_from(at).map_err(|_| AstBuildError::Overflow)?;
-                            at = self.add(at, sizes[child.0])?;
+                            sizes[child.0]
                         }
-                    }
+                        AstField::Nat(n) => nat_width(n as usize),
+                    };
+                    at = self.add(at, width)?;
                 }
             }
             if next != addresses {
-                addresses = next;
+                std::mem::swap(&mut addresses, &mut next);
                 continue;
             }
             self.validate_reference_targets(&order)?;
@@ -544,15 +510,13 @@ impl AstBuilder {
                     AstField::Nat(n) => writer.write_nat(n),
                     AstField::Tree(l) => {
                         let node = self.node(l)?;
-                        writer.write_bytes(self.prefix(node, &addresses, &sizes)?.as_slice());
-                        match node {
-                            AstNode::Length { fields, .. } => {
-                                stack.extend(fields.iter().rev().cloned())
-                            }
-                            _ => {
-                                stack.extend(node.children().into_iter().rev().map(AstField::Tree))
-                            }
-                        }
+                        Self::write_prefix(
+                            node,
+                            &addresses,
+                            sizes[l.0] - prefixes[l.0],
+                            &mut writer,
+                        )?;
+                        stack.extend(node.fields().rev());
                     }
                 }
             }

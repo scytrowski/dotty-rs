@@ -123,6 +123,10 @@ impl Writer {
         self.bytes.len()
     }
 
+    pub(crate) fn clear(&mut self) {
+        self.bytes.clear();
+    }
+
     /// Appends one byte to the output.
     pub fn write_u8(&mut self, value: u8) {
         self.bytes.push(value);
@@ -189,6 +193,15 @@ impl Writer {
     pub fn as_slice(&self) -> &[u8] {
         &self.bytes
     }
+}
+
+pub(crate) fn nat_width(mut value: usize) -> usize {
+    let mut width = 1;
+    while value >= 128 {
+        value >>= 7;
+        width += 1;
+    }
+    width
 }
 
 fn write_unsigned(output: &mut Vec<u8>, value: u64) {

@@ -320,3 +320,38 @@ fn bind_references_follow_the_namespace_of_the_unshared_type() {
         }
     }
 }
+
+#[test]
+fn block_layout_matches_the_wire_encoder_for_mixed_width_constants() {
+    let mut builder = AstBuilder::new(Default::default());
+    let mut payload = Writer::new();
+    let mut fields = Vec::new();
+    let mut offsets = Vec::new();
+    for value in [i64::MIN, -65, -64, 63, 64, i64::MAX]
+        .into_iter()
+        .cycle()
+        .take(40)
+    {
+        let term = SimpleTerm::new(LONGCONST_TAG, TermValue::LongInt(value)).unwrap();
+        let label = builder.push(AstNode::Leaf(term.clone())).unwrap();
+        offsets.push((label, payload.position()));
+        term.encode(&mut payload).unwrap();
+        fields.push(AstField::Tree(label));
+    }
+    let block = builder
+        .push(AstNode::Length {
+            tag: BLOCK_TAG,
+            fields,
+        })
+        .unwrap();
+    let built = builder.finish(&[block]).unwrap();
+    let mut expected = Writer::new();
+    expected.write_u8(BLOCK_TAG);
+    expected.write_nat(payload.position() as u32);
+    let prefix = expected.position();
+    expected.write_bytes(payload.as_slice());
+    assert_eq!(built.bytes(), expected.as_slice());
+    for (label, offset) in offsets {
+        assert_eq!(built.address(label), Some((prefix + offset) as u32));
+    }
+}
