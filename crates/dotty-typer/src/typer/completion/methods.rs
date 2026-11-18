@@ -1148,7 +1148,7 @@ impl SourceTyper<'_> {
                 clauses.len(),
             )?));
         }
-        for trees in &definition.value_param_clauses {
+        for trees in self.context_bound_clauses(definition).iter() {
             let clause_index = clauses.len();
             let (parameters, kind) = self.method_parameter_specs(
                 method,
@@ -1363,12 +1363,22 @@ impl SourceTyper<'_> {
                     tree_index: tree.index(),
                 });
             };
-            let TreeKind::ValDef(definition) = &node.kind else {
-                return Err(TyperError::MalformedMethodClause {
-                    method,
-                    method_tree_index,
-                    clause_index,
-                });
+            let (name, tpt) = match &node.kind {
+                TreeKind::ValDef(definition) => (definition.name, definition.tpt),
+                TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(_)) => {
+                    let witness = self.method_parameter_symbol(method, *tree, derived)?;
+                    (
+                        dotty_core::TermName::new(self.store.symbols.get(witness).name.text()),
+                        *tree,
+                    )
+                }
+                _ => {
+                    return Err(TyperError::MalformedMethodClause {
+                        method,
+                        method_tree_index,
+                        clause_index,
+                    });
+                }
             };
             let symbol = self.method_parameter_symbol(method, *tree, derived)?;
             if self.store.symbols.get(symbol).kind != SymbolKind::Parameter {
@@ -1404,7 +1414,7 @@ impl SourceTyper<'_> {
             }
             clause_kind = Some(parameter_kind);
             let repeated_parameter = matches!(
-                self.arena.try_get(definition.tpt).map(|node| &node.kind),
+                self.arena.try_get(tpt).map(|node| &node.kind),
                 Some(TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)))
                     if self.store.names.resolve(postfix.op.text()) == "*"
             );
@@ -1443,7 +1453,7 @@ impl SourceTyper<'_> {
             };
             parameters.push(MethodParamSpec {
                 symbol,
-                name: definition.name,
+                name,
                 ty,
                 erased: flags.contains(SymbolFlags::ERASED),
                 varargs: repeated_parameter,
@@ -1475,5 +1485,108 @@ impl SourceTyper<'_> {
             method,
             parameter_tree_index: tree.index(),
         })
+    }
+}
+
+impl SourceTyper<'_> {
+    /// Scala 3.9 Desugar.fitEvidenceParams. Keep the source-bound tree as the
+    /// identity of each witness across naming, signature completion and DefDef typing.
+    pub(in crate::typer) fn context_bound_clauses<'d>(
+        &self,
+        definition: &'d dotty_core::ast::DefDef<Untyped>,
+    ) -> std::borrow::Cow<'d, [Vec<TreeId<Untyped>>]> {
+        let mut witnesses = Vec::new();
+        let mut names = HashSet::new();
+        for parameter in &definition.type_params {
+            if let Some(TreeKind::TypeDef(td)) = self.arena.try_get(*parameter).map(|n| &n.kind)
+                && let Some(TreeKind::PhaseSpecific(UntypedNode::ContextBounds(bounds))) =
+                    self.arena.try_get(td.rhs).map(|n| &n.kind)
+            {
+                for &tree in &bounds.context_bounds {
+                    witnesses.push(tree);
+                    if let Some(symbol) = self.index.symbol_at(self.source, tree) {
+                        names.insert(self.store.symbols.get(symbol).name);
+                    }
+                }
+            }
+        }
+        if witnesses.is_empty() {
+            return std::borrow::Cow::Borrowed(&definition.value_param_clauses);
+        }
+        let mut clauses = definition.value_param_clauses.clone();
+        if let Some(index) = clauses.iter().position(|clause| clause.iter().any(|parameter|
+            matches!(self.arena.try_get(*parameter).map(|n| &n.kind), Some(TreeKind::ValDef(param)) if self.type_references_witness(param.tpt, &names)) )) {
+            clauses.insert(index,witnesses);
+        } else if let Some(last) = clauses.last_mut()
+            && last.first().is_some_and(|tree| matches!(self.arena.try_get(*tree).map(|n| &n.kind), Some(TreeKind::ValDef(v)) if v.metadata.modifiers.contains(&Modifier::Given) || v.metadata.modifiers.contains(&Modifier::Implicit))) {
+            witnesses.append(last);
+            *last=witnesses;
+        } else {
+            clauses.push(witnesses);
+        }
+        std::borrow::Cow::Owned(clauses)
+    }
+
+    fn type_references_witness(
+        &self,
+        root: TreeId<Untyped>,
+        names: &HashSet<dotty_core::Name>,
+    ) -> bool {
+        let mut pending = vec![root];
+        let mut seen = HashSet::new();
+        while let Some(tree) = pending.pop() {
+            if !seen.insert(tree) {
+                continue;
+            }
+            let Some(node) = self.arena.try_get(tree) else {
+                continue;
+            };
+            match &node.kind {
+                TreeKind::Ident(id) if names.contains(&id.name) => return true,
+                TreeKind::Select(s) => pending.push(s.qualifier),
+                TreeKind::AppliedTypeTree(t) => {
+                    pending.push(t.tpt);
+                    pending.extend(&t.args);
+                }
+                TreeKind::SingletonTypeTree(t) => pending.push(t.reference),
+                TreeKind::ByNameTypeTree(t) => pending.push(t.result),
+                TreeKind::TypeBoundsTree(t) => {
+                    pending.extend([t.low, t.high, t.alias].into_iter().flatten())
+                }
+                TreeKind::RefinedTypeTree(t) => {
+                    pending.push(t.tpt);
+                    pending.extend(&t.refinements);
+                }
+                TreeKind::ValDef(v) => pending.push(v.tpt),
+                TreeKind::TypeDef(t) => pending.push(t.rhs),
+                TreeKind::LambdaTypeTree(t) => {
+                    pending.push(t.body);
+                    pending.extend(&t.type_params);
+                }
+                TreeKind::MatchTypeTree(t) => {
+                    pending.extend(t.bound);
+                    pending.push(t.selector);
+                    pending.extend(&t.cases);
+                }
+                TreeKind::CaseDef(t) => pending.extend([t.pattern, t.body]),
+                TreeKind::Annotated(t) => pending.push(t.expr),
+                TreeKind::PhaseSpecific(UntypedNode::Function(t)) => {
+                    pending.extend(&t.params);
+                    pending.push(t.body);
+                }
+                TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(t)) => {
+                    pending.extend(&t.params);
+                    pending.push(t.result);
+                }
+                TreeKind::PhaseSpecific(UntypedNode::Tuple(t)) => pending.extend(&t.elements),
+                TreeKind::PhaseSpecific(UntypedNode::Parens(t)) => pending.push(t.inner),
+                TreeKind::PhaseSpecific(UntypedNode::PostfixOp(t)) => pending.push(t.operand),
+                TreeKind::PhaseSpecific(UntypedNode::InfixOp(t)) => {
+                    pending.extend([t.left, t.right])
+                }
+                _ => {}
+            }
+        }
+        false
     }
 }

@@ -3353,6 +3353,11 @@ impl Namer<'_> {
         let TreeKind::DefDef(definition) = &self.arena.get(tree).kind else {
             return Ok(());
         };
+        let witness_flag = definition.value_param_clauses.last().and_then(|clause| clause.first())
+            .and_then(|tree| self.arena.try_get(*tree))
+            .filter(|node| matches!(&node.kind, TreeKind::ValDef(parameter) if parameter.metadata.modifiers.contains(&Modifier::Implicit)))
+            .map_or(SymbolFlags::GIVEN, |_| SymbolFlags::IMPLICIT);
+        let mut anonymous_witnesses = 0;
         for parameter_tree in &definition.type_params {
             let TreeKind::TypeDef(parameter) = &self.arena.get(*parameter_tree).kind else {
                 return Err(NamerError::MalformedAstShape {
@@ -3375,6 +3380,52 @@ impl Namer<'_> {
             )?;
             self.index
                 .record_declaration_context(parameter_symbol, method_context)?;
+            let bounds_tree =
+                self.arena
+                    .try_get(parameter.rhs)
+                    .ok_or(NamerError::MalformedAstShape {
+                        tree_index: parameter.rhs.index(),
+                        expected: "method type parameter bounds",
+                    })?;
+            if let TreeKind::PhaseSpecific(UntypedNode::ContextBounds(bounds)) = &bounds_tree.kind {
+                for &tree in &bounds.context_bounds {
+                    let Some(TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(bound))) =
+                        self.arena.try_get(tree).map(|node| &node.kind)
+                    else {
+                        return Err(NamerError::MalformedAstShape {
+                            tree_index: tree.index(),
+                            expected: "context bound on method type parameter",
+                        });
+                    };
+                    if bound.parameter != parameter.name {
+                        return Err(NamerError::MalformedAstShape {
+                            tree_index: tree.index(),
+                            expected: "context bound of its enclosing type parameter",
+                        });
+                    }
+                    let name = bound.name.unwrap_or_else(|| {
+                        anonymous_witnesses += 1;
+                        dotty_core::TermName::new(
+                            self.store
+                                .names
+                                .intern(&format!("evidence${anonymous_witnesses}")),
+                        )
+                    });
+                    let witness = self.enter_symbol(
+                        tree,
+                        *name.as_name(),
+                        method,
+                        method_scope,
+                        SymbolSpec {
+                            kind: SymbolKind::Parameter,
+                            flags: witness_flag,
+                            visibility: Visibility::Public,
+                        },
+                    )?;
+                    self.index
+                        .record_declaration_context(witness, method_context)?;
+                }
+            }
         }
         for clause in &definition.value_param_clauses {
             for parameter_tree in clause {

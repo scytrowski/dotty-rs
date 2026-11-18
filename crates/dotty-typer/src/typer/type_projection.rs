@@ -364,6 +364,31 @@ impl SourceTyper<'_> {
             }
             return Ok(ty);
         }
+        if let TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(bound)) = source_tree.kind
+        {
+            let tycon = self.type_of_tpt_inner_journaled(bound.bound, context, info_journal)?;
+            let parameter = SourceNameResolver { typer: self }.resolve_type_name(
+                *bound.parameter.as_name(),
+                context,
+                SourceTreeLocation {
+                    tree_index: tree.index(),
+                    position: source_tree.position,
+                },
+            )?;
+            let ty = self.store.types.alloc(Type::Applied {
+                tycon,
+                args: vec![parameter],
+            });
+            self.type_index
+                .insert(self.source, tree, ty)
+                .map_err(|existing| TyperError::DuplicateSourceTypeCacheEntry {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    existing,
+                    attempted: ty,
+                })?;
+            return Ok(ty);
+        }
         if let TreeKind::ByNameTypeTree(by_name) = &source_tree.kind {
             let result = self.type_of_tpt_inner_journaled(by_name.result, context, info_journal)?;
             let ty = self.store.types.alloc(Type::ByName { result });

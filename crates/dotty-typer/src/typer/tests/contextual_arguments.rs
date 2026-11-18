@@ -415,3 +415,86 @@ fn cyclic_dependency_fails_locally_and_does_not_hide_a_valid_alternative() {
         }
     }
 }
+
+#[test]
+fn named_and_aggregate_context_bounds_supply_canonical_method_evidence() {
+    let text = "class TC[A]; class Show[A]; class C { def witness[A: {TC as ev, Show}](using i: Int): TC[A] = ev; def call(using tc: TC[Int], sh: Show[Int], i: Int): TC[Int] = witness[Int] }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "witness");
+    let (call, call_rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "call");
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    let root = typer
+        .type_method_definition(definition_tree(&index, method))
+        .unwrap();
+    let TreeKind::DefDef(def) = &typer.typed_ast().get(root).kind else {
+        panic!()
+    };
+    assert_eq!(def.value_param_clauses.len(), 1);
+    assert_eq!(def.value_param_clauses[0].len(), 3);
+    let witness = reference(&typer, typer.typed_index.get(source, rhs).unwrap());
+    assert_eq!(typer.store.symbols.owner(witness), Some(method));
+    assert_eq!(
+        typer
+            .store
+            .names
+            .resolve(typer.store.symbols.get(witness).name.text()),
+        "ev"
+    );
+    typer
+        .type_method_definition(definition_tree(&index, call))
+        .unwrap();
+    let TreeKind::Apply(app) = &typer
+        .typed_ast()
+        .get(typer.typed_index.get(source, call_rhs).unwrap())
+        .kind
+    else {
+        panic!()
+    };
+    for (i, arg) in app.args.iter().enumerate() {
+        assert_eq!(
+            reference(&typer, *arg),
+            method_parameter_symbol(&parsed, &index, source, call, i)
+        );
+    }
+}
+
+#[test]
+fn context_bound_placement_precedes_a_dependent_clause_or_follows_plain_clauses() {
+    let text = "class TC[A]; class C { def before[A: TC as ev](same: ev.type): Int = 1; def after[A: TC](value: Int): Int = value }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for (name, kinds) in [
+        ("before", [MethodKind::Contextual, MethodKind::Plain]),
+        ("after", [MethodKind::Plain, MethodKind::Contextual]),
+    ] {
+        let method = method_symbol(&parsed, typer.store(), &index, source, name);
+        let sig = typer.complete_symbol(method).unwrap();
+        let Type::Poly(poly) = typer.store.types.get(sig) else {
+            panic!()
+        };
+        let mut next = poly.result;
+        for kind in kinds {
+            let Type::Method(clause) = typer.store.types.get(next) else {
+                panic!()
+            };
+            assert_eq!(clause.kind, kind);
+            assert_eq!(clause.params.len(), 1);
+            next = clause.result;
+        }
+        assert_eq!(next, definitions.int);
+    }
+}

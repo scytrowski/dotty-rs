@@ -1444,7 +1444,11 @@ imports, and unbounded or nominally bounded given selectors. Imported
 values retain their receiver in the typed selection. After lexical search finds
 no candidate, applied types contribute their constructor and argument anchors;
 nominal anchors contribute their linked companion and base classes. Candidates
-in these companions are ranked together. Conditional providers with inferable
+in these companions are ranked together. For ordinary member methods, context
+bounds enter a witness parameter for each source bound. Named and aggregate
+bounds preserve order. The witnesses precede the first term clause whose
+parameter type mentions them, merge into a trailing contextual clause, or
+form a final clause. Conditional providers with inferable
 result-type binders build a typed type application and recursively supply their
 contextual clauses. Missing or cyclic dependencies can eliminate a candidate;
 ambiguity in a dependency propagates. Search has explicit depth and work limits.
@@ -1601,7 +1605,7 @@ are ready:
 - expected-type-driven constructor inference, selecting constructor overloads, and
   anonymous-class lowering;
 - enum semantics, case-class synthetic APIs, and `derives`;
-- context-bound evidence synthesis;
+- context-bound witnesses on constructors and polymorphic function literals;
 - default imports and general standard-library member lookup;
 - ordinary and bounded contextual source function types are projected as
   canonical applied function-class types (#827 below). Refined types, type

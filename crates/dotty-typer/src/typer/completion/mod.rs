@@ -298,6 +298,10 @@ impl SourceTyper<'_> {
                 | SymbolKind::Parameter,
                 TreeKind::ValDef(definition),
             ) => Some(definition.tpt),
+            (
+                SymbolKind::Parameter,
+                TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(_)),
+            ) => Some(tree),
             (SymbolKind::Method | SymbolKind::Constructor, TreeKind::DefDef(_)) => None,
             (
                 SymbolKind::TypeParameter

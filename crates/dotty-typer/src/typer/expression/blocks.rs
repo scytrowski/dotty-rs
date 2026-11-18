@@ -1438,8 +1438,9 @@ impl SourceTyper<'_> {
                 }
             };
         }
+        let value_clauses = self.context_bound_clauses(definition);
         let extension_prefix_count = usize::from(is_extension);
-        for _ in 0..extension_prefix_count + definition.value_param_clauses.len() {
+        for _ in 0..extension_prefix_count + value_clauses.len() {
             result = match self.store.types.try_get(result) {
                 Some(Type::Method(method_type)) => method_type.result,
                 _ => {
@@ -1498,6 +1499,16 @@ impl SourceTyper<'_> {
                     source: self.source,
                     tree_index: parameter.rhs.index(),
                 });
+            };
+            let rhs_node = match &rhs_node.kind {
+                TreeKind::PhaseSpecific(UntypedNode::ContextBounds(context)) => self
+                    .arena
+                    .try_get(context.bounds)
+                    .ok_or(TyperError::TreeOutsideArena {
+                        source: self.source,
+                        tree_index: context.bounds.index(),
+                    })?,
+                _ => rhs_node,
             };
             let TreeKind::TypeBoundsTree(source_bounds) = rhs_node.kind else {
                 return Err(TyperError::LocalBlockDeclarationDeferred {
@@ -1561,8 +1572,7 @@ impl SourceTyper<'_> {
             typed_type_params.push(typed_parameter);
         }
 
-        let mut typed_clauses =
-            Vec::with_capacity(definition.value_param_clauses.len() + extension_prefix_count);
+        let mut typed_clauses = Vec::with_capacity(value_clauses.len() + extension_prefix_count);
         if is_extension {
             let receiver_tree = self
                 .extension_prefix_clauses(method)
@@ -1626,20 +1636,13 @@ impl SourceTyper<'_> {
             new_mappings.push((self.source, receiver_tree));
             typed_clauses.push(vec![typed_receiver]);
         }
-        for clause in &definition.value_param_clauses {
+        for clause in value_clauses.iter() {
             let mut typed_parameters = Vec::with_capacity(clause.len());
             for parameter_tree in clause {
                 let Some(parameter_node) = self.arena.try_get(*parameter_tree).cloned() else {
                     return Err(TyperError::TreeOutsideArena {
                         source: self.source,
                         tree_index: parameter_tree.index(),
-                    });
-                };
-                let TreeKind::ValDef(parameter) = parameter_node.kind else {
-                    return Err(TyperError::LocalBlockDeclarationDeferred {
-                        source: self.source,
-                        tree_index: parameter_tree.index(),
-                        kind: "method parameter",
                     });
                 };
                 if let Some(typed) = self.typed_index.get(self.source, *parameter_tree) {
@@ -1663,11 +1666,33 @@ impl SourceTyper<'_> {
                         });
                     }
                 };
-                let typed_tpt =
-                    self.reify_constructor_type_tree(parameter.tpt, parameter_type, new_mappings)?;
+                let (name, typed_tpt) = match parameter_node.kind {
+                    TreeKind::ValDef(parameter) => (
+                        parameter.name,
+                        self.reify_constructor_type_tree(
+                            parameter.tpt,
+                            parameter_type,
+                            new_mappings,
+                        )?,
+                    ),
+                    TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(_)) => (
+                        dotty_core::TermName::new(
+                            self.store.symbols.get(parameter_symbol).name.text(),
+                        ),
+                        TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                            .type_tree(parameter_type, parameter_node.position),
+                    ),
+                    _ => {
+                        return Err(TyperError::LocalBlockDeclarationDeferred {
+                            source: self.source,
+                            tree_index: parameter_tree.index(),
+                            kind: "method parameter",
+                        });
+                    }
+                };
                 let typed_parameter = self.typed_arena.alloc(Tree {
                     kind: TreeKind::ValDef(ValDef {
-                        name: parameter.name,
+                        name,
                         tpt: typed_tpt,
                         rhs: None,
                         metadata: (),
