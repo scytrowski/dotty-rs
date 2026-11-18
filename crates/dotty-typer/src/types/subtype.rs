@@ -121,6 +121,32 @@ impl SourceTyper<'_> {
         self.is_subtype(found, expected)
     }
 
+    /// Align an applied provider result with the goal's constructor before
+    /// inferring binders. Collect all matching paths through a nominal diamond.
+    pub(crate) fn contextual_inference_views(
+        &mut self,
+        result: TypeId,
+        goal: TypeId,
+    ) -> Result<Vec<TypeId>, TypeRelationError> {
+        if !matches!(self.store.types.try_get(result), Some(Type::Applied { .. }))
+            || !matches!(self.store.types.try_get(goal), Some(Type::Applied { .. }))
+        {
+            return Ok(vec![result]);
+        }
+        let mut relation = TypeRelation::new(self);
+        let declared = relation.class_view(result)?;
+        let expected = relation.class_view(goal)?;
+        if declared.class == expected.class {
+            return Ok(vec![result]);
+        }
+        let mut views = Vec::new();
+        relation.visit_inherited_views(declared, expected.class, |_, view| {
+            views.push(view.ty);
+            Ok(())
+        })?;
+        Ok(views)
+    }
+
     #[cfg(test)]
     pub(crate) fn subtype_sequence_with_cache_size(
         &mut self,
@@ -690,6 +716,21 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         expected: ClassView,
         expected_type: TypeId,
     ) -> Result<bool, TypeRelationError> {
+        let mut matched_expected = false;
+        self.visit_inherited_views(found, expected.class, |relation, view| {
+            relation.check_view_arity(view, &expected, view.ty, expected_type)?;
+            matched_expected |= relation.subtype_class_views(view, &expected, 0)?;
+            Ok(())
+        })?;
+        Ok(matched_expected)
+    }
+
+    fn visit_inherited_views(
+        &mut self,
+        found: ClassView,
+        target: SymbolId,
+        mut visit: impl FnMut(&mut Self, &ClassView) -> Result<(), TypeRelationError>,
+    ) -> Result<(), TypeRelationError> {
         let found_class = found.class;
         let mut pending_views = vec![PendingView {
             view: found,
@@ -697,7 +738,6 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             path: vec![found_class],
         }];
         let mut inspected_views = 1;
-        let mut matched_expected = false;
 
         while let Some(pending) = pending_views.pop() {
             let info = self.class_info(pending.view.class)?;
@@ -734,11 +774,8 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
                     });
                 }
 
-                if parent_view.class == expected.class {
-                    self.check_view_arity(&parent_view, &expected, parent, expected_type)?;
-                    if self.subtype_class_views(&parent_view, &expected, 0)? {
-                        matched_expected = true;
-                    }
+                if parent_view.class == target {
+                    visit(self, &parent_view)?;
                 }
 
                 if matches!(
@@ -768,7 +805,7 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             pending_views.extend(children.into_iter().rev());
         }
 
-        Ok(matched_expected)
+        Ok(())
     }
 
     fn subtype_class_views(

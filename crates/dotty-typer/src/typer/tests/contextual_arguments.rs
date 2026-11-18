@@ -902,3 +902,34 @@ fn bounded_import_selects_a_conditional_declaration_and_preserves_its_type_param
         );
     }
 }
+
+#[test]
+fn generic_evidence_infers_through_its_declared_parent_result() {
+    let text = include_str!("../../../tests/fixtures/contextual-arguments/Inherited.scala");
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "run");
+    let producer = method_symbol(&parsed, &store, &index, source, "instance");
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    typer
+        .type_method_definition(definition_tree(&index, method))
+        .unwrap();
+    let TreeKind::Apply(call) = &typer
+        .typed_ast()
+        .get(typer.typed_index.get(source, rhs).unwrap())
+        .kind
+    else {
+        panic!()
+    };
+    let TreeKind::TypeApply(produced) = &typer.typed_ast().get(call.args[0]).kind else {
+        panic!()
+    };
+    assert_eq!(reference(&typer, produced.function), producer);
+    assert_eq!(typer.typed_ast().get(produced.args[0]).ty, definitions.int);
+}

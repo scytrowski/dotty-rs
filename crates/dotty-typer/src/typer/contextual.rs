@@ -666,24 +666,42 @@ impl SourceTyper<'_> {
         let mut type_arguments = Vec::new();
         if let Some(poly) = poly {
             let mut inferred = vec![None; poly.params.len()];
-            match self.infer_type_constraints(
-                result,
-                expected,
-                signature,
-                &mut inferred,
-                InferenceLocation {
-                    tree_index,
-                    argument_index: 0,
-                    depth: 0,
-                },
-                journal,
-            ) {
-                Ok(()) => {}
-                Err(
-                    TyperError::UnsupportedInferenceShape { .. }
-                    | TyperError::ConflictingInferenceConstraints { .. },
-                ) => return Ok(None),
-                Err(error) => return Err(error),
+            self.complete_relation_type(result, journal, &mut HashSet::new(), 0)?;
+            let views = self
+                .contextual_inference_views(result, expected)
+                .map_err(
+                    |error| TyperError::ExpectedExpressionConformanceUnsupported {
+                        source: self.source,
+                        tree_index,
+                        actual: result,
+                        expected,
+                        error: Box::new(error),
+                    },
+                )?;
+            if views.is_empty() {
+                return Ok(None);
+            }
+            for view in views {
+                match self.infer_type_constraints(
+                    view,
+                    expected,
+                    signature,
+                    &mut inferred,
+                    InferenceLocation {
+                        result_pattern: true,
+                        tree_index,
+                        argument_index: 0,
+                        depth: 0,
+                    },
+                    journal,
+                ) {
+                    Ok(()) => {}
+                    Err(
+                        TyperError::UnsupportedInferenceShape { .. }
+                        | TyperError::ConflictingInferenceConstraints { .. },
+                    ) => return Ok(None),
+                    Err(error) => return Err(error),
+                }
             }
             let Some(arguments) = inferred.into_iter().collect::<Option<Vec<_>>>() else {
                 return Err(TyperError::UsingApplicationDeferred {

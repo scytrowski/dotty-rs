@@ -33,6 +33,7 @@ def main():
                 "def pick(using n: Int): Int = this.one(n)", "this.from(1)(b)",
                 "Implicit parameters should be provided with a `using` clause",
             )),
+            ("Inherited.scala", 0, ("this.need(TC.instance[Int])",)),
             ("Invalid.scala", 1, (
                 "[E050]", "[E172]", "does not take more parameters",
                 "No given instance of type scala.util.NotGiven[Int]",
