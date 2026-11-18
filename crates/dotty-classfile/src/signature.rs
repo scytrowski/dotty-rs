@@ -190,10 +190,12 @@ fn parse_optional_type_arguments(
     }
 
     let mut arguments = Vec::new();
-    while !cursor.eat_ascii(b'>') {
+    loop {
         arguments.push(parse_type_argument(cursor, depth + 1)?);
+        if cursor.eat_ascii(b'>') {
+            return Ok(arguments);
+        }
     }
-    Ok(arguments)
 }
 
 fn parse_type_argument(
@@ -235,10 +237,17 @@ fn parse_type_parameters(
     }
 
     let mut parameters = Vec::new();
-    while !cursor.eat_ascii(b'>') {
+    loop {
         parameters.push(parse_type_parameter(cursor, depth)?);
+        if cursor.eat_ascii(b'>') {
+            return Ok(parameters);
+        }
     }
-    Ok(parameters)
+}
+
+fn starts_type_parameter(cursor: &Cursor<'_>) -> bool {
+    let mut lookahead = cursor.clone();
+    read_identifier(&mut lookahead).is_ok() && lookahead.eat_ascii(b':')
 }
 
 fn parse_type_parameter(
@@ -254,14 +263,14 @@ fn parse_type_parameter(
         });
     }
 
-    // ClassBound's ReferenceTypeSignature is optional: a second ':'
-    // immediately following means the bound was empty (implicit Object),
-    // and what follows is actually the first InterfaceBound.
-    let class_bound = if cursor.peek_ascii() == Some(b':') {
-        None
-    } else {
-        Some(parse_reference_type_signature(cursor, depth + 1)?)
-    };
+    // Even an identifier beginning with 'L' or 'T' starts the next
+    // parameter if its delimiter is ':'.
+    let class_bound =
+        if matches!(cursor.peek_ascii(), Some(b':' | b'>')) || starts_type_parameter(cursor) {
+            None
+        } else {
+            Some(parse_reference_type_signature(cursor, depth + 1)?)
+        };
 
     let mut interface_bounds = Vec::new();
     while cursor.eat_ascii(b':') {
@@ -680,6 +689,40 @@ mod tests {
                 class_bound: Some(ReferenceTypeSignature::Class(object_class_type())),
                 interface_bounds: vec![],
             }]
+        );
+    }
+
+    #[test]
+    fn omitted_class_bounds_may_precede_another_parameter_or_the_closing_bracket() {
+        let signature = ClassSignature::parse("<A:TValue:LName:β:>Ljava/lang/Object;").unwrap();
+        let names: Vec<_> = signature
+            .type_parameters
+            .iter()
+            .map(|param| {
+                assert_eq!(param.class_bound, None);
+                assert!(param.interface_bounds.is_empty());
+                param.name.as_str()
+            })
+            .collect();
+        assert_eq!(names, ["A", "TValue", "LName", "β"]);
+    }
+
+    #[test]
+    fn rejects_an_empty_list_of_formal_type_parameters() {
+        assert_eq!(
+            MethodSignature::parse("<>()V"),
+            Err(SignatureError::EmptyIdentifier { offset: 1 })
+        );
+    }
+
+    #[test]
+    fn rejects_an_empty_list_of_type_arguments() {
+        assert_eq!(
+            FieldSignature::parse("LBox<>;"),
+            Err(SignatureError::UnknownLeadChar {
+                offset: 5,
+                found: '>'
+            })
         );
     }
 

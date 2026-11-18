@@ -184,8 +184,8 @@ pub enum ElementValue {
 /// like `signature::DEFAULT_MAX_SIGNATURE_DEPTH`.
 pub const DEFAULT_MAX_ANNOTATION_DEPTH: usize = 128;
 
-/// Bounds recursively nested `Code` and `Record` attribute lists during
-/// encoding so caller-constructed models cannot exhaust the stack.
+/// Maximum depth of an attribute nested inside `Code` or `Record`.
+/// A top-level attribute has depth zero.
 pub const DEFAULT_MAX_ATTRIBUTE_DEPTH: usize = 128;
 
 /// A structured attribute, resolved one level above [`RawAttribute`].
@@ -251,6 +251,8 @@ pub enum AttributeError {
     /// An `element_value` nested (via `annotation`/`array`) past
     /// [`DEFAULT_MAX_ANNOTATION_DEPTH`].
     TooDeeplyNestedAnnotation,
+    /// An attribute exceeded [`DEFAULT_MAX_ATTRIBUTE_DEPTH`].
+    TooDeeplyNestedAttribute,
     /// A Module attribute field contains flag bits reserved by JVMS §4.7.25.
     InvalidModuleFlags {
         field: &'static str,
@@ -280,6 +282,10 @@ impl fmt::Display for AttributeError {
                 formatter,
                 "annotation element_value nested past depth {DEFAULT_MAX_ANNOTATION_DEPTH}"
             ),
+            Self::TooDeeplyNestedAttribute => write!(
+                formatter,
+                "Code/Record attribute nested past depth {DEFAULT_MAX_ATTRIBUTE_DEPTH}"
+            ),
             Self::InvalidModuleFlags { field, flags } => write!(
                 formatter,
                 "reserved Module attribute flag bits {flags:#06x} in {field}"
@@ -303,7 +309,7 @@ pub(crate) fn read_index_list(
     reader: &mut Reader<'_>,
 ) -> Result<Vec<ConstantPoolIndex>, ReadError> {
     let count = reader.read_u16()?;
-    let mut indices = Vec::with_capacity(usize::from(count));
+    let mut indices = Vec::with_capacity(reader.table_capacity(count, 2));
     for _ in 0..count {
         indices.push(read_index(reader)?);
     }
@@ -333,15 +339,6 @@ fn validate_module_flags(
             flags: reserved,
         })
     }
-}
-
-fn read_module_index_list(reader: &mut Reader<'_>) -> Result<Vec<ConstantPoolIndex>, ReadError> {
-    let count = reader.read_u16()?;
-    let mut indices = Vec::new();
-    for _ in 0..count {
-        indices.push(read_index(reader)?);
-    }
-    Ok(indices)
 }
 
 fn read_module_attribute(reader: &mut Reader<'_>) -> Result<ModuleAttribute, AttributeError> {
@@ -385,7 +382,7 @@ fn read_module_attribute(reader: &mut Reader<'_>) -> Result<ModuleAttribute, Att
             exports_flags,
             MODULE_ACC_SYNTHETIC | MODULE_ACC_MANDATED,
         )?;
-        let exports_to = read_module_index_list(reader)?;
+        let exports_to = read_index_list(reader)?;
         exports.push(ModuleExport {
             exports_index,
             exports_flags,
@@ -403,7 +400,7 @@ fn read_module_attribute(reader: &mut Reader<'_>) -> Result<ModuleAttribute, Att
             opens_flags,
             MODULE_ACC_SYNTHETIC | MODULE_ACC_MANDATED,
         )?;
-        let opens_to = read_module_index_list(reader)?;
+        let opens_to = read_index_list(reader)?;
         opens.push(ModuleOpen {
             opens_index,
             opens_flags,
@@ -411,7 +408,7 @@ fn read_module_attribute(reader: &mut Reader<'_>) -> Result<ModuleAttribute, Att
         });
     }
 
-    let uses = read_module_index_list(reader)?;
+    let uses = read_index_list(reader)?;
     let provides_count = reader.read_u16()?;
     let mut provides = Vec::new();
     for _ in 0..provides_count {
@@ -444,7 +441,7 @@ fn read_module_attribute(reader: &mut Reader<'_>) -> Result<ModuleAttribute, Att
 
 fn read_bootstrap_methods(reader: &mut Reader<'_>) -> Result<Vec<BootstrapMethodEntry>, ReadError> {
     let count = reader.read_u16()?;
-    let mut methods = Vec::with_capacity(usize::from(count));
+    let mut methods = Vec::with_capacity(reader.table_capacity(count, 4));
     for _ in 0..count {
         let method_ref = read_index(reader)?;
         let arguments = read_index_list(reader)?;
@@ -458,7 +455,7 @@ fn read_bootstrap_methods(reader: &mut Reader<'_>) -> Result<Vec<BootstrapMethod
 
 fn read_inner_classes(reader: &mut Reader<'_>) -> Result<Vec<InnerClassEntry>, ReadError> {
     let count = reader.read_u16()?;
-    let mut classes = Vec::with_capacity(usize::from(count));
+    let mut classes = Vec::with_capacity(reader.table_capacity(count, 8));
     for _ in 0..count {
         let inner_class_info_index = read_index(reader)?;
         let outer_class_info_index = read_optional_index(reader)?;
@@ -476,7 +473,7 @@ fn read_inner_classes(reader: &mut Reader<'_>) -> Result<Vec<InnerClassEntry>, R
 
 fn read_method_parameters(reader: &mut Reader<'_>) -> Result<Vec<MethodParameterEntry>, ReadError> {
     let count = reader.read_u8()?;
-    let mut parameters = Vec::with_capacity(usize::from(count));
+    let mut parameters = Vec::with_capacity(reader.table_capacity(u16::from(count), 4));
     for _ in 0..count {
         let name_index = read_optional_index(reader)?;
         let access_flags = reader.read_u16()?;
@@ -522,7 +519,7 @@ fn read_element_value(
                 return Err(AttributeError::TooDeeplyNestedAnnotation);
             }
             let count = reader.read_u16()?;
-            let mut values = Vec::with_capacity(usize::from(count));
+            let mut values = Vec::with_capacity(reader.nested_table_capacity(count, 3));
             for _ in 0..count {
                 values.push(read_element_value(reader, depth + 1)?);
             }
@@ -535,7 +532,7 @@ fn read_element_value(
 fn read_annotation(reader: &mut Reader<'_>, depth: usize) -> Result<Annotation, AttributeError> {
     let type_index = read_index(reader)?;
     let count = reader.read_u16()?;
-    let mut element_value_pairs = Vec::with_capacity(usize::from(count));
+    let mut element_value_pairs = Vec::with_capacity(reader.nested_table_capacity(count, 5));
     for _ in 0..count {
         let element_name_index = read_index(reader)?;
         let value = read_element_value(reader, depth)?;
@@ -549,7 +546,7 @@ fn read_annotation(reader: &mut Reader<'_>, depth: usize) -> Result<Annotation, 
 
 fn read_annotations(reader: &mut Reader<'_>) -> Result<Vec<Annotation>, AttributeError> {
     let count = reader.read_u16()?;
-    let mut annotations = Vec::with_capacity(usize::from(count));
+    let mut annotations = Vec::with_capacity(reader.nested_table_capacity(count, 4));
     for _ in 0..count {
         annotations.push(read_annotation(reader, 0)?);
     }
@@ -558,7 +555,7 @@ fn read_annotations(reader: &mut Reader<'_>) -> Result<Vec<Annotation>, Attribut
 
 fn read_exception_table(reader: &mut Reader<'_>) -> Result<Vec<ExceptionTableEntry>, ReadError> {
     let count = reader.read_u16()?;
-    let mut entries = Vec::with_capacity(usize::from(count));
+    let mut entries = Vec::with_capacity(reader.table_capacity(count, 8));
     for _ in 0..count {
         let start_pc = reader.read_u16()?;
         let end_pc = reader.read_u16()?;
@@ -577,13 +574,14 @@ fn read_exception_table(reader: &mut Reader<'_>) -> Result<Vec<ExceptionTableEnt
 fn read_code<'a>(
     reader: &mut Reader<'a>,
     constant_pool: &ConstantPool,
+    depth: usize,
 ) -> Result<CodeAttribute<'a>, AttributeError> {
     let max_stack = reader.read_u16()?;
     let max_locals = reader.read_u16()?;
     let code_length = reader.read_u32()?;
     let code = reader.read_bytes(code_length as usize)?;
     let exception_table = read_exception_table(reader)?;
-    let attributes = decode_attributes(reader, constant_pool)?;
+    let attributes = decode_attributes_at_depth(reader, constant_pool, depth + 1)?;
     Ok(CodeAttribute {
         max_stack,
         max_locals,
@@ -600,10 +598,18 @@ pub(crate) fn decode_attributes<'a>(
     reader: &mut Reader<'a>,
     constant_pool: &ConstantPool,
 ) -> Result<Vec<Attribute<'a>>, AttributeError> {
+    decode_attributes_at_depth(reader, constant_pool, 0)
+}
+
+fn decode_attributes_at_depth<'a>(
+    reader: &mut Reader<'a>,
+    constant_pool: &ConstantPool,
+    depth: usize,
+) -> Result<Vec<Attribute<'a>>, AttributeError> {
     let count = reader.read_u16()?;
-    let mut attributes = Vec::with_capacity(usize::from(count));
+    let mut attributes = Vec::with_capacity(reader.nested_table_capacity(count, 6));
     for _ in 0..count {
-        attributes.push(Attribute::decode(reader, constant_pool)?);
+        attributes.push(Attribute::decode_at_depth(reader, constant_pool, depth)?);
     }
     Ok(attributes)
 }
@@ -611,13 +617,14 @@ pub(crate) fn decode_attributes<'a>(
 fn read_record_components<'a>(
     reader: &mut Reader<'a>,
     constant_pool: &ConstantPool,
+    depth: usize,
 ) -> Result<Vec<RecordComponentInfo<'a>>, AttributeError> {
     let count = reader.read_u16()?;
-    let mut components = Vec::with_capacity(usize::from(count));
+    let mut components = Vec::with_capacity(reader.nested_table_capacity(count, 6));
     for _ in 0..count {
         let name_index = read_index(reader)?;
         let descriptor_index = read_index(reader)?;
-        let attributes = decode_attributes(reader, constant_pool)?;
+        let attributes = decode_attributes_at_depth(reader, constant_pool, depth + 1)?;
         components.push(RecordComponentInfo {
             name_index,
             descriptor_index,
@@ -829,20 +836,6 @@ fn validate_element_value_at_depth(
             }
             Ok(())
         }
-    }
-}
-
-fn encode_pool_ref_error(pool: &ConstantPool, error: PoolRefError) -> EncodeError {
-    match error {
-        PoolRefError::InvalidIndex { index } => EncodeError::InvalidIndex {
-            index: usize::from(index.0),
-            count: pool.entry_count(),
-        },
-        PoolRefError::WrongKind { index, .. } => EncodeError::InvalidReference {
-            index: usize::from(index.0),
-        },
-        PoolRefError::TooDeeplyNestedAttribute => EncodeError::TooDeeplyNestedAttribute,
-        PoolRefError::TooDeeplyNestedAnnotation => EncodeError::TooDeeplyNestedAnnotation,
     }
 }
 
@@ -1382,14 +1375,14 @@ impl<'a> Attribute<'a> {
         let payload_length = encoded_payload_length(self, depth)?;
         let name_index = if let Some(name) = attribute_name(self) {
             validate_attribute(self, constant_pool)
-                .map_err(|error| encode_pool_ref_error(constant_pool, error))?;
+                .map_err(|error| error.into_encode_error(constant_pool))?;
             constant_pool
                 .find_utf8(name)
                 .ok_or(EncodeError::MissingAttributeName { name })?
         } else if let Attribute::Other(raw) = self {
             constant_pool
                 .utf8(raw.name_index)
-                .map_err(|error| encode_pool_ref_error(constant_pool, error))?;
+                .map_err(|error| error.into_encode_error(constant_pool))?;
             raw.name_index
         } else {
             return Err(EncodeError::UnsupportedAttribute);
@@ -1492,6 +1485,17 @@ impl<'a> Attribute<'a> {
         reader: &mut Reader<'a>,
         constant_pool: &ConstantPool,
     ) -> Result<Self, AttributeError> {
+        Self::decode_at_depth(reader, constant_pool, 0)
+    }
+
+    fn decode_at_depth(
+        reader: &mut Reader<'a>,
+        constant_pool: &ConstantPool,
+        depth: usize,
+    ) -> Result<Self, AttributeError> {
+        if depth > DEFAULT_MAX_ATTRIBUTE_DEPTH {
+            return Err(AttributeError::TooDeeplyNestedAttribute);
+        }
         let name_index = read_index(reader)?;
         let attribute_length = reader.read_u32()?;
         let mut sub_reader = reader.read_sub_reader(attribute_length as usize)?;
@@ -1539,8 +1543,12 @@ impl<'a> Attribute<'a> {
             "RuntimeInvisibleAnnotations" => {
                 Attribute::RuntimeInvisibleAnnotations(read_annotations(&mut sub_reader)?)
             }
-            "Record" => Attribute::Record(read_record_components(&mut sub_reader, constant_pool)?),
-            "Code" => Attribute::Code(read_code(&mut sub_reader, constant_pool)?),
+            "Record" => Attribute::Record(read_record_components(
+                &mut sub_reader,
+                constant_pool,
+                depth,
+            )?),
+            "Code" => Attribute::Code(read_code(&mut sub_reader, constant_pool, depth)?),
             _ => {
                 let bytes = sub_reader.read_bytes(sub_reader.remaining())?;
                 return Ok(Attribute::Other(RawAttribute { name_index, bytes }));
@@ -1865,6 +1873,33 @@ mod tests {
             descriptor_index: ConstantPoolIndex(19),
             attributes: vec![attribute],
         }])
+    }
+
+    #[test]
+    fn nested_code_and_record_decoding_obeys_the_depth_boundary() {
+        let pool = complex_attribute_pool();
+        let mut attribute = Attribute::Signature(ConstantPoolIndex(23));
+        for level in 0..DEFAULT_MAX_ATTRIBUTE_DEPTH {
+            attribute = if level % 2 == 0 {
+                wrap_code_attribute(attribute)
+            } else {
+                wrap_record_attribute(attribute)
+            };
+        }
+        let bytes = attribute.encode(&pool).unwrap();
+        assert_eq!(
+            Attribute::decode(&mut Reader::new(&bytes), &pool),
+            Ok(attribute)
+        );
+
+        // Add one record component containing the encoded boundary case.
+        let mut payload = vec![0, 1, 0, 18, 0, 19, 0, 1];
+        payload.extend_from_slice(&bytes);
+        let nested = attribute_info_bytes(4, &payload);
+        assert_eq!(
+            Attribute::decode(&mut Reader::new(&nested), &pool),
+            Err(AttributeError::TooDeeplyNestedAttribute)
+        );
     }
 
     #[test]

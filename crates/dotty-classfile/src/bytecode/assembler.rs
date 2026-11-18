@@ -284,63 +284,62 @@ fn assemble_labeled_validated(
 ) -> Result<AssembledCode, AssembleError> {
     let mut instruction_offsets = Vec::with_capacity(sequence.instruction_count());
     let mut label_offsets = HashMap::new();
-    let mut operation_bytes = Vec::with_capacity(sequence.instruction_count());
+    let mut writer = Writer::new();
     let mut branches = Vec::new();
-    let mut pc = 0usize;
-    let mut instruction_index = 0usize;
 
     for element in sequence.elements() {
+        let pc = writer.len();
         match element {
             CodeElement::Label(label) => {
                 label_offsets.insert(label.clone(), pc);
+                continue;
             }
             CodeElement::Instruction(instruction) => {
-                instruction_offsets.push(pc);
-                let mut writer = Writer::new();
                 write_instruction(&mut writer, *instruction, constant_pool)?;
-                let encoded = writer.into_bytes();
-                pc = advance_pc(pc, encoded.len())?;
-                ensure_code_limit(pc)?;
-                operation_bytes.push(Some(encoded));
-                instruction_index = instruction_index
-                    .checked_add(1)
-                    .ok_or(AssembleError::ProgramCounterOverflow)?;
             }
             CodeElement::Branch(branch) => {
-                instruction_offsets.push(pc);
-                branches.push((instruction_index, pc, branch.clone()));
-                let branch_size = branch_size(branch);
-                pc = advance_pc(pc, branch_size)?;
-                ensure_code_limit(pc)?;
-                operation_bytes.push(None);
-                instruction_index = instruction_index
-                    .checked_add(1)
-                    .ok_or(AssembleError::ProgramCounterOverflow)?;
+                writer.write_u1(branch_opcode(branch));
+                if matches!(branch, BranchInstruction::GotoWide(_)) {
+                    writer.write_u4(0);
+                } else {
+                    writer.write_u2(0);
+                }
+                branches.push((instruction_offsets.len(), pc..writer.len(), branch.target()));
             }
         }
+        instruction_offsets.push(pc);
+        ensure_code_limit(writer.len())?;
     }
 
-    if pc == 0 {
+    let code_length = writer.len();
+    if code_length == 0 {
         return Err(AssembleError::InvalidCodeLength { length: 0 });
     }
 
-    for (branch_index, source_pc, branch) in branches {
-        let target_pc = label_offsets.get(branch.target()).copied().ok_or(
-            AssembleError::InvalidCodeSequence(CodeSequenceErrorKind::UnboundLabel),
-        )?;
-        let encoded = encode_branch(&branch, branch_index, source_pc, target_pc)?;
-        let Some(slot) = operation_bytes.get_mut(branch_index) else {
-            return Err(AssembleError::ProgramCounterOverflow);
-        };
-        *slot = Some(encoded);
-    }
-
-    let mut bytes = Vec::with_capacity(pc);
-    for encoded in operation_bytes {
-        let Some(encoded) = encoded else {
-            return Err(AssembleError::ProgramCounterOverflow);
-        };
-        bytes.extend_from_slice(&encoded);
+    let mut bytes = writer.into_bytes();
+    for (instruction, range, label) in branches {
+        let target_pc =
+            label_offsets
+                .get(label)
+                .copied()
+                .ok_or(AssembleError::InvalidCodeSequence(
+                    CodeSequenceErrorKind::UnboundLabel,
+                ))?;
+        // Both PCs are bounded by the JVM code_length limit (65535).
+        let offset = target_pc as i32 - range.start as i32;
+        let operand = &mut bytes[range][1..];
+        if operand.len() == 4 {
+            operand.copy_from_slice(&offset.to_be_bytes());
+        } else {
+            let short =
+                i16::try_from(offset).map_err(|_| AssembleError::BranchOffsetOutOfRange {
+                    instruction,
+                    offset: i64::from(offset),
+                    min: i64::from(i16::MIN),
+                    max: i64::from(i16::MAX),
+                })?;
+            operand.copy_from_slice(&short.to_be_bytes());
+        }
     }
 
     Ok(AssembledCode {
@@ -348,134 +347,36 @@ fn assemble_labeled_validated(
         layout: CodeLayout {
             instruction_offsets,
             label_offsets,
-            code_length: pc,
+            code_length,
             sequence_scope: Arc::clone(sequence.sequence_scope()),
             sequence_revision: Arc::clone(sequence.sequence_revision()),
         },
     })
 }
 
-fn branch_size(branch: &BranchInstruction) -> usize {
+fn branch_opcode(branch: &BranchInstruction) -> u8 {
     match branch {
-        BranchInstruction::GotoWide(_) => 5,
-        BranchInstruction::Goto(_)
-        | BranchInstruction::IfEq(_)
-        | BranchInstruction::IfNe(_)
-        | BranchInstruction::IfICmpEq(_)
-        | BranchInstruction::IfICmpNe(_)
-        | BranchInstruction::IfICmpLt(_)
-        | BranchInstruction::IfICmpGe(_)
-        | BranchInstruction::IfICmpGt(_)
-        | BranchInstruction::IfICmpLe(_)
-        | BranchInstruction::IfACmpEq(_)
-        | BranchInstruction::IfACmpNe(_)
-        | BranchInstruction::IfNull(_)
-        | BranchInstruction::IfNonNull(_) => 3,
+        BranchInstruction::Goto(_) => 0xa7,
+        BranchInstruction::GotoWide(_) => 0xc8,
+        BranchInstruction::IfEq(_) => 0x99,
+        BranchInstruction::IfNe(_) => 0x9a,
+        BranchInstruction::IfICmpEq(_) => 0x9f,
+        BranchInstruction::IfICmpNe(_) => 0xa0,
+        BranchInstruction::IfICmpLt(_) => 0xa1,
+        BranchInstruction::IfICmpGe(_) => 0xa2,
+        BranchInstruction::IfICmpGt(_) => 0xa3,
+        BranchInstruction::IfICmpLe(_) => 0xa4,
+        BranchInstruction::IfACmpEq(_) => 0xa5,
+        BranchInstruction::IfACmpNe(_) => 0xa6,
+        BranchInstruction::IfNull(_) => 0xc6,
+        BranchInstruction::IfNonNull(_) => 0xc7,
     }
-}
-
-fn advance_pc(pc: usize, length: usize) -> Result<usize, AssembleError> {
-    pc.checked_add(length)
-        .ok_or(AssembleError::ProgramCounterOverflow)
 }
 
 fn ensure_code_limit(length: usize) -> Result<(), AssembleError> {
     if length > usize::from(u16::MAX) {
         return Err(AssembleError::InvalidCodeLength { length });
     }
-    Ok(())
-}
-
-fn encode_branch(
-    branch: &BranchInstruction,
-    instruction: usize,
-    source_pc: usize,
-    target_pc: usize,
-) -> Result<Vec<u8>, AssembleError> {
-    let source_pc = i64::try_from(source_pc).map_err(|_| AssembleError::ProgramCounterOverflow)?;
-    let target_pc = i64::try_from(target_pc).map_err(|_| AssembleError::ProgramCounterOverflow)?;
-    let offset = target_pc
-        .checked_sub(source_pc)
-        .ok_or(AssembleError::ProgramCounterOverflow)?;
-    let mut writer = Writer::new();
-    match branch {
-        BranchInstruction::Goto(_) => {
-            writer.write_u1(0xa7);
-            write_i16_branch_offset(&mut writer, instruction, offset)?;
-        }
-        BranchInstruction::GotoWide(_) => {
-            let offset =
-                i32::try_from(offset).map_err(|_| AssembleError::BranchOffsetOutOfRange {
-                    instruction,
-                    offset,
-                    min: i64::from(i32::MIN),
-                    max: i64::from(i32::MAX),
-                })?;
-            writer.write_u1(0xc8);
-            writer.write_bytes(&offset.to_be_bytes());
-        }
-        BranchInstruction::IfEq(_) => {
-            write_conditional_branch(&mut writer, instruction, offset, 0x99)?;
-        }
-        BranchInstruction::IfNe(_) => {
-            write_conditional_branch(&mut writer, instruction, offset, 0x9a)?;
-        }
-        BranchInstruction::IfICmpEq(_) => {
-            write_conditional_branch(&mut writer, instruction, offset, 0x9f)?;
-        }
-        BranchInstruction::IfICmpNe(_) => {
-            write_conditional_branch(&mut writer, instruction, offset, 0xa0)?;
-        }
-        BranchInstruction::IfICmpLt(_) => {
-            write_conditional_branch(&mut writer, instruction, offset, 0xa1)?;
-        }
-        BranchInstruction::IfICmpGe(_) => {
-            write_conditional_branch(&mut writer, instruction, offset, 0xa2)?;
-        }
-        BranchInstruction::IfICmpGt(_) => {
-            write_conditional_branch(&mut writer, instruction, offset, 0xa3)?;
-        }
-        BranchInstruction::IfICmpLe(_) => {
-            write_conditional_branch(&mut writer, instruction, offset, 0xa4)?;
-        }
-        BranchInstruction::IfACmpEq(_) => {
-            write_conditional_branch(&mut writer, instruction, offset, 0xa5)?;
-        }
-        BranchInstruction::IfACmpNe(_) => {
-            write_conditional_branch(&mut writer, instruction, offset, 0xa6)?;
-        }
-        BranchInstruction::IfNull(_) => {
-            write_conditional_branch(&mut writer, instruction, offset, 0xc6)?;
-        }
-        BranchInstruction::IfNonNull(_) => {
-            write_conditional_branch(&mut writer, instruction, offset, 0xc7)?;
-        }
-    }
-    Ok(writer.into_bytes())
-}
-
-fn write_conditional_branch(
-    writer: &mut Writer,
-    instruction: usize,
-    offset: i64,
-    opcode: u8,
-) -> Result<(), AssembleError> {
-    writer.write_u1(opcode);
-    write_i16_branch_offset(writer, instruction, offset)
-}
-
-fn write_i16_branch_offset(
-    writer: &mut Writer,
-    instruction: usize,
-    offset: i64,
-) -> Result<(), AssembleError> {
-    let offset = i16::try_from(offset).map_err(|_| AssembleError::BranchOffsetOutOfRange {
-        instruction,
-        offset,
-        min: i64::from(i16::MIN),
-        max: i64::from(i16::MAX),
-    })?;
-    writer.write_bytes(&offset.to_be_bytes());
     Ok(())
 }
 

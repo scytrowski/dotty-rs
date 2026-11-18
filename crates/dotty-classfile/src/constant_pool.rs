@@ -127,6 +127,8 @@ pub struct ConstantPool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConstantPoolError {
     Read(ReadError),
+    ZeroCount,
+    MissingReservedSlot { index: u16 },
     UnknownTag { index: u16, tag: u8 },
     InvalidMethodHandleReferenceKind { index: u16, kind: u8 },
 }
@@ -135,6 +137,11 @@ impl fmt::Display for ConstantPoolError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Read(error) => error.fmt(formatter),
+            Self::ZeroCount => formatter.write_str("constant_pool_count must include slot zero"),
+            Self::MissingReservedSlot { index } => write!(
+                formatter,
+                "no reserved slot after two-slot constant at index {index}"
+            ),
             Self::UnknownTag { index, tag } => write!(
                 formatter,
                 "unknown constant pool tag {tag} at index {index}"
@@ -243,6 +250,22 @@ impl fmt::Display for PoolRefError {
 
 impl std::error::Error for PoolRefError {}
 
+impl PoolRefError {
+    pub(crate) fn into_encode_error(self, pool: &ConstantPool) -> EncodeError {
+        match self {
+            Self::InvalidIndex { index } => EncodeError::InvalidIndex {
+                index: usize::from(index.0),
+                count: pool.entry_count(),
+            },
+            Self::WrongKind { index, .. } => EncodeError::InvalidReference {
+                index: usize::from(index.0),
+            },
+            Self::TooDeeplyNestedAttribute => EncodeError::TooDeeplyNestedAttribute,
+            Self::TooDeeplyNestedAnnotation => EncodeError::TooDeeplyNestedAnnotation,
+        }
+    }
+}
+
 impl ConstantPool {
     pub fn from_entries(entries: Vec<Option<ConstantPoolEntry>>) -> Self {
         Self { entries }
@@ -321,10 +344,7 @@ impl ConstantPool {
             let Some(entry) = entry else { continue };
             match entry {
                 ConstantPoolEntry::Utf8(value) => {
-                    // Check the complete modified UTF-8 payload before output
-                    // is started; `Writer::write_modified_utf8` repeats this
-                    // while producing the final bytes.
-                    crate::modified_utf8::encode_modified_utf8(value)?;
+                    crate::modified_utf8::modified_utf8_len(value)?;
                 }
                 ConstantPoolEntry::Integer(_)
                 | ConstantPoolEntry::Float(_)
@@ -678,30 +698,36 @@ impl ConstantPool {
         }
     }
 
-    /// Decodes `constant_pool_count` followed by that many constant pool
-    /// entries (JVMS §4.4). Purely structural: indices are stored as-is,
+    /// Decodes the entries occupying slots `1..constant_pool_count`,
+    /// including the reserved slots after long and double constants (JVMS §4.4).
+    /// Purely structural: indices are stored as-is,
     /// without checking that they are in range or point at the expected
     /// entry kind.
     pub fn decode(reader: &mut Reader<'_>) -> Result<Self, ConstantPoolError> {
-        let count = usize::from(reader.read_u16()?);
-        let mut entries: Vec<Option<ConstantPoolEntry>> = Vec::new();
-        let mut index = 1usize;
+        let count = reader.read_u16()?;
+        if count == 0 {
+            return Err(ConstantPoolError::ZeroCount);
+        }
+        let mut entries = Vec::new();
+        let mut index = 1;
 
         while index < count {
             let tag = reader.read_u8()?;
-            let entry = decode_entry(reader, tag, index as u16)?;
+            let entry = decode_entry(reader, tag, index)?;
             let occupies_two_slots = matches!(
                 entry,
                 ConstantPoolEntry::Long(_) | ConstantPoolEntry::Double(_)
             );
 
             entries.push(Some(entry));
-            index += 1;
-
             if occupies_two_slots {
+                if index + 1 == count {
+                    return Err(ConstantPoolError::MissingReservedSlot { index });
+                }
                 entries.push(None);
                 index += 1;
             }
+            index += 1;
         }
 
         Ok(Self { entries })
@@ -1445,7 +1471,7 @@ mod tests {
     #[test]
     fn decodes_a_long_entry_and_reserves_the_next_slot() {
         let value: i64 = 42_000_000_000;
-        let mut bytes = vec![0x00, 0x02, CONSTANT_LONG_TAG];
+        let mut bytes = vec![0x00, 0x03, CONSTANT_LONG_TAG];
         bytes.extend_from_slice(&(value as u64).to_be_bytes());
         let mut reader = Reader::new(&bytes);
 
@@ -1461,7 +1487,7 @@ mod tests {
     #[test]
     fn decodes_a_double_entry_and_reserves_the_next_slot() {
         let value: f64 = 12345.6789;
-        let mut bytes = vec![0x00, 0x02, CONSTANT_DOUBLE_TAG];
+        let mut bytes = vec![0x00, 0x03, CONSTANT_DOUBLE_TAG];
         bytes.extend_from_slice(&value.to_bits().to_be_bytes());
         let mut reader = Reader::new(&bytes);
 
@@ -1472,6 +1498,28 @@ mod tests {
             Some(&ConstantPoolEntry::Double(value))
         );
         assert_eq!(pool.get(ConstantPoolIndex(2)), None);
+    }
+
+    #[test]
+    fn rejects_zero_pool_count_but_accepts_an_empty_pool() {
+        assert_eq!(
+            ConstantPool::decode(&mut Reader::new(&[0, 0])),
+            Err(ConstantPoolError::ZeroCount)
+        );
+        assert_eq!(
+            ConstantPool::decode(&mut Reader::new(&[0, 1])),
+            Ok(ConstantPool::default())
+        );
+    }
+
+    #[test]
+    fn rejects_a_two_slot_constant_in_the_last_declared_slot() {
+        for tag in [CONSTANT_LONG_TAG, CONSTANT_DOUBLE_TAG] {
+            assert_eq!(
+                decode_single_entry(tag, &[0; 8]),
+                Err(ConstantPoolError::MissingReservedSlot { index: 1 })
+            );
+        }
     }
 
     #[test]

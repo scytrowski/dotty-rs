@@ -41,13 +41,14 @@ impl Writer {
     /// Encodes and appends a JVM modified UTF-8 string as a `u2` byte length
     /// followed by its payload. No constant-pool tag is written.
     ///
-    /// The string is encoded completely before this writer is changed. If its
+    /// The encoded length is checked before this writer is changed. If the
     /// modified UTF-8 payload exceeds the `u2` limit, this returns an error
     /// and leaves the writer unchanged.
     pub fn write_modified_utf8(&mut self, value: &str) -> Result<(), EncodeError> {
-        let bytes = crate::modified_utf8::encode_modified_utf8(value)?;
-        self.write_u2_length(bytes.len())?;
-        self.write_bytes(&bytes);
+        let length = crate::modified_utf8::modified_utf8_len(value)?;
+        self.bytes.reserve(2 + usize::from(length));
+        self.write_u2(length);
+        crate::modified_utf8::append_modified_utf8(value, &mut self.bytes);
         Ok(())
     }
 

@@ -321,7 +321,7 @@ impl<'a> ClassFile<'a> {
         crate::writer::checked_u16_len(self.fields.len())?;
         crate::writer::checked_u16_len(self.methods.len())?;
         self.validate_references()
-            .map_err(|error| encode_pool_ref_error(error, self.constant_pool.entry_count()))?;
+            .map_err(|error| error.into_encode_error(&self.constant_pool))?;
 
         // Prepare every fallible section before assembling the final bytes.
         let constant_pool = self.constant_pool.encode()?;
@@ -375,13 +375,13 @@ impl<'a> ClassFile<'a> {
         let interfaces = read_index_list(reader)?;
 
         let fields_count = reader.read_u16()?;
-        let mut fields = Vec::with_capacity(usize::from(fields_count));
+        let mut fields = Vec::with_capacity(reader.table_capacity(fields_count, 8));
         for _ in 0..fields_count {
             fields.push(FieldInfo::decode(reader, &constant_pool)?);
         }
 
         let methods_count = reader.read_u16()?;
-        let mut methods = Vec::with_capacity(usize::from(methods_count));
+        let mut methods = Vec::with_capacity(reader.table_capacity(methods_count, 8));
         for _ in 0..methods_count {
             methods.push(MethodInfo::decode(reader, &constant_pool)?);
         }
@@ -904,20 +904,6 @@ fn is_valid_package_name(name: &str) -> bool {
         && name.split('/').all(|part| {
             !part.is_empty() && !part.chars().any(|ch| matches!(ch, '.' | ';' | '[' | '/'))
         })
-}
-
-fn encode_pool_ref_error(error: PoolRefError, constant_pool_count: usize) -> EncodeError {
-    match error {
-        PoolRefError::InvalidIndex { index } => EncodeError::InvalidIndex {
-            index: usize::from(index.0),
-            count: constant_pool_count,
-        },
-        PoolRefError::WrongKind { index, .. } => EncodeError::InvalidReference {
-            index: usize::from(index.0),
-        },
-        PoolRefError::TooDeeplyNestedAttribute => EncodeError::TooDeeplyNestedAttribute,
-        PoolRefError::TooDeeplyNestedAnnotation => EncodeError::TooDeeplyNestedAnnotation,
-    }
 }
 
 fn tasty_link_payload<'a>(

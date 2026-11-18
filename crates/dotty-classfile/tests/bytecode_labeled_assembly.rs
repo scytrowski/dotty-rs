@@ -111,6 +111,26 @@ fn encodes_wide_goto_and_every_conditional_opcode() {
 }
 
 #[test]
+fn resolves_adjacent_short_and_wide_branches_without_overwriting_the_next_opcode() {
+    let mut sequence = CodeSequence::new();
+    let start = sequence.new_label().unwrap();
+    let end = sequence.new_label().unwrap();
+    sequence.bind(start.clone()).unwrap();
+    sequence.instruction(Instruction::Bipush(42));
+    sequence.branch(BranchInstruction::IfEq(end.clone()));
+    sequence.branch(BranchInstruction::GotoWide(start));
+    sequence.bind(end).unwrap();
+    sequence.instruction(Instruction::Return);
+
+    let assembled = assemble_labeled(&sequence, &empty_pool()).unwrap();
+    assert_eq!(assembled.layout.instruction_offsets(), [0, 2, 5, 10]);
+    assert_eq!(
+        assembled.bytes,
+        [0x10, 42, 0x99, 0, 8, 0xc8, 0xff, 0xff, 0xff, 0xfb, 0xb1]
+    );
+}
+
+#[test]
 fn uses_actual_ldc_and_wide_local_sizes_in_layout() {
     let pool = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Integer(0)); 256]);
     let integer = ConstantPoolIndexOperand::try_from(ConstantPoolIndex(256)).unwrap();
