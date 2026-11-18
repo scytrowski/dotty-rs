@@ -13,7 +13,7 @@ use crate::{
     ParseKind, RecoverySet,
 };
 
-/// Maximum simultaneous entries into the expression, type and pattern grammars.
+/// Maximum simultaneous entries into recursive tree and type-parameter grammars.
 pub(crate) const MAX_TREE_NESTING: usize = 64;
 
 /// Stateful input and allocation context for the handwritten parser.
@@ -589,6 +589,16 @@ where
         kind: ParseKind,
         parse: impl FnOnce(&mut Self) -> TreeId<Untyped>,
     ) -> TreeId<Untyped> {
+        self.with_nesting(kind, parse).unwrap_or_else(|error| error)
+    }
+
+    /// Shares the tree budget with recursive productions that return lists of trees.
+    /// On exhaustion, consumes the rejected operand and returns its error tree.
+    pub(crate) fn with_nesting<T>(
+        &mut self,
+        kind: ParseKind,
+        parse: impl FnOnce(&mut Self) -> T,
+    ) -> Result<T, TreeId<Untyped>> {
         if self.tree_nesting == MAX_TREE_NESTING {
             let mark = self.mark();
             self.report_issue(ParseIssue::NestingLimitExceeded {
@@ -597,16 +607,16 @@ where
             });
             self.skip_nested_tree();
             let span = self.span_from(mark);
-            return match kind {
+            return Err(match kind {
                 ParseKind::Expr => self.error_expr(span),
                 ParseKind::Type => self.error_type(span),
                 ParseKind::Pattern => self.error_pattern(span),
-            };
+            });
         }
         self.tree_nesting += 1;
         let tree = parse(self);
         self.tree_nesting -= 1;
-        tree
+        Ok(tree)
     }
 
     /// Consumes the rejected operand, leaving enclosing delimiters and siblings to their caller.
