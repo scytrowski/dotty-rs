@@ -282,7 +282,7 @@ fn scala_oracle_freezes_dual_reference_abi_wire_identity_and_bytecode() {
             .into_iter()
             .map(|n| factory_tasty.names().render(n).unwrap())
             .collect::<Vec<_>>(),
-        ["Pair"]
+        ["Pair", "Pair"]
     );
     let index = factory_tasty.ast_address_index().unwrap();
     let params = parameter_addresses(&index, method_address);

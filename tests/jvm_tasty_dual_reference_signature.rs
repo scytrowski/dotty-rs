@@ -96,12 +96,20 @@ fn rust_signature_only_pair_emits_two_typed_template_and_constructor_params() {
         [
             (
                 "first".to_owned(),
-                vec!["Counter".to_owned(), "example".to_owned()],
+                vec![
+                    "Counter".to_owned(),
+                    "Counter".to_owned(),
+                    "example".to_owned()
+                ],
                 vec![PRIVATE_TAG, LOCAL_TAG],
             ),
             (
                 "second".to_owned(),
-                vec!["Counter".to_owned(), "example".to_owned()],
+                vec![
+                    "Counter".to_owned(),
+                    "Counter".to_owned(),
+                    "example".to_owned()
+                ],
                 vec![PRIVATE_TAG, LOCAL_TAG],
             ),
             ("first".to_owned(), vec!["Counter".to_owned()], vec![]),

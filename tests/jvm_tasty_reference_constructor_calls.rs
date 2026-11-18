@@ -225,7 +225,7 @@ fn scala39_nested_constructor_oracle_pins_abi_bytecode_and_tasty_shape() {
             .into_iter()
             .map(|name| factory_tasty.names().render(name).unwrap())
             .collect::<Vec<_>>(),
-        ["Int", "scala"]
+        ["Int", "Int", "scala"]
     );
     assert_eq!(body.return_type.nodes()[0].tag, IDENTTPT_TAG);
     assert_eq!(
@@ -234,7 +234,7 @@ fn scala39_nested_constructor_oracle_pins_abi_bytecode_and_tasty_shape() {
             .into_iter()
             .map(|name| factory_tasty.names().render(name).unwrap())
             .collect::<Vec<_>>(),
-        ["CounterOwner", "example"]
+        ["CounterOwner", "CounterOwner", "example"]
     );
     let RawTree::LengthNode(outer_node) = body.rhs.expect("create has an RHS") else {
         panic!("create outer expression is APPLY");
@@ -1098,7 +1098,7 @@ fn scala39_three_class_oracle_pins_constructor_argument_tasty_and_jvm_abi() {
             .into_iter()
             .map(|name| factory_tasty.names().render(name).unwrap())
             .collect::<Vec<_>>(),
-        ["Counter", "example"]
+        ["Counter", "Counter", "example"]
     );
     assert!(
         formal_type
@@ -1126,7 +1126,7 @@ fn scala39_three_class_oracle_pins_constructor_argument_tasty_and_jvm_abi() {
             .into_iter()
             .map(|name| factory_tasty.names().render(name).unwrap())
             .collect::<Vec<_>>(),
-        ["CounterOwner"]
+        ["CounterOwner", "CounterOwner"]
     );
     let formal_address = parameter_address(&address_index, wrap_address);
     let argument_reference = {

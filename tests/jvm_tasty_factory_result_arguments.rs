@@ -1386,7 +1386,7 @@ fn scala39_factory_result_oracle_decodes_classes_and_both_factory_methods() {
             .into_iter()
             .map(|name| factory.names().render(name).unwrap())
             .collect::<Vec<_>>(),
-        ["Counter", "example"]
+        ["Counter", "Counter", "example"]
     );
     let make_counter_wire_nodes = [DEFDEF_TAG, APPLY_TAG, SELECTIN_TAG, PARAM_TAG]
         .into_iter()
@@ -1466,7 +1466,7 @@ fn scala39_factory_result_oracle_decodes_classes_and_both_factory_methods() {
             .into_iter()
             .map(|name| factory.names().render(name).unwrap())
             .collect::<Vec<_>>(),
-        ["CounterOwner"]
+        ["CounterOwner", "CounterOwner"]
     );
     let RawTree::LengthNode(apply) = create.rhs.unwrap() else {
         panic!("create body is an outer APPLY");

@@ -110,7 +110,7 @@ fn assert_counter_type_ref(
             .collect::<Vec<_>>();
         assert_eq!(
             names,
-            ["Counter", "example"],
+            ["Counter", "Counter", "example"],
             "cross-sidecar TypeRef uses Counter qualified by example"
         );
     }

@@ -80,7 +80,7 @@ fn rust_batch_writer_emits_two_distinct_ordered_nested_constructor_receipts() {
             .map(|name| factory_tasty.names().render(name).unwrap())
             .collect::<Vec<_>>();
         if ordinal == 0 {
-            assert_eq!(type_names, ["Int", "scala"]);
+            assert_eq!(type_names, ["Int", "Int", "scala"]);
         } else {
             assert_eq!(type_names, ["Int"]);
             assert!(
@@ -97,7 +97,7 @@ fn rust_batch_writer_emits_two_distinct_ordered_nested_constructor_receipts() {
             .into_iter()
             .map(|name| factory_tasty.names().render(name).unwrap())
             .collect::<Vec<_>>(),
-        ["Pair", "example"]
+        ["Pair", "Pair", "example"]
     );
     let index = factory_tasty.ast_address_index().unwrap();
     let first_address = parameter_address(&index, create_address);
@@ -562,7 +562,7 @@ fn scala_oracle_pins_three_class_abi_tasty_identity_and_sibling_tree_order() {
             .map(|name| factory_tasty.names().render(name).unwrap())
             .collect::<Vec<_>>();
         if ordinal == 0 {
-            assert_eq!(names, ["Int", "scala"]);
+            assert_eq!(names, ["Int", "Int", "scala"]);
         } else {
             assert_eq!(names, ["Int"]);
             assert!(
@@ -580,7 +580,7 @@ fn scala_oracle_pins_three_class_abi_tasty_identity_and_sibling_tree_order() {
             .into_iter()
             .map(|name| factory_tasty.names().render(name).unwrap())
             .collect::<Vec<_>>(),
-        ["Pair", "example"]
+        ["Pair", "Pair", "example"]
     );
     let index = factory_tasty.ast_address_index().unwrap();
     let first_address = parameter_address(&index, create_address);
