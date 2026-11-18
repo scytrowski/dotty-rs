@@ -2,6 +2,8 @@
 //! each have a public no-arg constructor and a single method.
 #[path = "support/parsing.rs"]
 mod parsing;
+#[path = "support/pipeline_timing.rs"]
+mod pipeline_timing;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -10,15 +12,15 @@ use std::process::Command;
 
 use dotty::core::{
     AstArena, Definitions, Packages, SemanticStore, SourceId, SourceSemanticIndex, SymbolFlags,
-    SymbolId, SymbolInfo, TreeId, TreeKind, Untyped,
+    SymbolId, SymbolInfo, TreeId, TreeKind, Typed, Untyped,
 };
 use dotty::jvm::{
     GeneratedClass, JvmClassInitializationPlan, JvmClassPlan, JvmCompilationUnit, JvmLocalBinding,
-    JvmMethodPlan, emit_class,
+    JvmMethodPlan, PreparedJvmEmission, emit_class,
 };
 use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
-use dotty::parser::ParseResult;
-use dotty::typer::{SourceTyper, TyperError};
+use dotty::parser::{DetachedParse, ParseResult};
+use dotty::typer::{SourceTypedIndex, SourceTyper, TypedLocalBinding, TyperError};
 
 struct NamedUnit {
     source: SourceId,
@@ -100,12 +102,13 @@ fn enter(
 
 fn name_units(
     files: &[(SourceId, &str, &str)],
+    parsed: Vec<DetachedParse>,
     store: &mut SemanticStore,
     packages: &mut Packages,
 ) -> Vec<NamedUnit> {
     files
         .iter()
-        .zip(parsing::parse_files(files, 4))
+        .zip(parsed)
         .map(|(&(id, name, _), detached)| {
             let parsed = detached.into_session(&mut store.names);
             enter(id, name, parsed, store, packages)
@@ -170,29 +173,69 @@ fn with_plan<R>(
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
     let mut packages = Packages::new();
-    let units = name_units(files, &mut store, &mut packages);
+    let units = name_units(
+        files,
+        parsing::parse_files(files, 4),
+        &mut store,
+        &mut packages,
+    );
     complete_signatures(&units, &mut store, definitions, &packages).unwrap();
 
+    let (output, typed_units) = type_bodies(&units, &mut store, definitions, &packages);
+    let classes = class_plans(&units, typed_units, &output, &store);
+    let plan = JvmCompilationUnit {
+        store: &store,
+        typed_ast: &output,
+        classes,
+    };
+    run(&plan, &definitions)
+}
+
+struct TypedUnit {
+    root: TreeId<Typed>,
+    index: SourceTypedIndex,
+    locals: Vec<TypedLocalBinding>,
+}
+
+fn type_bodies(
+    units: &[NamedUnit],
+    store: &mut SemanticStore,
+    definitions: Definitions,
+    packages: &Packages,
+) -> (AstArena<Typed>, Vec<TypedUnit>) {
     let mut output = AstArena::new();
     let mut typed_units = Vec::new();
-    for unit in &units {
+    for unit in units {
         let mut typer = SourceTyper::new_with_typed_ast(
             &unit.ast,
             unit.source,
             &unit.index,
-            &mut store,
+            store,
             definitions,
-            &packages,
+            packages,
             output,
         );
         let root = typer.type_method_definition(unit.method).unwrap();
         let result = typer.into_typed_output();
         output = result.typed_ast;
-        typed_units.push((root, result.source_typed_index, result.local_bindings));
+        typed_units.push(TypedUnit {
+            root,
+            index: result.source_typed_index,
+            locals: result.local_bindings,
+        });
     }
 
+    (output, typed_units)
+}
+
+fn class_plans(
+    units: &[NamedUnit],
+    typed_units: Vec<TypedUnit>,
+    output: &AstArena<Typed>,
+    store: &SemanticStore,
+) -> Vec<JvmClassPlan> {
     let mut classes = Vec::new();
-    for (unit, (root, index, bindings)) in units.iter().zip(typed_units) {
+    for (unit, typed) in units.iter().zip(typed_units) {
         let TreeKind::DefDef(method) = &unit.ast.get(unit.method).kind else {
             panic!("expected method")
         };
@@ -202,11 +245,14 @@ fn with_plan<R>(
             .flatten()
             .map(|&tree| unit.index.symbol_at(unit.source, tree).unwrap())
             .collect();
-        let TreeKind::DefDef(typed) = &output.get(root).kind else {
+        let TreeKind::DefDef(definition) = &output.get(typed.root).kind else {
             panic!("expected typed method")
         };
-        let body = typed.rhs.unwrap();
-        assert_eq!(index.get(unit.source, method.rhs.unwrap()), Some(body));
+        let body = definition.rhs.unwrap();
+        assert_eq!(
+            typed.index.get(unit.source, method.rhs.unwrap()),
+            Some(body)
+        );
         assert_eq!(output.get(body).position.unwrap().source(), unit.source);
         classes.push(JvmClassPlan {
             class: unit.class,
@@ -216,7 +262,8 @@ fn with_plan<R>(
                 method: unit.method_symbol(),
                 parameters,
                 body: Some(body),
-                locals: bindings
+                locals: typed
+                    .locals
                     .into_iter()
                     .map(|binding| {
                         let symbol = store.symbols.get(binding.symbol());
@@ -231,25 +278,38 @@ fn with_plan<R>(
             }],
         });
     }
-    let plan = JvmCompilationUnit {
-        store: &store,
-        typed_ast: &output,
-        classes,
-    };
-    run(&plan, &definitions)
+    classes
+}
+
+fn emit_batch(
+    prepared: &PreparedJvmEmission<'_>,
+    classes: &[JvmClassPlan],
+    workers: usize,
+) -> Vec<GeneratedClass> {
+    let chunk_size = classes.len().div_ceil(workers).max(1);
+    std::thread::scope(|scope| {
+        let tasks: Vec<_> = classes
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(|| {
+                    chunk
+                        .iter()
+                        .map(|class| prepared.emit_class(class.class).unwrap())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        tasks
+            .into_iter()
+            .flat_map(|task| task.join().unwrap())
+            .collect()
+    })
 }
 
 fn compile(files: [(SourceId, &str, &str); 2]) -> Vec<GeneratedClass> {
     with_plan(&files, |plan, definitions| {
         let prepared = plan.prepare_emission(definitions).unwrap();
-        let concurrent: Vec<_> = std::thread::scope(|scope| {
-            let workers: Vec<_> = plan
-                .classes
-                .iter()
-                .map(|c| scope.spawn(|| prepared.emit_class(c.class).unwrap()))
-                .collect();
-            workers.into_iter().map(|w| w.join().unwrap()).collect()
-        });
+        let concurrent = emit_batch(&prepared, &plan.classes, 2);
         for (class, artifact) in plan.classes.iter().zip(&concurrent) {
             assert_eq!(
                 &emit_class(plan, class.class, definitions).unwrap(),
@@ -377,7 +437,12 @@ fn cross_file_inference_cycle_reports_the_reentered_method_and_rolls_back() {
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);
         let mut packages = Packages::new();
-        let units = name_units(&files, &mut store, &mut packages);
+        let units = name_units(
+            &files,
+            parsing::parse_files(&files, 4),
+            &mut store,
+            &mut packages,
+        );
         let error = complete_signatures(&units, &mut store, definitions, &packages).unwrap_err();
         assert!(
             matches!(error, TyperError::RecursiveInferredMethodResult { symbol } if symbol == units[0].method_symbol()),
