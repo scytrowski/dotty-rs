@@ -1,9 +1,9 @@
 # Compiling dependent Scala sources through the public library
 
-The standalone client compiles 64 in-memory sources in a fresh semantic
-session. They form 16 independent chains of four classes. Each method has an
-inferred result. A leaf adds an integer to a local value. The other methods
-call through a receiver declared in another file. Input order places the last
+The standalone client compiles 16, 64 or 256 in-memory sources in a fresh
+semantic session. Each workload consists of independent chains of four classes. Each
+method has an inferred result. A leaf adds an integer to a local value. The
+other methods call through a receiver declared in another file. Input order places the last
 caller first in each chain, exercising completion of missing method signatures
 and retries in the owning sources.
 
@@ -21,18 +21,18 @@ threads respectively. Name binding, declaration entry, signature completion
 and body typing run on the calling thread. The interval starts before creating
 the session and ends when the ordered class bytes are available. Source
 generation, disk I/O, Java execution and artifact comparison are outside the
-interval. Every sample compares all 64 class names and byte arrays against
-the one-worker reference.
+interval. Every sample compares the ordered class names and byte arrays against
+the one-worker reference for its input size.
 
-The harness warms up both configurations and then alternates their order over
-nine pairs. It prints raw wall-clock microseconds for every phase and the whole
-compilation. The regular client tests cover the chain without a timing threshold.
+The harness warms up both worker counts for each size. Over nine pairs it
+alternates the worker order and rotates which size runs first. It prints raw
+wall-clock microseconds for every phase and the whole compilation. The regular client tests cover the chain without a timing threshold.
 
 ## Original measurements before call metadata reuse
 
-Rust 1.98.1, release build, AMD Ryzen 9 7940HS. Times are medians in
-milliseconds, with each column calculated from the nine samples for that
-worker count. The total comes from the elapsed time of each complete run.
+The original 64-file measurement used Rust 1.98.1, a release build and an AMD
+Ryzen 9 7940HS. Times are medians in milliseconds, with each column
+calculated from the nine samples for that worker count. The total comes from the elapsed time of each complete run.
 
 | Phase | One worker | Four workers |
 | --- | ---: | ---: |
@@ -82,3 +82,86 @@ one worker and 15.5× with four. After the change, emission still benefits from
 parallelism (3.0×), while the sequential plan construction and preparation
 phase now takes the largest share of elapsed time. Total times after the change
 ranged from 36.3 to 54.2 ms with one worker and 26.7 to 40.7 ms with four.
+
+## Where JVM preparation spends time
+
+This experiment uses the production backend at `13079f5bf3`. The client times
+construction of the `JvmCompilationUnit`, including its class plans, separately
+from `prepare_emission`. Both stages run on the calling thread in both worker
+configurations.
+
+On Linux 6.12.74, with Rust 1.98.1 in release mode on the Ryzen 9 7940HS, we
+ran the test binary three times in succession, first without probes, then
+with probes and finally using the original binary again. All runs used CPU
+affinity 0–7 (one logical CPU per physical core) on a shared host. Each run
+contributed nine samples per table row after warm-up. Each sample reproduced
+the ordered class files for that workload. The CSV keeps the two control runs
+and the instrumented run separate. [Individual measurements](compiler-client-timings/prepare-runs.csv)
+
+| Files | Workers | Client plans (µs) | Prepare (ms) | Prepare middle 50% (ms) | Emit (ms) | End to end (ms) |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 | 1 | 7.0 | 1.90 | 1.88–1.98 | 1.86 | 8.00 |
+| 16 | 4 | 6.5 | 1.90 | 1.85–1.94 | 4.85 | 10.82 |
+| 64 | 1 | 40.5 | 37.98 | 34.23–45.85 | 22.09 | 65.84 |
+| 64 | 4 | 38.5 | 34.58 | 32.57–49.69 | 11.04 | 54.04 |
+| 256 | 1 | 249.0 | 770.16 | 619.28–878.85 | 424.88 | 1200.99 |
+| 256 | 4 | 243.5 | 766.79 | 657.01–921.19 | 163.89 | 952.83 |
+
+Times above are medians from the 18 control samples per configuration. The
+middle 50% uses linearly interpolated 25th and 75th percentiles. Absolute
+latencies varied across runs. At 64 files and four workers the individual
+control medians for preparation were 34.20 and 36.02 ms. Client plan
+construction took less than 0.25 ms at every size by median.
+
+### Attribution inside the backend
+
+The probes timed the first hierarchy build, `metadata_with_hierarchy`, and the
+remaining accessor checks, identity copies and verifier hierarchy construction.
+During metadata construction they also counted and timed the hierarchy builds
+inside `reference::project_class`. Each nested build includes validation of
+the full compilation unit.
+
+| Files | Workers | First hierarchy (ms) | Metadata (ms) | Remaining setup (ms) | Hierarchy rebuilds inside metadata | Rebuilds (ms) | Share of preparation |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 | 1 | 0.036 | 1.87 | 0.014 | 96 | 1.68 | 87.7% |
+| 16 | 4 | 0.038 | 1.86 | 0.014 | 96 | 1.69 | 87.9% |
+| 64 | 1 | 0.130 | 43.64 | 0.038 | 384 | 40.78 | 94.7% |
+| 64 | 4 | 0.136 | 36.16 | 0.040 | 384 | 34.50 | 94.3% |
+| 256 | 1 | 0.535 | 1006.80 | 0.167 | 1536 | 977.03 | 97.3% |
+| 256 | 4 | 0.512 | 621.19 | 0.164 | 1536 | 605.10 | 97.3% |
+
+These are medians of the nine instrumented samples per configuration. The
+rebuild interval is part of the metadata interval. Each percentage is the
+median of the nine within-sample ratios to total internal preparation time.
+Logging follows the last internal timestamp. Internal and control times come
+from separate executions.
+
+Each four-file chain declares six class-typed parameters. The class metadata
+builder computes a method descriptor for accessor collision checks and again
+for method metadata. Each computation projects both the parameter's signature
+type and its symbol type. For each projection the backend rebuilds the entire
+unit hierarchy to check that the reference class derives from Object.
+This accounts for 24 nested builds per chain and 384 for the original 64
+files. All samples had the predicted count. [Class metadata](../crates/dotty-jvm/src/identity.rs) · [Parameter projection](../crates/dotty-jvm/src/descriptor.rs) · [Reference validation](../crates/dotty-jvm/src/reference.rs)
+
+With four times as many files, this workload performs four times as many
+hierarchy builds, each traversing four times as many class plans. The measured
+cost is concentrated in a proof for which preparation already has the unit
+hierarchy. The measured shares apply to the independent chains above. Measuring the
+attainable speedup would require running the same inputs with a backend that
+reuses the hierarchy.
+
+To reproduce the instrumented run, apply the archived probes to this revision,
+run the release command above, then remove the probes. On this host each test
+run used `taskset -c 0-7`. The `prepare_probe` rows include the initial
+warm-ups. For measured samples the probe row immediately precedes the
+corresponding client row. [Measurement patch](compiler-client-timings/prepare-probes.patch)
+
+```sh
+git apply --check docs/compiler-client-timings/prepare-probes.patch
+git apply docs/compiler-client-timings/prepare-probes.patch
+taskset -c 0-7 cargo test --release --locked --manifest-path tests/fixtures/compiler-client/Cargo.toml \
+  --target-dir target/compiler-client --test multi_file measure_dependent_pipeline \
+  -- --ignored --nocapture
+git apply -R docs/compiler-client-timings/prepare-probes.patch
+```

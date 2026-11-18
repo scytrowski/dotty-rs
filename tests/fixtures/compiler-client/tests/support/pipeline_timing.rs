@@ -45,7 +45,8 @@ struct Timings {
     bind_and_name: Duration,
     signatures: Duration,
     bodies: Duration,
-    plan_and_prepare: Duration,
+    class_plans: Duration,
+    prepare: Duration,
     emit: Duration,
     total: Duration,
 }
@@ -72,6 +73,7 @@ fn compile_timed(
         store: &store,
         typed_ast: &arena,
     };
+    let planned_at = Instant::now();
     let prepared = plan.prepare_emission(&definitions).unwrap();
     let prepared_at = Instant::now();
     let artifacts = emit_batch(&prepared, &plan.classes, workers);
@@ -84,7 +86,8 @@ fn compile_timed(
             bind_and_name: named - parsed_at,
             signatures: completed - named,
             bodies: typed_at - completed,
-            plan_and_prepare: prepared_at - typed_at,
+            class_plans: planned_at - typed_at,
+            prepare: prepared_at - planned_at,
             emit: end - prepared_at,
             total: end - start,
         },
@@ -108,30 +111,40 @@ fn dependent_chain_emits_all_four_classes_with_one_and_four_workers() {
 #[test]
 #[ignore = "release-mode end-to-end compilation measurement"]
 fn measure_dependent_pipeline() {
-    let sources = dependent_sources(16);
-    let files = inputs(&sources);
-    let reference = compile_timed(&files, 1).0;
-    assert_eq!(reference.len(), files.len());
-    assert_eq!(reference, compile_timed(&files, 4).0);
     eprintln!(
-        "sample,workers,setup_us,parse_us,bind_and_name_us,signatures_us,bodies_us,plan_and_prepare_us,emit_us,total_us"
+        "files,sample,workers,setup_us,parse_us,bind_and_name_us,signatures_us,bodies_us,class_plans_us,prepare_us,emit_us,total_us"
     );
+    let cases = [4, 16, 64].map(|groups| {
+        let sources = dependent_sources(groups);
+        let files = inputs(&sources);
+        let reference = compile_timed(&files, 1).0;
+        assert_eq!(reference.len(), files.len());
+        assert_eq!(reference, compile_timed(&files, 4).0);
+        (sources, reference)
+    });
     for sample in 0..9 {
-        let order = if sample % 2 == 0 { [1, 4] } else { [4, 1] };
-        for workers in order {
-            let (artifacts, t) = compile_timed(&files, workers);
-            assert_eq!(artifacts, reference);
-            eprintln!(
-                "{sample},{workers},{},{},{},{},{},{},{},{}",
-                t.setup.as_micros(),
-                t.parse.as_micros(),
-                t.bind_and_name.as_micros(),
-                t.signatures.as_micros(),
-                t.bodies.as_micros(),
-                t.plan_and_prepare.as_micros(),
-                t.emit.as_micros(),
-                t.total.as_micros()
-            );
+        // Give every size an equal number of first, middle and last slots.
+        for offset in 0..cases.len() {
+            let (sources, reference) = &cases[(sample + offset) % cases.len()];
+            let files = inputs(sources);
+            let count = files.len();
+            let order = if sample % 2 == 0 { [1, 4] } else { [4, 1] };
+            for workers in order {
+                let (artifacts, t) = compile_timed(&files, workers);
+                assert_eq!(&artifacts, reference);
+                eprintln!(
+                    "{count},{sample},{workers},{},{},{},{},{},{},{},{},{}",
+                    t.setup.as_micros(),
+                    t.parse.as_micros(),
+                    t.bind_and_name.as_micros(),
+                    t.signatures.as_micros(),
+                    t.bodies.as_micros(),
+                    t.class_plans.as_micros(),
+                    t.prepare.as_micros(),
+                    t.emit.as_micros(),
+                    t.total.as_micros()
+                );
+            }
         }
     }
 }
