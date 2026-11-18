@@ -47,12 +47,27 @@ pub enum AstRefKind {
     TermRefDirect,
     /// Direct type reference.
     TypeRefDirect,
+    /// Declaring term symbol of a qualified reference.
+    TermRefSymbol,
+    /// Declaring type symbol of a qualified reference.
+    TypeRefSymbol,
     /// Recursive `this` reference.
     RecursiveThis,
     /// Reference to a parameter-type binder.
     ParamTypeBinder,
     /// Reference to a return target.
     ReturnTarget,
+}
+
+impl AstRef {
+    pub(crate) fn symbol_operand(tag: u8, address: u32) -> Option<Self> {
+        let kind = match tag {
+            crate::TERMREFSYMBOL_TAG => AstRefKind::TermRefSymbol,
+            crate::TYPEREFSYMBOL_TAG => AstRefKind::TypeRefSymbol,
+            _ => return None,
+        };
+        Some(Self { kind, address })
+    }
 }
 
 /// An AST reference together with its wire-level kind.
@@ -606,14 +621,35 @@ impl<'a> RawTree<'a> {
     /// opaque; their tag-specific child trees are exposed by the structured
     /// AST decoders instead.
     pub fn visit_ast_refs(&self, visitor: &mut impl FnMut(AstRef)) {
-        match self {
-            Self::Leaf(term) => {
-                if let Some(reference) = term.ast_ref() {
-                    visitor(reference);
+        self.visit_ast_refs_until_length_node(visitor);
+    }
+
+    /// Walks the unary wrapper chain and returns the bounded node where the
+    /// structured visitor must resume with a tag-specific decoder.
+    pub(crate) fn visit_ast_refs_until_length_node(
+        &self,
+        visitor: &mut impl FnMut(AstRef),
+    ) -> Option<&RawNode<'a>> {
+        let mut tree = self;
+        loop {
+            tree = match tree {
+                Self::Leaf(term) => {
+                    if let Some(reference) = term.ast_ref() {
+                        visitor(reference);
+                    }
+                    return None;
+                }
+                Self::LengthNode(node) => return Some(node),
+                Self::Ast { child, .. } => child,
+                Self::NatAst {
+                    tag, value, child, ..
+                } => {
+                    if let Some(reference) = AstRef::symbol_operand(*tag, *value) {
+                        visitor(reference);
+                    }
+                    child
                 }
             }
-            Self::Ast { child, .. } | Self::NatAst { child, .. } => child.visit_ast_refs(visitor),
-            Self::LengthNode(_) => {}
         }
     }
 
@@ -798,7 +834,7 @@ impl<'a> RawTree<'a> {
                     return Err(TermEncodeError::InvalidTag { tag: *tag });
                 }
                 writer.write_u8(*tag);
-                writer.write_nat(*value);
+                writer.write_nat_ast_operand(*tag, *value);
                 child.encode(writer)
             }
             Self::LengthNode(node) if writer.has_ast_address_map() => {

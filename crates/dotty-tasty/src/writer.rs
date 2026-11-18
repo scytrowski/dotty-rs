@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
 /// Errors returned while encoding TASTy values.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,7 +75,7 @@ impl std::error::Error for WriteError {}
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Writer {
     bytes: Vec<u8>,
-    ast_address_map: Option<BTreeMap<u32, u32>>,
+    ast_address_map: Option<Arc<BTreeMap<u32, u32>>>,
 }
 
 impl Writer {
@@ -94,7 +95,7 @@ impl Writer {
     pub(crate) fn with_ast_address_map(map: BTreeMap<u32, u32>) -> Self {
         Self {
             bytes: Vec::new(),
-            ast_address_map: Some(map),
+            ast_address_map: Some(Arc::new(map)),
         }
     }
 
@@ -139,6 +140,14 @@ impl Writer {
 
     pub(crate) fn write_ast_ref(&mut self, value: u32) {
         self.write_nat(self.relocated_ast_ref(value));
+    }
+
+    pub(crate) fn write_nat_ast_operand(&mut self, tag: u8, value: u32) {
+        if crate::AstRef::symbol_operand(tag, value).is_some() {
+            self.write_ast_ref(value);
+        } else {
+            self.write_nat(value);
+        }
     }
 
     /// Writes a 64-bit TASTy natural number.

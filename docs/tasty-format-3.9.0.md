@@ -480,7 +480,9 @@ top-level node while retaining the original borrowed payloads.
 
 `RawNode::ast_refs()` and `RawNode::visit_ast_refs()` walk the child trees of
 all currently supported structured category-5 nodes, including nested package
-and template statements, as well as `ANNOTATION` payloads. Unknown category-5
+and template statements, as well as `ANNOTATION` payloads. They descend into
+known bounded children and include the declaration operands of `TERMREFsymbol`
+and `TYPEREFsymbol` before visiting the qualifier. Unknown category-5
 nodes remain opaque and produce no references from this convenience API.
 
 `RawTree::decode_structured()` provides the corresponding one-tree dispatcher.
