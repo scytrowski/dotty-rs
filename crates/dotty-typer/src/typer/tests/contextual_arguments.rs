@@ -844,3 +844,61 @@ fn by_name_contexts_search_the_result_type_without_eager_evaluation() {
         );
     }
 }
+
+#[test]
+fn bounded_import_selects_a_conditional_declaration_and_preserves_its_type_parameters() {
+    let text = "class Box[A]; trait TC[A]; object Provider { given leaf:TC[Int] with {}; given boxes: [A] => TC[A] => TC[Box[A]] = new TC[Box[A]] {} }; class C { import Provider.given TC[Box[Int]]; def ask(using t:TC[Box[Boolean]]):Int=1; def use(using b:TC[Boolean]):Int=ask; def needInt(using t:TC[Int]):Int=1; def excluded:Int=needInt }; class Direct { import Provider.leaf; def requireInt(using t:TC[Int]):Int=1; def direct:Int=requireInt }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for name in ["excluded", "use", "direct"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let result = typer.type_method_definition(definition_tree(&index, method));
+        if name == "excluded" {
+            assert!(
+                matches!(result, Err(TyperError::MissingContextualArgument { .. })),
+                "{result:?}"
+            );
+            continue;
+        }
+        result.unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let TreeKind::Apply(call) = &typer
+            .typed_ast()
+            .get(typer.typed_index.get(source, rhs).unwrap())
+            .kind
+        else {
+            panic!()
+        };
+        if name == "direct" {
+            let evidence = reference(&typer, call.args[0]);
+            let entry = typer.store.symbols.get(evidence);
+            assert_eq!(entry.kind, SymbolKind::Object);
+            assert_eq!(typer.store.names.resolve(entry.name.text()), "leaf");
+            assert!(matches!(
+                typer.typed_ast().get(call.args[0]).kind,
+                TreeKind::Select(_)
+            ));
+            continue;
+        }
+        let TreeKind::Apply(provider) = &typer.typed_ast().get(call.args[0]).kind else {
+            panic!()
+        };
+        let TreeKind::TypeApply(applied) = &typer.typed_ast().get(provider.function).kind else {
+            panic!()
+        };
+        assert_eq!(
+            typer.typed_ast().get(applied.args[0]).ty,
+            definitions.boolean
+        );
+        assert_eq!(
+            reference(&typer, provider.args[0]),
+            method_parameter_symbol(&parsed, &index, source, method, 0)
+        );
+    }
+}

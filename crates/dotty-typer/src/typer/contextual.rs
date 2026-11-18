@@ -438,6 +438,57 @@ impl SourceTyper<'_> {
         })
     }
 
+    fn contextual_reference_signature(
+        &mut self,
+        evidence: ContextualRef,
+        owner: SymbolId,
+        tree_index: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        let symbol = evidence.symbol;
+        let reference = if let Some(receiver) = evidence.receiver {
+            let prefix = match receiver {
+                ContextualReceiver::Import(tree) => self.typed_arena.get(tree).ty,
+                ContextualReceiver::Companion(object) => {
+                    self.expression_type_of_symbol(object, owner, tree_index, journal)?
+                }
+            };
+            self.store.types.alloc(Type::TermRef {
+                prefix,
+                target: TermRefTarget::Symbol(symbol),
+            })
+        } else {
+            self.expression_type_of_symbol(symbol, owner, tree_index, journal)?
+        };
+        // A structural given nested in a package-owned object has one
+        // enclosing instance. Compare its declaration at the canonical module
+        // this type while the argument tree retains the selected object path.
+        if self.store.symbols.get(symbol).kind == SymbolKind::Object
+            && let Some(Type::TermRef { prefix, .. }) = self.store.types.try_get(reference)
+            && let Some(Type::TermRef {
+                target: TermRefTarget::Symbol(receiver),
+                ..
+            }) = self.store.types.try_get(*prefix)
+            && self.store.symbols.contains(*receiver)
+            && self.store.symbols.get(*receiver).kind == SymbolKind::Object
+            && self
+                .store
+                .symbols
+                .get(*receiver)
+                .owner
+                .is_some_and(|owner| self.store.symbols.get(owner).kind == SymbolKind::Package)
+            && self.store.symbols.get(symbol).owner == Some(self.module_class_of_object(*receiver)?)
+        {
+            let class = self.module_class_of_object(symbol)?;
+            let prefix = self.type_symbol_prefix(class);
+            return Ok(self.store.types.alloc(Type::TypeRef {
+                prefix,
+                target: TypeRefTarget::Symbol(class),
+            }));
+        }
+        self.widen_expression_type_journaled(reference, journal, 0)
+    }
+
     fn choose_contextual_refs(
         &mut self,
         refs: Vec<ContextualRef>,
@@ -468,21 +519,8 @@ impl SourceTyper<'_> {
                     tree_index,
                 });
             }
-            let reference = if let Some(receiver) = evidence.receiver {
-                let prefix = match receiver {
-                    ContextualReceiver::Import(tree) => self.typed_arena.get(tree).ty,
-                    ContextualReceiver::Companion(object) => {
-                        self.expression_type_of_symbol(object, context.owner, tree_index, journal)?
-                    }
-                };
-                self.store.types.alloc(Type::TermRef {
-                    prefix,
-                    target: TermRefTarget::Symbol(symbol),
-                })
-            } else {
-                self.expression_type_of_symbol(symbol, context.owner, tree_index, journal)?
-            };
-            let actual = self.widen_expression_type_journaled(reference, journal, 0)?;
+            let actual =
+                self.contextual_reference_signature(evidence, context.owner, tree_index, journal)?;
             if let Some(provider) =
                 self.contextual_provider(evidence, actual, expected, tree_index, journal)?
             {
@@ -1003,6 +1041,10 @@ impl SourceTyper<'_> {
                 }
                 let name = entry.name;
                 let legacy = entry.flags.contains(SymbolFlags::IMPLICIT);
+                let evidence = ContextualRef {
+                    symbol,
+                    receiver: qualified.map(ContextualReceiver::Import),
+                };
                 let selected_by_name = import
                     .selectors
                     .iter()
@@ -1018,10 +1060,23 @@ impl SourceTyper<'_> {
                                 if let Some(bound) = selector.bound {
                                     let bound =
                                         self.type_of_tpt_inner_journaled(bound, lexical, journal)?;
-                                    let actual =
-                                        self.completed_expression_symbol_info(symbol, journal)?;
-                                    matched |= self
-                                        .contextual_conforms(actual, bound, tree_index, journal)?;
+                                    let owner = self.index.source_context(lexical).owner;
+                                    matched |= if bound == self.definitions.any_type {
+                                        true
+                                    } else if bound == self.definitions.nothing_type {
+                                        false
+                                    } else {
+                                        self.semantic_attempt(None, |typer, probe| {
+                                            let actual = typer.contextual_reference_signature(
+                                                evidence, owner, tree_index, probe,
+                                            )?;
+                                            Ok(typer
+                                                .contextual_provider(
+                                                    evidence, actual, bound, tree_index, probe,
+                                                )?
+                                                .is_some())
+                                        })?
+                                    };
                                 } else {
                                     matched = true;
                                 }
@@ -1030,10 +1085,6 @@ impl SourceTyper<'_> {
                         }
                     }
                     matched
-                };
-                let evidence = ContextualRef {
-                    symbol,
-                    receiver: qualified.map(ContextualReceiver::Import),
                 };
                 if selected {
                     // Repeated imports of the same declaration select its latest receiver.
