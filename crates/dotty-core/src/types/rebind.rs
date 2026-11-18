@@ -643,6 +643,33 @@ pub fn rebind_type_lambda(
     result
 }
 
+/// Views a member type from a selected receiver by replacing occurrences of
+/// the declaring class's `this`. Rebuilt nested binders retain their own
+/// parameter references. A type independent of the receiver is reused.
+pub fn substitute_this_type(
+    store: &mut SemanticStore,
+    member: TypeId,
+    class: SymbolId,
+    prefix: TypeId,
+) -> Result<TypeId, TypeRebindError> {
+    if !store.types.is_filled(prefix) {
+        return Err(TypeRebindError::UnfilledType { id: prefix });
+    }
+    if !references_this_type(store, member, class)?
+        || matches!(store.types.get(prefix), Type::ThisType {class: existing} if *existing == class)
+    {
+        return Ok(member);
+    }
+    let checkpoint = store.checkpoint();
+    let mut rebinder = Rebinder::new(store);
+    rebinder.this_prefix = Some((class, prefix));
+    let result = rebinder.ty(member);
+    if result.is_err() {
+        store.rollback_to(checkpoint);
+    }
+    result
+}
+
 /// Closes `parent` over `class`: every reachable `ThisType { class }` becomes
 /// the one canonical `RecThis` of a fresh recursive binder (Dotty's
 /// `RecType.closeOver`, used to turn a refinement's own `ThisType` into a
@@ -985,6 +1012,7 @@ struct Rebinder<'a> {
     /// `ThisType { class: target }` becomes the one canonical `RecThis` of the
     /// new binder. `None` outside a close-over call.
     close_over: Option<(SymbolId, TypeId)>,
+    this_prefix: Option<(SymbolId, TypeId)>,
     /// The one `RecThis` [`close_over`](Self::close_over) has allocated so
     /// far, made on first use and reused for every later occurrence.
     close_over_rec_this: Option<TypeId>,
@@ -1007,6 +1035,7 @@ impl<'a> Rebinder<'a> {
             lambda_arguments: HashMap::new(),
             lambda_source: None,
             close_over: None,
+            this_prefix: None,
             close_over_rec_this: None,
             in_progress: HashSet::new(),
             depth: 0,
@@ -1160,8 +1189,9 @@ impl<'a> Rebinder<'a> {
         let ty = self.store.types.get(id).clone();
         Ok(match ty {
             Type::NoType | Type::Error(_) | Type::NoPrefix => id,
-            Type::ThisType { class } => match self.close_over {
-                Some((target, binder)) if class == target => self.close_over_this_ref(binder),
+            Type::ThisType { class } => match (self.this_prefix, self.close_over) {
+                (Some((target, prefix)), _) if class == target => prefix,
+                (_, Some((target, binder))) if class == target => self.close_over_this_ref(binder),
                 _ => id,
             },
             Type::Constant(Constant::Class(class)) => {
@@ -2937,6 +2967,33 @@ mod tests {
             Type::Recursive { parent } => *parent,
             other => panic!("not recursive: {other:?}"),
         }
+    }
+
+    #[test]
+    fn member_view_substitutes_this_and_preserves_nested_method_parameter_identity() {
+        let mut f = Fixture::new();
+        let class = SymbolId::new(21);
+        let this = this_type(&mut f, class);
+        let x = SymbolId::new(22);
+        let parameter = method_param(&mut f, x, "x", this);
+        let result = term_ref_to(&mut f, x);
+        let method =
+            method_type_from_symbols(&mut f.store, &[parameter], result, MethodKind::Contextual)
+                .unwrap();
+        let receiver = term_ref_to(&mut f, SymbolId::new(23));
+        let selected = substitute_this_type(&mut f.store, method, class, receiver).unwrap();
+        assert_eq!(get_method(&f, selected).params[0].ty, receiver);
+        assert_eq!(
+            f.param_ref_of(get_method(&f, selected).result),
+            (selected, 0)
+        );
+        assert_eq!(get_method(&f, method).params[0].ty, this);
+        let before = type_count(&mut f);
+        assert_eq!(
+            substitute_this_type(&mut f.store, method, x, receiver),
+            Ok(method)
+        );
+        assert_eq!(type_count(&mut f), before + 1);
     }
 
     #[test]
