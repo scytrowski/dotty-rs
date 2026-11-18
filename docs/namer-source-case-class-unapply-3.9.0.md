@@ -13,7 +13,9 @@ unchanged.
 
 The generated method is entered in the companion module-class scope as a
 synthetic Method with the class visibility, source origin, declaration scope,
-and declaration context. It has no completed signature. Generic Product1
+and declaration context. Its generated instance parameter shares the
+method-owned lexical context and inherits the class declaration's enclosing
+environment. It has no completed signature. Generic Product1
 identity does not generate a selector or infer a `Product1` projection.
 An explicit `unapply(Box)` replaces the generated method. Namer does not treat
 a different simple type name as proof of a distinct parameter type: package,
