@@ -533,66 +533,65 @@ impl NameTable {
         for current in order {
             let index = current as usize;
             let kind = self.entries[index].kind();
+            let dependency = |r| rendered_dependency(&rendered, r, current, kind);
+            let qualified = |prefix, separator: &str, selector| -> Result<_, NameRenderError> {
+                Ok(Spelling::qualified(
+                    &dependency(prefix)?.text,
+                    separator,
+                    &dependency(selector)?.text,
+                ))
+            };
             let value = match &self.entries[index] {
-                RawName::Utf8(value) => value.clone(),
-                RawName::Qualified { prefix, selector } => format!(
-                    "{}.{}",
-                    rendered_dependency(&rendered, *prefix, current, kind)?,
-                    rendered_dependency(&rendered, *selector, current, kind)?
-                ),
-                RawName::Expanded { prefix, selector } => format!(
-                    "{}$${}",
-                    rendered_dependency(&rendered, *prefix, current, kind)?,
-                    rendered_dependency(&rendered, *selector, current, kind)?
-                ),
-                RawName::ExpandPrefix { prefix, selector } => format!(
-                    "{}${}",
-                    rendered_dependency(&rendered, *prefix, current, kind)?,
-                    rendered_dependency(&rendered, *selector, current, kind)?
-                ),
+                RawName::Utf8(value) => Spelling::plain(value.clone()),
+                RawName::Qualified { prefix, selector } => qualified(*prefix, ".", *selector)?,
+                RawName::Expanded { prefix, selector } => qualified(*prefix, "$$", *selector)?,
+                RawName::ExpandPrefix { prefix, selector } => qualified(*prefix, "$", *selector)?,
                 RawName::Unique {
                     separator,
                     uniqid,
                     underlying,
                 } => {
-                    let separator = rendered_dependency(&rendered, *separator, current, kind)?;
-                    let underlying = underlying
-                        .map(|reference| rendered_dependency(&rendered, reference, current, kind))
+                    let separator = &dependency(*separator)?.text;
+                    let mut name = underlying
+                        .map(dependency)
                         .transpose()?
+                        .cloned()
                         .unwrap_or_default();
-                    if underlying.is_empty() && separator == "$" {
-                        format!("${uniqid}$")
+                    if name.text.is_empty() && separator == "$" {
+                        name.text = format!("${uniqid}$");
                     } else {
-                        format!("{underlying}{separator}{uniqid}")
+                        name.text.push_str(separator);
+                        name.text.push_str(&uniqid.to_string());
                     }
+                    name
                 }
-                RawName::DefaultGetter { underlying, index } => format!(
-                    "{}$default${}",
-                    rendered_dependency(&rendered, *underlying, current, kind)?,
-                    u64::from(*index) + 1
-                ),
-                RawName::SuperAccessor { underlying } => format!(
-                    "super${}",
-                    rendered_dependency(&rendered, *underlying, current, kind)?
-                ),
-                RawName::InlineAccessor { underlying } => format!(
-                    "inline${}",
-                    rendered_dependency(&rendered, *underlying, current, kind)?
-                ),
-                RawName::ObjectClass { underlying } => format!(
-                    "{}$",
-                    rendered_dependency(&rendered, *underlying, current, kind)?
-                ),
-                RawName::BodyRetainer { underlying } => format!(
-                    "{}$retainedBody",
-                    rendered_dependency(&rendered, *underlying, current, kind)?
-                ),
+                RawName::DefaultGetter { underlying, index } => {
+                    let mut name =
+                        if matches!(self.get_utf8(*underlying), Some("<init>" | "$init$")) {
+                            Spelling::plain("$lessinit$greater".into())
+                        } else {
+                            dependency(*underlying)?.clone()
+                        };
+                    name.text
+                        .push_str(&format!("$default${}", u64::from(*index) + 1));
+                    name
+                }
+                RawName::SuperAccessor { underlying } => {
+                    dependency(*underlying)?.decorated("super$", "")
+                }
+                RawName::InlineAccessor { underlying } => {
+                    dependency(*underlying)?.decorated("inline$", "")
+                }
+                RawName::ObjectClass { underlying } => dependency(*underlying)?.decorated("", "$"),
+                RawName::BodyRetainer { underlying } => {
+                    dependency(*underlying)?.decorated("", "$retainedBody")
+                }
                 RawName::Signed {
                     original,
                     result_signature,
                     parameter_signatures,
                 } if include_signature_entries => {
-                    let original = rendered_dependency(&rendered, *original, current, kind)?;
+                    let mut name = dependency(*original)?.clone();
                     let signature = rendered_signature_text(
                         &rendered,
                         *result_signature,
@@ -600,7 +599,8 @@ impl NameTable {
                         current,
                         kind,
                     )?;
-                    format!("{original}[with sig {signature}]")
+                    name.text.push_str(&format!("[with sig {signature}]"));
+                    name
                 }
                 RawName::TargetSigned {
                     original,
@@ -608,8 +608,8 @@ impl NameTable {
                     result_signature,
                     parameter_signatures,
                 } if include_signature_entries => {
-                    let original = rendered_dependency(&rendered, *original, current, kind)?;
-                    let target = rendered_dependency(&rendered, *target, current, kind)?;
+                    let mut name = dependency(*original)?.clone();
+                    let target = &dependency(*target)?.text;
                     let signature = rendered_signature_text(
                         &rendered,
                         *result_signature,
@@ -617,7 +617,9 @@ impl NameTable {
                         current,
                         kind,
                     )?;
-                    format!("{original}[with sig {signature} @ {target}]")
+                    name.text
+                        .push_str(&format!("[with sig {signature} @ {target}]"));
+                    name
                 }
                 RawName::Signed { .. } | RawName::TargetSigned { .. } | RawName::Unknown { .. } => {
                     return Err(NameRenderError::Unsupported {
@@ -631,6 +633,7 @@ impl NameTable {
 
         rendered[reference as usize]
             .take()
+            .map(|name| name.text)
             .ok_or(NameRenderError::InvalidReference { reference })
     }
 
@@ -859,17 +862,56 @@ impl NameTable {
     }
 }
 
+/// Byte offsets from the name structure keep literal dots and dollars in UTF-8
+/// selectors distinct from qualification separators.
+#[derive(Clone, Default)]
+struct Spelling {
+    text: String,
+    qualification: Option<(usize, usize)>,
+}
+
+impl Spelling {
+    fn plain(text: String) -> Self {
+        Self {
+            text,
+            qualification: None,
+        }
+    }
+
+    fn qualified(prefix: &str, separator: &str, selector: &str) -> Self {
+        Self {
+            text: format!("{prefix}{separator}{selector}"),
+            qualification: Some((prefix.len(), prefix.len() + separator.len())),
+        }
+    }
+
+    fn decorated(&self, before: &str, after: &str) -> Self {
+        let Some((prefix_end, start)) = self.qualification else {
+            return Self::plain(format!("{before}{}{after}", self.text));
+        };
+        let selector = &self.text[start..];
+        if prefix_end == 0 {
+            return Self::plain(format!("{before}{selector}{after}"));
+        }
+        let qualifier = &self.text[..start];
+        Self {
+            text: format!("{qualifier}{before}{selector}{after}").replace(['<', '>'], "$"),
+            qualification: self.qualification,
+        }
+    }
+}
+
 fn rendered_dependency(
-    rendered: &[Option<String>],
+    rendered: &[Option<Spelling>],
     reference: NameRef,
     owner: NameRef,
     owner_kind: RawNameKind,
-) -> Result<String, NameRenderError> {
+) -> Result<&Spelling, NameRenderError> {
     let index =
         usize::try_from(reference).map_err(|_| NameRenderError::InvalidReference { reference })?;
     rendered
         .get(index)
-        .and_then(Clone::clone)
+        .and_then(Option::as_ref)
         .ok_or(NameRenderError::Unsupported {
             reference: owner,
             kind: owner_kind,
@@ -877,14 +919,14 @@ fn rendered_dependency(
 }
 
 fn rendered_signature_text(
-    rendered: &[Option<String>],
+    rendered: &[Option<Spelling>],
     result: NameRef,
     parameters: &[ParamSig],
     owner: NameRef,
     owner_kind: RawNameKind,
 ) -> Result<String, NameRenderError> {
     let result = rendered_dependency(rendered, result, owner, owner_kind)?;
-    let mut text = result;
+    let mut text = result.text.clone();
     text.push('(');
 
     for (index, parameter) in parameters.iter().enumerate() {
@@ -899,9 +941,7 @@ fn rendered_signature_text(
                 text.push(')');
             }
             Some(ParamSigValue::TermParameter(reference)) => {
-                text.push_str(&rendered_dependency(
-                    rendered, reference, owner, owner_kind,
-                )?);
+                text.push_str(&rendered_dependency(rendered, reference, owner, owner_kind)?.text);
             }
             None => {
                 return Err(NameRenderError::Unsupported {
@@ -1854,6 +1894,48 @@ mod tests {
         .unwrap();
 
         assert_eq!(table.render(1), Ok("method$default$1".to_owned()));
+    }
+
+    #[test]
+    fn renders_constructor_default_getters() {
+        for constructor in ["<init>", "$init$"] {
+            let table = NameTable::from_entries(vec![
+                RawName::Utf8(constructor.into()),
+                RawName::DefaultGetter {
+                    underlying: 0,
+                    index: 1,
+                },
+            ])
+            .unwrap();
+            assert_eq!(table.render(1).unwrap(), "$lessinit$greater$default$2");
+        }
+    }
+
+    #[test]
+    fn decorates_the_structural_selector_and_sanitizes_qualified_spellings() {
+        let table = NameTable::from_entries(vec![
+            RawName::Utf8("p$kg".into()),
+            RawName::Utf8("é.<:<".into()),
+            RawName::Expanded {
+                prefix: 0,
+                selector: 1,
+            },
+            RawName::InlineAccessor { underlying: 2 },
+            RawName::SuperAccessor { underlying: 2 },
+            RawName::ObjectClass { underlying: 2 },
+            RawName::BodyRetainer { underlying: 2 },
+            RawName::ObjectClass { underlying: 1 },
+        ])
+        .unwrap();
+        for (id, expected) in [
+            (3, "p$kg$$inline$é.$:$"),
+            (4, "p$kg$$super$é.$:$"),
+            (5, "p$kg$$é.$:$$"),
+            (6, "p$kg$$é.$:$$retainedBody"),
+            (7, "é.<:<$"),
+        ] {
+            assert_eq!(table.render(id).unwrap(), expected);
+        }
     }
 
     #[test]
