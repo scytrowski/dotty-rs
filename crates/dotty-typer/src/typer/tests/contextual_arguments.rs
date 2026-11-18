@@ -540,3 +540,45 @@ fn inherited_contextual_members_remain_on_the_lexical_or_imported_receiver() {
         }
     }
 }
+
+#[test]
+fn constructor_contexts_follow_normalized_scala_clause_order() {
+    let text = "class Context(using n:Int); class Old(implicit n:Int); class Pair(x:Int)(using n:Int); class C { def implicitCtor(using n:Int):Context=new Context; def explicitCtor(using n:Int):Context=new Context(using n); def legacy(using n:Int):Old=new Old; def trailing(using n:Int):Pair=new Pair(1) }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for (name, expected) in [
+        ("implicitCtor", [1, 0]),
+        ("explicitCtor", [1, 0]),
+        ("legacy", [0, 1]),
+        ("trailing", [1, 1]),
+    ] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        typer
+            .type_method_definition(definition_tree(&index, method))
+            .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let outer = typer.typed_index.get(source, rhs).unwrap();
+        let TreeKind::Apply(end) = &typer.typed_ast().get(outer).kind else {
+            panic!()
+        };
+        let TreeKind::Apply(start) = &typer.typed_ast().get(end.function).kind else {
+            panic!()
+        };
+        assert_eq!([start.args.len(), end.args.len()], expected);
+        let argument = if expected[1] == 0 {
+            start.args[0]
+        } else {
+            end.args[0]
+        };
+        assert_eq!(
+            reference(&typer, argument),
+            method_parameter_symbol(&parsed, &index, source, method, 0)
+        );
+    }
+}

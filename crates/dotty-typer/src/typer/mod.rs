@@ -19623,7 +19623,7 @@ mod tests {
     }
 
     #[test]
-    fn regular_constructor_application_rejects_a_contextual_clause() {
+    fn positional_constructor_argument_does_not_supply_an_omitted_context() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C(using value: Int); class Use { def make: C = new C(1) }");
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
@@ -19639,11 +19639,7 @@ mod tests {
 
         assert!(matches!(
             typer.type_expression(rhs, context),
-            Err(TyperError::ApplicationMethodKindMismatch {
-                application_kind: ApplyKind::Regular,
-                method_kind: MethodKind::Contextual,
-                ..
-            })
+            Err(TyperError::MissingContextualArgument {expected,..}) if expected == definitions.int
         ));
     }
 
@@ -38602,6 +38598,12 @@ mod tests {
 
         let typed = typer.type_expression(rhs, context).unwrap();
 
+        let TreeKind::Apply(trailing) = &typer.typed_ast().get(typed).kind else {
+            panic!("normalized empty constructor clause")
+        };
+        assert_eq!(trailing.kind, ApplyKind::Regular);
+        assert!(trailing.args.is_empty());
+        let typed = trailing.function;
         let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
             panic!("expected a typed contextual constructor application")
         };

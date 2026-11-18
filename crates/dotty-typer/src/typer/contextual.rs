@@ -32,12 +32,12 @@ impl SourceTyper<'_> {
     pub(super) fn apply_contextual_arguments(
         &mut self,
         source_tree: TreeId<Untyped>,
-        mut function: TreeId<Typed>,
+        function: TreeId<Typed>,
         context: ExpressionContext,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TreeId<Typed>, TyperError> {
         let ty = self.typed_arena.get(function).ty;
-        let mut callable = match self.store.types.try_get(ty) {
+        let callable = match self.store.types.try_get(ty) {
             Some(Type::TermRef {
                 target: TermRefTarget::Symbol(method),
                 ..
@@ -51,6 +51,65 @@ impl SourceTyper<'_> {
             Some(Type::Method(_)) => ty,
             _ => return Ok(function),
         };
+        let applied =
+            self.supply_contextual_clauses(source_tree, function, callable, context, journal)?;
+        let ty = self.typed_arena.get(applied).ty;
+        if let Some(Type::Method(method)) = self.store.types.try_get(ty)
+            && method.kind == MethodKind::Plain
+            && method.params.is_empty()
+            && self.is_contextual_constructor_chain(applied)
+        {
+            let result = method.result;
+            return Ok(
+                TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply(
+                    applied,
+                    Vec::new(),
+                    result,
+                    self.arena.get(source_tree).position,
+                ),
+            );
+        }
+        Ok(applied)
+    }
+
+    fn is_contextual_constructor_chain(&self, mut tree: TreeId<Typed>) -> bool {
+        let mut has_context = false;
+        while let TreeKind::Apply(app) = &self.typed_arena.get(tree).kind {
+            tree = app.function;
+            let ty = self.typed_arena.get(tree).ty;
+            let signature = match self.store.types.try_get(ty) {
+                Some(Type::TermRef {
+                    target: TermRefTarget::Symbol(method),
+                    ..
+                }) if self.store.symbols.contains(*method) => {
+                    let entry = self.store.symbols.get(*method);
+                    if entry.kind != SymbolKind::Constructor {
+                        return false;
+                    }
+                    let mut signature = entry.info;
+                    if let SymbolInfo::Complete(poly) = signature
+                        && let Some(Type::Poly(poly)) = self.store.types.try_get(poly)
+                    {
+                        signature = SymbolInfo::Complete(poly.result);
+                    }
+                    return has_context
+                        || matches!(signature,SymbolInfo::Complete(id) if matches!(self.store.types.try_get(id),Some(Type::Method(m)) if m.kind!=MethodKind::Plain));
+                }
+                other => other,
+            };
+            has_context |= matches!(signature,Some(Type::Method(m)) if m.kind!=MethodKind::Plain);
+        }
+        false
+    }
+
+    pub(super) fn supply_contextual_clauses(
+        &mut self,
+        source_tree: TreeId<Untyped>,
+        mut function: TreeId<Typed>,
+        mut callable: TypeId,
+        context: ExpressionContext,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
         let position = self.arena.get(source_tree).position;
         let tree_index = source_tree.index();
         let mut visited = HashSet::new();
