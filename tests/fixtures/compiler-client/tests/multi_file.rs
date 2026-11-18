@@ -1,15 +1,16 @@
 //! The consumer owns phase ordering, plans and output. Its two fixture classes
-//! each have a public no-arg constructor and a single method with an explicit result.
+//! each have a public no-arg constructor and a single method.
 #[path = "support/parsing.rs"]
 mod parsing;
 
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 
 use dotty::core::{
     AstArena, Definitions, Packages, SemanticStore, SourceId, SourceSemanticIndex, SymbolId,
-    TreeId, TreeKind, Untyped,
+    SymbolInfo, TreeId, TreeKind, Untyped,
 };
 use dotty::jvm::{
     GeneratedClass, JvmClassInitializationPlan, JvmClassPlan, JvmCompilationUnit, JvmMethodPlan,
@@ -17,7 +18,7 @@ use dotty::jvm::{
 };
 use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty::parser::ParseResult;
-use dotty::typer::SourceTyper;
+use dotty::typer::{SourceTyper, TyperError};
 
 struct NamedUnit {
     source: SourceId,
@@ -25,6 +26,28 @@ struct NamedUnit {
     index: SourceSemanticIndex,
     class: SymbolId,
     method: TreeId<Untyped>,
+}
+
+impl NamedUnit {
+    fn method_symbol(&self) -> SymbolId {
+        self.index.symbol_at(self.source, self.method).unwrap()
+    }
+
+    fn typer<'a>(
+        &'a self,
+        store: &'a mut SemanticStore,
+        definitions: Definitions,
+        packages: &'a Packages,
+    ) -> SourceTyper<'a> {
+        SourceTyper::new(
+            &self.ast,
+            self.source,
+            &self.index,
+            store,
+            definitions,
+            packages,
+        )
+    }
 }
 
 fn enter(
@@ -75,6 +98,71 @@ fn enter(
     }
 }
 
+fn name_units(
+    files: &[(SourceId, &str, &str)],
+    store: &mut SemanticStore,
+    packages: &mut Packages,
+) -> Vec<NamedUnit> {
+    files
+        .iter()
+        .zip(parsing::parse_files(files, 4))
+        .map(|(&(id, name, _), detached)| {
+            let parsed = detached.into_session(&mut store.names);
+            enter(id, name, parsed, store, packages)
+        })
+        .collect()
+}
+
+// Scheduling belongs to the consumer. The index identifies the owning source
+// even when different files reuse the same input tree slots.
+fn complete_signatures(
+    units: &[NamedUnit],
+    store: &mut SemanticStore,
+    definitions: Definitions,
+    packages: &Packages,
+) -> Result<(), TyperError> {
+    let mut owners = HashMap::new();
+    for unit in units {
+        unit.typer(store, definitions, packages)
+            .complete_symbol(unit.class)?;
+        owners.insert(unit.method_symbol(), unit);
+    }
+
+    for root in units {
+        let symbol = root.method_symbol();
+        if matches!(store.symbols.info(symbol), SymbolInfo::Complete(_)) {
+            continue;
+        }
+        let mut pending = vec![symbol];
+        let mut active = HashSet::from([symbol]);
+        while let Some(&symbol) = pending.last() {
+            let unit = owners[&symbol];
+            let completion = unit
+                .typer(store, definitions, packages)
+                .complete_symbol(symbol);
+            match completion {
+                Ok(_) => {
+                    pending.pop();
+                    active.remove(&symbol);
+                }
+                Err(TyperError::MemberTypeUnavailable { symbol: dependency })
+                    if owners.contains_key(&dependency)
+                        && matches!(store.symbols.info(dependency), SymbolInfo::Missing) =>
+                {
+                    if !active.insert(dependency) {
+                        return Err(TyperError::RecursiveInferredMethodResult {
+                            symbol: dependency,
+                        });
+                    }
+                    pending.push(dependency);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(())
+}
+
 fn with_plan<R>(
     files: &[(SourceId, &str, &str)],
     run: impl FnOnce(&JvmCompilationUnit<'_>, &Definitions) -> R,
@@ -82,30 +170,8 @@ fn with_plan<R>(
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
     let mut packages = Packages::new();
-    let units: Vec<_> = files
-        .iter()
-        .zip(parsing::parse_files(files, 4))
-        .map(|(&(id, name, _), detached)| {
-            let parsed = detached.into_session(&mut store.names);
-            enter(id, name, parsed, &mut store, &mut packages)
-        })
-        .collect();
-
-    // Both signatures are available before a body can request another file's method.
-    for unit in &units {
-        let mut typer = SourceTyper::new(
-            &unit.ast,
-            unit.source,
-            &unit.index,
-            &mut store,
-            definitions,
-            &packages,
-        );
-        typer.complete_symbol(unit.class).unwrap();
-        typer
-            .complete_symbol(unit.index.symbol_at(unit.source, unit.method).unwrap())
-            .unwrap();
-    }
+    let units = name_units(files, &mut store, &mut packages);
+    complete_signatures(&units, &mut store, definitions, &packages).unwrap();
 
     let mut output = AstArena::new();
     let mut typed_units = Vec::new();
@@ -147,7 +213,7 @@ fn with_plan<R>(
             fields: vec![],
             initialization: JvmClassInitializationPlan::ImplicitNoArg,
             methods: vec![JvmMethodPlan {
-                method: unit.index.symbol_at(unit.source, unit.method).unwrap(),
+                method: unit.method_symbol(),
                 parameters,
                 body: Some(body),
                 locals: vec![],
@@ -281,5 +347,36 @@ fn measure_jvm_batch() {
                 );
             }
         });
+    }
+}
+
+#[test]
+fn cross_file_inference_cycle_reports_the_reentered_method_and_rolls_back() {
+    let a = (
+        SourceId::from_index(0),
+        "A.scala",
+        "class A { def left(b: B) = b.right(this) }",
+    );
+    let b = (
+        SourceId::from_index(1),
+        "B.scala",
+        "class B { def right(a: A) = a.left(this) }",
+    );
+    for files in [[a, b], [b, a]] {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let units = name_units(&files, &mut store, &mut packages);
+        let error = complete_signatures(&units, &mut store, definitions, &packages).unwrap_err();
+        assert!(
+            matches!(error, TyperError::RecursiveInferredMethodResult { symbol } if symbol == units[0].method_symbol()),
+            "{error:?}"
+        );
+        for unit in &units {
+            assert!(matches!(
+                store.symbols.info(unit.method_symbol()),
+                SymbolInfo::Missing
+            ));
+        }
     }
 }

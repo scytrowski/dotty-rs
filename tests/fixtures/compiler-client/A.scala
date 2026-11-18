@@ -1,4 +1,4 @@
 package demo
 
 class A:
-  def get(): Int = 7
+  def get() = 7

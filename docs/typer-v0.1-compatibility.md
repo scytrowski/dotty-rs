@@ -1941,3 +1941,18 @@ limits are p95 depth <= 6 and completed-class fanout <= 16. The
 [checkpoint](typer-classpath-corpus-audit-post-tasty-parents-3.9.0.md) remains
 incomplete until the manually initiated hosted audit reconciles every frozen
 root and its source attribution.
+
+### Inferred results across source files
+
+The standalone compiler client names both sources and completes their class
+headers before requesting method signatures. For an ordinary source method,
+`MemberTypeUnavailable { symbol }` can identify a dependency: the client
+checks that the symbol belongs to a named method in this batch and its
+canonical info is still `Missing`. It completes that method in the owning
+source and retries the original request. Other errors propagate. An active
+stack of method symbols detects cross-file cycles. Each failed
+`complete_symbol` attempt rolls back before the client visits a dependency.
+
+The fixture infers both `A.get()` and `B.read(a: A) = a.get()`, emits identical
+classes in either input order and runs the call on JDK 21. The cycle fixture
+checks the reentered symbol and the absence of partial method signatures.
