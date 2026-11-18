@@ -7059,6 +7059,105 @@ mod tests {
     }
 
     #[test]
+    fn failed_selected_chain_resource_preserves_open_and_retries_in_same_session() {
+        let original_root = fixture_path("tests/fixtures/semantic_chain_3_9_0");
+        let selected_leaf = BinaryName::from_internal("convergence/ChainLeaf");
+        let malformed = ClassResource::new(
+            vec![0, 1, 2],
+            ClassFormat::Tasty,
+            ClassOrigin::Directory(PathBuf::from("<malformed-ChainLeaf>")),
+        );
+        let selected_resource = Arc::new(Mutex::new(Some(malformed)));
+        let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+        let classpath = CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(original_root.clone())),
+            Box::new(DirectoryClassPath::new(fixture_path(
+                "tests/fixtures/tasty_visibility",
+            ))),
+            Box::new(JdkClassPath::new(java_home.join("jmods")).expect("JDK 21 jmods")),
+        ]);
+        let path = CompositeClassPath::new(vec![Box::new(SelectedResourceControl {
+            inner: classpath,
+            selected_name: "convergence/ChainLeaf",
+            selected: selected_resource.clone(),
+        })]);
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(path, definitions, LoadingSession::new());
+        let visibility = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "visibility"],
+            )
+            .unwrap()
+            .expect("Open fixture package");
+        let convergence = resolver
+            .resolve_package(&mut store, &["convergence"])
+            .unwrap()
+            .expect("convergence fixture package");
+        let open_request =
+            semantic_member_request(&mut store, visibility, definitions.no_prefix, "Open");
+        let chain_request =
+            semantic_member_request(&mut store, convergence, definitions.no_prefix, "ChainLeaf");
+        let open_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Open");
+        let open = resolver
+            .resolve_member_with_semantic_class(&mut store, &open_request, &open_name)
+            .unwrap()
+            .expect("Open commits before the selected chain failure");
+        let store_before_failure = store.checkpoint();
+        let session_before_failure = resolver.session.checkpoint();
+
+        let error = resolver
+            .transact(&mut store, |resolver, store| {
+                resolver.resolve_member_inner_with_semantic_request(
+                    store,
+                    &chain_request,
+                    &selected_leaf,
+                )
+            })
+            .expect_err("malformed selected ChainLeaf is a terminal typed failure");
+        let MemberResolutionFailure::SemanticLoad(failure) = error else {
+            panic!("selected chain resource error remains typed: {error:?}");
+        };
+        assert_eq!(failure.binary_name, selected_leaf);
+        assert!(matches!(
+            failure.source,
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(_, _))
+        ));
+        assert_eq!(store.checkpoint(), store_before_failure);
+        assert_eq!(resolver.session.checkpoint(), session_before_failure);
+        assert_eq!(resolver.session.resolved.get(&open_name), Some(&open));
+        assert_eq!(resolver.session.identified.get(&open_name), Some(&open));
+        assert!(!resolver.session.identified.contains_key(&selected_leaf));
+        assert!(!resolver.session.resolved.contains_key(&selected_leaf));
+        assert_eq!(
+            store
+                .scopes
+                .get(resolver.package_scope(visibility).unwrap())
+                .lookup_all(&open_request.name),
+            [open]
+        );
+
+        *selected_resource.lock().expect("selected resource lock") = Some(ClassResource::new(
+            std::fs::read(original_root.join("convergence/ChainLeaf.tasty"))
+                .expect("authentic original ChainLeaf"),
+            ClassFormat::Tasty,
+            ClassOrigin::Directory(original_root.clone()),
+        ));
+        let leaf = resolver
+            .resolve_member_with_semantic_class(&mut store, &chain_request, &selected_leaf)
+            .unwrap()
+            .expect("retry loads the original complete chain");
+        assert_eq!(resolver.session.resolved.get(&open_name), Some(&open));
+        assert_eq!(resolver.session.identified.get(&open_name), Some(&open));
+        assert_eq!(resolver.session.resolved.get(&selected_leaf), Some(&leaf));
+        assert_eq!(
+            resolver.session.origins.get(&leaf),
+            Some(&ClassOrigin::Directory(original_root))
+        );
+    }
+
+    #[test]
     fn selected_chain_request_controls_do_not_confuse_namespace_package_or_spelling() {
         let original_root = fixture_path("tests/fixtures/semantic_chain_3_9_0");
         let foreign_root = fixture_path("tests/fixtures/semantic_chain_controls_3_9_0");
