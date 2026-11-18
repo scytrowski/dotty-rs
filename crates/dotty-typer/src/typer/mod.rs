@@ -9565,6 +9565,21 @@ mod tests {
             else {
                 panic!("synthetic method definition should be available separately");
             };
+            let implementation = closure
+                .implementation
+                .as_ref()
+                .expect("source lambda implementation");
+            assert_eq!(implementation.definition, method_definition_tree);
+            assert_eq!(
+                typer
+                    .source_typed_index()
+                    .synthetic_definition_symbol(method_definition_tree),
+                typer
+                    .store()
+                    .types
+                    .get(typer.typed_ast().get(closure.method).ty)
+                    .reference_symbol()
+            );
             assert_ne!(closure.method, method_definition_tree);
             let TreeKind::DefDef(method_definition) =
                 &typer.typed_ast().get(method_definition_tree).kind
@@ -9573,6 +9588,18 @@ mod tests {
             };
             assert_eq!(method_definition.value_param_clauses.len(), 1);
             let parameters = &method_definition.value_param_clauses[0];
+            assert_eq!(
+                implementation.parameters,
+                parameters
+                    .iter()
+                    .map(|parameter| {
+                        typer
+                            .source_typed_index()
+                            .synthetic_definition_symbol(*parameter)
+                            .expect("canonical lambda parameter")
+                    })
+                    .collect::<Vec<_>>()
+            );
             let expected_arity = match method_name {
                 "zero" => 0,
                 "one" | "block" => 1,

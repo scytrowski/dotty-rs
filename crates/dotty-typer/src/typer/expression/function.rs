@@ -566,6 +566,7 @@ impl SourceTyper<'_> {
             });
         }
 
+        let mut formal_symbols = Vec::with_capacity(parameters.len());
         let mut typed_parameters = Vec::with_capacity(parameters.len());
         let mut method_parameters = Vec::with_capacity(parameters.len());
         for parameter in parameters {
@@ -611,16 +612,21 @@ impl SourceTyper<'_> {
                 TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
                     .type_tree(parameter_type, None)
             };
-            let typed_parameter = self.typed_arena.alloc(Tree {
-                kind: TreeKind::ValDef(ValDef {
-                    name: parameter.name,
-                    tpt: typed_tpt,
-                    rhs: None,
-                    metadata: (),
-                }),
-                position: parameter_position,
-                ty: parameter_type,
-            });
+            formal_symbols.push(symbol);
+            let typed_parameter = self.typed_index.alloc_synthetic_definition(
+                &mut self.typed_arena,
+                symbol,
+                Tree {
+                    kind: TreeKind::ValDef(ValDef {
+                        name: parameter.name,
+                        tpt: typed_tpt,
+                        rhs: None,
+                        metadata: (),
+                    }),
+                    position: parameter_position,
+                    ty: parameter_type,
+                },
+            );
             if let Some((parameter_tree, _)) = parameter.source {
                 self.typed_index
                     .insert(self.source, parameter_tree, typed_parameter)
@@ -690,19 +696,23 @@ impl SourceTyper<'_> {
         });
         let typed_result = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
             .type_tree(function_result, position);
-        let typed_method = self.typed_arena.alloc(Tree {
-            kind: TreeKind::DefDef(DefDef {
-                name: TermName::new(method_name.text()),
-                type_params: Vec::new(),
-                value_param_clauses: vec![typed_parameters],
-                source_param_clause_order: None,
-                tpt: typed_result,
-                rhs: Some(typed_body),
-                metadata: (),
-            }),
-            position,
-            ty: method_ref,
-        });
+        let typed_method = self.typed_index.alloc_synthetic_definition(
+            &mut self.typed_arena,
+            method,
+            Tree {
+                kind: TreeKind::DefDef(DefDef {
+                    name: TermName::new(method_name.text()),
+                    type_params: Vec::new(),
+                    value_param_clauses: vec![typed_parameters],
+                    source_param_clause_order: None,
+                    tpt: typed_result,
+                    rhs: Some(typed_body),
+                    metadata: (),
+                }),
+                position,
+                ty: method_ref,
+            },
+        );
         let Some(definition) = self
             .function_literals
             .definitions
@@ -724,13 +734,18 @@ impl SourceTyper<'_> {
             .ident(method_name, method_ref, position);
         let captures = self.function_literals.captures(method);
         Ok(
-            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).closure(
-                captures,
-                typed_method_reference,
-                None,
-                function_type,
-                position,
-            ),
+            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                .closure_with_implementation(
+                    captures,
+                    typed_method_reference,
+                    None,
+                    Some(dotty_core::ast::ClosureImplementation {
+                        definition: typed_method,
+                        parameters: formal_symbols,
+                    }),
+                    function_type,
+                    position,
+                ),
         )
     }
 }

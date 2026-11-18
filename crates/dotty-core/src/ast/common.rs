@@ -168,6 +168,17 @@ pub struct Closure<P: AstPhase> {
     pub env: Vec<TreeId<P>>,
     pub method: TreeId<P>,
     pub tpt: Option<TreeId<P>>,
+    /// Source-generated implementation and its ordered parameters, when available.
+    pub implementation: Option<ClosureImplementation<P>>,
+}
+
+/// A closure's synthetic method definition in the same arena and session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClosureImplementation<P: AstPhase> {
+    /// Typed method definition referenced by the closure.
+    pub definition: TreeId<P>,
+    /// Formal symbols in the same order as the method definition.
+    pub parameters: Vec<crate::SymbolId>,
 }
 
 /// `mods val name: tpt = rhs`.

@@ -263,6 +263,25 @@ impl<'a> TypedAstBuilder<'a> {
         ty: TypeId,
         position: Option<SourceSpan>,
     ) -> TreeId<Typed> {
+        self.closure_with_implementation(env, method, tpt, None, ty, position)
+    }
+
+    /// Allocates a closure linked to the exact method definition in this arena.
+    pub fn closure_with_implementation(
+        &mut self,
+        env: Vec<TreeId<Typed>>,
+        method: TreeId<Typed>,
+        tpt: Option<TreeId<Typed>>,
+        implementation: Option<super::ClosureImplementation<Typed>>,
+        ty: TypeId,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Typed> {
+        if let Some(implementation) = &implementation {
+            self.assert_real_typed_tree(
+                implementation.definition,
+                "a typed closure implementation",
+            );
+        }
         for captured in &env {
             self.assert_real_typed_tree(*captured, "each typed closure environment value");
         }
@@ -272,7 +291,12 @@ impl<'a> TypedAstBuilder<'a> {
         }
         self.assert_real_type(ty, "a typed closure");
         self.arena.alloc(Tree {
-            kind: TreeKind::Closure(Closure { env, method, tpt }),
+            kind: TreeKind::Closure(Closure {
+                env,
+                method,
+                tpt,
+                implementation,
+            }),
             position,
             ty,
         })
