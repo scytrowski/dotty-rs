@@ -1393,10 +1393,12 @@ fn default_getter_types_its_body_in_the_scope_of_its_own_parameter_copies() {
 }
 
 #[test]
-fn contextual_default_shares_an_effectful_previous_argument_once() {
-    let text = "class Reader { def offset(x:Int)(using n:Int = x):Int = n }; class C { def next():Int = 4; def run(r:Reader):Int = r.offset(next()) }";
+fn contextual_defaults_evaluate_the_receiver_and_earlier_arguments_once_in_order() {
+    let text = "class Reader { def offset(x:Int)(using n:Int = x, b:Boolean = true):Int = n }; class C { def reader():Reader = new Reader; def next():Int = 4; def run():Int = reader().offset(next()) }";
     let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
     let (run, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "run");
+    let reader = method_symbol(&parsed, &store, &index, source, "reader");
+    let next = method_symbol(&parsed, &store, &index, source, "next");
     let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
     typer
         .type_method_definition(definition_tree(&index, run))
@@ -1406,28 +1408,35 @@ fn contextual_default_shares_an_effectful_previous_argument_once() {
         .get(typer.typed_index.get(source, rhs).unwrap())
         .kind
     else {
-        panic!("missing shared argument")
+        panic!("missing shared operands")
     };
-    assert_eq!(block.stats.len(), 1);
-    let local = typer
-        .typed_index
-        .synthetic_definition_symbol(block.stats[0])
-        .unwrap();
-    let TreeKind::ValDef(shared) = &typer.typed_arena.get(block.stats[0]).kind else {
-        panic!()
+    let [receiver, argument] = block.stats.as_slice() else {
+        panic!("each operand should be evaluated once")
     };
-    assert!(matches!(
-        typer.typed_arena.get(shared.rhs.unwrap()).kind,
-        TreeKind::Apply(_)
-    ));
+    let [receiver_local, argument_local] =
+        [(*receiver, reader), (*argument, next)].map(|(tree, method)| {
+            let TreeKind::ValDef(shared) = &typer.typed_arena.get(tree).kind else {
+                panic!("expected temporary")
+            };
+            let TreeKind::Apply(init) = &typer.typed_arena.get(shared.rhs.unwrap()).kind else {
+                panic!("expected initializer call")
+            };
+            assert_eq!(reference(&typer, init.function), method);
+            typer.typed_index.synthetic_definition_symbol(tree).unwrap()
+        });
     let TreeKind::Apply(call) = &typer.typed_arena.get(block.expr).kind else {
         panic!()
     };
-    for tree in [call.function, call.args[0]] {
-        let TreeKind::Apply(prefix) = &typer.typed_arena.get(tree).kind else {
-            panic!()
+    assert_eq!(call.args.len(), 2);
+    for tree in std::iter::once(&call.function).chain(&call.args) {
+        let TreeKind::Apply(prefix) = &typer.typed_arena.get(*tree).kind else {
+            panic!("expected replay of the same earlier clause")
         };
-        assert_eq!(reference(&typer, prefix.args[0]), local);
+        assert_eq!(reference(&typer, prefix.args[0]), argument_local);
+        let TreeKind::Select(member) = &typer.typed_arena.get(prefix.function).kind else {
+            panic!("expected receiver")
+        };
+        assert_eq!(reference(&typer, member.qualifier), receiver_local);
     }
 }
 
