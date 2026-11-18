@@ -1247,6 +1247,18 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         self.load_semantic_class_with_tasty_unpickler_injected(name, false)
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn load_semantic_class_for_selected_member(
+        &mut self,
+        name: &BinaryName,
+    ) -> Result<SymbolId, SemanticTastyLoadError> {
+        if let Some(resource) = self.semantic_chain_candidate_resource(name) {
+            self.load_semantic_chain_with_tasty_unpickler(name, resource)
+        } else {
+            self.load_semantic_class_with_tasty_unpickler_without_chain(name)
+        }
+    }
+
     fn semantic_chain_candidate_resource(
         &mut self,
         requested: &BinaryName,
@@ -1519,8 +1531,17 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                         return Err(error);
                     }
                 };
+                let answer = match Self::semantic_chain_answer_address(
+                    file, &index, self.store, root, name, resource,
+                ) {
+                    Ok(address) => address,
+                    Err(error) => {
+                        self.restore_tasty_pair_packages(file, session);
+                        return Err(error);
+                    }
+                };
                 unit_symbols[position] = Some(index.symbol_at(root).expect("indexed root symbol"));
-                indexes[position] = Some((index, root, constructor));
+                indexes[position] = Some((index, root, constructor, answer));
                 tasty_session = session;
             }
 
@@ -1534,7 +1555,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     continue;
                 };
                 let name = &names[position];
-                let (index, root, constructor) = indexes[position]
+                let (index, root, constructor, answer) = indexes[position]
                     .take()
                     .expect("every newly entered unit has its source index");
                 let mut unpickler = TastyUnpickler::with_session_and_index(
@@ -1544,7 +1565,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     tasty_session,
                     index,
                 );
-                for address in [root, constructor] {
+                for address in [Some(root), Some(constructor), answer]
+                    .into_iter()
+                    .flatten()
+                {
                     if let Err(error) = unpickler.complete_symbol(address) {
                         let (_, session) = unpickler.into_session_parts();
                         self.restore_tasty_pair_packages(file, session);
@@ -1933,20 +1957,103 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 tasty_symbol::TastyDecodeError::Ast(error),
             ))
         })?;
-        if !template.type_params.is_empty()
-            || !template.term_params.is_empty()
-            || template.stats.len() != 1
-            || !matches!(
+        let has_only_constructor = template.stats.len() == 1
+            && matches!(
                 template.stats.first(),
                 Some(dotty_tasty::tasty::RawTree::LengthNode(node))
                     if node.tag == dotty_tasty::tasty::DEFDEF_TAG
-            )
+            );
+        let has_indexed_answer = name.as_internal() == "convergence/ChainLeaf"
+            && template.stats.len() == 2
+            && template.stats.iter().all(|stat| {
+                matches!(stat, dotty_tasty::tasty::RawTree::LengthNode(node)
+                    if node.tag == dotty_tasty::tasty::DEFDEF_TAG)
+            })
+            && template.stats.iter().any(|stat| {
+                let dotty_tasty::tasty::RawTree::LengthNode(node) = stat else {
+                    return false;
+                };
+                matches!(node.decode_structured(),
+                    Ok(dotty_tasty::tasty::StructuredNode::DefDef(body))
+                        if file.names().get_utf8(body.name) == Some("answer")
+                            && body.parameters.is_empty()
+                            && body.clauses.is_empty()
+                            && body.rhs.is_some()
+                            && !has_unsupported_class_annotations(file, &body.tail))
+            });
+        if !template.type_params.is_empty()
+            || !template.term_params.is_empty()
+            || !(has_only_constructor || has_indexed_answer)
         {
             return Err(SemanticTastyLoadError::UnsupportedShape(
-                "a chain unit must have no parameters and only its constructor stat",
+                "a chain unit must have no parameters and only its constructor, or the indexed ChainLeaf.answer declaration",
             ));
         }
         Ok(())
+    }
+
+    fn semantic_chain_answer_address(
+        file: &dotty_tasty::tasty::TastyFile<'_>,
+        index: &TastySemanticIndex,
+        store: &SemanticStore,
+        root: u32,
+        name: &BinaryName,
+        resource: &ClassResource,
+    ) -> Result<Option<u32>, SemanticTastyLoadError> {
+        if name.as_internal() != "convergence/ChainLeaf" {
+            return Ok(None);
+        }
+        let nodes = file.ast_address_index().map_err(|error| {
+            SemanticTastyLoadError::for_pair_unit(
+                name,
+                resource,
+                SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                    name.clone(),
+                    tasty_symbol::TastyDecodeError::Parse(error),
+                )),
+            )
+        })?;
+        let root_symbol = index.symbol_at(root).ok_or_else(|| {
+            SemanticTastyLoadError::for_pair_unit(
+                name,
+                resource,
+                SemanticTastyLoadError::UnsupportedShape(
+                    "the indexed ChainLeaf root has no semantic symbol",
+                ),
+            )
+        })?;
+        let answers = nodes
+            .iter()
+            .filter_map(|node| {
+                let address = u32::try_from(node.offset).ok()?;
+                let symbol = index.symbol_at(address)?;
+                let is_answer = match node.decode_structured().ok()? {
+                    dotty_tasty::tasty::StructuredNode::DefDef(body) => {
+                        file.names().get_utf8(body.name) == Some("answer")
+                            && body.parameters.is_empty()
+                            && body.clauses.is_empty()
+                            && body.rhs.is_some()
+                            && !has_unsupported_class_annotations(file, &body.tail)
+                    }
+                    _ => false,
+                };
+                (is_answer
+                    && store.symbols.get(symbol).owner == Some(root_symbol)
+                    && store.symbols.get(symbol).kind == SymbolKind::Method)
+                    .then_some(address)
+            })
+            .collect::<Vec<_>>();
+        match answers.as_slice() {
+            [answer] => Ok(Some(*answer)),
+            [] => Ok(None),
+            _ => Err(SemanticTastyLoadError::for_pair_unit(
+                name,
+                resource,
+                SemanticTastyLoadError::UnsupportedShape(
+                    "the bounded ChainLeaf template has multiple indexed answer methods",
+                ),
+            )),
+        }
     }
 
     fn semantic_chain_root_and_constructor(
@@ -22919,6 +23026,60 @@ mod tests {
         let original_root = fixture_root.join("tests/fixtures/semantic_chain_3_9_0");
         let simple_root = fixture_root.join("tests/fixtures/semantic_chain_simple_3_9_0");
         let foreign_root = fixture_root.join("tests/fixtures/semantic_chain_controls_3_9_0");
+        for (root, expected) in [
+            (
+                &original_root,
+                [
+                    (
+                        "ChainRoot",
+                        "4c5ab08bcd61019347716e88c5edb0a0f03fc07bb124ad063318809b389d41b3",
+                    ),
+                    (
+                        "ChainMiddle",
+                        "b737055909e3839893f8e2bcaee0faa10aceac1260da01efa82e3e6864751d00",
+                    ),
+                    (
+                        "ChainLeaf",
+                        "8cefb2d2e8c74c6c65a9a9dce0df69f320ad7cae08f8b2c4af0679fbbcd72868",
+                    ),
+                ],
+            ),
+            (
+                &simple_root,
+                [
+                    (
+                        "ChainRoot",
+                        "7cbca928d379b6593ca5c9360316ff5e02960e8a19f81696ff418c1da2cd762f",
+                    ),
+                    (
+                        "ChainMiddle",
+                        "58e5dbb5914bd8b6406591be74152dc22adb5c320b80df632a84f611a1d15bac",
+                    ),
+                    (
+                        "ChainLeaf",
+                        "cf64ad9429db6a20cfe1d36045a0d80655fd267ed98ed1fd4df7398a72ad3d57",
+                    ),
+                ],
+            ),
+        ] {
+            for (class, expected_hash) in expected {
+                let path = root.join("convergence").join(format!("{class}.tasty"));
+                let output = Command::new("sha256sum")
+                    .arg("--")
+                    .arg(&path)
+                    .output()
+                    .expect("sha256sum is available to fixture tests");
+                assert!(output.status.success());
+                assert_eq!(
+                    String::from_utf8(output.stdout)
+                        .expect("sha256sum output is UTF-8")
+                        .split_whitespace()
+                        .next(),
+                    Some(expected_hash),
+                    "fixture hash for {path:?}"
+                );
+            }
+        }
         let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
         let class_path = |root: PathBuf, include_foreign: bool| {
             let mut entries: Vec<Box<dyn ClassPathEntry>> =
@@ -23055,14 +23216,7 @@ mod tests {
             original, original_fresh,
             "fresh-store outcomes are normalized"
         );
-        assert_eq!(
-            original,
-            [
-                "Loaded",
-                "Loaded",
-                "UnsupportedShape:the class template must have no type parameters and one constructor declaration",
-            ]
-        );
+        assert_eq!(original, ["Loaded", "Loaded", "Loaded"]);
         let simple = load_each(simple_root.clone());
         let simple_fresh = load_each(simple_root.clone());
         assert_eq!(simple, simple_fresh, "fresh-store outcomes are normalized");
@@ -23106,6 +23260,7 @@ mod tests {
             let selected_name = BinaryName::from_internal("convergence/ChainLeaf");
             let normalize_result =
                 |result: &Result<Option<SymbolId>, dotty_core::ResolutionError>| match result {
+                    Ok(Some(_)) => format!("requested={selected_name}; selected"),
                     Err(dotty_core::ResolutionError::Malformed { reason }) => {
                         format!("requested={selected_name}; {}", normalize_type_ids(reason))
                     }
@@ -23121,12 +23276,7 @@ mod tests {
         };
         let selected = observe_selected_resolver(simple_root.clone());
         let selected_fresh = observe_selected_resolver(simple_root.clone());
-        let expected_selected = concat!(
-            "requested=convergence/ChainLeaf; ",
-            "semantic loading of convergence/ChainLeaf failed: ",
-            "Unpickle { address: 4, error: UnresolvedMember { address: 17, ",
-            "prefix: TypeId(_), space: None, name: \"ChainMiddle\", namespace: Type } }"
-        );
+        let expected_selected = "requested=convergence/ChainLeaf; selected";
         assert_eq!(selected, expected_selected);
         assert_eq!(selected_fresh, expected_selected);
         assert_eq!(
@@ -23390,6 +23540,97 @@ mod tests {
         assert!(first[1].starts_with("ChainMiddle:convergence:["));
         assert!(first[1].contains("ChainRoot"));
         assert!(first[2].starts_with("ChainLeaf:convergence:[\"ChainMiddle\"]"));
+    }
+
+    #[test]
+    fn original_semantic_chain_leaf_completes_indexed_direct_answer() {
+        let fixture_root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/semantic_chain_3_9_0");
+        let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            CompositeClassPath::new(vec![
+                Box::new(crate::class_path::DirectoryClassPath::new(
+                    fixture_root.clone(),
+                )),
+                Box::new(
+                    crate::jdk_class_path::JdkClassPath::new(java_home.join("jmods"))
+                        .expect("JDK 21 jmods"),
+                ),
+            ]),
+            &mut store,
+        );
+        let root_name = BinaryName::from_internal("convergence/ChainRoot");
+        let middle_name = BinaryName::from_internal("convergence/ChainMiddle");
+        let leaf_name = BinaryName::from_internal("convergence/ChainLeaf");
+
+        let leaf = loader
+            .load_semantic_class_with_tasty_unpickler(&leaf_name)
+            .expect("original ChainLeaf completes through its bounded semantic hierarchy");
+        assert_eq!(
+            loader
+                .load_semantic_class_with_tasty_unpickler(&leaf_name)
+                .expect("repeated request reuses the selected class"),
+            leaf
+        );
+        let middle = parent_symbol(loader.store, class_info(loader.store, leaf).parents[0]);
+        assert_eq!(symbol_name(loader.store, middle), "ChainMiddle");
+        let root = class_info(loader.store, middle)
+            .parents
+            .iter()
+            .map(|parent| parent_symbol(loader.store, *parent))
+            .find(|parent| symbol_name(loader.store, *parent) == "ChainRoot")
+            .expect("ChainMiddle has the authentic ChainRoot parent");
+        assert_eq!(loader.store.symbols.get(root).kind, SymbolKind::Trait);
+        for (name, symbol) in [
+            ("ChainLeaf", leaf),
+            ("ChainMiddle", middle),
+            ("ChainRoot", root),
+        ] {
+            assert_eq!(symbol_name(loader.store, symbol), name);
+            assert!(matches!(
+                loader.store.symbols.get(symbol).info,
+                SymbolInfo::Complete(_)
+            ));
+            assert_eq!(
+                loader.session.origins.get(&symbol),
+                Some(&ClassOrigin::Directory(fixture_root.clone()))
+            );
+        }
+
+        let declarations = class_info(loader.store, leaf).declarations;
+        let answer_name = Name::new(loader.store.names.intern("answer"), Namespace::Term);
+        let answer = loader
+            .store
+            .scopes
+            .get(declarations)
+            .lookup(&answer_name)
+            .expect("the indexed direct answer declaration belongs to ChainLeaf");
+        assert_eq!(loader.store.symbols.get(answer).owner, Some(leaf));
+        assert_eq!(loader.store.symbols.get(answer).kind, SymbolKind::Method);
+        let SymbolInfo::Complete(answer_info) = loader.store.symbols.get(answer).info else {
+            panic!("answer must be fully completed, not merely entered");
+        };
+        let Type::ByName { result } = loader.store.types.get(answer_info) else {
+            panic!("answer's complete serialized info is ByName(Int)");
+        };
+        assert_eq!(
+            type_ref_symbol(loader.store, *result),
+            type_ref_symbol(loader.store, loader.definitions.int),
+            "answer uses the canonical scala.Int definition"
+        );
+        assert_eq!(
+            loader
+                .load_semantic_class_with_tasty_unpickler(&middle_name)
+                .expect("explicit ancestor request reuses the completed hierarchy"),
+            middle
+        );
+        assert_eq!(
+            loader
+                .load_semantic_class_with_tasty_unpickler(&root_name)
+                .expect("explicit trait request reuses the completed hierarchy"),
+            root
+        );
     }
 
     #[test]
