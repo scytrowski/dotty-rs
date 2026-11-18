@@ -150,6 +150,11 @@ impl SourceTyper<'_> {
         let typed = self.type_expression_inner(source_tree, context, info_journal, new_mappings)?;
         let typed =
             self.adapt_java_nullary_method_value(source_tree, typed, info_journal, new_mappings)?;
+        let adapted = self.apply_contextual_arguments(source_tree, typed, context, info_journal)?;
+        if adapted != typed {
+            self.record_adapted_value(source_tree, adapted, new_mappings)?;
+        }
+        let typed = adapted;
         self.validate_value_expression(source_tree, typed)?;
         Ok(typed)
     }
@@ -205,6 +210,16 @@ impl SourceTyper<'_> {
             method.result,
             position,
         );
+        self.record_adapted_value(source_tree, applied, new_mappings)?;
+        Ok(applied)
+    }
+
+    fn record_adapted_value(
+        &mut self,
+        source_tree: TreeId<Untyped>,
+        applied: TreeId<Typed>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<(), TyperError> {
         self.typed_index.remove(self.source, source_tree);
         self.typed_index
             .insert(self.source, source_tree, applied)
@@ -217,7 +232,7 @@ impl SourceTyper<'_> {
         if !new_mappings.contains(&(self.source, source_tree)) {
             new_mappings.push((self.source, source_tree));
         }
-        Ok(applied)
+        Ok(())
     }
 
     pub(in crate::typer) fn enclosing_this_owner(

@@ -1125,6 +1125,19 @@ pub enum TyperError {
         tree_index: u32,
         kind: MethodKind,
     },
+    /// No eligible contextual value conforms to the formal parameter.
+    MissingContextualArgument {
+        source: SourceId,
+        tree_index: u32,
+        expected: TypeId,
+    },
+    /// Multiple contextual values at the same priority conform to the formal.
+    AmbiguousContextualArgument {
+        source: SourceId,
+        tree_index: u32,
+        expected: TypeId,
+        candidates: Vec<SymbolId>,
+    },
     /// A call requires contextual argument insertion or implicit search.
     UsingApplicationDeferred {
         source: SourceId,

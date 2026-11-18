@@ -1434,8 +1434,13 @@ Generic inference uses the current explicit clause, including contextual or
 legacy implicit clauses passed with `using`, and the supported direct-parameter
 and matching applied-type constraints also participate in overload selection.
 Curried plain-then-contextual calls continue from the exact result callable of
-the first clause, including after generic inference. Automatic contextual or
-implicit argument insertion and implicit search remain deferred. Erased
+the first clause, including after generic inference. At a value use, a remaining
+contextual or legacy implicit clause can be supplied by monomorphic context
+parameters of the calling method. Each inserted ordinary typed application
+retains the exact selected parameter reference. Missing and ambiguous evidence
+report the expected type and source site. Explicit `using` keeps its own kind.
+See the Scala 3.9 controls under `tests/fixtures/contextual-arguments` in the
+typer crate. Erased
 parameters remain unsupported for explicit application. Bounded by-name
 formals use their result type for argument conformance and retain the source
 argument node in the typed `Apply`; polymorphic inference and overload sets

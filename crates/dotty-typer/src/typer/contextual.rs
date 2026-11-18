@@ -1,0 +1,152 @@
+//! Context argument synthesis at a value use of a method.
+
+use super::*;
+
+impl SourceTyper<'_> {
+    pub(super) fn apply_contextual_arguments(
+        &mut self,
+        source_tree: TreeId<Untyped>,
+        mut function: TreeId<Typed>,
+        context: ExpressionContext,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let ty = self.typed_arena.get(function).ty;
+        let mut callable = match self.store.types.try_get(ty) {
+            Some(Type::TermRef {
+                target: TermRefTarget::Symbol(method),
+                ..
+            }) if self.store.symbols.contains(*method)
+                && self.store.symbols.get(*method).kind == SymbolKind::Method
+                && matches!(self.store.symbols.info(*method), SymbolInfo::Complete(info)
+                    if matches!(self.store.types.try_get(*info), Some(Type::Method(m)) if m.kind != MethodKind::Plain)) =>
+            {
+                self.widen_expression_type_journaled(ty, journal, 0)?
+            }
+            Some(Type::Method(_)) => ty,
+            _ => return Ok(function),
+        };
+        let position = self.arena.get(source_tree).position;
+        let tree_index = source_tree.index();
+        let mut visited = HashSet::new();
+        while let Some(Type::Method(method)) = self.store.types.try_get(callable) {
+            if method.kind == MethodKind::Plain {
+                break;
+            }
+            let method = method.clone();
+            if !visited.insert(callable)
+                || visited.len() > crate::types::MAX_TYPE_NORMALIZATION_DEPTH
+            {
+                return Err(TyperError::TypeNormalization(
+                    crate::types::TypeNormalizeError::TooDeep,
+                ));
+            }
+            if self.type_contains_param_ref(method.result, callable)? {
+                return Err(TyperError::DependentMethodApplicationDeferred {
+                    source: self.source,
+                    tree_index,
+                    binder: callable,
+                    result: method.result,
+                });
+            }
+            let mut arguments = Vec::with_capacity(method.params.len());
+            for parameter in method.params {
+                if parameter.erased
+                    || parameter.varargs
+                    || matches!(
+                        self.store.types.try_get(parameter.ty),
+                        Some(Type::ByName { .. })
+                    )
+                {
+                    return Err(TyperError::UsingApplicationDeferred {
+                        source: self.source,
+                        tree_index,
+                    });
+                }
+                let symbol = self.contextual_value(parameter.ty, context, tree_index, journal)?;
+                let ident = Ident {
+                    name: self.store.symbols.get(symbol).name,
+                    backquoted: false,
+                };
+                arguments.push(self.type_resolved_identifier_expression(
+                    symbol, ident, position, context, tree_index, journal,
+                )?);
+            }
+            function = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply(
+                function,
+                arguments,
+                method.result,
+                position,
+            );
+            callable = method.result;
+        }
+        Ok(function)
+    }
+
+    fn contextual_value(
+        &mut self,
+        expected: TypeId,
+        context: ExpressionContext,
+        tree_index: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<SymbolId, TyperError> {
+        let mut candidates = Vec::new();
+        self.validate_expression_scope_stack(context.local_scopes)?;
+        let mut stack = context.local_scopes;
+        while let Some(id) = stack {
+            let frame = &self.expression_scopes[id.index()];
+            stack = frame.parent;
+            let mut symbols: Vec<_> = self
+                .store
+                .scopes
+                .get(frame.scope)
+                .entered_symbols()
+                .filter(|symbol| {
+                    let entry = self.store.symbols.get(*symbol);
+                    entry.kind == SymbolKind::Parameter
+                        && entry.owner == Some(context.owner)
+                        && (entry.flags.contains(SymbolFlags::GIVEN)
+                            || entry.flags.contains(SymbolFlags::IMPLICIT))
+                })
+                .collect();
+            symbols.sort_by_key(|symbol| {
+                self.store
+                    .symbols
+                    .get(*symbol)
+                    .position
+                    .map(|p| p.span().range().start())
+            });
+            symbols.dedup();
+            for symbol in symbols {
+                let actual = self.completed_expression_symbol_info(symbol, journal)?;
+                if self.conforms(actual, expected).map_err(|error| {
+                    TyperError::ExpectedExpressionConformanceUnsupported {
+                        source: self.source,
+                        tree_index,
+                        actual,
+                        expected,
+                        error: Box::new(error),
+                    }
+                })? {
+                    candidates.push(symbol);
+                }
+            }
+            if !candidates.is_empty() {
+                break;
+            }
+        }
+        match candidates.as_slice() {
+            [symbol] => Ok(*symbol),
+            [] => Err(TyperError::MissingContextualArgument {
+                source: self.source,
+                tree_index,
+                expected,
+            }),
+            _ => Err(TyperError::AmbiguousContextualArgument {
+                source: self.source,
+                tree_index,
+                expected,
+                candidates,
+            }),
+        }
+    }
+}
