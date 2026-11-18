@@ -95,3 +95,38 @@ fn omitted_argument_reports_missing_and_ambiguous_without_partial_state() {
         }
     }
 }
+
+#[test]
+fn nested_local_evidence_is_applied_in_clause_and_parameter_order() {
+    let text = "class C { def f(x: Int)(using n: Int)(using b: Boolean): Int = n; def use(using outer: Int): Int = { implicit val b: Boolean = true; given local: Int = 7; f(1) } }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+    let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+        panic!()
+    };
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    typer
+        .type_method_definition(definition_tree(&index, method))
+        .unwrap();
+    let mut call = typer.source_typed_index().get(source, block.expr).unwrap();
+    for stat in &block.stats {
+        let expected = typer.local_symbol_at(source, *stat).unwrap();
+        let TreeKind::Apply(app) = &typer.typed_ast().get(call).kind else {
+            panic!()
+        };
+        assert_eq!(app.args.len(), 1);
+        assert_eq!(reference(&typer, app.args[0]), expected);
+        call = app.function;
+    }
+    assert!(matches!(
+        typer.typed_ast().get(call).kind,
+        TreeKind::Apply(_)
+    ));
+}

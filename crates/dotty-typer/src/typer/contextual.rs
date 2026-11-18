@@ -102,18 +102,18 @@ impl SourceTyper<'_> {
                 .entered_symbols()
                 .filter(|symbol| {
                     let entry = self.store.symbols.get(*symbol);
-                    entry.kind == SymbolKind::Parameter
-                        && entry.owner == Some(context.owner)
+                    matches!(entry.kind, SymbolKind::Parameter | SymbolKind::Local)
+                        && !self.initializing_local_symbols.contains(symbol)
                         && (entry.flags.contains(SymbolFlags::GIVEN)
                             || entry.flags.contains(SymbolFlags::IMPLICIT))
                 })
                 .collect();
             symbols.sort_by_key(|symbol| {
-                self.store
-                    .symbols
-                    .get(*symbol)
-                    .position
-                    .map(|p| p.span().range().start())
+                let entry = self.store.symbols.get(*symbol);
+                (
+                    entry.position.map(|p| p.span().range().start()),
+                    self.store.names.resolve(entry.name.text()),
+                )
             });
             symbols.dedup();
             for symbol in symbols {

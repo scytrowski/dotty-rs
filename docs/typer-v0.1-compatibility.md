@@ -895,8 +895,8 @@ resolution/classpath blockers before the declarations are typed. This focused
 change therefore has no measured corpus uplift; the full typer corpus result
 remains 0 / 3,297 fully typed local methods.
 
-Contextual search, contextual argument insertion, implicit conversions, and
-summon remain unsupported. `inline val` declarations and lazy pattern
+Named local contextual values participate in omitted argument search. Implicit
+conversions and standard-library summon are separate surfaces. `inline val` declarations and lazy pattern
 definitions remain deferred. Recursive inferred lazy initializers remain
 unsupported and report `RecursiveLazyLocalValueInitializer`; the acyclic
 forward-reference subset is described above.
@@ -1436,7 +1436,8 @@ and matching applied-type constraints also participate in overload selection.
 Curried plain-then-contextual calls continue from the exact result callable of
 the first clause, including after generic inference. At a value use, a remaining
 contextual or legacy implicit clause can be supplied by monomorphic context
-parameters of the calling method. Each inserted ordinary typed application
+parameters or named contextual values in the enclosing expression scopes.
+Each inserted ordinary typed application
 retains the exact selected parameter reference. Missing and ambiguous evidence
 report the expected type and source site. Explicit `using` keeps its own kind.
 See the Scala 3.9 controls under `tests/fixtures/contextual-arguments` in the
