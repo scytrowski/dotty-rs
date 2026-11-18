@@ -1844,7 +1844,18 @@ inner parameter wins. The inner closure captures an outer parameter only
 when it uses it. An instance method call also captures the receiver, which
 the outer closure retains for constructing the inner closure. Shared
 object-owned values do not require a capture. Deeper implicit abstractions
-remain unsupported. Failed lambda typing rolls back its
+remain unsupported.
+
+For a method `build: Int ?=> (Boolean ?=> Int)`, the client expression
+`build(using 7)(using true)` applies each layer explicitly. At an `Int`
+expectation, `build` searches for an `Int` and then a `Boolean`, while
+`build(using 7)` searches only for the `Boolean`. With an expected
+`Boolean ?=> Int`, the latter expression produces a closure whose binder
+supplies the second argument. Missing or ambiguous evidence at the second
+layer rolls back the first application. These checks cover typed client
+trees and the Scala 3.9.0 typer oracle.
+
+Failed lambda typing rolls back its
 synthetic method, parameter symbols, scopes, typed nodes, and source mappings. The pinned
 Scala 3.9.0 typer and `lambdaLift` shapes, including source positions, are
 recorded in the [function-literal fixture](../crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.oracle.md).

@@ -69,19 +69,23 @@ impl SourceTyper<'_> {
             }
             _ => own_type,
         };
-        if self.is_applied_context_function(declared)
-            && !self
+        if !self.is_applied_context_function(declared)
+            || self
                 .expected_value_at(source_tree.index())
                 .is_some_and(|expected| self.is_applied_context_function(expected))
         {
-            let callable = self.widen_expression_type_journaled(own_type, info_journal, 0)?;
-            let request = ApplicationRequest {
-                function_tree: source_tree,
-                argument_trees: &[],
-                application_kind: ApplyKind::Using,
-                context,
-                tree_index: source_tree.index(),
-            };
+            return Ok(adapted);
+        }
+        let request = ApplicationRequest {
+            function_tree: source_tree,
+            argument_trees: &[],
+            application_kind: ApplyKind::Using,
+            context,
+            tree_index: source_tree.index(),
+        };
+        let mut callable = self.widen_expression_type_journaled(own_type, info_journal, 0)?;
+        // Each result can be another context function with its own evidence.
+        for _ in 0..crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
             let (selected, signature) =
                 self.resolve_apply_function(adapted, callable, request, info_journal)?;
             adapted = self.supply_contextual_clauses(
@@ -91,8 +95,20 @@ impl SourceTyper<'_> {
                 context,
                 info_journal,
             )?;
+            let result = self.typed_arena.get(adapted).ty;
+            if !self.is_applied_context_function(result) {
+                return Ok(adapted);
+            }
+            if result == callable {
+                return Err(TyperError::TypeNormalization(
+                    crate::types::TypeNormalizeError::NormalizationCycle { ty: result },
+                ));
+            }
+            callable = result;
         }
-        Ok(adapted)
+        Err(TyperError::TypeNormalization(
+            crate::types::TypeNormalizeError::TooDeep,
+        ))
     }
 
     pub(super) fn apply_contextual_arguments(

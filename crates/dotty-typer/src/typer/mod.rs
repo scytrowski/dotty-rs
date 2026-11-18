@@ -9818,6 +9818,7 @@ mod tests {
     mod lexical_closure_rollback;
     mod local_value_capture;
     mod method_parameter_capture;
+    mod nested_context_client;
     mod nested_context_evidence;
 
     #[test]

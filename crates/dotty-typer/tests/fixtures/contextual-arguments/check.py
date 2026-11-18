@@ -31,6 +31,16 @@ def main():
                 if (Path(output) / fixture).read_bytes() != (HERE / "binary" / fixture).read_bytes():
                     raise SystemExit(f"{fixture} differs from the pinned Scala compiler output")
         for source, code, required in (
+            ("NestedContextClient.scala", 0, (
+                "this.build.apply(using 7).apply(using true)",
+                "this.build.apply(number).apply(flag)", "this.build.apply(using 7).apply(flag)",
+                "this.build.apply(using 7).apply(contextual$3)",
+            )),
+            ("NestedContextClientErrors.scala", 1, (
+                "[E172]", "this.build.apply(n).apply(/* missing */summon[Boolean])",
+                "No given instance of type Boolean was found for parameter of (Boolean) ?=> Int",
+                "both parameter right and parameter left match type Boolean of parameter of (Boolean) ?=> Int",
+            )),
             ("StructuralClauses.scala", 0, (
                 "this.box(structuralclauses.Makers.simple[Int])",
                 "this.mark(structuralclauses.Makers.mono(seed))",
