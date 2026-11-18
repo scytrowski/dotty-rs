@@ -34,6 +34,12 @@ def main():
                 "this.read(Result.direct)", "this.provider(n).apply(2)",
                 "Implicit parameters should be provided with a `using` clause",
             )),
+            ("Structural.scala", 0, (
+                "given class boxes[A", "final given def boxes[A",
+                "new structural.Builders.boxes[A](using base)()",
+                "this.need(structural.Builders.boxes[Int](leaf))",
+                "structural.Builders.boxes[Int](using leaf).tag",
+            )),
             ("Inherited.scala", 0, ("this.need(TC.instance[Int])",)),
             ("Invalid.scala", 1, (
                 "[E050]", "[E172]", "does not take more parameters",
