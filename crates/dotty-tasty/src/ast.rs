@@ -452,7 +452,8 @@ pub struct AstAddressIndex<'a> {
     nodes: Vec<RawNode<'a>>,
     all_nodes: Vec<AstTreeNode>,
     edges: Vec<AstTreeEdge>,
-    edges_by_child: Vec<AstTreeEdge>,
+    edges_by_child: Vec<usize>,
+    edges_by_parent: Vec<usize>,
 }
 
 /// Owned AST payload together with its top-level node addresses.
@@ -1423,6 +1424,7 @@ impl<'a> RawNodes<'a> {
             all_nodes,
             edges: Vec::new(),
             edges_by_child: Vec::new(),
+            edges_by_parent: Vec::new(),
         }
     }
 
@@ -1438,13 +1440,17 @@ impl<'a> RawNodes<'a> {
         nodes.sort_unstable_by_key(|node| node.offset);
         all_nodes.sort_unstable_by_key(|node| node.offset);
         let edges = context.into_edges();
-        let mut edges_by_child = edges.clone();
-        edges_by_child.sort_unstable_by_key(|edge| edge.child.offset);
+        let mut edges_by_child: Vec<_> = (0..edges.len()).collect();
+        let mut edges_by_parent = edges_by_child.clone();
+        edges_by_child.sort_unstable_by_key(|&i| edges[i].child.offset);
+        // Stable sorting preserves traversal order among siblings.
+        edges_by_parent.sort_by_key(|&i| edges[i].parent.offset);
         Ok(AstAddressIndex {
             nodes,
             all_nodes,
             edges,
             edges_by_child,
+            edges_by_parent,
         })
     }
 
@@ -1624,9 +1630,9 @@ impl<'a> AstAddressIndex<'a> {
     /// for an unknown address and for a root node.
     pub fn parent_of(&self, child_address: u32) -> Option<AstTreeNode> {
         self.edges_by_child
-            .binary_search_by_key(&child_address, |edge| edge.child.offset as u32)
+            .binary_search_by_key(&(child_address as usize), |&i| self.edges[i].child.offset)
             .ok()
-            .map(|index| self.edges_by_child[index].parent)
+            .map(|index| self.edges[self.edges_by_child[index]].parent)
     }
 
     /// Iterates over the direct children of a visible node in wire order.
@@ -1634,9 +1640,14 @@ impl<'a> AstAddressIndex<'a> {
     /// The result is empty for an unknown address, a leaf node, or a shallow
     /// index created with [`RawNodes::address_index`].
     pub fn children_of(&self, parent_address: u32) -> impl Iterator<Item = AstTreeNode> + '_ {
-        self.edges
+        let parent = parent_address as usize;
+        let start = self
+            .edges_by_parent
+            .partition_point(|&i| self.edges[i].parent.offset < parent);
+        self.edges_by_parent[start..]
             .iter()
-            .filter(move |edge| edge.parent.offset as u64 == u64::from(parent_address))
+            .map(|&i| self.edges[i])
+            .take_while(move |edge| edge.parent.offset == parent)
             .map(|edge| edge.child)
     }
 
