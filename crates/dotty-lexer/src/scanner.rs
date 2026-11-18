@@ -88,6 +88,10 @@ impl ContextualScanner {
     }
 
     /// Returns all tokens produced by this scan.
+    ///
+    /// After parser feedback splits the buffer, the first call copies the full
+    /// sequence into a contiguous snapshot. Further calls reuse that snapshot
+    /// until feedback edits the tokens again.
     pub fn tokens(&self) -> &[Token] {
         self.tokens.as_slice()
     }
