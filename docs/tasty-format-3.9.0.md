@@ -823,7 +823,7 @@ Assoc      = Header Delta? Delta? Delta?
 Delta      = Int
 ```
 
-`LinesSizes` contains the number of lines followed by the size of each line excluding the trailing `\n`.
+`LinesSizes` contains the number of lines followed by the length of each line in UTF-16 code units, excluding the trailing `\n`.
 
 Each position entry starts with one signed `Int` header. The `SOURCE` entry is
 encoded as the reserved header value `SOURCE = 4`, followed by the source

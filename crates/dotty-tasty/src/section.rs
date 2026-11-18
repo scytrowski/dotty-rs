@@ -173,7 +173,7 @@ pub struct ResolvedPosition {
 /// Decoded source-position section.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PositionSection {
-    /// Size of each source line in bytes.
+    /// Length of each source line in UTF-16 code units, excluding the line feed.
     pub line_sizes: Vec<u32>,
     /// Position events in wire order.
     pub entries: Vec<PositionEntry>,

@@ -760,6 +760,21 @@ fn all_tasty_fixture_name_reference_queries_match_the_complete_reference_list() 
 }
 
 #[test]
+fn scala_position_line_sizes_count_utf16_code_units() {
+    let source = include_str!("fixtures/scala3-parent-unicode/UnicodeParent.scala");
+    let file = TastyFile::parse(include_bytes!(
+        "fixtures/scala3-parent-unicode/review/Child.tasty"
+    ))
+    .unwrap();
+    let expected: Vec<_> = source
+        .split('\n')
+        .map(|line| line.encode_utf16().count() as u32)
+        .collect();
+    let positions = file.positions().unwrap().unwrap();
+    assert_eq!(positions.line_sizes, expected);
+}
+
+#[test]
 fn all_tasty_fixture_position_sections_resolve_without_overflow() {
     let mut section_count = 0;
 
