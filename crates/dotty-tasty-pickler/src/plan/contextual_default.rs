@@ -1,25 +1,17 @@
 //! Checked source and typed identities for supported contextual default getters.
 use super::*;
 
-#[derive(Clone, Copy)]
 pub(crate) struct GetterParameter {
     pub(crate) copied: SymbolId,
     pub(crate) source_tree: TreeId<Untyped>,
 }
 
-#[derive(Clone, Copy)]
 pub(crate) struct ContextualDefault {
     pub(crate) defaulted: SymbolId,
     pub(crate) getter: SymbolId,
-    pub(crate) previous: Option<GetterParameter>,
+    pub(crate) previous: Vec<GetterParameter>,
     pub(crate) default_tree: TreeId<Untyped>,
     pub(crate) body: TreeId<Typed>,
-}
-
-impl ContextualDefault {
-    pub(crate) fn ordinal(&self) -> u32 {
-        u32::from(self.previous.is_some())
-    }
 }
 
 impl Validator<'_, '_> {
@@ -35,8 +27,8 @@ impl Validator<'_, '_> {
             });
         };
         let (previous, default_clause) = match def.value_param_clauses.as_slice() {
-            [only] => (None, only),
-            [first, second] if first.len() == 1 => (Some(first[0]), second),
+            [only] => (&[][..], only),
+            [first, second] if matches!(first.len(), 1 | 2) => (first.as_slice(), second),
             _ => return Ok(None),
         };
         let [default] = default_clause.as_slice() else {
@@ -53,7 +45,7 @@ impl Validator<'_, '_> {
         let Some(getter) = index.derived_symbol_at(p.class, source, *default) else {
             return Ok(None);
         };
-        self.charge(4)?;
+        self.charge(4 + previous.len().saturating_sub(1))?;
         let invalid = || PickleError::SourceDefinition { symbol: getter };
         let defaulted = index.symbol_at(source, *default).ok_or_else(invalid)?;
         let unsupported = || PickleError::Unsupported {
@@ -70,7 +62,7 @@ impl Validator<'_, '_> {
         {
             return Err(unsupported());
         }
-        let ordinal = usize::from(previous.is_some());
+        let ordinal = previous.len();
         self.getter_declaration(
             getter,
             p.class,
@@ -89,18 +81,12 @@ impl Validator<'_, '_> {
         {
             return Err(invalid());
         }
-        let previous = if let Some(previous_tree) = previous {
-            Some(self.getter_parameter(getter, previous_tree, defaulted)?)
-        } else {
-            // A parameterless getter carries its result directly. An empty method
-            // clause would denote a different callable in Scala and on the wire.
-            if self.complete(getter)? != int {
-                return Err(invalid());
-            }
-            None
-        };
-        let parameter = previous.map(|p| p.copied);
-        if !self.scope(getter)?.entered_symbols().eq(parameter) {
+        let previous = self.getter_parameters(getter, previous, defaulted)?;
+        let parameters: Vec<_> = previous.iter().map(|p| p.copied).collect();
+        // Each copy was checked in its own name bucket. Scope iteration is
+        // unordered; the getter signature and source clause establish order.
+        let scope = self.scope(getter)?;
+        if scope.entered_symbols().take(parameters.len() + 1).count() != parameters.len() {
             return Err(PickleError::ScopeMembers { owner: getter });
         }
         let body = p
@@ -111,11 +97,13 @@ impl Validator<'_, '_> {
             .typed_ast
             .try_get(body)
             .ok_or(PickleError::InvalidTypedTree { tree: body })?;
-        if let Some(copied) = parameter {
-            if !matches!(&self.source_tree(rhs)?.kind,TreeKind::Ident(id) if id.name==self.symbol(copied)?.name)
-            {
+        if !parameters.is_empty() {
+            let TreeKind::Ident(id) = &self.source_tree(rhs)?.kind else {
                 return Err(unsupported());
-            }
+            };
+            let &[copied] = scope.lookup_all(&id.name) else {
+                return Err(unsupported());
+            };
             if !matches!(&node.kind, TreeKind::Ident(_))
                 || self.ty(node.ty)?.reference_symbol() != Some(copied)
             {
@@ -145,7 +133,11 @@ impl Validator<'_, '_> {
             &MethodPicklePlan {
                 symbol: getter,
                 source_tree: method.source_tree,
-                parameter_clauses: parameter.into_iter().map(|p| vec![p]).collect(),
+                parameter_clauses: if parameters.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![parameters]
+                },
                 body: Some(body),
             },
             int,
@@ -159,56 +151,69 @@ impl Validator<'_, '_> {
         }))
     }
 
-    fn getter_parameter(
+    fn getter_parameters(
         &self,
         getter: SymbolId,
-        source_tree: TreeId<Untyped>,
+        preceding_clause: &[TreeId<Untyped>],
         defaulted: SymbolId,
-    ) -> Result<GetterParameter, PickleError> {
+    ) -> Result<Vec<GetterParameter>, PickleError> {
         let p = self.plan;
-        let source = p.source.id;
-        let invalid = || PickleError::SourceDefinition { symbol: getter };
-        let original = p
-            .source_index
-            .symbol_at(source, source_tree)
-            .ok_or_else(invalid)?;
-        let copied = p
-            .source_index
-            .derived_symbol_at(getter, source, source_tree)
-            .ok_or_else(invalid)?;
-        self.getter_declaration(
-            copied,
-            getter,
-            source_tree,
-            SymbolKind::Parameter,
-            SymbolFlags::EMPTY,
-        )?;
         let int = p.definitions.int;
-        if !self.symbol(original)?.flags.is_empty() || self.complete(original)? != int {
-            return Err(self.unsupported(UnsupportedFeature::ParameterClauses, Some(defaulted)));
+        let invalid = || PickleError::SourceDefinition { symbol: getter };
+        let info = self.complete(getter)?;
+        if preceding_clause.is_empty() {
+            // A parameterless getter carries its result type directly.
+            return if info == int {
+                Ok(Vec::new())
+            } else {
+                Err(invalid())
+            };
         }
-        let Type::Method(signature) = self.ty(self.complete(getter)?)? else {
+        let Type::Method(signature) = self.ty(info)? else {
             return Err(invalid());
         };
-        let [param] = signature.params.as_slice() else {
-            return Err(invalid());
-        };
-        let name = self.symbol(copied)?.name;
-        if name != self.symbol(original)?.name
-            || self.complete(copied)? != int
-            || signature.kind != MethodKind::Plain
+        if signature.kind != MethodKind::Plain
             || signature.result != int
-            || param.name.as_name() != &name
-            || param.ty != int
-            || param.erased
-            || param.varargs
+            || signature.params.len() != preceding_clause.len()
         {
             return Err(invalid());
         }
-        Ok(GetterParameter {
-            copied,
-            source_tree,
-        })
+        let mut copies = Vec::with_capacity(preceding_clause.len());
+        for (&source_tree, formal) in preceding_clause.iter().zip(&signature.params) {
+            let original = p
+                .source_index
+                .symbol_at(p.source.id, source_tree)
+                .ok_or_else(invalid)?;
+            let copied = p
+                .source_index
+                .derived_symbol_at(getter, p.source.id, source_tree)
+                .ok_or_else(invalid)?;
+            self.getter_declaration(
+                copied,
+                getter,
+                source_tree,
+                SymbolKind::Parameter,
+                SymbolFlags::EMPTY,
+            )?;
+            if !self.symbol(original)?.flags.is_empty() || self.complete(original)? != int {
+                return Err(self.unsupported(UnsupportedFeature::ParameterClauses, Some(defaulted)));
+            }
+            let name = self.symbol(copied)?.name;
+            if name != self.symbol(original)?.name
+                || self.complete(copied)? != int
+                || formal.name.as_name() != &name
+                || formal.ty != int
+                || formal.erased
+                || formal.varargs
+            {
+                return Err(invalid());
+            }
+            copies.push(GetterParameter {
+                copied,
+                source_tree,
+            });
+        }
+        Ok(copies)
     }
 
     fn getter_declaration(

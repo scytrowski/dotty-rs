@@ -440,7 +440,7 @@ impl ValidatedPicklePlan<'_, '_> {
                 type_parameters.push(parameter);
             }
             let default = self.context_defaults.get(&method.symbol);
-            let mut previous_type = None;
+            let mut previous_types = Vec::new();
             for (index, parameters) in method.parameter_clauses.iter().enumerate() {
                 if parameters.is_empty() {
                     fields.push(AstField::Tree(marker(&mut context, EMPTYCLAUSE_TAG)?));
@@ -470,8 +470,8 @@ impl ValidatedPicklePlan<'_, '_> {
                         } else {
                             method_type_syntax(self, &mut context, parameter_semantic_type)?
                         };
-                        if default.is_some_and(|d| d.previous.is_some()) && index == 0 {
-                            previous_type = Some(parameter_type);
+                        if default.is_some_and(|d| !d.previous.is_empty()) && index == 0 {
+                            previous_types.push(parameter_type);
                         }
                         let mut parameter_fields = vec![
                             AstField::Nat(parameter_name),
@@ -595,16 +595,16 @@ impl ValidatedPicklePlan<'_, '_> {
             if let Some(default) = default {
                 let getter = context.contextual_default_getter(
                     self,
-                    *default,
+                    default,
                     name,
-                    previous_type,
+                    &previous_types,
                     complete.is_some(),
                     limits,
                 )?;
                 stats.push(AstField::Tree(getter));
                 bodies.push((default.getter, default.body));
                 getter_declarations.push(default.getter);
-                getter_declarations.extend(default.previous.map(|p| p.copied));
+                getter_declarations.extend(default.previous.iter().map(|p| p.copied));
             }
         }
         // All supported semantic visibility/flags/annotations are public/empty,

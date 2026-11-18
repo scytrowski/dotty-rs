@@ -4814,3 +4814,153 @@ fn first_contextual_default_getter_rejects_a_substituted_literal_even_with_its_m
         "{error:?}"
     );
 }
+
+const PAIR_DEFAULTS: &str = "package example; class PairDefaults {
+  def pick(x: Int, y: Int)(using n: Int = y): Int = n
+  def first(x: Int, y: Int)(implicit n: Int = x): Int = n
+}";
+
+#[test]
+fn two_formal_default_getters_preserve_copy_order_source_syntax_and_scala_calls() {
+    use dotty_tasty::tasty::*;
+    let emit = || source_outputs_named(PAIR_DEFAULTS, "PairDefaults.scala", |_| {}).unwrap();
+    let (skeleton, output) = emit();
+    let (second_skeleton, second_output) = emit();
+    assert_eq!(skeleton, second_skeleton);
+    assert_eq!(output.bytes(), second_output.bytes());
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let index = file.ast_address_index().unwrap();
+    let member = |name: &str| {
+        index
+            .iter()
+            .filter(|n| n.tag == DEFDEF_TAG)
+            .map(|n| n.decode_defdef_body().unwrap())
+            .find(|m| file.render_name(m.name).unwrap() == name)
+            .unwrap()
+    };
+    for (name, modifier, selected) in [("pick", GIVEN_TAG, 1), ("first", IMPLICIT_TAG, 0)] {
+        let original = member(name);
+        assert_eq!(original.clauses, [SPLITCLAUSE_TAG]);
+        assert_eq!(original.parameters.len(), 3);
+        assert_eq!(
+            original.parameters[2].decode_body().unwrap().tail,
+            [
+                DefinitionTail::Modifier(modifier),
+                DefinitionTail::Modifier(HASDEFAULT_TAG)
+            ]
+        );
+        let getter = member(&format!("{name}$default$3"));
+        assert!(
+            matches!(file.names().get(getter.name),Some(RawName::DefaultGetter{underlying,index:2}) if *underlying==original.name)
+        );
+        assert!(getter.clauses.is_empty());
+        assert_eq!(getter.parameters.len(), 2);
+        for (i, expected_name) in ["x", "y"].into_iter().enumerate() {
+            let original_formal = &original.parameters[i];
+            let copy = &getter.parameters[i];
+            assert_eq!(file.render_name(copy.name()).unwrap(), expected_name);
+            assert_eq!(copy.name(), original_formal.name());
+            assert!(!std::ptr::eq(copy.payload(), original_formal.payload()));
+            let RawTree::Leaf(shared) = copy.decode_body().unwrap().type_tree else {
+                panic!("expected shared parameter type syntax")
+            };
+            assert_eq!(shared.tag, SHAREDTERM_TAG);
+            let target = shared.ast_ref().unwrap().address;
+            assert_eq!(index.get_node(target).unwrap().tag, IDENTTPT_TAG);
+            let parent = index.parent_of(target).unwrap();
+            let original_declaration = index.get(parent.offset as u32).unwrap();
+            assert!(std::ptr::eq(
+                original_declaration.payload,
+                original_formal.payload()
+            ));
+        }
+        let Some(RawTree::Leaf(reference)) = getter.rhs else {
+            panic!("expected reference to a copied formal")
+        };
+        assert_eq!(reference.tag, TERMREFDIRECT_TAG);
+        let target = index.resolve(reference.ast_ref().unwrap()).unwrap();
+        assert!(std::ptr::eq(
+            target.payload,
+            getter.parameters[selected].payload()
+        ));
+    }
+    verify_contextual_client(
+        "PairDefaults",
+        output.bytes(),
+        r#"val reader = new example.PairDefaults
+        var trace = ""
+        def argument(label: String, value: Int): Int = { trace += label; value }
+        assert(reader.pick(argument("x", 21), argument("y", 37)) == 37)
+        assert(trace == "xy")
+        trace = ""
+        assert(reader.pick(argument("x", 13), argument("y", 29))(using argument("n", 41)) == 41)
+        assert(trace == "xyn")
+        locally { given Int = 59; assert(reader.pick(13, 29) == 59) }
+        assert(reader.first(13, 29) == 13)"#,
+    );
+}
+
+#[test]
+fn two_formal_default_getter_rejects_the_other_copy_owned_by_the_same_getter() {
+    // Type both references in the getter scope so the mutation can use the
+    // real copy of x. Select y's existing source/typed pair as the default.
+    let fixture =
+        "package example; class PairDefaults { def pick(x:Int,y:Int)(using n:Int=x+y):Int=n }";
+    for corrupt in [false, true] {
+        let mut changed = None;
+        let output = source_outputs_named_with_tree_edits(
+            fixture,
+            "PairDefaults.scala",
+            ValidationLimits::default(),
+            |source, typed, bindings, store| {
+                let id = SourceId::from_index(7);
+                let (parameter, left, right) = source
+                    .iter()
+                    .find_map(|(tree, node)| {
+                        let TreeKind::ValDef(parameter) = &node.kind else {
+                            return None;
+                        };
+                        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(op)) =
+                            &source.get(parameter.rhs?).kind
+                        else {
+                            return None;
+                        };
+                        Some((tree, op.left, op.right))
+                    })
+                    .unwrap();
+                let TreeKind::ValDef(parameter) = &mut source.get_mut(parameter).kind else {
+                    panic!()
+                };
+                parameter.rhs = Some(right);
+                let x = typed.get(bindings.get(id, left).unwrap()).ty;
+                let body = bindings.get(id, right).unwrap();
+                let y = typed.get(body).ty;
+                let copy = |ty| {
+                    store
+                        .symbols
+                        .get(store.types.get(ty).reference_symbol().unwrap())
+                };
+                assert_eq!(store.names.resolve(copy(x).name.text()), "x");
+                assert_eq!(store.names.resolve(copy(y).name.text()), "y");
+                assert_eq!(copy(x).owner, copy(y).owner);
+                assert_eq!(copy(x).info, copy(y).info);
+                let (_, ordinal) = store.default_getter_origin(copy(x).owner.unwrap()).unwrap();
+                assert_eq!(ordinal, 2);
+                if corrupt {
+                    typed.get_mut(body).ty = x;
+                    changed = Some((body, x));
+                }
+            },
+            |_| {},
+        );
+        if corrupt {
+            let error = output.unwrap_err();
+            assert!(
+                matches!(error,PickleError::BodyType{tree,ty} if Some((tree,ty))==changed),
+                "{error:?}"
+            );
+        } else {
+            output.unwrap();
+        }
+    }
+}

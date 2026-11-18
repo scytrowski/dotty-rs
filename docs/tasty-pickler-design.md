@@ -912,21 +912,26 @@ non-capturing calls.
 
 ### Integer defaults for contextual parameters
 
-The method-only producer supports `def offset(x: Int)(using n: Int = x): Int = n`.
-The frontend types the default expression in the scope of the generated
-getter, which owns its own copy of `x`. Validation checks the registered
-method and ordinal, both derived source identities and the exact typed
-reference in the getter body. The default can
-refer to the single plain `Int` parameter in the preceding clause.
+The method-only producer accepts a default that refers to either parameter of
+a preceding plain clause with two `Int` parameters, or to the sole parameter
+of a plain `Int` clause. For example:
 
-The defaulted parameter has `GIVEN` and `HASDEFAULT` on the wire. A separate
-method uses the structured `DEFAULTGETTER(offset, 1)` name, which renders as
-`offset$default$2`. Its parameter shares the original parameter’s type syntax
-and has its own declaration address. Its result is annotated with
-`scala.annotation.unchecked.uncheckedVariance`, as in Scala 3.9.0. The
-declaration skeleton records both omitted bodies. The complete artifact
-retains both typed roots. The Scala client test compiles and executes a call
-using the default and a call supplying an explicit contextual argument.
+```scala
+def offset(x: Int)(using n: Int = x): Int = n
+def pick(x: Int, y: Int)(using n: Int = y): Int = n
+```
+
+The defaulted parameter carries `GIVEN` and `HASDEFAULT`. The structured name
+`DEFAULTGETTER(pick, 2)` renders as `pick$default$3`. This getter owns copies of
+`x` and `y`, in source order. Each copy's `SHAREDterm` points to its original
+parameter's type syntax. The body's `TERMREFdirect` points to the getter's
+copy of `y`. Validation checks the registered method and ordinal, each copy's
+source identity and signature position, and the symbol referenced by the body.
+The result carries `scala.annotation.unchecked.uncheckedVariance`, as in
+Scala 3.9.0. The declaration skeleton records both omitted bodies, and the
+complete artifact retains both typed roots. A separate Scala client checks
+that ordinary arguments run once in source order when the default is used,
+and that a local given or an explicit contextual argument supplies its own value.
 
 A sole contextual clause can default its one `Int` parameter to an integer
 literal, as in `def read(using n: Int = 7): Int = n`. Its getter uses

@@ -6,9 +6,9 @@ impl EncodingContext<'_> {
     pub(crate) fn contextual_default_getter(
         &mut self,
         plan: &ValidatedPicklePlan<'_, '_>,
-        default: ContextualDefault,
+        default: &ContextualDefault,
         method_name: NameRef,
-        previous_type: Option<AstLabel>,
+        previous_types: &[AstLabel],
         complete: bool,
         limits: ProjectionLimits,
     ) -> Result<AstLabel, PickleError> {
@@ -21,9 +21,17 @@ impl EncodingContext<'_> {
             SymbolKind::Method,
             SymbolFlags::SYNTHETIC,
         )?;
-        let getter_name = self.intern(NameKey::DefaultGetter(method_name, default.ordinal()))?;
+        if previous_types.len() != default.previous.len() {
+            return Err(PickleError::SourceDefinition {
+                symbol: default.getter,
+            });
+        }
+        // Validation admits at most two copied parameters.
+        let ordinal = default.previous.len() as u32;
+        let getter_name = self.intern(NameKey::DefaultGetter(method_name, ordinal))?;
         let mut fields = vec![AstField::Nat(getter_name)];
-        if let Some(previous) = default.previous {
+        let mut parameters = Vec::with_capacity(default.previous.len());
+        for (previous, &previous_type) in default.previous.iter().zip(previous_types) {
             let copied = self.reserve_derived(
                 previous.copied,
                 default.getter,
@@ -35,9 +43,7 @@ impl EncodingContext<'_> {
             let name = self.intern_name(self.symbol(previous.copied)?.name)?;
             let tpt = self.wire_node(AstNode::Reference {
                 tag: SHAREDTERM_TAG,
-                target: previous_type.ok_or(PickleError::SourceDefinition {
-                    symbol: previous.copied,
-                })?,
+                target: previous_type,
             })?;
             self.bind_declaration(
                 previous.copied,
@@ -47,6 +53,7 @@ impl EncodingContext<'_> {
                 },
             )?;
             fields.push(AstField::Tree(copied));
+            parameters.push(previous.copied);
         }
         fields.push(AstField::Tree(self.unchecked_int_result()?));
         if complete {
@@ -55,7 +62,7 @@ impl EncodingContext<'_> {
                 p.typed_ast,
                 default.body,
                 default.getter,
-                default.previous.map(|p| p.copied).as_slice(),
+                &parameters,
                 limits,
                 self,
             )?;
