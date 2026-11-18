@@ -1424,7 +1424,8 @@ inference or conformance shapes remain conservative when they could compete.
 Standalone overloaded identifiers and selections remain deferred.
 
 Application syntax is checked against the current method clause: regular
-applications consume plain clauses, while explicit `using` applications consume
+applications consume plain or legacy implicit clauses. Passing positional arguments
+to a legacy implicit clause emits a migration warning. Explicit `using` applications consume
 contextual or legacy implicit clauses. Explicit arguments use the ordinary
 typing, widening, arity, and conformance checks, and the typed `Apply` retains
 its `ApplyKind`. Overload applicability applies the same clause-kind filter, so

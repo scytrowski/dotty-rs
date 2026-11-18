@@ -92,7 +92,7 @@ pub enum OverloadRejection {
 
 fn application_kind_accepts(application_kind: ApplyKind, method_kind: MethodKind) -> bool {
     match application_kind {
-        ApplyKind::Regular => method_kind == MethodKind::Plain,
+        ApplyKind::Regular => matches!(method_kind, MethodKind::Plain | MethodKind::Implicit),
         ApplyKind::Using => matches!(method_kind, MethodKind::Contextual | MethodKind::Implicit),
     }
 }
@@ -134,6 +134,7 @@ pub struct SourceTyper<'a> {
     import_qualifier_cache: HashMap<ImportQualifierCacheKey, SymbolId>,
     import_member_cache: HashMap<ImportMemberCacheKey, SymbolId>,
     semantic_transaction_depth: usize,
+    diagnostics: Vec<dotty_core::Diagnostic>,
     typed_arena: AstArena<Typed>,
     typed_index: SourceTypedIndex,
     function_literals: expression::FunctionLiteralIndex,
@@ -301,6 +302,7 @@ impl<'a> SourceTyper<'a> {
             import_qualifier_cache: HashMap::new(),
             import_member_cache: HashMap::new(),
             semantic_transaction_depth: 0,
+            diagnostics: Vec::new(),
             typed_arena: AstArena::new(),
             typed_index: SourceTypedIndex::new(),
             function_literals: expression::FunctionLiteralIndex::default(),
@@ -796,6 +798,11 @@ impl<'a> SourceTyper<'a> {
     /// Exposes the shared semantic store after the driver is no longer needed.
     pub fn store(&self) -> &SemanticStore {
         self.store
+    }
+
+    /// Diagnostics emitted by successful typing operations in this source session.
+    pub fn diagnostics(&self) -> &[dotty_core::Diagnostic] {
+        &self.diagnostics
     }
 
     /// Typed expression trees produced by this typer instance.
@@ -38508,7 +38515,7 @@ mod tests {
     }
 
     #[test]
-    fn regular_application_rejects_an_implicit_clause() {
+    fn regular_application_consumes_legacy_implicit_clause_with_warning() {
         let source_text = "class C { def f(implicit x: Int): Int = x; def use: Int = f(1) }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
@@ -38526,14 +38533,20 @@ mod tests {
             &packages,
         );
 
-        assert!(matches!(
-            typer.type_expression(rhs, context),
-            Err(TyperError::ApplicationMethodKindMismatch {
-                application_kind: ApplyKind::Regular,
-                method_kind: MethodKind::Implicit,
-                ..
-            })
-        ));
+        typer.inject_failure_after_outermost_success = true;
+        assert!(typer.type_expression(rhs, context).is_err());
+        assert!(typer.diagnostics().is_empty());
+        let typed = typer.type_expression(rhs, context).unwrap();
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+        assert_eq!(typer.type_expression(rhs, context).unwrap(), typed);
+        let [warning] = typer.diagnostics() else {
+            panic!("expected one migration warning")
+        };
+        assert_eq!(warning.severity(), dotty_core::DiagnosticSeverity::Warning);
+        assert_eq!(
+            warning.span().start() as usize,
+            source_text.rfind('1').unwrap()
+        );
     }
 
     #[test]

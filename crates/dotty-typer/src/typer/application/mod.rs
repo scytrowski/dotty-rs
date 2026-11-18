@@ -1080,6 +1080,19 @@ impl SourceTyper<'_> {
             }
             arguments.push(argument);
         }
+        if application_kind == ApplyKind::Regular
+            && method.kind == MethodKind::Implicit
+            && let Some(span) = argument_trees
+                .first()
+                .and_then(|tree| self.arena.get(*tree).position)
+                .or(position)
+        {
+            self.diagnostics.push(dotty_core::Diagnostic::new(
+                dotty_core::DiagnosticSeverity::Warning,
+                span.span().range(),
+                "Implicit parameters should be provided with a `using` clause.",
+            ));
+        }
         Ok(
             TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply_with_kind(
                 function,

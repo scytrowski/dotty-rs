@@ -27,6 +27,7 @@ impl SourceTyper<'_> {
         operation: impl FnOnce(&mut Self, &mut Vec<(SymbolId, SymbolInfo)>) -> Result<T, TyperError>,
     ) -> Result<T, TyperError> {
         let outermost_transaction = self.begin_semantic_transaction();
+        let diagnostic_checkpoint = self.diagnostics.len();
         let checkpoint = self.store.checkpoint();
         let resolver_checkpoint = self.resolver.checkpoint();
         let package_entry_checkpoint = self.synthetic_package_entries.len();
@@ -52,6 +53,7 @@ impl SourceTyper<'_> {
         let result = operation(self, &mut info_journal);
         let committed = result.is_ok();
         if result.is_err() {
+            self.diagnostics.truncate(diagnostic_checkpoint);
             for (changed, previous) in info_journal.into_iter().rev() {
                 if self.store.symbols.contains(changed) {
                     self.store.symbols.set_info(changed, previous);
@@ -91,6 +93,7 @@ impl SourceTyper<'_> {
         ) -> Result<T, TyperError>,
     ) -> Result<T, TyperError> {
         let outermost_transaction = self.begin_semantic_transaction();
+        let diagnostic_checkpoint = self.diagnostics.len();
         let ast_checkpoint = self.typed_arena.checkpoint();
         let typed_index_checkpoint = self.typed_index.clone();
         let function_literals_checkpoint = self.function_literals.clone();
@@ -145,6 +148,7 @@ impl SourceTyper<'_> {
         let outcome = match result {
             Ok(typed) => Ok(typed),
             Err(error) => {
+                self.diagnostics.truncate(diagnostic_checkpoint);
                 for (symbol, previous) in info_journal.into_iter().rev() {
                     if self.store.symbols.contains(symbol) {
                         self.store.symbols.set_info(symbol, previous);
