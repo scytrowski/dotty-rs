@@ -23,6 +23,7 @@ pub struct SemanticStore {
     /// Mints origin IDs for `SymbolOrigin::Classfile`/`SymbolOrigin::Tasty`
     /// — see [`OriginTable`].
     pub origins: OriginTable,
+    pub(super) default_getters: super::default_getters::DefaultGetters,
 }
 
 /// The allocation state of a [`SemanticStore`], taken by
@@ -33,6 +34,7 @@ pub struct StoreCheckpoint {
     types: usize,
     scopes: usize,
     annotations: usize,
+    default_getters: usize,
 }
 
 impl StoreCheckpoint {
@@ -55,6 +57,7 @@ impl SemanticStore {
             types: self.types.len(),
             scopes: self.scopes.len(),
             annotations: self.annotations.len(),
+            default_getters: self.default_getters.len(),
         }
     }
 
@@ -62,7 +65,8 @@ impl SemanticStore {
     /// `checkpoint`. Their ids become invalid and are handed out again by
     /// later allocations.
     ///
-    /// Only allocations are undone. Interned names stay (an interned name is
+    /// Default getter relations recorded since the checkpoint are also removed.
+    /// Interned names stay (an interned name is
     /// harmless and may be shared), registered origin ids stay (an unused id
     /// is harmless), and changes made to values that existed at the
     /// checkpoint, such as a name entered into an older scope or a completed
@@ -73,6 +77,7 @@ impl SemanticStore {
     /// id it obtained after the checkpoint. `checkpoint` must come from this
     /// store and must not be older than an earlier rollback.
     pub fn rollback_to(&mut self, checkpoint: StoreCheckpoint) {
+        self.default_getters.truncate(checkpoint.default_getters);
         self.symbols.truncate(checkpoint.symbols);
         self.types.truncate(checkpoint.types);
         self.scopes.truncate(checkpoint.scopes);

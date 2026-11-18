@@ -334,3 +334,230 @@ fn library_not_given_inverts_each_search_and_selects_the_real_value_method() {
         );
     }
 }
+
+#[test]
+fn binary_contextual_defaults_replay_the_selected_receiver_and_evaluated_argument() {
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(include_str!(
+        "../../../tests/fixtures/contextual-arguments/BinaryDefaultsClient.scala"
+    ));
+    let next = method_symbol(&parsed, &store, &index, source, "next");
+    let resolver = contextual_fixture_resolver(defs, &packages);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages)
+        .with_resolver(Box::new(resolver));
+    for name in ["fallback", "supplied", "explicit", "noEarlierClause"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+            panic!("client method")
+        };
+        typer
+            .type_method_definition(tree)
+            .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        let ast = typer.typed_ast();
+        let reference = |tree| {
+            typer
+                .store()
+                .types
+                .get(ast.get(tree).ty)
+                .reference_symbol()
+                .expect("reference")
+        };
+        let original = typer.typed_index.get(source, rhs).unwrap();
+        let (call, shared) = match &ast.get(original).kind {
+            TreeKind::Block(block) if name == "fallback" => {
+                let [temp] = block.stats.as_slice() else {
+                    panic!("one evaluation of next")
+                };
+                let TreeKind::ValDef(value) = &ast.get(*temp).kind else {
+                    panic!("shared argument")
+                };
+                let TreeKind::Apply(init) = &ast.get(value.rhs.unwrap()).kind else {
+                    panic!("next()")
+                };
+                assert_eq!(reference(init.function), next);
+                (
+                    block.expr,
+                    Some(
+                        typer
+                            .typed_index
+                            .synthetic_definition_symbol(*temp)
+                            .unwrap(),
+                    ),
+                )
+            }
+            _ => (original, None),
+        };
+        let TreeKind::Apply(evidence) = &ast.get(call).kind else {
+            panic!("contextual call")
+        };
+        let [argument] = evidence.args.as_slice() else {
+            panic!("one contextual parameter")
+        };
+        if name == "supplied" {
+            let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+                panic!()
+            };
+            assert_eq!(
+                Some(reference(*argument)),
+                index.symbol_at(source, def.value_param_clauses[1][0])
+            );
+            assert_eq!(evidence.kind, ApplyKind::Regular);
+            continue;
+        }
+        assert_eq!(evidence.kind, ApplyKind::Using);
+        if name == "explicit" {
+            assert!(matches!(&ast.get(*argument).kind, TreeKind::Literal(_)));
+            continue;
+        }
+        let (target, getter) = if name == "fallback" {
+            let TreeKind::Apply(target) = &ast.get(evidence.function).kind else {
+                panic!("offset(x)")
+            };
+            let TreeKind::Apply(getter) = &ast.get(*argument).kind else {
+                panic!("getter(x)")
+            };
+            assert_eq!(target.args, getter.args);
+            assert_eq!(Some(reference(target.args[0])), shared);
+            (target.function, getter.function)
+        } else {
+            (evidence.function, *argument)
+        };
+        let TreeKind::Select(target_selection) = &ast.get(target).kind else {
+            panic!("method selection")
+        };
+        let TreeKind::Select(getter_selection) = &ast.get(getter).kind else {
+            panic!("getter selection")
+        };
+        assert_eq!(target_selection.qualifier, getter_selection.qualifier);
+        let position = usize::from(name == "fallback");
+        assert_eq!(
+            typer.store().default_getter(reference(target), position),
+            Some(reference(getter))
+        );
+        let getter = typer.store().symbols.get(reference(getter));
+        assert_eq!(getter.owner, typer.store().symbols.owner(reference(target)));
+        assert!(matches!(getter.origin, SymbolOrigin::Tasty(_)));
+        assert_eq!(
+            typer.store().names.resolve(getter.name.text()),
+            if name == "fallback" {
+                "offset$default$2"
+            } else {
+                "read$default$1"
+            }
+        );
+    }
+}
+
+#[test]
+fn binary_contextual_default_preserves_ambiguity_and_rolls_back_binary_loading() {
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(include_str!(
+        "../../../tests/fixtures/contextual-arguments/BinaryDefaultsAmbiguous.scala"
+    ));
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "ambiguous");
+    let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+        panic!()
+    };
+    let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+        panic!()
+    };
+    let candidates = def.value_param_clauses[1]
+        .iter()
+        .map(|p| index.symbol_at(source, *p).unwrap())
+        .collect::<Vec<_>>();
+    let resolver = contextual_fixture_resolver(defs, &packages);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages)
+        .with_resolver(Box::new(resolver));
+    let before = typer.store().checkpoint();
+    for _ in 0..2 {
+        let error = typer.type_method_definition(tree).unwrap_err();
+        assert!(
+            matches!(&error, TyperError::AmbiguousContextualArgument { tree_index, candidates: found, .. }
+                if *tree_index == rhs.index() && *found == candidates),
+            "{error:?}"
+        );
+        assert_eq!(typer.store().checkpoint(), before);
+        assert!(typer.typed_index.get(source, rhs).is_none());
+    }
+}
+
+#[test]
+fn binary_contextual_default_rejects_a_mismatched_getter_signature_before_insertion() {
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(include_str!(
+        "../../../tests/fixtures/contextual-arguments/BinaryDefaultsClient.scala"
+    ));
+    let (explicit, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "explicit");
+    let fallback = method_symbol(&parsed, &store, &index, source, "fallback");
+    let Some(SourceDefinition::Canonical {
+        tree: explicit_tree,
+        ..
+    }) = index.definition_of(explicit)
+    else {
+        panic!()
+    };
+    let Some(SourceDefinition::Canonical {
+        tree: fallback_tree,
+        ..
+    }) = index.definition_of(fallback)
+    else {
+        panic!()
+    };
+    let resolver = contextual_fixture_resolver(defs, &packages);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages)
+        .with_resolver(Box::new(resolver));
+    typer.type_method_definition(explicit_tree).unwrap();
+    let root = typer.typed_index.get(source, rhs).unwrap();
+    let TreeKind::Apply(call) = &typer.typed_ast().get(root).kind else {
+        panic!()
+    };
+    let TreeKind::Apply(prefix) = &typer.typed_ast().get(call.function).kind else {
+        panic!()
+    };
+    let target = typer
+        .store
+        .types
+        .get(typer.typed_ast().get(prefix.function).ty)
+        .reference_symbol()
+        .unwrap();
+    let getter = typer
+        .store
+        .default_getter(target, 1)
+        .expect("offset default for n");
+    let original = typer
+        .completed_expression_symbol_info(getter, &mut Vec::new())
+        .unwrap();
+    let Type::Method(correct) = typer.store.types.get(original).clone() else {
+        panic!("expected a getter taking x")
+    };
+    for wrong_result in [false, true] {
+        let mut wrong = correct.clone();
+        if wrong_result {
+            wrong.result = defs.boolean;
+        } else {
+            wrong.params[0].ty = defs.boolean;
+        }
+        let info = typer.store.types.alloc(Type::Method(wrong));
+        typer
+            .store
+            .symbols
+            .set_info(getter, SymbolInfo::Complete(info));
+        let before = typer.store.checkpoint();
+        let err = typer.type_method_definition(fallback_tree).unwrap_err();
+        if wrong_result {
+            assert!(
+                matches!(err, TyperError::ExpectedExpressionTypeMismatch { actual, .. } if actual == defs.boolean),
+                "{err:?}"
+            );
+        } else {
+            assert!(
+                matches!(err, TyperError::UsingApplicationDeferred { .. }),
+                "{err:?}"
+            );
+        }
+        assert_eq!(typer.store.checkpoint(), before);
+        assert!(typer.typed_index.get(source, fallback_tree).is_none());
+    }
+    typer
+        .store
+        .symbols
+        .set_info(getter, SymbolInfo::Complete(original));
+    typer.type_method_definition(fallback_tree).unwrap();
+}

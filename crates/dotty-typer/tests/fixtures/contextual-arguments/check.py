@@ -21,6 +21,7 @@ def main():
     with tempfile.TemporaryDirectory() as output:
         for source, package, classes in (
             ("Evidence.scala", "evidence", ("Box.tasty", "TC.tasty")),
+            ("Defaults.scala", "defaults", ("Reader.tasty",)),
             ("Structural.scala", "structural", ("Box.tasty", "TC.tasty", "Builders.tasty", "Builders$boxes.class")),
         ):
             toolchain.compiler(["-sourceroot", ".", "-d", output, source], cwd=HERE)
@@ -84,14 +85,32 @@ def main():
                 "No given instance of type Int", "Ambiguous given instances",
             )),
         ):
-            result = subprocess.run(
-                [toolchain.java, "-cp", toolchain.classpath, "dotty.tools.dotc.Main",
-                 "-classpath", toolchain.classpath, "-color:never", "-Vprint:typer",
-                 "-d", output, HERE / source],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False,
-            )
-            if result.returncode != code or any(item not in result.stdout for item in required):
-                raise SystemExit(f"{source} disagrees with Scala 3.9 controls\n{result.stdout}")
+            check_typer_output(toolchain, output, source, code, required, toolchain.classpath)
+
+        # Compile the client independently, with Reader available only on its classpath.
+        client_output = Path(output) / "client"
+        client_output.mkdir()
+        classpath = os.pathsep.join((output, toolchain.classpath))
+        check_typer_output(toolchain, client_output, "BinaryDefaultsClient.scala", 0, (
+            "val x$1: Int = this.next()",
+            "reader.offset(x$1)(using reader.offset$default$2(x$1))",
+            "reader.offset(this.next())(chosen)", "reader.offset(7)(using 9)",
+            "reader.read(using reader.read$default$1)",
+        ), classpath)
+        check_typer_output(toolchain, client_output, "BinaryDefaultsAmbiguous.scala", 1, (
+            "[E172]", "Ambiguous given instances", "of parameter n of method offset",
+        ), classpath)
+
+
+def check_typer_output(toolchain, output, source, code, required, classpath):
+    result = subprocess.run(
+        [toolchain.java, "-cp", toolchain.classpath, "dotty.tools.dotc.Main",
+         "-classpath", classpath, "-color:never", "-Vprint:typer",
+         "-d", output, HERE / source],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False,
+    )
+    if result.returncode != code or any(item not in result.stdout for item in required):
+        raise SystemExit(f"{source} disagrees with Scala 3.9 controls\n{result.stdout}")
 
 
 def verify_rust_library(toolchain, candidate, client=None):

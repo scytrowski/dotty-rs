@@ -35,7 +35,7 @@ of the binary evidence. Run them with `JAVA_HOME`, `SCALA39_ROOT` and
 | Increment | Supported behavior | Regression control |
 | --- | --- | --- |
 | Parameterized structural givens | A factory, its implementation class and its constructor have separately owned binders. The factory result retains the implementation type. | A client imports `Builders.given`, infers `boxes[Int]` and supplies its own leaf. Explicit selection of `.tag` works from source and from a Scala-generated TASTy/class-file pair. Type-only and contextual-only factories preserve their respective clauses. |
-| Contextual defaults | For source methods and conditional providers, a missing argument can invoke its indexed default getter. The getter receives the original receiver and earlier clauses. | Tests check the getter's parameter identity, supplied evidence, rejection of ambiguity, rejection of an ill-typed default, and single evaluation of effectful operands. |
+| Contextual defaults | A missing argument can invoke the indexed default getter of a source method, a source conditional provider, or a method loaded from Scala TASTy. The getter receives the original receiver and earlier clauses. | Tests check the getter's parameter identity, supplied evidence, rejection of ambiguity, rejection of an ill-typed default, and single evaluation of effectful operands. |
 | Recursive by-name evidence | A successful recursive search across a by-name parameter creates a shared dictionary. Its synthetic definitions and references have canonical identities. | Two recursive dependencies refer to the same field. The strict variant diverges. Discarding a failed candidate rolls back its dictionary and symbols. |
 | Implicit scope and dependent types | Search can follow transparent aliases, use an opaque type's companion, and preserve the stable term prefix of a nested type. | `p.Item` and `q.Item` select evidence from their respective receivers. A later contextual clause and result can depend on a stable argument to an earlier clause. |
 | Other searches | A contextual receiver can provide an extension. A supported extractor can request trailing contextual clauses. Expected result and argument types can trigger a `scala.Conversion` instance or a unary monomorphic `implicit def`. | The contextual consumer fixtures check selected symbols, nested scopes, ambiguity, and the order of arguments passed to `unapply`. |
@@ -46,8 +46,10 @@ simple source opaque alias's defining owner, contextual search can use its
 representation. Outside that owner it uses the nominal type and its companion.
 Higher-kinded inference and general proofs from opaque bounds remain open.
 
-Default-getter replay currently uses source declarations and their earlier
-written clauses. Combining a default with a synthesized context-bound clause
+For a classpath method, replay uses the link between a defaulted parameter
+and its getter in the same TASTy template. The typer checks the copied clauses
+and the result type before accepting the default. The binary Reader fixture
+checks both a parameterless getter and a getter that reuses an earlier argument. Combining a default with a synthesized context-bound clause
 still reports a typing error. Conversion insertion covers value adaptation to
 a known expected type. This includes ordinary method arguments. Searching for
 a conversion solely because a member is missing, and instantiating generic

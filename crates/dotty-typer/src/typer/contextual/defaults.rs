@@ -5,6 +5,7 @@ struct DefaultCall {
     root: TreeId<Typed>,
     applications: Vec<TreeId<Typed>>,
     getter: SymbolId,
+    expected: TypeId,
 }
 
 impl SourceTyper<'_> {
@@ -22,7 +23,7 @@ impl SourceTyper<'_> {
         let mut args = Vec::with_capacity(method.params.len());
         let mut kind = ApplyKind::Regular;
         for (ordinal, param) in method.params.iter().enumerate() {
-            let default = self.default_call(*function, ordinal);
+            let default = self.default_call(*function, ordinal, param.ty);
             // A missing candidate may have opened a recursive dictionary before
             // reaching a missing dependency. Its symbols follow the probe's lifetime.
             let saved_dictionary = default
@@ -58,7 +59,12 @@ impl SourceTyper<'_> {
         Ok((args, kind))
     }
 
-    fn default_call(&self, mut tree: TreeId<Typed>, ordinal: usize) -> Option<DefaultCall> {
+    fn default_call(
+        &self,
+        mut tree: TreeId<Typed>,
+        ordinal: usize,
+        expected: TypeId,
+    ) -> Option<DefaultCall> {
         let mut applications = Vec::new();
         let mut clause = 0;
         loop {
@@ -81,6 +87,29 @@ impl SourceTyper<'_> {
             .types
             .get(self.typed_arena.get(tree).ty)
             .reference_symbol()?;
+        let getter = if matches!(
+            self.store.symbols.get(method).origin,
+            SymbolOrigin::Tasty(_)
+        ) {
+            self.binary_default_getter(method, clause, ordinal)?
+        } else {
+            self.source_default_getter(method, clause, ordinal)?
+        };
+        applications.reverse();
+        Some(DefaultCall {
+            root: tree,
+            applications,
+            getter,
+            expected,
+        })
+    }
+
+    fn source_default_getter(
+        &self,
+        method: SymbolId,
+        clause: usize,
+        ordinal: usize,
+    ) -> Option<SymbolId> {
         let SourceDefinition::Canonical {
             source,
             tree: def_tree,
@@ -99,12 +128,41 @@ impl SourceTyper<'_> {
             self.index
                 .derived_symbol_at(self.store.symbols.owner(method)?, source, param)?;
         self.contextual_getter_source(getter)?;
-        applications.reverse();
-        Some(DefaultCall {
-            root: tree,
-            applications,
-            getter,
-        })
+        Some(getter)
+    }
+
+    /// The TASTy default-getter index counts term parameters across clauses.
+    /// Count declaration formals, since a repeated parameter can consume more
+    /// than one argument at a call site.
+    fn binary_default_getter(
+        &self,
+        method: SymbolId,
+        clause: usize,
+        ordinal: usize,
+    ) -> Option<SymbolId> {
+        let SymbolInfo::Complete(mut signature) = *self.store.symbols.info(method) else {
+            return None;
+        };
+        let mut preceding = 0usize;
+        let mut current = 0;
+        for _ in 0..crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
+            match self.store.types.try_get(signature)? {
+                Type::Poly(poly) => signature = poly.result,
+                Type::Method(parameters) if current == clause => {
+                    parameters.params.get(ordinal)?;
+                    return self
+                        .store
+                        .default_getter(method, preceding.checked_add(ordinal)?);
+                }
+                Type::Method(parameters) => {
+                    preceding = preceding.checked_add(parameters.params.len())?;
+                    current += 1;
+                    signature = parameters.result;
+                }
+                _ => return None,
+            }
+        }
+        None
     }
 
     fn apply_default_getter(
@@ -116,10 +174,8 @@ impl SourceTyper<'_> {
         tree_index: u32,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TreeId<Typed>, TyperError> {
-        let deferred = || TyperError::UsingApplicationDeferred {
-            source: self.source,
-            tree_index,
-        };
+        let source = self.source;
+        let deferred = || TyperError::UsingApplicationDeferred { source, tree_index };
         let original = self.typed_arena.get(call.root).clone();
         let method = self
             .store
@@ -127,7 +183,19 @@ impl SourceTyper<'_> {
             .get(original.ty)
             .reference_symbol()
             .ok_or_else(deferred)?;
-        let name = self.store.symbols.get(call.getter).name;
+        let entry = self.store.symbols.get(call.getter);
+        let name = entry.name;
+        let binary = matches!(entry.origin, SymbolOrigin::Tasty(_));
+        if binary
+            && !self.is_selected_member_accessible(
+                call.getter,
+                entry.owner.ok_or_else(deferred)?,
+                context,
+                tree_index,
+            )?
+        {
+            return Err(deferred());
+        }
         let mut target = call.root;
         let mut getter = match original.kind {
             TreeKind::Select(sel) => {
@@ -204,6 +272,16 @@ impl SourceTyper<'_> {
                             tree_index,
                         });
                     }
+                    if binary
+                        && !self.binary_getter_clause_matches(
+                            app.function,
+                            &previous,
+                            tree_index,
+                            journal,
+                        )?
+                    {
+                        return Err(deferred());
+                    }
                     let mut shared = Vec::with_capacity(app.args.len());
                     for (&arg, param) in app.args.iter().zip(previous.params) {
                         shared.push(
@@ -237,8 +315,55 @@ impl SourceTyper<'_> {
                 }
             }
         }
+        if binary {
+            // A parameterless binary getter has ExprType and is selected without ().
+            if let Some(Type::ByName { result }) = self.store.types.try_get(signature) {
+                signature = *result;
+            }
+            let expected = match self.store.types.try_get(call.expected) {
+                Some(Type::ByName { result }) => *result,
+                _ => call.expected,
+            };
+            if !self.contextual_conforms(signature, expected, tree_index, journal)? {
+                return Err(TyperError::ExpectedExpressionTypeMismatch {
+                    source: self.source,
+                    tree_index,
+                    actual: signature,
+                    expected,
+                });
+            }
+        }
         *function = target;
         Ok(getter)
+    }
+
+    /// Both the receiver and earlier arguments will be used with two distinct
+    /// declarations. Authenticate the copied clause before rebuilding those calls.
+    fn binary_getter_clause_matches(
+        &mut self,
+        target: TreeId<Typed>,
+        copied: &MethodType,
+        tree_index: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<bool, TyperError> {
+        let applied =
+            self.widen_expression_type_journaled(self.typed_arena.get(target).ty, journal, 0)?;
+        let Some(Type::Method(original)) = self.store.types.try_get(applied).cloned() else {
+            return Ok(false);
+        };
+        if original.kind != copied.kind || original.params.len() != copied.params.len() {
+            return Ok(false);
+        }
+        for (param, copy) in original.params.iter().zip(&copied.params) {
+            if param.erased != copy.erased
+                || param.varargs != copy.varargs
+                || !self.contextual_conforms(param.ty, copy.ty, tree_index, journal)?
+                || !self.contextual_conforms(copy.ty, param.ty, tree_index, journal)?
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn share_default_operand(

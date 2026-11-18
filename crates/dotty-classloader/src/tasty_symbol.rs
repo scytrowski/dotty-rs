@@ -317,6 +317,10 @@ pub(crate) struct DecodedTastyField {
 /// One `DefDef` reconstructed from a class's `Template.stats`.
 #[derive(Debug, Clone)]
 pub(crate) struct DecodedTastyMethod {
+    /// Wire offset within the selected template, shared with default-getter sites.
+    pub offset: usize,
+    /// Original method offset and flattened term ordinal of a structural getter.
+    pub default_for: Option<(usize, usize)>,
     pub name: String,
     pub flags: MethodAccessFlags,
     pub contextual_flags: SymbolFlags,
@@ -388,6 +392,7 @@ pub(crate) struct DecodedTastyTypeParameter {
 /// One term parameter of a [`DecodedTastyMethod`].
 #[derive(Debug, Clone)]
 pub(crate) struct DecodedTastyParameter {
+    pub contextual_flags: SymbolFlags,
     pub name: String,
     pub erased: bool,
     pub declared_type: Option<DecodedTastyType>,
@@ -2477,6 +2482,79 @@ fn is_member_parameter(tail: &[DefinitionTail<'_>]) -> bool {
     has(FIELDACCESSOR_TAG) || has(CASEACCESSOR_TAG) || !(has(PRIVATE_TAG) && has(LOCAL_TAG))
 }
 
+/// Scala marks inferred getter results with `@uncheckedVariance`. It does
+/// not change the value supplied at the call site. Unrecognized annotations
+/// keep the member decoder's normal unsupported result.
+fn default_getter_underlying_result<'a>(
+    file: &TastyFile<'a>,
+    tree: &RawTree<'a>,
+) -> Option<RawTree<'a>> {
+    let StructuredTree::Length(StructuredNode::Annotated(annotation)) =
+        tree.decode_structured().ok()?
+    else {
+        return None;
+    };
+    if annotation.tag != dotty_tasty::tasty::ANNOTATEDTYPE_TAG {
+        return None;
+    }
+    let StructuredTree::Length(StructuredNode::Apply(app)) =
+        annotation.annotation.decode_structured().ok()?
+    else {
+        return None;
+    };
+    let StructuredTree::Length(StructuredNode::SelectIn(select)) =
+        app.function.decode_structured().ok()?
+    else {
+        return None;
+    };
+    let RawName::Signed {
+        original,
+        result_signature,
+        parameter_signatures,
+    } = file.name(select.name)?
+    else {
+        return None;
+    };
+    let RawName::Qualified { prefix, selector } = file.name(*result_signature)? else {
+        return None;
+    };
+    let StructuredTree::AstChild(new) = select.qualifier.decode_structured().ok()? else {
+        return None;
+    };
+    let marker_type = |tree: &RawTree<'a>| -> Option<bool> {
+        let shared = match tree {
+            RawTree::Leaf(term) if term.tag == SHAREDTYPE_TAG => {
+                Some(decode_shared_tree(file, term.ast_ref()?.address)?)
+            }
+            _ => None,
+        };
+        let StructuredTree::Reference(reference) =
+            shared.as_ref().unwrap_or(tree).decode_structured().ok()?
+        else {
+            return None;
+        };
+        let RawTree::Leaf(package) = reference.qualifier else {
+            return None;
+        };
+        Some(
+            reference.tag == TYPEREF_TAG
+                && reference.reference == *selector
+                && package.tag == TERMREFPKG_TAG
+                && package.name_ref() == Some(*prefix),
+        )
+    };
+    (app.arguments.is_empty()
+        && select.tag == SELECTIN_TAG
+        && file.names().get_utf8(*original) == Some("<init>")
+        && parameter_signatures.is_empty()
+        && file.names().get_utf8(*selector) == Some("uncheckedVariance")
+        && file.names().render(*prefix).ok()? == "scala.annotation.unchecked"
+        && new.tag == NEW_TAG
+        && marker_type(&new.child)?
+        && marker_type(&select.underlying_type)?)
+    .then_some(annotation.underlying)
+}
+
 /// Decodes the supported subset of a TASTy member type while retaining
 /// references to the enclosing method's exact type-parameter AST nodes.
 fn decode_tasty_member_type(
@@ -2992,6 +3070,19 @@ fn decode_members(
     let mut methods = Vec::new();
     let address_index = file.ast_address_index()?;
 
+    let mut incomplete_methods = HashSet::new();
+    let default_sites: HashMap<_, _> = dotty_tasty::tasty::template_default_getters(
+        file.names(),
+        stats.iter().filter_map(|tree| match tree {
+            RawTree::LengthNode(node) if node.tag == DEFDEF_TAG => Some(node),
+            _ => None,
+        }),
+    )?
+    .into_iter()
+    .filter(|site| site.contextual)
+    .map(|site| (site.getter, (site.method, site.ordinal)))
+    .collect();
+
     for stat in stats {
         let RawTree::LengthNode(node) = stat else {
             continue;
@@ -3039,7 +3130,13 @@ fn decode_members(
                 else {
                     continue;
                 };
-                let Some(method_name) = wire_name(file, name) else {
+                let default_for = default_sites.get(&node.offset).copied();
+                let method_name = if default_for.is_some() {
+                    file.names().render(name).ok()
+                } else {
+                    wire_name(file, name)
+                };
+                let Some(method_name) = method_name else {
                     continue;
                 };
 
@@ -3094,6 +3191,9 @@ fn decode_members(
                         continue;
                     };
                     let Some(parameter_name) = wire_name(file, *parameter_name) else {
+                        // Keep the existing partial signature for other lookups, but
+                        // it no longer preserves the wire parameter ordinals.
+                        incomplete_methods.insert(node.offset);
                         continue;
                     };
                     let allow_selected_get_or_else_by_name = owner.as_internal() == "scala/Option"
@@ -3111,6 +3211,7 @@ fn decode_members(
                         allow_selected_get_or_else_by_name,
                     );
                     decoded_parameters.push(DecodedTastyParameter {
+                        contextual_flags: contextual_flags(&body.tail),
                         name: parameter_name,
                         erased,
                         declared_type,
@@ -3149,12 +3250,14 @@ fn decode_members(
                     },
                     _ => None,
                 };
+                let underlying =
+                    default_for.and_then(|_| default_getter_underlying_result(file, &return_type));
                 let return_type = if method_name == "<init>" {
                     None
                 } else {
                     decode_tasty_member_type(
                         file,
-                        &return_type,
+                        underlying.as_ref().unwrap_or(&return_type),
                         package,
                         &type_parameters_by_address,
                         class_type_parameters,
@@ -3168,6 +3271,8 @@ fn decode_members(
                     || clauses.contains(&EMPTYCLAUSE_TAG);
 
                 methods.push(DecodedTastyMethod {
+                    offset: node.offset,
+                    default_for,
                     name: method_name,
                     flags: decode_method_flags(&tail),
                     contextual_flags: symbol_flags(&tail).intersection(
@@ -3188,6 +3293,13 @@ fn decode_members(
         }
     }
 
+    for method in &mut methods {
+        if let Some((target, _)) = method.default_for
+            && (incomplete_methods.contains(&target) || incomplete_methods.contains(&method.offset))
+        {
+            method.default_for = None;
+        }
+    }
     Ok((fields, methods))
 }
 
@@ -5145,6 +5257,55 @@ fn render_member_name(file: &TastyFile<'_>, reference: u32) -> Option<String> {
 mod tests {
     use super::*;
     use dotty_tasty::tasty::{AstChildNode, SimpleTerm, Writer};
+
+    #[test]
+    fn scala_default_getter_result_recognizes_the_unchecked_variance_marker() {
+        let bytes = include_bytes!(
+            "../../dotty-typer/tests/fixtures/contextual-arguments/binary/defaults/Reader.tasty"
+        );
+        let name = BinaryName::from_internal("defaults/Reader");
+        let check = |data: &[u8], supported: bool| {
+            let decoded = decode(data, &name).unwrap();
+            for getter in ["read$default$1", "offset$default$2"] {
+                let method = decoded.methods.iter().find(|m| m.name == getter).unwrap();
+                assert_eq!(
+                    method.return_type,
+                    supported
+                        .then(|| DecodedTastyType::Named(BinaryName::from_internal("scala/Int")))
+                );
+            }
+        };
+        check(bytes, true);
+        let mut foreign = bytes.to_vec();
+        let marker = b"uncheckedVariance";
+        let index = foreign
+            .windows(marker.len())
+            .position(|w| w == marker)
+            .unwrap();
+        foreign[index] = b'X';
+        check(&foreign, false);
+        // Both getters reference the same marker type. A term with identical
+        // name and package cannot be used as the constructed annotation type.
+        let mut wrong_owner = bytes.to_vec();
+        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+        let marker_name = file
+            .names()
+            .entries()
+            .iter()
+            .position(|n| matches!(n, RawName::Utf8(s) if s == "uncheckedVariance"))
+            .unwrap();
+        let mut pattern = Writer::new();
+        pattern.write_u8(NEW_TAG);
+        pattern.write_u8(TYPEREF_TAG);
+        pattern.write_nat(marker_name.try_into().unwrap());
+        let new_type = pattern.into_inner();
+        let at = wrong_owner
+            .windows(new_type.len())
+            .position(|w| w == new_type)
+            .unwrap();
+        wrong_owner[at + 1] = TERMREF_TAG;
+        check(&wrong_owner, false);
+    }
 
     #[test]
     fn callback_profile_keeps_error_status_per_repeated_invocation() {

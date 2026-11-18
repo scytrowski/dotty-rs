@@ -89,6 +89,13 @@ resolution.
 ## 3. Scope
 
 ### Implemented
+
+- The loader links a Scala 3.9 contextual default getter to the marked parameter
+  of its sibling method using the structural TASTy name and parameter ordinal. Its result
+  can carry the compiler's `scala.annotation.unchecked.uncheckedVariance`
+  annotation. The member decoder checks the marker constructor and uses the
+  underlying result type for calls. Other annotated getter results remain
+  unsupported.
 - A canonical binary class name representation (`BinaryName`),
   internal-form (`java/lang/Object`), matching `docs/
   classfile-format-jdk25.md` §8. `$` stays a naming convention on the

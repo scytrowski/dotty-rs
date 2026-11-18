@@ -5667,19 +5667,14 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             let flags = self.store.symbols.get(symbol).flags | field.contextual_flags;
             self.store.symbols.get_mut(symbol).flags = flags;
         }
-        for method in &decoded.methods {
-            let resolved_type = self.lower_tasty_method(&identity.module_class_name, method);
-            let symbol = self.enter_method(
-                identity.module_class,
-                declarations,
-                &method.name,
-                method.flags,
-                resolved_type,
-                origin,
-            );
-            let flags = self.store.symbols.get(symbol).flags | method.contextual_flags;
-            self.store.symbols.get_mut(symbol).flags = flags;
-        }
+        self.enter_tasty_methods(
+            &identity.module_class_name,
+            identity.module_class,
+            declarations,
+            &decoded.methods,
+            &[],
+            origin,
+        )?;
         if let Some(alias) = predef_string_alias {
             debug_assert_eq!(alias.address, 378);
             let text = self.store.names.intern(&alias.name);
@@ -7530,23 +7525,116 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             let flags = self.store.symbols.get(symbol).flags | field.contextual_flags;
             self.store.symbols.get_mut(symbol).flags = flags;
         }
-        for method in &decoded.methods {
-            let resolved_type =
-                self.lower_tasty_method_with_class_parameters(name, method, &class_type_parameters);
+        self.enter_tasty_methods(
+            name,
+            class_symbol,
+            declarations,
+            &decoded.methods,
+            &class_type_parameters,
+            origin,
+        )?;
+
+        self.complete_class_with_parent_types(class_symbol, declarations, parents);
+        Ok(class_symbol)
+    }
+
+    fn enter_tasty_methods(
+        &mut self,
+        class_name: &BinaryName,
+        owner: SymbolId,
+        declarations: ScopeId,
+        methods: &[tasty_symbol::DecodedTastyMethod],
+        class_parameters: &[TypeId],
+        origin: SymbolOrigin,
+    ) -> Result<(), ClassLoadError> {
+        // Only methods participating in a getter relation need this offset index.
+        let endpoints: HashSet<_> = methods
+            .iter()
+            .filter_map(|getter| {
+                getter
+                    .default_for
+                    .map(|(target, _)| [target, getter.offset])
+            })
+            .flatten()
+            .collect();
+        let mut entries = HashMap::new();
+        for method in methods {
+            let info =
+                self.lower_tasty_method_with_class_parameters(class_name, method, class_parameters);
             let symbol = self.enter_method(
-                class_symbol,
+                owner,
                 declarations,
                 &method.name,
                 method.flags,
-                resolved_type,
+                info,
                 origin,
             );
             let flags = self.store.symbols.get(symbol).flags | method.contextual_flags;
             self.store.symbols.get_mut(symbol).flags = flags;
+            if endpoints.contains(&method.offset) {
+                entries.insert(method.offset, (symbol, info, method));
+            }
         }
-
-        self.complete_class_with_parent_types(class_symbol, declarations, parents);
-        Ok(class_symbol)
+        for getter in methods {
+            let Some((target_offset, ordinal)) = getter.default_for else {
+                continue;
+            };
+            let Some(&(method, mut signature, target)) = entries.get(&target_offset) else {
+                continue;
+            };
+            let getter_symbol = entries[&getter.offset].0;
+            if self
+                .store
+                .scopes
+                .get(declarations)
+                .lookup_all(&self.store.symbols.get(getter_symbol).name)
+                != [getter_symbol]
+            {
+                continue;
+            }
+            let Some(decoded_param) = target.parameters.get(ordinal) else {
+                continue;
+            };
+            let mut remaining = ordinal;
+            let parameter = loop {
+                match self.store.types.get(signature) {
+                    Type::Poly(poly) => signature = poly.result,
+                    Type::Method(clause) if remaining >= clause.params.len() => {
+                        remaining -= clause.params.len();
+                        signature = clause.result;
+                    }
+                    Type::Method(clause) => break Some(clause.params[remaining]),
+                    _ => break None,
+                }
+            };
+            let Some(parameter) = parameter else {
+                continue;
+            };
+            let param = self.store.symbols.alloc(Symbol {
+                name: *parameter.name.as_name(),
+                kind: SymbolKind::Parameter,
+                owner: Some(method),
+                flags: decoded_param.contextual_flags
+                    | if parameter.erased {
+                        SymbolFlags::ERASED
+                    } else {
+                        SymbolFlags::EMPTY
+                    },
+                visibility: Visibility::Public,
+                info: SymbolInfo::Complete(parameter.ty),
+                origin,
+                annotations: vec![],
+                position: None,
+                links: SymbolLinks::default(),
+            });
+            self.store
+                .record_default_getter(method, ordinal, param, getter_symbol)
+                .map_err(|error| ClassLoadError::IdentityConflict {
+                    name: class_name.clone(),
+                    reason: error.to_string(),
+                })?;
+        }
+        Ok(())
     }
 
     fn enter_tasty_class_type_parameters(
@@ -7697,6 +7785,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// does not yet recognize (see `tasty_symbol`'s doc comments), rather
     /// than a flag alongside an ordinary array type the way JVMS
     /// `ACC_VARARGS` is.
+    #[cfg(test)]
     fn lower_tasty_method(
         &mut self,
         owner: &BinaryName,

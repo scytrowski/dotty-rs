@@ -20,6 +20,7 @@
 pub mod ast;
 /// Fresh wire AST construction with symbolic address labels.
 pub mod construction;
+mod default_getters;
 /// File-level parsing, validation, encoding, and AST queries.
 pub mod file;
 /// TASTy header parsing and version validation.
@@ -41,6 +42,7 @@ pub mod tasty {
     pub use super::ast::*;
     pub use super::construction;
     pub use super::construction::*;
+    pub use super::default_getters::{DefaultGetterSite, template_default_getters};
     pub use super::file;
     pub use super::file::*;
     pub use super::header;
