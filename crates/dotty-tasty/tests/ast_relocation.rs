@@ -137,3 +137,92 @@ fn relocation_rejects_swapped_declarations_even_with_the_same_name() {
         );
     }
 }
+
+#[test]
+fn shared_match_case_keeps_its_wire_node_and_relocates_to_the_case() {
+    use dotty_tasty::tasty::*;
+    let bytes = [
+        APPLY_TAG,
+        0x82,
+        INTCONST_TAG,
+        0xbf,
+        MATCH_TAG,
+        0x87,
+        IMPLICIT_TAG,
+        CASEDEF_TAG,
+        0x82,
+        TRUECONST_TAG,
+        UNITCONST_TAG,
+        SHAREDTERM_TAG,
+        0x87,
+    ];
+    let raw = RawNodes::decode(&mut Reader::new(&bytes)).unwrap();
+    let mut roots: Vec<_> = raw
+        .iter()
+        .map(|node| node.decode_structured().unwrap())
+        .collect();
+    let StructuredNode::Match(m) = &roots[1] else {
+        panic!("expected MATCH")
+    };
+    assert!(matches!(
+        &m.cases[..],
+        [
+            MatchCase::Inline(_),
+            MatchCase::Shared {
+                offset: 5,
+                address: 7
+            }
+        ]
+    ));
+    let StructuredNode::Apply(app) = &mut roots[0] else {
+        panic!("expected APPLY")
+    };
+    app.function = RawTree::leaf(INTCONST_TAG, TermValue::Int(64)).unwrap();
+    let section = EncodedSection::structured_asts_relocated(0, &bytes, &roots).unwrap();
+    let raw = RawNodes::decode(&mut Reader::new(section.payload())).unwrap();
+    let original = TastyFile::parse(include_bytes!("fixtures/simple_def/SimpleDef.tasty")).unwrap();
+    let builder = TastyFileBuilder::new(
+        original.header().clone(),
+        NameTable::from_entries(vec![RawName::Utf8("ASTs".into())]).unwrap(),
+    )
+    .with_section(section.section().clone());
+    let encoded = builder.encode_validated().unwrap();
+    let file = TastyFile::parse_and_validate_scala_3_9(&encoded).unwrap();
+    let index = file.ast_address_index().unwrap();
+    let children: Vec<_> = index.children_of(5).collect();
+    assert_eq!(
+        children,
+        [
+            AstTreeNode {
+                tag: CASEDEF_TAG,
+                offset: 8
+            },
+            AstTreeNode {
+                tag: SHAREDTERM_TAG,
+                offset: 12
+            }
+        ]
+    );
+    let refs = raw.get(1).unwrap().ast_refs().unwrap();
+    assert_eq!(
+        refs,
+        [AstRef {
+            kind: AstRefKind::SharedCase,
+            address: 8
+        }]
+    );
+    assert_eq!(index.resolve_node(refs[0]), Some(children[0]));
+    let StructuredNode::Match(m) = &mut roots[1] else {
+        unreachable!()
+    };
+    m.cases[1] = MatchCase::Shared {
+        offset: 5,
+        address: 0,
+    };
+    assert_eq!(
+        EncodedSection::structured_asts_relocated(0, &bytes, &roots),
+        Err(TermEncodeError::Ast(AstError::InvalidAstReference {
+            address: 0
+        }))
+    );
+}

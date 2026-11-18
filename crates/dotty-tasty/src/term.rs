@@ -41,6 +41,8 @@ pub const DEFAULT_MAX_TREE_DEPTH: usize = 1024;
 pub enum AstRefKind {
     /// Reference to a shared term.
     SharedTerm,
+    /// A shared term in a MATCH case slot, which must target a CASEDEF.
+    SharedCase,
     /// Reference to a shared type.
     SharedType,
     /// Direct term reference.

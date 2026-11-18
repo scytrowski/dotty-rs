@@ -512,6 +512,10 @@ returns `AmbiguousRelocation` in that case. Padding alone does not count as an e
 Use the raw AST-section builders when exact bytes and original addresses must
 be preserved.
 
+A term `MATCH` preserves the order of inline `CASEDEF` and `SHAREDterm`
+case entries. The latter occupies its own AST address. Its operand targets a
+`CASEDEF` and is relocated along with other AST references.
+
 Structured definition bodies retain their leading `NameRef`. `DefinitionBody`
 and `DefDefBody` expose it through `name()` and can be re-encoded with
 `encode_self()`, so structural decoding no longer loses the definition name.

@@ -982,7 +982,14 @@ impl<'a> MatchSelector<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatchNode<'a> {
     pub selector: MatchSelector<'a>,
-    pub cases: Vec<CaseDefNode<'a>>,
+    pub cases: Vec<MatchCase<'a>>,
+}
+
+/// One case in a MATCH payload, in its original wire position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MatchCase<'a> {
+    Inline(CaseDefNode<'a>),
+    Shared { offset: usize, address: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1589,6 +1596,7 @@ impl<'a> AstAddressIndex<'a> {
     /// Resolves a reference when its target is a category-five node.
     pub fn resolve(&self, reference: AstRef) -> Option<&RawNode<'a>> {
         self.get(reference.address)
+            .filter(|node| reference.kind != AstRefKind::SharedCase || node.tag == CASEDEF_TAG)
     }
 
     /// Iterates over indexed category-five nodes in absolute address order.
@@ -1608,6 +1616,7 @@ impl<'a> AstAddressIndex<'a> {
     /// Resolves a reference to any visible AST node.
     pub fn resolve_node(&self, reference: AstRef) -> Option<AstTreeNode> {
         self.get_node(reference.address)
+            .filter(|node| reference.kind != AstRefKind::SharedCase || node.tag == CASEDEF_TAG)
     }
 
     /// Iterates over all visible nodes in absolute address order.
@@ -2198,7 +2207,21 @@ fn collect_structured_nodes<'a>(
             if let Some(tree) = match_node.selector.scrutinee() {
                 tree!(tree);
             }
-            case_defs!(&match_node.cases);
+            for case in &match_node.cases {
+                match case {
+                    MatchCase::Inline(case) => collect_embedded_case_def_node(
+                        case, source, base, context, output, all_output,
+                    )?,
+                    MatchCase::Shared { offset, .. } => {
+                        let node = AstTreeNode {
+                            tag: SHAREDTERM_TAG,
+                            offset: base + offset,
+                        };
+                        context.record_node(node);
+                        all_output.push(node);
+                    }
+                }
+            }
         }
         StructuredNode::Return(return_node) => {
             if let Some(expression) = &return_node.expression {
@@ -3049,14 +3072,26 @@ impl<'a> RawNode<'a> {
             }
             _ => MatchSelector::Plain(RawTree::decode(&mut reader)?),
         };
-        let cases = read_case_defs(&mut reader)?;
-        if !reader.is_at_end() {
-            return Err(AstError::UnsupportedCategory {
-                tag: self.tag,
-                offset: self.offset,
-            });
+        let mut cases = Vec::new();
+        while !reader.is_at_end() {
+            let offset = reader.position();
+            match reader.peek_u8()? {
+                CASEDEF_TAG => cases.push(MatchCase::Inline(read_inline_case(&mut reader)?)),
+                SHAREDTERM_TAG => {
+                    reader.read_u8()?;
+                    cases.push(MatchCase::Shared {
+                        offset,
+                        address: reader.read_nat()?,
+                    });
+                }
+                _ => {
+                    return Err(AstError::UnsupportedCategory {
+                        tag: self.tag,
+                        offset: self.offset,
+                    });
+                }
+            }
         }
-
         Ok(MatchNode { selector, cases })
     }
 
@@ -4398,7 +4433,13 @@ impl<'a> MatchNode<'a> {
                 }
             }
             for case in &self.cases {
-                case.encode(payload)?;
+                match case {
+                    MatchCase::Inline(case) => case.encode(payload)?,
+                    MatchCase::Shared { address, .. } => {
+                        payload.write_u8(SHAREDTERM_TAG);
+                        payload.write_ast_ref(*address);
+                    }
+                }
             }
             Ok(())
         })
@@ -5316,7 +5357,17 @@ fn collect_structured_refs<'a>(
             if let Some(tree) = match_node.selector.scrutinee() {
                 collect_tree_refs(tree, items);
             }
-            collect_case_defs_refs(&match_node.cases, items);
+            for case in &match_node.cases {
+                match case {
+                    MatchCase::Inline(case) => collect_case_def_refs(case, items),
+                    MatchCase::Shared { address, .. } => {
+                        items.push(ReferenceItem::Reference(WireReference::Ast(AstRef {
+                            kind: AstRefKind::SharedCase,
+                            address: *address,
+                        })))
+                    }
+                }
+            }
         }
         StructuredNode::Return(return_node) => {
             items.push(ReferenceItem::Reference(WireReference::Ast(
@@ -5585,14 +5636,17 @@ fn read_definition_tail<'a>(reader: &mut Reader<'a>) -> Result<Vec<DefinitionTai
     Ok(tail)
 }
 
+fn read_inline_case<'a>(reader: &mut Reader<'a>) -> Result<CaseDefNode<'a>, AstError> {
+    let RawTree::LengthNode(raw) = RawTree::decode(reader)? else {
+        unreachable!("case definition tags are category-five tags");
+    };
+    raw.decode_case_def()
+}
+
 fn read_case_defs<'a>(reader: &mut Reader<'a>) -> Result<Vec<CaseDefNode<'a>>, AstError> {
     let mut cases = Vec::new();
     while !reader.is_at_end() && reader.peek_u8()? == CASEDEF_TAG {
-        let tree = RawTree::decode(reader)?;
-        let RawTree::LengthNode(raw) = tree else {
-            unreachable!("case definition tags are category-five tags");
-        };
-        cases.push(raw.decode_case_def()?);
+        cases.push(read_inline_case(reader)?);
     }
     Ok(cases)
 }
@@ -7994,7 +8048,9 @@ mod tests {
                 Some(RawTree::Leaf(_))
             ));
             assert_eq!(matched.cases.len(), 1);
-            assert!(matched.cases[0].guard.is_none());
+            assert!(
+                matches!(&matched.cases[0], super::MatchCase::Inline(case) if case.guard.is_none())
+            );
         }
     }
 

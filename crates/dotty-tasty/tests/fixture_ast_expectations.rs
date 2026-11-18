@@ -605,10 +605,18 @@ fn match_fixture_has_three_cases_and_expected_results() {
                 dotty_tasty::ast::MatchSelector::Plain(_)
             ));
             assert_eq!(matched.cases.len(), 3);
-            assert_int_constant(&matched.cases[0].pattern, 0);
-            assert_int_constant(&matched.cases[1].pattern, 1);
-            assert!(matched.cases[2].guard.is_none());
-            for (case, expected) in matched.cases.iter().zip(["zero", "one", "other"]) {
+            let cases = matched
+                .cases
+                .iter()
+                .map(|case| match case {
+                    dotty_tasty::MatchCase::Inline(case) => case,
+                    _ => panic!("expected an inline case"),
+                })
+                .collect::<Vec<_>>();
+            assert_int_constant(&cases[0].pattern, 0);
+            assert_int_constant(&cases[1].pattern, 1);
+            assert!(cases[2].guard.is_none());
+            for (case, expected) in cases.iter().zip(["zero", "one", "other"]) {
                 let RawTree::LengthNode(block_node) = &case.body else {
                     panic!("match case body is not a block");
                 };
