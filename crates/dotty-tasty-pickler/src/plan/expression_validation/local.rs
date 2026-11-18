@@ -23,6 +23,7 @@ struct ConditionalMutableInitializerValidation<'a> {
     local_type: TypeId,
     source_initializer: TreeId<Untyped>,
     typed_initializer: TreeId<Typed>,
+    depth: usize,
     method: &'a MethodPicklePlan,
     visited: &'a mut HashSet<TreeId<Typed>>,
 }
@@ -290,6 +291,7 @@ impl Validator<'_, '_> {
                             local_type,
                             source_initializer: source_rhs,
                             typed_initializer: typed_rhs,
+                            depth: rhs_depth,
                             method,
                             visited,
                         },
@@ -317,6 +319,7 @@ impl Validator<'_, '_> {
                         local_type,
                         source_initializer: source_rhs,
                         typed_initializer: typed_rhs,
+                        depth: rhs_depth,
                         method,
                         visited,
                     },
@@ -519,6 +522,7 @@ impl Validator<'_, '_> {
             local_type,
             source_initializer,
             typed_initializer,
+            depth: _,
             method,
             visited,
         } = validation;
@@ -596,6 +600,7 @@ impl Validator<'_, '_> {
             local_type,
             source_initializer,
             typed_initializer,
+            depth,
             method,
             visited,
         } = validation;
@@ -623,11 +628,35 @@ impl Validator<'_, '_> {
             });
         };
         let source_declaration = local.source_tree;
+        let source_value = self.source_tree(source_declaration)?;
+        let typed_value =
+            p.typed_ast
+                .try_get(local.typed_declaration)
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: local.typed_declaration,
+                })?;
+        let (TreeKind::ValDef(source_value), TreeKind::ValDef(typed_value)) =
+            (&source_value.kind, &typed_value.kind)
+        else {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        };
         let (TreeKind::Apply(source_apply), TreeKind::Apply(typed_apply)) =
             (&source.kind, &typed.kind)
         else {
             return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
         };
+        let initializer = p
+            .typed_bindings
+            .local_counter_initializers(p.source.id, method.symbol)
+            .into_iter()
+            .find(|initializer| {
+                initializer.local == local.symbol
+                    && initializer.source_declaration == source_declaration
+                    && initializer.typed_declaration == local.typed_declaration
+            })
+            .ok_or_else(|| {
+                self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+            })?;
         let formals = method
             .parameter_clauses
             .first()
@@ -639,6 +668,19 @@ impl Validator<'_, '_> {
             || typed_apply.kind != ApplyKind::Regular
             || source_apply.args.len() != 1
             || typed_apply.args.len() != 1
+            || source_value.rhs != Some(source_initializer)
+            || typed_value.rhs != Some(typed_initializer)
+            || initializer.source_block != proof.source_block
+            || initializer.typed_block != proof.typed_block
+            || initializer.source_initializer != source_initializer
+            || initializer.typed_initializer != typed_initializer
+            || initializer.call.source_apply != source_initializer
+            || initializer.call.typed_apply != typed_initializer
+            || initializer.source_type_tree != source_value.tpt
+            || initializer.typed_type_tree != typed_value.tpt
+            || initializer.local != local.symbol
+            || initializer.scope != local.scope
+            || !self.same_reference_type(initializer.local_type, local_type)?
             || p.typed_bindings.typed_at(p.source.id, source_initializer) != Some(typed_initializer)
         {
             return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
@@ -722,6 +764,8 @@ impl Validator<'_, '_> {
             || !proof.rhs_locals.contains(&local.symbol)
             || local.scope != proof.scope
             || expected_local != local.symbol
+            || initializer.call.class != class
+            || initializer.call.constructor != constructor
             || declared.kind != SymbolKind::Local
             || declared.owner != Some(method.symbol)
             || declared.flags != SymbolFlags::EMPTY
@@ -752,6 +796,14 @@ impl Validator<'_, '_> {
                 tree: typed_initializer,
             });
         }
+        self.validate_nested_constructor_argument(
+            initializer.call,
+            initializer.argument_formal,
+            local_type,
+            method,
+            depth,
+            visited,
+        )?;
         Ok(())
     }
 

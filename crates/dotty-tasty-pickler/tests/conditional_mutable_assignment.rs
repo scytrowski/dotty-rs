@@ -16,7 +16,7 @@ const SOURCE: &str = include_str!(
     "../../../tests/fixtures/jvm_tasty_conditional_mutable_reference_assignment/ConditionalMutableReferenceAssignment.scala"
 );
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Bindings {
     typed: HashMap<(SourceId, TreeId<Untyped>), TreeId<Typed>>,
     locals: HashMap<(SourceId, SymbolId), Vec<LocalValueBinding>>,
@@ -27,6 +27,14 @@ struct Bindings {
     setter: Option<LocalReceiverUnitCallBinding>,
     setter_pair: Option<[LocalReceiverUnitCallBinding; 2]>,
     pair: Option<FormalLocalConstructorCallPairBinding>,
+}
+
+fn clone_ast<P: AstPhase + Clone>(source: &AstArena<P>) -> AstArena<P> {
+    let mut cloned = AstArena::new();
+    for (_, tree) in source.iter() {
+        cloned.alloc(tree.clone());
+    }
+    cloned
 }
 
 impl SourceTypedBindings for Bindings {
@@ -634,4 +642,102 @@ fn exact_conditional_receipt_emits_the_bounded_result_first_tasty_body() {
             .and_then(|validated| validated.validate_method_bodies())
             .is_err()
     );
+
+    bindings.setter = Some(setter);
+    bindings.setter_pair = None;
+    let validate_body =
+        |source_ast: &AstArena<Untyped>, typed_ast: &AstArena<Typed>, typed_bindings: &Bindings| {
+            ClassStatePicklePlan {
+                store: typer.store(),
+                definitions: &definitions,
+                source_ast,
+                typed_ast,
+                source_index: &source_index,
+                typed_bindings,
+                source: SourceMetadata {
+                    id: source_id,
+                    name: "ConditionalMutableReferenceAssignment.scala".into(),
+                },
+                class,
+                class_tree: factory_tree,
+                constructor: PrimaryConstructorInputPlan {
+                    symbol: constructor,
+                    source_tree: constructor_tree,
+                    parameter_clauses: vec![],
+                },
+                members: &members,
+            }
+            .validate()
+            .and_then(|validated| validated.validate_method_bodies())
+        };
+
+    let mut truncated_source = clone_ast(&parsed.ast);
+    let mut truncated_typed = clone_ast(typer.typed_ast());
+    let TreeKind::Block(truncated_source_block) = &mut truncated_source.get_mut(method_body).kind
+    else {
+        unreachable!()
+    };
+    let TreeKind::Block(truncated_typed_block) =
+        &mut truncated_typed.get_mut(receipt.typed_block).kind
+    else {
+        unreachable!()
+    };
+    truncated_source_block.stats.truncate(1);
+    truncated_typed_block.stats.truncate(1);
+    assert!(
+        validate_body(&truncated_source, &truncated_typed, &bindings).is_err(),
+        "a short source/typed block is rejected without panicking"
+    );
+
+    let first_initializer = bindings
+        .initializers
+        .iter()
+        .find(|initializer| initializer.local == first.symbol())
+        .unwrap();
+    let source_new_type = match &parsed.ast.get(first_initializer.call.source_new).kind {
+        TreeKind::New(new_tree) => new_tree.tpt,
+        _ => unreachable!(),
+    };
+    for source_child in [first_initializer.call.source_new, source_new_type] {
+        let mut corrupted = bindings.clone();
+        corrupted
+            .typed
+            .insert((source_id, source_child), receipt.typed_if);
+        assert!(
+            validate_body(&parsed.ast, typer.typed_ast(), &corrupted).is_err(),
+            "forged constructor NEW/type-tree child mappings are rejected"
+        );
+    }
+
+    for target in [first, second] {
+        let rhs_index = receipt
+            .rhs_locals
+            .iter()
+            .position(|&local| local == target.symbol())
+            .unwrap();
+        let mut substituted_source = clone_ast(&parsed.ast);
+        substituted_source.get_mut(setter.source_receiver).kind =
+            parsed.ast.get(receipt.source_rhss[rhs_index]).kind.clone();
+        let mut substituted_typed = clone_ast(typer.typed_ast());
+        let replacement = typer.typed_ast().get(receipt.typed_rhss[rhs_index]).clone();
+        let receiver = substituted_typed.get_mut(setter.typed_receiver);
+        receiver.kind = replacement.kind;
+        receiver.ty = replacement.ty;
+        let substituted_setter = LocalReceiverUnitCallBinding {
+            receiver: target.symbol(),
+            receiver_scope: target.scope(),
+            ..setter
+        };
+        let mut substituted_bindings = bindings.clone();
+        substituted_bindings.setter = Some(substituted_setter);
+        assert!(
+            validate_body(
+                &substituted_source,
+                &substituted_typed,
+                &substituted_bindings,
+            )
+            .is_err(),
+            "post-IF setter receiver substitutions to original locals are rejected"
+        );
+    }
 }

@@ -403,15 +403,20 @@ impl Validator<'_, '_> {
                 );
             let conditional_rhs_roles_valid = conditional_assignment.is_some_and(|assignment| {
                 let mut seed_locals = [None, None];
+                let (Some(source_declarations), Some(typed_declarations)) =
+                    (source_block.stats.get(..2), typed_block.stats.get(..2))
+                else {
+                    return false;
+                };
                 let [formals] = method.parameter_clauses.as_slice() else {
                     return false;
                 };
                 if formals.len() != 4 {
                     return false;
                 }
-                for (index, (&source_declaration, &typed_declaration)) in source_block.stats[..2]
+                for (index, (&source_declaration, &typed_declaration)) in source_declarations
                     .iter()
-                    .zip(&typed_block.stats[..2])
+                    .zip(typed_declarations)
                     .enumerate()
                 {
                     let Some(local) = self.local_bindings.get(&source_declaration) else {
@@ -1028,6 +1033,12 @@ impl Validator<'_, '_> {
                     && assignment.method == method.symbol
                     && assignment.owner == p.class
             });
+        let conditional_receiver_is_exact = conditional_assignment.is_none_or(|assignment| {
+            assignment.local == binding.receiver
+                && assignment.scope == binding.receiver_scope
+                && assignment.method == method.symbol
+                && assignment.owner == p.class
+        });
         let receiver_class = receiver_initializer
             .map(|initializer| initializer.call.class)
             .or_else(|| {
@@ -1145,6 +1156,7 @@ impl Validator<'_, '_> {
                 && !receiver_is_selection
                 && !receiver_is_mutable_rebinding
                 && !receiver_is_conditional_mutable_rebinding)
+            || !conditional_receiver_is_exact
             || !self.visible_locals.contains(&binding.receiver)
             || !canonical_method
             || expected_argument_formal != Some(binding.argument_formal)
