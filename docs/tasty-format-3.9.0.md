@@ -844,12 +844,12 @@ together with the section boundary.
 `Section` view for assembling a `SectionTable`. `EncodedSection::raw()` covers
 unknown or application-specific sections without requiring a guessed grammar.
 `PositionSection::resolved_entries()` provides an ordered derived view that
-accumulates association deltas into absolute coordinates while retaining
+accumulates address, start and end deltas while retaining
 `SOURCE` events. The raw `PositionEntry` deltas remain authoritative for
-lossless re-encoding.
+lossless re-encoding. The point is the current start plus the optional point offset.
 `PositionSection::resolved_associations()` provides a smaller derived view
-that omits source-change events and attaches the currently active source
-`NameRef`—or `None` before the first source event—to each association. Use
+that omits source-change events and attaches the explicit source
+`NameRef` at the same AST address. Addresses without a marker carry `None`. Use
 `resolved_entries()` when source-event ordering itself is significant.
 `TastyFile::resolved_position_associations()` exposes the same view directly
 from a parsed file and returns `None` when the file has no `Positions` section.

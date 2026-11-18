@@ -1153,7 +1153,7 @@ impl<'a> TastyFile<'a> {
     /// section.
     ///
     /// `None` means that the section is absent. The returned associations carry
-    /// the active source reference and omit standalone source-change events.
+    /// the source marker at their address and omit standalone source events.
     pub fn resolved_position_associations(
         &self,
     ) -> Result<Option<Vec<ResolvedPosition>>, TastyFileError> {
@@ -1715,12 +1715,17 @@ mod tests {
         let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
         let file = TastyFile::parse_scala_3_9(bytes).unwrap();
 
-        assert!(
-            !file
-                .resolved_position_associations()
-                .unwrap()
-                .unwrap()
-                .is_empty()
+        // Values reported by Scala 3.9's PositionUnpickler for this fixture.
+        let root = file.resolved_position_at(0).unwrap().unwrap();
+        assert_eq!((root.start, root.end, root.point), (0, 129, 21));
+        assert_eq!(
+            file.names().get_utf8(root.source.unwrap()),
+            file.source_file().unwrap()
+        );
+        let next = file.resolved_position_at(5).unwrap().unwrap();
+        assert_eq!(
+            (next.start, next.end, next.point, next.source),
+            (36, 36, 36, None)
         );
     }
 

@@ -117,10 +117,10 @@ pub enum PositionEntry {
         start_delta: Option<i64>,
         /// Optional delta for the end coordinate.
         end_delta: Option<i64>,
-        /// Optional delta for the point coordinate.
+        /// Optional point offset from the current start coordinate.
         point_delta: Option<i64>,
     },
-    /// Changes the active source-file name reference.
+    /// Records the source-file name at the current AST address.
     Source(NameRef),
 }
 
@@ -140,7 +140,7 @@ pub enum PositionCoordinate {
 /// Position event after address and coordinate deltas are resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedPositionEntry {
-    /// Changes the active source-file name reference.
+    /// Records the source-file name at the current AST address.
     Source(NameRef),
     /// Absolute position association.
     Association {
@@ -155,10 +155,10 @@ pub enum ResolvedPositionEntry {
     },
 }
 
-/// A resolved source position with the active source-file reference.
+/// A resolved source position with the source explicitly recorded at its AST address.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPosition {
-    /// Active source-file name reference, if a source event preceded it.
+    /// Source-file name explicitly recorded at this address, when present.
     pub source: Option<NameRef>,
     /// Absolute AST address.
     pub address: i64,
@@ -323,7 +323,6 @@ impl PositionSection {
         let mut address = 0;
         let mut start = 0;
         let mut end = 0;
-        let mut point = 0;
         let mut resolved = Vec::with_capacity(self.entries.len());
 
         for entry in &self.entries {
@@ -345,9 +344,11 @@ impl PositionSection {
                     if let Some(delta) = end_delta {
                         end = add_position_delta(end, *delta, PositionCoordinate::End)?;
                     }
-                    if let Some(delta) = point_delta {
-                        point = add_position_delta(point, *delta, PositionCoordinate::Point)?;
-                    }
+                    let point = add_position_delta(
+                        start,
+                        point_delta.unwrap_or(0),
+                        PositionCoordinate::Point,
+                    )?;
                     resolved.push(ResolvedPositionEntry::Association {
                         address,
                         start,
@@ -361,34 +362,38 @@ impl PositionSection {
         Ok(resolved)
     }
 
-    /// Resolves position deltas and returns only associations with their
-    /// currently active source reference.
-    ///
-    /// An association before the first `SOURCE` event has `source = None`.
-    /// Source-change events are omitted from this derived view; use
-    /// [`Self::resolved_entries`] when their ordering must be preserved.
+    /// Returns associations in wire order with the explicit source marker at
+    /// each address. Scala writes the marker after the associated span.
     pub fn resolved_associations(&self) -> Result<Vec<ResolvedPosition>, SectionError> {
-        let mut source = None;
+        let mut sources = BTreeMap::new();
+        let mut current_address = 0;
         let mut associations = Vec::new();
 
         for entry in self.resolved_entries()? {
             match entry {
-                ResolvedPositionEntry::Source(reference) => source = Some(reference),
+                ResolvedPositionEntry::Source(reference) => {
+                    sources.insert(current_address, reference);
+                }
                 ResolvedPositionEntry::Association {
                     address,
                     start,
                     end,
                     point,
-                } => associations.push(ResolvedPosition {
-                    source,
-                    address,
-                    start,
-                    end,
-                    point,
-                }),
+                } => {
+                    current_address = address;
+                    associations.push(ResolvedPosition {
+                        source: None,
+                        address,
+                        start,
+                        end,
+                        point,
+                    });
+                }
             }
         }
-
+        for association in &mut associations {
+            association.source = sources.get(&association.address).copied();
+        }
         Ok(associations)
     }
 
@@ -1290,7 +1295,7 @@ mod tests {
                     address_delta: 3,
                     start_delta: None,
                     end_delta: Some(-1),
-                    point_delta: Some(7),
+                    point_delta: Some(1),
                 },
                 PositionEntry::Source(8),
             ],
@@ -1304,13 +1309,13 @@ mod tests {
                     address: 10,
                     start: 2,
                     end: 5,
-                    point: 0,
+                    point: 2,
                 },
                 ResolvedPositionEntry::Association {
                     address: 13,
                     start: 2,
                     end: 4,
-                    point: 7,
+                    point: 3,
                 },
                 ResolvedPositionEntry::Source(8),
             ])
@@ -1333,7 +1338,7 @@ mod tests {
                     address_delta: 3,
                     start_delta: Some(2),
                     end_delta: None,
-                    point_delta: Some(-1),
+                    point_delta: Some(1),
                 },
             ],
         };
@@ -1355,7 +1360,7 @@ mod tests {
                     address_delta: 9,
                     start_delta: Some(2),
                     end_delta: None,
-                    point_delta: Some(-1),
+                    point_delta: Some(1),
                 },
             ]
         );
@@ -1367,13 +1372,13 @@ mod tests {
                     address: 100,
                     start: 4,
                     end: 9,
-                    point: 0,
+                    point: 4,
                 },
                 ResolvedPositionEntry::Association {
                     address: 109,
                     start: 6,
                     end: 9,
-                    point: -1,
+                    point: 7,
                 },
             ]
         );
@@ -1413,7 +1418,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_position_associations_with_the_active_source() {
+    fn resolves_position_associations_with_the_marker_at_the_same_address() {
         let positions = PositionSection {
             line_sizes: vec![],
             entries: vec![
@@ -1429,7 +1434,7 @@ mod tests {
                     address_delta: 3,
                     start_delta: None,
                     end_delta: None,
-                    point_delta: Some(7),
+                    point_delta: Some(1),
                 },
             ],
         };
@@ -1438,18 +1443,18 @@ mod tests {
             positions.resolved_associations(),
             Ok(vec![
                 ResolvedPosition {
-                    source: Some(4),
+                    source: Some(8),
                     address: 10,
                     start: 2,
                     end: 5,
-                    point: 0,
+                    point: 2,
                 },
                 ResolvedPosition {
-                    source: Some(8),
+                    source: None,
                     address: 13,
                     start: 2,
                     end: 5,
-                    point: 7,
+                    point: 3,
                 },
             ])
         );
@@ -1494,7 +1499,7 @@ mod tests {
                     address_delta: 6,
                     start_delta: Some(4),
                     end_delta: Some(5),
-                    point_delta: Some(6),
+                    point_delta: Some(1),
                 },
             ],
         };
@@ -1506,7 +1511,7 @@ mod tests {
                 address: 10,
                 start: 5,
                 end: 8,
-                point: 8,
+                point: 6,
             }))
         );
     }
