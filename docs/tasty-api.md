@@ -59,6 +59,15 @@ references, and AST references before returning the file view.
 - `TastyFile::encode_structured_relocated` re-encodes structured nodes and
   relocates AST references when node sizes change. Its guarantee is structural
   and semantic compatibility, not byte identity.
+- `TastyFile::encode_structured_relocated_with_identities` accepts reordered
+  siblings. Build an `AstNodeIdentityMap` from the original address of every
+  visible node in edited wire order. For example, if two adjacent subtrees
+  originally occupy address lists `[4, 7, 9]` and `[11, 14, 16]`, exchange
+  those two slices in the list returned by `index.node_addresses()` and pass
+  it to `AstNodeIdentityMap::from_edited_order`. Keep all reference operands
+  in the original coordinate system. The caller identifies each node. The
+  encoder checks completeness, uniqueness, tags and parent identities, then
+  resolves final byte offsets, including changes in operand width.
 
 Offsets, AST addresses, and compiler bookkeeping are wire-level data. They
 are not semantic identities and may change during a relocated structured

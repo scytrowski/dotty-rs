@@ -498,18 +498,30 @@ impl PositionSection {
             .find(|association| association.address == address))
     }
 
-    /// Rebuild address deltas after AST nodes have moved within the AST
-    /// section. Source and source-coordinate entries retain their wire order
-    /// and values; only association address deltas are changed.
+    /// Rebuild address deltas and keep source markers with their original
+    /// nodes, including markers at the implicit initial address zero.
     pub(crate) fn relocate_ast_addresses(
         &self,
-        address_map: &BTreeMap<u32, u32>,
+        relocate: impl Fn(u32) -> Result<u32, SectionError>,
     ) -> Result<Self, SectionError> {
         let mut old_address = 0i64;
         let mut new_address = 0i64;
         let mut entries = Vec::with_capacity(self.entries.len());
 
-        for entry in &self.entries {
+        // SOURCE has no address operand. If the first root moved, attach its
+        // leading markers to the first span for that root in the new layout.
+        let leading = self
+            .entries
+            .iter()
+            .take_while(|entry| matches!(entry, PositionEntry::Source(_)))
+            .count();
+        let deferred = if leading > 0 && relocate(0)? != 0 {
+            leading
+        } else {
+            0
+        };
+        let mut markers = &self.entries[..deferred];
+        for entry in &self.entries[deferred..] {
             match entry {
                 PositionEntry::Source(reference) => {
                     entries.push(PositionEntry::Source(*reference));
@@ -530,11 +542,7 @@ impl PositionSection {
                             address: old_address,
                         }
                     })?;
-                    let relocated = address_map
-                        .get(&old_address_u32)
-                        .copied()
-                        .unwrap_or(old_address_u32);
-                    let relocated = i64::from(relocated);
+                    let relocated = i64::from(relocate(old_address_u32)?);
                     let relocated_delta = relocated.checked_sub(new_address).ok_or(
                         SectionError::PositionOverflow {
                             coordinate: PositionCoordinate::Address,
@@ -543,14 +551,33 @@ impl PositionSection {
                         },
                     )?;
                     new_address = relocated;
+                    // A zero address delta with only a start delta spells
+                    // SOURCE on the wire. An explicit zero end delta preserves
+                    // the same span and synthetic-point flag.
+                    let end = if relocated_delta == 0
+                        && start_delta.is_some()
+                        && end_delta.is_none()
+                        && point_delta.is_none()
+                    {
+                        Some(0)
+                    } else {
+                        *end_delta
+                    };
                     entries.push(PositionEntry::Association {
                         address_delta: relocated_delta,
                         start_delta: *start_delta,
-                        end_delta: *end_delta,
+                        end_delta: end,
                         point_delta: *point_delta,
                     });
+                    if old_address == 0 && !markers.is_empty() {
+                        entries.extend_from_slice(markers);
+                        markers = &[];
+                    }
                 }
             }
+        }
+        if !markers.is_empty() {
+            return Err(SectionError::UnanchoredPositionSource);
         }
 
         Ok(Self {
@@ -604,6 +631,14 @@ pub enum SectionError {
         /// Delta that could not be added.
         delta: i64,
     },
+    /// An explicit relocation has no visible node for a position address.
+    MissingPositionIdentity {
+        /// Original position association address.
+        address: u32,
+    },
+    /// A source marker at the implicit initial address has no span to
+    /// attach to after the first root moves.
+    UnanchoredPositionSource,
     /// An AST address could not be represented as an unsigned address.
     InvalidAstAddress {
         /// Invalid absolute address.
@@ -647,6 +682,14 @@ impl fmt::Display for SectionError {
             } => write!(
                 formatter,
                 "position {coordinate:?} overflows when adding delta {delta} to {previous}"
+            ),
+            Self::MissingPositionIdentity { address } => write!(
+                formatter,
+                "no AST node identity for position at original address {address}"
+            ),
+            Self::UnanchoredPositionSource => write!(
+                formatter,
+                "cannot relocate leading SOURCE without a span for the original first root"
             ),
             Self::InvalidAstAddress { address } => {
                 write!(
@@ -1126,6 +1169,15 @@ impl EncodedAstSection {
                     .iter()
                     .map(|node| ast_address_from_offset(node.offset))
                     .collect::<Result<Vec<_>, _>>()?;
+                // File metadata can target any visible node. In explicit mode
+                // preserve the full domain when movement requires translation.
+                if let Some(identities) = identities
+                    && !address_map.is_empty()
+                {
+                    for &address in &identities.original_addresses {
+                        address_map.entry(address).or_insert(address);
+                    }
+                }
                 return Ok(Self {
                     section: EncodedSection::raw(name, bytes),
                     ast_addresses,
@@ -1565,7 +1617,9 @@ mod tests {
         };
         let address_map = BTreeMap::from([(10, 100), (13, 109)]);
 
-        let relocated = positions.relocate_ast_addresses(&address_map).unwrap();
+        let relocated = positions
+            .relocate_ast_addresses(|addr| Ok(address_map.get(&addr).copied().unwrap_or(addr)))
+            .unwrap();
 
         assert_eq!(
             relocated.entries,
@@ -1604,6 +1658,18 @@ mod tests {
                     is_synthetic: false,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn relocation_rejects_a_leading_source_with_no_span_for_its_moved_root() {
+        let positions = PositionSection {
+            line_sizes: vec![],
+            entries: vec![PositionEntry::Source(1)],
+        };
+        assert_eq!(
+            positions.relocate_ast_addresses(|_| Ok(3)),
+            Err(SectionError::UnanchoredPositionSource)
         );
     }
 

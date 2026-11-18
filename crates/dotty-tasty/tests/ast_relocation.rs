@@ -377,3 +377,130 @@ fn explicit_relocation_rejects_hidden_operands_even_in_stationary_opaque_nodes()
         }))
     );
 }
+
+#[test]
+fn explicit_file_relocation_keeps_spans_sources_and_comments_with_their_nodes() {
+    use dotty_tasty::tasty::*;
+    let header = TastyFile::parse(include_bytes!("fixtures/simple_def/SimpleDef.tasty"))
+        .unwrap()
+        .header()
+        .clone();
+    let names = NameTable::from_entries(
+        ["ASTs", "Positions", "Comments", "A.scala", "B.scala"]
+            .map(|n| RawName::Utf8(n.into()))
+            .into(),
+    )
+    .unwrap();
+    let positions = PositionSection {
+        line_sizes: vec![12],
+        entries: vec![
+            PositionEntry::Source(3),
+            PositionEntry::Association {
+                address_delta: 3,
+                start_delta: Some(0),
+                end_delta: None,
+                point_delta: None,
+            },
+            PositionEntry::Source(4),
+            PositionEntry::Association {
+                address_delta: -3,
+                start_delta: Some(1),
+                end_delta: Some(8),
+                point_delta: Some(1),
+            },
+        ],
+    };
+    let comment = Comment {
+        address: 2,
+        text: "original leaf".into(),
+        coordinates: 19,
+    };
+    let builder = TastyFileBuilder::new(header, names)
+        .with_section(EncodedSection::raw(
+            0,
+            [
+                APPLY_TAG,
+                0x81,
+                UNITCONST_TAG,
+                APPLY_TAG,
+                0x81,
+                TRUECONST_TAG,
+            ],
+        ))
+        .with_section(EncodedSection::positions(1, &positions).unwrap())
+        .with_section(EncodedSection::comments(2, std::slice::from_ref(&comment)).unwrap());
+    let file = builder.build().unwrap();
+    let mut roots = file.structured_asts().unwrap();
+    roots.swap(0, 1);
+    let ids = AstNodeIdentityMap::from_edited_order([3, 5, 0, 2]);
+    let bytes = file
+        .encode_structured_relocated_with_identities(&roots, &ids)
+        .unwrap();
+    let result = TastyFile::parse_and_validate_scala_3_9(&bytes).unwrap();
+    assert_eq!(
+        result.ast_address_index().unwrap().get_node(2).unwrap().tag,
+        TRUECONST_TAG
+    );
+    let mut spans = positions.resolved_associations().unwrap();
+    spans[0].address = 0;
+    spans[1].address = 3;
+    assert_eq!(
+        result.resolved_position_associations().unwrap().unwrap(),
+        spans
+    );
+    assert_eq!(
+        result.comments().unwrap().unwrap(),
+        [Comment {
+            address: 5,
+            ..comment
+        }]
+    );
+}
+
+#[test]
+fn explicit_file_relocation_rejects_positions_with_no_original_node_identity() {
+    use dotty_tasty::tasty::*;
+    let header = TastyFile::parse(include_bytes!("fixtures/simple_def/SimpleDef.tasty"))
+        .unwrap()
+        .header()
+        .clone();
+    let names = NameTable::from_entries(vec![
+        RawName::Utf8("ASTs".into()),
+        RawName::Utf8("Positions".into()),
+    ])
+    .unwrap();
+    let positions = PositionSection {
+        line_sizes: vec![],
+        entries: vec![PositionEntry::Association {
+            address_delta: 1,
+            start_delta: None,
+            end_delta: None,
+            point_delta: None,
+        }],
+    };
+    let builder = TastyFileBuilder::new(header, names)
+        .with_section(EncodedSection::raw(
+            0,
+            [
+                APPLY_TAG,
+                0x81,
+                UNITCONST_TAG,
+                APPLY_TAG,
+                0x81,
+                TRUECONST_TAG,
+            ],
+        ))
+        .with_section(EncodedSection::positions(1, &positions).unwrap());
+    let file = builder.build().unwrap();
+    let mut roots = file.structured_asts().unwrap();
+    roots.swap(0, 1);
+    assert_eq!(
+        file.encode_structured_relocated_with_identities(
+            &roots,
+            &AstNodeIdentityMap::from_edited_order([3, 5, 0, 2])
+        ),
+        Err(TastyFileError::Sections(
+            SectionError::MissingPositionIdentity { address: 1 }
+        ))
+    );
+}

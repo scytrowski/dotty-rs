@@ -7,8 +7,8 @@ use crate::name_table::{
 };
 use crate::reader::Reader;
 use crate::section::{
-    Attribute, Comment, EncodedSection, PositionSection, ResolvedPosition, Section, SectionError,
-    SectionTable, StandardSection,
+    AstNodeIdentityMap, Attribute, Comment, EncodedAstSection, EncodedSection, PositionSection,
+    ResolvedPosition, Section, SectionError, SectionTable, StandardSection,
 };
 use crate::term::{AstRef, AstTreeNode, TermEncodeError};
 use crate::writer::{WriteError, Writer};
@@ -775,15 +775,37 @@ impl<'a> TastyFile<'a> {
         &self,
         nodes: &[StructuredNode<'a>],
     ) -> Result<Vec<u8>, TastyFileError> {
+        self.encode_relocated(nodes, None)
+    }
+
+    /// Relocates AST references, positions and comments according to the
+    /// caller's explicit identities, including reordered sibling subtrees.
+    /// The identities and all edited reference operands use original AST
+    /// addresses. A position without a visible identity cannot be translated
+    /// when the layout changes.
+    pub fn encode_structured_relocated_with_identities(
+        &self,
+        nodes: &[StructuredNode<'_>],
+        identities: &AstNodeIdentityMap,
+    ) -> Result<Vec<u8>, TastyFileError> {
+        self.encode_relocated(nodes, Some(identities))
+    }
+
+    fn encode_relocated(
+        &self,
+        nodes: &[StructuredNode<'_>],
+        identities: Option<&AstNodeIdentityMap>,
+    ) -> Result<Vec<u8>, TastyFileError> {
         let original_ast_section = self
             .section(StandardSection::Asts)
             .ok_or(TastyFileError::MissingSection(StandardSection::Asts))?;
-        let ast_section = EncodedSection::structured_asts_relocated(
+        let ast_section = EncodedAstSection::from_structured_relocated(
             original_ast_section.name,
             original_ast_section.payload,
             nodes,
+            identities,
         )?;
-        let ast_address_map = ast_section.ast_address_map().clone();
+        let ast_address_map = ast_section.ast_address_map();
 
         let mut builder = TastyFileBuilder::new(self.header.clone(), self.names.clone());
         for section in self.sections.iter() {
@@ -791,17 +813,24 @@ impl<'a> TastyFile<'a> {
                 Some(StandardSection::Asts) => ast_section.section().clone(),
                 Some(StandardSection::Comments) => {
                     let comments = section.decode_comments()?;
-                    // The relocation map contains only moved nodes. An absent
-                    // entry denotes an unchanged address only for an original node.
+                    // A comment must already target a visible original node.
                     if !comments.is_empty() {
                         self.validate_comment_addresses(&comments, &self.ast_address_index()?)?;
                     }
-                    let comments = Comment::relocate_ast_addresses(&comments, &ast_address_map);
+                    let comments = Comment::relocate_ast_addresses(&comments, ast_address_map);
                     EncodedSection::comments(section.name, &comments)?
                 }
                 Some(StandardSection::Positions) => {
                     let positions = section.decode_positions()?;
-                    let positions = positions.relocate_ast_addresses(&ast_address_map)?;
+                    let positions = positions.relocate_ast_addresses(|address| {
+                        match ast_address_map.get(&address) {
+                            Some(&target) => Ok(target),
+                            None if identities.is_some() && !ast_address_map.is_empty() => {
+                                Err(SectionError::MissingPositionIdentity { address })
+                            }
+                            None => Ok(address),
+                        }
+                    })?;
                     EncodedSection::positions(section.name, &positions)?
                 }
                 _ => EncodedSection::raw(section.name, section.payload),
