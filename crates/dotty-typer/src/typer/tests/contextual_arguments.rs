@@ -172,16 +172,18 @@ fn same_level_contextual_ranking_prefers_more_general_result_regardless_of_order
 
 #[test]
 fn imported_values_retain_the_qualifier_and_selector_filter() {
-    for (selector, selected) in [
-        ("given", Some("modern")),
-        ("given Int", Some("modern")),
-        ("modern", Some("modern")),
-        ("{modern as renamed}", Some("modern")),
-        ("{modern as _, given}", None),
-        ("*", None),
+    for (declaration, selector, selected) in [
+        ("modern", "given", Some("modern")),
+        ("modern", "given Int", Some("modern")),
+        ("modern", "modern", Some("modern")),
+        ("modern", "{modern as renamed}", Some("modern")),
+        ("modern", "{modern as _, given}", None),
+        ("modern", "*", None),
+        ("`*`", "*", None),
+        ("`*`", "`*`", Some("*")),
     ] {
         let text = format!(
-            "object Instances {{ given modern: Int = 7; given flag: Boolean = true }}; class C {{ def need(using n: Int): Int = n; def use: Int = {{ import Instances.{selector}; need }} }}"
+            "object Instances {{ given {declaration}: Int = 7; given flag: Boolean = true }}; class C {{ def need(using n: Int): Int = n; def use: Int = {{ import Instances.{selector}; need }} }}"
         );
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(&text);
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
@@ -1024,4 +1026,40 @@ fn positional_arguments_apply_to_a_contextual_methods_returned_value() {
         typer.typed_ast().get(outer.args[0]).kind,
         TreeKind::Literal(_)
     ));
+}
+
+#[test]
+fn malformed_contextual_import_rename_rolls_back_with_the_import_location() {
+    let text = "object P { given n:Int=1 }; class C { import P.{n as renamed}; def need(using i:Int):Int=i; def use:Int=need }";
+    let (mut parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let (import, rename) = parsed
+        .ast
+        .iter()
+        .find_map(|(id, node)| {
+            let TreeKind::Import(import) = &node.kind else {
+                return None;
+            };
+            Some((id, import.selectors.first()?.renamed?))
+        })
+        .unwrap();
+    parsed.ast.get_mut(rename).kind = TreeKind::Literal(dotty_core::ast::Literal {
+        value: dotty_core::Constant::Unit,
+    });
+    let (method, _) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    let before = typer.store.checkpoint();
+    let result = typer.type_method_definition(definition_tree(&index, method));
+    assert!(
+        matches!(result, Err(TyperError::MalformedSourceImport{import_tree_index,..}) if import_tree_index==import.index()),
+        "{result:?}"
+    );
+    assert_eq!(typer.store.checkpoint(), before);
+    assert!(typer.typed_index.is_empty());
 }

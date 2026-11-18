@@ -1055,6 +1055,28 @@ impl SourceTyper<'_> {
                 }
             }
         }
+        let mut named = HashMap::new();
+        for selector in &import.selectors {
+            if !selector.imported_backquoted
+                && matches!(self.store.names.resolve(selector.imported.text()), "*" | "")
+            {
+                continue;
+            }
+            let visible = if let Some(rename) = selector.renamed {
+                let Some(TreeKind::Ident(ident)) =
+                    self.arena.try_get(rename).map(|tree| &tree.kind)
+                else {
+                    return Err(TyperError::MalformedSourceImport {
+                        source: self.source,
+                        import_tree_index: tree.index(),
+                    });
+                };
+                ident.backquoted || self.store.names.resolve(ident.name.text()) != "_"
+            } else {
+                true
+            };
+            named.entry(selector.imported.text()).or_insert(visible);
+        }
         for scope in scopes {
             for symbol in self.contextual_members(scope, journal)? {
                 let entry = self.store.symbols.get(symbol);
@@ -1067,12 +1089,8 @@ impl SourceTyper<'_> {
                     symbol,
                     receiver: qualified.map(ContextualReceiver::Import),
                 };
-                let selected_by_name = import
-                    .selectors
-                    .iter()
-                    .find(|s| s.imported.text() == name.text());
-                let selected = if let Some(named) = selected_by_name {
-                    !named.renamed.is_some_and(|rename| matches!(&self.arena.get(rename).kind, TreeKind::Ident(id) if !id.backquoted && self.store.names.resolve(id.name.text()) == "_"))
+                let selected = if let Some(&visible) = named.get(&name.text()) {
+                    visible
                 } else {
                     let mut matched = false;
                     for selector in &import.selectors {
