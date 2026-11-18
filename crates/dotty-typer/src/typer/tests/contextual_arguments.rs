@@ -723,7 +723,7 @@ fn context_lambda_owns_the_evidence_used_by_its_body() {
 
 #[test]
 fn applied_context_function_uses_its_instantiated_apply_signature() {
-    let text = "package scala; class C { def supplied(f: Int ?=> Boolean): Boolean = f(using 3); def auto(f: Int ?=> Boolean)(using n: Int): Boolean = f; def missing(f: Int ?=> Boolean): Boolean = f; def kept(f: Int ?=> Boolean): Int ?=> Boolean = f }";
+    let text = "package scala; class C { def supplied(f: Int ?=> Boolean): Boolean = f(using 3); def auto(f: Int ?=> Boolean)(using n: Int): Boolean = f; def missing(f: Int ?=> Boolean): Boolean = f; def kept(f: Int ?=> Boolean): Int ?=> Boolean = f; def need(using n: Int): Int = n; def build: Int ?=> Int = need }";
     let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
     let mut typer = SourceTyper::new(
         &parsed.ast,
@@ -733,7 +733,7 @@ fn applied_context_function_uses_its_instantiated_apply_signature() {
         definitions,
         &packages,
     );
-    for name in ["supplied", "auto", "missing", "kept"] {
+    for name in ["supplied", "auto", "missing", "kept", "build"] {
         let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
         let result = typer.type_method_definition(definition_tree(&index, method));
         if name == "missing" {
@@ -745,11 +745,29 @@ fn applied_context_function_uses_its_instantiated_apply_signature() {
         }
         result.unwrap_or_else(|error| panic!("{name}: {error:?}"));
         let typed = typer.typed_index.get(source, rhs).unwrap();
-        if name == "kept" {
-            assert_eq!(
-                reference(&typer, typed),
-                method_parameter_symbol(&parsed, &index, source, method, 0)
+        if matches!(name, "kept" | "build") {
+            let closure = typer.function_literals.method_at(source, rhs).unwrap();
+            let definition = typer.function_literals.definition_at(source, rhs).unwrap();
+            let TreeKind::DefDef(d) = &typer.typed_ast().get(definition).kind else {
+                panic!()
+            };
+            let TreeKind::Apply(call) = &typer.typed_ast().get(d.rhs.unwrap()).kind else {
+                panic!()
+            };
+            let evidence = reference(&typer, call.args[0]);
+            assert_eq!(typer.store.symbols.get(evidence).owner, Some(closure));
+            assert!(
+                typer
+                    .store
+                    .symbols
+                    .get(evidence)
+                    .flags
+                    .contains(SymbolFlags::GIVEN)
             );
+            assert!(matches!(
+                typer.typed_ast().get(typed).kind,
+                TreeKind::Closure(_)
+            ));
             continue;
         }
         let TreeKind::Apply(call) = &typer.typed_ast().get(typed).kind else {

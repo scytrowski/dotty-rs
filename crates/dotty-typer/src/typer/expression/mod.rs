@@ -433,6 +433,18 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
+        if self.requires_context_abstraction(tree, expected)
+            && self.typed_index.get(self.source, tree).is_none()
+        {
+            return self.synthesize_context_lambda(
+                tree,
+                expected,
+                context,
+                poly_binder,
+                info_journal,
+                new_mappings,
+            );
+        }
         let mut typed = match self.arena.try_get(tree).map(|node| &node.kind) {
             Some(TreeKind::Block(block))
                 if !block.stats.is_empty() && self.is_function_literal_value(block.expr) =>
@@ -622,6 +634,16 @@ impl SourceTyper<'_> {
             self.validate_cached_parent_argument_receiver_access(tree, typed)?;
             return Ok(typed);
         }
+        if self.requires_context_abstraction(tree, expected) {
+            return self.synthesize_context_lambda(
+                tree,
+                expected,
+                context,
+                poly_binder,
+                info_journal,
+                new_mappings,
+            );
+        }
         let node = self
             .arena
             .try_get(tree)
@@ -661,7 +683,6 @@ impl SourceTyper<'_> {
                 self.type_function_literal(
                     tree,
                     function,
-                    node.position,
                     FunctionLiteralTypingContext {
                         context,
                         expected_function1,
@@ -723,6 +744,10 @@ impl SourceTyper<'_> {
             })?;
         new_mappings.push((self.source, tree));
         Ok(typed)
+    }
+
+    fn requires_context_abstraction(&self, tree: TreeId<Untyped>, expected: TypeId) -> bool {
+        self.is_applied_context_function(expected) && !self.is_function_literal_value(tree)
     }
 
     pub(in crate::typer) fn is_function_literal_value(&self, tree: TreeId<Untyped>) -> bool {

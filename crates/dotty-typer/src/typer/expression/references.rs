@@ -216,7 +216,7 @@ impl SourceTyper<'_> {
         Ok(applied)
     }
 
-    fn record_adapted_value(
+    pub(in crate::typer) fn record_adapted_value(
         &mut self,
         source_tree: TreeId<Untyped>,
         applied: TreeId<Typed>,

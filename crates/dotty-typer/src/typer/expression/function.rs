@@ -19,6 +19,20 @@ pub(in crate::typer) struct FunctionLiteralTypingContext {
     pub poly_binder: Option<TypeId>,
 }
 
+struct LambdaParameter {
+    name: TermName,
+    ty: TypeId,
+    position: Option<SourceSpan>,
+    source: Option<(TreeId<Untyped>, TreeId<Untyped>)>,
+}
+
+struct LambdaBody {
+    tree: TreeId<Untyped>,
+    parameters: Vec<LambdaParameter>,
+    kind: SourceFunctionKind,
+    expected_result: Option<TypeId>,
+}
+
 #[derive(Clone)]
 struct FunctionLiteralDefinition {
     method: SymbolId,
@@ -369,7 +383,6 @@ impl SourceTyper<'_> {
         &mut self,
         tree: TreeId<Untyped>,
         function: Function,
-        position: Option<SourceSpan>,
         typing_context: FunctionLiteralTypingContext,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
@@ -431,14 +444,91 @@ impl SourceTyper<'_> {
                 }
                 result => result?,
             };
-            parameters.push((
-                parameter_tree,
-                parameter_node.position,
-                parameter,
-                parameter_type,
-            ));
+            parameters.push(LambdaParameter {
+                name: parameter.name,
+                ty: parameter_type,
+                position: parameter_node.position,
+                source: Some((parameter_tree, parameter.tpt)),
+            });
         }
+        let body = LambdaBody {
+            tree: function.body,
+            parameters,
+            kind,
+            expected_result: expected_function1.and_then(|(_, result)| result),
+        };
+        self.type_lambda_body(tree, body, context, poly_binder, info_journal, new_mappings)
+    }
 
+    pub(in crate::typer) fn synthesize_context_lambda(
+        &mut self,
+        tree: TreeId<Untyped>,
+        expected: TypeId,
+        context: ExpressionContext,
+        poly_binder: Option<TypeId>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let Some(Type::Applied { args, .. }) = self.store.types.try_get(expected) else {
+            return Err(TyperError::UnsupportedExpression {
+                source: self.source,
+                tree_index: tree.index(),
+                expression_kind: "context function requires an applied expected type",
+            });
+        };
+        let Some((&result, inputs)) = args.split_last() else {
+            return Err(TyperError::UnsupportedExpression {
+                source: self.source,
+                tree_index: tree.index(),
+                expression_kind: "context function result is missing",
+            });
+        };
+        if self.is_applied_context_function(result) {
+            return Err(TyperError::UnsupportedExpression {
+                source: self.source,
+                tree_index: tree.index(),
+                expression_kind: "nested implicit context function abstraction",
+            });
+        }
+        let parameters = inputs.iter().copied().enumerate().map(|(index, ty)| {
+            // Fresh with respect to identifiers actually present in the source.
+            // Interned names survive rollback, so interning alone is not freshness.
+            let mut spelling = format!("contextual${}${}", tree.index(), index + 1);
+            while self.store.names.get(&spelling).is_some_and(|id| self.arena.iter().any(|(_, tree)| matches!(&tree.kind, TreeKind::Ident(ident) if ident.name.text()==id))) {
+                spelling.push('$');
+            }
+            LambdaParameter {name:TermName::new(self.store.names.intern(&spelling)), ty, position:None, source:None}
+        }).collect();
+        let body = LambdaBody {
+            tree,
+            parameters,
+            kind: SourceFunctionKind::Contextual,
+            expected_result: Some(result),
+        };
+        let typed =
+            self.type_lambda_body(tree, body, context, poly_binder, info_journal, new_mappings)?;
+        self.record_adapted_value(tree, typed, new_mappings)?;
+        Ok(typed)
+    }
+
+    fn type_lambda_body(
+        &mut self,
+        tree: TreeId<Untyped>,
+        body: LambdaBody,
+        context: ExpressionContext,
+        poly_binder: Option<TypeId>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let LambdaBody {
+            tree: body,
+            parameters,
+            kind,
+            expected_result,
+        } = body;
+        let contextual = kind == SourceFunctionKind::Contextual;
+        let position = self.arena.get(tree).position;
+        let mut args: Vec<_> = parameters.iter().map(|p| p.ty).collect();
         let method_name_text = format!("$sourceLambda${}", tree.index());
         let method_name = Name::new(self.store.names.intern(&method_name_text), Namespace::Term);
         let method = self.store.symbols.alloc(Symbol {
@@ -464,7 +554,7 @@ impl SourceTyper<'_> {
                     scope: method_scope,
                     typed_definition: None,
                     captures: Vec::new(),
-                    capture_enclosing_values: function.params.len() == 1,
+                    capture_enclosing_values: parameters.len() == 1,
                 },
             )
             .is_some()
@@ -478,7 +568,9 @@ impl SourceTyper<'_> {
 
         let mut typed_parameters = Vec::with_capacity(parameters.len());
         let mut method_parameters = Vec::with_capacity(parameters.len());
-        for (parameter_tree, parameter_position, parameter, parameter_type) in parameters {
+        for parameter in parameters {
+            let parameter_position = parameter.position;
+            let parameter_type = parameter.ty;
             let name = *parameter.name.as_name();
             if !self
                 .store
@@ -489,7 +581,10 @@ impl SourceTyper<'_> {
             {
                 return Err(TyperError::UnsupportedFunctionLiteralParameter {
                     source: self.source,
-                    tree_index: parameter_tree.index(),
+                    tree_index: parameter
+                        .source
+                        .map_or(tree, |(parameter, _)| parameter)
+                        .index(),
                     reason: "duplicate parameter names are unsupported",
                 });
             }
@@ -510,8 +605,12 @@ impl SourceTyper<'_> {
                 links: SymbolLinks::default(),
             });
             self.store.scopes.get_mut(method_scope).enter(name, symbol);
-            let typed_tpt =
-                self.reify_constructor_type_tree(parameter.tpt, parameter_type, new_mappings)?;
+            let typed_tpt = if let Some((_, tpt)) = parameter.source {
+                self.reify_constructor_type_tree(tpt, parameter_type, new_mappings)?
+            } else {
+                TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                    .type_tree(parameter_type, None)
+            };
             let typed_parameter = self.typed_arena.alloc(Tree {
                 kind: TreeKind::ValDef(ValDef {
                     name: parameter.name,
@@ -522,18 +621,20 @@ impl SourceTyper<'_> {
                 position: parameter_position,
                 ty: parameter_type,
             });
-            self.typed_index
-                .insert(self.source, parameter_tree, typed_parameter)
-                .map_err(|error| TyperError::ConflictingTypedExpression {
-                    source: error.source,
-                    tree_index: error.untyped.index(),
-                    existing: error.existing.index(),
-                    attempted: error.attempted.index(),
-                })?;
-            new_mappings.push((self.source, parameter_tree));
-            self.function_literals
-                .parameters
-                .insert((self.source, parameter_tree), symbol);
+            if let Some((parameter_tree, _)) = parameter.source {
+                self.typed_index
+                    .insert(self.source, parameter_tree, typed_parameter)
+                    .map_err(|error| TyperError::ConflictingTypedExpression {
+                        source: error.source,
+                        tree_index: error.untyped.index(),
+                        existing: error.existing.index(),
+                        attempted: error.attempted.index(),
+                    })?;
+                new_mappings.push((self.source, parameter_tree));
+                self.function_literals
+                    .parameters
+                    .insert((self.source, parameter_tree), symbol);
+            }
             typed_parameters.push(typed_parameter);
             method_parameters.push(MethodParam {
                 name: parameter.name,
@@ -551,9 +652,9 @@ impl SourceTyper<'_> {
             },
             method_scope,
         )?;
-        let typed_body = if let Some((_, Some(expected_output))) = expected_function1 {
+        let typed_body = if let Some(expected_output) = expected_result {
             self.type_expression_expected_with_poly_binder(
-                function.body,
+                body,
                 lambda_context,
                 expected_output,
                 poly_binder,
@@ -561,12 +662,7 @@ impl SourceTyper<'_> {
                 new_mappings,
             )
         } else {
-            self.type_value_expression_inner(
-                function.body,
-                lambda_context,
-                info_journal,
-                new_mappings,
-            )
+            self.type_value_expression_inner(body, lambda_context, info_journal, new_mappings)
         };
         let typed_body = typed_body?;
         let body_result = self.widen_expression_type_journaled(
@@ -575,9 +671,7 @@ impl SourceTyper<'_> {
             0,
         )?;
 
-        let function_result = expected_function1
-            .and_then(|(_, result)| result)
-            .unwrap_or(body_result);
+        let function_result = expected_result.unwrap_or(body_result);
         let method_type = self.store.types.alloc(Type::Method(MethodType {
             params: method_parameters,
             result: function_result,
@@ -622,25 +716,7 @@ impl SourceTyper<'_> {
         };
         definition.typed_definition = Some(typed_method);
 
-        let tycon =
-            self.source_function_type_constructor(kind, function.params.len(), tree.index())?;
-        let mut args = function
-            .params
-            .iter()
-            .map(|parameter| {
-                self.function_literals
-                    .parameter_at(self.source, *parameter)
-                    .and_then(|symbol| match self.store.symbols.info(symbol) {
-                        SymbolInfo::Complete(ty) => Some(*ty),
-                        _ => None,
-                    })
-                    .ok_or(TyperError::UnsupportedFunctionLiteralParameter {
-                        source: self.source,
-                        tree_index: parameter.index(),
-                        reason: "parameter type was not completed",
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let tycon = self.source_function_type_constructor(kind, args.len(), tree.index())?;
         args.push(function_result);
         let function_type = self.store.types.alloc(Type::Applied { tycon, args });
 

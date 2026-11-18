@@ -646,7 +646,6 @@ impl<'a> SourceTyper<'a> {
             TreeKind::PhaseSpecific(UntypedNode::Function(function)) => self.type_function_literal(
                 tree,
                 function,
-                source_tree.position,
                 expression::FunctionLiteralTypingContext {
                     context,
                     expected_function1: None,
