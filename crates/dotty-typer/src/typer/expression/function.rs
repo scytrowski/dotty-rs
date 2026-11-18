@@ -8,7 +8,8 @@ use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Default)]
 pub(in crate::typer) struct FunctionLiteralIndex {
-    definitions: HashMap<(SourceId, TreeId<Untyped>), FunctionLiteralDefinition>,
+    roots: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
+    definitions: HashMap<SymbolId, FunctionLiteralDefinition>,
     parameters: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
 }
 
@@ -35,7 +36,6 @@ struct LambdaBody {
 
 #[derive(Clone)]
 struct FunctionLiteralDefinition {
-    method: SymbolId,
     scope: ScopeId,
     typed_definition: Option<TreeId<Typed>>,
     captures: Vec<(SymbolId, TreeId<Typed>)>,
@@ -44,9 +44,7 @@ struct FunctionLiteralDefinition {
 
 impl FunctionLiteralIndex {
     pub(in crate::typer) fn is_method(&self, method: SymbolId) -> bool {
-        self.definitions
-            .values()
-            .any(|definition| definition.method == method)
+        self.definitions.contains_key(&method)
     }
 
     pub(in crate::typer) fn method_at(
@@ -54,16 +52,11 @@ impl FunctionLiteralIndex {
         source: SourceId,
         tree: TreeId<Untyped>,
     ) -> Option<SymbolId> {
-        self.definitions
-            .get(&(source, tree))
-            .map(|entry| entry.method)
+        self.roots.get(&(source, tree)).copied()
     }
 
     pub(in crate::typer) fn scope_of(&self, method: SymbolId) -> Option<ScopeId> {
-        self.definitions
-            .values()
-            .find(|entry| entry.method == method)
-            .map(|entry| entry.scope)
+        self.definitions.get(&method).map(|entry| entry.scope)
     }
 
     pub(in crate::typer) fn definition_at(
@@ -72,7 +65,7 @@ impl FunctionLiteralIndex {
         tree: TreeId<Untyped>,
     ) -> Option<TreeId<Typed>> {
         self.definitions
-            .get(&(source, tree))
+            .get(&self.method_at(source, tree)?)
             .and_then(|entry| entry.typed_definition)
     }
 
@@ -90,10 +83,7 @@ impl FunctionLiteralIndex {
         symbol: SymbolId,
         value: TreeId<Typed>,
     ) {
-        if let Some(definition) = self
-            .definitions
-            .values_mut()
-            .find(|definition| definition.method == method)
+        if let Some(definition) = self.definitions.get_mut(&method)
             && !definition
                 .captures
                 .iter()
@@ -105,8 +95,7 @@ impl FunctionLiteralIndex {
 
     pub(in crate::typer) fn captures(&self, method: SymbolId) -> Vec<TreeId<Typed>> {
         self.definitions
-            .values()
-            .find(|definition| definition.method == method)
+            .get(&method)
             .map(|definition| {
                 definition
                     .captures
@@ -125,8 +114,8 @@ impl FunctionLiteralIndex {
     ) -> bool {
         if !self
             .definitions
-            .values()
-            .any(|definition| definition.method == method && definition.capture_enclosing_values)
+            .get(&method)
+            .is_some_and(|definition| definition.capture_enclosing_values)
             || !store.symbols.contains(method)
             || !store.symbols.contains(class)
             || !matches!(
@@ -180,8 +169,8 @@ impl FunctionLiteralIndex {
     ) -> Option<SymbolId> {
         if !self
             .definitions
-            .values()
-            .any(|definition| definition.method == method && definition.capture_enclosing_values)
+            .get(&method)
+            .is_some_and(|definition| definition.capture_enclosing_values)
             || !store.symbols.contains(method)
             || !store.symbols.contains(symbol)
         {
@@ -259,8 +248,8 @@ impl FunctionLiteralIndex {
     ) -> bool {
         if !self
             .definitions
-            .values()
-            .any(|definition| definition.method == method && definition.capture_enclosing_values)
+            .get(&method)
+            .is_some_and(|definition| definition.capture_enclosing_values)
         {
             return false;
         }
@@ -295,8 +284,8 @@ impl FunctionLiteralIndex {
     ) -> bool {
         if !self
             .definitions
-            .values()
-            .any(|definition| definition.method == method && definition.capture_enclosing_values)
+            .get(&method)
+            .is_some_and(|definition| definition.capture_enclosing_values)
             || !store.symbols.contains(symbol)
         {
             return false;
@@ -484,16 +473,25 @@ impl SourceTyper<'_> {
             });
         };
         if self.is_applied_context_function(result) {
-            return Err(TyperError::UnsupportedExpression {
-                source: self.source,
-                tree_index: tree.index(),
-                expression_kind: "nested implicit context function abstraction",
-            });
+            let supported = inputs.len() == 1
+                && matches!(self.store.types.try_get(result), Some(Type::Applied { args, .. })
+                    if matches!(args.as_slice(), [_, output] if !self.is_applied_context_function(*output)));
+            if !supported {
+                return Err(TyperError::UnsupportedExpression {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    expression_kind: "nested context abstraction requires two unary layers",
+                });
+            }
         }
+        // Both implicit lambdas share a source expression. Give their binders
+        // distinct names so the inner scope does not hide the outer evidence.
+        let nested = self.function_literals.method_at(self.source, tree) == Some(context.owner);
+        let layer = if nested { "$inner" } else { "" };
         let parameters = inputs.iter().copied().enumerate().map(|(index, ty)| {
             // Fresh with respect to identifiers actually present in the source.
             // Interned names survive rollback, so interning alone is not freshness.
-            let mut spelling = format!("contextual${}${}", tree.index(), index + 1);
+            let mut spelling = format!("contextual${}{layer}${}", tree.index(), index + 1);
             while self.store.names.get(&spelling).is_some_and(|id| self.arena.iter().any(|(_, tree)| matches!(&tree.kind, TreeKind::Ident(ident) if ident.name.text()==id))) {
                 spelling.push('$');
             }
@@ -544,20 +542,17 @@ impl SourceTyper<'_> {
             links: SymbolLinks::default(),
         });
         let method_scope = self.store.scopes.alloc(Scope::new(Some(method)));
-        if self
-            .function_literals
-            .definitions
-            .insert(
-                (self.source, tree),
-                FunctionLiteralDefinition {
-                    method,
-                    scope: method_scope,
-                    typed_definition: None,
-                    captures: Vec::new(),
-                    capture_enclosing_values: parameters.len() == 1,
-                },
-            )
-            .is_some()
+        // The source index names the outer closure. Both implementation
+        // methods remain directly addressable by symbol and typed closure.
+        let nested = contextual
+            && tree == body
+            && self.function_literals.method_at(self.source, tree) == Some(context.owner);
+        if !nested
+            && self
+                .function_literals
+                .roots
+                .insert((self.source, tree), method)
+                .is_some()
         {
             return Err(TyperError::UnsupportedExpression {
                 source: self.source,
@@ -565,6 +560,15 @@ impl SourceTyper<'_> {
                 expression_kind: "function literal identity was already assigned",
             });
         }
+        self.function_literals.definitions.insert(
+            method,
+            FunctionLiteralDefinition {
+                scope: method_scope,
+                typed_definition: None,
+                captures: Vec::new(),
+                capture_enclosing_values: parameters.len() == 1,
+            },
+        );
 
         let mut formal_symbols = Vec::with_capacity(parameters.len());
         let mut typed_parameters = Vec::with_capacity(parameters.len());
@@ -713,11 +717,7 @@ impl SourceTyper<'_> {
                 ty: method_ref,
             },
         );
-        let Some(definition) = self
-            .function_literals
-            .definitions
-            .get_mut(&(self.source, tree))
-        else {
+        let Some(definition) = self.function_literals.definitions.get_mut(&method) else {
             return Err(TyperError::UnsupportedExpression {
                 source: self.source,
                 tree_index: tree.index(),

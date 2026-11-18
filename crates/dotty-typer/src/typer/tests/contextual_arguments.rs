@@ -1519,3 +1519,94 @@ fn conditional_provider_uses_its_own_default_after_dependency_search() {
         .unwrap();
     assert_eq!(index.symbol_at(source, def), Some(provider));
 }
+
+#[test]
+fn nested_context_abstraction_registers_both_methods_and_rolls_back_a_bad_body() {
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(
+        "package scala; class C { def constant: Int ?=> (Boolean ?=> Int) = 1; def bad: Int ?=> (Boolean ?=> Int) = false; def deeper: Int ?=> (Boolean ?=> (Int ?=> Int)) = 1 }",
+    );
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let (method, rhs) =
+        method_definition_and_rhs(&parsed, typer.store(), &index, source, "constant");
+    let root = typer
+        .type_method_definition(definition_tree(&index, method))
+        .unwrap();
+    let mut closure_tree = typer.source_typed_index().get(source, rhs).unwrap();
+    let mut owner = method;
+    for expected in [defs.int, defs.boolean] {
+        let TreeKind::Closure(closure) = &typer.typed_ast().get(closure_tree).kind else {
+            panic!("expected a context function")
+        };
+        assert!(closure.env.is_empty());
+        let implementation = closure.implementation.as_ref().unwrap();
+        let method_symbol = reference(&typer, closure.method);
+        assert_eq!(
+            typer
+                .source_typed_index()
+                .synthetic_definition_symbol(implementation.definition),
+            Some(method_symbol)
+        );
+        assert_eq!(typer.store().symbols.owner(method_symbol), Some(owner));
+        if owner == method {
+            assert_eq!(
+                typer.function_literal_method_at(source, rhs),
+                Some(method_symbol)
+            );
+            assert_eq!(
+                typer.function_literal_definition_at(source, rhs),
+                Some(implementation.definition)
+            );
+        }
+        let [param] = implementation.parameters.as_slice() else {
+            panic!("one binder")
+        };
+        let record = typer.store().symbols.get(*param);
+        assert_eq!(record.owner, Some(method_symbol));
+        assert_eq!(record.info, SymbolInfo::Complete(expected));
+        assert!(record.flags.contains(SymbolFlags::GIVEN));
+        let scope = typer.function_literal_method_scope(method_symbol).unwrap();
+        assert_eq!(
+            typer.store().scopes.get(scope).lookup_all(&record.name),
+            &[*param]
+        );
+        let TreeKind::DefDef(def) = &typer.typed_ast().get(implementation.definition).kind else {
+            panic!("method definition")
+        };
+        closure_tree = def.rhs.unwrap();
+        owner = method_symbol;
+    }
+    assert!(
+        matches!(&typer.typed_ast().get(closure_tree).kind, TreeKind::Literal(l) if l.value == dotty_core::types::Constant::Int(1))
+    );
+    assert_eq!(
+        typer
+            .type_method_definition(definition_tree(&index, method))
+            .unwrap(),
+        root
+    );
+    for name in ["bad", "deeper"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let checkpoint = typer.store().checkpoint();
+        let nodes = typer.typed_ast().iter().count();
+        for _ in 0..2 {
+            let err = typer
+                .type_method_definition(definition_tree(&index, method))
+                .unwrap_err();
+            if name == "bad" {
+                assert!(
+                    matches!(err, TyperError::ExpectedExpressionTypeMismatch { expected, .. } if expected == defs.int),
+                    "{err:?}"
+                );
+            } else {
+                assert!(
+                    matches!(err, TyperError::UnsupportedExpression { tree_index, .. } if tree_index == rhs.index()),
+                    "{err:?}"
+                );
+            }
+            assert_eq!(typer.store().checkpoint(), checkpoint);
+            assert_eq!(typer.typed_ast().iter().count(), nodes);
+            assert_eq!(typer.function_literal_method_at(source, rhs), None);
+            assert_eq!(typer.source_typed_index().get(source, rhs), None);
+        }
+    }
+}

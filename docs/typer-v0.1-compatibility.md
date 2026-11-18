@@ -1835,7 +1835,10 @@ synthetic method owns the evidence parameters used in the body. Values of the
 canonical synthesized `ContextFunctionN` call the instantiated `apply` method
 with explicit or searched arguments. An expected contextual function can wrap
 a non-lambda body in a closure with fresh evidence parameters before typing
-the body. Nested implicit abstractions remain deferred. Captures requiring
+the body. Two nested unary contextual expectations can introduce two synthetic
+methods at the same source expression. The source binding identifies the outer
+closure, and each typed closure links to its own definition and ordered formals.
+Deeper implicit abstractions remain unsupported. Captures requiring
 an environment are rejected explicitly; references to shared object-owned
 values do not count as closure captures. Failed lambda typing rolls back its
 synthetic method, parameter symbols, scopes, typed nodes, and source mappings. The pinned
