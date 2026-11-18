@@ -452,6 +452,9 @@ where
                 }
             }
 
+            if let StatementSequenceBoundary::FeedbackRegionBlock { indent_offset, .. } = boundary {
+                self.observe_outdented_region(indent_offset);
+            }
             if self.is_sequence_separator(boundary) {
                 self.consume_sequence_separators(boundary);
                 self.last_advance_consumed_statement_separator = false;

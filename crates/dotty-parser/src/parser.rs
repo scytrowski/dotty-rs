@@ -13,7 +13,7 @@ use crate::{
     ParseKind, RecoverySet,
 };
 
-/// Maximum simultaneous entries into recursive tree and type-parameter grammars.
+/// Maximum simultaneous entries into guarded recursive grammar productions.
 pub(crate) const MAX_TREE_NESTING: usize = 64;
 
 /// Stateful input and allocation context for the handwritten parser.

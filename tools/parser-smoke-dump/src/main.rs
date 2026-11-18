@@ -1507,6 +1507,114 @@ mod tests {
     }
 
     #[test]
+    fn an_indented_package_preserves_the_dedented_declaration_and_package_span() {
+        let source = "package p:\n  class C\nclass N\n";
+        let mut names = NameInterner::new();
+        let result = parse_compilation_unit(
+            SourceText::new(source).unwrap(),
+            SourceId::from_index(0),
+            ContextualScanner::new(source).unwrap(),
+            &mut names,
+        );
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::PackageDef(root) = &result.ast.get(result.root).kind else {
+            panic!("expected the source root");
+        };
+        assert_eq!(root.stats.len(), 2);
+        let TreeKind::PackageDef(package) = &result.ast.get(root.stats[0]).kind else {
+            panic!("expected the indented package");
+        };
+        assert_eq!(package.stats.len(), 1);
+        let TreeKind::TypeDef(inside) = &result.ast.get(package.stats[0]).kind else {
+            panic!("expected a class inside the package");
+        };
+        assert_eq!(names.resolve(inside.name.as_name().text()), "C");
+        let TreeKind::TypeDef(outside) = &result.ast.get(root.stats[1]).kind else {
+            panic!("expected the class outside the package");
+        };
+        assert_eq!(names.resolve(outside.name.as_name().text()), "N");
+        assert_eq!(
+            result
+                .ast
+                .get(root.stats[0])
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            dotty_core::TextRange::new(0, 20).unwrap()
+        );
+        assert_eq!(
+            result
+                .ast
+                .get(root.stats[1])
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            dotty_core::TextRange::new(21, 28).unwrap()
+        );
+    }
+
+    #[test]
+    fn deeply_nested_packages_recover_with_the_contextual_scanner() {
+        for indented in [false, true] {
+            let depth = 96;
+            let mut source = String::new();
+            if indented {
+                for layer in 0..depth {
+                    source.push_str(&format!("{}package p:\n", "  ".repeat(layer)));
+                }
+                source.push_str(&format!(
+                    "{}class C\n  class S\nclass N",
+                    "  ".repeat(depth)
+                ));
+            } else {
+                source.push_str(&"package p {".repeat(depth));
+                source.push_str("class C");
+                source.push_str(&"}".repeat(depth - 1));
+                source.push_str("; class S}; class N");
+            }
+            let scanner = ContextualScanner::new(&source).unwrap();
+            let mut names = NameInterner::new();
+            let result = parse_compilation_unit(
+                SourceText::new(&source).unwrap(),
+                SourceId::from_index(0),
+                scanner,
+                &mut names,
+            );
+            let [diagnostic] = result.diagnostics.as_slice() else {
+                panic!(
+                    "expected one nesting diagnostic, got {:?}",
+                    result.diagnostics
+                );
+            };
+            assert!(matches!(
+                diagnostic.issue(),
+                ParseIssue::NestingLimitExceeded {
+                    kind: dotty_parser::ParseKind::Expr,
+                    ..
+                }
+            ));
+            let TreeKind::PackageDef(root) = &result.ast.get(result.root).kind else {
+                panic!("expected the source root");
+            };
+            assert_eq!(root.stats.len(), 2);
+            let TreeKind::TypeDef(next) = &result.ast.get(root.stats[1]).kind else {
+                panic!("expected the following class");
+            };
+            assert_eq!(names.resolve(next.name.as_name().text()), "N");
+            let TreeKind::PackageDef(outer) = &result.ast.get(root.stats[0]).kind else {
+                panic!("expected the outer package");
+            };
+            assert_eq!(outer.stats.len(), 2);
+            let TreeKind::TypeDef(sibling) = &result.ast.get(outer.stats[1]).kind else {
+                panic!("expected the sibling class");
+            };
+            assert_eq!(names.resolve(sibling.name.as_name().text()), "S");
+        }
+    }
+
+    #[test]
     fn deeply_nested_templates_recover_with_the_contextual_scanner() {
         for (indented, end_markers) in [(false, false), (true, false), (true, true)] {
             let depth = 96;

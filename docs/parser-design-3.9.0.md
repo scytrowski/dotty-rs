@@ -206,8 +206,8 @@ issue payload. `UnboundPlaceholderParameter` is reported when an expression
 placeholder reaches the end of a compilation unit or expression block without
 being captured by a complete expression.
 
-The expression, type, pattern, type-parameter clause, and template-body entry
-points share a limit of 64 active calls. Crossing it reports
+The expression, type, pattern, type-parameter clause, template-body, and
+package-body entry points share a limit of 64 active calls. Crossing it reports
 `parser.nesting_limit_exceeded` at the first rejected operand and inserts an
 error node of the corresponding kind.
 Recovery skips a delimited operand iteratively so the enclosing list can
@@ -217,6 +217,10 @@ an error type in the rejected parameter list.
 Template bodies retain an error expression as their sole member. Their rejected
 body is skipped as one delimited region, preserving enclosing members and
 following definitions.
+Package bodies also retain an error expression. A rejected unbraced package
+header owns the rest of the file, which is consumed iteratively into that error
+span. Rejected braced or indented packages preserve declarations outside their
+body.
 
 Reusable recovery sets cover statements, arguments, type arguments, case
 clauses, and for enumerators. Every recovery loop checks that the token source

@@ -71,19 +71,23 @@ where
             self.observe_colon_eol(true);
         }
         let has_colon = self.current().kind == TokenKind::ColonEol;
-        if has_colon {
-            self.observe_indented();
+        let feedback_indent = if has_colon {
+            let indent = self.observe_indented_body_region();
             self.advance();
+            indent
         } else if self.current().kind == TokenKind::Newline
             && self.cursor.lookahead(1).kind == TokenKind::Punctuation(Punctuation::LeftBrace)
         {
             self.advance();
-        }
+            None
+        } else {
+            None
+        };
 
-        let end = if self.accept(TokenKind::Punctuation(Punctuation::LeftBrace)) {
-            TokenKind::Punctuation(Punctuation::RightBrace)
-        } else if self.accept(TokenKind::Indent) {
-            TokenKind::Outdent
+        let end = if self.current().kind == TokenKind::Punctuation(Punctuation::LeftBrace) {
+            Some(TokenKind::Punctuation(Punctuation::RightBrace))
+        } else if self.current().kind == TokenKind::Indent {
+            Some(TokenKind::Outdent)
         } else {
             if !allow_header || has_colon {
                 self.report_issue(ParseIssue::Package(PackageIssue::ExpectedBodyStart {
@@ -106,22 +110,59 @@ where
                     },
                 ));
             }
-            return self.parse_top_level_sequence(
-                StatementSequenceBoundary::CompilationUnit,
-                Location::InPackageBody,
-            );
+            None
         };
 
-        let stats = self.with_location(Location::InPackageBody, |parser| {
-            parser.with_block_end(Some(end), |parser| {
+        self.with_nesting(crate::ParseKind::Expr, |parser| {
+            if let Some(end) = end {
+                parser.parse_delimited_package_body(end, feedback_indent)
+            } else {
                 parser.parse_top_level_sequence(
-                    StatementSequenceBoundary::Block(end),
+                    StatementSequenceBoundary::CompilationUnit,
                     Location::InPackageBody,
                 )
+            }
+        })
+        .unwrap_or_else(|error| {
+            if end.is_none() {
+                // A package header owns the rest of this compilation unit.
+                // Keep its rejected contents inside this package's error tree.
+                while self.current().kind != TokenKind::Eof {
+                    let checkpoint = self.cursor.checkpoint();
+                    self.advance();
+                    if !self.cursor.progressed_since(checkpoint) {
+                        break;
+                    }
+                }
+                self.extend_tree_end(error, self.last_real_token_end);
+            }
+            vec![error]
+        })
+    }
+
+    fn parse_delimited_package_body(
+        &mut self,
+        end: TokenKind,
+        feedback_indent: Option<u32>,
+    ) -> Vec<TreeId<Untyped>> {
+        let boundary = if let Some(indent_offset) = feedback_indent {
+            StatementSequenceBoundary::FeedbackRegionBlock {
+                closing: end,
+                indent_offset,
+            }
+        } else {
+            StatementSequenceBoundary::Block(end)
+        };
+        self.advance();
+        let stats = self.with_location(Location::InPackageBody, |parser| {
+            parser.with_block_end(Some(end), |parser| {
+                parser.parse_top_level_sequence(boundary, Location::InPackageBody)
             })
         });
 
-        if end == TokenKind::Outdent && self.current().kind != TokenKind::Outdent {
+        if let Some(indent_offset) = feedback_indent {
+            self.observe_outdented_region(indent_offset);
+        } else if end == TokenKind::Outdent && self.current().kind != TokenKind::Outdent {
             self.observe_outdented();
         }
         if !self.accept(end) {
@@ -139,6 +180,117 @@ mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
     use dotty_core::{NameInterner, TextRange};
+
+    #[test]
+    fn nested_packages_report_the_limit_and_preserve_outer_siblings() {
+        use crate::parser::MAX_TREE_NESTING;
+        for braced in [false, true] {
+            for depth in [MAX_TREE_NESTING, MAX_TREE_NESTING + 2] {
+                let prefix = if braced { "package p {" } else { "package p\n" };
+                let suffix = if braced {
+                    format!("{}; class D", "}".repeat(depth))
+                } else {
+                    String::new()
+                };
+                let source = format!("{}class C{suffix}", prefix.repeat(depth));
+                let mut tokens = Vec::new();
+                for layer in 0..depth as u32 {
+                    let start = layer * prefix.len() as u32;
+                    tokens.extend([
+                        token(TokenKind::Keyword(HardKeyword::Package), start, start + 7),
+                        token(TokenKind::Identifier, start + 8, start + 9),
+                    ]);
+                    if braced {
+                        tokens.push(token(
+                            TokenKind::Punctuation(Punctuation::LeftBrace),
+                            start + 10,
+                            start + 11,
+                        ));
+                    } else {
+                        tokens.push(token(TokenKind::Newline, start + 9, start + 10));
+                    }
+                }
+                let start = (depth * prefix.len()) as u32;
+                tokens.extend([
+                    token(TokenKind::Keyword(HardKeyword::Class), start, start + 5),
+                    token(TokenKind::Identifier, start + 6, start + 7),
+                ]);
+                if braced {
+                    for offset in start + 7..start + 7 + depth as u32 {
+                        tokens.push(token(
+                            TokenKind::Punctuation(Punctuation::RightBrace),
+                            offset,
+                            offset + 1,
+                        ));
+                    }
+                    let end = start + 7 + depth as u32;
+                    tokens.extend([
+                        token(TokenKind::Punctuation(Punctuation::Semicolon), end, end + 1),
+                        token(TokenKind::Keyword(HardKeyword::Class), end + 2, end + 7),
+                        token(TokenKind::Identifier, end + 8, end + 9),
+                    ]);
+                }
+                let end = source.len() as u32;
+                tokens.push(token(TokenKind::Eof, end, end));
+                let mut names = NameInterner::new();
+                let result = parser_for(&source, tokens, &mut names).source_compilation_unit();
+                let TreeKind::PackageDef(root) = &result.ast.get(result.root).kind else {
+                    panic!("expected the source root");
+                };
+                let mut inner = if braced {
+                    assert_eq!(root.stats.len(), 2);
+                    let TreeKind::TypeDef(sibling) = &result.ast.get(root.stats[1]).kind else {
+                        panic!("expected the following class");
+                    };
+                    assert_eq!(names.resolve(sibling.name.as_name().text()), "D");
+                    root.stats[0]
+                } else {
+                    result.root
+                };
+                while let TreeKind::PackageDef(package) = &result.ast.get(inner).kind {
+                    assert_eq!(package.stats.len(), 1);
+                    inner = package.stats[0];
+                }
+                if depth <= MAX_TREE_NESTING {
+                    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+                    assert!(matches!(result.ast.get(inner).kind, TreeKind::TypeDef(_)));
+                } else {
+                    let [diagnostic] = result.diagnostics.as_slice() else {
+                        panic!(
+                            "expected one nesting diagnostic, got {:?}",
+                            result.diagnostics
+                        );
+                    };
+                    assert_eq!(
+                        diagnostic.issue(),
+                        &ParseIssue::NestingLimitExceeded {
+                            kind: crate::ParseKind::Expr,
+                            limit: MAX_TREE_NESTING,
+                        }
+                    );
+                    let rejected_start = ((MAX_TREE_NESTING + 1) * prefix.len() - 1) as u32;
+                    if !braced {
+                        assert_eq!(
+                            result.ast.get(inner).position.unwrap().span().range(),
+                            TextRange::new(rejected_start, end).unwrap()
+                        );
+                    }
+                    assert_eq!(
+                        diagnostic.span(),
+                        TextRange::new(rejected_start, rejected_start + 1).unwrap()
+                    );
+                    assert!(matches!(
+                        result.ast.get(inner).kind,
+                        TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::Error(
+                            dotty_core::ast::ErrorNode {
+                                kind: dotty_core::ast::ErrorNodeKind::MissingExpression
+                            }
+                        ))
+                    ));
+                }
+            }
+        }
+    }
 
     #[test]
     fn parses_an_empty_package_at_eof() {
