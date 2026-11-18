@@ -378,16 +378,11 @@ impl SourceTyper<'_> {
             return false;
         };
         if !self.store.symbols.contains(*class)
-            || !self
-                .store
-                .symbols
-                .get(*class)
-                .flags
-                .contains(SymbolFlags::GIVEN)
+            || self.store.symbols.get(*class).kind != SymbolKind::Class
         {
             return false;
         }
-        loop {
+        for _ in 0..crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
             let node = self.typed_arena.get(tree);
             match &node.kind {
                 TreeKind::Apply(call) => tree = call.function,
@@ -400,17 +395,50 @@ impl SourceTyper<'_> {
                     else {
                         return false;
                     };
-                    let Some(SourceDefinition::Derived { source, tree }) =
-                        self.index.definition_of(*method)
-                    else {
+                    if !self.store.symbols.contains(*method) {
                         return false;
-                    };
-                    return source == self.source
-                        && self.structural_given_class(*method, tree) == Some(*class);
+                    }
+                    if let Some(SourceDefinition::Derived { source, tree }) =
+                        self.index.definition_of(*method)
+                    {
+                        return source == self.source
+                            && self.structural_given_class(*method, tree) == Some(*class);
+                    }
+                    return self.binary_given_returns_class(*method, *class);
                 }
                 _ => return false,
             }
         }
+        false
+    }
+
+    /// A separately compiled provider can be used as an expression receiver
+    /// when its declared result identifies the exact class under the same owner.
+    fn binary_given_returns_class(&self, method: SymbolId, class: SymbolId) -> bool {
+        let callable = self.store.symbols.get(method);
+        if !matches!(callable.origin, SymbolOrigin::Tasty(_))
+            || callable.kind != SymbolKind::Method
+            || !callable.flags.contains(SymbolFlags::GIVEN)
+            || callable.owner != self.store.symbols.owner(class)
+        {
+            return false;
+        }
+        let SymbolInfo::Complete(mut result) = callable.info else {
+            return false;
+        };
+        for _ in 0..crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
+            result = match self.store.types.try_get(result) {
+                Some(Type::Method(m)) => m.result,
+                Some(Type::Poly(p)) => p.result,
+                Some(Type::Applied { tycon, .. }) => *tycon,
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(declared),
+                    ..
+                }) => return *declared == class,
+                _ => return false,
+            };
+        }
+        false
     }
 
     fn is_source_parameterless_method_value(

@@ -74,7 +74,7 @@ fn contextual_fixture_resolver(
 
 #[test]
 fn imported_binary_structural_given_infers_the_implementation_type_and_passes_evidence() {
-    let text = "package consumer; import structural.{Builders, Box, TC}; class Consumer { import Builders.given; def need(using x: TC[Box[Int]]):Int=x.tag; def use(using leaf:TC[Int]):Int=need }";
+    let text = "package consumer; import structural.{Builders, Box, TC}; class Consumer { import Builders.given; def need(using x: TC[Box[Int]]):Int=x.tag; def use(using leaf:TC[Int]):Int=need; def selected(using leaf:TC[Int]):Int=Builders.boxes[Int](using leaf).tag }";
     let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
     let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
     let leaf = method_parameter_symbol(&parsed, &index, source, method, 0);
@@ -142,6 +142,7 @@ fn imported_binary_structural_given_infers_the_implementation_type_and_passes_ev
         factory.owner,
         Some(typer.module_class_of_object(object).unwrap())
     );
+    let implementation_symbol = *class;
     let implementation = typer.store.symbols.get(*class);
     assert_eq!(implementation.kind, SymbolKind::Class);
     assert_eq!(factory.kind, SymbolKind::Method);
@@ -152,6 +153,30 @@ fn imported_binary_structural_given_infers_the_implementation_type_and_passes_ev
     );
     assert_eq!(typer.store.names.resolve(factory.name.text()), "boxes");
     assert!(matches!(factory.origin, SymbolOrigin::Tasty(_)));
+    let (selected, rhs) =
+        method_definition_and_rhs(&parsed, typer.store(), &index, source, "selected");
+    let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(selected) else {
+        panic!()
+    };
+    typer.type_method_definition(tree).unwrap();
+    let mut tree = typer.typed_index.get(source, rhs).unwrap();
+    if let TreeKind::Apply(app) = &typer.typed_arena.get(tree).kind {
+        tree = app.function;
+    }
+    let TreeKind::Select(tag) = &typer.typed_arena.get(tree).kind else {
+        panic!("expected tag selection")
+    };
+    let target = typer
+        .store
+        .types
+        .get(typer.typed_arena.get(tree).ty)
+        .reference_symbol()
+        .unwrap();
+    assert_eq!(typer.store.names.resolve(tag.name.text()), "tag");
+    assert_eq!(
+        typer.store.symbols.owner(target),
+        Some(implementation_symbol)
+    );
 }
 
 #[test]
