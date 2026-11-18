@@ -177,6 +177,17 @@ pub trait SourceTypedBindings {
         None
     }
 
+    /// Borrowed identity receipt for the original Unit-valued conditional
+    /// whose THEN and ELSE arms assign one initialized mutable Counter local.
+    /// It does not authorize arbitrary reference assignments or nested flow.
+    fn conditional_mutable_reference_assignment(
+        &self,
+        _source: SourceId,
+        _method: SymbolId,
+    ) -> Option<ConditionalMutableReferenceAssignmentBinding> {
+        None
+    }
+
     /// Exact ordered direct-formal/local pair receipt from the source proof.
     fn formal_local_constructor_call_pair(
         &self,
@@ -646,6 +657,7 @@ impl<'a> PicklePlan<'a> {
             reference_fields: &[],
             planned_class_symbols: &[],
             mutable_counter_assignment: None,
+            conditional_mutable_assignment: None,
             local_bindings: HashMap::new(),
             registered_local_symbols: HashSet::new(),
             seen_local_bindings: HashSet::new(),
@@ -703,6 +715,11 @@ pub(crate) fn validate_class_state_method(
             class
                 .typed_bindings
                 .mutable_counter_reference_assignment(class.source.id, method.symbol)
+        }),
+        conditional_mutable_assignment: methods.first().and_then(|method| {
+            class
+                .typed_bindings
+                .conditional_mutable_reference_assignment(class.source.id, method.symbol)
         }),
         local_bindings: HashMap::new(),
         registered_local_symbols: HashSet::new(),
@@ -785,6 +802,7 @@ pub(crate) fn validate_class_state_mutable_declaration_fragment(
         reference_fields,
         planned_class_symbols: class.typed_bindings.planned_class_symbols(),
         mutable_counter_assignment: None,
+        conditional_mutable_assignment: None,
         local_bindings: HashMap::new(),
         registered_local_symbols: HashSet::new(),
         seen_local_bindings: HashSet::new(),
@@ -845,6 +863,7 @@ pub(crate) fn validate_class_state_mutable_reference_assignment_fragment(
         reference_fields,
         planned_class_symbols: class.typed_bindings.planned_class_symbols(),
         mutable_counter_assignment: Some(assignment),
+        conditional_mutable_assignment: None,
         local_bindings: HashMap::new(),
         registered_local_symbols: HashSet::new(),
         seen_local_bindings: HashSet::new(),
@@ -876,6 +895,7 @@ struct Validator<'p, 'a> {
     reference_fields: &'a [SymbolId],
     planned_class_symbols: &'a [SymbolId],
     mutable_counter_assignment: Option<MutableCounterReferenceAssignmentBinding>,
+    conditional_mutable_assignment: Option<ConditionalMutableReferenceAssignmentBinding>,
     local_bindings: HashMap<TreeId<Untyped>, LocalValueBinding>,
     registered_local_symbols: HashSet<SymbolId>,
     seen_local_bindings: HashSet<TreeId<Untyped>>,
