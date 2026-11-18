@@ -374,128 +374,147 @@ fn extract_given_type_name(
     tree: TreeId<Untyped>,
     follow_args: bool,
 ) -> Result<String, UnsupportedGivenNameTree> {
-    fn reference_name(name: dotty_core::Name, names: &dotty_core::NameInterner) -> String {
-        let text = names.resolve(name.text());
-        if name.is_type() {
-            text.to_owned()
-        } else {
-            format!("{text}_type")
-        }
+    enum Task<'a> {
+        Visit(TreeId<Untyped>, bool),
+        Arguments(&'a [TreeId<Untyped>]),
+        Text(&'a str),
+        Finish(TreeId<Untyped>, usize),
     }
 
-    fn argument_names(
-        arena: &AstArena<Untyped>,
+    fn append_reference(
+        output: &mut String,
+        name: dotty_core::Name,
         names: &dotty_core::NameInterner,
-        args: &[TreeId<Untyped>],
-    ) -> Result<String, UnsupportedGivenNameTree> {
-        args.iter()
-            .map(|arg| extract_given_type_name(arena, names, *arg, false))
-            .collect::<Result<Vec<_>, _>>()
-            .map(|parts| parts.join("_"))
+    ) {
+        output.push_str(names.resolve(name.text()));
+        if name.is_term() {
+            output.push_str("_type");
+        }
     }
 
-    let node = &arena.get(tree).kind;
-    let extracted = match node {
-        TreeKind::Ident(ident) => reference_name(ident.name, names),
-        TreeKind::Select(select) if names.resolve(select.name.text()) == "<init>" => {
-            extract_given_type_name(arena, names, select.qualifier, follow_args)?
-        }
-        TreeKind::Select(select) => reference_name(select.name, names),
-        TreeKind::TypeDef(definition) => names.resolve(definition.name.as_name().text()).to_owned(),
-        TreeKind::AppliedTypeTree(applied) if follow_args && !applied.args.is_empty() => {
-            let constructor = extract_given_type_name(arena, names, applied.tpt, true)?;
-            let args = argument_names(arena, names, &applied.args)?;
-            format!("{constructor}_{args}")
-        }
-        TreeKind::AppliedTypeTree(applied) => {
-            extract_given_type_name(arena, names, applied.tpt, follow_args)?
-        }
-        // The source parser currently represents applied parent types in
-        // structural givens with `Apply`; other type contexts use the
-        // dedicated `AppliedTypeTree` node.
-        TreeKind::Apply(applied) if follow_args && !applied.args.is_empty() => {
-            let constructor = extract_given_type_name(arena, names, applied.function, true)?;
-            let args = argument_names(arena, names, &applied.args)?;
-            format!("{constructor}_{args}")
-        }
-        TreeKind::Apply(applied) => {
-            extract_given_type_name(arena, names, applied.function, follow_args)?
-        }
-        TreeKind::LambdaTypeTree(lambda) => {
-            extract_given_type_name(arena, names, lambda.body, follow_args)?
-        }
-        TreeKind::RefinedTypeTree(refined) if refined.refinements.is_empty() => {
-            extract_given_type_name(arena, names, refined.tpt, follow_args)?
-        }
-        TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => {
-            extract_given_type_name(arena, names, parens.inner, follow_args)?
-        }
-        TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) => {
-            argument_names(arena, names, &tuple.elements)?
-        }
-        TreeKind::PhaseSpecific(UntypedNode::Function(function)) => {
-            if function.params.is_empty() {
-                return Err(UnsupportedGivenNameTree {
-                    tree,
-                    kind: given_type_tree_kind(node),
-                });
+    let mut output = String::new();
+    let mut active = HashSet::new();
+    let mut pending = vec![Task::Visit(tree, follow_args)];
+    while let Some(task) = pending.pop() {
+        let (tree, follow_args) = match task {
+            Task::Text(text) => {
+                output.push_str(text);
+                continue;
             }
-            if !follow_args {
-                "Function".to_owned()
-            } else {
-                let params = argument_names(arena, names, &function.params)?;
-                let result = extract_given_type_name(arena, names, function.body, true)?;
-                format!("{params}_to_{result}")
+            Task::Arguments(args) => {
+                for (ordinal, arg) in args.iter().enumerate().rev() {
+                    pending.push(Task::Visit(*arg, false));
+                    if ordinal > 0 {
+                        pending.push(Task::Text("_"));
+                    }
+                }
+                continue;
             }
-        }
-        TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) => {
-            if function.params.is_empty() {
-                return Err(UnsupportedGivenNameTree {
-                    tree,
-                    kind: given_type_tree_kind(node),
-                });
+            Task::Finish(tree, start) => {
+                active.remove(&tree);
+                if output.len() == start {
+                    return Err(UnsupportedGivenNameTree {
+                        tree,
+                        kind: given_type_tree_kind(&arena.get(tree).kind),
+                    });
+                }
+                continue;
             }
-            if !follow_args {
-                "Function".to_owned()
-            } else {
-                let params = argument_names(arena, names, &function.params)?;
-                let result = extract_given_type_name(arena, names, function.result, true)?;
-                format!("{params}_to_{result}")
-            }
-        }
-        TreeKind::PhaseSpecific(UntypedNode::CapturesAndResult(captures)) => {
-            extract_given_type_name(arena, names, captures.result, follow_args)?
-        }
-        TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => {
-            let operator = names.resolve(infix.op.text());
-            if follow_args {
-                let operands = argument_names(arena, names, &[infix.left, infix.right])?;
-                format!("{operator}_{operands}")
-            } else {
-                operator.to_owned()
-            }
-        }
-        TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(bound)) => {
-            let constructor = extract_given_type_name(arena, names, bound.bound, true)?;
-            let parameter = names.resolve(bound.parameter.as_name().text());
-            format!("{constructor}_{parameter}")
-        }
-        _ => {
+            Task::Visit(tree, follow_args) => (tree, follow_args),
+        };
+        if !active.insert(tree) {
             return Err(UnsupportedGivenNameTree {
                 tree,
-                kind: given_type_tree_kind(node),
+                kind: "cyclic type tree",
             });
         }
-    };
-
-    if extracted.is_empty() {
-        Err(UnsupportedGivenNameTree {
-            tree,
-            kind: given_type_tree_kind(node),
-        })
-    } else {
-        Ok(extracted)
+        // Append each component once. Recursive string concatenation copies
+        // the accumulated name at every level of an applied/function type.
+        pending.push(Task::Finish(tree, output.len()));
+        match &arena.get(tree).kind {
+            TreeKind::Ident(ident) => append_reference(&mut output, ident.name, names),
+            TreeKind::Select(select) if names.resolve(select.name.text()) == "<init>" => {
+                pending.push(Task::Visit(select.qualifier, follow_args));
+            }
+            TreeKind::Select(select) => append_reference(&mut output, select.name, names),
+            TreeKind::TypeDef(definition) => {
+                output.push_str(names.resolve(definition.name.as_name().text()));
+            }
+            TreeKind::AppliedTypeTree(applied) => {
+                if follow_args && !applied.args.is_empty() {
+                    pending.push(Task::Arguments(&applied.args));
+                    pending.push(Task::Text("_"));
+                }
+                pending.push(Task::Visit(applied.tpt, follow_args));
+            }
+            // Structural given parents currently use Apply in the parser.
+            TreeKind::Apply(applied) => {
+                if follow_args && !applied.args.is_empty() {
+                    pending.push(Task::Arguments(&applied.args));
+                    pending.push(Task::Text("_"));
+                }
+                pending.push(Task::Visit(applied.function, follow_args));
+            }
+            TreeKind::LambdaTypeTree(lambda) => {
+                pending.push(Task::Visit(lambda.body, follow_args));
+            }
+            TreeKind::RefinedTypeTree(refined) if refined.refinements.is_empty() => {
+                pending.push(Task::Visit(refined.tpt, follow_args));
+            }
+            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => {
+                pending.push(Task::Visit(parens.inner, follow_args));
+            }
+            TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) => {
+                pending.push(Task::Arguments(&tuple.elements));
+            }
+            TreeKind::PhaseSpecific(UntypedNode::Function(function))
+                if !function.params.is_empty() =>
+            {
+                if follow_args {
+                    pending.push(Task::Visit(function.body, true));
+                    pending.push(Task::Text("_to_"));
+                    pending.push(Task::Arguments(&function.params));
+                } else {
+                    output.push_str("Function");
+                }
+            }
+            TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function))
+                if !function.params.is_empty() =>
+            {
+                if follow_args {
+                    pending.push(Task::Visit(function.result, true));
+                    pending.push(Task::Text("_to_"));
+                    pending.push(Task::Arguments(&function.params));
+                } else {
+                    output.push_str("Function");
+                }
+            }
+            TreeKind::PhaseSpecific(UntypedNode::CapturesAndResult(captures)) => {
+                pending.push(Task::Visit(captures.result, follow_args));
+            }
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => {
+                output.push_str(names.resolve(infix.op.text()));
+                if follow_args {
+                    pending.push(Task::Visit(infix.right, false));
+                    pending.push(Task::Text("_"));
+                    pending.push(Task::Visit(infix.left, false));
+                    pending.push(Task::Text("_"));
+                }
+            }
+            TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(bound)) => {
+                pending.push(Task::Text(names.resolve(bound.parameter.as_name().text())));
+                pending.push(Task::Text("_"));
+                pending.push(Task::Visit(bound.bound, true));
+            }
+            node => {
+                return Err(UnsupportedGivenNameTree {
+                    tree,
+                    kind: given_type_tree_kind(node),
+                });
+            }
+        }
     }
+    Ok(output)
 }
 
 /// Dynamic traversal state for naming declarations.
@@ -4518,6 +4537,80 @@ mod tests {
         assert_eq!(
             type_tree_name(&arena, &store, tree, true).unwrap(),
             "Config"
+        );
+    }
+
+    #[test]
+    fn given_type_name_extractor_handles_deeply_applied_types() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let mut tree = type_ident(&mut arena, &mut store, "F");
+        let argument = type_ident(&mut arena, &mut store, "A");
+        for _ in 0..16384 {
+            tree = arena.alloc(Tree {
+                kind: TreeKind::AppliedTypeTree(dotty_core::ast::AppliedTypeTree {
+                    tpt: tree,
+                    args: vec![argument],
+                }),
+                position: None,
+                ty: (),
+            });
+        }
+
+        assert_eq!(
+            type_tree_name(&arena, &store, tree, true).unwrap(),
+            format!("F{}", "_A".repeat(16384))
+        );
+        assert_eq!(type_tree_name(&arena, &store, tree, false).unwrap(), "F");
+    }
+
+    #[test]
+    fn given_type_name_extractor_does_not_expand_nested_argument_parameters() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let outer = type_ident(&mut arena, &mut store, "F");
+        let inner = type_ident(&mut arena, &mut store, "G");
+        let argument = type_tree(&mut arena);
+        let nested = arena.alloc(Tree {
+            kind: TreeKind::AppliedTypeTree(dotty_core::ast::AppliedTypeTree {
+                tpt: inner,
+                args: vec![argument],
+            }),
+            position: None,
+            ty: (),
+        });
+        let tree = arena.alloc(Tree {
+            kind: TreeKind::AppliedTypeTree(dotty_core::ast::AppliedTypeTree {
+                tpt: outer,
+                args: vec![nested, nested],
+            }),
+            position: None,
+            ty: (),
+        });
+        assert_eq!(type_tree_name(&arena, &store, tree, true).unwrap(), "F_G_G");
+        assert_eq!(type_tree_name(&arena, &store, tree, false).unwrap(), "F");
+    }
+
+    #[test]
+    fn given_type_name_extractor_rejects_empty_components_after_a_prefix() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let constructor = type_ident(&mut arena, &mut store, "F");
+        let argument = type_ident(&mut arena, &mut store, "");
+        let tree = arena.alloc(Tree {
+            kind: TreeKind::AppliedTypeTree(dotty_core::ast::AppliedTypeTree {
+                tpt: constructor,
+                args: vec![argument],
+            }),
+            position: None,
+            ty: (),
+        });
+        assert_eq!(
+            type_tree_name(&arena, &store, tree, true).unwrap_err(),
+            UnsupportedGivenNameTree {
+                tree: argument,
+                kind: "Ident"
+            }
         );
     }
 

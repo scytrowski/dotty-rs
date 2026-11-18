@@ -363,6 +363,74 @@ fn source_pattern_bindings(
 }
 
 #[test]
+fn deeply_applied_anonymous_given_keeps_its_complete_name() {
+    let source_text = format!("given F{} = impl", "[A]".repeat(2048));
+    let named = named_source(&source_text, 401);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        unreachable!()
+    };
+    assert_eq!(
+        named_source_tree_name(&named, package.stats[0]),
+        format!("given_F{}", "_A".repeat(2048))
+    );
+}
+
+#[test]
+fn cyclic_anonymous_given_type_rolls_back_and_can_be_repaired() {
+    let (mut parsed, source, mut store) = parsed_source("given Config = impl", 402);
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        unreachable!()
+    };
+    let given = package.stats[0];
+    let TreeKind::ValDef(definition) = &parsed.ast.get(given).kind else {
+        unreachable!()
+    };
+    let tpt = definition.tpt;
+    let original_kind = parsed.ast.get(tpt).kind.clone();
+    parsed.ast.get_mut(tpt).kind = TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::Parens(
+        dotty_core::ast::Parens { inner: tpt },
+    ));
+    let mut packages = Packages::new();
+    let checkpoint = store.checkpoint();
+    let mark = packages.mark();
+    assert_eq!(
+        name_compilation_unit(
+            &parsed.ast,
+            parsed.root,
+            source,
+            "Given.scala",
+            &mut store,
+            &mut packages,
+        )
+        .unwrap_err(),
+        NamerError::UnsupportedGivenNameShape {
+            tree_index: given.index(),
+            position: parsed.ast.get(given).position,
+            unsupported_tree_index: tpt.index(),
+            unsupported_kind: "cyclic type tree",
+        }
+    );
+    assert_eq!(store.checkpoint(), checkpoint);
+    assert_eq!(packages.mark(), mark);
+
+    parsed.ast.get_mut(tpt).kind = original_kind;
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Given.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let symbol = index.symbol_at(source, given).unwrap();
+    assert_eq!(
+        store.names.resolve(store.symbols.get(symbol).name.text()),
+        "given_Config"
+    );
+}
+
+#[test]
 fn anonymous_given_alias_gets_a_deterministic_invented_name() {
     let named = named_source("given Config = makeConfig", 105);
     let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
