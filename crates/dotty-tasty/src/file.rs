@@ -1094,8 +1094,19 @@ impl<'a> TastyFile<'a> {
 
         if let Some(attributes) = &attributes {
             for attribute in attributes {
-                if let Attribute::SourceFile(reference) = attribute {
-                    self.resolve_source_file(*reference)?;
+                match attribute {
+                    Attribute::SourceFile(reference) => {
+                        self.resolve_source_file(*reference)?;
+                    }
+                    Attribute::StringExtension { reference, .. }
+                        if self.names.get_utf8(*reference).is_none() =>
+                    {
+                        return Err(TastyFileError::InvalidNameReference {
+                            context: "string extension attribute",
+                            reference: *reference,
+                        });
+                    }
+                    _ => {}
                 }
             }
         }
@@ -1466,6 +1477,46 @@ mod tests {
                 reference: 2,
             })
         );
+    }
+
+    #[test]
+    fn validates_string_extension_references_at_file_level() {
+        let header = TastyFile::parse(&compatible_file_bytes())
+            .unwrap()
+            .header()
+            .clone();
+        let names = NameTable::from_entries(vec![
+            crate::RawName::Utf8("ASTs".into()),
+            crate::RawName::Utf8("Attributes".into()),
+            crate::RawName::Qualified {
+                prefix: 0,
+                selector: 1,
+            },
+        ])
+        .unwrap();
+        for reference in [0, 2, 3] {
+            let attr = crate::Attribute::StringExtension {
+                tag: 130,
+                reference,
+            };
+            let builder = super::TastyFileBuilder::new(header.clone(), names.clone())
+                .with_section(EncodedSection::raw(0, []))
+                .with_section(EncodedSection::attributes(1, std::slice::from_ref(&attr)).unwrap());
+            if reference == 0 {
+                let bytes = builder.encode().unwrap();
+                let file = TastyFile::parse_and_validate_compatible_with(&bytes, 28, 9, 0).unwrap();
+                assert_eq!(file.attributes().unwrap(), Some(vec![attr]));
+                assert_eq!(file.source_file().unwrap(), None);
+            } else {
+                assert_eq!(
+                    builder.validate(),
+                    Err(TastyFileError::InvalidNameReference {
+                        context: "string extension attribute",
+                        reference
+                    })
+                );
+            }
+        }
     }
 
     #[test]

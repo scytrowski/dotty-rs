@@ -76,6 +76,9 @@ pub const OUTLINE_ATTR: u8 = 6;
 /// Attribute tag for the source-file name reference.
 pub const SOURCEFILE_ATTR: u8 = 129;
 
+const BOOLEAN_EXTENSION_TAGS: std::ops::RangeInclusive<u8> = 7..=32;
+const STRING_EXTENSION_TAGS: std::ops::RangeInclusive<u8> = 130..=160;
+
 /// Decoded standard TASTy file attribute.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Attribute {
@@ -93,6 +96,18 @@ pub enum Attribute {
     Outline,
     /// Raw zero-based name-table index emitted by Scala's `SOURCEFILEattr`.
     SourceFile(NameRef),
+    /// An unnamed boolean attribute in Scala's reserved boolean range.
+    BooleanExtension {
+        /// Wire tag in `7..=32`.
+        tag: u8,
+    },
+    /// An unnamed string attribute in Scala's reserved string range.
+    StringExtension {
+        /// Wire tag in `130..=160`.
+        tag: u8,
+        /// Zero-based UTF-8 name-table reference.
+        reference: NameRef,
+    },
 }
 
 /// A source comment associated with an AST address.
@@ -201,15 +216,29 @@ impl Attribute {
         let mut previous = None;
         for attribute in attributes {
             let tag = attribute.tag();
-            if previous.is_some_and(|previous| tag <= previous) {
+            match attribute {
+                Self::BooleanExtension { .. } if !BOOLEAN_EXTENSION_TAGS.contains(&tag) => {
+                    return Err(WriteError::InvalidTag { tag });
+                }
+                Self::StringExtension { .. } if !STRING_EXTENSION_TAGS.contains(&tag) => {
+                    return Err(WriteError::InvalidTag { tag });
+                }
+                _ => {}
+            }
+            if let Some(previous) = previous
+                && tag <= previous
+            {
                 return Err(WriteError::AttributeOrder {
-                    previous: previous.unwrap(),
+                    previous,
                     current: tag,
                 });
             }
             previous = Some(tag);
-            writer.write_u8(tag);
-            if let Self::SourceFile(reference) = attribute {
+        }
+        for attribute in attributes {
+            writer.write_u8(attribute.tag());
+            if let Self::SourceFile(reference) | Self::StringExtension { reference, .. } = attribute
+            {
                 writer.write_nat(*reference);
             }
         }
@@ -225,6 +254,7 @@ impl Attribute {
             Self::Java => JAVA_ATTR,
             Self::Outline => OUTLINE_ATTR,
             Self::SourceFile(_) => SOURCEFILE_ATTR,
+            Self::BooleanExtension { tag } | Self::StringExtension { tag, .. } => *tag,
         }
     }
 }
@@ -640,6 +670,11 @@ impl<'a> Section<'a> {
                 JAVA_ATTR => Attribute::Java,
                 OUTLINE_ATTR => Attribute::Outline,
                 SOURCEFILE_ATTR => Attribute::SourceFile(reader.read_nat()?),
+                tag if BOOLEAN_EXTENSION_TAGS.contains(&tag) => Attribute::BooleanExtension { tag },
+                tag if STRING_EXTENSION_TAGS.contains(&tag) => Attribute::StringExtension {
+                    tag,
+                    reference: reader.read_nat()?,
+                },
                 _ => return Err(SectionError::InvalidAttributeTag { tag, offset }),
             };
             attributes.push(attribute);
@@ -1968,18 +2003,76 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_attribute_tags() {
-        let section = Section {
-            name: 0,
-            offset: 0,
-            length: 0,
-            payload: &[7],
-        };
+    fn rejects_tags_outside_assigned_attribute_categories() {
+        for tag in [0, 33, 128, 161, 255] {
+            assert_eq!(
+                Section::new(0, &[tag]).decode_attributes(),
+                Err(SectionError::InvalidAttributeTag { tag, offset: 0 })
+            );
+        }
+    }
 
+    #[test]
+    fn preserves_the_tags_and_references_of_attribute_extensions() {
+        let payload = [6, 7, 32, 129, 0x81, 130, 0x80, 160, 1, 0x80];
+        let attributes = Section::new(0, &payload).decode_attributes().unwrap();
         assert_eq!(
-            section.decode_attributes(),
-            Err(SectionError::InvalidAttributeTag { tag: 7, offset: 0 })
+            attributes,
+            [
+                Attribute::Outline,
+                Attribute::BooleanExtension { tag: 7 },
+                Attribute::BooleanExtension { tag: 32 },
+                Attribute::SourceFile(1),
+                Attribute::StringExtension {
+                    tag: 130,
+                    reference: 0
+                },
+                Attribute::StringExtension {
+                    tag: 160,
+                    reference: 128
+                }
+            ]
         );
+        let mut writer = Writer::new();
+        Attribute::encode_all(&attributes, &mut writer).unwrap();
+        assert_eq!(writer.as_slice(), payload);
+        assert!(matches!(
+            Section::new(0, &[130]).decode_attributes(),
+            Err(SectionError::Read(_))
+        ));
+        assert_eq!(
+            Section::new(0, &[7, 7]).decode_attributes(),
+            Err(SectionError::AttributesNotOrdered {
+                previous: 7,
+                current: 7,
+                offset: 1
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_extension_variants_before_appending_to_the_writer() {
+        for attr in [
+            Attribute::BooleanExtension { tag: 6 },
+            Attribute::BooleanExtension { tag: 130 },
+            Attribute::StringExtension {
+                tag: 129,
+                reference: 0,
+            },
+            Attribute::StringExtension {
+                tag: 32,
+                reference: 0,
+            },
+        ] {
+            let tag = attr.tag();
+            let mut writer = Writer::new();
+            writer.write_u8(42);
+            assert_eq!(
+                Attribute::encode_all(&[Attribute::ExplicitNulls, attr], &mut writer),
+                Err(WriteError::InvalidTag { tag })
+            );
+            assert_eq!(writer.as_slice(), &[42]);
+        }
     }
 
     #[test]

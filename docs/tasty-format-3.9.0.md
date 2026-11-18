@@ -945,6 +945,10 @@ Attributes:
 - have no additional payload in range `1..32`;
 - have a `Utf8Ref` payload in range `129..160`.
 
+Unnamed boolean tags `7..=32` and string tags `130..=160` are retained as
+`BooleanExtension` and `StringExtension`. File validation checks each string
+extension’s zero-based UTF-8 reference.
+
 The Scala 3.9.0 compiler emits the `SOURCEFILEattr` `Utf8Ref` as a zero-based
 name-table index in the fixtures used by this project, despite the grammar's
 one-based `Utf8Ref` description. The decoder preserves the raw value in
