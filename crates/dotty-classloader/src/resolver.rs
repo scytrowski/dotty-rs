@@ -7270,30 +7270,36 @@ mod tests {
                 BinaryName::from_internal("convergence/ChainMiddle"),
                 BinaryName::from_internal("convergence/ChainRoot"),
             ];
-            let mut symbol_for = |simple_name: &str| {
-                let index = match simple_name {
-                    "ChainLeaf" => 0,
-                    "ChainMiddle" => 1,
-                    "ChainRoot" => 2,
-                    _ => unreachable!(),
+            let mut selected = {
+                let mut symbol_for = |simple_name: &str| {
+                    let index = match simple_name {
+                        "ChainLeaf" => 0,
+                        "ChainMiddle" => 1,
+                        "ChainRoot" => 2,
+                        _ => unreachable!(),
+                    };
+                    resolver
+                        .resolve_member_with_semantic_class(
+                            &mut store,
+                            &requests[index],
+                            &names[index],
+                        )
+                        .unwrap()
+                        .expect("explicit selected class-root request succeeds")
                 };
-                resolver
-                    .resolve_member_with_semantic_class(&mut store, &requests[index], &names[index])
-                    .unwrap()
-                    .expect("explicit selected class-root request succeeds")
+                let mut selected = HashMap::new();
+                for simple_name in first_order {
+                    let symbol = symbol_for(simple_name);
+                    let previous = selected.insert((*simple_name).to_owned(), symbol);
+                    assert!(previous.is_none());
+                    assert_eq!(
+                        symbol_for(simple_name),
+                        symbol,
+                        "same-session repeat identity"
+                    );
+                }
+                selected
             };
-            let mut selected = HashMap::new();
-            for simple_name in first_order {
-                let symbol = symbol_for(simple_name);
-                let previous = selected.insert((*simple_name).to_owned(), symbol);
-                assert!(previous.is_none());
-                assert_eq!(
-                    symbol_for(simple_name),
-                    symbol,
-                    "same-session repeat identity"
-                );
-            }
-            drop(symbol_for);
             let package_scope = resolver.session.packages.scope_of(package).unwrap();
             let root_name = Name::new(store.names.intern("ChainRoot"), Namespace::Type);
             let root = store
