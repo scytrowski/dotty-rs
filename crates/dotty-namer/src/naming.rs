@@ -1159,11 +1159,12 @@ impl Namer<'_> {
                     visibility: mapped.visibility,
                 },
             )?;
-            self.enter_factory_parameters(
+            self.enter_derived_method_parameters(
                 factory,
                 owner_context.source_context,
                 &constructor.type_params,
                 constructor.value_param_clauses.iter().flatten().copied(),
+                true,
             )?;
         }
         Ok(Some(EnteredHeader::ClassLike {
@@ -2383,20 +2384,22 @@ impl Namer<'_> {
             class_tree,
             apply,
         )?;
-        self.enter_factory_parameters(
+        self.enter_derived_method_parameters(
             apply,
             declaration_context,
             type_parameters,
             value_parameters.iter().copied(),
+            false,
         )
     }
 
-    fn enter_factory_parameters(
+    fn enter_derived_method_parameters(
         &mut self,
         factory: SymbolId,
         declaration_context: SourceContextId,
         type_parameters: &[TreeId<Untyped>],
         value_parameters: impl Iterator<Item = TreeId<Untyped>>,
+        preserve_parameter_flags: bool,
     ) -> Result<(), NamerError> {
         let scope = self.store.scopes.alloc(Scope::new(Some(factory)));
         self.index.record_scope(factory, scope)?;
@@ -2437,13 +2440,7 @@ impl Namer<'_> {
                 scope,
                 SymbolSpec {
                     kind: SymbolKind::Parameter,
-                    flags: if self
-                        .store
-                        .symbols
-                        .get(factory)
-                        .flags
-                        .contains(SymbolFlags::GIVEN)
-                    {
+                    flags: if preserve_parameter_flags {
                         Self::source_flags(&parameter.metadata.modifiers)
                             & (SymbolFlags::GIVEN | SymbolFlags::IMPLICIT | SymbolFlags::ERASED)
                     } else {
@@ -3316,6 +3313,54 @@ impl Namer<'_> {
         if let Some(clauses) = extension_prefix_clauses {
             self.index
                 .record_extension_prefix_clauses(method, clauses)?;
+        }
+
+        if extension_prefix_clauses.is_none() {
+            let mut ordinal = 0;
+            for (clause_index, clause) in definition.value_param_clauses.iter().enumerate() {
+                for &parameter_tree in clause {
+                    ordinal += 1;
+                    let TreeKind::ValDef(parameter) = &self.arena.get(parameter_tree).kind else {
+                        continue;
+                    };
+                    if parameter.rhs.is_none()
+                        || !parameter
+                            .metadata
+                            .modifiers
+                            .iter()
+                            .any(|m| matches!(m, Modifier::Given | Modifier::Implicit))
+                    {
+                        continue;
+                    }
+                    let getter_name = format!(
+                        "{}$default${ordinal}",
+                        self.store.names.resolve(name.text())
+                    );
+                    let getter_name =
+                        dotty_core::TermName::new(self.store.names.intern(&getter_name));
+                    let getter = self.enter_derived_symbol(
+                        parameter_tree,
+                        *getter_name.as_name(),
+                        owner,
+                        class_scope,
+                        SymbolSpec {
+                            kind: SymbolKind::Method,
+                            flags: SymbolFlags::SYNTHETIC,
+                            visibility: self.store.symbols.get(method).visibility,
+                        },
+                    )?;
+                    self.enter_derived_method_parameters(
+                        getter,
+                        declaration_context,
+                        &definition.type_params,
+                        definition.value_param_clauses[..clause_index]
+                            .iter()
+                            .flatten()
+                            .copied(),
+                        true,
+                    )?;
+                }
+            }
         }
 
         Ok(EnteredHeader::Method {

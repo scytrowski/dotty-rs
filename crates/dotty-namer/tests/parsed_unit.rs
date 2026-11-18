@@ -666,6 +666,57 @@ fn structural_given_factory_and_its_binders_have_distinct_source_identities() {
     }
 }
 
+#[test]
+fn contextual_default_getters_copy_only_earlier_clauses() {
+    let named = named_source(
+        "class Reader { def read[A](x: A)(using n: A = x, extra: A = x): A = n }",
+        110,
+    );
+    let (method_tree, definition) = named
+        .parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::DefDef(def)
+                if named.store.names.resolve(def.name.as_name().text()) == "read" =>
+            {
+                Some((tree, def))
+            }
+            _ => None,
+        })
+        .unwrap();
+    let method = named.index.symbol_at(named.source, method_tree).unwrap();
+    let owner = named.store.symbols.owner(method).unwrap();
+    for (i, &param) in definition.value_param_clauses[1].iter().enumerate() {
+        let getter = named
+            .index
+            .derived_symbol_at(owner, named.source, param)
+            .unwrap();
+        let entry = named.store.symbols.get(getter);
+        assert_eq!(entry.kind, SymbolKind::Method);
+        assert_eq!(
+            named.store.names.resolve(entry.name.text()),
+            format!("read$default${}", i + 2)
+        );
+        for &source in &[
+            definition.type_params[0],
+            definition.value_param_clauses[0][0],
+        ] {
+            let copy = named
+                .index
+                .derived_symbol_at(getter, named.source, source)
+                .unwrap();
+            assert_eq!(named.store.symbols.owner(copy), Some(getter));
+        }
+        assert!(
+            named
+                .index
+                .derived_symbol_at(getter, named.source, param)
+                .is_none()
+        );
+    }
+}
+
 struct PrimaryConstructorParts {
     class_tree: dotty_core::TreeId<dotty_core::Untyped>,
     constructor_tree: dotty_core::TreeId<dotty_core::Untyped>,
