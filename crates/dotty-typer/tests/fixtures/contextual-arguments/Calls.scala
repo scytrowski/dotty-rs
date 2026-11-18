@@ -20,3 +20,9 @@ class Priority:
   given narrow: Child = new Child
   def need(using x: Base): Base = x
   def read: Base = need
+
+class NegativeEvidence:
+  import scala.util.NotGiven
+  def absent(using n: NotGiven[Base]): Int = 1
+  def free: Int = absent
+  def ambiguous(using a: Base, b: Base): Int = absent

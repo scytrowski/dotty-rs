@@ -29,10 +29,12 @@ def main():
                 "def explicit(using n: Int): Int = this.need(using n)",
                 "this.f(1)(instance)", "this.legacy(9)", "this.need(using 9)",
                 "def read: Base = this.need(this.broad)",
+                "this.absent(scala.util.NotGiven.value)",
                 "Implicit parameters should be provided with a `using` clause",
             )),
             ("Invalid.scala", 1, (
                 "[E050]", "[E172]", "does not take more parameters",
+                "No given instance of type scala.util.NotGiven[Int]",
                 "No given instance of type Int", "Ambiguous given instances",
             )),
         ):

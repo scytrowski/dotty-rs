@@ -738,6 +738,17 @@ impl SourceTyper<'_> {
         if self.store.symbols.get(object).kind != SymbolKind::Object {
             return Ok(None);
         }
+        Ok(self
+            .resolved_object_method(object, name, tree_index)?
+            .map(|method| (object, method)))
+    }
+
+    pub(in crate::typer) fn resolved_object_method(
+        &mut self,
+        object: SymbolId,
+        name: dotty_core::Name,
+        tree_index: u32,
+    ) -> Result<Option<SymbolId>, TyperError> {
         let module = self.module_class_of_object(object)?;
         let prefix = self.store.types.alloc(Type::TermRef {
             prefix: self.definitions.no_prefix,
@@ -757,13 +768,11 @@ impl SourceTyper<'_> {
                 tree_index,
                 error,
             })?;
-        Ok(symbol
-            .filter(|s| {
-                self.store.symbols.contains(*s)
-                    && self.store.symbols.get(*s).owner == Some(module)
-                    && self.store.symbols.get(*s).kind == SymbolKind::Method
-            })
-            .map(|s| (object, s)))
+        Ok(symbol.filter(|s| {
+            self.store.symbols.contains(*s)
+                && self.store.symbols.get(*s).owner == Some(module)
+                && self.store.symbols.get(*s).kind == SymbolKind::Method
+        }))
     }
 
     fn lookup_default_term_import(

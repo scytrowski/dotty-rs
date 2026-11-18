@@ -415,6 +415,58 @@ impl SourceTyper<'_> {
                 candidates.push(provider);
             }
         }
+        if !candidates.is_empty()
+            && let Some(class) = self.not_given_class(expected)
+        {
+            // Dotty negates the result of trying each eligible candidate. In
+            // particular, an ambiguous nested search also yields NotGiven.value.
+            // Operational limits and unsupported typing must remain observable.
+            for provider in candidates {
+                match self.probe_contextual_candidate(|typer, nested| {
+                    typer
+                        .materialize_provider(
+                            &provider, expected, context, tree_index, history, nested,
+                        )
+                        .map(|_| ())
+                }) {
+                    Ok(()) => {}
+                    Err(
+                        TyperError::MissingContextualArgument { .. }
+                        | TyperError::DivergentContextualArgument { .. }
+                        | TyperError::AmbiguousContextualArgument { .. },
+                    ) => {
+                        let Some(object) = self.contextual_companion(class, tree_index)? else {
+                            return Err(TyperError::UsingApplicationDeferred {
+                                source: self.source,
+                                tree_index,
+                            });
+                        };
+                        let name =
+                            *dotty_core::TermName::new(self.store.names.intern("value")).as_name();
+                        let symbol = self
+                            .resolved_object_method(object, name, tree_index)?
+                            .ok_or(TyperError::UsingApplicationDeferred {
+                                source: self.source,
+                                tree_index,
+                            })?;
+                        return self
+                            .contextual_reference_tree(
+                                ContextualRef {
+                                    symbol,
+                                    receiver: Some(ContextualReceiver::Companion(object)),
+                                },
+                                context,
+                                tree_index,
+                                None,
+                                journal,
+                            )
+                            .map(Some);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            return Ok(None);
+        }
         if let [provider] = candidates.as_slice() {
             if !matches!(
                 self.store.types.try_get(provider.callable),
@@ -650,6 +702,68 @@ impl SourceTyper<'_> {
         Ok(tree)
     }
 
+    fn not_given_class(&self, expected: TypeId) -> Option<SymbolId> {
+        let Type::Applied { tycon, args } = self.store.types.try_get(expected)? else {
+            return None;
+        };
+        let Type::TypeRef {
+            target: TypeRefTarget::Symbol(class),
+            ..
+        } = self.store.types.try_get(*tycon)?
+        else {
+            return None;
+        };
+        if args.len() != 1 || !self.store.symbols.contains(*class) {
+            return None;
+        }
+        let entry = self.store.symbols.get(*class);
+        (entry.kind == SymbolKind::Class
+            && matches!(entry.origin, SymbolOrigin::Tasty(_))
+            && self.store.names.resolve(entry.name.text()) == "NotGiven"
+            && self.package_path(entry.owner?) == ["scala", "util"])
+        .then_some(*class)
+    }
+
+    fn contextual_companion(
+        &mut self,
+        class: SymbolId,
+        tree_index: u32,
+    ) -> Result<Option<SymbolId>, TyperError> {
+        let entry = self.store.symbols.get(class);
+        if entry.links.companion.is_none()
+            && matches!(entry.origin, SymbolOrigin::Tasty(_))
+            && let Some(package) = entry.owner
+            && self.store.symbols.get(package).kind == SymbolKind::Package
+        {
+            // Loading the type alone may leave the object unentered.
+            // Only the resolver can establish their canonical link.
+            let name = dotty_core::Name::new(entry.name.text(), dotty_core::Namespace::Term);
+            let request = MemberRequest {
+                name,
+                prefix: self.package_type_prefix(package),
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            };
+            self.resolver
+                .resolve_member(self.store, &request)
+                .map_err(|error| TyperError::SymbolResolution {
+                    source: self.source,
+                    tree_index,
+                    error,
+                })?;
+        }
+        let Some(object) = self.store.symbols.get(class).links.companion else {
+            return Ok(None);
+        };
+        if !self.store.symbols.contains(object)
+            || self.store.symbols.get(object).kind != SymbolKind::Object
+            || self.store.symbols.get(object).links.companion != Some(class)
+        {
+            return Err(TyperError::ObjectModuleClassUnavailable { object });
+        }
+        Ok(Some(object))
+    }
+
     /// Collect nominal anchors and their parent scopes only after lexical search
     /// has no winner. Each companion contributes a stable term prefix.
     fn companion_refs(
@@ -695,39 +809,9 @@ impl SourceTyper<'_> {
                         .class_info(class, journal)
                         .map_err(|e| TyperError::MemberLookup(Box::new(e)))?;
                     pending.extend(info.parents);
-                    let entry = self.store.symbols.get(class);
-                    if entry.links.companion.is_none()
-                        && matches!(entry.origin, SymbolOrigin::Tasty(_))
-                        && let Some(package) = entry.owner
-                        && self.store.symbols.get(package).kind == SymbolKind::Package
-                    {
-                        // Loading the type alone may leave the object unentered.
-                        // Only the resolver can establish their canonical link.
-                        let name =
-                            dotty_core::Name::new(entry.name.text(), dotty_core::Namespace::Term);
-                        let request = MemberRequest {
-                            name,
-                            prefix: self.package_type_prefix(package),
-                            selector: MemberSelector::Unique,
-                            space: MemberSpace::Prefix,
-                        };
-                        self.resolver
-                            .resolve_member(self.store, &request)
-                            .map_err(|error| TyperError::SymbolResolution {
-                                source: self.source,
-                                tree_index,
-                                error,
-                            })?;
-                    }
-                    let Some(object) = self.store.symbols.get(class).links.companion else {
+                    let Some(object) = self.contextual_companion(class, tree_index)? else {
                         continue;
                     };
-                    if !self.store.symbols.contains(object)
-                        || self.store.symbols.get(object).kind != SymbolKind::Object
-                        || self.store.symbols.get(object).links.companion != Some(class)
-                    {
-                        return Err(TyperError::ObjectModuleClassUnavailable { object });
-                    }
                     let module = self.module_class_of_object(object)?;
                     let scope = self
                         .class_info(module, journal)

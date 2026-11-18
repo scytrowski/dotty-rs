@@ -1458,7 +1458,9 @@ report the expected type and source site. The binary Scala library's
 `Predef.implicitly` uses its real method signature. For the transparent inline
 `Predef.summon`, the singleton return type refers to the exact evidence
 parameter and the typed result retains the selected argument. Local definitions
-shadow the default import. Explicit `using` keeps its own kind.
+shadow the default import. For the library class `scala.util.NotGiven[T]`,
+failed candidate probes, including ambiguity in a nested search for `T`,
+produce a reference to the linked companion’s `value` method. Explicit `using` keeps its own kind.
 See the Scala 3.9 controls under `tests/fixtures/contextual-arguments` in the
 typer crate. Erased
 parameters remain unsupported for explicit application. Bounded by-name
