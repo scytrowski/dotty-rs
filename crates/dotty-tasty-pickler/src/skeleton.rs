@@ -402,6 +402,7 @@ impl ValidatedPicklePlan<'_, '_> {
         ]);
         let mut bodies = Vec::new();
         let mut type_parameters = Vec::new();
+        let mut getter_declarations = Vec::new();
         for method in p.methods {
             let name = context.intern_name(symbol(self, method.symbol)?.name)?;
             let mut fields = vec![AstField::Nat(name)];
@@ -438,6 +439,8 @@ impl ValidatedPicklePlan<'_, '_> {
                 type_parameter = Some(parameter);
                 type_parameters.push(parameter);
             }
+            let default = self.context_defaults.get(&method.symbol);
+            let mut previous_type = None;
             for (index, parameters) in method.parameter_clauses.iter().enumerate() {
                 if parameters.is_empty() {
                     fields.push(AstField::Tree(marker(&mut context, EMPTYCLAUSE_TAG)?));
@@ -467,6 +470,9 @@ impl ValidatedPicklePlan<'_, '_> {
                         } else {
                             method_type_syntax(self, &mut context, parameter_semantic_type)?
                         };
+                        if default.is_some() && index == 0 {
+                            previous_type = Some(parameter_type);
+                        }
                         let mut parameter_fields = vec![
                             AstField::Nat(parameter_name),
                             AstField::Tree(parameter_type),
@@ -478,6 +484,10 @@ impl ValidatedPicklePlan<'_, '_> {
                         };
                         if let Some(tag) = contextual_tag {
                             parameter_fields.push(AstField::Tree(marker(&mut context, tag)?));
+                        }
+                        if default.is_some_and(|d| d.defaulted == parameter) {
+                            parameter_fields
+                                .push(AstField::Tree(marker(&mut context, HASDEFAULT_TAG)?));
                         }
                         context.bind_declaration(
                             parameter,
@@ -582,6 +592,22 @@ impl ValidatedPicklePlan<'_, '_> {
                     method: method.symbol,
                 })?,
             ));
+            if let Some(default) = default {
+                let previous_type = previous_type.ok_or(PickleError::SourceDefinition {
+                    symbol: default.copied,
+                })?;
+                let getter = context.contextual_default_getter(
+                    self,
+                    *default,
+                    name,
+                    previous_type,
+                    complete.is_some(),
+                    limits,
+                )?;
+                stats.push(AstField::Tree(getter));
+                bodies.push((default.getter, default.body));
+                getter_declarations.extend([default.getter, default.copied]);
+            }
         }
         // All supported semantic visibility/flags/annotations are public/empty,
         // as validated from symbol records, not Typed's unit metadata. Unsupported
@@ -618,6 +644,7 @@ impl ValidatedPicklePlan<'_, '_> {
             .chain(std::iter::once(p.constructor.symbol))
             .chain(p.methods.iter().map(|m| m.symbol))
             .chain(type_parameters)
+            .chain(getter_declarations)
             .chain(
                 p.methods
                     .iter()

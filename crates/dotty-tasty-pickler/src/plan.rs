@@ -2,9 +2,12 @@ use std::collections::{HashMap, HashSet};
 
 mod class_state;
 mod contextual_closure;
+mod contextual_default;
 mod contextual_poly;
 mod expression_validation;
 mod source_binding;
+
+pub(crate) use contextual_default::ContextualDefault;
 
 pub use class_state::{
     ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan,
@@ -608,6 +611,7 @@ pub struct ValidatedPicklePlan<'p, 'a> {
     plan: &'p PicklePlan<'a>,
     package: SymbolId,
     pub(crate) context_closures: HashMap<SymbolId, dotty_core::CheckedUnaryContextClosure>,
+    pub(crate) context_defaults: HashMap<SymbolId, ContextualDefault>,
 }
 
 /// Validated input for the explicitly incomplete #2300 declaration fragment.
@@ -669,12 +673,14 @@ impl<'a> PicklePlan<'a> {
             seen_local_symbols: HashSet::new(),
             visible_locals: HashSet::new(),
             context_closures: HashMap::new(),
+            context_defaults: HashMap::new(),
         };
         let package = validator.validate(None)?;
         Ok(ValidatedPicklePlan {
             plan: self,
             package,
             context_closures: validator.context_closures,
+            context_defaults: validator.context_defaults,
         })
     }
 }
@@ -729,6 +735,7 @@ pub(crate) fn validate_class_state_method(
         seen_local_symbols: HashSet::new(),
         visible_locals: HashSet::new(),
         context_closures: HashMap::new(),
+        context_defaults: HashMap::new(),
     };
     for binding in local_values {
         if validator
@@ -811,6 +818,7 @@ pub(crate) fn validate_class_state_mutable_declaration_fragment(
         seen_local_symbols: HashSet::new(),
         visible_locals: HashSet::new(),
         context_closures: HashMap::new(),
+        context_defaults: HashMap::new(),
     };
     for local in &local_values {
         if validator
@@ -872,6 +880,7 @@ pub(crate) fn validate_class_state_mutable_reference_assignment_fragment(
         seen_local_symbols: HashSet::new(),
         visible_locals: HashSet::new(),
         context_closures: HashMap::new(),
+        context_defaults: HashMap::new(),
     };
     for local in &local_values {
         if validator
@@ -904,6 +913,7 @@ struct Validator<'p, 'a> {
     seen_local_symbols: HashSet<SymbolId>,
     visible_locals: HashSet<SymbolId>,
     context_closures: HashMap<SymbolId, dotty_core::CheckedUnaryContextClosure>,
+    context_defaults: HashMap<SymbolId, ContextualDefault>,
 }
 
 impl<'a> Validator<'_, 'a> {
@@ -1270,7 +1280,12 @@ impl<'a> Validator<'_, 'a> {
                     });
                 };
                 self.parameter_metadata(&parameter.metadata, symbol)?;
-                if parameter.rhs.is_some() {
+                if parameter.rhs.is_some()
+                    && !self
+                        .context_defaults
+                        .get(&method)
+                        .is_some_and(|d| d.defaulted == symbol)
+                {
                     return Err(
                         self.unsupported(UnsupportedFeature::ParameterClauses, Some(symbol))
                     );
@@ -1492,6 +1507,16 @@ impl<'a> Validator<'_, 'a> {
         // that scope, but this serializer slice must report it as an
         // unsupported constructor form rather than an opaque scope mismatch.
         let has_two_reference_parameters = self.constructor(template.constructor)?;
+        for method in p.methods {
+            if let Some(default) = self.contextual_default(method)? {
+                if !expected.insert(default.getter) {
+                    return Err(PickleError::DuplicateDeclaration {
+                        symbol: default.getter,
+                    });
+                }
+                self.context_defaults.insert(method.symbol, default);
+            }
+        }
         let mut entered = HashSet::new();
         let mut invalid_scope = false;
         for symbol in class_scope.entered_symbols() {

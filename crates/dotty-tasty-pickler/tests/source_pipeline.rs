@@ -1250,6 +1250,11 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
         };
         let body = definition.rhs.map(|rhs| {
             if !definition.type_params.is_empty()
+                || definition
+                    .value_param_clauses
+                    .iter()
+                    .flatten()
+                    .any(|&tree| index.derived_symbol_at(class, source, tree).is_some())
                 || matches!(
                     parsed.ast.get(definition.tpt).kind,
                     TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_))
@@ -1460,9 +1465,28 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
         skeleton.omitted_bodies(),
         methods
             .iter()
-            .map(|method| OmittedMethodBody {
-                method: method.symbol,
-                typed_root: method.body.unwrap(),
+            .flat_map(|method| {
+                let mut omitted = vec![OmittedMethodBody {
+                    method: method.symbol,
+                    typed_root: method.body.unwrap(),
+                }];
+                let TreeKind::DefDef(definition) = &source_ast.get(method.source_tree).kind else {
+                    panic!()
+                };
+                for &parameter in definition.value_param_clauses.iter().flatten() {
+                    if let Some(getter) = index.derived_symbol_at(class, source, parameter) {
+                        let TreeKind::ValDef(p) = &source_ast.get(parameter).kind else {
+                            panic!()
+                        };
+                        let typed = typed_bindings.get(source, p.rhs.unwrap()).unwrap();
+                        assert_eq!(output.body(getter), Some(typed));
+                        omitted.push(OmittedMethodBody {
+                            method: getter,
+                            typed_root: typed,
+                        });
+                    }
+                }
+                omitted
             })
             .collect::<Vec<_>>()
     );
@@ -4543,4 +4567,112 @@ fn a_foreign_same_named_parameter_cannot_become_a_context_closure_capture() {
             ..
         }
     ));
+}
+
+const CONTEXT_DEFAULT: &str =
+    "package example; class Reader { def offset(x: Int)(using n: Int = x): Int = n }";
+
+#[test]
+fn contextual_default_getter_preserves_its_own_parameter_and_scala_client_semantics() {
+    use dotty_tasty::tasty::*;
+    let (_, output) = source_outputs_named(CONTEXT_DEFAULT, "Reader.scala", |_| {}).unwrap();
+    let (_, repeat) = source_outputs_named(CONTEXT_DEFAULT, "Reader.scala", |_| {}).unwrap();
+    assert_eq!(output.bytes(), repeat.bytes());
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let addresses = file.ast_address_index().unwrap();
+    let member = |name: &str| {
+        addresses
+            .iter()
+            .filter(|node| node.tag == DEFDEF_TAG)
+            .map(|node| node.decode_defdef_body().unwrap())
+            .find(|body| file.render_name(body.name).unwrap() == name)
+            .unwrap()
+    };
+    let original = member("offset");
+    let getter = member("offset$default$2");
+    assert_eq!(
+        original.parameters[1].decode_body().unwrap().tail,
+        [
+            DefinitionTail::Modifier(GIVEN_TAG),
+            DefinitionTail::Modifier(HASDEFAULT_TAG)
+        ]
+    );
+    assert!(
+        matches!(file.names().get(getter.name).unwrap(),RawName::DefaultGetter{underlying,index:1} if *underlying==original.name)
+    );
+    let RawTree::LengthNode(return_type) = &getter.return_type else {
+        panic!("expected annotated getter result")
+    };
+    let RawTree::LengthNode(annotation) = return_type.decode_annotated().unwrap().annotation else {
+        panic!("expected annotation application")
+    };
+    let application = annotation.decode_apply().unwrap();
+    assert!(application.arguments.is_empty());
+    let RawTree::LengthNode(constructor) = application.function else {
+        panic!("expected annotation constructor")
+    };
+    let signed = file
+        .render_signed_name(constructor.decode_select_in().unwrap().name)
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(signed,RenderedSignedName::Signed{original,signature} if original=="<init>" && signature.parameters.is_empty() && signature.result=="scala.annotation.unchecked.uncheckedVariance")
+    );
+
+    let Some(RawTree::Leaf(reference)) = getter.rhs else {
+        panic!("missing default expression")
+    };
+    assert_eq!(reference.tag, TERMREFDIRECT_TAG);
+    let rebound = addresses.get(reference.ast_ref().unwrap().address).unwrap();
+    assert!(std::ptr::eq(
+        rebound.payload,
+        getter.parameters[0].payload()
+    ));
+    assert!(!std::ptr::eq(
+        rebound.payload,
+        original.parameters[0].payload()
+    ));
+    verify_contextual_client(
+        "Reader",
+        output.bytes(),
+        "val reader = new example.Reader; assert(reader.offset(7) == 7); assert(reader.offset(7)(using 9) == 9)",
+    );
+}
+
+#[test]
+fn contextual_default_getter_rejects_a_reference_to_the_original_same_named_parameter() {
+    let text = CONTEXT_DEFAULT.replace("Int = n }", "Int = x }");
+    let mut corrupted = None;
+    let error = source_outputs_named_with_tree_edits(
+        &text,
+        "Reader.scala",
+        ValidationLimits::default(),
+        |source, typed, bindings, _| {
+            let source_id = SourceId::from_index(7);
+            let (method_body, default) = source
+                .iter()
+                .find_map(|(_, node)| {
+                    let TreeKind::DefDef(method) = &node.kind else {
+                        return None;
+                    };
+                    let p = method.value_param_clauses.get(1)?.first()?;
+                    let TreeKind::ValDef(parameter) = &source.get(*p).kind else {
+                        return None;
+                    };
+                    Some((method.rhs?, parameter.rhs?))
+                })
+                .unwrap();
+            let enclosing = typed.get(bindings.get(source_id, method_body).unwrap()).ty;
+            let body = bindings.get(source_id, default).unwrap();
+            assert_ne!(enclosing, typed.get(body).ty);
+            typed.get_mut(body).ty = enclosing;
+            corrupted = Some((body, enclosing));
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error,PickleError::BodyType{tree,ty} if Some((tree,ty))==corrupted),
+        "{error:?}"
+    );
 }

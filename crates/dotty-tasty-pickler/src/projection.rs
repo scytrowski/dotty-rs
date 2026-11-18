@@ -11,6 +11,7 @@ use crate::{
 };
 
 mod contextual_closure;
+mod contextual_default;
 mod primitive_operator;
 
 /// Budgets for semantic projection; type and expression recursion have hard
@@ -43,6 +44,7 @@ impl Default for ProjectionLimits {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum NameKey {
     Utf8(String),
+    DefaultGetter(NameRef, u32),
     Qualified(NameRef, NameRef),
     SignedEmpty(NameRef, NameRef),
     SignedMany(NameRef, NameRef, Vec<i32>),
@@ -700,6 +702,10 @@ impl<'a> EncodingContext<'a> {
             });
         }
         let raw = match &key {
+            NameKey::DefaultGetter(underlying, index) => RawName::DefaultGetter {
+                underlying: *underlying,
+                index: *index,
+            },
             NameKey::Utf8(text) => RawName::Utf8(text.clone()),
             NameKey::Qualified(prefix, selector) => RawName::Qualified {
                 prefix: *prefix,
@@ -964,19 +970,34 @@ impl<'a> EncodingContext<'a> {
         source: SourceId,
         tree: dotty_core::TreeId<dotty_core::Untyped>,
     ) -> Result<AstLabel, PickleError> {
+        self.reserve_derived(
+            symbol,
+            constructor,
+            source,
+            tree,
+            SymbolKind::Parameter,
+            SymbolFlags::EMPTY,
+        )
+    }
+    fn reserve_derived(
+        &mut self,
+        symbol: SymbolId,
+        owner: SymbolId,
+        source: SourceId,
+        tree: dotty_core::TreeId<dotty_core::Untyped>,
+        kind: SymbolKind,
+        flags: SymbolFlags,
+    ) -> Result<AstLabel, PickleError> {
         self.run(|context| {
             context.charge(1)?;
             let record = context.symbol(symbol)?;
             if context.source != source
-                || context
-                    .source_index
-                    .derived_symbol_at(constructor, source, tree)
-                    != Some(symbol)
-                || record.kind != SymbolKind::Parameter
+                || context.source_index.derived_symbol_at(owner, source, tree) != Some(symbol)
+                || record.kind != kind
                 || record.origin != SymbolOrigin::Source(source)
-                || record.owner != Some(constructor)
+                || record.owner != Some(owner)
                 || record.visibility != Visibility::Public
-                || !record.flags.is_empty()
+                || record.flags != flags
                 || !record.annotations.is_empty()
             {
                 return Err(reference(symbol, ReferenceError::Metadata));

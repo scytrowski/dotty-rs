@@ -909,3 +909,21 @@ the context parameter to the method's JVM parameters. The focused
 `source_pipeline` oracle test reconstructs the library with Scala 3.9.0
 `-from-tasty`, compiles a separate client and executes both the capturing and
 non-capturing calls.
+
+### Defaults that refer to an earlier parameter
+
+The method-only producer supports `def offset(x: Int)(using n: Int = x): Int = n`.
+The frontend types the default expression in the scope of the generated
+getter, which owns its own copy of `x`. Validation checks the registered
+method and ordinal, both derived source identities and the exact typed
+reference in the getter body. The default can
+refer to the single plain `Int` parameter in the preceding clause.
+
+The defaulted parameter has `GIVEN` and `HASDEFAULT` on the wire. A separate
+method uses the structured `DEFAULTGETTER(offset, 1)` name, which renders as
+`offset$default$2`. Its parameter shares the original parameter’s type syntax
+and has its own declaration address. Its result is annotated with
+`scala.annotation.unchecked.uncheckedVariance`, as in Scala 3.9.0. The
+declaration skeleton records both omitted bodies. The complete artifact
+retains both typed roots. The Scala client test compiles and executes a call
+using the default and a call supplying an explicit contextual argument.
