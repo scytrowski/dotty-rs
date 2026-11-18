@@ -1410,8 +1410,9 @@ impl Namer<'_> {
         enclosing_scope: ScopeId,
     ) -> Option<SymbolId> {
         let name = *TypeName::new(object_name.text()).as_name();
-        self.unique_companion_candidate(enclosing_scope, name, |kind| {
-            matches!(kind, SymbolKind::Class | SymbolKind::Trait)
+        self.unique_companion_candidate(enclosing_scope, name, |entry| {
+            matches!(entry.kind, SymbolKind::Class | SymbolKind::Trait)
+                || entry.kind == SymbolKind::TypeAlias && entry.flags.contains(SymbolFlags::OPAQUE)
         })
     }
 
@@ -1419,7 +1420,7 @@ impl Namer<'_> {
         &self,
         scope: ScopeId,
         name: dotty_core::Name,
-        matches_kind: impl Fn(SymbolKind) -> bool,
+        matches_kind: impl Fn(&Symbol) -> bool,
     ) -> Option<SymbolId> {
         let mut candidates = self
             .store
@@ -1429,7 +1430,7 @@ impl Namer<'_> {
             .iter()
             .copied()
             .filter(|id| {
-                matches_kind(self.store.symbols.get(*id).kind)
+                matches_kind(self.store.symbols.get(*id))
                     && self.index.declaration_context_of(*id).is_some()
             });
         let candidate = candidates.next()?;
@@ -1443,9 +1444,9 @@ impl Namer<'_> {
         for link in &self.companion_links {
             let name = self.store.symbols.get(link.object).name;
             if self.source_companion_class(name, link.scope) == Some(link.class)
-                && self
-                    .unique_companion_candidate(link.scope, name, |kind| kind == SymbolKind::Object)
-                    == Some(link.object)
+                && self.unique_companion_candidate(link.scope, name, |entry| {
+                    entry.kind == SymbolKind::Object
+                }) == Some(link.object)
             {
                 pairs.push((link.class, link.object));
             } else if let Some(tree) = link.required_by {
@@ -7209,13 +7210,38 @@ mod tests {
             position: None,
             ty: (),
         });
-        let class = class_definition(&mut arena, &mut store, "C", vec![], vec![alias], None);
+        let (object, _, _) = module_definition(
+            &mut arena,
+            &mut store,
+            "OpaqueAlias",
+            vec![],
+            None,
+            vec![],
+            None,
+        );
+        let class = class_definition(
+            &mut arena,
+            &mut store,
+            "C",
+            vec![],
+            vec![object, alias],
+            None,
+        );
         let root = package_with_stat(&mut arena, &mut store, "aliases", vec![class]);
         let mut packages = Packages::new();
 
         let index = name_package(&arena, root, 45, &mut store, &mut packages).unwrap();
         let alias_symbol = index.symbol_at(SourceId::from_index(45), alias).unwrap();
 
+        let object_symbol = index.symbol_at(SourceId::from_index(45), object).unwrap();
+        assert_eq!(
+            store.symbols.get(alias_symbol).links.companion,
+            Some(object_symbol)
+        );
+        assert_eq!(
+            store.symbols.get(object_symbol).links.companion,
+            Some(alias_symbol)
+        );
         assert_eq!(store.symbols.get(alias_symbol).kind, SymbolKind::TypeAlias);
         assert_eq!(store.symbols.get(alias_symbol).flags, SymbolFlags::OPAQUE);
         assert_eq!(
