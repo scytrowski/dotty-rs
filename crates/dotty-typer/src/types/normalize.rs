@@ -100,7 +100,7 @@ impl<'a> TypeNormalizer<'a> {
     /// its `TypeLambda` binder.
     pub fn dealias_top(&mut self, ty: TypeId) -> Result<TypeId, TypeNormalizeError> {
         let checkpoint = self.store.checkpoint();
-        match self.dealias_top_with_budget(ty, MAX_TYPE_NORMALIZATION_DEPTH) {
+        match self.dealias_top_with_budget(ty, MAX_TYPE_NORMALIZATION_DEPTH, false) {
             Ok((ty, _)) => Ok(ty),
             Err(error) => {
                 self.store.rollback_to(checkpoint);
@@ -113,17 +113,18 @@ impl<'a> TypeNormalizer<'a> {
         &mut self,
         ty: TypeId,
         budget: usize,
+        nominal_opaque: bool,
     ) -> Result<(TypeId, usize), TypeNormalizeError> {
         let mut current = ty;
         let mut visited = Vec::new();
 
         for links in 0..=budget {
-            let (symbol, next) = match self.type_at(current)?.clone() {
+            let (symbol, prefix, next) = match self.type_at(current)?.clone() {
                 Type::TypeRef {
                     target: TypeRefTarget::Symbol(symbol),
-                    ..
+                    prefix,
                 } => {
-                    let Some(next) = self.alias_target(symbol)? else {
+                    let Some(next) = self.alias_target(symbol, nominal_opaque)? else {
                         return Ok((current, links));
                     };
                     if let Type::TypeLambda(lambda) = self.type_at(next)?.clone() {
@@ -134,19 +135,21 @@ impl<'a> TypeNormalizer<'a> {
                             instantiate_type_lambda(self.store, next, &[]).map_err(|error| {
                                 TypeNormalizeError::AliasInstantiationFailed { symbol, error }
                             })?;
-                        (symbol, instantiated.result)
+                        (symbol, prefix, instantiated.result)
                     } else {
-                        (symbol, next)
+                        (symbol, prefix, next)
                     }
                 }
                 Type::Applied { tycon, args } => {
-                    let Some(symbol) = self.alias_symbol(tycon)? else {
+                    let Some((symbol, prefix)) = self.alias_symbol(tycon)? else {
                         return Ok((current, links));
                     };
-                    let Some(next) = self.alias_application_target(symbol, &args)? else {
+                    let Some(next) =
+                        self.alias_application_target(symbol, &args, nominal_opaque)?
+                    else {
                         return Ok((current, links));
                     };
-                    (symbol, next)
+                    (symbol, prefix, next)
                 }
                 _ => return Ok((current, links)),
             };
@@ -157,7 +160,19 @@ impl<'a> TypeNormalizer<'a> {
                 return Err(TypeNormalizeError::TooDeep);
             }
             visited.push(symbol);
-            current = next;
+            current = if matches!(self.type_at(prefix)?, Type::TermRef { .. })
+                && let Some(owner) = self.store.symbols.get(symbol).owner
+                && self.store.symbols.contains(owner)
+                && matches!(
+                    self.store.symbols.get(owner).kind,
+                    SymbolKind::Class | SymbolKind::Trait
+                ) {
+                dotty_core::types::substitute_this_type(self.store, next, owner, prefix).map_err(
+                    |error| TypeNormalizeError::AliasInstantiationFailed { symbol, error },
+                )?
+            } else {
+                next
+            };
         }
 
         Err(TypeNormalizeError::TooDeep)
@@ -266,6 +281,7 @@ impl<'a> TypeNormalizer<'a> {
             let (dealiased, links) = self.dealias_top_with_budget(
                 current,
                 MAX_TYPE_NORMALIZATION_DEPTH.saturating_sub(depth),
+                preserve_retains_cap,
             )?;
             depth += links;
             if dealiased != current {
@@ -338,10 +354,10 @@ impl<'a> TypeNormalizer<'a> {
         false
     }
 
-    fn alias_symbol(&self, ty: TypeId) -> Result<Option<SymbolId>, TypeNormalizeError> {
+    fn alias_symbol(&self, ty: TypeId) -> Result<Option<(SymbolId, TypeId)>, TypeNormalizeError> {
         let Type::TypeRef {
             target: TypeRefTarget::Symbol(symbol),
-            ..
+            prefix,
         } = self.type_at(ty)?
         else {
             return Ok(None);
@@ -351,7 +367,7 @@ impl<'a> TypeNormalizer<'a> {
         }
         Ok(
             matches!(self.store.symbols.get(*symbol).kind, SymbolKind::TypeAlias)
-                .then_some(*symbol),
+                .then_some((*symbol, *prefix)),
         )
     }
 
@@ -359,8 +375,9 @@ impl<'a> TypeNormalizer<'a> {
         &mut self,
         symbol: SymbolId,
         arguments: &[TypeId],
+        nominal_opaque: bool,
     ) -> Result<Option<TypeId>, TypeNormalizeError> {
-        let Some(target) = self.alias_target(symbol)? else {
+        let Some(target) = self.alias_target(symbol, nominal_opaque)? else {
             return Ok(None);
         };
         let lambda_arity = match self.type_at(target)?.clone() {
@@ -386,7 +403,11 @@ impl<'a> TypeNormalizer<'a> {
             .map_err(|error| TypeNormalizeError::AliasInstantiationFailed { symbol, error })
     }
 
-    fn alias_target(&self, symbol: SymbolId) -> Result<Option<TypeId>, TypeNormalizeError> {
+    fn alias_target(
+        &self,
+        symbol: SymbolId,
+        nominal_opaque: bool,
+    ) -> Result<Option<TypeId>, TypeNormalizeError> {
         if !self.store.symbols.contains(symbol) {
             return Err(TypeNormalizeError::UnknownSymbol { symbol });
         }
@@ -395,7 +416,11 @@ impl<'a> TypeNormalizer<'a> {
             return Ok(None);
         }
         if declaration.flags.contains(SymbolFlags::OPAQUE) {
-            return Err(TypeNormalizeError::OpaqueAlias { symbol });
+            return if nominal_opaque {
+                Ok(None)
+            } else {
+                Err(TypeNormalizeError::OpaqueAlias { symbol })
+            };
         }
         let info = match declaration.info {
             SymbolInfo::Complete(info) => info,

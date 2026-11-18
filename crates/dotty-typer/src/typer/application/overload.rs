@@ -1650,6 +1650,23 @@ impl SourceTyper<'_> {
                     return Err(TyperError::UnknownSymbol { symbol });
                 }
                 children.push(prefix);
+                if self.store.symbols.get(symbol).kind == SymbolKind::TypeAlias
+                    && !self
+                        .store
+                        .symbols
+                        .get(symbol)
+                        .flags
+                        .contains(SymbolFlags::OPAQUE)
+                {
+                    if self.is_current_source_symbol(symbol)
+                        && matches!(*self.store.symbols.info(symbol), SymbolInfo::Missing)
+                    {
+                        self.complete_symbol_inner(symbol, info_journal)?;
+                    }
+                    if let SymbolInfo::Complete(info) = *self.store.symbols.info(symbol) {
+                        children.push(info);
+                    }
+                }
                 if matches!(
                     self.store.symbols.get(symbol).kind,
                     SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass

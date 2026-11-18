@@ -20838,6 +20838,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::PatDefBinderInventoryConflict { .. } => "PatDefBinderInventoryConflict",
         TyperError::PatDefAggregateArityDeferred { .. } => "PatDefAggregateArityDeferred",
         TyperError::UnsupportedProduct1FieldType { .. } => "UnsupportedProduct1FieldType",
+        TyperError::MemberPrefixRebinding { .. } => "MemberPrefixRebinding",
         TyperError::UnsupportedProduct2FieldTypes { .. } => "UnsupportedProduct2FieldTypes",
     }
 }

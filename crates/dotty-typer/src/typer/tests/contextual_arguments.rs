@@ -1270,6 +1270,9 @@ fn structural_context_bound_owns_distinct_class_constructor_and_factory_witnesse
     );
 }
 
+#[path = "contextual_paths.rs"]
+mod contextual_paths;
+
 #[path = "recursive_dictionary.rs"]
 mod recursive_dictionary;
 

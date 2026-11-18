@@ -963,6 +963,31 @@ impl SourceTyper<'_> {
                             })?,
                     };
                     let member_type = self.member_type_on_journaled(&candidate, info_journal)?;
+                    let member_type =
+                        if matches!(self.store.types.try_get(prefix), Some(Type::TermRef { .. }))
+                            && matches!(
+                                self.store.symbols.get(candidate.declaring_class).kind,
+                                SymbolKind::Class | SymbolKind::Trait
+                            )
+                            && self.source_tree_for_symbol(symbol).is_some()
+                            && self.is_stable_selection_prefix(prefix)?
+                        {
+                            dotty_core::types::substitute_this_type(
+                                self.store,
+                                member_type,
+                                candidate.declaring_class,
+                                prefix,
+                            )
+                            .map_err(|error| {
+                                TyperError::MemberPrefixRebinding {
+                                    symbol,
+                                    prefix,
+                                    error,
+                                }
+                            })?
+                        } else {
+                            member_type
+                        };
                     if self.definitions.any_hash_code_symbol(self.store) == Some(symbol)
                         && let Some(Type::ByName { result }) = self.store.types.try_get(member_type)
                     {

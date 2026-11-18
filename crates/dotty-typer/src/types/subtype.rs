@@ -6,8 +6,8 @@ use std::fmt;
 use dotty_core::Namespace;
 use dotty_core::types::{ClassInfo, Type, TypeRefTarget};
 use dotty_core::{
-    ClassTypeParameter, Constant, ResolutionError, ScopeId, SymbolId, SymbolInfo, SymbolKind,
-    SymbolOrigin, TypeId, Variance,
+    ClassTypeParameter, Constant, ResolutionError, ScopeId, SymbolFlags, SymbolId, SymbolInfo,
+    SymbolKind, SymbolOrigin, TypeId, Variance,
 };
 
 use crate::types::{SymbolInfoState, TypeNormalizeError, TypeNormalizer};
@@ -298,6 +298,20 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         }
         if self.is_class(expected, self.typer.definitions.any_class) {
             return Ok(true);
+        }
+        let mut opaque = false;
+        for ty in [found, expected] {
+            if let Some(symbol) = self.opaque_alias(ty) {
+                opaque = true;
+                // Nontrivial public bounds can prove further subtype relations.
+                // Leave them explicit until this relation substitutes the bounds.
+                if !self.has_unbounded_source_opaque_rhs(symbol) {
+                    return Err(TypeRelationError::UnsupportedType { found, expected });
+                }
+            }
+        }
+        if opaque {
+            return Ok(false);
         }
         if self.is_class(expected, self.typer.definitions.null_class) {
             return Ok(false);
@@ -655,6 +669,57 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             && root.owner.is_none()
     }
 
+    fn has_unbounded_source_opaque_rhs(&self, symbol: SymbolId) -> bool {
+        use dotty_core::ast::TreeKind;
+        let Some((source, tree)) = self.typer.source_tree_for_symbol(symbol) else {
+            return false;
+        };
+        if source != self.typer.source {
+            return false;
+        }
+        let Some(TreeKind::TypeDef(definition)) =
+            self.typer.arena.try_get(tree).map(|node| &node.kind)
+        else {
+            return false;
+        };
+        match self
+            .typer
+            .arena
+            .try_get(definition.rhs)
+            .map(|node| &node.kind)
+        {
+            Some(TreeKind::TypeBoundsTree(bounds)) => {
+                bounds.low.is_none() && bounds.high.is_none() && bounds.alias.is_some()
+            }
+            Some(_) => true,
+            None => false,
+        }
+    }
+
+    fn opaque_alias(&self, ty: TypeId) -> Option<SymbolId> {
+        let head = match self.typer.store.types.try_get(ty) {
+            Some(Type::Applied { tycon, .. }) => *tycon,
+            _ => ty,
+        };
+        let Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        } = self.typer.store.types.try_get(head)?
+        else {
+            return None;
+        };
+        (self.typer.store.symbols.contains(*symbol)
+            && self.typer.store.symbols.get(*symbol).kind == SymbolKind::TypeAlias
+            && self
+                .typer
+                .store
+                .symbols
+                .get(*symbol)
+                .flags
+                .contains(SymbolFlags::OPAQUE))
+        .then_some(*symbol)
+    }
+
     fn is_class(&self, ty: TypeId, symbol: SymbolId) -> bool {
         matches!(
             self.typer.store.types.try_get(ty),
@@ -1004,6 +1069,17 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         let mut children = Vec::new();
         match node {
             Type::NoPrefix if !value_position => {}
+            Type::TermRef {
+                prefix,
+                target: dotty_core::types::TermRefTarget::Symbol(symbol),
+            } if !value_position => {
+                if !self.typer.store.symbols.contains(symbol)
+                    || !matches!(self.typer.is_stable_selection_prefix(found), Ok(true))
+                {
+                    return Err(TypeRelationError::UnsupportedType { found, expected });
+                }
+                children.push((prefix, false));
+            }
             Type::TypeRef {
                 prefix,
                 target: TypeRefTarget::Symbol(symbol),
@@ -1013,6 +1089,8 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
                 }
                 let declaration = self.typer.store.symbols.get(symbol);
                 if value_position
+                    && !(declaration.kind == SymbolKind::TypeAlias
+                        && declaration.flags.contains(SymbolFlags::OPAQUE))
                     && !matches!(
                         declaration.kind,
                         SymbolKind::Class
@@ -1143,6 +1221,16 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         let right_node = self.type_at(right)?.clone();
         let result: Result<bool, TypeRelationError> = (|| match (left_node, right_node) {
             (Type::NoPrefix, Type::NoPrefix) => Ok(true),
+            (
+                Type::TermRef {
+                    prefix: left,
+                    target: dotty_core::types::TermRefTarget::Symbol(l),
+                },
+                Type::TermRef {
+                    prefix: right,
+                    target: dotty_core::types::TermRefTarget::Symbol(r),
+                },
+            ) => Ok(l == r && self.equivalent(left, right, depth + 1)?),
             (
                 Type::TypeRef {
                     prefix: left_prefix,

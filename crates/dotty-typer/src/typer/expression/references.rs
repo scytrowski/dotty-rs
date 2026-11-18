@@ -279,7 +279,22 @@ impl SourceTyper<'_> {
         qualifier_type: TypeId,
         tree_index: u32,
     ) -> Result<(), TyperError> {
-        let stable = match self.store.types.try_get(qualifier_type) {
+        if self.is_stable_selection_prefix(qualifier_type)? {
+            Ok(())
+        } else {
+            Err(TyperError::UnstableSelectionPrefix {
+                source: self.source,
+                tree_index,
+                qualifier_type,
+            })
+        }
+    }
+
+    pub(in crate::typer) fn is_stable_selection_prefix(
+        &self,
+        qualifier_type: TypeId,
+    ) -> Result<bool, TyperError> {
+        Ok(match self.store.types.try_get(qualifier_type) {
             Some(Type::ThisType { .. } | Type::Constant(_)) => true,
             Some(Type::TermRef {
                 target: TermRefTarget::Symbol(symbol),
@@ -309,16 +324,7 @@ impl SourceTyper<'_> {
                 }
             }
             _ => false,
-        };
-        if stable {
-            Ok(())
-        } else {
-            Err(TyperError::UnstableSelectionPrefix {
-                source: self.source,
-                tree_index,
-                qualifier_type,
-            })
-        }
+        })
     }
 
     pub(in crate::typer) fn require_stable_application_selection_prefix(

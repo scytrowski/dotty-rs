@@ -1440,7 +1440,9 @@ impl SourceTyper<'_> {
         }
         let value_clauses = self.context_bound_clauses(definition);
         let extension_prefix_count = usize::from(is_extension);
+        let mut method_binders = Vec::new();
         for _ in 0..extension_prefix_count + value_clauses.len() {
+            method_binders.push(result);
             result = match self.store.types.try_get(result) {
                 Some(Type::Method(method_type)) => method_type.result,
                 _ => {
@@ -1714,6 +1716,17 @@ impl SourceTyper<'_> {
             typed_clauses.push(typed_parameters);
         }
 
+        // The public signature abstracts term parameters to ParamRefs. Inside
+        // its own body those paths still denote the entered parameter symbols.
+        let mut body_result = result;
+        for binder in method_binders {
+            if self.type_contains_param_ref(result, binder)? {
+                if let Some(declared) = self.type_index.type_at(self.source, definition.tpt) {
+                    body_result = declared;
+                }
+                break;
+            }
+        }
         let typed_result =
             self.reify_constructor_type_tree(definition.tpt, result, new_mappings)?;
         let rhs = definition
@@ -1757,7 +1770,7 @@ impl SourceTyper<'_> {
         let typed_rhs = self.type_expression_expected_inner(
             rhs,
             method_context,
-            result,
+            body_result,
             info_journal,
             new_mappings,
         );

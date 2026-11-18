@@ -2,6 +2,7 @@
 
 use super::*;
 
+mod anchors;
 mod dictionary;
 use dictionary::Dictionary;
 
@@ -9,6 +10,7 @@ mod conversions;
 pub(super) use conversions::{ConversionGoal, ConversionTarget};
 mod defaults;
 mod extension;
+mod opaque;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ContextualRef {
@@ -19,6 +21,7 @@ struct ContextualRef {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ContextualReceiver {
     Companion(SymbolId),
+    Path(TypeId),
     Import(TreeId<Typed>),
 }
 
@@ -105,10 +108,13 @@ impl SourceTyper<'_> {
                 target: TermRefTarget::Symbol(method),
                 ..
             }) if self.store.symbols.contains(*method)
-                && self.store.symbols.get(*method).kind == SymbolKind::Method
-                && matches!(self.store.symbols.info(*method), SymbolInfo::Complete(info)
-                    if matches!(self.store.types.try_get(*info), Some(Type::Method(m)) if m.kind != MethodKind::Plain)) =>
+                && self.store.symbols.get(*method).kind == SymbolKind::Method =>
             {
+                let info = self.completed_expression_symbol_info(*method, journal)?;
+                if !matches!(self.store.types.try_get(info), Some(Type::Method(m)) if m.kind != MethodKind::Plain)
+                {
+                    return Ok(function);
+                }
                 self.widen_expression_type_journaled(ty, journal, 0)?
             }
             Some(Type::Method(_)) => ty,
@@ -279,7 +285,25 @@ impl SourceTyper<'_> {
                 .map_err(|_| deferred)?;
             arg_ty
         } else if self.type_contains_param_ref(result, binder)? {
-            return Err(deferred);
+            let paths = args
+                .iter()
+                .map(|arg| {
+                    let path = self.typed_arena.get(*arg).ty;
+                    Ok(self.is_stable_selection_prefix(path)?.then_some(path))
+                })
+                .collect::<Result<Vec<_>, TyperError>>()?;
+            dotty_core::types::instantiate_method_result(self.store, binder, &paths).map_err(
+                |error| match error {
+                    dotty_core::types::TypeRebindError::MissingMethodArgumentPath { .. } => {
+                        deferred
+                    }
+                    error => TyperError::TypeRebinding {
+                        source: self.source,
+                        tree_index,
+                        error,
+                    },
+                },
+            )?
         } else {
             result
         };
@@ -301,6 +325,9 @@ impl SourceTyper<'_> {
         if let Some(receiver) = evidence.receiver {
             let qualifier = match receiver {
                 ContextualReceiver::Import(tree) => tree,
+                ContextualReceiver::Path(path) => {
+                    self.contextual_path_tree(path, position, tree_index)?
+                }
                 ContextualReceiver::Companion(object) => {
                     let ident = Ident {
                         name: self.store.symbols.get(object).name,
@@ -380,6 +407,7 @@ impl SourceTyper<'_> {
         history: &mut SearchHistory,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TreeId<Typed>, TyperError> {
+        let expected = self.contextual_type_at_owner(expected, context.owner, journal)?;
         if let Some(reference) = history
             .dictionary
             .existing_reference(self, expected, tree_index, journal)?
@@ -501,6 +529,7 @@ impl SourceTyper<'_> {
         let reference = if let Some(receiver) = evidence.receiver {
             let prefix = match receiver {
                 ContextualReceiver::Import(tree) => self.typed_arena.get(tree).ty,
+                ContextualReceiver::Path(path) => path,
                 ContextualReceiver::Companion(object) => {
                     self.expression_type_of_symbol(object, owner, tree_index, journal)?
                 }
@@ -573,9 +602,23 @@ impl SourceTyper<'_> {
             }
             let actual =
                 self.contextual_reference_signature(evidence, context.owner, tree_index, journal)?;
-            if let Some(provider) =
-                self.contextual_provider(evidence, actual, expected, tree_index, journal)?
-            {
+            if let Some(provider) = self.contextual_provider(
+                evidence,
+                actual,
+                expected,
+                context.owner,
+                tree_index,
+                journal,
+            )? {
+                if matches!(evidence.receiver, Some(ContextualReceiver::Import(_))) {
+                    candidates.retain(|prior: &Provider| {
+                        prior.reference.symbol != symbol
+                            || !matches!(
+                                prior.reference.receiver,
+                                Some(ContextualReceiver::Import(_))
+                            )
+                    });
+                }
                 candidates.push(provider);
             }
         }
@@ -688,6 +731,7 @@ impl SourceTyper<'_> {
         reference: ContextualRef,
         signature: TypeId,
         expected: TypeId,
+        owner: SymbolId,
         tree_index: u32,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Option<Provider>, TyperError> {
@@ -810,6 +854,7 @@ impl SourceTyper<'_> {
                 result = method.result;
             }
         }
+        let result = self.contextual_type_at_owner(result, owner, journal)?;
         if !self.contextual_conforms(result, expected, tree_index, journal)? {
             return Ok(None);
         }
@@ -862,7 +907,7 @@ impl SourceTyper<'_> {
             });
         }
         for &(reference, ancestor, _) in &history.active {
-            if reference == provider.reference
+            if self.same_contextual_ref(reference, provider.reference)
                 && self.contextual_conforms(expected, ancestor, tree_index, journal)?
                 && self.contextual_conforms(ancestor, expected, tree_index, journal)?
             {
@@ -909,14 +954,6 @@ impl SourceTyper<'_> {
         }
         let mut shared = Vec::new();
         while let Some(Type::Method(method)) = self.store.types.try_get(signature).cloned() {
-            if self.type_contains_param_ref(method.result, signature)? {
-                return Err(TyperError::DependentMethodApplicationDeferred {
-                    source: self.source,
-                    tree_index,
-                    binder: signature,
-                    result: method.result,
-                });
-            }
             let (args, kind) = self.contextual_call_arguments(
                 &mut tree,
                 &method,
@@ -926,14 +963,16 @@ impl SourceTyper<'_> {
                 &mut shared,
                 journal,
             )?;
-            tree = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply_with_kind(
+            tree = self.finish_contextual_call(
                 tree,
+                signature,
+                method.result,
                 args,
                 kind,
-                method.result,
                 None,
-            );
-            signature = method.result;
+                tree_index,
+            )?;
+            signature = self.typed_arena.get(tree).ty;
         }
         if !shared.is_empty() {
             tree = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
@@ -1002,81 +1041,6 @@ impl SourceTyper<'_> {
             return Err(TyperError::ObjectModuleClassUnavailable { object });
         }
         Ok(Some(object))
-    }
-
-    /// Collect nominal anchors and their parent scopes only after lexical search
-    /// has no winner. Each companion contributes a stable term prefix.
-    fn companion_refs(
-        &mut self,
-        expected: TypeId,
-        tree_index: u32,
-        journal: &mut Vec<(SymbolId, SymbolInfo)>,
-    ) -> Result<Vec<ContextualRef>, TyperError> {
-        let mut pending = vec![expected];
-        let mut seen = HashSet::new();
-        let mut classes = HashSet::new();
-        let mut refs = Vec::new();
-        while let Some(ty) = pending.pop() {
-            if !seen.insert(ty) {
-                continue;
-            }
-            if seen.len() > MAX_TYPE_RELATION_VIEWS {
-                return Err(TyperError::TypeNormalization(
-                    crate::types::TypeNormalizeError::TooDeep,
-                ));
-            }
-            match self.store.types.try_get(ty).cloned() {
-                Some(Type::Applied { tycon, args }) => {
-                    pending.extend(args);
-                    pending.push(tycon);
-                }
-                Some(Type::TypeRef {
-                    target: TypeRefTarget::Symbol(class),
-                    ..
-                }) if self.store.symbols.contains(class) => {
-                    let entry = self.store.symbols.get(class);
-                    if !matches!(
-                        entry.kind,
-                        SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
-                    ) || !classes.insert(class)
-                    {
-                        continue;
-                    }
-                    if matches!(entry.origin, SymbolOrigin::Builtin) {
-                        continue;
-                    }
-                    let info = self
-                        .class_info(class, journal)
-                        .map_err(|e| TyperError::MemberLookup(Box::new(e)))?;
-                    pending.extend(info.parents);
-                    let Some(object) = self.contextual_companion(class, tree_index)? else {
-                        continue;
-                    };
-                    let module = self.module_class_of_object(object)?;
-                    let scope = self
-                        .class_info(module, journal)
-                        .map_err(|e| TyperError::MemberLookup(Box::new(e)))?
-                        .declarations;
-                    for symbol in self.contextual_members(scope, journal)? {
-                        if self.store.symbols.get(symbol).visibility == Visibility::Public {
-                            let evidence = ContextualRef {
-                                symbol,
-                                receiver: Some(ContextualReceiver::Companion(object)),
-                            };
-                            if !refs.contains(&evidence) {
-                                refs.push(evidence);
-                            }
-                        }
-                    }
-                }
-                Some(Type::And { left, right } | Type::Or { left, right }) => {
-                    pending.extend([left, right])
-                }
-                Some(Type::AliasingBounds { alias }) => pending.push(alias),
-                _ => {}
-            }
-        }
-        Ok(refs)
     }
 
     fn contextual_import_refs(
@@ -1233,7 +1197,8 @@ impl SourceTyper<'_> {
                                             )?;
                                             Ok(typer
                                                 .contextual_provider(
-                                                    evidence, actual, bound, tree_index, probe,
+                                                    evidence, actual, bound, owner, tree_index,
+                                                    probe,
                                                 )?
                                                 .is_some())
                                         })?
@@ -1247,12 +1212,8 @@ impl SourceTyper<'_> {
                     }
                     matched
                 };
-                if selected {
-                    // Repeated imports of the same declaration select its latest receiver.
-                    refs.retain(|prior| prior.symbol != symbol || prior.receiver.is_none());
-                    if !refs.contains(&evidence) {
-                        refs.push(evidence);
-                    }
+                if selected && !refs.contains(&evidence) {
+                    refs.push(evidence);
                 }
             }
         }
@@ -1413,7 +1374,7 @@ impl SourceTyper<'_> {
         for (index, (candidate, _)) in candidates.iter().enumerate() {
             let mut dominated = false;
             for (rival, _) in &candidates {
-                if rival.reference == candidate.reference {
+                if self.same_contextual_ref(rival.reference, candidate.reference) {
                     continue;
                 }
                 let is_method = |p: &Provider| {

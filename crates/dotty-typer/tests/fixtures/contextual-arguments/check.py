@@ -54,6 +54,18 @@ def main():
                 "final given def boxes[A",
                 "this.need(bound.Builders.boxes[Int](leaf))",
             )),
+            ("Paths.scala", 0, (
+                "Client.this.p.read(Client.this.p.member)", "Client.this.q.read(Client.this.q.member)",
+                "a.family.read(", "a.family.member)",
+            )),
+            ("PathErrors.scala", 1, ("[E007]", "Found:    Client.this.q.Item", "Required: Client.this.p.Item")),
+            ("Anchors.scala", 0, (
+                "this.useAlias(anchorsearch.Target.targetKey)", "this.useToken(anchorsearch.Tokens.Token.tokenKey)",
+                "anchorsearch.Tokens.useHere(raw)",
+            )),
+            ("OpaqueError.scala", 1, ("[E172]", "No given instance of type opaqueerror.Key[opaqueerror.Tokens.Token]")),
+            ("Dependent.scala", 0, ("this.read(p)(p.member)", "this.read(using p)(p.member)",
+                "this.needs(dependentclauses.Witness.derive(p)(p.member))")),
             ("Recursive.scala", 0, (
                 "final class $_lazy_implicit_$2() extends Object(), Serializable",
                 "recursivesearch.Evidence.loop(this.$_lazy_implicit_$1,",

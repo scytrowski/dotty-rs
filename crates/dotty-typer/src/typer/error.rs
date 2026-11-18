@@ -795,6 +795,12 @@ pub enum TyperError {
         existing: TypeId,
         attempted: TypeId,
     },
+    /// A member's declaration-relative this type could not be adapted to its receiver.
+    MemberPrefixRebinding {
+        symbol: SymbolId,
+        prefix: TypeId,
+        error: dotty_core::types::TypeRebindError,
+    },
     /// A future completion operation could not rebind a semantic type.
     TypeRebinding {
         source: SourceId,
