@@ -479,6 +479,8 @@ fn compile_source_batch_with_typer_failure_observer(
         }));
     }
 
+    // The typer installs compiler-synthesized ContextFunctionN classes in scala.
+    packages.enter(&mut store, dotty_core::SymbolOrigin::Synthetic, &["scala"]);
     let mut typer = SourceTyper::new(
         &parsed.ast,
         source_id,
@@ -31734,7 +31736,7 @@ fn polymorphic_contextual_identity_rejects_another_methods_type_parameter() {
         };
         let (first, a) = evidence("first");
         let (_, b) = evidence("second");
-        let foreign = store.symbols.info(b).clone();
+        let foreign = *store.symbols.info(b);
         store.symbols.set_info(a, foreign);
         expected = Some(first);
     };
@@ -31787,7 +31789,7 @@ fn curried_contextual_calls_flatten_into_one_jvm_invocation() {
 fn context_function_results_use_the_lambda_evidence_and_captured_parameter() {
     let output = TestOutputDirectory::new("context-function-results");
     let emitted = compile_source(
-        "package scala; class ContextResults { def closure: Int ?=> Int = (n: Int) ?=> n; def capture(x: Int): Int ?=> Int = (n: Int) ?=> n + x; def shadow(x: Int): Int ?=> Int = (x: Int) ?=> x; def empty(): Int ?=> Int = (n: Int) ?=> n }",
+        "package example; class ContextResults { def closure: Int ?=> Int = (n: Int) ?=> n; def capture(x: Int): Int ?=> Int = (n: Int) ?=> n + x; def shadow(x: Int): Int ?=> Int = (x: Int) ?=> x; def empty(): Int ?=> Int = (n: Int) ?=> n }",
         "ContextResults.scala", output.path(),
     ).unwrap();
     let mut reader = Reader::new(emitted.class.bytes());
@@ -31801,7 +31803,7 @@ fn context_function_results_use_the_lambda_evidence_and_captured_parameter() {
     assert_opcode_sequence(emitted_method_code(&class, "empty"), &[0x1b, 0xac]);
     if require_jdk_or_skip() {
         let harness = output.path().join("Run.java");
-        fs::write(&harness, "class Run { public static void main(String[] args) { var c = new scala.ContextResults(); if (c.closure(37) != 37 || c.capture(19, 23) != 42 || c.shadow(1, 5) != 5 || c.empty(17) != 17) throw new AssertionError(); } }").unwrap();
+        fs::write(&harness, "class Run { public static void main(String[] args) { var c = new example.ContextResults(); if (c.closure(37) != 37 || c.capture(19, 23) != 42 || c.shadow(1, 5) != 5 || c.empty(17) != 17) throw new AssertionError(); } }").unwrap();
         let result = Command::new("java")
             .arg("-Xverify:all")
             .arg("-classpath")
@@ -31828,12 +31830,12 @@ fn context_function_results_reject_another_methods_closure_root() {
         methods[0].body = Some(root);
     };
     let failure = compile_source_batch_observed(
-        "package scala; class Foreign { def first: Int ?=> Int = (n: Int) ?=> n; def second: Int ?=> Int = (n: Int) ?=> n }",
+        "package example; class Foreign { def first: Int ?=> Int = (n: Int) ?=> n; def second: Int ?=> Int = (n: Int) ?=> n }",
         "Foreign.scala", output.path(), SourceId::from_index(1), SourceUnitCardinality::ExactlyOne, Some(&mut change)
     ).unwrap_err();
     assert!(
         matches!(failure, PipelineFailure::Codegen(JvmCodegenError::InvalidContextFunctionResult { method, tree }) if Some((method, tree)) == expected),
         "{failure:?}"
     );
-    assert!(!output.path().join("scala/Foreign.class").exists());
+    assert!(!output.path().join("example/Foreign.class").exists());
 }
