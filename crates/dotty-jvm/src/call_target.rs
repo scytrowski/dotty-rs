@@ -10,6 +10,7 @@ use dotty_core::store::SemanticStore;
 use dotty_core::symbols::{SymbolInfo, SymbolKind, Visibility};
 use dotty_core::types::{Constant, TermRefTarget, Type, TypeRefTarget};
 
+use crate::reference::ReferenceUnit;
 use crate::{
     JvmCallTarget, JvmClassMetadata, JvmCodegenError, JvmCompilationUnit, JvmInvocationKind,
     JvmReturnType, JvmType, SymbolRole, UnsupportedJvmCallShapeKind,
@@ -61,7 +62,7 @@ pub(super) fn resolve_same_class_call(
 }
 
 pub(super) fn resolve_instance_call(
-    unit: &JvmCompilationUnit<'_>,
+    scope: ReferenceUnit<'_>,
     caller_class: SymbolId,
     caller_method: SymbolId,
     call: TreeId<Typed>,
@@ -74,7 +75,7 @@ pub(super) fn resolve_instance_call(
         ..Default::default()
     };
     resolve_instance_call_recursive(
-        unit,
+        scope,
         caller_class,
         caller_method,
         call,
@@ -107,7 +108,7 @@ impl CallResolutionContext<'_> {
 }
 
 fn resolve_instance_call_recursive(
-    unit: &JvmCompilationUnit<'_>,
+    scope: ReferenceUnit<'_>,
     caller_class: SymbolId,
     caller_method: SymbolId,
     call: TreeId<Typed>,
@@ -115,6 +116,7 @@ fn resolve_instance_call_recursive(
     context: &mut CallResolutionContext<'_>,
     invocation: JvmInvocationKind,
 ) -> Result<JvmCallTarget, JvmCodegenError> {
+    let unit = scope.unit;
     let call_tree = tree(unit.store, unit.typed_ast, call)?;
     if context.depth >= crate::JVM_EXPRESSION_DEPTH_LIMIT {
         return Err(JvmCodegenError::ExpressionDepthExceeded {
@@ -131,7 +133,7 @@ fn resolve_instance_call_recursive(
     }
     context.depth += 1;
     let result = resolve_instance_call_body(
-        unit,
+        scope,
         caller_class,
         caller_method,
         call,
@@ -145,7 +147,7 @@ fn resolve_instance_call_recursive(
 }
 
 fn resolve_instance_call_body(
-    unit: &JvmCompilationUnit<'_>,
+    scope: ReferenceUnit<'_>,
     caller_class: SymbolId,
     caller_method: SymbolId,
     call: TreeId<Typed>,
@@ -153,6 +155,7 @@ fn resolve_instance_call_body(
     context: &mut CallResolutionContext<'_>,
     invocation: JvmInvocationKind,
 ) -> Result<JvmCallTarget, JvmCodegenError> {
+    let unit = scope.unit;
     let class_plan = unit
         .classes
         .iter()
@@ -206,7 +209,7 @@ fn resolve_instance_call_body(
         TreeKind::Select(select) => {
             let receiver = select.qualifier;
             let receiver_class = resolve_receiver_class(
-                unit,
+                scope,
                 caller_class,
                 caller_method,
                 caller_method_plan,
@@ -274,7 +277,7 @@ fn resolve_instance_call_body(
                 *class == caller_class && receiver_class == caller_class
             }
             (Some(receiver), _) => prefix_matches_receiver(
-                unit,
+                scope,
                 prefix,
                 receiver.ty,
                 receiver_class,
@@ -292,7 +295,7 @@ fn resolve_instance_call_body(
         ));
     }
     if let Some(expected_parent) = direct_super_parent {
-        if !is_validated_ancestor(unit, expected_parent, method_owner, definitions)? {
+        if !is_validated_ancestor(scope, expected_parent, method_owner, definitions)? {
             return Err(JvmCodegenError::WrongOwner {
                 symbol: method,
                 expected: expected_parent,
@@ -300,7 +303,7 @@ fn resolve_instance_call_body(
             });
         }
     } else if method_owner != receiver_class
-        && !is_validated_ancestor(unit, receiver_class, method_owner, definitions)?
+        && !is_validated_ancestor(scope, receiver_class, method_owner, definitions)?
     {
         return Err(JvmCodegenError::WrongOwner {
             symbol: method,
@@ -416,7 +419,7 @@ fn resolve_instance_call_body(
             });
         }
     }
-    let found = project_result_type(unit, call_tree.ty, definitions, all_metadata);
+    let found = project_result_type(scope, call_tree.ty, definitions, all_metadata);
     let expected = method_metadata.descriptor().result();
     if found != Some(expected) {
         return Err(JvmCodegenError::JvmCallResultTypeMismatch {
@@ -448,12 +451,12 @@ fn resolve_instance_call_body(
 }
 
 fn is_validated_ancestor(
-    unit: &JvmCompilationUnit<'_>,
+    scope: ReferenceUnit<'_>,
     class: SymbolId,
     ancestor: SymbolId,
     definitions: &Definitions,
 ) -> Result<bool, JvmCodegenError> {
-    let hierarchy = unit.class_hierarchy(definitions)?;
+    let hierarchy = scope.checked_hierarchy(definitions)?;
     let mut current = class;
     for _ in 0..=hierarchy.superclasses().len() {
         if current == ancestor {
@@ -542,7 +545,7 @@ fn validate_direct_super_receiver(
 }
 
 fn resolve_receiver_class(
-    unit: &JvmCompilationUnit<'_>,
+    scope: ReferenceUnit<'_>,
     caller_class: SymbolId,
     caller_method: SymbolId,
     method_plan: &crate::JvmMethodPlan,
@@ -550,6 +553,7 @@ fn resolve_receiver_class(
     definitions: &Definitions,
     context: &mut CallResolutionContext<'_>,
 ) -> Result<SymbolId, JvmCodegenError> {
+    let unit = scope.unit;
     let receiver = tree(unit.store, unit.typed_ast, receiver_id)?;
     match &receiver.kind {
         TreeKind::This(this) => {
@@ -652,7 +656,7 @@ fn resolve_receiver_class(
                         symbol: Some(*local),
                     })?;
                 let found = crate::reference::project_call_reference(
-                    unit,
+                    scope,
                     local_type,
                     definitions,
                     all_metadata,
@@ -697,7 +701,7 @@ fn resolve_receiver_class(
                     UnsupportedJvmCallShapeKind::MutableOrUnplannedReferenceReceiver,
                 ));
             }
-            project_reference_class(unit, local_type, definitions, context.metadata.as_deref())
+            project_reference_class(scope, local_type, definitions, context.metadata.as_deref())
                 .ok_or_else(|| {
                     unsupported_call(
                         receiver_id,
@@ -744,7 +748,7 @@ fn resolve_receiver_class(
             .map(|target| target.owner_class()),
         TreeKind::Apply(_) => {
             let target = resolve_instance_call_recursive(
-                unit,
+                scope,
                 caller_class,
                 caller_method,
                 receiver_id,
@@ -846,7 +850,7 @@ fn planned_current_field_receiver_class(
 }
 
 fn prefix_matches_receiver(
-    unit: &JvmCompilationUnit<'_>,
+    scope: ReferenceUnit<'_>,
     prefix: TypeId,
     receiver_type: TypeId,
     receiver_class: SymbolId,
@@ -858,19 +862,22 @@ fn prefix_matches_receiver(
         return true;
     }
     matches!(
-        project_reference_class(unit, prefix, definitions, metadata),
+        project_reference_class(scope, prefix, definitions, metadata),
         Some(class) if class == receiver_class || class == method_owner
     )
 }
 
 fn project_reference_class(
-    unit: &JvmCompilationUnit<'_>,
+    scope: ReferenceUnit<'_>,
     ty: TypeId,
     definitions: &Definitions,
     metadata: Option<&[JvmClassMetadata]>,
 ) -> Option<SymbolId> {
+    let unit = scope.unit;
     let projected = match metadata {
-        Some(metadata) => crate::reference::project_call_reference(unit, ty, definitions, metadata),
+        Some(metadata) => {
+            crate::reference::project_call_reference(scope, ty, definitions, metadata)
+        }
         None => crate::reference::project_type(unit, ty, definitions)
             .or_else(|_| crate::reference::project_constructor_type(unit, ty, definitions)),
     }
@@ -897,11 +904,12 @@ fn tree<'a>(
 }
 
 fn project_result_type(
-    unit: &JvmCompilationUnit<'_>,
+    scope: ReferenceUnit<'_>,
     ty: TypeId,
     definitions: &Definitions,
     metadata: &[JvmClassMetadata],
 ) -> Option<JvmReturnType> {
+    let unit = scope.unit;
     let store = unit.store;
     match store.types.try_get(ty)? {
         Type::Constant(Constant::Int(_)) => Some(JvmReturnType::Value(JvmType::Int)),
@@ -944,7 +952,7 @@ fn project_result_type(
             target: TypeRefTarget::Symbol(symbol),
             ..
         } if Some(*symbol) == type_symbol(store, definitions.unit) => Some(JvmReturnType::Void),
-        Type::TypeRef { .. } => project_reference_class(unit, ty, definitions, Some(metadata))
+        Type::TypeRef { .. } => project_reference_class(scope, ty, definitions, Some(metadata))
             .map(|class| JvmReturnType::Value(JvmType::Reference(class))),
         _ => None,
     }

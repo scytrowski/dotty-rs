@@ -1239,7 +1239,8 @@ general combined Scala ABI/TASTy output outside the audited Counter pair path.
 Call `unit.prepare_emission(&definitions)` after building the complete unit.
 The returned `PreparedJvmEmission` borrows that unit and its definitions.
 Its `emit_class(symbol)` method reuses unit metadata, class identities and
-the verifier hierarchy across classes. Workers can share the prepared value by
+the verifier hierarchy across classes. Method call lowering also borrows the
+validated semantic hierarchy for reference projection and assignability. Workers can share the prepared value by
 reference. Each call returns one owned artifact or a class-specific error.
 The caller chooses task order and decides when to publish a completed batch.
 Some expression-specific checks still query the unit during lowering.

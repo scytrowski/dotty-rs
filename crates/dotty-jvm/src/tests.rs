@@ -1279,96 +1279,54 @@ fn reference_assignability_uses_only_the_validated_two_edge_ancestor_path() {
         SymbolFlags::EMPTY,
     );
     let unit = fixture.unit(&[fixture.base, fixture.derived, fixture.third, other]);
-    let reference = |class| JvmType::Reference(class);
-
-    assert!(
+    let hierarchy = unit.class_hierarchy(&fixture.definitions).unwrap();
+    for proof in [None, Some(&hierarchy)] {
+        let scope = crate::reference::ReferenceUnit {
+            unit: &unit,
+            hierarchy: proof,
+        };
+        let assignable = |found, expected| {
+            crate::reference::is_assignable(
+                Some(scope),
+                JvmType::Reference(found),
+                JvmType::Reference(expected),
+                &fixture.definitions,
+            )
+        };
+        assert_eq!(assignable(fixture.third, fixture.base), Ok(true));
+        assert_eq!(assignable(fixture.third, fixture.derived), Ok(true));
+        assert_eq!(assignable(fixture.derived, fixture.base), Ok(true));
+        assert_eq!(assignable(fixture.base, fixture.third), Ok(false));
+        assert_eq!(assignable(other, fixture.base), Ok(false));
+        for found in [fixture.third, foreign_base] {
+            assert_eq!(
+                assignable(found, foreign_base),
+                Err(JvmCodegenError::ReferenceClassNotInJvmPlan {
+                    class: foreign_base
+                })
+            );
+        }
+    }
+    assert_eq!(
         crate::reference::is_assignable(
-            Some(&unit),
-            reference(fixture.third),
-            reference(fixture.base),
-            &fixture.definitions,
-        )
-        .unwrap()
-    );
-    assert!(
-        crate::reference::is_assignable(
-            Some(&unit),
-            reference(fixture.third),
-            reference(fixture.derived),
-            &fixture.definitions,
-        )
-        .unwrap()
-    );
-    assert!(
-        crate::reference::is_assignable(
-            Some(&unit),
-            reference(fixture.derived),
-            reference(fixture.base),
-            &fixture.definitions,
-        )
-        .unwrap()
-    );
-    assert!(
-        !crate::reference::is_assignable(
-            Some(&unit),
-            reference(fixture.base),
-            reference(fixture.third),
-            &fixture.definitions,
-        )
-        .unwrap()
-    );
-    assert!(
-        !crate::reference::is_assignable(
-            Some(&unit),
-            reference(other),
-            reference(fixture.base),
-            &fixture.definitions,
-        )
-        .unwrap()
-    );
-    assert!(
-        !crate::reference::is_assignable(
             None,
-            reference(fixture.third),
-            reference(fixture.base),
+            JvmType::Reference(fixture.third),
+            JvmType::Reference(fixture.base),
             &fixture.definitions,
-        )
-        .unwrap()
+        ),
+        Ok(false)
     );
 
     let unplanned_unit = fixture.unit(&[fixture.base, fixture.derived]);
     assert_eq!(
         crate::reference::is_assignable(
-            Some(&unplanned_unit),
-            reference(fixture.third),
-            reference(fixture.base),
+            Some((&unplanned_unit).into()),
+            JvmType::Reference(fixture.third),
+            JvmType::Reference(fixture.base),
             &fixture.definitions,
         ),
         Err(JvmCodegenError::ReferenceClassNotInJvmPlan {
-            class: fixture.third,
-        })
-    );
-
-    assert_eq!(
-        crate::reference::is_assignable(
-            Some(&unit),
-            reference(fixture.third),
-            reference(foreign_base),
-            &fixture.definitions,
-        ),
-        Err(JvmCodegenError::ReferenceClassNotInJvmPlan {
-            class: foreign_base,
-        })
-    );
-    assert_eq!(
-        crate::reference::is_assignable(
-            Some(&unit),
-            reference(foreign_base),
-            reference(foreign_base),
-            &fixture.definitions,
-        ),
-        Err(JvmCodegenError::ReferenceClassNotInJvmPlan {
-            class: foreign_base,
+            class: fixture.third
         })
     );
 }
@@ -7263,6 +7221,7 @@ fn reference_call_values_are_forwarded_and_used_as_receivers_once() {
     let generated = prepared
         .emit_class(fixture.class)
         .expect("exact planned reference calls lower");
+    assert_eq!(crate::identity::HIERARCHY_BUILDS.get() - hierarchies, 1);
     assert_eq!(crate::identity::METADATA_BUILDS.get(), builds);
     let mut reader = Reader::new(generated.bytes());
     let class = ClassFile::decode(&mut reader).expect("decode reference-call class");

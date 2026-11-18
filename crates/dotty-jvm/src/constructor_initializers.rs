@@ -744,7 +744,7 @@ pub(super) fn lower_with_metadata(
         let expected = field_metadata.value_type();
         let mut instructions = vec![JvmConstructorInitializerInstruction::LoadThis];
         let found = context.lower_expression(initializer, &mut instructions, 0)?;
-        if !crate::reference::is_assignable(Some(unit), found, expected, definitions)? {
+        if !crate::reference::is_assignable(Some(unit.into()), found, expected, definitions)? {
             return Err(JvmCodegenError::FieldInitializerTypeMismatch {
                 field: field_metadata.symbol(),
                 initializer,
@@ -1057,7 +1057,12 @@ impl ConstructorInitializerContext<'_> {
         }
         let value_type = field.value_type();
         let found = self.tree_value_type(tree, self.typed_ast.get(tree).ty)?;
-        if !crate::reference::is_assignable(Some(self.unit), found, value_type, self.definitions)? {
+        if !crate::reference::is_assignable(
+            Some(self.unit.into()),
+            found,
+            value_type,
+            self.definitions,
+        )? {
             return self.type_mismatch(tree, value_type, found);
         }
         instructions.push(JvmConstructorInitializerInstruction::GetField {

@@ -1,0 +1,65 @@
+--- a/crates/dotty-jvm/src/lib.rs
++++ b/crates/dotty-jvm/src/lib.rs
+@@ -18,6 +18,15 @@
+ use dotty_core::store::SemanticStore;
+ use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind};
+ use dotty_core::types::Type;
++
++std::thread_local! {
++    static WORKER_COUNTS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
++}
++
++/// Reads and resets this emission worker's hierarchy and validation counts.
++pub fn take_worker_counts() -> (usize, usize) {
++    WORKER_COUNTS.take()
++}
+
+ mod boolean_ops;
+ mod call_target;
+@@ -2979,6 +2988,8 @@
+     /// then typed-arena allocation order. Symbol identity is always the
+     /// canonical [`SymbolId`]; equal names never substitute for identity.
+     pub fn validate(&self) -> Result<(), JvmCodegenError> {
++        let (builds, validations) = WORKER_COUNTS.get();
++        WORKER_COUNTS.set((builds, validations + 1));
+         let mut seen_classes = HashSet::new();
+         let mut seen_methods = HashSet::new();
+         let mut seen_fields = HashSet::new();
+--- a/crates/dotty-jvm/src/identity.rs
++++ b/crates/dotty-jvm/src/identity.rs
+@@ -175,6 +175,8 @@
+ ) -> Result<crate::JvmClassHierarchy, JvmCodegenError> {
+     #[cfg(test)]
+     HIERARCHY_BUILDS.with(|count| count.set(count.get() + 1));
++    let (builds, validations) = crate::WORKER_COUNTS.get();
++    crate::WORKER_COUNTS.set((builds + 1, validations));
+     unit.validate()?;
+     let plans = unit
+         .classes
+--- a/tests/fixtures/compiler-client/tests/multi_file.rs
++++ b/tests/fixtures/compiler-client/tests/multi_file.rs
+@@ -298,17 +298,22 @@
+                         .iter()
+                         .map(|class| prepared.emit_class(class.class).unwrap())
+                         .collect::<Vec<_>>();
+-                    (artifacts, start.elapsed())
++                    (artifacts, start.elapsed(), dotty::jvm::take_worker_counts())
+                 })
+             })
+             .collect();
+         let mut artifacts = Vec::with_capacity(classes.len());
+         let mut worker_time = Duration::ZERO;
++        let mut builds = 0;
++        let mut validations = 0;
+         for task in tasks {
+-            let (chunk, elapsed) = task.join().unwrap();
++            let (chunk, elapsed, counts) = task.join().unwrap();
++            builds += counts.0;
++            validations += counts.1;
+             artifacts.extend(chunk);
+             worker_time += elapsed;
+         }
++        eprintln!("emission_counts,{},{workers},{builds},{validations}", classes.len());
+         (artifacts, worker_time)
+     })
+ }

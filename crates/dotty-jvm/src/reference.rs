@@ -1,5 +1,7 @@
 //! Checked projection of semantic class references within one emission unit.
 
+use std::borrow::Cow;
+
 use dotty_core::definitions::Definitions;
 use dotty_core::ids::{SymbolId, TypeId};
 use dotty_core::store::SemanticStore;
@@ -27,10 +29,22 @@ impl<'a> From<&'a JvmCompilationUnit<'a>> for ReferenceUnit<'a> {
     }
 }
 
+impl<'a> ReferenceUnit<'a> {
+    pub(super) fn checked_hierarchy(
+        self,
+        definitions: &Definitions,
+    ) -> Result<Cow<'a, JvmClassHierarchy>, JvmCodegenError> {
+        match self.hierarchy {
+            Some(hierarchy) => Ok(Cow::Borrowed(hierarchy)),
+            None => self.unit.class_hierarchy(definitions).map(Cow::Owned),
+        }
+    }
+}
+
 /// Returns whether `found` is assignable to `expected` through the validated
 /// canonical ancestry in this emission unit, bounded to two user-class edges.
 pub(super) fn is_validated_subtype(
-    unit: &JvmCompilationUnit<'_>,
+    unit: ReferenceUnit<'_>,
     found: SymbolId,
     expected: SymbolId,
     definitions: &Definitions,
@@ -38,7 +52,7 @@ pub(super) fn is_validated_subtype(
     if found == expected {
         return Ok(true);
     }
-    let hierarchy = unit.class_hierarchy(definitions)?;
+    let hierarchy = unit.checked_hierarchy(definitions)?;
     for class in [found, expected] {
         if !hierarchy
             .superclasses()
@@ -74,14 +88,14 @@ pub(super) fn is_validated_subtype(
 /// compilation unit. References may use exact identity or at most two verified
 /// user-class ancestry edges; primitive values remain invariant.
 pub(super) fn is_assignable(
-    unit: Option<&JvmCompilationUnit<'_>>,
+    unit: Option<ReferenceUnit<'_>>,
     found: JvmType,
     expected: JvmType,
     definitions: &Definitions,
 ) -> Result<bool, JvmCodegenError> {
     if found == expected {
         if let (JvmType::Reference(class), Some(unit)) = (found, unit) {
-            let hierarchy = unit.class_hierarchy(definitions)?;
+            let hierarchy = unit.checked_hierarchy(definitions)?;
             if !hierarchy
                 .superclasses()
                 .iter()
@@ -147,8 +161,8 @@ pub(super) fn project_sibling_union_to_expected_type(
     // siblings. Ancestor pairs already have an ordinary exact projection and
     // must continue to use that existing path.
     if arm_classes[0] == arm_classes[1]
-        || is_validated_subtype(unit, arm_classes[0], arm_classes[1], definitions)?
-        || is_validated_subtype(unit, arm_classes[1], arm_classes[0], definitions)?
+        || is_validated_subtype(unit.into(), arm_classes[0], arm_classes[1], definitions)?
+        || is_validated_subtype(unit.into(), arm_classes[1], arm_classes[0], definitions)?
     {
         return Err(unsupported());
     }
@@ -156,8 +170,8 @@ pub(super) fn project_sibling_union_to_expected_type(
     let hierarchy = unit.class_hierarchy(definitions)?;
     if hierarchy.nearest_common_non_object_ancestor(arm_classes[0], arm_classes[1])
         != Some(expected_class)
-        || !is_validated_subtype(unit, arm_classes[0], expected_class, definitions)?
-        || !is_validated_subtype(unit, arm_classes[1], expected_class, definitions)?
+        || !is_validated_subtype(unit.into(), arm_classes[0], expected_class, definitions)?
+        || !is_validated_subtype(unit.into(), arm_classes[1], expected_class, definitions)?
     {
         return Err(unsupported());
     }
@@ -264,15 +278,15 @@ pub(super) fn project_method_signature_type(
 
 /// Projects a canonical receiver or result reference against validated call metadata.
 pub(super) fn project_call_reference(
-    unit: &JvmCompilationUnit<'_>,
+    scope: ReferenceUnit<'_>,
     ty: TypeId,
     definitions: &Definitions,
     metadata: &[crate::JvmClassMetadata],
 ) -> Result<JvmType, JvmCodegenError> {
-    let class = method_signature_class_target(unit.store, ty, definitions)?;
+    let class = method_signature_class_target(scope.unit.store, ty, definitions)?;
     project_class(
-        Some(unit.into()),
-        unit.store,
+        Some(scope),
+        scope.unit.store,
         ty,
         class,
         definitions,
@@ -512,14 +526,7 @@ fn project_class(
     }
 
     let object_rooted = if let Some(scope) = projection {
-        let owned;
-        let hierarchy = match scope.hierarchy {
-            Some(hierarchy) => hierarchy,
-            None => {
-                owned = scope.unit.class_hierarchy(definitions)?;
-                &owned
-            }
-        };
+        let hierarchy = scope.checked_hierarchy(definitions)?;
         let mut cursor = class;
         let mut rooted = false;
         while let Some(edge) = hierarchy

@@ -4,7 +4,8 @@ On 256 files with four workers, building the semantic class hierarchy during
 method lowering consumed 88.8% of summed worker elapsed time for independent
 chains and 88.9% for shared receivers. Each layout performed 768 full hierarchy
 builds during emission, after the unit had already prepared its hierarchy.
-The backend at `bba5c6e371` produced all measurements below.
+The initial profile used backend revision `bba5c6e371`.
+The [follow-up experiment](#sharing-the-semantic-hierarchy-across-emission-workers) compares the resulting change with a fresh baseline.
 
 ## Two call graphs with the same method bodies
 
@@ -103,17 +104,13 @@ unit validation and is part of the method column above.
 | 64 | 192 / 192 | 144 | 48 | 77.4% / 82.6% | 79.3% / 83.8% |
 | 256 | 768 / 768 | 576 | 192 | 87.7% / 88.8% | 87.0% / 88.9% |
 
-The next experiment is to retain the validated semantic hierarchy in
-`PreparedJvmEmission` and borrow it during method lowering, in both call
-receiver/parameter projection and exact-reference assignability. Both checks
-can use the same unit's existing proof across workers. For these sources the count should fall
-from 768 to zero during emission of the 256-class batch. The same test should
-compare ordered class bytes and check rejection diagnostics on invalid plans. A fresh timing run would quantify the actual gain.
-The measurements cover straight-line methods on these two call graphs.
+These counts suggested that retaining the validated semantic hierarchy in
+`PreparedJvmEmission` could eliminate all three builds per file on these call
+graphs. The comparison below tests that prediction.
 
-## Reproduction
+## Reproducing the initial profile
 
-Run the standalone test below from the repository root. To measure the
+Run the standalone test below at `1de459c368`. To measure the
 internal stages, apply the probe patch, repeat the command, reverse the patch
 and run the control once more. Each `emit_probe` record follows a completed
 batch and precedes its sample row. The first twelve records are warm-ups.
@@ -126,3 +123,71 @@ taskset -c 0-7 cargo test --release --locked \
   --manifest-path tests/fixtures/compiler-client/Cargo.toml --target-dir target/compiler-client \
   --test multi_file measure_dependent_pipeline -- --ignored --nocapture
 ```
+
+## Sharing the semantic hierarchy across emission workers
+
+The baseline was `1de459c368`. The changed backend keeps the semantic hierarchy
+built by `prepare_emission` and lends it to method lowering. The worker checks
+the class of each call receiver, argument and result against the same unit.
+An exact reference match still requires the class symbol to occur in the plan.
+The public client API and the caller's scheduling code are identical for both
+versions.
+
+Both release binaries used Rust 1.98.1, the same generated sources and CPU
+affinity (Ryzen 9 7940HS, logical CPUs 0–7). We ran four processes sequentially
+in baseline, changed, changed, baseline order. Each warmed up all twelve cases.
+The table gives median wall time in milliseconds over 18 samples per version
+and configuration. Speedups divide the two unrounded medians. Emission includes
+starting the workers and collecting their ordered results. The full pipeline
+starts at session setup and ends with the class bytes in memory. [All 432 latency samples](compiler-client-timings/emission-worker-reuse-runs.csv)
+
+| Files | Workers | Call graph | Emission before → after (ms) | Speedup | Full pipeline before → after (ms) | Speedup |
+| ---: | ---: | --- | ---: | ---: | ---: | ---: |
+| 16 | 1 | Chains | 1.14 → 0.53 | 2.2× | 1.98 → 1.33 | 1.5× |
+| 16 | 1 | Shared | 0.81 → 0.49 | 1.7× | 1.55 → 1.22 | 1.3× |
+| 16 | 4 | Chains | 0.62 → 0.30 | 2.0× | 1.35 → 1.02 | 1.3× |
+| 16 | 4 | Shared | 0.63 → 0.30 | 2.1× | 1.44 → 1.01 | 1.4× |
+| 64 | 1 | Chains | 9.67 → 1.58 | 6.1× | 12.57 → 4.54 | 2.8× |
+| 64 | 1 | Shared | 9.84 → 1.29 | 7.7× | 12.41 → 3.70 | 3.4× |
+| 64 | 4 | Chains | 3.28 → 0.67 | 4.9× | 5.75 → 2.87 | 2.0× |
+| 64 | 4 | Shared | 3.37 → 0.66 | 5.1× | 5.61 → 2.63 | 2.1× |
+| 256 | 1 | Chains | 140.81 → 5.57 | 25.3× | 149.65 → 14.57 | 10.3× |
+| 256 | 1 | Shared | 140.98 → 5.67 | 24.8× | 151.00 → 14.30 | 10.6× |
+| 256 | 4 | Chains | 38.26 → 2.17 | 17.6× | 45.84 → 9.06 | 5.1× |
+| 256 | 4 | Shared | 38.68 → 1.86 | 20.8× | 45.59 → 8.28 | 5.5× |
+
+At 256 files and four workers, the middle 50% of emission times fell from
+37.71–39.32 ms to 2.08–2.22 ms for the chains, and from 38.37–39.45 ms to
+1.76–2.18 ms for shared receivers. Preparation at this size stayed close to
+1.2 ms in both versions. With reuse, going from one worker to four sped up
+emission by 2.6× for chains and 3.0× for shared receivers. These figures cover
+straight-line call bodies on a shared host.
+
+### Counts and correctness
+
+We applied the same two thread-local counters to separate release builds of
+both versions and repeated the run. Fresh emission workers counted calls to
+`unit_hierarchy` and `JvmCompilationUnit::validate`. Preparation takes place on
+the caller's thread. Every warm-up and all nine measured rounds gave the counts
+below for both call graphs and both worker counts. [Worker counter patch](compiler-client-timings/emission-worker-counts.patch)
+
+| Files | Worker hierarchy builds before → after | Worker full-unit validations before → after |
+| ---: | ---: | ---: |
+| 16 | 48 → 0 | 48 → 0 |
+| 64 | 192 → 0 | 192 → 0 |
+| 256 | 768 → 0 | 768 → 0 |
+
+A separate cross-version comparison checked the position, internal name and
+contents of every emitted class in all twelve configurations. All 1,344 class
+files matched byte for byte. The invalid-call regression produced the same
+`JvmCallResultTypeMismatch` and `JvmCallArgumentMismatch` with the same tree,
+method and type identities. A focused regression checks the hierarchy build
+count across preparation and emission for nested reference calls. Separate
+assignability assertions cover both the prepared proof and standalone lookup,
+including the rejection of an unplanned class with the same name.
+
+To repeat the latency comparison, run the release command above on the baseline
+and changed revisions in the stated order. For the counts, apply
+`emission-worker-counts.patch` to each revision and repeat once. The probe
+prints `emission_counts,files,workers,hierarchy_builds,unit_validations`
+immediately before each timed sample, after the initial twelve warm-up records.

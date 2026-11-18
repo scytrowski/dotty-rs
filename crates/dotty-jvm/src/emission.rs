@@ -59,6 +59,7 @@ fn emit_class_with_optional_tasty_link(
 pub struct PreparedJvmEmission<'a> {
     unit: &'a JvmCompilationUnit<'a>,
     definitions: &'a Definitions,
+    hierarchy: crate::JvmClassHierarchy,
     metadata: Vec<crate::JvmClassMetadata>,
     identities: Vec<crate::JvmClassIdentity>,
     verification: Result<ClassHierarchy, ClassHierarchyError>,
@@ -87,6 +88,7 @@ impl JvmCompilationUnit<'_> {
         Ok(PreparedJvmEmission {
             unit: self,
             definitions,
+            hierarchy,
             metadata,
             identities,
             verification,
@@ -348,7 +350,10 @@ fn emit_prepared_class(
             method: method_plan.method,
         })?;
         let code = crate::expression::lower_planned_method_body(
-            unit,
+            crate::reference::ReferenceUnit {
+                unit,
+                hierarchy: Some(&prepared.hierarchy),
+            },
             metadata,
             definitions,
             &prepared.metadata,

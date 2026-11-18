@@ -239,9 +239,12 @@ pub(super) fn resolve(
             matches!(expected, JvmType::Reference(_))
         } else {
             match found {
-                Some(found) => {
-                    crate::reference::is_assignable(Some(unit), found, *expected, definitions)?
-                }
+                Some(found) => crate::reference::is_assignable(
+                    Some(unit.into()),
+                    found,
+                    *expected,
+                    definitions,
+                )?,
                 None => false,
             }
         };

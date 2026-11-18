@@ -2808,7 +2808,7 @@ impl JvmCompilationUnit<'_> {
             .body
             .ok_or(JvmCodegenError::MissingTypedBody { method })?;
         expression::lower_planned_method_body(
-            self,
+            self.into(),
             metadata,
             definitions,
             &all_metadata,
@@ -2877,7 +2877,7 @@ impl JvmCompilationUnit<'_> {
         definitions: &Definitions,
     ) -> Result<JvmCallTarget, JvmCodegenError> {
         call_target::resolve_instance_call(
-            self,
+            self.into(),
             caller_class,
             caller_method,
             call,
@@ -2903,7 +2903,7 @@ impl JvmCompilationUnit<'_> {
         definitions: &Definitions,
     ) -> Result<JvmCallTarget, JvmCodegenError> {
         call_target::resolve_instance_call(
-            self,
+            self.into(),
             caller_class,
             caller_method,
             call,

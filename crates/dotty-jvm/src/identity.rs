@@ -1075,12 +1075,7 @@ fn field_metadata(
             symbol,
         });
     }
-    if !crate::reference::is_assignable(
-        unit.map(|scope| scope.unit),
-        initializer_type,
-        field_type,
-        definitions,
-    )? {
+    if !crate::reference::is_assignable(unit, initializer_type, field_type, definitions)? {
         return Err(JvmCodegenError::FieldInitializerTypeMismatch {
             field: plan.field,
             initializer: initializer_id,
