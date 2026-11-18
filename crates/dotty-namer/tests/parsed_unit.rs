@@ -692,6 +692,11 @@ fn contextual_default_getters_copy_only_earlier_clauses() {
             .index
             .derived_symbol_at(owner, named.source, param)
             .unwrap();
+        assert_eq!(named.store.default_getter(method, i + 1), Some(getter));
+        assert_eq!(
+            named.store.default_getter_origin(getter),
+            Some((method, i + 1))
+        );
         let entry = named.store.symbols.get(getter);
         assert_eq!(entry.kind, SymbolKind::Method);
         assert_eq!(
@@ -715,6 +720,37 @@ fn contextual_default_getters_copy_only_earlier_clauses() {
                 .is_none()
         );
     }
+}
+
+#[test]
+fn contextual_getter_with_context_bound_witnesses_has_no_unverified_ordinal() {
+    let named = named_source(
+        "trait Show[A]; class C { def read[A: Show](x: A)(using n: Int = 1): Int = n }",
+        110,
+    );
+    let (tree, def) = named
+        .parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::DefDef(def)
+                if named.store.names.resolve(def.name.as_name().text()) == "read" =>
+            {
+                Some((tree, def))
+            }
+            _ => None,
+        })
+        .unwrap();
+    let method = named.index.symbol_at(named.source, tree).unwrap();
+    let getter = named
+        .index
+        .derived_symbol_at(
+            named.store.symbols.owner(method).unwrap(),
+            named.source,
+            def.value_param_clauses[1][0],
+        )
+        .unwrap();
+    assert_eq!(named.store.default_getter_origin(getter), None);
 }
 
 struct PrimaryConstructorParts {

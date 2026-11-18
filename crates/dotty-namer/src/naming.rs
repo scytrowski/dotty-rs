@@ -3563,6 +3563,7 @@ impl Namer<'_> {
             .filter(|node| matches!(&node.kind, TreeKind::ValDef(parameter) if parameter.metadata.modifiers.contains(&Modifier::Implicit)))
             .map_or(SymbolFlags::GIVEN, |_| SymbolFlags::IMPLICIT);
         let mut anonymous_witnesses = 0;
+        let mut has_context_bounds = false;
         for parameter_tree in &definition.type_params {
             let TreeKind::TypeDef(parameter) = &self.arena.get(*parameter_tree).kind else {
                 return Err(NamerError::MalformedAstShape {
@@ -3586,6 +3587,7 @@ impl Namer<'_> {
             self.index
                 .record_declaration_context(parameter_symbol, method_context)?;
             for (tree, name) in self.context_bound_witnesses(parameter, &mut anonymous_witnesses)? {
+                has_context_bounds = true;
                 let witness = self.enter_symbol(
                     tree,
                     *name.as_name(),
@@ -3601,6 +3603,7 @@ impl Namer<'_> {
                     .record_declaration_context(witness, method_context)?;
             }
         }
+        let mut ordinal = 0;
         for clause in &definition.value_param_clauses {
             for parameter_tree in clause {
                 let TreeKind::ValDef(parameter) = &self.arena.get(*parameter_tree).kind else {
@@ -3632,6 +3635,23 @@ impl Namer<'_> {
                 )?;
                 self.index
                     .record_declaration_context(parameter_symbol, method_context)?;
+                // Context-bound witnesses can move before explicit clauses. Until default
+                // completion supports that signature, its flattened positions are unknown.
+                if !has_context_bounds
+                    && parameter.rhs.is_some()
+                    && let Some(getter) = self.store.symbols.owner(method).and_then(|owner| {
+                        self.index
+                            .derived_symbol_at(owner, self.source, *parameter_tree)
+                    })
+                {
+                    self.store
+                        .record_default_getter(method, ordinal, parameter_symbol, getter)
+                        .map_err(|_| NamerError::MalformedAstShape {
+                            tree_index: parameter_tree.index(),
+                            expected: "a unique contextual default getter for this parameter",
+                        })?;
+                }
+                ordinal += 1;
             }
         }
         Ok(())

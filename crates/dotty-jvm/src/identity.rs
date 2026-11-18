@@ -2297,7 +2297,14 @@ fn method_metadata(
             visibility: method.visibility,
         });
     }
-    let access_flags = method_access_flags(plan.method, method.visibility, method.flags)?;
+    let getter_name = crate::defaults::getter_name(store, plan)?;
+    // Scala emits source default getters as ordinary instance methods.
+    let flags = if getter_name.is_some() {
+        method.flags.difference(SymbolFlags::SYNTHETIC)
+    } else {
+        method.flags
+    };
+    let access_flags = method_access_flags(plan.method, method.visibility, flags)?;
     let name = store
         .names
         .try_resolve(method.name.text())
@@ -2309,7 +2316,7 @@ fn method_metadata(
             name.to_owned(),
         ));
     }
-    let Some(jvm_name) = jvm_method_name(name) else {
+    let Some(jvm_name) = getter_name.or_else(|| jvm_method_name(name)) else {
         return Err(invalid_name(
             plan.method,
             JvmNameKind::Method,
@@ -2576,7 +2583,7 @@ fn is_simple_identifier(text: &str) -> bool {
         && chars.all(|character| character.is_alphanumeric() || character == '_')
 }
 
-fn jvm_method_name(source_name: &str) -> Option<String> {
+pub(super) fn jvm_method_name(source_name: &str) -> Option<String> {
     if let Some(setter_name) = source_name.strip_suffix("_=") {
         is_simple_identifier(setter_name).then(|| format!("{setter_name}_$eq"))
     } else {

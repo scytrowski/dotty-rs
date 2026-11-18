@@ -83,6 +83,11 @@ For a supported contextual parameter with a default, the derived getter
 belongs to the method's owner. Its source tree is the defaulted parameter.
 Earlier parameter clauses have their own getter-owned bindings, which let the
 typer resolve a reference in the default expression to the correct parameter.
+For methods with explicit value clauses and no context bounds, the namer
+also records the method, flattened zero-based parameter position, parameter
+symbol, and getter symbol in the semantic store. Context-bound witnesses can
+change the positions, so these methods retain their source-index bindings
+until default completion supports witness placement.
 
 ## Bounded nested case-class companions
 

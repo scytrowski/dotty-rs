@@ -25,6 +25,7 @@ mod constructor;
 mod constructor_call;
 mod constructor_initializers;
 mod context_result;
+mod defaults;
 mod descriptor;
 pub use constructor::{
     JvmConstructorAccessorBinding, JvmConstructorArgumentBinding, JvmConstructorIssue,
@@ -862,6 +863,8 @@ impl JvmMethodPlan {
 /// A plan failed validation against its caller-owned semantic input.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum JvmCodegenError {
+    /// The contextual getter, its copied formals or its body disagree with the source plan.
+    InvalidContextualDefaultGetter { method: SymbolId },
     /// A primary constructor plan or its source evidence is inconsistent.
     InvalidPrimaryConstructor {
         constructor: SymbolId,
@@ -3401,14 +3404,22 @@ fn validate_type(store: &SemanticStore, ty: TypeId) -> Result<(), InvalidTypeRea
 }
 
 fn typed_tree_contains(ast: &TypedAst, root: TreeId<Typed>, sought: TreeId<Typed>) -> bool {
+    any_typed_tree(ast, root, |tree| tree == sought)
+}
+
+fn any_typed_tree(
+    ast: &TypedAst,
+    root: TreeId<Typed>,
+    mut visit: impl FnMut(TreeId<Typed>) -> bool,
+) -> bool {
     let mut pending = vec![root];
     let mut visited = HashSet::new();
     while let Some(id) = pending.pop() {
-        if id == sought {
-            return true;
-        }
         if !visited.insert(id) {
             continue;
+        }
+        if visit(id) {
+            return true;
         }
         let Some(tree) = ast.try_get(id) else {
             continue;
