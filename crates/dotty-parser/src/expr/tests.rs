@@ -2037,6 +2037,44 @@ fn recovers_from_missing_do_while_body_or_condition() {
 }
 
 #[test]
+fn nested_grouping_uses_a_linear_number_of_lookahead_reads() {
+    let depth = 32u32;
+    let source = format!(
+        "{}x{}",
+        "(".repeat(depth as usize),
+        ")".repeat(depth as usize)
+    );
+    let mut tokens: Vec<_> = (0..depth)
+        .map(|i| token(TokenKind::Punctuation(Punctuation::LeftParen), i, i + 1))
+        .collect();
+    tokens.push(token(TokenKind::Identifier, depth, depth + 1));
+    for i in depth + 1..2 * depth + 1 {
+        tokens.push(token(
+            TokenKind::Punctuation(Punctuation::RightParen),
+            i,
+            i + 1,
+        ));
+    }
+    let end = source.len() as u32;
+    tokens.push(token(TokenKind::Eof, end, end));
+
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(&source, tokens, &mut names);
+    parser.cursor.lookahead_budget = 16 * depth as usize;
+    let result = parser.parse_expression_fragment();
+    assert!(result.diagnostics.is_empty());
+    let mut tree = result.root;
+    for _ in 0..depth {
+        let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) = &result.ast.get(tree).kind
+        else {
+            panic!("expected grouping parentheses");
+        };
+        tree = parens.inner;
+    }
+    assert!(matches!(result.ast.get(tree).kind, TreeKind::Ident(_)));
+}
+
+#[test]
 fn parses_inline_if_and_preserves_its_marker_and_span() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
@@ -2118,6 +2156,29 @@ fn parses_inline_match_and_preserves_its_marker_and_cases() {
         TextRange::new(7, 30).unwrap()
     );
     assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn inline_match_lookahead_stops_at_eof_in_each_delimiter() {
+    for (source, delimiter) in [
+        ("inline(", Punctuation::LeftParen),
+        ("inline[", Punctuation::LeftBracket),
+        ("inline{", Punctuation::LeftBrace),
+    ] {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::Identifier, 0, 6),
+                token(TokenKind::Punctuation(delimiter), 6, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
+        parser.cursor.lookahead_budget = 2;
+        assert!(!parser.starts_inline_match());
+        assert_eq!(parser.current().kind, TokenKind::Identifier);
+    }
 }
 
 #[test]
@@ -3899,7 +3960,16 @@ fn rejects_a_literal_assignment_target() {
 
     assert!(!matches!(parser.ast().get(id).kind, TreeKind::Assign(_)));
     assert_eq!(parser.current().kind, TokenKind::Eof);
-    assert!(!parser.diagnostics().is_empty());
+    let [diagnostic] = parser.diagnostics() else {
+        panic!("expected one assignment error")
+    };
+    assert_eq!(
+        diagnostic.issue(),
+        &ParseIssue::Expression(ExpressionIssue::UnassignableAssignmentTarget {
+            found: TokenKind::Operator
+        })
+    );
+    assert_eq!(diagnostic.span(), TextRange::new(2, 3).unwrap());
 }
 
 #[test]
@@ -3922,7 +3992,16 @@ fn rejects_an_infix_assignment_target() {
 
     assert!(!matches!(parser.ast().get(id).kind, TreeKind::Assign(_)));
     assert_eq!(parser.current().kind, TokenKind::Eof);
-    assert!(!parser.diagnostics().is_empty());
+    let [diagnostic] = parser.diagnostics() else {
+        panic!("expected one assignment error")
+    };
+    assert_eq!(
+        diagnostic.issue(),
+        &ParseIssue::Expression(ExpressionIssue::UnassignableAssignmentTarget {
+            found: TokenKind::Operator
+        })
+    );
+    assert_eq!(diagnostic.span(), TextRange::new(6, 7).unwrap());
 }
 
 #[test]
@@ -4698,11 +4777,19 @@ fn reports_mixed_associativity_at_equal_precedence() {
         parser.ast().get(id).kind,
         TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
     ));
-    assert_eq!(parser.diagnostics().len(), 1);
-    assert_eq!(
-        parser.diagnostics()[0].kind(),
-        crate::ParseDiagnosticKind::UnexpectedToken
-    );
+    let [diagnostic] = parser.diagnostics() else {
+        panic!("expected a single mixed-associativity diagnostic");
+    };
+    assert_eq!(diagnostic.kind(), ParseDiagnosticKind::UnexpectedToken);
+    assert_eq!(diagnostic.span(), TextRange::new(6, 8).unwrap());
+    let ParseIssue::Expression(ExpressionIssue::MixedAssociativityOperators { left, right }) =
+        diagnostic.issue()
+    else {
+        panic!("expected an expression associativity issue");
+    };
+    assert_eq!(parser.names.resolve(left.text()), "+");
+    assert_eq!(parser.names.resolve(right.text()), "+:");
+    assert_eq!(parser.current().kind, TokenKind::Eof);
 }
 
 #[test]
@@ -4740,6 +4827,55 @@ fn parses_a_postfix_operator_when_the_feature_is_enabled() {
     );
     drop(parser);
     assert_eq!(names.resolve(operator.text()), "reverse");
+}
+
+#[test]
+fn postfix_operator_applies_to_the_whole_pending_infix_chain() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "a += b * c reverse",
+        vec![
+            token(TokenKind::Identifier, 0, 1),
+            token(TokenKind::Operator, 2, 4),
+            token(TokenKind::Identifier, 5, 6),
+            token(TokenKind::Operator, 7, 8),
+            token(TokenKind::Identifier, 9, 10),
+            token(TokenKind::Identifier, 11, 18),
+            token(TokenKind::Eof, 18, 18),
+        ],
+        &mut names,
+    )
+    .with_features(crate::ParserFeatures {
+        postfix_ops: true,
+        ..crate::ParserFeatures::default()
+    });
+
+    let id = parser.postfix_expr();
+    let TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)) = parser.ast().get(id).kind else {
+        panic!("expected a postfix operator around the chain");
+    };
+    let operand = parser.ast().get(postfix.operand);
+    let TreeKind::PhaseSpecific(UntypedNode::InfixOp(assign)) = operand.kind else {
+        panic!("expected += as the postfix operand");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::InfixOp(product)) =
+        parser.ast().get(assign.right).kind
+    else {
+        panic!("expected the product on the right of +=");
+    };
+    assert_eq!(parser.names.resolve(postfix.op.text()), "reverse");
+    assert_eq!(parser.names.resolve(assign.op.text()), "+=");
+    assert_eq!(parser.names.resolve(product.op.text()), "*");
+    assert_eq!(
+        operand.position.unwrap().span().range(),
+        TextRange::new(0, 10).unwrap()
+    );
+    assert_eq!(
+        parser.ast().get(id).position.unwrap().span().range(),
+        TextRange::new(0, 18).unwrap()
+    );
+    assert!(parser.diagnostics().is_empty());
+    assert_eq!(parser.current().kind, TokenKind::Eof);
 }
 
 #[test]

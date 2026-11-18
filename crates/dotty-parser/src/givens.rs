@@ -399,7 +399,7 @@ where
             lookahead += 1;
         }
         let next_start = self.cursor.lookahead(lookahead).span.start();
-        self.has_line_break_between(with_end, next_start)
+        self.line_break_in_gap(with_end, next_start).unwrap_or(true)
     }
 
     fn parse_given_parent(&mut self, location: Location) -> TreeId<Untyped> {
@@ -616,7 +616,9 @@ where
                     | TokenKind::Punctuation(Punctuation::LeftBracket)
                     | TokenKind::Punctuation(Punctuation::LeftParen)
             )
-            && !self.has_line_break_between(next.span.end(), candidate.span.start())
+            && !self
+                .line_break_in_gap(next.span.end(), candidate.span.start())
+                .unwrap_or(true)
     }
 
     fn starts_parameterized_named_given(&mut self) -> bool {
@@ -689,15 +691,9 @@ where
                     | TokenKind::Punctuation(Punctuation::Colon)
             )
             && self.token_text(&colon).ok() == Some(":")
-            && !self.has_line_break_between(colon.span.end(), candidate.span.start())
-    }
-
-    fn has_line_break_between(&self, start: u32, end: u32) -> bool {
-        self.source
-            .as_str()
-            .get(start as usize..end as usize)
-            .map(|text| text.chars().any(dotty_core::is_line_break_char))
-            .unwrap_or(true)
+            && !self
+                .line_break_in_gap(colon.span.end(), candidate.span.start())
+                .unwrap_or(true)
     }
 
     fn current_is_given_colon(&mut self) -> bool {

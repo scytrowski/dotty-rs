@@ -209,6 +209,22 @@ issue payload. `UnboundPlaceholderParameter` is reported when an expression
 placeholder reaches the end of a compilation unit or expression block without
 being captured by a complete expression.
 
+The expression, type, pattern, type-parameter clause, template-body, and
+package-body entry points share a limit of 64 active calls. Crossing it reports
+`parser.nesting_limit_exceeded` at the first rejected operand and inserts an
+error node of the corresponding kind.
+Recovery skips a delimited operand iteratively so the enclosing list can
+still parse subsequent elements. Siblings parsed in sequence reuse the budget.
+Higher-kinded parameter clauses use the type diagnostic category and retain
+an error type in the rejected parameter list.
+Template bodies retain an error expression as their sole member. Their rejected
+body is skipped as one delimited region, preserving enclosing members and
+following definitions.
+Package bodies also retain an error expression. A rejected unbraced package
+header owns the rest of the file, which is consumed iteratively into that error
+span. Rejected braced or indented packages preserve declarations outside their
+body.
+
 Reusable recovery sets cover statements, arguments, type arguments, case
 clauses, and for enumerators. Every recovery loop checks that the token source
 advances; a broken external source cannot turn recovery into an infinite loop.
@@ -245,7 +261,10 @@ sees `[` or `(`.
 ```
 
 Package bodies may be braced, scanner-provided indented regions, or the
-unbraced outermost package form. Import and export clauses preserve source
+unbraced outermost package form. Consecutive unbraced package headers at the
+beginning of the file each require a statement separator before further
+definitions. Later package clauses require a braced or indented body.
+Import and export clauses preserve source
 order and expand comma-separated expressions into separate `Import` or
 `Export` statement trees. Their selectors retain aliases, wildcard selectors,
 backquoted source names, and the narrow `given T` type-bound form. Symbolic
@@ -598,10 +617,13 @@ Wildcard syntax is enabled in type arguments (`List[?]` and
 `List[? >: String <: Number]`), tuple-type elements (`(?, V)`), and function
 type parameter/result positions (`? => ?`). A standalone `?` or `(?)` remains
 an invalid type and produces a parser diagnostic. `type_expr()` parses arrows
-outside the infix-type layer using the shared Scala precedence buckets; `&`
-still binds tighter than `|`, and operators ending in `:` associate to the
-right. All infix type operators produce source-level `InfixOp` trees with type-namespace
-operator names; ordinary arrows produce `Function` trees and context arrows
+outside the infix-type layer. Expressions, types, and patterns share the
+same infix reducer. `&` binds tighter than `|`, and operators ending in `:`
+associate to the right. Assignment precedence applies only to term names.
+For example, the type `A += B :: C` groups as `(A += B) :: C`, while the
+corresponding expression and pattern group as `a += (b :: c)`. All infix
+type operators produce source-level `InfixOp` trees with type-namespace
+operator names. Ordinary arrows produce `Function` trees and context arrows
 produce `FunctionWithMods`.
 Parenthesized
 grouping and tuples preserve the shared source-level `Parens` and `Tuple`
@@ -840,7 +862,9 @@ and the existing `InterpolatedString` node. Parts remain source-level literal,
 identifier, and braced `Block` trees in source order; semantic expansion to
 `StringContext` and interpolator-specific behavior are outside the parser.
 Literal-fragment spans follow Scala 3.9's decoded-length rule, including
-escaped dollars. In pattern context, a braced splice parses its contents with
+escaped dollars and escaped quotes. The final fragment includes the closing
+quote delimiter. A following operator or block belongs to the enclosing
+grammar. In pattern context, a braced splice parses its contents with
 the pattern grammar; a wildcard such as `${_}` therefore does not enter
 expression placeholder tracking.
 

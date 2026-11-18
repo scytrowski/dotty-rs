@@ -9,6 +9,8 @@ pub struct CursorCheckpoint {
 /// Small adapter that keeps parser token access in one place.
 pub struct Cursor<S> {
     source: S,
+    #[cfg(test)]
+    pub(crate) lookahead_budget: usize,
 }
 
 impl<S> Cursor<S>
@@ -17,7 +19,11 @@ where
 {
     /// Creates a cursor over a parser-facing token source.
     pub const fn new(source: S) -> Self {
-        Self { source }
+        Self {
+            source,
+            #[cfg(test)]
+            lookahead_budget: usize::MAX,
+        }
     }
 
     /// Returns the current parser-facing token.
@@ -54,6 +60,13 @@ where
 
     /// Returns the token `n` positions after the current token.
     pub fn lookahead(&mut self, n: usize) -> &Token {
+        #[cfg(test)]
+        {
+            self.lookahead_budget = self
+                .lookahead_budget
+                .checked_sub(1)
+                .expect("lookahead budget exhausted");
+        }
         self.source.lookahead(n)
     }
 

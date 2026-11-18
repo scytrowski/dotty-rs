@@ -7,6 +7,7 @@ mod token_def;
 mod token_source;
 mod value;
 
+pub use characters::is_operator_character;
 pub use kind::{HardKeyword, Punctuation, TokenKind};
 pub use scanner_event::ScannerEvent;
 pub use token_def::Token;

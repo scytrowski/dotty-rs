@@ -13,6 +13,9 @@ use crate::{
     ParseKind, RecoverySet,
 };
 
+/// Maximum simultaneous entries into guarded recursive grammar productions.
+pub(crate) const MAX_TREE_NESTING: usize = 64;
+
 /// Stateful input and allocation context for the handwritten parser.
 pub struct Parser<'src, 'names, S>
 where
@@ -32,6 +35,9 @@ where
     pub(crate) outermost_imports_allowed: bool,
     pub(crate) diagnostics: Vec<ParseDiagnostic>,
     pub(crate) known_names: KnownNames,
+    tree_nesting: usize,
+    /// End of a balanced parenthesized type region whose source contains no by-name arrow.
+    pub(crate) arrow_free_type_end: u32,
     pub(crate) next_wildcard_param: u32,
     pub(crate) next_wildcard_type_param: u32,
     pub(crate) wildcard_type_depth: u32,
@@ -111,6 +117,8 @@ where
             outermost_imports_allowed: false,
             diagnostics: Vec::new(),
             known_names,
+            tree_nesting: 0,
+            arrow_free_type_end: 0,
             next_wildcard_param: 0,
             next_wildcard_type_param: 0,
             wildcard_type_depth: 0,
@@ -143,21 +151,6 @@ where
     /// Returns the current token's source span.
     pub fn current_span(&self) -> SourceSpan {
         SourceSpan::new(self.source_id, Span::without_point(self.current().span))
-    }
-
-    pub(crate) fn source_line_before(&self, offset: u32) -> &'src str {
-        self.source
-            .as_str()
-            .get(..offset as usize)
-            .unwrap_or_default()
-            .rsplit(dotty_core::is_line_break_char)
-            .next()
-            .unwrap_or_default()
-    }
-
-    pub(crate) fn source_line_indent_prefix(&self, offset: u32) -> &'src str {
-        let line = self.source_line_before(offset);
-        &line[..line.len() - line.trim_start_matches([' ', '\t']).len()]
     }
 
     /// Returns the current parser context.
@@ -591,6 +584,102 @@ where
         self.placeholder_params.clear();
     }
 
+    pub(crate) fn with_tree_nesting(
+        &mut self,
+        kind: ParseKind,
+        parse: impl FnOnce(&mut Self) -> TreeId<Untyped>,
+    ) -> TreeId<Untyped> {
+        self.with_nesting(kind, parse).unwrap_or_else(|error| error)
+    }
+
+    /// Shares the tree budget with recursive productions that return lists of trees.
+    /// On exhaustion, consumes the rejected operand and returns its error tree.
+    pub(crate) fn with_nesting<T>(
+        &mut self,
+        kind: ParseKind,
+        parse: impl FnOnce(&mut Self) -> T,
+    ) -> Result<T, TreeId<Untyped>> {
+        if self.tree_nesting == MAX_TREE_NESTING {
+            let mark = self.mark();
+            self.report_issue(ParseIssue::NestingLimitExceeded {
+                kind,
+                limit: MAX_TREE_NESTING,
+            });
+            self.skip_nested_tree();
+            let span = self.span_from(mark);
+            return Err(match kind {
+                ParseKind::Expr => self.error_expr(span),
+                ParseKind::Type => self.error_type(span),
+                ParseKind::Pattern => self.error_pattern(span),
+            });
+        }
+        self.tree_nesting += 1;
+        let tree = parse(self);
+        self.tree_nesting -= 1;
+        Ok(tree)
+    }
+
+    /// Consumes the rejected operand, leaving enclosing delimiters and siblings to their caller.
+    fn skip_nested_tree(&mut self) {
+        use dotty_core::Punctuation::*;
+        let mut closing = Vec::new();
+        loop {
+            // Feedback-opened indentation regions need parser feedback while
+            // skipping too, or the scanner can leave them open until EOF.
+            if let Some(&(TokenKind::Outdent, indent_offset)) = closing.last() {
+                let offset = if matches!(
+                    self.current().kind,
+                    TokenKind::Newline | TokenKind::Newlines
+                ) {
+                    self.cursor.lookahead(1).span.start()
+                } else {
+                    self.current().span.start()
+                };
+                if self.current().kind == TokenKind::Eof
+                    || !self
+                        .source_line_indent_prefix(offset)
+                        .starts_with(self.source_line_indent_prefix(indent_offset))
+                {
+                    self.observe_outdented_region(indent_offset);
+                }
+            }
+            let kind = self.current().kind;
+            let start = self.current().span.start();
+            match kind {
+                TokenKind::Eof => break,
+                TokenKind::Punctuation(LeftParen) => {
+                    closing.push((TokenKind::Punctuation(RightParen), start))
+                }
+                TokenKind::Punctuation(LeftBracket) => {
+                    closing.push((TokenKind::Punctuation(RightBracket), start))
+                }
+                TokenKind::Punctuation(LeftBrace) => {
+                    closing.push((TokenKind::Punctuation(RightBrace), start))
+                }
+                TokenKind::Indent => closing.push((TokenKind::Outdent, start)),
+                TokenKind::Punctuation(RightParen | RightBracket | RightBrace)
+                | TokenKind::Outdent => {
+                    if closing.pop().map(|(kind, _)| kind) != Some(kind) {
+                        break;
+                    }
+                }
+                TokenKind::Punctuation(Comma | Semicolon)
+                | TokenKind::Newline
+                | TokenKind::Newlines
+                    if closing.is_empty() =>
+                {
+                    break;
+                }
+                _ => {}
+            }
+            let checkpoint = self.cursor.checkpoint();
+            self.advance();
+            if closing.is_empty() || !self.cursor.progressed_since(checkpoint) {
+                break;
+            }
+        }
+    }
+
     /// Consumes input until a synchronization token or EOF is reached.
     pub fn recover_until(&mut self, set: RecoverySet) {
         while !set.contains(self.current().kind) {
@@ -906,6 +995,98 @@ mod tests {
             SequenceTokenSource { tokens, index: 0 },
             names,
         )
+    }
+
+    #[test]
+    fn nesting_limit_reports_the_inner_operand_and_preserves_tuple_siblings() {
+        use crate::compilation_unit::tests::token;
+        for kind in [ParseKind::Expr, ParseKind::Type, ParseKind::Pattern] {
+            for depth in [MAX_TREE_NESTING - 1, MAX_TREE_NESTING + 2] {
+                let source = format!("{}x{},y)", "(".repeat(depth), ")".repeat(depth - 1));
+                let mut tokens: Vec<_> = source
+                    .char_indices()
+                    .map(|(i, ch)| {
+                        let token_kind = match ch {
+                            '(' => TokenKind::Punctuation(Punctuation::LeftParen),
+                            ')' => TokenKind::Punctuation(Punctuation::RightParen),
+                            ',' => TokenKind::Punctuation(Punctuation::Comma),
+                            _ => TokenKind::Identifier,
+                        };
+                        token(token_kind, i as u32, i as u32 + 1)
+                    })
+                    .collect();
+                let end = source.len() as u32;
+                tokens.push(token(TokenKind::Eof, end, end));
+                let mut names = NameInterner::new();
+                let mut parser = parser_with_tokens(&source, tokens, &mut names);
+                let root = match kind {
+                    ParseKind::Expr => parser.expr(),
+                    ParseKind::Type => parser.type_expr(),
+                    ParseKind::Pattern => parser.pattern(),
+                };
+                let TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) = &parser.ast.get(root).kind
+                else {
+                    panic!("expected a {kind:?} tuple at depth {depth}");
+                };
+                assert_eq!(tuple.elements.len(), 2);
+                assert_eq!(
+                    parser
+                        .ast
+                        .get(tuple.elements[1])
+                        .position
+                        .unwrap()
+                        .span()
+                        .range(),
+                    TextRange::new(end - 2, end - 1).unwrap()
+                );
+                assert!(matches!(
+                    parser.ast.get(tuple.elements[1]).kind,
+                    TreeKind::Ident(_)
+                ));
+                assert_eq!(parser.current().kind, TokenKind::Eof);
+                assert_eq!(parser.tree_nesting, 0);
+                if depth < MAX_TREE_NESTING {
+                    assert!(
+                        parser.diagnostics.is_empty(),
+                        "{kind:?}: {:?}",
+                        parser.diagnostics
+                    );
+                } else {
+                    let [diagnostic] = parser.diagnostics() else {
+                        panic!("{kind:?}: {:?}", parser.diagnostics);
+                    };
+                    assert_eq!(
+                        diagnostic.issue(),
+                        &ParseIssue::NestingLimitExceeded {
+                            kind,
+                            limit: MAX_TREE_NESTING
+                        }
+                    );
+                    let offset = MAX_TREE_NESTING as u32;
+                    assert_eq!(
+                        diagnostic.span(),
+                        TextRange::new(offset, offset + 1).unwrap()
+                    );
+                    let mut inner = tuple.elements[0];
+                    while let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) =
+                        &parser.ast.get(inner).kind
+                    {
+                        inner = parens.inner;
+                    }
+                    let TreeKind::PhaseSpecific(UntypedNode::Error(error)) =
+                        parser.ast.get(inner).kind
+                    else {
+                        panic!("expected an error operand in the {kind:?} tuple");
+                    };
+                    let expected = match kind {
+                        ParseKind::Expr => ErrorNodeKind::MissingExpression,
+                        ParseKind::Type => ErrorNodeKind::MissingType,
+                        ParseKind::Pattern => ErrorNodeKind::MissingPattern,
+                    };
+                    assert_eq!(error.kind, expected);
+                }
+            }
+        }
     }
 
     #[test]

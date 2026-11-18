@@ -468,10 +468,7 @@ where
             return false;
         }
         // The scanner suppresses physical newlines inside parameter parens.
-        self.source
-            .as_str()
-            .get(comma_end as usize..self.current().span.start() as usize)
-            .map(|gap| gap.chars().any(dotty_core::is_line_break_char))
+        self.line_break_in_gap(comma_end, self.current().span.start())
             .unwrap_or(false)
     }
 

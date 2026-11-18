@@ -60,7 +60,7 @@ where
     /// `simple_type` deliberately remains an atomic/applied type parser. The
     /// higher-level entries own function-arrow precedence.
     pub(crate) fn type_expr(&mut self) -> TreeId<Untyped> {
-        self.parse_function_type()
+        self.with_tree_nesting(ParseKind::Type, Self::parse_function_type)
     }
 
     /// Parses a formal parameter type, whose final `*` is the source-level
@@ -642,23 +642,7 @@ where
             return None;
         }
 
-        let mut depth = 1usize;
-        let mut offset = 1usize;
-        loop {
-            let token = self.cursor.lookahead(offset).clone();
-            match token.kind {
-                TokenKind::Punctuation(Punctuation::LeftParen) => depth += 1,
-                TokenKind::Punctuation(Punctuation::RightParen) => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 {
-                        return self.lookahead_function_type_arrow(offset + 1);
-                    }
-                }
-                TokenKind::Eof => return None,
-                _ => {}
-            }
-            offset = offset.saturating_add(1);
-        }
+        self.arrow_after_type_parameter_parens()
     }
 
     /// Recognizes a parenthesized function parameter list containing a
@@ -668,7 +652,10 @@ where
     /// particular, `(A => B) => C` is an ordinary function type whose single
     /// parameter is itself a function type, not a by-name parameter list.
     fn unnamed_by_name_function_type_arrow(&mut self) -> Option<FunctionTypeArrow> {
-        if self.current().kind != TokenKind::Punctuation(Punctuation::LeftParen) {
+        let start = self.current().span.start();
+        if self.current().kind != TokenKind::Punctuation(Punctuation::LeftParen)
+            || start < self.arrow_free_type_end
+        {
             return None;
         }
 
@@ -676,12 +663,15 @@ where
         let mut bracket_depth = 0usize;
         let mut parameter_start = true;
         let mut has_by_name = false;
+        let mut nested = false;
         let mut offset = 1usize;
 
         loop {
-            let token = self.cursor.lookahead(offset).clone();
-            match token.kind {
+            let token = self.cursor.lookahead(offset);
+            let (kind, end) = (token.kind, token.span.start());
+            match kind {
                 TokenKind::Punctuation(Punctuation::LeftParen) => {
+                    nested = true;
                     paren_depth += 1;
                     parameter_start = false;
                 }
@@ -689,6 +679,17 @@ where
                     paren_depth = paren_depth.saturating_sub(1);
                     if paren_depth == 0 {
                         if !has_by_name {
+                            // Every inner group closes before this one. Without an arrow
+                            // spelling anywhere in the source, none can contain a by-name parameter.
+                            if nested
+                                && self
+                                    .source
+                                    .as_str()
+                                    .get(start as usize..end as usize)
+                                    .is_some_and(|text| !text.contains("=>") && !text.contains('⇒'))
+                            {
+                                self.arrow_free_type_end = end;
+                            }
                             return None;
                         }
                         return self.lookahead_function_type_arrow(offset + 1);
@@ -763,11 +764,14 @@ where
             return None;
         }
 
+        self.arrow_after_type_parameter_parens()
+    }
+
+    fn arrow_after_type_parameter_parens(&mut self) -> Option<FunctionTypeArrow> {
         let mut depth = 1usize;
         let mut offset = 1usize;
         loop {
-            let token = self.cursor.lookahead(offset).clone();
-            match token.kind {
+            match self.cursor.lookahead(offset).kind {
                 TokenKind::Punctuation(Punctuation::LeftParen) => depth += 1,
                 TokenKind::Punctuation(Punctuation::RightParen) => {
                     depth = depth.saturating_sub(1);
@@ -1200,27 +1204,10 @@ where
         let mut top = self.parse_refined_type_inner(stop_at_legacy_with);
         let mut operators = Vec::new();
 
-        while let Some((operator, offset)) =
-            self.current_type_infix_operator(stop_at_context_bound_alias)
-        {
+        while let Some(operator) = self.current_type_infix_operator(stop_at_context_bound_alias) {
             let checkpoint = self.cursor.checkpoint();
-            let spelling = self.names.resolve(operator.text());
-            let operator_precedence = crate::infix::precedence(spelling);
-            let operator_left_associative = !crate::infix::is_right_associative(spelling);
-
-            top = self.reduce_type_operator_stack(
-                &mut operators,
-                top,
-                operator_precedence,
-                operator_left_associative,
-                Some(operator),
-            );
+            self.push_infix_operator(&mut operators, top, operator, ParseKind::Type);
             self.advance();
-            operators.push(crate::OpInfo {
-                operand: top,
-                operator,
-                offset,
-            });
             self.consume_type_infix_newlines();
 
             let operand_checkpoint = self.cursor.checkpoint();
@@ -1236,13 +1223,10 @@ where
             }
         }
 
-        self.reduce_type_operator_stack(&mut operators, top, 0, true, None)
+        self.finish_infix_operators(operators, top)
     }
 
-    fn current_type_infix_operator(
-        &mut self,
-        stop_at_context_bound_alias: bool,
-    ) -> Option<(Name, u32)> {
+    fn current_type_infix_operator(&mut self, stop_at_context_bound_alias: bool) -> Option<Name> {
         if !matches!(
             self.current().kind,
             TokenKind::Identifier
@@ -1269,8 +1253,7 @@ where
             return None;
         }
 
-        let operator = *self.intern_current_type_name().ok()?.as_name();
-        Some((operator, self.current().span.start()))
+        Some(*self.intern_current_type_name().ok()?.as_name())
     }
 
     fn current_is_parameter_vararg_marker(&mut self) -> bool {
@@ -1328,42 +1311,6 @@ where
                             | Punctuation::RightBrace
                     )
             )
-    }
-
-    fn reduce_type_operator_stack(
-        &mut self,
-        operators: &mut Vec<crate::OpInfo>,
-        mut top: TreeId<Untyped>,
-        precedence: u8,
-        left_associative: bool,
-        next_operator: Option<Name>,
-    ) -> TreeId<Untyped> {
-        if let (Some(stack_top), Some(next_operator)) = (operators.last(), next_operator) {
-            let stack_spelling = self.names.resolve(stack_top.operator.text());
-            let next_spelling = self.names.resolve(next_operator.text());
-            if crate::infix::has_mixed_associativity(stack_spelling, next_spelling) {
-                self.report_issue(ParseIssue::Type(
-                    TypeIssue::MixedAssociativityTypeOperators {
-                        left: stack_top.operator,
-                        right: next_operator,
-                    },
-                ));
-            }
-        }
-
-        while let Some(stack_top) = operators.last() {
-            let stack_spelling = self.names.resolve(stack_top.operator.text());
-            let stack_precedence = crate::infix::precedence(stack_spelling);
-            if !(precedence < stack_precedence
-                || left_associative && precedence == stack_precedence)
-            {
-                break;
-            }
-
-            let stack_top = operators.pop().expect("type operator stack was non-empty");
-            top = self.alloc_infix(stack_top.operand, stack_top.operator, top);
-        }
-        top
     }
 
     /// Parses `annotatedType` followed by zero or more refinement bodies.
@@ -1525,20 +1472,14 @@ where
         let next = self.cursor.lookahead(lookahead).clone();
         if next.kind == TokenKind::Punctuation(Punctuation::LeftBrace)
             || matches!(self.token_text(&next).ok(), Some("->" | "?->"))
-            || self.physical_line_break_between(self.current().span.end(), next.span.start())
+            || self
+                .line_break_in_gap(self.current().span.end(), next.span.start())
+                .unwrap_or(true)
         {
             return true;
         }
 
         !self.can_start_type_operand(&next)
-    }
-
-    fn physical_line_break_between(&self, start: u32, end: u32) -> bool {
-        self.source
-            .as_str()
-            .get(start as usize..end as usize)
-            .map(|text| text.chars().any(dotty_core::is_line_break_char))
-            .unwrap_or(true)
     }
 
     /// Parses Dotty's capture-set source grammar. The returned references are
@@ -5973,6 +5914,39 @@ mod tests {
     }
 
     #[test]
+    fn nested_type_grouping_uses_linear_lookahead() {
+        let depth = 40;
+        let source = format!("{}A{}", "(".repeat(depth), ")".repeat(depth));
+        let mut tokens: Vec<_> = source
+            .char_indices()
+            .map(|(i, ch)| {
+                let kind = match ch {
+                    '(' => TokenKind::Punctuation(Punctuation::LeftParen),
+                    ')' => TokenKind::Punctuation(Punctuation::RightParen),
+                    _ => TokenKind::Identifier,
+                };
+                token(kind, i as u32, i as u32 + 1)
+            })
+            .collect();
+        let end = source.len() as u32;
+        tokens.push(token(TokenKind::Eof, end, end));
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(&source, tokens, &mut names);
+        parser.cursor.lookahead_budget = 24 * depth;
+        let mut tree = parser.type_expr();
+        for _ in 0..depth {
+            let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) = &parser.ast().get(tree).kind
+            else {
+                panic!("expected a grouping parenthesis");
+            };
+            tree = parens.inner;
+        }
+        assert!(matches!(parser.ast().get(tree).kind, TreeKind::Ident(_)));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn parses_a_single_by_name_function_type_parameter() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
@@ -9919,6 +9893,38 @@ mod tests {
         };
         assert_eq!(parser.names.resolve(left.text()), "+");
         assert_eq!(parser.names.resolve(right.text()), "+:");
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn assignment_like_type_operator_can_conflict_with_right_associativity() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A +: B += C",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+
+        parser.type_expr();
+        let [diagnostic] = parser.diagnostics() else {
+            panic!("expected a single mixed-associativity diagnostic");
+        };
+        let ParseIssue::Type(TypeIssue::MixedAssociativityTypeOperators { left, right }) =
+            diagnostic.issue()
+        else {
+            panic!("expected a type associativity issue");
+        };
+        assert_eq!(diagnostic.span(), TextRange::new(7, 9).unwrap());
+        assert!(left.is_type() && right.is_type());
+        assert_eq!(parser.names.resolve(left.text()), "+:");
+        assert_eq!(parser.names.resolve(right.text()), "+=");
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 

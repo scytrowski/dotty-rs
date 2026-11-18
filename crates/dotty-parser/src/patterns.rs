@@ -58,6 +58,10 @@ where
     }
 
     pub(crate) fn pattern(&mut self) -> TreeId<Untyped> {
+        self.with_tree_nesting(ParseKind::Pattern, Self::pattern_inner)
+    }
+
+    fn pattern_inner(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
         let first = self.pattern1();
         let Some(mut pipe_offset) = self.pattern_alternative_operator_offset() else {
@@ -225,50 +229,15 @@ where
     }
 
     fn infix_pattern(&mut self) -> TreeId<Untyped> {
-        let mut operands = vec![self.simple_pattern()];
-        let mut operators: Vec<dotty_core::Name> = Vec::new();
+        let mut top = self.simple_pattern();
+        let mut operators = Vec::new();
 
         while let Some(operator) = self.current_pattern_operator() {
             let checkpoint = self.cursor.checkpoint();
-            let spelling = self.names.resolve(operator.text()).to_owned();
-            let precedence = crate::precedence(&spelling);
-            let left_associative = !crate::is_right_associative(&spelling);
-            if self.pattern_operand_offset().is_none() {
-                break;
-            }
-
-            if let Some(top) = operators.last().copied() {
-                let top_spelling = self.names.resolve(top.text()).to_owned();
-                if crate::infix::has_mixed_associativity(&top_spelling, &spelling) {
-                    self.report_issue(ParseIssue::Pattern(
-                        PatternIssue::MixedAssociativityOperators {
-                            left: top,
-                            right: operator,
-                        },
-                    ));
-                }
-            }
-
-            while let Some(top) = operators.last().copied() {
-                let top_spelling = self.names.resolve(top.text());
-                let top_precedence = crate::precedence(top_spelling);
-                if !(precedence < top_precedence
-                    || (left_associative && precedence == top_precedence))
-                {
-                    break;
-                }
-                let top = operators
-                    .pop()
-                    .expect("pattern operator stack is non-empty");
-                let right = operands.pop().expect("pattern operand stack is non-empty");
-                let left = operands.pop().expect("pattern operand stack is non-empty");
-                operands.push(self.alloc_infix(left, top, right));
-            }
-
+            self.push_infix_operator(&mut operators, top, operator, ParseKind::Pattern);
             self.advance();
             self.consume_pattern_newlines();
-            operators.push(operator);
-            operands.push(self.simple_pattern());
+            top = self.simple_pattern();
             if !self.cursor.progressed_since(checkpoint) {
                 self.report_issue(ParseIssue::Pattern(PatternIssue::InfixPatternNoProgress {
                     found: self.current().kind,
@@ -277,14 +246,7 @@ where
             }
         }
 
-        while let Some(operator) = operators.pop() {
-            let right = operands.pop().expect("pattern operand stack is non-empty");
-            let left = operands.pop().expect("pattern operand stack is non-empty");
-            operands.push(self.alloc_infix(left, operator, right));
-        }
-        operands
-            .pop()
-            .expect("pattern parser always allocates an initial operand")
+        self.finish_infix_operators(operators, top)
     }
 
     fn simple_pattern(&mut self) -> TreeId<Untyped> {
@@ -567,20 +529,18 @@ where
         if matches!(spelling, "|" | "@" | ":") || self.current_is_structural_operator() {
             return None;
         }
-        self.pattern_operand_offset()?;
+        let operand_offset = match self.cursor.lookahead(1).kind {
+            TokenKind::Newline | TokenKind::Newlines => 2,
+            _ => 1,
+        };
+        if !can_start_simple_pattern_at(self, operand_offset) {
+            return None;
+        }
         Some(*self.intern_current_term_name().ok()?.as_name())
     }
 
     fn current_starts_symbolic_pattern_extractor(&mut self) -> bool {
         symbolic_pattern_extractor_at(self, 0)
-    }
-
-    fn pattern_operand_offset(&mut self) -> Option<usize> {
-        let offset = match self.cursor.lookahead(1).kind {
-            TokenKind::Newline | TokenKind::Newlines => 2,
-            _ => 1,
-        };
-        can_start_simple_pattern_at(self, offset).then_some(offset)
     }
 
     /// Finds a pattern-alternative bar after optional physical line separators.
@@ -1837,6 +1797,44 @@ mod tests {
         assert_eq!(
             result.diagnostics[0].issue().code(),
             "parser.pattern.mixed_associativity"
+        );
+    }
+
+    #[test]
+    fn dangling_pattern_operator_preserves_the_completed_infix_pattern() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "a :: b +",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::ColonOp, 2, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Eof, 8, 8),
+            ],
+            &mut names,
+        );
+
+        let result = parser.parse_pattern_fragment();
+        let root = result.ast.get(result.root);
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) = root.kind else {
+            panic!("expected the completed cons pattern");
+        };
+        assert_eq!(names.resolve(infix.op.text()), "::");
+        assert!(infix.op.is_term());
+        assert_eq!(
+            root.position.unwrap().span().range(),
+            TextRange::new(0, 6).unwrap()
+        );
+        let [diagnostic] = result.diagnostics.as_slice() else {
+            panic!("expected a single diagnostic on the dangling operator");
+        };
+        assert_eq!(diagnostic.span(), TextRange::new(7, 8).unwrap());
+        assert_eq!(
+            diagnostic.issue(),
+            &ParseIssue::Pattern(PatternIssue::TrailingInput {
+                found: TokenKind::Operator
+            })
         );
     }
 

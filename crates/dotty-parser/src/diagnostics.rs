@@ -9,6 +9,7 @@ use crate::{Location, ParamOwner};
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParseDiagnosticKind {
+    NestingLimitExceeded,
     ExpectedToken,
     UnexpectedToken,
     ExpectedExpression,
@@ -411,6 +412,8 @@ pub enum PackageIssue {
     ExpectedName { found: TokenKind },
     /// A dot in a package name is not followed by another name.
     ExpectedNameAfterDot { found: TokenKind },
+    /// A package clause requires a braced or indented body at this position.
+    ExpectedBodyStart { found: TokenKind },
     /// A delimited package body is missing its closing token.
     ExpectedBodyEnd {
         expected: TokenKind,
@@ -425,6 +428,7 @@ impl PackageIssue {
             Self::PackageObjectNotAllowedHere { .. } => ParseDiagnosticKind::UnsupportedSyntax,
             Self::ExpectedName { .. }
             | Self::ExpectedNameAfterDot { .. }
+            | Self::ExpectedBodyStart { .. }
             | Self::ExpectedBodyEnd { .. } => ParseDiagnosticKind::ExpectedToken,
         }
     }
@@ -434,6 +438,7 @@ impl PackageIssue {
             Self::PackageObjectNotAllowedHere { .. } => "parser.package.object_not_allowed_here",
             Self::ExpectedName { .. } => "parser.package.expected_name",
             Self::ExpectedNameAfterDot { .. } => "parser.package.expected_name_after_dot",
+            Self::ExpectedBodyStart { .. } => "parser.package.expected_body_start",
             Self::ExpectedBodyEnd { .. } => "parser.package.expected_body_end",
         }
     }
@@ -1776,6 +1781,11 @@ impl CaseIssue {
 /// Structured parser issue data.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ParseIssue {
+    /// Nested grammar entries exhausted the parser's tree nesting budget.
+    NestingLimitExceeded {
+        kind: crate::ParseKind,
+        limit: usize,
+    },
     /// A required parser-facing token was absent.
     ExpectedToken {
         expected: TokenKind,
@@ -1834,6 +1844,7 @@ impl ParseIssue {
     #[cfg(test)]
     pub const fn kind(&self) -> ParseDiagnosticKind {
         match self {
+            Self::NestingLimitExceeded { .. } => ParseDiagnosticKind::NestingLimitExceeded,
             Self::ExpectedToken { .. } => ParseDiagnosticKind::ExpectedToken,
             Self::ExpectedExpression { .. } => ParseDiagnosticKind::ExpectedExpression,
             Self::ExpectedType { .. } => ParseDiagnosticKind::ExpectedType,
@@ -1864,6 +1875,7 @@ impl ParseIssue {
     /// Returns a stable, text-independent identifier for corpus reporting.
     pub const fn code(&self) -> &'static str {
         match self {
+            Self::NestingLimitExceeded { .. } => "parser.nesting_limit_exceeded",
             Self::ExpectedToken { .. } => "parser.expected_token",
             Self::ExpectedExpression { .. } => "parser.expected_expression",
             Self::ExpectedType { .. } => "parser.expected_type",

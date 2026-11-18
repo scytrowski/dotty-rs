@@ -41,17 +41,21 @@ def compare_one(source_path: pathlib.Path, scala: object, rust: object) -> int:
     return 1
 
 
+def read_records(path: pathlib.Path) -> list[str]:
+    # U+2028 and U+2029 can appear inside a JSON string or source path.
+    with path.open(encoding="utf-8", newline="\n") as stream:
+        return [line.removesuffix("\r\n").removesuffix("\n") for line in stream]
+
+
 def compare_batch(manifest_path: pathlib.Path, scala_path: pathlib.Path, rust_path: pathlib.Path) -> int:
     entries = []
-    for line in manifest_path.read_text(encoding="utf-8").splitlines():
+    for line in read_records(manifest_path):
         if line:
             mode, path = line.split("\t", 1)
             entries.append((mode, pathlib.Path(path)))
 
-    with scala_path.open(encoding="utf-8") as stream:
-        scala_lines = list(stream)
-    with rust_path.open(encoding="utf-8") as stream:
-        rust_lines = list(stream)
+    scala_lines = read_records(scala_path)
+    rust_lines = read_records(rust_path)
     if len(scala_lines) != len(entries) or len(rust_lines) != len(entries):
         print(
             "oracle batch output count mismatch: "
