@@ -184,55 +184,145 @@ impl SourceTyper<'_> {
                     import, lexical, context, tree_index, journal, &mut refs,
                 )?;
             }
-            let mut candidates = Vec::new();
-            for evidence in refs {
-                let symbol = evidence.symbol;
-                let entry = self.store.symbols.get(symbol);
-                if self.initializing_local_symbols.contains(&symbol) {
-                    continue;
-                }
-                if !matches!(
-                    entry.kind,
-                    SymbolKind::Field
-                        | SymbolKind::Parameter
-                        | SymbolKind::Local
-                        | SymbolKind::Value
-                ) {
-                    return Err(TyperError::UsingApplicationDeferred {
-                        source: self.source,
-                        tree_index,
-                    });
-                }
-                let reference = if let Some(receiver) = evidence.receiver {
-                    let prefix = self.expression_type_of_symbol(
-                        receiver,
-                        context.owner,
-                        tree_index,
-                        journal,
-                    )?;
-                    self.store.types.alloc(Type::TermRef {
-                        prefix,
-                        target: TermRefTarget::Symbol(symbol),
-                    })
-                } else {
-                    self.expression_type_of_symbol(symbol, context.owner, tree_index, journal)?
-                };
-                let actual = self.widen_expression_type_journaled(reference, journal, 0)?;
-                if self.contextual_conforms(actual, expected, tree_index, journal)? {
-                    candidates.push((evidence, actual));
-                }
-            }
             if let Some(winner) =
-                self.choose_contextual_candidate(&candidates, expected, tree_index, journal)?
+                self.choose_contextual_refs(refs, expected, context, tree_index, journal)?
             {
                 return Ok(winner);
             }
+        }
+        let companions = self.companion_refs(expected, journal)?;
+        if let Some(winner) =
+            self.choose_contextual_refs(companions, expected, context, tree_index, journal)?
+        {
+            return Ok(winner);
         }
         Err(TyperError::MissingContextualArgument {
             source: self.source,
             tree_index,
             expected,
         })
+    }
+
+    fn choose_contextual_refs(
+        &mut self,
+        refs: Vec<ContextualRef>,
+        expected: TypeId,
+        context: ExpressionContext,
+        tree_index: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Option<ContextualRef>, TyperError> {
+        let mut candidates = Vec::new();
+        for evidence in refs {
+            let symbol = evidence.symbol;
+            let entry = self.store.symbols.get(symbol);
+            if self.initializing_local_symbols.contains(&symbol) {
+                continue;
+            }
+            if !matches!(
+                entry.kind,
+                SymbolKind::Field | SymbolKind::Parameter | SymbolKind::Local | SymbolKind::Value
+            ) {
+                return Err(TyperError::UsingApplicationDeferred {
+                    source: self.source,
+                    tree_index,
+                });
+            }
+            let reference = if let Some(receiver) = evidence.receiver {
+                let prefix =
+                    self.expression_type_of_symbol(receiver, context.owner, tree_index, journal)?;
+                self.store.types.alloc(Type::TermRef {
+                    prefix,
+                    target: TermRefTarget::Symbol(symbol),
+                })
+            } else {
+                self.expression_type_of_symbol(symbol, context.owner, tree_index, journal)?
+            };
+            let actual = self.widen_expression_type_journaled(reference, journal, 0)?;
+            if self.contextual_conforms(actual, expected, tree_index, journal)? {
+                candidates.push((evidence, actual));
+            }
+        }
+        self.choose_contextual_candidate(&candidates, expected, tree_index, journal)
+    }
+
+    /// Collect nominal anchors and their parent scopes only after lexical search
+    /// has no winner. Each companion contributes a stable term prefix.
+    fn companion_refs(
+        &mut self,
+        expected: TypeId,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Vec<ContextualRef>, TyperError> {
+        let mut pending = vec![expected];
+        let mut seen = HashSet::new();
+        let mut classes = HashSet::new();
+        let mut refs = Vec::new();
+        while let Some(ty) = pending.pop() {
+            if !seen.insert(ty) {
+                continue;
+            }
+            if seen.len() > MAX_TYPE_RELATION_VIEWS {
+                return Err(TyperError::TypeNormalization(
+                    crate::types::TypeNormalizeError::TooDeep,
+                ));
+            }
+            match self.store.types.try_get(ty).cloned() {
+                Some(Type::Applied { tycon, args }) => {
+                    pending.extend(args);
+                    pending.push(tycon);
+                }
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(class),
+                    ..
+                }) if self.store.symbols.contains(class) => {
+                    let entry = self.store.symbols.get(class);
+                    if !matches!(
+                        entry.kind,
+                        SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+                    ) || !classes.insert(class)
+                    {
+                        continue;
+                    }
+                    if matches!(entry.origin, SymbolOrigin::Builtin) {
+                        continue;
+                    }
+                    let info = self
+                        .class_info(class, journal)
+                        .map_err(|e| TyperError::MemberLookup(Box::new(e)))?;
+                    pending.extend(info.parents);
+                    let Some(object) = self.store.symbols.get(class).links.companion else {
+                        continue;
+                    };
+                    if !self.store.symbols.contains(object)
+                        || self.store.symbols.get(object).kind != SymbolKind::Object
+                        || self.store.symbols.get(object).links.companion != Some(class)
+                    {
+                        return Err(TyperError::ObjectModuleClassUnavailable { object });
+                    }
+                    let module = self.module_class_of_object(object)?;
+                    let scope = self
+                        .class_info(module, journal)
+                        .map_err(|e| TyperError::MemberLookup(Box::new(e)))?
+                        .declarations;
+                    for symbol in self.contextual_symbols(scope) {
+                        if self.store.symbols.get(symbol).visibility == Visibility::Public {
+                            let evidence = ContextualRef {
+                                symbol,
+                                receiver: Some(object),
+                            };
+                            if !refs.contains(&evidence) {
+                                refs.push(evidence);
+                            }
+                        }
+                    }
+                }
+                Some(Type::And { left, right } | Type::Or { left, right }) => {
+                    pending.extend([left, right])
+                }
+                Some(Type::AliasingBounds { alias }) => pending.push(alias),
+                _ => {}
+            }
+        }
+        Ok(refs)
     }
 
     fn contextual_import_refs(

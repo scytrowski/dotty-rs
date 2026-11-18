@@ -280,3 +280,27 @@ fn imports_from_distinct_instances_keep_distinct_evidence_paths() {
         method_parameter_symbol(&parsed, &index, source, method, 1)
     );
 }
+
+#[test]
+fn applied_type_and_argument_companions_contribute_evidence() {
+    let text = "class Box[A]; class Item; object Item { given boxed: Box[Item] = new Box[Item] }; class C { def ask(using i: Box[Item]): Box[Item] = i; def call: Box[Item] = ask }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "call");
+    let (boxed, _, _) = val_definition_and_rhs(&parsed, &store, &index, source, "boxed");
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    typer
+        .type_method_definition(definition_tree(&index, method))
+        .unwrap();
+    let rhs = typer.typed_index.get(source, rhs).unwrap();
+    let TreeKind::Apply(app) = &typer.typed_ast().get(rhs).kind else {
+        panic!()
+    };
+    assert_eq!(reference(&typer, app.args[0]), boxed);
+}
