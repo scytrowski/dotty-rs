@@ -938,8 +938,7 @@ impl EncodedAstSection {
         original_payload: &[u8],
         nodes: &[StructuredNode<'_>],
     ) -> Result<Self, TermEncodeError> {
-        let original_index = ast_index(original_payload)?;
-        let original_top_level = top_level_nodes(original_payload)?;
+        let (original_top_level, original_index) = ast_index_with_nodes(original_payload)?;
         if original_top_level.len() != nodes.len() {
             return Err(AstError::AstNodeCountMismatch {
                 expected: original_top_level.len(),
@@ -1030,7 +1029,7 @@ impl EncodedAstSection {
             }
 
             if next_map == address_map {
-                validate_structured_ast_payload(&bytes)?;
+                validate_indexed_ast_references(&encoded_nodes, &encoded_index)?;
                 let ast_addresses = encoded_nodes
                     .iter()
                     .map(|node| ast_address_from_offset(node.offset))
@@ -1160,10 +1159,6 @@ fn canonical_relocation_tree(bytes: &[u8]) -> Result<Vec<u8>, TermEncodeError> {
     Ok(writer.into_inner())
 }
 
-fn ast_index<'a>(bytes: &'a [u8]) -> Result<AstAddressIndex<'a>, TermEncodeError> {
-    Ok(ast_index_with_nodes(bytes)?.1)
-}
-
 fn ast_index_with_nodes<'a>(
     bytes: &'a [u8],
 ) -> Result<(RawNodes<'a>, AstAddressIndex<'a>), TermEncodeError> {
@@ -1181,16 +1176,15 @@ fn ast_index_with_nodes<'a>(
     Ok((nodes, index))
 }
 
-fn top_level_nodes<'a>(bytes: &'a [u8]) -> Result<RawNodes<'a>, TermEncodeError> {
-    Ok(ast_index_with_nodes(bytes)?.0)
+fn validate_structured_ast_payload(bytes: &[u8]) -> Result<(), TermEncodeError> {
+    let (nodes, index) = ast_index_with_nodes(bytes)?;
+    validate_indexed_ast_references(&nodes, &index)
 }
 
-fn validate_structured_ast_payload(bytes: &[u8]) -> Result<(), TermEncodeError> {
-    let mut reader = Reader::new(bytes);
-    let nodes = RawNodes::decode(&mut reader)?;
-    let index =
-        nodes.deep_address_index_with_source_and_max_depth(bytes, DEFAULT_MAX_AST_INDEX_DEPTH)?;
-
+fn validate_indexed_ast_references(
+    nodes: &RawNodes<'_>,
+    index: &AstAddressIndex<'_>,
+) -> Result<(), TermEncodeError> {
     for node in nodes.iter() {
         for reference in node.ast_refs()? {
             if index.resolve_node(reference).is_none() {
