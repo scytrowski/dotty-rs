@@ -211,7 +211,7 @@ fn predef_context_methods_use_the_library_symbol_and_keep_local_shadowing() {
     }
 }
 
-fn library_resolver(
+pub(super) fn library_resolver(
     definitions: Definitions,
     packages: &Packages,
 ) -> ClasspathSymbolResolver<CompositeClassPath> {

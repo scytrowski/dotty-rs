@@ -1033,7 +1033,7 @@ impl SourceTyper<'_> {
                 Some(Type::ByName { result }) => *result,
                 _ => parameter.ty,
             };
-            let (argument, actual) = if let Some(typed_arguments) = &typed_arguments {
+            let (mut argument, actual) = if let Some(typed_arguments) = &typed_arguments {
                 let typed_argument = typed_arguments[argument_index];
                 debug_assert_eq!(
                     self.typed_arena.get(typed_argument.typed).ty,
@@ -1097,13 +1097,22 @@ impl SourceTyper<'_> {
                             0,
                         )? => {}
                 Ok(false) => {
-                    return Err(TyperError::ApplicationArgumentTypeMismatch {
-                        source: self.source,
-                        tree_index,
-                        argument_index,
-                        actual,
-                        expected: expected_type,
-                    });
+                    argument = self
+                        .try_implicit_conversion(
+                            *argument_tree,
+                            argument,
+                            actual,
+                            expected_type,
+                            context,
+                            info_journal,
+                        )?
+                        .ok_or(TyperError::ApplicationArgumentTypeMismatch {
+                            source: self.source,
+                            tree_index,
+                            argument_index,
+                            actual,
+                            expected: expected_type,
+                        })?;
                 }
                 Err(error) => {
                     return Err(TyperError::ApplicationArgumentConformanceUnsupported {

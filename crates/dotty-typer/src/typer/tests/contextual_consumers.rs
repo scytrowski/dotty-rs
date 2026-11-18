@@ -106,3 +106,94 @@ fn equally_nested_contextual_extensions_report_the_conflicting_providers() {
     assert_eq!(typer.store.checkpoint(), checkpoint);
     assert!(typer.typed_index.is_empty());
 }
+
+#[test]
+fn contextual_conversion_uses_canonical_scala_conversion_in_result_and_argument_positions() {
+    let text = include_str!("../../../tests/fixtures/contextual-consumers/Conversions.scala");
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let resolver = super::contextual_binary::library_resolver(definitions, &packages);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(resolver));
+    for name in ["result", "argument"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+            panic!()
+        };
+        let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+            panic!()
+        };
+        let formal = |clause: usize| {
+            index
+                .symbol_at(source, def.value_param_clauses[clause][0])
+                .unwrap()
+        };
+        typer.type_method_definition(tree).unwrap();
+        let mut adapted = typer.typed_index.get(source, rhs).unwrap();
+        if name == "argument" {
+            let TreeKind::Apply(accept) = &typer.typed_arena.get(adapted).kind else {
+                panic!("expected accept")
+            };
+            adapted = accept.args[0];
+        }
+        let TreeKind::Apply(app) = &typer.typed_arena.get(adapted).kind else {
+            panic!("expected conversion")
+        };
+        let TreeKind::Select(selected) = &typer.typed_arena.get(app.function).kind else {
+            panic!()
+        };
+        assert_eq!(typed_reference(&typer, selected.qualifier), formal(1));
+        assert_eq!(typed_reference(&typer, app.args[0]), formal(0));
+        let apply = typer
+            .store
+            .symbols
+            .get(typed_reference(&typer, app.function));
+        assert_eq!(typer.store.names.resolve(apply.name.text()), "apply");
+        assert!(matches!(apply.origin, SymbolOrigin::Tasty(_)));
+    }
+}
+
+#[test]
+fn contextual_conversion_reports_ambiguity_and_ignores_an_unrelated_conversion_class() {
+    for canonical in [true, false] {
+        let text = if canonical {
+            "class From; class To; class C { def result(x: From)(using a: Conversion[From, To], b: Conversion[From, To]): To = x }"
+        } else {
+            "package decoy; class From; class To; class Conversion[A,B] { def apply(x:A):B }; class C { def result(x: From)(using a: Conversion[From, To]): To = x }"
+        };
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+        let (method, _) = method_definition_and_rhs(&parsed, &store, &index, source, "result");
+        let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+            panic!()
+        };
+        let resolver = super::contextual_binary::library_resolver(definitions, &packages);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+        let before = typer.store.checkpoint();
+        let error = typer.type_method_definition(tree).unwrap_err();
+        assert!(
+            match error {
+                TyperError::AmbiguousContextualArgument { ref candidates, .. } =>
+                    canonical && candidates.len() == 2,
+                TyperError::ExpectedExpressionTypeMismatch { .. } => !canonical,
+                _ => false,
+            },
+            "{error:?}"
+        );
+        assert_eq!(typer.store.checkpoint(), before);
+        assert!(typer.typed_index.is_empty());
+    }
+}

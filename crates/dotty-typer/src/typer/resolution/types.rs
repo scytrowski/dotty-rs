@@ -242,7 +242,7 @@ impl SourceTyper<'_> {
         self.lookup_default_type_import(name, tree_index, position)
     }
 
-    fn lookup_default_type_import(
+    pub(in crate::typer) fn lookup_default_type_import(
         &mut self,
         name: dotty_core::Name,
         tree_index: u32,

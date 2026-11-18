@@ -12,6 +12,7 @@ mod annotated;
 mod assignment;
 pub(super) mod blocks;
 mod control_flow;
+mod conversion;
 pub(super) mod function;
 mod match_expr;
 mod new;
@@ -586,12 +587,14 @@ impl SourceTyper<'_> {
                 }
                 Ok(typed)
             }
-            Ok(false) => Err(TyperError::ExpectedExpressionTypeMismatch {
-                source: self.source,
-                tree_index: tree.index(),
-                actual,
-                expected,
-            }),
+            Ok(false) => self
+                .try_implicit_conversion(tree, typed, actual, expected, context, info_journal)?
+                .ok_or(TyperError::ExpectedExpressionTypeMismatch {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    actual,
+                    expected,
+                }),
             Err(error) => Err(TyperError::ExpectedExpressionConformanceUnsupported {
                 source: self.source,
                 tree_index: tree.index(),
