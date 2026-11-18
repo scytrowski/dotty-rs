@@ -125,3 +125,6 @@ jobs:
             --test jvm_tasty_dual_reference_identity \
             --test jvm_stateful_class_contract \
             --locked -- --nocapture
+
+      - name: Verify a standalone compiler client on JDK 21
+        run: cargo +stable test --manifest-path tests/fixtures/compiler-client/Cargo.toml --target-dir target --locked

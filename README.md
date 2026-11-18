@@ -149,6 +149,15 @@ Scala oracle runs and corpus audits have additional pinned checkout, JDK, and
 cached dependency requirements. Follow the tool-specific instructions before
 regenerating fixtures or reports.
 
+With JDK 21 on `PATH`, run the standalone client test to exercise the public
+facade. Its Cargo workspace declares a single dependency on `dotty`. The test
+compiles two Scala sources in both orders, compares the class files and runs a
+Java caller against the generated classes.
+
+```sh
+cargo test --manifest-path tests/fixtures/compiler-client/Cargo.toml --target-dir target --locked
+```
+
 ## Documentation and tools
 
 - [Contributor/agent instructions](AGENTS.md): scope, dependency boundaries,
