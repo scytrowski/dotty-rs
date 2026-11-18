@@ -2610,12 +2610,39 @@ mod tests {
     }
 
     #[test]
+    fn finds_nested_method_names_in_scala_generated_templates() {
+        let file = TastyFile::parse(include_bytes!(
+            "../tests/fixtures/simple_def/SimpleDef.tasty"
+        ))
+        .unwrap();
+        for name in ["identity", "add"] {
+            let reference = file.names().find_utf8(name).unwrap();
+            let sites = file.name_references_to(reference).unwrap();
+            assert_eq!(
+                sites,
+                [crate::NameReference {
+                    owner_address: 0,
+                    reference
+                }]
+            );
+        }
+    }
+
+    #[test]
     fn rejects_a_file_ast_name_reference_outside_the_name_table() {
         let names =
             crate::NameTable::from_entries(vec![crate::RawName::Utf8("ASTs".to_owned())]).unwrap();
         let sections = crate::SectionTable::from_sections(vec![crate::Section::new(
             0,
-            &[crate::APPLY_TAG, 0x82, crate::TERMREFPKG_TAG, 0x83],
+            &[
+                crate::BLOCK_TAG,
+                0x85,
+                crate::APPLY_TAG,
+                0x83,
+                crate::TYPEREF_TAG,
+                0x83,
+                crate::UNITCONST_TAG,
+            ],
         )]);
         let file = TastyFile::from_parts(
             crate::Header {

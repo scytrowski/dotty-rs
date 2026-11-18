@@ -16,6 +16,7 @@
 
 use crate::name_table::NameRef;
 use crate::reader::{ReadError, Reader};
+use crate::term::WireReference;
 use crate::term::{
     AstRef, AstRefKind, AstTreeNode, ConstantValue, RawTree, SimpleTerm, TermEncodeError, TermError,
 };
@@ -2459,19 +2460,11 @@ impl<'a> RawNode<'a> {
     /// Visits AST references contained in the supported structured payload
     /// of this node without allocating a result vector.
     pub fn visit_ast_refs(&self, visitor: &mut impl FnMut(AstRef)) -> Result<(), AstError> {
-        let mut pending = vec![ReferenceItem::Node(self.clone())];
-        while let Some(item) = pending.pop() {
-            match item {
-                ReferenceItem::Reference(reference) => visitor(reference),
-                ReferenceItem::Node(node) => {
-                    let start = pending.len();
-                    collect_structured_ast_refs(&node.decode_structured()?, &mut pending)?;
-                    // Pop the newly discovered children in their original wire order.
-                    pending[start..].reverse();
-                }
+        self.visit_references(&mut |reference| {
+            if let WireReference::Ast(reference) = reference {
+                visitor(reference);
             }
-        }
-        Ok(())
+        })
     }
 
     /// Returns name-table references contained in the supported structured
@@ -2487,8 +2480,27 @@ impl<'a> RawNode<'a> {
     /// Visits name-table references contained in the supported structured
     /// payload of this node without allocating a result vector.
     pub fn visit_name_refs(&self, visitor: &mut impl FnMut(NameRef)) -> Result<(), AstError> {
-        let structured = self.decode_structured()?;
-        collect_structured_name_refs(&structured, visitor)
+        self.visit_references(&mut |reference| {
+            if let WireReference::Name(name) = reference {
+                visitor(name);
+            }
+        })
+    }
+
+    fn visit_references(&self, visitor: &mut impl FnMut(WireReference)) -> Result<(), AstError> {
+        let mut pending = vec![ReferenceItem::Node(self.clone())];
+        while let Some(item) = pending.pop() {
+            match item {
+                ReferenceItem::Reference(reference) => visitor(reference),
+                ReferenceItem::Node(node) => {
+                    let start = pending.len();
+                    collect_structured_refs(&node.decode_structured()?, &mut pending)?;
+                    // Pop the newly discovered children in their original wire order.
+                    pending[start..].reverse();
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn encode(&self, writer: &mut Writer) -> Result<(), WriteError> {
@@ -5108,38 +5120,38 @@ fn raw_tree_tag_offset(tree: &RawTree<'_>) -> (u8, usize) {
 }
 
 enum ReferenceItem<'a> {
-    Reference(AstRef),
+    Reference(WireReference),
     Node(RawNode<'a>),
 }
 
-fn collect_tree_ast_refs<'a>(tree: &RawTree<'a>, items: &mut Vec<ReferenceItem<'a>>) {
-    if let Some(node) = tree.visit_ast_refs_until_length_node(&mut |reference| {
+fn collect_tree_refs<'a>(tree: &RawTree<'a>, items: &mut Vec<ReferenceItem<'a>>) {
+    if let Some(node) = tree.visit_references_until_length_node(&mut |reference| {
         items.push(ReferenceItem::Reference(reference));
     }) {
         items.push(ReferenceItem::Node(node.clone()));
     }
 }
 
-fn collect_trees_ast_refs<'a>(trees: &[RawTree<'a>], items: &mut Vec<ReferenceItem<'a>>) {
+fn collect_trees_refs<'a>(trees: &[RawTree<'a>], items: &mut Vec<ReferenceItem<'a>>) {
     for tree in trees {
-        collect_tree_ast_refs(tree, items);
+        collect_tree_refs(tree, items);
     }
 }
 
-fn collect_raw_nodes_ast_refs<'a>(nodes: &RawNodes<'a>, items: &mut Vec<ReferenceItem<'a>>) {
+fn collect_raw_nodes_refs<'a>(nodes: &RawNodes<'a>, items: &mut Vec<ReferenceItem<'a>>) {
     for node in &nodes.nodes {
         items.push(ReferenceItem::Node(node.clone()));
     }
 }
 
-fn collect_definition_tail_ast_refs<'a>(
+fn collect_definition_tail_refs<'a>(
     tail: &[DefinitionTail<'a>],
     items: &mut Vec<ReferenceItem<'a>>,
 ) {
     for entry in tail {
         match entry {
             DefinitionTail::QualifiedModifier(modifier) => {
-                collect_tree_ast_refs(&modifier.child, items);
+                collect_tree_refs(&modifier.child, items);
             }
             DefinitionTail::Annotation(node) => {
                 items.push(ReferenceItem::Node(node.clone()));
@@ -5149,10 +5161,8 @@ fn collect_definition_tail_ast_refs<'a>(
     }
 }
 
-fn collect_definition_body_ast_refs<'a>(
-    body: &DefinitionBody<'a>,
-    items: &mut Vec<ReferenceItem<'a>>,
-) {
+fn collect_definition_body_refs<'a>(body: &DefinitionBody<'a>, items: &mut Vec<ReferenceItem<'a>>) {
+    items.push(ReferenceItem::Reference(WireReference::Name(body.name())));
     match body {
         DefinitionBody::ValDef {
             type_tree,
@@ -5160,659 +5170,307 @@ fn collect_definition_body_ast_refs<'a>(
             tail,
             ..
         } => {
-            collect_tree_ast_refs(type_tree, items);
+            collect_tree_refs(type_tree, items);
             if let Some(rhs) = rhs {
-                collect_tree_ast_refs(rhs, items);
+                collect_tree_refs(rhs, items);
             }
-            collect_definition_tail_ast_refs(tail, items);
+            collect_definition_tail_refs(tail, items);
         }
         DefinitionBody::TypeDef {
             type_or_template,
             tail,
             ..
         } => {
-            collect_tree_ast_refs(type_or_template, items);
-            collect_definition_tail_ast_refs(tail, items);
+            collect_tree_refs(type_or_template, items);
+            collect_definition_tail_refs(tail, items);
         }
     }
 }
 
-fn collect_parameter_ast_refs<'a>(
+fn collect_parameter_refs<'a>(
     parameter: &ParameterNode<'a>,
     items: &mut Vec<ReferenceItem<'a>>,
 ) -> Result<(), AstError> {
+    items.push(ReferenceItem::Reference(WireReference::Name(
+        parameter.name(),
+    )));
     let body = parameter.decode_body()?;
-    collect_tree_ast_refs(&body.type_tree, items);
-    collect_definition_tail_ast_refs(&body.tail, items);
+    collect_tree_refs(&body.type_tree, items);
+    collect_definition_tail_refs(&body.tail, items);
     Ok(())
 }
 
-fn collect_parameters_ast_refs<'a>(
+fn collect_parameters_refs<'a>(
     parameters: &[ParameterNode<'a>],
     items: &mut Vec<ReferenceItem<'a>>,
 ) -> Result<(), AstError> {
     for parameter in parameters {
-        collect_parameter_ast_refs(parameter, items)?;
+        collect_parameter_refs(parameter, items)?;
     }
     Ok(())
 }
 
-fn collect_case_def_ast_refs<'a>(case_def: &CaseDefNode<'a>, items: &mut Vec<ReferenceItem<'a>>) {
-    collect_tree_ast_refs(&case_def.pattern, items);
-    collect_tree_ast_refs(&case_def.body, items);
+fn collect_case_def_refs<'a>(case_def: &CaseDefNode<'a>, items: &mut Vec<ReferenceItem<'a>>) {
+    collect_tree_refs(&case_def.pattern, items);
+    collect_tree_refs(&case_def.body, items);
     if let Some(guard) = &case_def.guard {
-        collect_tree_ast_refs(guard, items);
+        collect_tree_refs(guard, items);
     }
 }
 
-fn collect_case_defs_ast_refs<'a>(
-    case_defs: &[CaseDefNode<'a>],
-    items: &mut Vec<ReferenceItem<'a>>,
-) {
+fn collect_case_defs_refs<'a>(case_defs: &[CaseDefNode<'a>], items: &mut Vec<ReferenceItem<'a>>) {
     for case_def in case_defs {
-        collect_case_def_ast_refs(case_def, items);
+        collect_case_def_refs(case_def, items);
     }
 }
 
-fn collect_structured_ast_refs<'a>(
+fn collect_structured_refs<'a>(
     node: &StructuredNode<'a>,
     items: &mut Vec<ReferenceItem<'a>>,
 ) -> Result<(), AstError> {
     match node {
         StructuredNode::Package(package) => {
-            collect_tree_ast_refs(&package.path, items);
-            collect_raw_nodes_ast_refs(&package.stats, items);
+            collect_tree_refs(&package.path, items);
+            collect_raw_nodes_refs(&package.stats, items);
         }
         StructuredNode::ValDef(body) | StructuredNode::TypeDef(body) => {
-            collect_definition_body_ast_refs(body, items);
+            collect_definition_body_refs(body, items);
         }
         StructuredNode::DefDef(body) => {
-            collect_parameters_ast_refs(&body.parameters, items)?;
-            collect_tree_ast_refs(&body.return_type, items);
+            items.push(ReferenceItem::Reference(WireReference::Name(body.name())));
+            collect_parameters_refs(&body.parameters, items)?;
+            collect_tree_refs(&body.return_type, items);
             if let Some(rhs) = &body.rhs {
-                collect_tree_ast_refs(rhs, items);
+                collect_tree_refs(rhs, items);
             }
-            collect_definition_tail_ast_refs(&body.tail, items);
+            collect_definition_tail_refs(&body.tail, items);
         }
         StructuredNode::ImportExport(import_export) => {
-            collect_tree_ast_refs(&import_export.expr, items);
-            for selector in &import_export.selectors {
-                if let ImportSelector::Bounded { type_tree } = selector {
-                    collect_tree_ast_refs(type_tree, items);
-                }
-            }
-        }
-        StructuredNode::Parameter(parameter) => collect_parameter_ast_refs(parameter, items)?,
-        StructuredNode::Apply(apply) => {
-            collect_tree_ast_refs(&apply.function, items);
-            collect_trees_ast_refs(&apply.arguments, items);
-        }
-        StructuredNode::TypeApply(type_apply) => {
-            collect_tree_ast_refs(&type_apply.function, items);
-            collect_trees_ast_refs(&type_apply.type_arguments, items);
-        }
-        StructuredNode::Typed(typed) => {
-            collect_tree_ast_refs(&typed.expression, items);
-            collect_tree_ast_refs(&typed.type_tree, items);
-        }
-        StructuredNode::Assign(assign) => {
-            collect_tree_ast_refs(&assign.left, items);
-            collect_tree_ast_refs(&assign.right, items);
-        }
-        StructuredNode::Block(block) => {
-            collect_tree_ast_refs(&block.expression, items);
-            collect_trees_ast_refs(&block.stats, items);
-        }
-        StructuredNode::If(if_node) => {
-            collect_tree_ast_refs(&if_node.condition, items);
-            collect_tree_ast_refs(&if_node.then_branch, items);
-            collect_tree_ast_refs(&if_node.else_branch, items);
-        }
-        StructuredNode::Lambda(lambda) => {
-            collect_tree_ast_refs(&lambda.method, items);
-            if let Some(target_type) = &lambda.target_type {
-                collect_tree_ast_refs(target_type, items);
-            }
-        }
-        StructuredNode::Match(match_node) => {
-            collect_tree_ast_refs(&match_node.scrutinee, items);
-            collect_case_defs_ast_refs(&match_node.cases, items);
-        }
-        StructuredNode::Return(return_node) => {
-            items.push(ReferenceItem::Reference(return_node.target));
-            if let Some(expression) = &return_node.expression {
-                collect_tree_ast_refs(expression, items);
-            }
-        }
-        StructuredNode::While(while_node) => {
-            collect_tree_ast_refs(&while_node.condition, items);
-            collect_tree_ast_refs(&while_node.body, items);
-        }
-        StructuredNode::Try(try_node) => {
-            collect_tree_ast_refs(&try_node.expression, items);
-            collect_case_defs_ast_refs(&try_node.cases, items);
-            if let Some(finalizer) = &try_node.finalizer {
-                collect_tree_ast_refs(finalizer, items);
-            }
-        }
-        StructuredNode::Inlined(inlined) => {
-            collect_tree_ast_refs(&inlined.expression, items);
-            if let Some(call_site) = &inlined.call_site {
-                collect_tree_ast_refs(call_site, items);
-            }
-            collect_raw_nodes_ast_refs(&inlined.definitions, items);
-        }
-        StructuredNode::SelectOuter(select_outer) => {
-            collect_tree_ast_refs(&select_outer.qualifier, items);
-            collect_tree_ast_refs(&select_outer.underlying_type, items);
-        }
-        StructuredNode::Repeated(repeated) => {
-            collect_tree_ast_refs(&repeated.element_type, items);
-            collect_trees_ast_refs(&repeated.elements, items);
-        }
-        StructuredNode::Bind(bind) => {
-            collect_tree_ast_refs(&bind.type_tree, items);
-            if let BindBody::Pattern(pattern) = &bind.body {
-                collect_tree_ast_refs(pattern, items);
-            }
-        }
-        StructuredNode::Alternative(alternative) => {
-            collect_trees_ast_refs(&alternative.alternatives, items);
-        }
-        StructuredNode::Unapply(unapply) => {
-            collect_tree_ast_refs(&unapply.function, items);
-            for implicit_arg in &unapply.implicit_args {
-                collect_tree_ast_refs(&implicit_arg.child, items);
-            }
-            collect_tree_ast_refs(&unapply.type_tree, items);
-            collect_trees_ast_refs(&unapply.patterns, items);
-        }
-        StructuredNode::Annotated(annotated) => {
-            collect_tree_ast_refs(&annotated.underlying, items);
-            collect_tree_ast_refs(&annotated.annotation, items);
-        }
-        StructuredNode::Annotation(annotation) => {
-            collect_tree_ast_refs(&annotation.tycon, items);
-            collect_tree_ast_refs(&annotation.full_annotation, items);
-        }
-        StructuredNode::CaseDef(case_def) => collect_case_def_ast_refs(case_def, items),
-        StructuredNode::Template(template) => {
-            collect_parameters_ast_refs(&template.type_params, items)?;
-            collect_parameters_ast_refs(&template.term_params, items)?;
-            collect_trees_ast_refs(&template.parents, items);
-            if let Some(self_def) = &template.self_def {
-                collect_tree_ast_refs(self_def, items);
-            }
-            collect_trees_ast_refs(&template.stats, items);
-        }
-        StructuredNode::Super(super_node) => {
-            collect_tree_ast_refs(&super_node.this_term, items);
-            if let Some(mixin_type) = &super_node.mixin_type {
-                collect_tree_ast_refs(mixin_type, items);
-            }
-        }
-        StructuredNode::BinaryType(binary) => {
-            collect_tree_ast_refs(&binary.left, items);
-            collect_tree_ast_refs(&binary.right, items);
-        }
-        StructuredNode::RefinedType(refined) => {
-            collect_tree_ast_refs(&refined.parent, items);
-            collect_tree_ast_refs(&refined.refinement, items);
-        }
-        StructuredNode::RefinedTpt(refined) => {
-            collect_tree_ast_refs(&refined.qualifier, items);
-            collect_raw_nodes_ast_refs(&refined.stats, items);
-        }
-        StructuredNode::AppliedType(applied) => {
-            collect_tree_ast_refs(&applied.tycon, items);
-            collect_trees_ast_refs(&applied.arguments, items);
-        }
-        StructuredNode::TypeBounds(bounds) => {
-            collect_tree_ast_refs(&bounds.low_or_alias, items);
-            if let Some(high) = &bounds.high {
-                collect_tree_ast_refs(high, items);
-            }
-            if let Some(alias) = &bounds.alias {
-                collect_tree_ast_refs(alias, items);
-            }
-        }
-        StructuredNode::FlexibleType(flexible) => {
-            collect_tree_ast_refs(&flexible.underlying_type, items);
-        }
-        StructuredNode::LambdaTpt(lambda) => {
-            collect_parameters_ast_refs(&lambda.type_params, items)?;
-            collect_tree_ast_refs(&lambda.body, items);
-        }
-        StructuredNode::PolyType(poly) => {
-            collect_tree_ast_refs(&poly.result_type, items);
-            for type_name in &poly.type_names {
-                collect_tree_ast_refs(&type_name.type_or_bounds, items);
-            }
-        }
-        StructuredNode::ParamType(param_type) => {
-            items.push(ReferenceItem::Reference(param_type.binder))
-        }
-        StructuredNode::MethodType(method) => {
-            collect_tree_ast_refs(&method.result_type, items);
-            for type_name in &method.type_names {
-                collect_tree_ast_refs(&type_name.type_or_bounds, items);
-            }
-        }
-        StructuredNode::ApplySigPoly(apply) => {
-            collect_tree_ast_refs(&apply.function, items);
-            collect_tree_ast_refs(&apply.type_tree, items);
-            collect_trees_ast_refs(&apply.arguments, items);
-        }
-        StructuredNode::Quote(quote) => {
-            collect_tree_ast_refs(&quote.expression, items);
-            collect_tree_ast_refs(&quote.type_tree, items);
-        }
-        StructuredNode::QuotePattern(pattern) => {
-            collect_tree_ast_refs(&pattern.body, items);
-            collect_tree_ast_refs(&pattern.quotes, items);
-            collect_tree_ast_refs(&pattern.pattern_type, items);
-            collect_trees_ast_refs(&pattern.bindings, items);
-        }
-        StructuredNode::SplicePattern(pattern) => {
-            collect_tree_ast_refs(&pattern.pattern, items);
-            collect_tree_ast_refs(&pattern.pattern_type, items);
-            collect_trees_ast_refs(&pattern.arguments, items);
-        }
-        StructuredNode::MatchType(match_type) => {
-            collect_tree_ast_refs(&match_type.bound, items);
-            collect_tree_ast_refs(&match_type.selector, items);
-            collect_trees_ast_refs(&match_type.cases, items);
-        }
-        StructuredNode::MatchTpt(match_tpt) => {
-            if let Some(bound) = &match_tpt.bound {
-                collect_tree_ast_refs(bound, items);
-            }
-            collect_tree_ast_refs(&match_tpt.selector, items);
-            collect_case_defs_ast_refs(&match_tpt.cases, items);
-        }
-        StructuredNode::Hole(hole) => {
-            collect_tree_ast_refs(&hole.type_tree, items);
-            collect_trees_ast_refs(&hole.arguments, items);
-        }
-        StructuredNode::InReference(reference) => {
-            collect_tree_ast_refs(&reference.qualifier, items);
-            collect_tree_ast_refs(&reference.underlying_type, items);
-        }
-        StructuredNode::SelectIn(select_in) => {
-            collect_tree_ast_refs(&select_in.qualifier, items);
-            collect_tree_ast_refs(&select_in.underlying_type, items);
-        }
-        StructuredNode::Raw(_) => {}
-    }
-    Ok(())
-}
-
-fn collect_raw_node_name_refs(
-    node: &RawNode<'_>,
-    visitor: &mut impl FnMut(NameRef),
-) -> Result<(), AstError> {
-    let structured = node.decode_structured()?;
-    collect_structured_name_refs(&structured, visitor)
-}
-
-fn collect_raw_nodes_name_refs(
-    nodes: &RawNodes<'_>,
-    visitor: &mut impl FnMut(NameRef),
-) -> Result<(), AstError> {
-    for node in nodes.iter() {
-        collect_raw_node_name_refs(node, visitor)?;
-    }
-    Ok(())
-}
-
-fn collect_definition_tail_name_refs(
-    tail: &[DefinitionTail<'_>],
-    visitor: &mut impl FnMut(NameRef),
-) -> Result<(), AstError> {
-    for entry in tail {
-        match entry {
-            DefinitionTail::QualifiedModifier(modifier) => {
-                modifier.child.visit_name_refs(visitor);
-            }
-            DefinitionTail::Annotation(node) => {
-                collect_raw_node_name_refs(node, visitor)?;
-            }
-            DefinitionTail::Modifier(_) => {}
-        }
-    }
-    Ok(())
-}
-
-fn collect_definition_body_name_refs(
-    body: &DefinitionBody<'_>,
-    visitor: &mut impl FnMut(NameRef),
-) -> Result<(), AstError> {
-    visitor(body.name());
-    match body {
-        DefinitionBody::ValDef {
-            type_tree,
-            rhs,
-            tail,
-            ..
-        } => {
-            type_tree.visit_name_refs(visitor);
-            if let Some(rhs) = rhs {
-                rhs.visit_name_refs(visitor);
-            }
-            collect_definition_tail_name_refs(tail, visitor)?;
-        }
-        DefinitionBody::TypeDef {
-            type_or_template,
-            tail,
-            ..
-        } => {
-            type_or_template.visit_name_refs(visitor);
-            collect_definition_tail_name_refs(tail, visitor)?;
-        }
-    }
-    Ok(())
-}
-
-fn collect_parameter_name_refs(
-    parameter: &ParameterNode<'_>,
-    visitor: &mut impl FnMut(NameRef),
-) -> Result<(), AstError> {
-    visitor(parameter.name());
-    let body = parameter.decode_body()?;
-    body.type_tree.visit_name_refs(visitor);
-    collect_definition_tail_name_refs(&body.tail, visitor)
-}
-
-fn collect_parameters_name_refs(
-    parameters: &[ParameterNode<'_>],
-    visitor: &mut impl FnMut(NameRef),
-) -> Result<(), AstError> {
-    for parameter in parameters {
-        collect_parameter_name_refs(parameter, visitor)?;
-    }
-    Ok(())
-}
-
-fn collect_case_def_name_refs(case_def: &CaseDefNode<'_>, visitor: &mut impl FnMut(NameRef)) {
-    case_def.pattern.visit_name_refs(visitor);
-    case_def.body.visit_name_refs(visitor);
-    if let Some(guard) = &case_def.guard {
-        guard.visit_name_refs(visitor);
-    }
-}
-
-fn collect_case_defs_name_refs(case_defs: &[CaseDefNode<'_>], visitor: &mut impl FnMut(NameRef)) {
-    for case_def in case_defs {
-        collect_case_def_name_refs(case_def, visitor);
-    }
-}
-
-fn collect_structured_name_refs(
-    node: &StructuredNode<'_>,
-    visitor: &mut impl FnMut(NameRef),
-) -> Result<(), AstError> {
-    macro_rules! tree {
-        ($tree:expr) => {
-            $tree.visit_name_refs(visitor)
-        };
-    }
-    macro_rules! trees {
-        ($trees:expr) => {
-            for tree in $trees {
-                tree.visit_name_refs(visitor);
-            }
-        };
-    }
-    macro_rules! raw_nodes {
-        ($nodes:expr) => {
-            collect_raw_nodes_name_refs($nodes, visitor)?
-        };
-    }
-    macro_rules! definition_body {
-        ($body:expr) => {
-            collect_definition_body_name_refs($body, visitor)?
-        };
-    }
-    macro_rules! definition_tail {
-        ($tail:expr) => {
-            collect_definition_tail_name_refs($tail, visitor)?
-        };
-    }
-    macro_rules! parameters {
-        ($parameters:expr) => {
-            collect_parameters_name_refs($parameters, visitor)?
-        };
-    }
-    macro_rules! case_defs {
-        ($case_defs:expr) => {
-            collect_case_defs_name_refs($case_defs, visitor)
-        };
-    }
-
-    match node {
-        StructuredNode::Package(package) => {
-            package.path.visit_name_refs(visitor);
-            raw_nodes!(&package.stats);
-        }
-        StructuredNode::ValDef(body) | StructuredNode::TypeDef(body) => definition_body!(body),
-        StructuredNode::DefDef(body) => {
-            visitor(body.name());
-            parameters!(&body.parameters);
-            tree!(&body.return_type);
-            if let Some(rhs) = &body.rhs {
-                tree!(rhs);
-            }
-            definition_tail!(&body.tail);
-        }
-        StructuredNode::ImportExport(import_export) => {
-            tree!(&import_export.expr);
+            collect_tree_refs(&import_export.expr, items);
             for selector in &import_export.selectors {
                 match selector {
                     ImportSelector::Imported { name } | ImportSelector::Renamed { name } => {
-                        visitor(*name)
+                        items.push(ReferenceItem::Reference(WireReference::Name(*name)))
                     }
-                    ImportSelector::Bounded { type_tree } => tree!(type_tree),
+                    ImportSelector::Bounded { type_tree } => collect_tree_refs(type_tree, items),
                 }
             }
         }
-        StructuredNode::Parameter(parameter) => collect_parameter_name_refs(parameter, visitor)?,
+        StructuredNode::Parameter(parameter) => collect_parameter_refs(parameter, items)?,
         StructuredNode::Apply(apply) => {
-            tree!(&apply.function);
-            trees!(&apply.arguments);
+            collect_tree_refs(&apply.function, items);
+            collect_trees_refs(&apply.arguments, items);
         }
         StructuredNode::TypeApply(type_apply) => {
-            tree!(&type_apply.function);
-            trees!(&type_apply.type_arguments);
+            collect_tree_refs(&type_apply.function, items);
+            collect_trees_refs(&type_apply.type_arguments, items);
         }
         StructuredNode::Typed(typed) => {
-            tree!(&typed.expression);
-            tree!(&typed.type_tree);
+            collect_tree_refs(&typed.expression, items);
+            collect_tree_refs(&typed.type_tree, items);
         }
         StructuredNode::Assign(assign) => {
-            tree!(&assign.left);
-            tree!(&assign.right);
+            collect_tree_refs(&assign.left, items);
+            collect_tree_refs(&assign.right, items);
         }
         StructuredNode::Block(block) => {
-            tree!(&block.expression);
-            trees!(&block.stats);
+            collect_tree_refs(&block.expression, items);
+            collect_trees_refs(&block.stats, items);
         }
         StructuredNode::If(if_node) => {
-            tree!(&if_node.condition);
-            tree!(&if_node.then_branch);
-            tree!(&if_node.else_branch);
+            collect_tree_refs(&if_node.condition, items);
+            collect_tree_refs(&if_node.then_branch, items);
+            collect_tree_refs(&if_node.else_branch, items);
         }
         StructuredNode::Lambda(lambda) => {
-            tree!(&lambda.method);
+            collect_tree_refs(&lambda.method, items);
             if let Some(target_type) = &lambda.target_type {
-                tree!(target_type);
+                collect_tree_refs(target_type, items);
             }
         }
         StructuredNode::Match(match_node) => {
-            tree!(&match_node.scrutinee);
-            case_defs!(&match_node.cases);
+            collect_tree_refs(&match_node.scrutinee, items);
+            collect_case_defs_refs(&match_node.cases, items);
         }
         StructuredNode::Return(return_node) => {
+            items.push(ReferenceItem::Reference(WireReference::Ast(
+                return_node.target,
+            )));
             if let Some(expression) = &return_node.expression {
-                tree!(expression);
+                collect_tree_refs(expression, items);
             }
         }
         StructuredNode::While(while_node) => {
-            tree!(&while_node.condition);
-            tree!(&while_node.body);
+            collect_tree_refs(&while_node.condition, items);
+            collect_tree_refs(&while_node.body, items);
         }
         StructuredNode::Try(try_node) => {
-            tree!(&try_node.expression);
-            case_defs!(&try_node.cases);
+            collect_tree_refs(&try_node.expression, items);
+            collect_case_defs_refs(&try_node.cases, items);
             if let Some(finalizer) = &try_node.finalizer {
-                tree!(finalizer);
+                collect_tree_refs(finalizer, items);
             }
         }
         StructuredNode::Inlined(inlined) => {
-            tree!(&inlined.expression);
+            collect_tree_refs(&inlined.expression, items);
             if let Some(call_site) = &inlined.call_site {
-                tree!(call_site);
+                collect_tree_refs(call_site, items);
             }
-            raw_nodes!(&inlined.definitions);
+            collect_raw_nodes_refs(&inlined.definitions, items);
         }
         StructuredNode::SelectOuter(select_outer) => {
-            tree!(&select_outer.qualifier);
-            tree!(&select_outer.underlying_type);
+            collect_tree_refs(&select_outer.qualifier, items);
+            collect_tree_refs(&select_outer.underlying_type, items);
         }
         StructuredNode::Repeated(repeated) => {
-            tree!(&repeated.element_type);
-            trees!(&repeated.elements);
+            collect_tree_refs(&repeated.element_type, items);
+            collect_trees_refs(&repeated.elements, items);
         }
         StructuredNode::Bind(bind) => {
-            visitor(bind.name);
-            tree!(&bind.type_tree);
+            items.push(ReferenceItem::Reference(WireReference::Name(bind.name)));
+            collect_tree_refs(&bind.type_tree, items);
             if let BindBody::Pattern(pattern) = &bind.body {
-                tree!(pattern);
+                collect_tree_refs(pattern, items);
             }
         }
-        StructuredNode::Alternative(alternative) => trees!(&alternative.alternatives),
+        StructuredNode::Alternative(alternative) => {
+            collect_trees_refs(&alternative.alternatives, items);
+        }
         StructuredNode::Unapply(unapply) => {
-            tree!(&unapply.function);
+            collect_tree_refs(&unapply.function, items);
             for implicit_arg in &unapply.implicit_args {
-                tree!(&implicit_arg.child);
+                collect_tree_refs(&implicit_arg.child, items);
             }
-            tree!(&unapply.type_tree);
-            trees!(&unapply.patterns);
+            collect_tree_refs(&unapply.type_tree, items);
+            collect_trees_refs(&unapply.patterns, items);
         }
         StructuredNode::Annotated(annotated) => {
-            tree!(&annotated.underlying);
-            tree!(&annotated.annotation);
+            collect_tree_refs(&annotated.underlying, items);
+            collect_tree_refs(&annotated.annotation, items);
         }
         StructuredNode::Annotation(annotation) => {
-            tree!(&annotation.tycon);
-            tree!(&annotation.full_annotation);
+            collect_tree_refs(&annotation.tycon, items);
+            collect_tree_refs(&annotation.full_annotation, items);
         }
-        StructuredNode::CaseDef(case_def) => collect_case_def_name_refs(case_def, visitor),
+        StructuredNode::CaseDef(case_def) => collect_case_def_refs(case_def, items),
         StructuredNode::Template(template) => {
-            parameters!(&template.type_params);
-            parameters!(&template.term_params);
-            trees!(&template.parents);
+            collect_parameters_refs(&template.type_params, items)?;
+            collect_parameters_refs(&template.term_params, items)?;
+            collect_trees_refs(&template.parents, items);
             if let Some(self_def) = &template.self_def {
-                tree!(self_def);
+                collect_tree_refs(self_def, items);
             }
-            trees!(&template.stats);
+            collect_trees_refs(&template.stats, items);
         }
         StructuredNode::Super(super_node) => {
-            tree!(&super_node.this_term);
+            collect_tree_refs(&super_node.this_term, items);
             if let Some(mixin_type) = &super_node.mixin_type {
-                tree!(mixin_type);
+                collect_tree_refs(mixin_type, items);
             }
         }
         StructuredNode::BinaryType(binary) => {
-            tree!(&binary.left);
-            tree!(&binary.right);
+            collect_tree_refs(&binary.left, items);
+            collect_tree_refs(&binary.right, items);
         }
         StructuredNode::RefinedType(refined) => {
-            visitor(refined.name);
-            tree!(&refined.parent);
-            tree!(&refined.refinement);
+            items.push(ReferenceItem::Reference(WireReference::Name(refined.name)));
+            collect_tree_refs(&refined.parent, items);
+            collect_tree_refs(&refined.refinement, items);
         }
         StructuredNode::RefinedTpt(refined) => {
-            tree!(&refined.qualifier);
-            raw_nodes!(&refined.stats);
+            collect_tree_refs(&refined.qualifier, items);
+            collect_raw_nodes_refs(&refined.stats, items);
         }
         StructuredNode::AppliedType(applied) => {
-            tree!(&applied.tycon);
-            trees!(&applied.arguments);
+            collect_tree_refs(&applied.tycon, items);
+            collect_trees_refs(&applied.arguments, items);
         }
         StructuredNode::TypeBounds(bounds) => {
-            tree!(&bounds.low_or_alias);
+            collect_tree_refs(&bounds.low_or_alias, items);
             if let Some(high) = &bounds.high {
-                tree!(high);
+                collect_tree_refs(high, items);
             }
             if let Some(alias) = &bounds.alias {
-                tree!(alias);
+                collect_tree_refs(alias, items);
             }
         }
-        StructuredNode::FlexibleType(flexible) => tree!(&flexible.underlying_type),
+        StructuredNode::FlexibleType(flexible) => {
+            collect_tree_refs(&flexible.underlying_type, items);
+        }
         StructuredNode::LambdaTpt(lambda) => {
-            parameters!(&lambda.type_params);
-            tree!(&lambda.body);
+            collect_parameters_refs(&lambda.type_params, items)?;
+            collect_tree_refs(&lambda.body, items);
         }
         StructuredNode::PolyType(poly) => {
-            tree!(&poly.result_type);
+            collect_tree_refs(&poly.result_type, items);
             for type_name in &poly.type_names {
-                tree!(&type_name.type_or_bounds);
-                visitor(type_name.name);
+                collect_tree_refs(&type_name.type_or_bounds, items);
+                items.push(ReferenceItem::Reference(WireReference::Name(
+                    type_name.name,
+                )));
             }
         }
-        StructuredNode::ParamType(_) => {}
+        StructuredNode::ParamType(param_type) => items.push(ReferenceItem::Reference(
+            WireReference::Ast(param_type.binder),
+        )),
         StructuredNode::MethodType(method) => {
-            tree!(&method.result_type);
+            collect_tree_refs(&method.result_type, items);
             for type_name in &method.type_names {
-                tree!(&type_name.type_or_bounds);
-                visitor(type_name.name);
+                collect_tree_refs(&type_name.type_or_bounds, items);
+                items.push(ReferenceItem::Reference(WireReference::Name(
+                    type_name.name,
+                )));
             }
         }
         StructuredNode::ApplySigPoly(apply) => {
-            tree!(&apply.function);
-            tree!(&apply.type_tree);
-            trees!(&apply.arguments);
+            collect_tree_refs(&apply.function, items);
+            collect_tree_refs(&apply.type_tree, items);
+            collect_trees_refs(&apply.arguments, items);
         }
         StructuredNode::Quote(quote) => {
-            tree!(&quote.expression);
-            tree!(&quote.type_tree);
+            collect_tree_refs(&quote.expression, items);
+            collect_tree_refs(&quote.type_tree, items);
         }
         StructuredNode::QuotePattern(pattern) => {
-            tree!(&pattern.body);
-            tree!(&pattern.quotes);
-            tree!(&pattern.pattern_type);
-            trees!(&pattern.bindings);
+            collect_tree_refs(&pattern.body, items);
+            collect_tree_refs(&pattern.quotes, items);
+            collect_tree_refs(&pattern.pattern_type, items);
+            collect_trees_refs(&pattern.bindings, items);
         }
         StructuredNode::SplicePattern(pattern) => {
-            tree!(&pattern.pattern);
-            tree!(&pattern.pattern_type);
-            trees!(&pattern.arguments);
+            collect_tree_refs(&pattern.pattern, items);
+            collect_tree_refs(&pattern.pattern_type, items);
+            collect_trees_refs(&pattern.arguments, items);
         }
         StructuredNode::MatchType(match_type) => {
-            tree!(&match_type.bound);
-            tree!(&match_type.selector);
-            trees!(&match_type.cases);
+            collect_tree_refs(&match_type.bound, items);
+            collect_tree_refs(&match_type.selector, items);
+            collect_trees_refs(&match_type.cases, items);
         }
         StructuredNode::MatchTpt(match_tpt) => {
             if let Some(bound) = &match_tpt.bound {
-                tree!(bound);
+                collect_tree_refs(bound, items);
             }
-            tree!(&match_tpt.selector);
-            case_defs!(&match_tpt.cases);
+            collect_tree_refs(&match_tpt.selector, items);
+            collect_case_defs_refs(&match_tpt.cases, items);
         }
         StructuredNode::Hole(hole) => {
-            tree!(&hole.type_tree);
-            trees!(&hole.arguments);
+            collect_tree_refs(&hole.type_tree, items);
+            collect_trees_refs(&hole.arguments, items);
         }
         StructuredNode::InReference(reference) => {
-            visitor(reference.name);
-            tree!(&reference.qualifier);
-            tree!(&reference.underlying_type);
+            items.push(ReferenceItem::Reference(WireReference::Name(
+                reference.name,
+            )));
+            collect_tree_refs(&reference.qualifier, items);
+            collect_tree_refs(&reference.underlying_type, items);
         }
         StructuredNode::SelectIn(select_in) => {
-            visitor(select_in.name);
-            tree!(&select_in.qualifier);
-            tree!(&select_in.underlying_type);
+            items.push(ReferenceItem::Reference(WireReference::Name(
+                select_in.name,
+            )));
+            collect_tree_refs(&select_in.qualifier, items);
+            collect_tree_refs(&select_in.underlying_type, items);
         }
         StructuredNode::Raw(_) => {}
     }
@@ -9189,6 +8847,22 @@ mod tests {
         node.visit_name_refs(&mut |reference| visited.push(reference))
             .unwrap();
         assert_eq!(visited, node.name_refs().unwrap());
+    }
+
+    #[test]
+    fn nested_name_operands_are_visited_once_in_wire_order() {
+        let payload = [
+            TERMREF_TAG,
+            0x81,
+            BLOCK_TAG,
+            0x84,
+            TYPEREF_TAG,
+            0x82,
+            TERMREFPKG_TAG,
+            0x83,
+        ];
+        let node = RawNode::new(BLOCK_TAG, &payload).unwrap();
+        assert_eq!(node.name_refs().unwrap(), [1, 2, 3]);
     }
 
     #[test]

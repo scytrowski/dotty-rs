@@ -88,6 +88,11 @@ pub struct AstTreeNode {
     pub offset: usize,
 }
 
+pub(crate) enum WireReference {
+    Ast(AstRef),
+    Name(NameRef),
+}
+
 /// Value carried by a category-one or category-two term leaf.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TermValue {
@@ -621,21 +626,28 @@ impl<'a> RawTree<'a> {
     /// opaque; their tag-specific child trees are exposed by the structured
     /// AST decoders instead.
     pub fn visit_ast_refs(&self, visitor: &mut impl FnMut(AstRef)) {
-        self.visit_ast_refs_until_length_node(visitor);
+        self.visit_references_until_length_node(&mut |reference| {
+            if let WireReference::Ast(reference) = reference {
+                visitor(reference);
+            }
+        });
     }
 
     /// Walks the unary wrapper chain and returns the bounded node where the
     /// structured visitor must resume with a tag-specific decoder.
-    pub(crate) fn visit_ast_refs_until_length_node(
+    pub(crate) fn visit_references_until_length_node(
         &self,
-        visitor: &mut impl FnMut(AstRef),
+        visitor: &mut impl FnMut(WireReference),
     ) -> Option<&RawNode<'a>> {
         let mut tree = self;
         loop {
             tree = match tree {
                 Self::Leaf(term) => {
                     if let Some(reference) = term.ast_ref() {
-                        visitor(reference);
+                        visitor(WireReference::Ast(reference));
+                    }
+                    if let Some(name) = term.name_ref() {
+                        visitor(WireReference::Name(name));
                     }
                     return None;
                 }
@@ -645,7 +657,20 @@ impl<'a> RawTree<'a> {
                     tag, value, child, ..
                 } => {
                     if let Some(reference) = AstRef::symbol_operand(*tag, *value) {
-                        visitor(reference);
+                        visitor(WireReference::Ast(reference));
+                    }
+                    if matches!(
+                        *tag,
+                        IDENT_TAG
+                            | IDENTTPT_TAG
+                            | SELECT_TAG
+                            | SELECTTPT_TAG
+                            | crate::TERMREF_TAG
+                            | crate::TYPEREF_TAG
+                            | SELFDEF_TAG
+                            | NAMEDARG_TAG
+                    ) {
+                        visitor(WireReference::Name(*value));
                     }
                     child
                 }
@@ -668,31 +693,11 @@ impl<'a> RawTree<'a> {
     /// Visits all name-table references visible in this raw tree in source
     /// order without allocating a result vector.
     pub fn visit_name_refs(&self, visitor: &mut impl FnMut(NameRef)) {
-        match self {
-            Self::Leaf(term) => {
-                if let Some(reference) = term.name_ref() {
-                    visitor(reference);
-                }
+        self.visit_references_until_length_node(&mut |reference| {
+            if let WireReference::Name(name) = reference {
+                visitor(name);
             }
-            Self::Ast { child, .. } => child.visit_name_refs(visitor),
-            Self::NatAst {
-                tag, value, child, ..
-            } => {
-                if matches!(
-                    *tag,
-                    IDENT_TAG
-                        | IDENTTPT_TAG
-                        | SELECT_TAG
-                        | SELECTTPT_TAG
-                        | SELFDEF_TAG
-                        | NAMEDARG_TAG
-                ) {
-                    visitor(*value);
-                }
-                child.visit_name_refs(visitor);
-            }
-            Self::LengthNode(_) => {}
-        }
+        });
     }
 
     /// Returns the AST reference if this tree is a direct reference leaf.
@@ -853,8 +858,7 @@ mod tests {
     };
     use crate::ast::{
         IDENT_TAG, IDENTTPT_TAG, NAMEDARG_TAG, RECTHIS_TAG, SELECT_TAG, SELECTTPT_TAG, SELFDEF_TAG,
-        SHAREDTERM_TAG, SHAREDTYPE_TAG, TERMREF_TAG, TERMREFDIRECT_TAG, THIS_TAG,
-        TYPEREFDIRECT_TAG,
+        SHAREDTERM_TAG, SHAREDTYPE_TAG, TERMREFDIRECT_TAG, THIS_TAG, TYPEREFDIRECT_TAG,
     };
     use crate::reader::{ReadError, Reader};
     use crate::writer::Writer;
@@ -1368,7 +1372,7 @@ mod tests {
 
     #[test]
     fn does_not_treat_a_category_four_ast_reference_as_a_name_reference() {
-        let mut reader = Reader::new(&[TERMREF_TAG, 0x85, 2]);
+        let mut reader = Reader::new(&[crate::TERMREFSYMBOL_TAG, 0x85, 2]);
         let tree = RawTree::decode(&mut reader).unwrap();
 
         assert!(tree.name_refs().is_empty());
