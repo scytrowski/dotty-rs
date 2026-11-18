@@ -873,3 +873,9 @@ parameter against its symbol and the kind of the completed method type.
 The writer emits the corresponding `GIVEN` or `IMPLICIT` modifier on each
 `PARAM`. A Scala 3.9 client compiles against this TASTy and executes both
 an inferred call and an explicit `using` call in the contextual-arguments oracle.
+
+For same-class methods returning `Int`, explicit `using` calls preserve the
+validated target and argument symbols in TASTy. A method with one contextual
+`Int` parameter can also forward it to a same-class method by naming the
+callee as its entire body. Validation checks the inserted argument against
+the caller’s parameter identity and the callee’s contextual signature.

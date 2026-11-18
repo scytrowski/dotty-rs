@@ -59,7 +59,8 @@ def verify_rust_library(toolchain, candidate):
         client.write_text(
             "object Client { def main(args: Array[String]): Unit = { "
             "given Int = 41; val lib = new example.Evidence; "
-            "assert(lib.read == 41); assert(lib.old(using 7) == 7) } }"
+            "assert(lib.read == 41); assert(lib.old(using 7) == 7); "
+            "assert(lib.forward == 41); assert(lib.explicit(7) == 7) } }"
         )
         classpath = os.pathsep.join((str(library), toolchain.classpath))
         toolchain.compiler(["-d", root, client], classpath=classpath)

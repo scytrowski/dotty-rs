@@ -3322,7 +3322,7 @@ fn real_source_default_constructor_clauses_normalize_without_fabricating_method_
 #[test]
 fn contextual_parameters_retain_their_wire_flags_and_reference_identity() {
     use dotty_tasty::tasty::*;
-    let text = "package example; class Evidence { def read(using x: Int): Int = x; def old(implicit x: Int): Int = x }";
+    let text = "package example; class Evidence { def read(using x: Int): Int = x; def old(implicit x: Int): Int = x; def forward(using n: Int): Int = read; def explicit(n: Int): Int = old(using n) }";
     let (_, output) = source_outputs_named(text, "Evidence.scala", |_| {}).unwrap();
     assert_eq!(
         output.bytes(),
@@ -3369,6 +3369,47 @@ fn contextual_parameters_retain_their_wire_flags_and_reference_identity() {
                 .success()
         );
     }
+}
+
+#[test]
+fn synthesized_context_call_rejects_a_foreign_evidence_parameter_with_the_same_name() {
+    let text = "package example; class Evidence { def read(using n: Int): Int = n; def forward(using n: Int): Int = read }";
+    let error = source_outputs_named_with_tree_edits(
+        text,
+        "Evidence.scala",
+        ValidationLimits::default(),
+        |source, typed, bindings, store| {
+            let body = |name: &str| {
+                let rhs = source
+                    .iter()
+                    .find_map(|(_, tree)| match &tree.kind {
+                        TreeKind::DefDef(d)
+                            if store.names.resolve(d.name.as_name().text()) == name =>
+                        {
+                            d.rhs
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                bindings.get(SourceId::from_index(7), rhs).unwrap()
+            };
+            let foreign_type = typed.get(body("read")).ty;
+            let TreeKind::Apply(call) = &typed.get(body("forward")).kind else {
+                panic!()
+            };
+            let argument = call.args[0];
+            typed.get_mut(argument).ty = foreign_type;
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        PickleError::Unsupported {
+            feature: UnsupportedFeature::BodyExpression,
+            ..
+        }
+    ));
 }
 
 #[test]

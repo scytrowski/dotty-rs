@@ -435,17 +435,24 @@ fn lower_expression_inner(
         );
     }
     if let TreeKind::Apply(application) = &tree.kind {
-        if application.kind != ApplyKind::Regular {
-            return Err(PickleError::Unsupported {
-                feature: UnsupportedFeature::BodyExpression,
-                symbol: Some(method),
-            });
-        }
         let function = ast
             .try_get(application.function)
             .ok_or(PickleError::InvalidTypedTree {
                 tree: application.function,
             })?;
+        if application.kind == ApplyKind::Using
+            && !matches!(
+                store.types.try_get(function.ty),
+                Some(Type::TermRef {target: TermRefTarget::Symbol(target), ..})
+                    if store.symbols.contains(*target) && store.symbols.get(*target).kind == dotty_core::SymbolKind::Method
+                    && matches!(store.symbols.info(*target),SymbolInfo::Complete(ty) if matches!(store.types.try_get(*ty), Some(Type::Method(m)) if m.kind != dotty_core::types::MethodKind::Plain))
+            )
+        {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::BodyExpression,
+                symbol: Some(method),
+            });
+        }
         budget.visit(application.function, depth)?;
         if let TreeKind::Select(selection) = &function.kind
             && let Some(Type::TermRef {

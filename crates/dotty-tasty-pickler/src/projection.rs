@@ -1402,7 +1402,8 @@ impl<'a> EncodingContext<'a> {
                     role: crate::TypeRole::Parameter,
                 });
             };
-            if signature.kind != dotty_core::MethodKind::Plain
+            if (signature.kind != dotty_core::MethodKind::Plain
+                && signature.result != c.definitions.int)
                 || signature.params.len() != parameter_count
                 || signature.params.iter().any(|parameter| {
                     parameter.erased || parameter.varargs || parameter.ty != c.definitions.int
