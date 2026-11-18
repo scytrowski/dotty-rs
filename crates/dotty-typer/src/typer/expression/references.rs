@@ -1398,6 +1398,35 @@ impl SourceTyper<'_> {
                         .contains(SymbolFlags::STATIC)
             });
         }
+        if candidates.len() > 1
+            && let Some(expected) = self.contextual_overload_expected_at(tree_index)
+            && candidates
+                .iter()
+                .all(|m| self.store.symbols.get(m.symbol).kind == SymbolKind::Method)
+        {
+            let mut signatures = Vec::with_capacity(candidates.len());
+            for member in &candidates {
+                if self.is_selected_member_accessible(
+                    member.symbol,
+                    member.declaring_class,
+                    context,
+                    tree_index,
+                )? {
+                    signatures.push((
+                        member.symbol,
+                        self.member_type_on_journaled(member, info_journal)?,
+                    ));
+                }
+            }
+            if let Some(winner) = self.overload_with_contextual_result(
+                &signatures,
+                expected,
+                tree_index,
+                info_journal,
+            )? {
+                candidates.retain(|m| m.symbol == winner);
+            }
+        }
         let candidate = match candidates.as_slice() {
             [] => {
                 return Err(TyperError::MemberNotFound {

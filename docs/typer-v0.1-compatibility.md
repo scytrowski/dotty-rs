@@ -1421,7 +1421,10 @@ members use receiver-adapted signatures, including inherited generic methods.
 Arguments are typed once per overload set. Candidate-local inference conflicts,
 argument mismatches, and bound violations reject that candidate; unsupported
 inference or conformance shapes remain conservative when they could compete.
-Standalone overloaded identifiers and selections remain deferred.
+A contextual overload can use the expected result of an identifier, selection,
+or tied application when exactly one result after omitted clauses conforms.
+Evidence availability does not break an overload tie. Other standalone
+overloaded identifiers and selections remain deferred.
 
 Application syntax is checked against the current method clause: regular
 applications consume plain or legacy implicit clauses. Passing positional arguments

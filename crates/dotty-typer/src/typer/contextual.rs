@@ -1055,6 +1055,46 @@ impl SourceTyper<'_> {
         symbols
     }
 
+    pub(super) fn contextual_overload_expected_at(&self, tree_index: u32) -> Option<TypeId> {
+        self.contextual_overload_expectation
+            .filter(|(tree, _)| tree.index() == tree_index)
+            .map(|(_, ty)| ty)
+    }
+
+    /// Disambiguate by the result after omitted clauses, before searching for
+    /// any evidence. A candidate with an unmodelled result can still compete.
+    pub(super) fn overload_with_contextual_result(
+        &mut self,
+        signatures: &[(SymbolId, TypeId)],
+        expected: TypeId,
+        tree_index: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Option<SymbolId>, TyperError> {
+        let mut winner = None;
+        for &(symbol, mut ty) in signatures {
+            let mut depth = 0;
+            while let Some(Type::Method(clause)) = self.store.types.try_get(ty) {
+                if clause.kind == MethodKind::Plain
+                    || depth >= crate::types::MAX_TYPE_NORMALIZATION_DEPTH
+                    || self.type_contains_param_ref(clause.result, ty)?
+                {
+                    return Ok(None);
+                }
+                ty = clause.result;
+                depth += 1;
+            }
+            if depth == 0 || matches!(self.store.types.try_get(ty), Some(Type::Poly(_))) {
+                return Ok(None);
+            }
+            if self.contextual_conforms(ty, expected, tree_index, journal)?
+                && winner.replace(symbol).is_some()
+            {
+                return Ok(None);
+            }
+        }
+        Ok(winner)
+    }
+
     fn contextual_conforms(
         &mut self,
         actual: TypeId,

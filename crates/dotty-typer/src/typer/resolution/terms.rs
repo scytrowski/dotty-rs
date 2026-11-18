@@ -30,6 +30,28 @@ impl SourceTyper<'_> {
             true,
             info_journal,
         )?;
+        if candidates.len() > 1
+            && let Some(expected) = self.contextual_overload_expected_at(tree_index)
+            && candidates
+                .iter()
+                .all(|s| self.store.symbols.get(*s).kind == SymbolKind::Method)
+        {
+            let mut signatures = Vec::with_capacity(candidates.len());
+            for &symbol in &candidates {
+                signatures.push((
+                    symbol,
+                    self.completed_expression_symbol_info(symbol, info_journal)?,
+                ));
+            }
+            if let Some(winner) = self.overload_with_contextual_result(
+                &signatures,
+                expected,
+                tree_index,
+                info_journal,
+            )? {
+                return Ok(winner);
+            }
+        }
         self.unique_expression_term(&candidates, name, tree_index, position)
     }
 

@@ -625,3 +625,50 @@ fn nested_import_evidence_keeps_the_whole_qualifier_at_local_and_member_use_site
         );
     }
 }
+
+#[test]
+fn expected_result_disambiguates_contextual_overloads_before_evidence_search() {
+    let text = "class C { def one(using n:Int):Int=n; def one(using b:Boolean):Boolean=b; def from(x:Int)(using n:Int):Int=n; def from(x:Int)(using b:Boolean):Boolean=b; def bare(using n:Int):Int=one; def selected(using b:Boolean):Boolean=this.one; def curried(using n:Int):Int=from(1); def missing(using n:Int):Boolean=from(1); def ambiguous(using n:Int):Any=from(1) }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for name in ["bare", "selected", "curried", "missing", "ambiguous"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let result = typer.type_method_definition(definition_tree(&index, method));
+        match name {
+            "missing" => assert!(
+                matches!(result,Err(TyperError::MissingContextualArgument{expected,..}) if expected==definitions.boolean),
+                "{result:?}"
+            ),
+            "ambiguous" => assert!(
+                matches!(result, Err(TyperError::AmbiguousOverloadApplication { .. })),
+                "{result:?}"
+            ),
+            _ => {
+                result.unwrap_or_else(|error| panic!("{name}: {error:?}"));
+                let typed = typer.typed_index.get(source, rhs).unwrap();
+                let TreeKind::Apply(app) = &typer.typed_ast().get(typed).kind else {
+                    panic!()
+                };
+                assert_eq!(
+                    reference(&typer, app.args[0]),
+                    method_parameter_symbol(&parsed, &index, source, method, 0)
+                );
+                assert_eq!(
+                    typer.typed_ast().get(typed).ty,
+                    if name == "selected" {
+                        definitions.boolean
+                    } else {
+                        definitions.int
+                    }
+                );
+            }
+        }
+    }
+}

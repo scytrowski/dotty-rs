@@ -1344,7 +1344,36 @@ impl SourceTyper<'_> {
                 candidates.len() == 1,
                 info_journal,
             )?;
-            self.choose_overload_candidate(candidates, arguments, tree_index, application_kind)
+            let resolution =
+                self.choose_overload_candidate(candidates, arguments, tree_index, application_kind);
+            if let Err(TyperError::AmbiguousOverloadApplication {
+                candidates: tied, ..
+            }) = &resolution
+                && let Some(expected) = self.contextual_overload_expected_at(tree_index)
+            {
+                let signatures: Vec<_> = candidates
+                    .iter()
+                    .filter(|c| tied.contains(&c.symbol))
+                    .filter_map(|c| {
+                        let Type::Method(m) = self.store.types.try_get(c.callable)? else {
+                            return None;
+                        };
+                        Some((c.symbol, m.result))
+                    })
+                    .collect();
+                if signatures.len() == tied.len()
+                    && let Some(winner) = self.overload_with_contextual_result(
+                        &signatures,
+                        expected,
+                        tree_index,
+                        info_journal,
+                    )?
+                    && let Some(candidate) = candidates.iter().find(|c| c.symbol == winner)
+                {
+                    return Ok(*candidate);
+                }
+            }
+            resolution
         })();
         let selected = resolution?;
 

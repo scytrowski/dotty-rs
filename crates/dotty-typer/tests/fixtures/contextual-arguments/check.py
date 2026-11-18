@@ -30,6 +30,7 @@ def main():
                 "this.f(1)(instance)", "this.legacy(9)", "this.need(using 9)",
                 "def read: Base = this.need(this.broad)",
                 "this.absent(scala.util.NotGiven.value)",
+                "def pick(using n: Int): Int = this.one(n)", "this.from(1)(b)",
                 "Implicit parameters should be provided with a `using` clause",
             )),
             ("Invalid.scala", 1, (

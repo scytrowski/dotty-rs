@@ -26,3 +26,11 @@ class NegativeEvidence:
   def absent(using n: NotGiven[Base]): Int = 1
   def free: Int = absent
   def ambiguous(using a: Base, b: Base): Int = absent
+
+class Overloaded:
+  def one(using n: Int): Int = n
+  def one(using b: Boolean): Boolean = b
+  def from(x: Int)(using n: Int): Int = n
+  def from(x: Int)(using b: Boolean): Boolean = b
+  def pick(using n: Int): Int = one
+  def take(using b: Boolean): Boolean = from(1)
