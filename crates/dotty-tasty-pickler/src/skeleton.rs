@@ -403,11 +403,8 @@ impl ValidatedPicklePlan<'_, '_> {
         let mut bodies = Vec::new();
         for method in p.methods {
             let name = context.intern_name(symbol(self, method.symbol)?.name)?;
-            // Preserve the source distinction: no clause has no marker; one
-            // explicit empty clause has EMPTYCLAUSE before the result type.
             let mut fields = vec![AstField::Nat(name)];
-            if method.parameter_clauses.len() == 1 {
-                let parameters = &method.parameter_clauses[0];
+            for (index, parameters) in method.parameter_clauses.iter().enumerate() {
                 if parameters.is_empty() {
                     fields.push(AstField::Tree(marker(&mut context, EMPTYCLAUSE_TAG)?));
                 } else {
@@ -459,6 +456,13 @@ impl ValidatedPicklePlan<'_, '_> {
                             },
                         )?));
                     }
+                    if method
+                        .parameter_clauses
+                        .get(index + 1)
+                        .is_some_and(|next| !next.is_empty())
+                    {
+                        fields.push(AstField::Tree(marker(&mut context, SPLITCLAUSE_TAG)?));
+                    }
                 }
             }
             let method_info = match symbol(self, method.symbol)?.info {
@@ -470,11 +474,17 @@ impl ValidatedPicklePlan<'_, '_> {
                     });
                 }
             };
-            let result_semantic_type = match p.store.types.try_get(method_info) {
-                Some(Type::Method(signature)) => signature.result,
-                Some(_) => method_info,
-                None => return Err(PickleError::IncompleteType { ty: method_info }),
-            };
+            let mut result_semantic_type = method_info;
+            for _ in &method.parameter_clauses {
+                let Some(Type::Method(signature)) = p.store.types.try_get(result_semantic_type)
+                else {
+                    return Err(PickleError::MalformedType {
+                        ty: result_semantic_type,
+                        role: TypeRole::MethodResult,
+                    });
+                };
+                result_semantic_type = signature.result;
+            }
             let result = method_type_syntax(self, &mut context, result_semantic_type)?;
             // No invented METHODtype payload, abstract modifier or substitute
             // for the method's real RHS.

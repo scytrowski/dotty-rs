@@ -2322,7 +2322,14 @@ impl<'a> Validator<'_, 'a> {
                                 && declaration.typed_block == assignment.typed_block
                         })
             });
-        if definition.value_param_clauses.len() > 1
+        let curried = method.parameter_clauses.len() > 1;
+        if (curried
+            && !method.parameter_clauses.iter().flatten().any(|&parameter| {
+                matches!(
+                    p.store.symbols.get(parameter).flags,
+                    SymbolFlags::GIVEN | SymbolFlags::IMPLICIT
+                )
+            }))
             || (definition.source_param_clause_order.is_some() && !mutable_rebinding_method)
         {
             return Err(self.unsupported(UnsupportedFeature::ParameterClauses, Some(method.symbol)));
@@ -2358,40 +2365,34 @@ impl<'a> Validator<'_, 'a> {
                 || result_ty == p.definitions.unit
                 || validator.is_planned_sibling_class_type(result_ty, Some(result.name))
         };
-        match definition.value_param_clauses.as_slice() {
-            [] if supports_result(self, ty) => {}
-            [] => {
+        let mut result_type = ty;
+        for parameters in &method.parameter_clauses {
+            let Type::Method(signature) = self.ty(result_type)? else {
                 return Err(PickleError::MalformedType {
                     ty,
-                    role: TypeRole::MethodResult,
+                    role: if parameters.is_empty() {
+                        TypeRole::MethodResult
+                    } else {
+                        TypeRole::Parameter
+                    },
+                });
+            };
+            if (parameters.is_empty() && signature.kind != MethodKind::Plain)
+                || signature.params.len() != parameters.len()
+            {
+                return Err(PickleError::MalformedType {
+                    ty,
+                    role: TypeRole::Parameter,
                 });
             }
-            [clause] => {
-                let Type::Method(signature) = self.ty(ty)? else {
-                    return Err(PickleError::MalformedType {
-                        ty,
-                        role: if clause.is_empty() {
-                            TypeRole::MethodResult
-                        } else {
-                            TypeRole::Parameter
-                        },
-                    });
-                };
-                if (clause.is_empty() && signature.kind != MethodKind::Plain)
-                    || signature.params.len() != method.parameter_clauses[0].len()
-                {
-                    return Err(PickleError::MalformedType {
-                        ty,
-                        role: TypeRole::Parameter,
-                    });
-                }
-                let planned_class_parameters = signature
-                    .params
-                    .iter()
-                    .filter(|formal| self.is_planned_sibling_class_type(formal.ty, None))
-                    .count();
-                if planned_class_parameters != 0
-                    && !((planned_class_parameters == 1 && signature.params.len() == 1)
+            let planned_class_parameters = signature
+                .params
+                .iter()
+                .filter(|formal| self.is_planned_sibling_class_type(formal.ty, None))
+                .count();
+            if planned_class_parameters != 0
+                && (curried
+                    || !((planned_class_parameters == 1 && signature.params.len() == 1)
                         || (planned_class_parameters == 1
                             && signature.params.len() == 2
                             && self.is_planned_sibling_class_type(signature.params[0].ty, None)
@@ -2411,53 +2412,42 @@ impl<'a> Validator<'_, 'a> {
                             && !self.same_planned_sibling_class_type(
                                 signature.params[0].ty,
                                 signature.result,
-                            )))
+                            ))))
+            {
+                return Err(PickleError::MalformedType {
+                    ty,
+                    role: TypeRole::Parameter,
+                });
+            }
+            for (formal, &parameter) in signature.params.iter().zip(parameters) {
+                let expected_kind = match self.symbol(parameter)?.flags {
+                    SymbolFlags::GIVEN => MethodKind::Contextual,
+                    SymbolFlags::IMPLICIT => MethodKind::Implicit,
+                    _ => MethodKind::Plain,
+                };
+                if signature.kind != expected_kind
+                    || formal.name.as_name() != &self.symbol(parameter)?.name
+                    || (formal.ty != p.definitions.int
+                        && formal.ty != p.definitions.boolean
+                        && !self.is_planned_sibling_class_type(formal.ty, None))
+                    || self.complete(parameter)? != formal.ty
+                    || formal.erased
+                    || formal.varargs
                 {
                     return Err(PickleError::MalformedType {
                         ty,
                         role: TypeRole::Parameter,
                     });
                 }
-                if !supports_result(self, signature.result) {
-                    return Err(PickleError::MalformedType {
-                        ty,
-                        role: TypeRole::MethodResult,
-                    });
-                }
-                for (formal, &parameter) in
-                    signature.params.iter().zip(&method.parameter_clauses[0])
-                {
-                    let expected_kind = match self.symbol(parameter)?.flags {
-                        SymbolFlags::GIVEN => MethodKind::Contextual,
-                        SymbolFlags::IMPLICIT => MethodKind::Implicit,
-                        _ => MethodKind::Plain,
-                    };
-                    if signature.kind != expected_kind
-                        || formal.name.as_name() != &self.symbol(parameter)?.name
-                        || (formal.ty != p.definitions.int
-                            && formal.ty != p.definitions.boolean
-                            && !self.is_planned_sibling_class_type(formal.ty, None))
-                        || self.complete(parameter)? != formal.ty
-                        || formal.erased
-                        || formal.varargs
-                    {
-                        return Err(PickleError::MalformedType {
-                            ty,
-                            role: TypeRole::Parameter,
-                        });
-                    }
-                }
             }
-            _ => {
-                return Err(
-                    self.unsupported(UnsupportedFeature::ParameterClauses, Some(method.symbol))
-                );
-            }
+            result_type = signature.result;
         }
-        let result_type = match self.ty(ty)? {
-            Type::Method(signature) => signature.result,
-            _ => ty,
-        };
+        if !supports_result(self, result_type) {
+            return Err(PickleError::MalformedType {
+                ty: result_type,
+                role: TypeRole::MethodResult,
+            });
+        }
         let expected_result_name = if result_type == p.definitions.int {
             self.symbol(int)?.name
         } else if result_type == p.definitions.boolean {

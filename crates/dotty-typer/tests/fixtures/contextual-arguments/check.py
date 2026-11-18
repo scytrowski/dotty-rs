@@ -14,8 +14,9 @@ ROOT = HERE.parents[4]
 
 def main():
     toolchain = runpy.run_path(str(ROOT / "tools/tasty-pickler-oracle/run.py"))["Toolchain"]()
-    if len(sys.argv) == 2:
-        verify_rust_library(toolchain, Path(sys.argv[1]).resolve())
+    if len(sys.argv) in (2, 3):
+        client = Path(sys.argv[2]).resolve() if len(sys.argv) == 3 else None
+        verify_rust_library(toolchain, Path(sys.argv[1]).resolve(), client)
         return
     with tempfile.TemporaryDirectory() as output:
         for source, package, classes in (
@@ -66,20 +67,21 @@ def main():
                 raise SystemExit(f"{source} disagrees with Scala 3.9 controls\n{result.stdout}")
 
 
-def verify_rust_library(toolchain, candidate):
+def verify_rust_library(toolchain, candidate, client=None):
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         library = root / "library"
         library.mkdir()
         toolchain.compiler(["-from-tasty", "-d", library, candidate])
-        shutil.copyfile(candidate, library / "example/Evidence.tasty")
-        client = root / "Client.scala"
-        client.write_text(
-            "object Client { def main(args: Array[String]): Unit = { "
-            "given Int = 41; val lib = new example.Evidence; "
-            "assert(lib.read == 41); assert(lib.old(using 7) == 7); "
-            "assert(lib.forward == 41); assert(lib.explicit(7) == 7) } }"
-        )
+        shutil.copyfile(candidate, library / "example" / candidate.name)
+        if client is None:
+            client = root / "Client.scala"
+            client.write_text(
+                "object Client { def main(args: Array[String]): Unit = { "
+                "given Int = 41; val lib = new example.Evidence; "
+                "assert(lib.read == 41); assert(lib.old(using 7) == 7); "
+                "assert(lib.forward == 41); assert(lib.explicit(7) == 7) } }"
+            )
         classpath = os.pathsep.join((str(library), toolchain.classpath))
         toolchain.compiler(["-d", root, client], classpath=classpath)
         subprocess.run([toolchain.java, "-Xverify:all", "-cp",

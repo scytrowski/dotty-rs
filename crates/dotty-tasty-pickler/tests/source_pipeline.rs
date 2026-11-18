@@ -3372,6 +3372,71 @@ fn contextual_parameters_retain_their_wire_flags_and_reference_identity() {
 }
 
 #[test]
+fn curried_contextual_parameters_preserve_clause_boundaries_in_scala() {
+    use dotty_tasty::tasty::*;
+    let source = "package example; class Curried { def pick(first: Int)(using second: Int): Int = second; def empty()(using second: Int): Int = second }";
+    let (_, output) = source_outputs_named(source, "Curried.scala", |_| {}).unwrap();
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let index = file.ast_address_index().unwrap();
+    let mut checked = 0;
+    for node in index.iter().filter(|node| node.tag == DEFDEF_TAG) {
+        let method = node.decode_defdef_body().unwrap();
+        let marker = match file.render_name(method.name).unwrap().as_str() {
+            "pick" => SPLITCLAUSE_TAG,
+            "empty" => EMPTYCLAUSE_TAG,
+            _ => continue,
+        };
+        checked += 1;
+        assert_eq!(method.clauses, [marker]);
+        let evidence = method.parameters.last().unwrap();
+        assert_eq!(
+            evidence.decode_body().unwrap().tail,
+            [DefinitionTail::Modifier(GIVEN_TAG)]
+        );
+        let Some(RawTree::Leaf(reference)) = method.rhs else {
+            panic!("expected evidence reference")
+        };
+        let target = index.get(reference.ast_ref().unwrap().address).unwrap();
+        assert!(std::ptr::eq(target.payload, evidence.payload()));
+    }
+    assert_eq!(checked, 2);
+    verify_contextual_client(
+        "Curried",
+        output.bytes(),
+        "val c = new example.Curried; given Int = 42; assert(c.pick(1) == 42); assert(c.pick(1)(using 7) == 7); assert(c.empty() == 42)",
+    );
+}
+
+fn verify_contextual_client(class: &str, bytes: &[u8], main_body: &str) {
+    if std::env::var_os(RUN_SCALA_ORACLE).is_none() {
+        return;
+    }
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let directory = root
+        .join("target/contextual-pickler")
+        .join(class)
+        .join("example");
+    std::fs::create_dir_all(&directory).unwrap();
+    let candidate = directory.join(format!("{class}.tasty"));
+    let client = directory.join("Client.scala");
+    std::fs::write(&candidate, bytes).unwrap();
+    std::fs::write(
+        &client,
+        format!("object Client {{ def main(args: Array[String]): Unit = {{ {main_body} }} }}"),
+    )
+    .unwrap();
+    assert!(
+        Command::new("python3")
+            .arg(root.join("crates/dotty-typer/tests/fixtures/contextual-arguments/check.py"))
+            .arg(candidate)
+            .arg(client)
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
 fn synthesized_context_call_rejects_a_foreign_evidence_parameter_with_the_same_name() {
     let text = "package example; class Evidence { def read(using n: Int): Int = n; def forward(using n: Int): Int = read }";
     let error = source_outputs_named_with_tree_edits(

@@ -877,3 +877,9 @@ validated target and argument symbols in TASTy. A method with one contextual
 `Int` parameter can also forward it to a same-class method by naming the
 callee as its entire body. Validation checks the inserted argument against
 the caller’s parameter identity and the callee’s contextual signature.
+
+The one-class producer also accepts successive primitive value clauses when
+at least one is contextual or legacy implicit. Each nonempty term clause
+followed by another nonempty term clause emits a `SPLITCLAUSE`. An empty
+clause emits `EMPTYCLAUSE`. A separately compiled Scala 3.9 client exercises
+both inferred and explicit evidence for these method declarations.
