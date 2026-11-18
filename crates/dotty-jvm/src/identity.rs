@@ -1385,6 +1385,11 @@ pub(super) fn validate_field_flags(
     Ok(())
 }
 
+#[cfg(test)]
+std::thread_local! {
+    pub(super) static METADATA_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(super) fn unit_metadata(
     unit: &crate::JvmCompilationUnit<'_>,
     definitions: &Definitions,
@@ -1398,6 +1403,8 @@ pub(super) fn metadata_with_hierarchy(
     definitions: &Definitions,
     hierarchy: &crate::JvmClassHierarchy,
 ) -> Result<Vec<JvmClassMetadata>, JvmCodegenError> {
+    #[cfg(test)]
+    METADATA_BUILDS.with(|count| count.set(count.get() + 1));
     let class_identities = unit_class_identities(unit)?;
     let mut metadata = Vec::with_capacity(unit.classes.len());
     for class_plan in &unit.classes {

@@ -7017,7 +7017,11 @@ fn emits_explicit_and_implicit_virtual_calls_with_exact_owner_and_descriptor() {
             ty: fixture.definitions.nothing_type,
         });
 
-        let generated = fixture.emit().unwrap();
+        let unit = fixture.unit();
+        let prepared = unit.prepare_emission(&fixture.definitions).unwrap();
+        let builds = crate::identity::METADATA_BUILDS.get();
+        let generated = prepared.emit_class(fixture.class).unwrap();
+        assert_eq!(crate::identity::METADATA_BUILDS.get(), builds);
         let mut reader = Reader::new(generated.bytes());
         let class = ClassFile::decode(&mut reader).unwrap();
         class.validate_references().unwrap();
@@ -7256,7 +7260,13 @@ fn reference_call_values_are_forwarded_and_used_as_receivers_once() {
     fixture.parameters.push(nested_receiver_parameters);
     fixture.bodies.push(nested_receiver_body);
 
-    let generated = fixture.emit().expect("exact planned reference calls lower");
+    let unit = fixture.unit();
+    let prepared = unit.prepare_emission(&fixture.definitions).unwrap();
+    let builds = crate::identity::METADATA_BUILDS.get();
+    let generated = prepared
+        .emit_class(fixture.class)
+        .expect("exact planned reference calls lower");
+    assert_eq!(crate::identity::METADATA_BUILDS.get(), builds);
     let mut reader = Reader::new(generated.bytes());
     let class = ClassFile::decode(&mut reader).expect("decode reference-call class");
     class

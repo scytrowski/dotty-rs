@@ -238,6 +238,25 @@ pub(super) fn project_method_signature_type(
     )
 }
 
+/// Projects a canonical receiver or result reference against validated call metadata.
+pub(super) fn project_call_reference(
+    unit: &JvmCompilationUnit<'_>,
+    ty: TypeId,
+    definitions: &Definitions,
+    metadata: &[crate::JvmClassMetadata],
+) -> Result<JvmType, JvmCodegenError> {
+    let class = method_signature_class_target(unit.store, ty, definitions)?;
+    project_class(
+        Some(unit),
+        unit.store,
+        ty,
+        class,
+        definitions,
+        Some(metadata),
+        None,
+    )
+}
+
 /// Returns the target of a supported method-signature class reference after
 /// checking the same canonical prefix rules used by JVM type projection.
 pub(super) fn method_signature_class_target(

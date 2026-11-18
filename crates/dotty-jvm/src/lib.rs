@@ -2876,7 +2876,15 @@ impl JvmCompilationUnit<'_> {
         call: TreeId<Typed>,
         definitions: &Definitions,
     ) -> Result<JvmCallTarget, JvmCodegenError> {
-        call_target::resolve_instance_call(self, caller_class, caller_method, call, definitions)
+        call_target::resolve_instance_call(
+            self,
+            caller_class,
+            caller_method,
+            call,
+            definitions,
+            JvmInvocationKind::Virtual,
+            None,
+        )
     }
 
     /// Resolves an explicitly typed `super.method(args)` call to the canonical
@@ -2894,7 +2902,15 @@ impl JvmCompilationUnit<'_> {
         call: TreeId<Typed>,
         definitions: &Definitions,
     ) -> Result<JvmCallTarget, JvmCodegenError> {
-        call_target::resolve_direct_super_call(self, caller_class, caller_method, call, definitions)
+        call_target::resolve_instance_call(
+            self,
+            caller_class,
+            caller_method,
+            call,
+            definitions,
+            JvmInvocationKind::SpecialSuper,
+            None,
+        )
     }
 
     /// Resolves a typed `Apply(Select(New(...), <init>), args)` to the exact

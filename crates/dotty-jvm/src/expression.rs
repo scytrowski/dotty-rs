@@ -2702,7 +2702,7 @@ fn emit_apply(
         );
     }
 
-    let Some((unit, class, _)) = context.call_context else {
+    let Some((unit, class, metadata)) = context.call_context else {
         return Err(JvmCodegenError::JvmCallContextUnavailable {
             tree: tree_id,
             method: context.method.symbol(),
@@ -2711,11 +2711,14 @@ fn emit_apply(
 
     let caller_class = class.identity().symbol();
     let caller_method = context.method.symbol();
-    let target = unit.resolve_planned_instance_call(
+    let target = crate::call_target::resolve_instance_call(
+        unit,
         caller_class,
         caller_method,
         tree_id,
         context.definitions,
+        JvmInvocationKind::Virtual,
+        Some(metadata),
     )?;
     let parameters = target.descriptor().parameters().to_vec();
     if arguments.len() != parameters.len() {
@@ -2828,17 +2831,20 @@ fn emit_direct_super_call(
     code: &mut CodeBuilder,
     depth: usize,
 ) -> Result<Flow, JvmCodegenError> {
-    let Some((unit, class, _)) = context.call_context else {
+    let Some((unit, class, metadata)) = context.call_context else {
         return Err(JvmCodegenError::JvmCallContextUnavailable {
             tree: tree_id,
             method: context.method.symbol(),
         });
     };
-    let target = unit.resolve_direct_super_call(
+    let target = crate::call_target::resolve_instance_call(
+        unit,
         class.identity().symbol(),
         context.method.symbol(),
         tree_id,
         context.definitions,
+        JvmInvocationKind::SpecialSuper,
+        Some(metadata),
     )?;
     let parameters = target.descriptor().parameters().to_vec();
     if arguments.len() != parameters.len() {
@@ -3410,14 +3416,17 @@ fn validate_constructor_reference_factory_call(
         tree: constructor_call,
         argument: tree_id,
     };
-    let Some((unit, class, _)) = context.call_context else {
+    let Some((unit, class, metadata)) = context.call_context else {
         return Err(unsupported());
     };
-    let target = unit.resolve_planned_instance_call(
+    let target = crate::call_target::resolve_instance_call(
+        unit,
         class.identity().symbol(),
         context.method.symbol(),
         tree_id,
         context.definitions,
+        JvmInvocationKind::Virtual,
+        Some(metadata),
     )?;
     let JvmReturnType::Value(result) = target.result() else {
         return Err(unsupported());
