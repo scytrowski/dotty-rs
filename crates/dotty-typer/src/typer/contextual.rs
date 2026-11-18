@@ -600,7 +600,7 @@ impl SourceTyper<'_> {
         }
         let mut eligible = Vec::new();
         for provider in candidates {
-            if matches!(
+            let ambiguity = if matches!(
                 self.store.types.try_get(provider.callable),
                 Some(Type::Method(_))
             ) {
@@ -621,17 +621,21 @@ impl SourceTyper<'_> {
                         TyperError::MissingContextualArgument { .. }
                         | TyperError::DivergentContextualArgument { .. },
                     ) => continue,
-                    other => other?,
+                    Err(error @ TyperError::AmbiguousContextualArgument { .. }) => Some(error),
+                    Ok(()) => None,
+                    Err(error) => return Err(error),
                 }
-            }
-            eligible.push(provider);
+            } else {
+                None
+            };
+            eligible.push((provider, ambiguity));
         }
         let Some(provider) =
-            self.choose_contextual_candidate(&eligible, expected, tree_index, journal)?
+            self.choose_contextual_candidate(eligible, expected, tree_index, journal)?
         else {
             return Ok(None);
         };
-        self.materialize_provider(provider, expected, context, tree_index, history, journal)
+        self.materialize_provider(&provider, expected, context, tree_index, history, journal)
             .map(Some)
     }
 
@@ -1259,17 +1263,17 @@ impl SourceTyper<'_> {
         })
     }
 
-    fn choose_contextual_candidate<'p>(
+    fn choose_contextual_candidate(
         &mut self,
-        candidates: &'p [Provider],
+        mut candidates: Vec<(Provider, Option<TyperError>)>,
         expected: TypeId,
         tree_index: u32,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
-    ) -> Result<Option<&'p Provider>, TyperError> {
+    ) -> Result<Option<Provider>, TyperError> {
         let mut maxima = Vec::new();
-        for candidate in candidates {
+        for (index, (candidate, _)) in candidates.iter().enumerate() {
             let mut dominated = false;
-            for rival in candidates {
+            for (rival, _) in &candidates {
                 if rival.reference == candidate.reference {
                     continue;
                 }
@@ -1314,17 +1318,27 @@ impl SourceTyper<'_> {
                 }
             }
             if !dominated {
-                maxima.push(candidate);
+                maxima.push(index);
+            }
+        }
+        // An ambiguous dependency rules out the whole search unless a strictly
+        // better viable provider supersedes it, regardless of declaration order.
+        for &index in &maxima {
+            if let Some(error) = candidates[index].1.take() {
+                return Err(error);
             }
         }
         match maxima.as_slice() {
             [] => Ok(None),
-            [winner] => Ok(Some(*winner)),
+            [winner] => Ok(Some(candidates.swap_remove(*winner).0)),
             _ => Err(TyperError::AmbiguousContextualArgument {
                 source: self.source,
                 tree_index,
                 expected,
-                candidates: maxima.iter().map(|p| p.reference.symbol).collect(),
+                candidates: maxima
+                    .iter()
+                    .map(|&i| candidates[i].0.reference.symbol)
+                    .collect(),
             }),
         }
     }

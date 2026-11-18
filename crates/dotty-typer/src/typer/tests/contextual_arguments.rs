@@ -933,3 +933,54 @@ fn generic_evidence_infers_through_its_declared_parent_result() {
     assert_eq!(reference(&typer, produced.function), producer);
     assert_eq!(typer.typed_ast().get(produced.args[0]).ty, definitions.int);
 }
+
+#[test]
+fn a_strictly_better_provider_recovers_from_an_ambiguous_nested_search() {
+    let text = include_str!("../../../tests/fixtures/contextual-arguments/Calls.scala");
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "healed");
+    let (direct, _, _) = val_definition_and_rhs(&parsed, &store, &index, source, "direct");
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    typer
+        .type_method_definition(definition_tree(&index, method))
+        .unwrap();
+    let TreeKind::Apply(call) = &typer
+        .typed_ast()
+        .get(typer.typed_index.get(source, rhs).unwrap())
+        .kind
+    else {
+        panic!()
+    };
+    assert_eq!(reference(&typer, call.args[0]), direct);
+}
+
+#[test]
+fn an_equally_ranked_provider_preserves_the_ambiguous_dependency() {
+    let text = include_str!("../../../tests/fixtures/contextual-arguments/Invalid.scala");
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let (method, _) = method_definition_and_rhs(&parsed, &store, &index, source, "unresolved");
+    let ambiguous: Vec<_> = (0..2)
+        .map(|i| method_parameter_symbol(&parsed, &index, source, method, i))
+        .collect();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    let checkpoint = typer.store.checkpoint();
+    let result = typer.type_method_definition(definition_tree(&index, method));
+    assert!(
+        matches!(result, Err(TyperError::AmbiguousContextualArgument{candidates,..}) if candidates==ambiguous)
+    );
+    assert_eq!(typer.store.checkpoint(), checkpoint);
+}

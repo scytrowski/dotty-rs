@@ -34,3 +34,12 @@ class Overloaded:
   def from(x: Int)(using b: Boolean): Boolean = b
   def pick(using n: Int): Int = one
   def take(using b: Boolean): Boolean = from(1)
+
+class Dependency
+class Result
+object Result:
+  given conditional: Dependency => Result = new Result
+  given direct: Result = new Result
+class Recovery:
+  def read(using r: Result): Int = 1
+  def healed(using a: Dependency, b: Dependency): Int = read
