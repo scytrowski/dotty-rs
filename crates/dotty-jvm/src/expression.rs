@@ -29,6 +29,7 @@ enum Flow {
 
 enum ExpressionShape {
     Leaf,
+    ParameterlessGetter,
     Select,
     Block,
     If,
@@ -97,21 +98,26 @@ fn append_current_receiver(
             tree: call_id,
             node: "missing tree",
         })?;
-    let TreeKind::Apply(application) = &call.kind else {
-        return Err(JvmCodegenError::UnsupportedJvmCallShape {
-            tree: call_id,
-            kind: UnsupportedJvmCallShapeKind::NotApplication,
-        });
+    let function_id = match &call.kind {
+        TreeKind::Apply(application) => application.function,
+        TreeKind::Ident(_) | TreeKind::Select(_) => call_id, // Validated parameterless getter.
+        _ => {
+            return Err(JvmCodegenError::UnsupportedJvmCallShape {
+                tree: call_id,
+                kind: UnsupportedJvmCallShapeKind::NotApplication,
+            });
+        }
     };
-    let source_function = typed_ast.try_get(application.function).ok_or(
-        JvmCodegenError::UnsupportedTypedExpression {
-            tree: application.function,
-            node: "missing tree",
-        },
-    )?;
+    let source_function =
+        typed_ast
+            .try_get(function_id)
+            .ok_or(JvmCodegenError::UnsupportedTypedExpression {
+                tree: function_id,
+                node: "missing tree",
+            })?;
     let function = if let Some(prior) = target.prior_application {
         match &source_function.kind {
-            TreeKind::Apply(previous) if prior == application.function => typed_ast
+            TreeKind::Apply(previous) if prior == function_id => typed_ast
                 .try_get(previous.function)
                 .ok_or(JvmCodegenError::UnsupportedTypedExpression {
                     tree: previous.function,
@@ -151,7 +157,7 @@ fn append_current_receiver(
         }
     } else if !matches!(function.kind, TreeKind::Ident(_)) {
         return Err(JvmCodegenError::UnsupportedJvmCallShape {
-            tree: application.function,
+            tree: function_id,
             kind: UnsupportedJvmCallShapeKind::UnsupportedFunctionTree,
         });
     }
@@ -957,6 +963,9 @@ fn emit_expression_with_identity_context(
     let shape = {
         let tree = context.tree(tree_id)?;
         match &tree.kind {
+            _ if crate::defaults::is_parameterless_getter(context.store, tree) => {
+                ExpressionShape::ParameterlessGetter
+            }
             TreeKind::Literal(_) | TreeKind::Ident(_) | TreeKind::This(_) => ExpressionShape::Leaf,
             TreeKind::Select(_) => ExpressionShape::Select,
             TreeKind::Block(_) => ExpressionShape::Block,
@@ -969,6 +978,9 @@ fn emit_expression_with_identity_context(
         }
     };
     let flow = match shape {
+        ExpressionShape::ParameterlessGetter => {
+            emit_planned_apply(context, tree_id, tree_id, Vec::new(), code, depth)
+        }
         ExpressionShape::Leaf => {
             if matches!(
                 &context.tree(tree_id)?.kind,
@@ -2809,7 +2821,9 @@ fn emit_planned_apply(
             found: arguments.len(),
         });
     }
-    context.visit(function, depth + 1)?;
+    if function != tree_id {
+        context.visit(function, depth + 1)?;
+    }
     match target.receiver_tree() {
         Some(receiver) if matches!(context.tree(receiver)?.kind, TreeKind::This(_)) => {
             context.visit(receiver, depth + 2)?;

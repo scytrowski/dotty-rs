@@ -21,9 +21,15 @@ pub(super) fn resolve_same_class_call(
     call: TreeId<Typed>,
     definitions: &Definitions,
 ) -> Result<JvmCallTarget, JvmCodegenError> {
-    if let Some(call_tree) = unit.typed_ast.try_get(call)
-        && let TreeKind::Apply(application) = &call_tree.kind
-        && let Some(function) = unit.typed_ast.try_get(application.function)
+    if let Some(function_id) = unit
+        .typed_ast
+        .try_get(call)
+        .and_then(|node| match &node.kind {
+            TreeKind::Apply(application) => Some(application.function),
+            _ if crate::defaults::is_parameterless_getter(unit.store, node) => Some(call),
+            _ => None,
+        })
+        && let Some(function) = unit.typed_ast.try_get(function_id)
         && let Some(function) = match &function.kind {
             TreeKind::Apply(previous) => unit.typed_ast.try_get(previous.function),
             _ => Some(function),
@@ -44,14 +50,14 @@ pub(super) fn resolve_same_class_call(
                     Some(Type::ThisType { class }) if *class == caller_class
                 ) {
                     return Err(unsupported_call(
-                        application.function,
+                        function_id,
                         UnsupportedJvmCallShapeKind::NonCurrentThis,
                     ));
                 }
             }
             _ => {
                 return Err(unsupported_call(
-                    application.function,
+                    function_id,
                     UnsupportedJvmCallShapeKind::NonThisReceiver,
                 ));
             }
@@ -187,7 +193,12 @@ fn resolve_instance_call_body(
 
     let call_tree = tree(unit.store, unit.typed_ast, call)?;
     let (function_id, apply_kind) = match &call_tree.kind {
-        TreeKind::Apply(apply) => (apply.function, apply.kind),
+        TreeKind::Apply(apply) => (apply.function, Some(apply.kind)),
+        _ if invocation == JvmInvocationKind::Virtual
+            && crate::defaults::is_parameterless_getter(unit.store, call_tree) =>
+        {
+            (call, None)
+        }
         TreeKind::TypeApply(_) => {
             return Err(unsupported_call(
                 call,
@@ -209,6 +220,12 @@ fn resolve_instance_call_body(
         _ => (function_id, None),
     };
     let function_tree = tree(unit.store, unit.typed_ast, function_id)?;
+    if apply_kind.is_some() && crate::defaults::is_parameterless_getter(unit.store, function_tree) {
+        return Err(unsupported_call(
+            call,
+            UnsupportedJvmCallShapeKind::UnexpectedGetterApplication,
+        ));
+    }
     let (receiver_tree, receiver_class, direct_super_parent) = match &function_tree.kind {
         TreeKind::Ident(_) if invocation == JvmInvocationKind::Virtual => {
             (None, caller_class, None)
@@ -306,7 +323,7 @@ fn resolve_instance_call_body(
                 UnsupportedJvmCallShapeKind::NestedApplication,
             ));
         }
-        _ if apply_kind == ApplyKind::Using
+        _ if apply_kind == Some(ApplyKind::Using)
             && !signature.is_some_and(|s| s.kind != dotty_core::MethodKind::Plain) =>
         {
             return Err(unsupported_call(
@@ -472,7 +489,11 @@ fn resolve_instance_call_body(
             });
         }
     }
-    let found = project_result_type(unit, call_tree.ty, definitions);
+    let result_type = match (apply_kind, method_symbol.info) {
+        (None, SymbolInfo::Complete(result)) => result,
+        _ => call_tree.ty,
+    };
+    let found = project_result_type(unit, result_type, definitions);
     let expected = method_metadata.descriptor().result();
     if found != Some(expected) {
         return Err(JvmCodegenError::JvmCallResultTypeMismatch {

@@ -1414,15 +1414,17 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                                                         && flags
                                                             == dotty_core::SymbolFlags::MUTABLE)
                                             })
-                                            .map(|binding| JvmLocalBinding {
-                                                declaration: binding.declaration(),
-                                                symbol: binding.symbol(),
-                                                mutable: typer
-                                                    .store()
-                                                    .symbols
-                                                    .get(binding.symbol())
-                                                    .flags
-                                                    == dotty_core::SymbolFlags::MUTABLE,
+                                            .map(|binding| {
+                                                JvmLocalBinding::ordinary(
+                                                    binding.declaration(),
+                                                    binding.symbol(),
+                                                    typer
+                                                        .store()
+                                                        .symbols
+                                                        .get(binding.symbol())
+                                                        .flags
+                                                        == dotty_core::SymbolFlags::MUTABLE,
+                                                )
                                             })
                                     })
                                     .collect()

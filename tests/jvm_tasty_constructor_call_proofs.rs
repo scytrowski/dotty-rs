@@ -341,15 +341,17 @@ fn with_two_local_proof_session_internal<R>(
             }
             let local_plan = all_local_bindings
                 .iter()
-                .map(|binding| dotty_jvm::JvmLocalBinding {
-                    declaration: binding.declaration(),
-                    symbol: binding.symbol(),
-                    mutable: typer
-                        .store()
-                        .symbols
-                        .get(binding.symbol())
-                        .flags
-                        .contains(dotty_core::SymbolFlags::MUTABLE),
+                .map(|binding| {
+                    dotty_jvm::JvmLocalBinding::ordinary(
+                        binding.declaration(),
+                        binding.symbol(),
+                        typer
+                            .store()
+                            .symbols
+                            .get(binding.symbol())
+                            .flags
+                            .contains(dotty_core::SymbolFlags::MUTABLE),
+                    )
                 })
                 .collect();
             method_plans.push((
@@ -1097,10 +1099,12 @@ fn with_two_argument_proof<R>(
                     .filter_map(|declaration| {
                         typer
                             .typed_local_binding_at(source_id, *declaration)
-                            .map(|binding| dotty_jvm::JvmLocalBinding {
-                                declaration: binding.declaration(),
-                                symbol: binding.symbol(),
-                                mutable: false,
+                            .map(|binding| {
+                                dotty_jvm::JvmLocalBinding::ordinary(
+                                    binding.declaration(),
+                                    binding.symbol(),
+                                    false,
+                                )
                             })
                     })
                     .collect(),

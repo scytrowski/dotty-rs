@@ -169,8 +169,16 @@ fn descriptor_for_with_references(
     }
 
     let method_type_id = complete_info(store, plan.method)?;
-    let method_type = match store.types.try_get(method_type_id) {
-        Some(Type::Method(method_type)) => method_type,
+    let default_getter = !constructor && crate::defaults::getter_name(store, plan)?.is_some();
+    let (kind, formals, declared_result, tail) = match store.types.try_get(method_type_id) {
+        Some(Type::Method(method_type)) => (
+            method_type.kind,
+            method_type.params.as_slice(),
+            method_type.result,
+            (!constructor)
+                .then(|| contextual_tail(store, method_type))
+                .flatten(),
+        ),
         Some(Type::Poly(poly)) if !constructor => {
             return contextual_poly::descriptor(plan, store, definitions, method_type_id, poly);
         }
@@ -181,6 +189,7 @@ fn descriptor_for_with_references(
                 kind: UnsupportedMethodShapeKind::Polymorphic,
             });
         }
+        Some(_) if default_getter => (MethodKind::Plain, &[][..], method_type_id, None),
         Some(_) => {
             return Err(JvmCodegenError::UnsupportedMethodShape {
                 method: plan.method,
@@ -197,20 +206,15 @@ fn descriptor_for_with_references(
         }
     };
 
-    if method_type.kind != MethodKind::Plain
-        && (method.kind == SymbolKind::Constructor || method_type.params.is_empty())
-    {
+    if kind != MethodKind::Plain && (constructor || formals.is_empty()) {
         return Err(JvmCodegenError::UnsupportedMethodShape {
             method: plan.method,
             ty: method_type_id,
             kind: UnsupportedMethodShapeKind::NonPlainClause,
         });
     }
-    let tail = (!constructor)
-        .then(|| contextual_tail(store, method_type))
-        .flatten();
-    let parameter_count = method_type.params.len() + tail.map_or(0, |tail| tail.params.len());
-    let result_type = tail.map_or(method_type.result, |tail| tail.result);
+    let parameter_count = formals.len() + tail.map_or(0, |tail| tail.params.len());
+    let result_type = tail.map_or(declared_result, |tail| tail.result);
     if parameter_count != plan.parameters.len() {
         return Err(JvmCodegenError::UnsupportedMethodShape {
             method: plan.method,
@@ -262,8 +266,7 @@ fn descriptor_for_with_references(
     let mut parameters = Vec::with_capacity(parameter_count);
     let mut parameter_slots = receiver_slots;
     let mut seen_parameters = HashSet::new();
-    for (index, (method_param, parameter_id)) in method_type
-        .params
+    for (index, (method_param, parameter_id)) in formals
         .iter()
         .chain(tail.into_iter().flat_map(|tail| &tail.params))
         .zip(&plan.parameters)
@@ -313,7 +316,7 @@ fn descriptor_for_with_references(
         }
 
         if let Some(tail) = tail {
-            let flags = if index < method_type.params.len() {
+            let flags = if index < formals.len() {
                 SymbolFlags::EMPTY
             } else if tail.kind == MethodKind::Contextual {
                 SymbolFlags::GIVEN
@@ -374,7 +377,7 @@ fn descriptor_for_with_references(
     }
 
     let result = if constructor {
-        if !matches!(store.types.try_get(method_type.result), Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }) if *symbol == owner)
+        if !matches!(store.types.try_get(declared_result), Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }) if *symbol == owner)
         {
             return Err(JvmCodegenError::InvalidPrimaryConstructor {
                 constructor: plan.method,

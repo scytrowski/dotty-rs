@@ -1264,9 +1264,9 @@ For `def offset(x: Int)(using n: Int = x): Int`, a source session types the
 whole definition. `JvmMethodPlan::source_default_getters` follows the registered
 method and parameter position to the getter, its own copy of `x`, and the typed
 default expression. Scala 3.9 and this backend both emit the public instance
-method `offset$default$2(I)I`. JVM emission requires one ordinary clause
-followed by a contextual or legacy implicit clause, with matching completed
-types. Context bounds can change parameter order and remain outside this
+method `offset$default$2(I)I`. The semantic getter signature copies the
+preceding ordinary clause and returns the type of the contextual or legacy
+implicit parameter. Context bounds can change parameter order and remain outside this
 source getter contract.
 
 `JvmMethodPlan::bind_generated_locals` reads the typer's symbol bindings for
@@ -1275,3 +1275,19 @@ temporary declarations reachable from the method body. For
 `next` in order, each once. The getter and `offset` read the same two slots.
 The JDK 21 test checks the call order, counters, and virtual dispatch to an
 overridden getter.
+
+For a first contextual clause, `def read(using n: Int = 7): Int = n` emits
+`read(I)I` and the public instance method `read$default$1()I`. Scala 3.9
+and this backend invoke the latter with `invokevirtual` only when the caller
+omits the argument and contextual search finds no evidence. The typer
+represents this getter with its result type directly and an `Ident` or
+`Select` at the call site. An explicit empty argument list on the getter or
+an empty method clause in its semantic signature fails validation.
+
+The source pipeline also proves an immutable named local
+`given evidence: Int = 11` using its source declaration, typed initializer
+and canonical local symbol. Only a matching integer literal can use an eager
+JVM local slot, because evaluating it early cannot cause a side effect.
+General lazy initializers remain unsupported. The JDK 21 test overrides the
+getter and checks that calls with this local evidence and with an explicit
+`using 9` leave its invocation count unchanged.
