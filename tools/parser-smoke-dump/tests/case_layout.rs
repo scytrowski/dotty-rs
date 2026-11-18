@@ -360,8 +360,10 @@ fn empty_catch_case_body_can_end_at_a_dedented_closing_brace() {
 }
 
 #[test]
-fn same_line_closing_brace_is_not_an_empty_catch_case_body() {
-    let source = "object O:\n  def f = {\n    try risky()\n    catch\n      case _: E => }\n";
+fn multiline_catch_accepts_an_empty_body_before_a_same_line_closing_brace() {
+    let source = include_str!(
+        "../../scala-parser-oracle/fixtures/compilation/catch-empty-case-before-same-line-brace.scala"
+    );
     let scanner = ContextualScanner::new(source).expect("source scans");
     let mut names = NameInterner::new();
     let result = parse_compilation_unit(
@@ -371,9 +373,34 @@ fn same_line_closing_brace_is_not_an_empty_catch_case_body() {
         &mut names,
     );
 
-    assert!(
-        !result.diagnostics.is_empty(),
-        "a same-line closing brace must not be accepted as an empty body"
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    let cases: Vec<_> = result
+        .ast
+        .iter()
+        .filter_map(|(_, tree)| {
+            if let TreeKind::CaseDef(case) = &tree.kind {
+                Some(case)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(cases.len(), 1);
+    let body = result.ast.get(cases[0].body);
+    let TreeKind::Block(Block { stats, expr }) = &body.kind else {
+        panic!("expected an empty case body block");
+    };
+    assert!(stats.is_empty());
+    assert!(matches!(
+        result.ast.get(*expr).kind,
+        TreeKind::Literal(Literal {
+            value: Constant::Unit
+        })
+    ));
+    let arrow = source.find("=>").unwrap() as u32;
+    assert_eq!(
+        body.position.unwrap().span().range(),
+        TextRange::new(arrow, arrow + 2).unwrap(),
     );
 }
 

@@ -385,8 +385,7 @@ where
         let requests_feedback_region = first_body_token.kind
             == TokenKind::Keyword(dotty_core::HardKeyword::Case)
             && self
-                .has_physical_line_break(self.current().span.end(), first_body_token.span.start())
-            && self.catch_has_multiple_unindented_cases();
+                .has_physical_line_break(self.current().span.end(), first_body_token.span.start());
         let case_region = if requests_feedback_region {
             self.observe_match_cases_indented()
         } else if first_body_token.kind == TokenKind::Indent {
@@ -397,45 +396,6 @@ where
 
         self.advance();
         Some(case_region)
-    }
-
-    fn catch_has_multiple_unindented_cases(&mut self) -> bool {
-        let mut offset = 1;
-        let mut delimiter_depth = 0u32;
-        let mut layout_depth = 0u32;
-        let mut first_case_column = None;
-
-        loop {
-            let token = self.cursor.lookahead(offset).clone();
-            match token.kind {
-                TokenKind::Eof => return false,
-                TokenKind::Punctuation(
-                    Punctuation::RightParen | Punctuation::RightBracket | Punctuation::RightBrace,
-                ) if delimiter_depth == 0 => {
-                    return false;
-                }
-                TokenKind::Indent => layout_depth += 1,
-                TokenKind::Outdent if layout_depth == 0 => return false,
-                TokenKind::Outdent => layout_depth -= 1,
-                TokenKind::Punctuation(
-                    Punctuation::LeftParen | Punctuation::LeftBracket | Punctuation::LeftBrace,
-                ) => delimiter_depth += 1,
-                TokenKind::Punctuation(
-                    Punctuation::RightParen | Punctuation::RightBracket | Punctuation::RightBrace,
-                ) => delimiter_depth = delimiter_depth.saturating_sub(1),
-                TokenKind::Keyword(dotty_core::HardKeyword::Case)
-                    if delimiter_depth == 0 && layout_depth == 0 =>
-                {
-                    let column = self.source_line_before(token.span.start()).chars().count();
-                    if first_case_column == Some(column) {
-                        return true;
-                    }
-                    first_case_column.get_or_insert(column);
-                }
-                _ => {}
-            }
-            offset += 1;
-        }
     }
 
     fn first_catch_handler_token(&mut self) -> dotty_core::Token {
@@ -1895,64 +1855,6 @@ mod tests {
             TreeKind::CaseDef(_)
         ));
         assert!(parser.diagnostics().is_empty());
-    }
-
-    #[test]
-    fn recognizes_multiple_unindented_catch_cases_in_a_braced_scope() {
-        let mut names = NameInterner::new();
-        let mut parser = parser_for(
-            "{ try x catch\n  case A => a\n  case B => b\n}",
-            vec![
-                token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
-                token(TokenKind::Keyword(HardKeyword::Try), 2, 5),
-                token(TokenKind::Identifier, 6, 7),
-                token(TokenKind::Keyword(HardKeyword::Catch), 8, 13),
-                token(TokenKind::Newline, 13, 14),
-                token(TokenKind::Keyword(HardKeyword::Case), 16, 20),
-                token(TokenKind::Identifier, 21, 22),
-                token(TokenKind::Operator, 23, 25),
-                token(TokenKind::Identifier, 26, 27),
-                token(TokenKind::Newline, 27, 28),
-                token(TokenKind::Keyword(HardKeyword::Case), 30, 34),
-                token(TokenKind::Identifier, 35, 36),
-                token(TokenKind::Operator, 37, 39),
-                token(TokenKind::Identifier, 40, 41),
-                token(TokenKind::Newline, 41, 42),
-                token(TokenKind::Punctuation(Punctuation::RightBrace), 42, 43),
-                token(TokenKind::Eof, 43, 43),
-            ],
-            &mut names,
-        );
-
-        parser.advance();
-        parser.advance();
-        parser.advance();
-        assert_eq!(
-            parser.current().kind,
-            TokenKind::Keyword(HardKeyword::Catch)
-        );
-        assert!(parser.catch_has_multiple_unindented_cases());
-    }
-
-    #[test]
-    fn catch_lookahead_stops_at_the_enclosing_argument_delimiter() {
-        let mut names = NameInterner::new();
-        let mut parser = parser_for(
-            "catch\n  case A => a)\n  case B",
-            vec![
-                token(TokenKind::Keyword(HardKeyword::Catch), 0, 5),
-                token(TokenKind::Keyword(HardKeyword::Case), 8, 12),
-                token(TokenKind::Identifier, 13, 14),
-                token(TokenKind::Operator, 15, 17),
-                token(TokenKind::Identifier, 18, 19),
-                token(TokenKind::Punctuation(Punctuation::RightParen), 19, 20),
-                token(TokenKind::Keyword(HardKeyword::Case), 23, 27),
-                token(TokenKind::Identifier, 28, 29),
-                token(TokenKind::Eof, 29, 29),
-            ],
-            &mut names,
-        );
-        assert!(!parser.catch_has_multiple_unindented_cases());
     }
 
     #[test]
