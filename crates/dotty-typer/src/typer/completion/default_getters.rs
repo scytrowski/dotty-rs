@@ -112,7 +112,13 @@ impl SourceTyper<'_> {
             return Ok(());
         };
         for &tree in definition.value_param_clauses.iter().flatten() {
-            let TreeKind::ValDef(param) = &self.arena.get(tree).kind else {
+            let Some(node) = self.arena.try_get(tree) else {
+                return Err(TyperError::TreeOutsideArena {
+                    source: self.source,
+                    tree_index: tree.index(),
+                });
+            };
+            let TreeKind::ValDef(param) = &node.kind else {
                 continue;
             };
             let Some(rhs) = param.rhs else { continue };

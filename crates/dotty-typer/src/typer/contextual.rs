@@ -187,31 +187,15 @@ impl SourceTyper<'_> {
                     crate::types::TypeNormalizeError::TooDeep,
                 ));
             }
-            let mut arguments = Vec::with_capacity(method.params.len());
-            let mut application_kind = ApplyKind::Regular;
-            for (ordinal, parameter) in method.params.iter().enumerate() {
-                let argument = if let Some(default) = self.default_call(function, ordinal) {
-                    match self.semantic_attempt(Some(journal), |typer, probe| {
-                        typer.search_contextual_argument(parameter, context, tree_index, probe)
-                    }) {
-                        Err(TyperError::MissingContextualArgument { .. }) => {
-                            application_kind = ApplyKind::Using;
-                            self.apply_default_getter(
-                                default,
-                                &mut function,
-                                &mut shared,
-                                context,
-                                tree_index,
-                                journal,
-                            )?
-                        }
-                        result => result?,
-                    }
-                } else {
-                    self.search_contextual_argument(parameter, context, tree_index, journal)?
-                };
-                arguments.push(argument);
-            }
+            let (arguments, application_kind) = self.contextual_call_arguments(
+                &mut function,
+                &method,
+                context,
+                tree_index,
+                None,
+                &mut shared,
+                journal,
+            )?;
             function = self.finish_contextual_call(
                 function,
                 callable,
@@ -921,6 +905,7 @@ impl SourceTyper<'_> {
                 .collect();
             tree = builder.type_apply(tree, args, signature, None);
         }
+        let mut shared = Vec::new();
         while let Some(Type::Method(method)) = self.store.types.try_get(signature).cloned() {
             if self.type_contains_param_ref(method.result, signature)? {
                 return Err(TyperError::DependentMethodApplicationDeferred {
@@ -930,19 +915,27 @@ impl SourceTyper<'_> {
                     result: method.result,
                 });
             }
-            let mut args = Vec::new();
-            for param in method.params {
-                args.push(
-                    self.contextual_parameter_value(&param, context, tree_index, history, journal)?,
-                );
-            }
-            tree = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply(
+            let (args, kind) = self.contextual_call_arguments(
+                &mut tree,
+                &method,
+                context,
+                tree_index,
+                Some(history),
+                &mut shared,
+                journal,
+            )?;
+            tree = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply_with_kind(
                 tree,
                 args,
+                kind,
                 method.result,
                 None,
             );
             signature = method.result;
+        }
+        if !shared.is_empty() {
+            tree = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                .block(shared, tree, signature, None);
         }
         Ok(tree)
     }

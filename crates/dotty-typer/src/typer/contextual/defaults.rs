@@ -1,18 +1,64 @@
 //! Replay earlier argument clauses on the selected method's default getter.
 use super::*;
 
-pub(super) struct DefaultCall {
+struct DefaultCall {
     root: TreeId<Typed>,
     applications: Vec<TreeId<Typed>>,
     getter: SymbolId,
 }
 
 impl SourceTyper<'_> {
-    pub(super) fn default_call(
-        &self,
-        mut tree: TreeId<Typed>,
-        ordinal: usize,
-    ) -> Option<DefaultCall> {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn contextual_call_arguments(
+        &mut self,
+        function: &mut TreeId<Typed>,
+        method: &MethodType,
+        context: ExpressionContext,
+        tree_index: u32,
+        mut history: Option<&mut SearchHistory>,
+        shared: &mut Vec<TreeId<Typed>>,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<(Vec<TreeId<Typed>>, ApplyKind), TyperError> {
+        let mut args = Vec::with_capacity(method.params.len());
+        let mut kind = ApplyKind::Regular;
+        for (ordinal, param) in method.params.iter().enumerate() {
+            let default = self.default_call(*function, ordinal);
+            // A missing candidate may have opened a recursive dictionary before
+            // reaching a missing dependency. Its symbols follow the probe's lifetime.
+            let saved_dictionary = default
+                .as_ref()
+                .and_then(|_| history.as_ref().map(|h| h.dictionary.clone()));
+            let mut search =
+                |typer: &mut Self, nested: &mut Vec<(SymbolId, SymbolInfo)>| match history
+                    .as_deref_mut()
+                {
+                    Some(h) => {
+                        typer.contextual_parameter_value(param, context, tree_index, h, nested)
+                    }
+                    None => typer.search_contextual_argument(param, context, tree_index, nested),
+                };
+            let Some(default) = default else {
+                args.push(search(self, journal)?);
+                continue;
+            };
+            let argument = self.semantic_attempt(Some(journal), search);
+            match argument {
+                Err(TyperError::MissingContextualArgument { .. }) => {
+                    if let (Some(h), Some(saved)) = (history.as_deref_mut(), saved_dictionary) {
+                        h.dictionary = saved;
+                    }
+                    kind = ApplyKind::Using;
+                    args.push(self.apply_default_getter(
+                        default, function, shared, context, tree_index, journal,
+                    )?);
+                }
+                result => args.push(result?),
+            }
+        }
+        Ok((args, kind))
+    }
+
+    fn default_call(&self, mut tree: TreeId<Typed>, ordinal: usize) -> Option<DefaultCall> {
         let mut applications = Vec::new();
         let mut clause = 0;
         loop {
@@ -61,7 +107,7 @@ impl SourceTyper<'_> {
         })
     }
 
-    pub(super) fn apply_default_getter(
+    fn apply_default_getter(
         &mut self,
         call: DefaultCall,
         function: &mut TreeId<Typed>,

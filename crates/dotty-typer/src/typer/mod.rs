@@ -452,7 +452,7 @@ impl<'a> SourceTyper<'a> {
             .symbol_at(self.source, tree)
             .and_then(|m| self.store.symbols.owner(m));
         let unsupported_default = definition.value_param_clauses.iter().flatten().any(|&tree| {
-            matches!(&self.arena.get(tree).kind, TreeKind::ValDef(parameter) if parameter.rhs.is_some()) &&
+            matches!(self.arena.try_get(tree).map(|node| &node.kind), Some(TreeKind::ValDef(parameter)) if parameter.rhs.is_some()) &&
             owner.and_then(|owner| self.index.derived_symbol_at(owner,self.source,tree)).and_then(|getter| self.contextual_getter_source(getter)).is_none()
         });
         if unsupported_default || has_default_in_body {
