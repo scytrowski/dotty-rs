@@ -339,7 +339,9 @@ impl SourceTyper<'_> {
                 _ => None,
             })
             .is_some_and(|tree| matches!(tree.kind, TreeKind::New(_)));
-        if is_initialized_constructor_result {
+        if is_initialized_constructor_result
+            || self.is_structural_factory_result(qualifier, qualifier_type)
+        {
             Ok(())
         } else if self
             .typed_arena
@@ -360,6 +362,54 @@ impl SourceTyper<'_> {
             Ok(())
         } else {
             self.require_stable_selection_prefix(qualifier_type, tree_index)
+        }
+    }
+
+    fn is_structural_factory_result(&self, mut tree: TreeId<Typed>, result: TypeId) -> bool {
+        let tycon = match self.store.types.try_get(result) {
+            Some(Type::Applied { tycon, .. }) => *tycon,
+            _ => result,
+        };
+        let Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(class),
+            ..
+        }) = self.store.types.try_get(tycon)
+        else {
+            return false;
+        };
+        if !self.store.symbols.contains(*class)
+            || !self
+                .store
+                .symbols
+                .get(*class)
+                .flags
+                .contains(SymbolFlags::GIVEN)
+        {
+            return false;
+        }
+        loop {
+            let node = self.typed_arena.get(tree);
+            match &node.kind {
+                TreeKind::Apply(call) => tree = call.function,
+                TreeKind::TypeApply(call) => tree = call.function,
+                TreeKind::Ident(_) | TreeKind::Select(_) => {
+                    let Some(Type::TermRef {
+                        target: TermRefTarget::Symbol(method),
+                        ..
+                    }) = self.store.types.try_get(node.ty)
+                    else {
+                        return false;
+                    };
+                    let Some(SourceDefinition::Derived { source, tree }) =
+                        self.index.definition_of(*method)
+                    else {
+                        return false;
+                    };
+                    return source == self.source
+                        && self.structural_given_class(*method, tree) == Some(*class);
+                }
+                _ => return false,
+            }
         }
     }
 

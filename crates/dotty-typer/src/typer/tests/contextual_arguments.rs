@@ -1063,3 +1063,62 @@ fn malformed_contextual_import_rename_rolls_back_with_the_import_location() {
     assert_eq!(typer.store.checkpoint(), before);
     assert!(typer.typed_index.is_empty());
 }
+
+#[test]
+fn imported_structural_given_builds_the_factory_call_and_selects_the_implementation_method() {
+    let text = include_str!("../../../tests/fixtures/contextual-arguments/Structural.scala");
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let class = class_symbol(&parsed, &store, &index, source, "boxes");
+    let tree = definition_tree(&index, class);
+    let factory = index
+        .derived_symbol_at(store.symbols.owner(class).unwrap(), source, tree)
+        .unwrap();
+    let tag_name = *dotty_core::TermName::new(store.names.intern("tag")).as_name();
+    let [tag] = *store
+        .scopes
+        .get(index.scope_of(class).unwrap())
+        .lookup_all(&tag_name)
+    else {
+        panic!("implementation tag")
+    };
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    typer
+        .type_method_definition(definition_tree(&index, tag))
+        .expect("type the implementation body");
+    for name in ["inferred", "explicit"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let leaf = method_parameter_symbol(&parsed, &index, source, method, 0);
+        typer
+            .type_method_definition(definition_tree(&index, method))
+            .unwrap_or_else(|err| panic!("{name}: {err:?}"));
+        let root = typer.typed_index.get(source, rhs).unwrap();
+        let factory_call = match &typer.typed_ast().get(root).kind {
+            TreeKind::Apply(call) if name == "inferred" => call.args[0],
+            TreeKind::Select(member) if name == "explicit" => {
+                assert_eq!(reference(&typer, root), tag);
+                member.qualifier
+            }
+            other => panic!("{name}: {other:?}"),
+        };
+        let TreeKind::Apply(call) = &typer.typed_ast().get(factory_call).kind else {
+            panic!()
+        };
+        assert_eq!(reference(&typer, call.args[0]), leaf);
+        let TreeKind::TypeApply(applied) = &typer.typed_ast().get(call.function).kind else {
+            panic!()
+        };
+        assert_eq!(typer.typed_ast().get(applied.args[0]).ty, definitions.int);
+        assert_eq!(reference(&typer, applied.function), factory);
+        assert!(matches!(
+            typer.typed_ast().get(applied.function).kind,
+            TreeKind::Select(_)
+        ));
+    }
+}

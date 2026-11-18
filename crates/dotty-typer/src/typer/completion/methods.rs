@@ -1197,7 +1197,15 @@ impl SourceTyper<'_> {
                 info_journal,
             )?
         };
-        let mut signature = result_type;
+        self.bind_method_clauses(clauses, result_type, method_tree_index)
+    }
+
+    pub(super) fn bind_method_clauses(
+        &mut self,
+        clauses: Vec<MethodClauseSpec>,
+        mut signature: TypeId,
+        method_tree_index: u32,
+    ) -> Result<TypeId, TyperError> {
         for clause in clauses.into_iter().rev() {
             signature = match clause {
                 MethodClauseSpec::Types(parameters) => {

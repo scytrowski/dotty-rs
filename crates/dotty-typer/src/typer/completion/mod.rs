@@ -4,6 +4,7 @@ use super::*;
 
 mod constructors;
 mod declarations;
+mod given_factory;
 mod local_methods;
 mod methods;
 
@@ -54,6 +55,15 @@ impl SourceTyper<'_> {
         symbol: SymbolId,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
+        if self.is_structural_factory_parameter(symbol) {
+            // The same parser tree also represents the constructor parameter
+            // and the class accessor. Only their canonical projection belongs
+            // in the source type index. Resolve this copy in the factory scope.
+            let canonical = std::mem::take(&mut self.type_index);
+            let result = self.complete_symbol_inner_body(symbol, info_journal);
+            self.type_index = canonical;
+            return result;
+        }
         if let Some(method) = self.generated_case_class_apply_owner_for_parameter(symbol) {
             self.complete_symbol_inner(method, info_journal)?;
             if let SymbolInfo::Complete(info) = *self.store.symbols.info(symbol) {
@@ -318,6 +328,11 @@ impl SourceTyper<'_> {
                 None
             }
             (SymbolKind::Method, TreeKind::TypeDef(_))
+                if self.structural_given_class(symbol, tree).is_some() =>
+            {
+                None
+            }
+            (SymbolKind::Method, TreeKind::TypeDef(_))
                 if self
                     .generated_case_class_for_apply(symbol, source, tree)
                     .is_some() =>
@@ -425,7 +440,9 @@ impl SourceTyper<'_> {
                 self.complete_type_alias(symbol, rhs, tree.index(), context, info_journal)
             }
             SymbolKind::Method => {
-                let info = if let Some(class) =
+                let info = if let Some(class) = self.structural_given_class(symbol, tree) {
+                    self.complete_structural_given_factory(symbol, class, tree, info_journal)?
+                } else if let Some(class) =
                     self.generated_case_class_for_apply(symbol, source, tree)
                 {
                     self.complete_generated_case_class_apply_signature(
