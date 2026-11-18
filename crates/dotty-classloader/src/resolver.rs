@@ -721,10 +721,10 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         let result = if self.inject_semantic_late_failure {
             loader.load_semantic_class_with_tasty_unpickler_injected_failure(name)
         } else {
-            loader.load_semantic_class_with_tasty_unpickler_without_chain(name)
+            loader.load_semantic_class_for_selected_member(name)
         };
         #[cfg(not(test))]
-        let result = loader.load_semantic_class_with_tasty_unpickler_without_chain(name);
+        let result = loader.load_semantic_class_for_selected_member(name);
         for profile in loader.take_load_profiles() {
             self.collect_class_load_profile(&profile);
             self.load_profiles.push(profile);
@@ -7056,6 +7056,366 @@ mod tests {
             },
             normalized_graph,
         }
+    }
+
+    #[test]
+    fn failed_selected_chain_resource_preserves_open_and_retries_in_same_session() {
+        let original_root = fixture_path("tests/fixtures/semantic_chain_3_9_0");
+        let selected_leaf = BinaryName::from_internal("convergence/ChainLeaf");
+        let malformed = ClassResource::new(
+            vec![0, 1, 2],
+            ClassFormat::Tasty,
+            ClassOrigin::Directory(PathBuf::from("<malformed-ChainLeaf>")),
+        );
+        let selected_resource = Arc::new(Mutex::new(Some(malformed)));
+        let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+        let classpath = CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(original_root.clone())),
+            Box::new(DirectoryClassPath::new(fixture_path(
+                "tests/fixtures/tasty_visibility",
+            ))),
+            Box::new(JdkClassPath::new(java_home.join("jmods")).expect("JDK 21 jmods")),
+        ]);
+        let path = CompositeClassPath::new(vec![Box::new(SelectedResourceControl {
+            inner: classpath,
+            selected_name: "convergence/ChainLeaf",
+            selected: selected_resource.clone(),
+        })]);
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(path, definitions, LoadingSession::new());
+        let visibility = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "visibility"],
+            )
+            .unwrap()
+            .expect("Open fixture package");
+        let convergence = resolver
+            .resolve_package(&mut store, &["convergence"])
+            .unwrap()
+            .expect("convergence fixture package");
+        let open_request =
+            semantic_member_request(&mut store, visibility, definitions.no_prefix, "Open");
+        let chain_request =
+            semantic_member_request(&mut store, convergence, definitions.no_prefix, "ChainLeaf");
+        let open_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Open");
+        let open = resolver
+            .resolve_member_with_semantic_class(&mut store, &open_request, &open_name)
+            .unwrap()
+            .expect("Open commits before the selected chain failure");
+        let store_before_failure = store.checkpoint();
+        let session_before_failure = resolver.session.checkpoint();
+
+        let error = resolver
+            .transact(&mut store, |resolver, store| {
+                resolver.resolve_member_inner_with_semantic_request(
+                    store,
+                    &chain_request,
+                    &selected_leaf,
+                )
+            })
+            .expect_err("malformed selected ChainLeaf is a terminal typed failure");
+        let MemberResolutionFailure::SemanticLoad(failure) = error else {
+            panic!("selected chain resource error remains typed: {error:?}");
+        };
+        assert_eq!(failure.binary_name, selected_leaf);
+        assert!(matches!(
+            failure.source,
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(_, _))
+        ));
+        assert_eq!(store.checkpoint(), store_before_failure);
+        assert_eq!(resolver.session.checkpoint(), session_before_failure);
+        assert_eq!(resolver.session.resolved.get(&open_name), Some(&open));
+        assert_eq!(resolver.session.identified.get(&open_name), Some(&open));
+        assert!(!resolver.session.identified.contains_key(&selected_leaf));
+        assert!(!resolver.session.resolved.contains_key(&selected_leaf));
+        assert_eq!(
+            store
+                .scopes
+                .get(resolver.package_scope(visibility).unwrap())
+                .lookup_all(&open_request.name),
+            [open]
+        );
+
+        *selected_resource.lock().expect("selected resource lock") = Some(ClassResource::new(
+            std::fs::read(original_root.join("convergence/ChainLeaf.tasty"))
+                .expect("authentic original ChainLeaf"),
+            ClassFormat::Tasty,
+            ClassOrigin::Directory(original_root.clone()),
+        ));
+        let leaf = resolver
+            .resolve_member_with_semantic_class(&mut store, &chain_request, &selected_leaf)
+            .unwrap()
+            .expect("retry loads the original complete chain");
+        assert_eq!(resolver.session.resolved.get(&open_name), Some(&open));
+        assert_eq!(resolver.session.identified.get(&open_name), Some(&open));
+        assert_eq!(resolver.session.resolved.get(&selected_leaf), Some(&leaf));
+        assert_eq!(
+            resolver.session.origins.get(&leaf),
+            Some(&ClassOrigin::Directory(original_root))
+        );
+    }
+
+    #[test]
+    fn selected_chain_request_controls_do_not_confuse_namespace_package_or_spelling() {
+        let original_root = fixture_path("tests/fixtures/semantic_chain_3_9_0");
+        let foreign_root = fixture_path("tests/fixtures/semantic_chain_controls_3_9_0");
+        let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(original_root)),
+            Box::new(DirectoryClassPath::new(foreign_root.clone())),
+            Box::new(JdkClassPath::new(java_home.join("jmods")).expect("JDK 21 jmods")),
+        ]);
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver =
+            ClasspathSymbolResolver::new(class_path, definitions, LoadingSession::new());
+        let convergence = resolver
+            .resolve_package(&mut store, &["convergence"])
+            .unwrap()
+            .expect("canonical convergence package");
+        let foreign = resolver
+            .resolve_package(&mut store, &["foreignchain"])
+            .unwrap()
+            .expect("foreign fixture package");
+        let selected_leaf = BinaryName::from_internal("convergence/ChainLeaf");
+
+        let wrong_namespace = MemberRequest {
+            prefix: store
+                .types
+                .alloc(Type::type_ref(definitions.no_prefix, convergence)),
+            name: Name::new(store.names.intern("ChainLeaf"), Namespace::Term),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+        assert_eq!(
+            resolver.resolve_member_with_semantic_class(
+                &mut store,
+                &wrong_namespace,
+                &selected_leaf
+            ),
+            Ok(None),
+            "a term request is not promoted to a selected type request"
+        );
+
+        let wrong_package =
+            semantic_member_request(&mut store, foreign, definitions.no_prefix, "ChainLeaf");
+        let foreign_leaf = resolver
+            .resolve_member_with_semantic_class(&mut store, &wrong_package, &selected_leaf)
+            .unwrap()
+            .expect("unmatched request follows the ordinary foreign-owner lookup");
+        assert_eq!(store.symbols.get(foreign_leaf).owner, Some(foreign));
+        assert!(!resolver.session.identified.contains_key(&selected_leaf));
+
+        let unrelated_name = semantic_member_request(
+            &mut store,
+            convergence,
+            definitions.no_prefix,
+            "NotChainLeaf",
+        );
+        assert_eq!(
+            resolver.resolve_member_with_semantic_class(
+                &mut store,
+                &unrelated_name,
+                &selected_leaf
+            ),
+            Ok(None),
+            "an unrelated class name does not select ChainLeaf"
+        );
+
+        let foreign_same_spelling =
+            semantic_member_request(&mut store, foreign, definitions.no_prefix, "ChainLeaf");
+        let foreign_name = BinaryName::from_internal("foreignchain/ChainLeaf");
+        let repeated_foreign_leaf = resolver
+            .resolve_member_with_semantic_class(&mut store, &foreign_same_spelling, &selected_leaf)
+            .unwrap()
+            .expect("ordinary resolution may find the foreign same-spelled control");
+        assert_eq!(repeated_foreign_leaf, foreign_leaf);
+        assert_eq!(store.symbols.get(foreign_leaf).owner, Some(foreign));
+        assert_eq!(
+            resolver.session.resolved.get(&foreign_name),
+            Some(&foreign_leaf)
+        );
+        assert!(!resolver.session.identified.contains_key(&selected_leaf));
+        assert!(!resolver.session.resolved.contains_key(&selected_leaf));
+        assert_eq!(
+            resolver.session.origins.get(&foreign_leaf),
+            Some(&ClassOrigin::Directory(foreign_root))
+        );
+    }
+
+    #[test]
+    fn selected_original_chain_leaf_then_ordinary_answer_converges_by_request_order() {
+        fn observe(first_order: &[&str]) -> String {
+            let fixture_root = fixture_path("tests/fixtures/semantic_chain_3_9_0");
+            let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+            let class_path = CompositeClassPath::new(vec![
+                Box::new(DirectoryClassPath::new(fixture_root.clone())),
+                Box::new(JdkClassPath::new(java_home.join("jmods")).expect("JDK 21 jmods")),
+            ]);
+            let mut store = SemanticStore::new();
+            let definitions = Definitions::bootstrap(&mut store);
+            let mut resolver =
+                ClasspathSymbolResolver::new(class_path, definitions, LoadingSession::new());
+            let package = resolver
+                .resolve_package(&mut store, &["convergence"])
+                .unwrap()
+                .expect("canonical convergence package");
+            let requests = ["ChainLeaf", "ChainMiddle", "ChainRoot"].map(|simple_name| {
+                semantic_member_request(&mut store, package, definitions.no_prefix, simple_name)
+            });
+            let names = [
+                BinaryName::from_internal("convergence/ChainLeaf"),
+                BinaryName::from_internal("convergence/ChainMiddle"),
+                BinaryName::from_internal("convergence/ChainRoot"),
+            ];
+            let mut selected = {
+                let mut symbol_for = |simple_name: &str| {
+                    let index = match simple_name {
+                        "ChainLeaf" => 0,
+                        "ChainMiddle" => 1,
+                        "ChainRoot" => 2,
+                        _ => unreachable!(),
+                    };
+                    resolver
+                        .resolve_member_with_semantic_class(
+                            &mut store,
+                            &requests[index],
+                            &names[index],
+                        )
+                        .unwrap()
+                        .expect("explicit selected class-root request succeeds")
+                };
+                let mut selected = HashMap::new();
+                for simple_name in first_order {
+                    let symbol = symbol_for(simple_name);
+                    let previous = selected.insert((*simple_name).to_owned(), symbol);
+                    assert!(previous.is_none());
+                    assert_eq!(
+                        symbol_for(simple_name),
+                        symbol,
+                        "same-session repeat identity"
+                    );
+                }
+                selected
+            };
+            let package_scope = resolver.session.packages.scope_of(package).unwrap();
+            let root_name = Name::new(store.names.intern("ChainRoot"), Namespace::Type);
+            let root = store
+                .scopes
+                .get(package_scope)
+                .lookup(&root_name)
+                .expect("the selected class chain entered its authentic trait root");
+            selected.insert("ChainRoot".to_owned(), root);
+            for (index, simple_name) in ["ChainLeaf", "ChainMiddle", "ChainRoot"]
+                .into_iter()
+                .enumerate()
+            {
+                let symbol = selected[simple_name];
+                assert_eq!(resolver.session.resolved.get(&names[index]), Some(&symbol));
+                assert_eq!(store.symbols.get(symbol).owner, Some(package));
+                let expected_kind = if simple_name == "ChainRoot" {
+                    SymbolKind::Trait
+                } else {
+                    SymbolKind::Class
+                };
+                assert_eq!(store.symbols.get(symbol).kind, expected_kind);
+                assert_eq!(
+                    resolver.session.origins.get(&symbol),
+                    Some(&ClassOrigin::Directory(fixture_root.clone()))
+                );
+                assert_eq!(
+                    store
+                        .scopes
+                        .get(resolver.session.packages.scope_of(package).unwrap())
+                        .lookup_all(&requests[index].name),
+                    [symbol],
+                    "one canonical declaration per chain root"
+                );
+            }
+            let leaf = selected["ChainLeaf"];
+            let leaf_info_id = match store.symbols.get(leaf).info {
+                SymbolInfo::Complete(info) => info,
+                _ => panic!("ChainLeaf completes in the selected resolver"),
+            };
+            let leaf_declarations = match store.types.get(leaf_info_id) {
+                Type::ClassInfo(info) => info.declarations,
+                _ => panic!("ChainLeaf owns ClassInfo"),
+            };
+            let answer_request = MemberRequest {
+                prefix: store
+                    .types
+                    .alloc(Type::type_ref(definitions.no_prefix, leaf)),
+                name: Name::new(store.names.intern("answer"), Namespace::Term),
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            };
+            let answer = resolver
+                .resolve_member(&mut store, &answer_request)
+                .unwrap()
+                .expect("ordinary direct term lookup finds ChainLeaf.answer");
+            assert_eq!(store.symbols.get(answer).owner, Some(leaf));
+            assert_eq!(store.symbols.get(answer).kind, SymbolKind::Method);
+            assert_eq!(
+                store
+                    .scopes
+                    .get(leaf_declarations)
+                    .lookup_all(&answer_request.name),
+                [answer],
+                "ordinary lookup returns the authenticated original declaration"
+            );
+            let SymbolInfo::Complete(answer_info) = store.symbols.get(answer).info else {
+                panic!("answer is completely resolved");
+            };
+            let Type::ByName { result } = store.types.get(answer_info) else {
+                panic!("original answer info is ByName(Int)");
+            };
+            assert_eq!(
+                info_pair_type_symbol(&store, *result),
+                info_pair_type_symbol(&store, definitions.int),
+                "answer retains canonical Definitions.int"
+            );
+
+            let parents = |symbol: SymbolId| {
+                let SymbolInfo::Complete(info_id) = store.symbols.get(symbol).info else {
+                    panic!("chain parent class is complete");
+                };
+                let Type::ClassInfo(info) = store.types.get(info_id) else {
+                    panic!("chain class has ClassInfo");
+                };
+                info.parents
+                    .iter()
+                    .map(|parent| {
+                        let symbol = info_pair_type_symbol(&store, *parent)
+                            .expect("chain parent is a canonical TypeRef");
+                        store
+                            .names
+                            .resolve(store.symbols.get(symbol).name.text())
+                            .to_owned()
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(parents(leaf), ["ChainMiddle"]);
+            assert!(parents(selected["ChainMiddle"]).contains(&"ChainRoot".to_owned()));
+            let normalized = ["ChainLeaf", "ChainMiddle", "ChainRoot"]
+                .into_iter()
+                .map(|simple_name| {
+                    let symbol = selected[simple_name];
+                    format!(
+                        "{simple_name}:{:?}:{:?}:{:?}",
+                        store.symbols.get(symbol).kind,
+                        parents(symbol),
+                        resolver.session.origins[&symbol]
+                    )
+                })
+                .collect::<Vec<_>>();
+            normalized.join("|")
+        }
+
+        let leaf_first = observe(&["ChainLeaf", "ChainMiddle"]);
+        let ancestors_first = observe(&["ChainMiddle", "ChainLeaf"]);
+        assert_eq!(leaf_first, ancestors_first);
     }
 
     #[test]
