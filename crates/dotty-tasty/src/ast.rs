@@ -1634,10 +1634,12 @@ impl<'a> AstAddressIndex<'a> {
         start: u32,
         end: u32,
     ) -> impl Iterator<Item = AstTreeNode> + '_ {
-        self.all_nodes.iter().copied().filter(move |node| {
-            let address = node.offset as u64;
-            address >= u64::from(start) && address < u64::from(end)
-        })
+        let first = self
+            .all_nodes
+            .partition_point(|node| node.offset < start as usize);
+        let remaining = &self.all_nodes[first..];
+        let count = remaining.partition_point(|node| node.offset < end as usize);
+        remaining[..count].iter().copied()
     }
 
     /// Returns the structural parent of a visible node.
@@ -9677,6 +9679,9 @@ mod tests {
         let index = nodes.address_index();
 
         assert!(index.iter_nodes_in_address_range(4, 4).next().is_none());
+        assert!(index.iter_nodes_in_address_range(5, 4).next().is_none());
+        assert!(index.iter_nodes_in_address_range(0, 4).next().is_none());
+        assert_eq!(index.iter_nodes_in_address_range(4, u32::MAX).count(), 1);
     }
 
     #[test]
