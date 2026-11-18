@@ -5,7 +5,13 @@ use super::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ContextualRef {
     symbol: SymbolId,
-    receiver: Option<SymbolId>,
+    receiver: Option<ContextualReceiver>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ContextualReceiver {
+    Companion(SymbolId),
+    Import(TreeId<Typed>),
 }
 
 #[derive(Clone)]
@@ -244,13 +250,18 @@ impl SourceTyper<'_> {
     ) -> Result<TreeId<Typed>, TyperError> {
         let name = self.store.symbols.get(evidence.symbol).name;
         if let Some(receiver) = evidence.receiver {
-            let ident = Ident {
-                name: self.store.symbols.get(receiver).name,
-                backquoted: false,
+            let qualifier = match receiver {
+                ContextualReceiver::Import(tree) => tree,
+                ContextualReceiver::Companion(object) => {
+                    let ident = Ident {
+                        name: self.store.symbols.get(object).name,
+                        backquoted: false,
+                    };
+                    self.type_resolved_identifier_expression(
+                        object, ident, position, context, tree_index, journal,
+                    )?
+                }
             };
-            let qualifier = self.type_resolved_identifier_expression(
-                receiver, ident, position, context, tree_index, journal,
-            )?;
             let ty = self.store.types.alloc(Type::TermRef {
                 prefix: self.typed_arena.get(qualifier).ty,
                 target: TermRefTarget::Symbol(evidence.symbol),
@@ -325,9 +336,7 @@ impl SourceTyper<'_> {
                 })
                 .collect();
             for (import, lexical) in imports {
-                self.contextual_import_refs(
-                    import, lexical, context, tree_index, journal, &mut refs,
-                )?;
+                self.contextual_import_refs(import, lexical, tree_index, journal, &mut refs)?;
             }
             if let Some(winner) =
                 self.choose_contextual_refs(refs, expected, context, tree_index, history, journal)?
@@ -386,8 +395,12 @@ impl SourceTyper<'_> {
                 });
             }
             let reference = if let Some(receiver) = evidence.receiver {
-                let prefix =
-                    self.expression_type_of_symbol(receiver, context.owner, tree_index, journal)?;
+                let prefix = match receiver {
+                    ContextualReceiver::Import(tree) => self.typed_arena.get(tree).ty,
+                    ContextualReceiver::Companion(object) => {
+                        self.expression_type_of_symbol(object, context.owner, tree_index, journal)?
+                    }
+                };
                 self.store.types.alloc(Type::TermRef {
                     prefix,
                     target: TermRefTarget::Symbol(symbol),
@@ -724,7 +737,7 @@ impl SourceTyper<'_> {
                         if self.store.symbols.get(symbol).visibility == Visibility::Public {
                             let evidence = ContextualRef {
                                 symbol,
-                                receiver: Some(object),
+                                receiver: Some(ContextualReceiver::Companion(object)),
                             };
                             if !refs.contains(&evidence) {
                                 refs.push(evidence);
@@ -746,7 +759,6 @@ impl SourceTyper<'_> {
         &mut self,
         tree: TreeId<Untyped>,
         lexical: SourceContextId,
-        context: ExpressionContext,
         tree_index: u32,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
         refs: &mut Vec<ContextualRef>,
@@ -778,20 +790,34 @@ impl SourceTyper<'_> {
             source: self.source,
             import_tree_index: tree.index(),
         })?;
-        let kind = self.store.symbols.get(receiver).kind;
-        let qualified = match kind {
+        let qualified = match self.store.symbols.get(receiver).kind {
             SymbolKind::Package => None,
             SymbolKind::Object
             | SymbolKind::Local
             | SymbolKind::Value
             | SymbolKind::Parameter
-            | SymbolKind::Field => Some(receiver),
+            | SymbolKind::Field => {
+                // A block import already has its typed binding. A member import
+                // belongs to the lexical context at its declaration, even if
+                // the use site contains a shadowing local of the same name.
+                let import_context = ExpressionContext {
+                    lexical,
+                    owner: self.index.source_context(lexical).owner,
+                    local_scopes: None,
+                };
+                Some(self.type_import_qualifier(
+                    import.expr,
+                    import_context,
+                    tree.index(),
+                    journal,
+                    &mut Vec::new(),
+                )?)
+            }
             _ => return Ok(()),
         };
         let mut scopes = self.scopes_of(receiver);
-        if let Some(receiver) = qualified {
-            let prefix =
-                self.expression_type_of_symbol(receiver, context.owner, tree_index, journal)?;
+        if let Some(qualifier) = qualified {
+            let prefix = self.typed_arena.get(qualifier).ty;
             self.require_stable_selection_prefix(prefix, tree_index)?;
             let ty = self.widen_expression_type_journaled(prefix, journal, 0)?;
             self.complete_relation_type(ty, journal, &mut HashSet::new(), 0)?;
@@ -849,7 +875,7 @@ impl SourceTyper<'_> {
                 };
                 let evidence = ContextualRef {
                     symbol,
-                    receiver: qualified,
+                    receiver: qualified.map(ContextualReceiver::Import),
                 };
                 if selected {
                     // Repeated imports of the same declaration select its latest receiver.

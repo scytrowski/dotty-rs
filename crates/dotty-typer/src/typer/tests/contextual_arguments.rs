@@ -582,3 +582,46 @@ fn constructor_contexts_follow_normalized_scala_clause_order() {
         );
     }
 }
+
+#[test]
+fn nested_import_evidence_keeps_the_whole_qualifier_at_local_and_member_use_sites() {
+    let text = "object Instances { object Nested { given n: Int = 3 } }; class C { def need(using n: Int): Int = n; def local: Int = { import Instances.Nested.given; need }; import Instances.Nested.given; def member: Int = need }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for name in ["local", "member"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        typer
+            .type_method_definition(definition_tree(&index, method))
+            .unwrap();
+        let rhs = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(b) => b.expr,
+            _ => rhs,
+        };
+        let typed = typer.typed_index.get(source, rhs).unwrap();
+        let TreeKind::Apply(app) = &typer.typed_ast().get(typed).kind else {
+            panic!()
+        };
+        let TreeKind::Select(evidence) = &typer.typed_ast().get(app.args[0]).kind else {
+            panic!()
+        };
+        let TreeKind::Select(nested) = &typer.typed_ast().get(evidence.qualifier).kind else {
+            panic!("lost selected receiver in {name}")
+        };
+        assert_eq!(typer.store.names.resolve(nested.name.text()), "Nested");
+        let outer = reference(&typer, nested.qualifier);
+        assert_eq!(
+            typer
+                .store
+                .names
+                .resolve(typer.store.symbols.get(outer).name.text()),
+            "Instances"
+        );
+    }
+}

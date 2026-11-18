@@ -1438,7 +1438,7 @@ impl SourceTyper<'_> {
         Ok(typed)
     }
 
-    fn type_import_qualifier(
+    pub(in crate::typer) fn type_import_qualifier(
         &mut self,
         tree: TreeId<Untyped>,
         context: ExpressionContext,
