@@ -2,6 +2,7 @@
 
 use super::*;
 
+mod defaults;
 mod extension;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -169,6 +170,7 @@ impl SourceTyper<'_> {
         let position = self.arena.get(source_tree).position;
         let tree_index = source_tree.index();
         let mut visited = HashSet::new();
+        let mut shared = Vec::new();
         while let Some(Type::Method(method)) = self.store.types.try_get(callable) {
             if method.kind == MethodKind::Plain {
                 break;
@@ -182,25 +184,44 @@ impl SourceTyper<'_> {
                 ));
             }
             let mut arguments = Vec::with_capacity(method.params.len());
-            for parameter in method.params {
-                arguments.push(self.contextual_parameter_value(
-                    &parameter,
-                    context,
-                    tree_index,
-                    &mut SearchHistory::default(),
-                    journal,
-                )?);
+            let mut application_kind = ApplyKind::Regular;
+            for (ordinal, parameter) in method.params.iter().enumerate() {
+                let argument = if let Some(default) = self.default_call(function, ordinal) {
+                    match self.semantic_attempt(Some(journal), |typer, probe| {
+                        typer.search_contextual_argument(parameter, context, tree_index, probe)
+                    }) {
+                        Err(TyperError::MissingContextualArgument { .. }) => {
+                            application_kind = ApplyKind::Using;
+                            self.apply_default_getter(
+                                default,
+                                &mut function,
+                                &mut shared,
+                                context,
+                                tree_index,
+                                journal,
+                            )?
+                        }
+                        result => result?,
+                    }
+                } else {
+                    self.search_contextual_argument(parameter, context, tree_index, journal)?
+                };
+                arguments.push(argument);
             }
             function = self.finish_contextual_call(
                 function,
                 callable,
                 method.result,
                 arguments,
-                ApplyKind::Regular,
+                application_kind,
                 position,
                 tree_index,
             )?;
             callable = self.typed_arena.get(function).ty;
+        }
+        if !shared.is_empty() {
+            function = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                .block(shared, function, callable, position);
         }
         Ok(function)
     }

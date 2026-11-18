@@ -1226,3 +1226,130 @@ fn structural_context_bound_owns_distinct_class_constructor_and_factory_witnesse
         method_parameter_symbol(&parsed, &index, source, method, 0)
     );
 }
+
+#[test]
+fn defaults_use_original_receiver_and_earlier_arguments_only_after_missing_evidence() {
+    let fixture = include_str!("../../../tests/fixtures/contextual-arguments/Defaults.scala");
+    let text = format!(
+        "{fixture}\nclass Amb {{ def amb(r: Reader)(using a: Int, b: Int): Int = r.read }}"
+    );
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(&text);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for name in ["read", "offset", "forwarded", "fallback", "previous", "amb"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let result = typer.type_method_definition(definition_tree(&index, method));
+        if name == "amb" {
+            assert!(
+                matches!(result, Err(TyperError::AmbiguousContextualArgument { .. })),
+                "{result:?}"
+            );
+            assert!(typer.typed_index.get(source, rhs).is_none());
+            continue;
+        }
+        result.unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        if matches!(name, "read" | "offset") {
+            continue;
+        }
+        let rhs = typer.typed_index.get(source, rhs).unwrap();
+        let TreeKind::Apply(call) = &typer.typed_arena.get(rhs).kind else {
+            panic!("missing call")
+        };
+        if name == "forwarded" {
+            assert_eq!(call.kind, ApplyKind::Regular);
+            let TreeKind::DefDef(def) = &parsed.ast.get(definition_tree(&index,method)).kind else {panic!()};
+            assert_eq!(Some(reference(&typer,call.args[0])),index.symbol_at(source,def.value_param_clauses[1][0]));
+            continue;
+        }
+        assert_eq!(call.kind, ApplyKind::Using);
+        let (target, getter) = if name == "previous" {
+            let TreeKind::Apply(target) = &typer.typed_arena.get(call.function).kind else {
+                panic!()
+            };
+            let TreeKind::Apply(getter) = &typer.typed_arena.get(call.args[0]).kind else {
+                panic!()
+            };
+            assert_eq!(target.args, getter.args);
+            (target.function, getter.function)
+        } else {
+            (call.function, call.args[0])
+        };
+        let TreeKind::Select(member) = &typer.typed_arena.get(target).kind else {
+            panic!()
+        };
+        let TreeKind::Select(default) = &typer.typed_arena.get(getter).kind else {
+            panic!()
+        };
+        assert_eq!(member.qualifier, default.qualifier);
+        let getter = reference(&typer, getter);
+        let (selected, _, _) = typer.contextual_getter_source(getter).unwrap();
+        assert_eq!(
+            index.symbol_at(source, selected),
+            Some(reference(&typer, target))
+        );
+    }
+}
+
+#[test]
+fn default_getter_types_its_body_in_the_scope_of_its_own_parameter_copies() {
+    let text =
+        "class R { def f[A](x: A)(using n: A = x): A = n; def bad(using n: Int = false): Int = n }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    let bad = method_symbol(&parsed, typer.store(), &index, source, "bad");
+    let error=typer.type_method_definition(definition_tree(&index,bad)).unwrap_err();
+    assert!(matches!(error,TyperError::ExpectedExpressionTypeMismatch{..}), "{error:?}");
+    assert!(typer.typed_index.is_empty());
+    let method = method_symbol(&parsed, typer.store(), &index, source, "f");
+    let tree = definition_tree(&index, method);
+    typer.type_method_definition(tree).unwrap();
+    let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+        panic!()
+    };
+    let param = def.value_param_clauses[1][0];
+    let getter = index
+        .derived_symbol_at(typer.store.symbols.owner(method).unwrap(), source, param)
+        .unwrap();
+    let TreeKind::ValDef(p) = &parsed.ast.get(param).kind else {
+        panic!()
+    };
+    let typed = typer.typed_index.get(source, p.rhs.unwrap()).unwrap();
+    assert_eq!(
+        reference(&typer, typed),
+        index
+            .derived_symbol_at(getter, source, def.value_param_clauses[0][0])
+            .unwrap()
+    );
+}
+
+#[test]
+fn contextual_default_shares_an_effectful_previous_argument_once() {
+    let text = "class Reader { def offset(x:Int)(using n:Int = x):Int = n }; class C { def next():Int = 4; def run(r:Reader):Int = r.offset(next()) }";
+    let (parsed,mut store,packages,defs,index,source)=parse_and_name(text);
+    let (run,rhs)=method_definition_and_rhs(&parsed,&store,&index,source,"run");
+    let mut typer=SourceTyper::new(&parsed.ast,source,&index,&mut store,defs,&packages);
+    typer.type_method_definition(definition_tree(&index,run)).unwrap();
+    let TreeKind::Block(block)=&typer.typed_arena.get(typer.typed_index.get(source,rhs).unwrap()).kind else {panic!("missing shared argument")};
+    assert_eq!(block.stats.len(),1);
+    let local=typer.typed_index.synthetic_definition_symbol(block.stats[0]).unwrap();
+    let TreeKind::ValDef(shared)=&typer.typed_arena.get(block.stats[0]).kind else {panic!()};
+    assert!(matches!(typer.typed_arena.get(shared.rhs.unwrap()).kind,TreeKind::Apply(_)));
+    let TreeKind::Apply(call)=&typer.typed_arena.get(block.expr).kind else {panic!()};
+    for tree in [call.function,call.args[0]] {
+        let TreeKind::Apply(prefix)=&typer.typed_arena.get(tree).kind else {panic!()};
+        assert_eq!(reference(&typer,prefix.args[0]),local);
+    }
+}

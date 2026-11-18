@@ -445,7 +445,15 @@ impl<'a> SourceTyper<'a> {
                     && matches!(&nested_node.kind, TreeKind::DefDef(nested) if has_parameter_default(nested))
             })
         });
-        if has_parameter_default(definition) || has_default_in_body {
+        let owner = self
+            .index
+            .symbol_at(self.source, tree)
+            .and_then(|m| self.store.symbols.owner(m));
+        let unsupported_default = definition.value_param_clauses.iter().flatten().any(|&tree| {
+            matches!(&self.arena.get(tree).kind, TreeKind::ValDef(parameter) if parameter.rhs.is_some()) &&
+            owner.and_then(|owner| self.index.derived_symbol_at(owner,self.source,tree)).and_then(|getter| self.contextual_getter_source(getter)).is_none()
+        });
+        if unsupported_default || has_default_in_body {
             return Err(TyperError::LocalBlockDeclarationDeferred {
                 source: self.source,
                 tree_index: tree.index(),
@@ -498,6 +506,12 @@ impl<'a> SourceTyper<'a> {
         }
 
         self.run_expression_transaction(|typer, info_journal, new_mappings| {
+            typer.check_contextual_default_bodies(
+                method,
+                &definition,
+                info_journal,
+                new_mappings,
+            )?;
             typer.type_source_method_definition(
                 tree,
                 &definition,
