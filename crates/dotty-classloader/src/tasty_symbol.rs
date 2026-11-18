@@ -321,6 +321,8 @@ pub(crate) struct DecodedTastyMethod {
     pub flags: MethodAccessFlags,
     pub contextual_flags: SymbolFlags,
     pub contextual_clauses: Option<Vec<(dotty_core::MethodKind, usize)>>,
+    /// Exact flattened term parameter address selected by a singleton result.
+    pub singleton_result_parameter: Option<usize>,
     /// Method-local type parameters, in their TASTy header order. Type
     /// references in the signature point back to these entries by AST
     /// address and are represented as indexed references, never by spelling.
@@ -3121,6 +3123,32 @@ fn decode_members(
                 // descriptor is always `V`, never resolved either) --
                 // see `ClassLoader::lower_tasty_method`'s doc comment for
                 // where the loader supplies `Unit` instead.
+                let singleton_result_parameter = match &return_type {
+                    RawTree::Ast {
+                        tag: dotty_tasty::tasty::SINGLETONTPT_TAG,
+                        child,
+                        ..
+                    } => match child.as_ref() {
+                        RawTree::Leaf(term)
+                            if term.tag == dotty_tasty::tasty::TERMREFDIRECT_TAG =>
+                        {
+                            term.ast_ref()
+                                .and_then(|reference| address_index.get(reference.address))
+                                .and_then(|node| {
+                                    parameters
+                                        .iter()
+                                        .filter(|param| {
+                                            matches!(param, ParameterNode::TermParam { .. })
+                                        })
+                                        .position(|param| {
+                                            std::ptr::eq(param.payload(), node.payload)
+                                        })
+                                })
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
                 let return_type = if method_name == "<init>" {
                     None
                 } else {
@@ -3142,8 +3170,14 @@ fn decode_members(
                 methods.push(DecodedTastyMethod {
                     name: method_name,
                     flags: decode_method_flags(&tail),
-                    contextual_flags: contextual_flags(&tail),
+                    contextual_flags: symbol_flags(&tail).intersection(
+                        SymbolFlags::GIVEN
+                            | SymbolFlags::IMPLICIT
+                            | SymbolFlags::INLINE
+                            | SymbolFlags::TRANSPARENT,
+                    ),
                     contextual_clauses: contextual_clauses(&header_items)?,
+                    singleton_result_parameter,
                     type_parameters,
                     parameters: decoded_parameters,
                     has_term_clause,

@@ -66,14 +66,6 @@ impl SourceTyper<'_> {
                     crate::types::TypeNormalizeError::TooDeep,
                 ));
             }
-            if self.type_contains_param_ref(method.result, callable)? {
-                return Err(TyperError::DependentMethodApplicationDeferred {
-                    source: self.source,
-                    tree_index,
-                    binder: callable,
-                    result: method.result,
-                });
-            }
             let mut arguments = Vec::with_capacity(method.params.len());
             for parameter in method.params {
                 if parameter.erased
@@ -96,15 +88,91 @@ impl SourceTyper<'_> {
                     journal,
                 )?);
             }
-            function = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply(
+            function = self.finish_contextual_call(
                 function,
-                arguments,
+                callable,
                 method.result,
+                arguments,
+                ApplyKind::Regular,
                 position,
-            );
-            callable = method.result;
+                tree_index,
+            )?;
+            callable = self.typed_arena.get(function).ty;
         }
         Ok(function)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn finish_contextual_call(
+        &mut self,
+        function: TreeId<Typed>,
+        binder: TypeId,
+        result: TypeId,
+        args: Vec<TreeId<Typed>>,
+        kind: ApplyKind,
+        position: Option<SourceSpan>,
+        tree_index: u32,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let deferred = TyperError::DependentMethodApplicationDeferred {
+            source: self.source,
+            tree_index,
+            binder,
+            result,
+        };
+        let result = if let Some(Type::ParamRef {
+            binder: owner,
+            index,
+        }) = self.store.types.try_get(result)
+            && *owner == binder
+        {
+            let Some(&arg) = args.get(*index as usize) else {
+                return Err(deferred);
+            };
+            let arg_ty = self.typed_arena.get(arg).ty;
+            if args.len() == 1
+                && let TreeKind::TypeApply(tapp) = &self.typed_arena.get(function).kind
+                && let Some(Type::TermRef {
+                    target: TermRefTarget::Symbol(method),
+                    ..
+                }) = self
+                    .store
+                    .types
+                    .try_get(self.typed_arena.get(tapp.function).ty)
+                    .cloned()
+                && self.store.symbols.contains(method)
+                && self
+                    .store
+                    .symbols
+                    .get(method)
+                    .flags
+                    .contains(SymbolFlags::TRANSPARENT | SymbolFlags::INLINE)
+                && self
+                    .store
+                    .names
+                    .resolve(self.store.symbols.get(method).name.text())
+                    == "summon"
+                && matches!(
+                    self.store.symbols.get(method).origin,
+                    SymbolOrigin::Tasty(_)
+                )
+                && self
+                    .predef_context_member(self.store.symbols.get(method).name, tree_index)?
+                    .is_some_and(|(_, symbol)| symbol == method)
+            {
+                return Ok(arg);
+            }
+            self.require_stable_selection_prefix(arg_ty, tree_index)
+                .map_err(|_| deferred)?;
+            arg_ty
+        } else if self.type_contains_param_ref(result, binder)? {
+            return Err(deferred);
+        } else {
+            result
+        };
+        Ok(
+            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                .apply_with_kind(function, args, kind, result, position),
+        )
     }
 
     fn contextual_reference_tree(

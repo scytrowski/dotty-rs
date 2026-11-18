@@ -7795,13 +7795,29 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 self.unresolved_tasty_type("incomplete contextual parameter clause")
             } else {
                 let mut inner = result;
-                for &(kind, count) in clauses.iter().rev() {
-                    let clause = params.split_off(params.len() - count);
-                    inner = self.store.types.alloc(Type::Method(MethodType {
-                        params: clause,
-                        result: inner,
-                        kind,
-                    }));
+                for (depth, &(kind, count)) in clauses.iter().rev().enumerate() {
+                    let start = params.len() - count;
+                    let clause = params.split_off(start);
+                    let binder = self.store.types.reserve();
+                    if depth == 0
+                        && let Some(index) = method
+                            .singleton_result_parameter
+                            .and_then(|index| index.checked_sub(start))
+                            .filter(|index| *index < count)
+                    {
+                        inner = self.store.types.alloc(Type::ParamRef {
+                            binder: binder.id(),
+                            index: index as u32,
+                        });
+                    }
+                    inner = self.store.types.fill(
+                        binder,
+                        Type::Method(MethodType {
+                            params: clause,
+                            result: inner,
+                            kind,
+                        }),
+                    );
                 }
                 inner
             }

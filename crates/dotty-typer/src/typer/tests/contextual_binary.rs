@@ -64,3 +64,78 @@ fn separate_compilation_finds_the_binary_conditional_and_its_companion_leaf() {
         assert!(!typer.is_current_source_symbol(*symbol));
     }
 }
+
+#[test]
+fn predef_context_methods_use_the_library_symbol_and_keep_local_shadowing() {
+    let text = "class Use { def summoned(using n: Int): Int = summon[Int]; def supplied(using n: Int): Int = summon[Int](using n); def missing: Int = summon[Int]; def legacy(using n: Int): Int = implicitly[Int] }; class Shadow { def summon[A](using n: Int): Int = 7; def shadowed(using n: Int): Int = summon[Int] }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let resolver = ClasspathSymbolResolver::new(
+        CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(
+                root.join("../dotty-tasty/tests/fixtures/scala3-library"),
+            )),
+            Box::new(
+                dotty_classloader::classloader::JdkClassPath::new(
+                    std::path::PathBuf::from(
+                        std::env::var_os("JAVA_HOME").expect("JDK 21 JAVA_HOME"),
+                    )
+                    .join("jmods"),
+                )
+                .unwrap(),
+            ),
+        ]),
+        definitions,
+        LoadingSession::with_packages(packages.snapshot()),
+    );
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(resolver));
+    for name in ["shadowed", "legacy", "missing", "summoned", "supplied"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+            panic!()
+        };
+        if name == "missing" {
+            assert!(matches!(
+                typer.type_method_definition(tree),
+                Err(TyperError::MissingContextualArgument { .. })
+            ));
+            continue;
+        }
+        typer
+            .type_method_definition(tree)
+            .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        let typed = typer.typed_index.get(source, rhs).unwrap();
+        if name == "summoned" || name == "supplied" {
+            let param = method_parameter_symbol(&parsed, &index, source, method, 0);
+            assert!(
+                matches!(typer.store.types.get(typer.typed_ast().get(typed).ty), Type::TermRef {target:TermRefTarget::Symbol(symbol),..} if *symbol==param)
+            );
+        } else {
+            let TreeKind::Apply(app) = &typer.typed_ast().get(typed).kind else {
+                panic!()
+            };
+            let TreeKind::TypeApply(tapp) = &typer.typed_ast().get(app.function).kind else {
+                panic!()
+            };
+            let Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } = typer
+                .store
+                .types
+                .get(typer.typed_ast().get(tapp.function).ty)
+            else {
+                panic!()
+            };
+            assert_eq!(typer.is_current_source_symbol(*symbol), name == "shadowed");
+        }
+    }
+}

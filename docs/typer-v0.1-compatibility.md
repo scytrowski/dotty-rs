@@ -1454,7 +1454,11 @@ contextual clauses. Missing or cyclic dependencies can eliminate a candidate;
 ambiguity in a dependency propagates. Search has explicit depth and work limits.
 Each inserted ordinary typed application
 retains the exact selected parameter reference. Missing and ambiguous evidence
-report the expected type and source site. Explicit `using` keeps its own kind.
+report the expected type and source site. The binary Scala library's
+`Predef.implicitly` uses its real method signature. For the transparent inline
+`Predef.summon`, the singleton return type refers to the exact evidence
+parameter and the typed result retains the selected argument. Local definitions
+shadow the default import. Explicit `using` keeps its own kind.
 See the Scala 3.9 controls under `tests/fixtures/contextual-arguments` in the
 typer crate. Erased
 parameters remain unsupported for explicit application. Bounded by-name
@@ -1600,7 +1604,7 @@ are ready:
 - other local `def` signature/body shapes, class, type, and pattern
   declarations;
 - generic overload inference outside the structural candidate-local subset,
-  contextual/implicit argument insertion and search, dependent result
+  contextual overload disambiguation outside the supported clauses, general dependent result
   application, and right-associative extension normalization;
 - expected-type-driven constructor inference, selecting constructor overloads, and
   anonymous-class lowering;

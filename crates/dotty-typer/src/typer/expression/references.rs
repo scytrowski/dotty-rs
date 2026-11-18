@@ -926,13 +926,46 @@ impl SourceTyper<'_> {
         context: ExpressionContext,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TreeId<Typed>, TyperError> {
-        let symbol = self.resolve_expression_term_with_inherited(
+        let symbol = match self.resolve_expression_term_with_inherited(
             ident.name,
             context,
             tree.index(),
             position,
             info_journal,
-        )?;
+        ) {
+            Err(error @ TyperError::TermNameNotFound { .. }) => {
+                let Some((object, symbol)) =
+                    self.predef_context_member(ident.name, tree.index())?
+                else {
+                    return Err(error);
+                };
+                let qualifier = self.type_resolved_identifier_expression(
+                    object,
+                    Ident {
+                        name: self.store.symbols.get(object).name,
+                        backquoted: false,
+                    },
+                    None,
+                    context,
+                    tree.index(),
+                    info_journal,
+                )?;
+                let ty = self.store.types.alloc(Type::TermRef {
+                    prefix: self.typed_arena.get(qualifier).ty,
+                    target: TermRefTarget::Symbol(symbol),
+                });
+                return Ok(
+                    TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).select(
+                        qualifier,
+                        ident.name,
+                        ident.backquoted,
+                        ty,
+                        position,
+                    ),
+                );
+            }
+            result => result?,
+        };
         if self.is_deferred_case_class_companion_apply(ident.name, symbol) {
             return Err(TyperError::OverloadedSelectionDeferred {
                 source: self.source,

@@ -972,7 +972,9 @@ impl SourceTyper<'_> {
                 });
             }
         }
-        if self.type_contains_param_ref(method.result, callable)? {
+        if method.kind == MethodKind::Plain
+            && self.type_contains_param_ref(method.result, callable)?
+        {
             return Err(TyperError::DependentMethodApplicationDeferred {
                 source: self.source,
                 tree_index,
@@ -1092,6 +1094,17 @@ impl SourceTyper<'_> {
                 span.span().range(),
                 "Implicit parameters should be provided with a `using` clause.",
             ));
+        }
+        if method.kind != MethodKind::Plain {
+            return self.finish_contextual_call(
+                function,
+                callable,
+                method.result,
+                arguments,
+                application_kind,
+                position,
+                tree_index,
+            );
         }
         Ok(
             TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply_with_kind(
