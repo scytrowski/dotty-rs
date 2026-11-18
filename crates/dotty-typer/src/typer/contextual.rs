@@ -320,6 +320,16 @@ impl SourceTyper<'_> {
         )
     }
 
+    pub(super) fn search_contextual_argument(
+        &mut self,
+        parameter: &dotty_core::types::MethodParam,
+        context: ExpressionContext,
+        tree_index: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        self.contextual_parameter_value(parameter, context, tree_index, &mut SearchHistory::default(), journal)
+    }
+
     fn contextual_parameter_value(
         &mut self,
         parameter: &dotty_core::types::MethodParam,

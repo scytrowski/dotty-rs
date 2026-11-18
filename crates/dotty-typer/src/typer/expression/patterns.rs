@@ -29,6 +29,7 @@ pub(super) struct CanonicalTupleSymbols {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ExtractorPlan {
     function: TreeId<Typed>,
+    implicits: Vec<TreeId<Typed>>,
     symbol: SymbolId,
     input_type: TypeId,
     result_type: TypeId,
@@ -1316,7 +1317,35 @@ impl SourceTyper<'_> {
                 });
             }
         };
-        if let Some(issue) = self.extractor_method_shape_issue(&method) {
+        // Scala's UnApply stores the implicit arguments of every trailing
+        // clause in order. Its single selector argument is supplied by the
+        // matcher and is never duplicated in that list.
+        let mut selector_method = method;
+        let mut parameters = Vec::new();
+        let mut binder = instantiated_callable;
+        let mut clause_count = 0;
+        while let Some(Type::Method(clause)) = self.store.types.try_get(selector_method.result) {
+            if clause.kind == MethodKind::Plain
+                || self.type_contains_param_ref(selector_method.result, binder)?
+            {
+                break;
+            }
+            parameters.extend_from_slice(&clause.params);
+            binder = selector_method.result;
+            selector_method.result = clause.result;
+            clause_count += 1;
+            if clause_count > crate::types::MAX_TYPE_NORMALIZATION_DEPTH || clause.params.is_empty()
+            {
+                return Err(TyperError::ExtractorUnapplyShapeUnsupported {
+                    source: self.source,
+                    tree_index: pattern.index(),
+                    unapply,
+                    callable: instantiated_callable,
+                    issue: ExtractorMethodShapeIssue::TrailingClause,
+                });
+            }
+        }
+        if let Some(issue) = self.extractor_method_shape_issue(&selector_method) {
             return Err(TyperError::ExtractorUnapplyShapeUnsupported {
                 source: self.source,
                 tree_index: pattern.index(),
@@ -1325,8 +1354,16 @@ impl SourceTyper<'_> {
                 issue,
             });
         }
-        let input_type = method.params[0].ty;
-        let result_type = method.result;
+        let input_type = selector_method.params[0].ty;
+        let result_type = selector_method.result;
+        if !parameters.is_empty() && self.type_contains_param_ref(result_type, binder)? {
+            return Err(TyperError::DependentMethodApplicationDeferred {
+                source: self.source,
+                tree_index: pattern.index(),
+                binder,
+                result: result_type,
+            });
+        }
         if matches!(
             self.store.types.try_get(result_type),
             None | Some(Type::NoType | Type::Error(_) | Type::Method(_) | Type::Poly(_))
@@ -1412,8 +1449,15 @@ impl SourceTyper<'_> {
         } else {
             function
         };
+        let implicits = parameters
+            .iter()
+            .map(|param| {
+                self.search_contextual_argument(param, context, pattern.index(), info_journal)
+            })
+            .collect::<Result<_, _>>()?;
         Ok(ExtractorPlan {
             function,
+            implicits,
             symbol: unapply,
             input_type,
             result_type,
@@ -2022,7 +2066,7 @@ impl SourceTyper<'_> {
                 };
                 TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).unapply(
                     plan.function,
-                    Vec::new(),
+                    plan.implicits,
                     patterns,
                     plan.unapply_type,
                     source_tree.position,
@@ -5251,7 +5295,7 @@ package scala.util {
                 ExtractorMethodShapeIssue::RepeatedParameter,
             ),
             (
-                "def unapply(value: Any)(using context: Any): Any = value",
+                "def unapply(value: Any)(extra: Int): Any = value",
                 ExtractorMethodShapeIssue::TrailingClause,
             ),
         ];
@@ -6274,6 +6318,75 @@ package scala.util {
         assert!(matches!(error, TyperError::DuplicatePatternBinding { .. }));
         assert!(store_rolled_back);
         assert!(typed_state_rolled_back);
+    }
+
+    #[test]
+    fn contextual_extractor_records_winning_evidence_in_clause_order() {
+        let (parsed, mut store, packages, definitions, index, source) = setup(include_str!(
+            "../../../tests/fixtures/contextual-consumers/Extractors.scala"
+        ));
+        let method = method_symbol(&parsed, &store, &index, source);
+        let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+            panic!()
+        };
+        let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+            panic!()
+        };
+        let expected: Vec<_> = def.value_param_clauses[1]
+            .iter()
+            .map(|p| index.symbol_at(source, *p).unwrap())
+            .collect();
+        let (mut typer, _) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        typer.type_method_definition(tree).unwrap();
+        let unapply = typer
+            .typed_arena
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::UnApply(u) => Some(u),
+                _ => None,
+            })
+            .unwrap();
+        let evidence: Vec<_> = unapply
+            .implicits
+            .iter()
+            .map(|arg| {
+                typer
+                    .store
+                    .types
+                    .get(typer.typed_arena.get(*arg).ty)
+                    .reference_symbol()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(evidence, expected);
+        assert!(unapply.patterns.is_empty());
+    }
+
+    #[test]
+    fn contextual_extractor_fails_transactionally_on_missing_or_ambiguous_evidence() {
+        for (parameters, ambiguous) in [("", false), ("(using left: Gate, right: Gate)", true)] {
+            let source = format!(
+                "trait Gate; object Extractor {{ def unapply(x: Int)(using gate: Gate): Boolean = true }}; class C {{ def choose(x: Int){parameters}: Int = x match {{ case Extractor() => 1; case _ => 0 }} }}"
+            );
+            let (error, store_rolled_back, typed_rolled_back) = type_match_error(&source);
+            assert!(
+                match error {
+                    TyperError::AmbiguousContextualArgument { .. } => ambiguous,
+                    TyperError::MissingContextualArgument { .. } => !ambiguous,
+                    _ => false,
+                },
+                "{error:?}"
+            );
+            assert!(store_rolled_back && typed_rolled_back);
+        }
     }
 
     #[test]
