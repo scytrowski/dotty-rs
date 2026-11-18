@@ -209,10 +209,17 @@ semantic handoff now adopts newly resolved roots through the existing
 `track_existing_class` journal. The test confirms the package links, session
 maps, origins and new symbols are removed while earlier `Open` and builtins
 survive, then retries the authentic Chain in the same resolver and verifies
-canonical repeats and provenance. This is a bounded journal handoff repair; no
-new transaction or dependency-scheduling mechanism was added.
+canonical repeats and provenance. A second handoff regression starts with
+ordinary-loader `ChainMiddle`/`ChainRoot` declarations in `Packages` and no
+resolver cache entries; rollback preserves those parent links and the exact
+prior `ClassInfo` graph. The handoff records only package-scope links absent
+from the pre-load scope snapshot, so a cache adoption does not claim ownership
+of an existing declaration. This is a bounded journal handoff repair; no new
+transaction or dependency-scheduling mechanism was added.
 
 The targeted regression names are
 `resolver::tests::selected_chain_dependency_failures_preserve_committed_state_and_retry`
 and
 `resolver::tests::selected_chain_outer_rollback_restores_prior_state_and_retries_canonically`.
+The handed-off-parent case is
+`resolver::tests::selected_chain_outer_rollback_preserves_preexisting_parent_from_package_handoff`.

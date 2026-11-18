@@ -717,6 +717,25 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             .keys()
             .cloned()
             .collect::<HashSet<_>>();
+        let package_segments = name
+            .package_path()
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+        let package_scope_links_before = self
+            .session
+            .packages
+            .get(&package_segments)
+            .and_then(|package| self.session.packages.scope_of(package))
+            .filter(|scope| store.scopes.contains(*scope))
+            .map(|scope| {
+                store
+                    .scopes
+                    .get(scope)
+                    .entered_symbols()
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
         let session = std::mem::replace(&mut self.session, LoadingSession::new());
         let mut loader =
             ClassLoader::with_definitions(class_path, store, self.definitions, session);
@@ -742,6 +761,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             for (binary_name, symbol) in &self.session.resolved {
                 if binary_name.package_path() == name.package_path()
                     && !resolved_before.contains(binary_name)
+                    && !package_scope_links_before.contains(symbol)
                 {
                     self.session.packages.track_existing_class(store, *symbol);
                 }
@@ -7644,6 +7664,216 @@ mod tests {
             Some(retry)
         );
         assert_eq!(resolver.session.resolved.get(&open_name), Some(&open));
+    }
+
+    #[test]
+    fn selected_chain_outer_rollback_preserves_preexisting_parent_from_package_handoff() {
+        let original_root = fixture_path("tests/fixtures/semantic_chain_3_9_0");
+        let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+        let class_path = || {
+            CompositeClassPath::new(vec![
+                Box::new(DirectoryClassPath::new(original_root.clone())),
+                Box::new(DirectoryClassPath::new(fixture_path(
+                    "tests/fixtures/tasty_visibility",
+                ))),
+                Box::new(JdkClassPath::new(java_home.join("jmods")).expect("JDK 21 jmods")),
+            ])
+        };
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut prior_resolver =
+            ClasspathSymbolResolver::new(class_path(), definitions, LoadingSession::new());
+        let convergence = prior_resolver
+            .resolve_package(&mut store, &["convergence"])
+            .unwrap()
+            .expect("authentic Chain package");
+        let middle_name = BinaryName::from_internal("convergence/ChainMiddle");
+        let root_name = BinaryName::from_internal("convergence/ChainRoot");
+        let leaf_name = BinaryName::from_internal("convergence/ChainLeaf");
+        let middle_request = semantic_member_request(
+            &mut store,
+            convergence,
+            definitions.no_prefix,
+            "ChainMiddle",
+        );
+        let leaf_request =
+            semantic_member_request(&mut store, convergence, definitions.no_prefix, "ChainLeaf");
+
+        // Commit the original Middle through the ordinary resolver, then hand
+        // off only canonical Packages as another adapter can. The new
+        // resolver has the package declarations but no per-session positive
+        // class cache entries for Middle or Root.
+        let middle = prior_resolver
+            .resolve_member(&mut store, &middle_request)
+            .unwrap()
+            .expect("ordinary loading commits ChainMiddle");
+        let package_scope = prior_resolver
+            .session
+            .packages
+            .scope_of(convergence)
+            .expect("canonical Chain package scope");
+        let middle_info = match store.symbols.get(middle).info {
+            SymbolInfo::Complete(info) => info,
+            _ => panic!("the pre-existing ChainMiddle is complete"),
+        };
+        let middle_parents = match store.types.get(middle_info) {
+            Type::ClassInfo(info) => info
+                .parents
+                .iter()
+                .map(|parent| info_pair_type_symbol(&store, *parent).unwrap())
+                .collect::<Vec<_>>(),
+            _ => panic!("the pre-existing ChainMiddle owns ClassInfo"),
+        };
+        assert!(
+            middle_parents.contains(
+                &store
+                    .scopes
+                    .get(package_scope)
+                    .lookup(&Name::new(store.names.intern("ChainRoot"), Namespace::Type))
+                    .expect("the committed parent root is in the package scope")
+            )
+        );
+        assert_eq!(
+            store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&middle_request.name),
+            [middle]
+        );
+        let packages = prior_resolver.into_session().into_packages();
+        let mut resolver = ClasspathSymbolResolver::new(
+            class_path(),
+            definitions,
+            LoadingSession::with_packages(packages),
+        );
+        assert_eq!(
+            resolver
+                .resolve_package(&mut store, &["convergence"])
+                .unwrap(),
+            Some(convergence)
+        );
+        assert!(!resolver.session.resolved.contains_key(&middle_name));
+        assert!(!resolver.session.resolved.contains_key(&root_name));
+        assert_eq!(
+            resolver.session.packages.scope_of(convergence),
+            Some(package_scope)
+        );
+
+        let store_before = store.checkpoint();
+        let session_before = resolver.session.checkpoint();
+        let parent_package_declarations_before = store
+            .scopes
+            .get(package_scope)
+            .lookup_all(&middle_request.name)
+            .to_vec();
+        let parent_symbol_before = store.symbols.get(middle).clone();
+        let parent_package = store.symbols.get(middle).owner.unwrap();
+        let parent_package_before = store.symbols.get(parent_package).clone();
+        let parent_root_declarations_before = store
+            .scopes
+            .get(package_scope)
+            .lookup_all(&Name::new(store.names.intern("ChainRoot"), Namespace::Type))
+            .to_vec();
+        let parent_root = parent_root_declarations_before[0];
+
+        let resolver_checkpoint = resolver.checkpoint();
+        let store_checkpoint = store.checkpoint();
+        let leaf = resolver
+            .transact(&mut store, |resolver, store| {
+                resolver.resolve_member_inner_with_semantic_request(
+                    store,
+                    &leaf_request,
+                    &leaf_name,
+                )
+            })
+            .expect("selected child load commits inside the enclosing transaction")
+            .expect("selected ChainLeaf root");
+        assert_eq!(resolver.session.resolved.get(&middle_name), Some(&middle));
+        assert_eq!(resolver.session.resolved.get(&leaf_name), Some(&leaf));
+        assert_eq!(
+            store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&middle_request.name),
+            [middle]
+        );
+
+        resolver.rollback_to(&mut store, resolver_checkpoint);
+        store.rollback_to(store_checkpoint);
+        assert_eq!(store.checkpoint(), store_before);
+        assert_eq!(resolver.session.checkpoint(), session_before);
+        assert_eq!(store.symbols.get(middle), &parent_symbol_before);
+        assert_eq!(store.symbols.get(parent_package), &parent_package_before);
+        assert_eq!(
+            store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&middle_request.name),
+            parent_package_declarations_before,
+            "outer rollback preserves a pre-existing parent declaration"
+        );
+        assert_eq!(
+            store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&Name::new(store.names.intern("ChainRoot"), Namespace::Type)),
+            parent_root_declarations_before
+        );
+        assert!(store.symbols.contains(parent_root));
+        assert_eq!(store.symbols.get(middle).info, parent_symbol_before.info);
+        assert!(!store.symbols.contains(leaf));
+        assert!(!resolver.session.identified.contains_key(&leaf_name));
+        assert!(!resolver.session.resolved.contains_key(&leaf_name));
+        assert!(!resolver.session.identified.contains_key(&middle_name));
+        assert!(!resolver.session.resolved.contains_key(&middle_name));
+        let restored_parents = match store.symbols.get(middle).info {
+            SymbolInfo::Complete(info) => match store.types.get(info) {
+                Type::ClassInfo(info) => info
+                    .parents
+                    .iter()
+                    .map(|parent| info_pair_type_symbol(&store, *parent).unwrap())
+                    .collect::<Vec<_>>(),
+                _ => panic!("pre-existing parent retains ClassInfo after rollback"),
+            },
+            _ => panic!("pre-existing parent remains complete after rollback"),
+        };
+        assert_eq!(restored_parents, middle_parents);
+
+        let retry_leaf = resolver
+            .resolve_member_with_semantic_class(&mut store, &leaf_request, &leaf_name)
+            .unwrap()
+            .expect("same-session retry reuses the handed-off parent graph");
+        assert_eq!(resolver.session.resolved.get(&middle_name), Some(&middle));
+        assert_eq!(
+            store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&middle_request.name),
+            [middle]
+        );
+        assert_eq!(store.symbols.get(middle).info, parent_symbol_before.info);
+        let retry_leaf_info = match store.symbols.get(retry_leaf).info {
+            SymbolInfo::Complete(info) => info,
+            _ => panic!("retried ChainLeaf is complete"),
+        };
+        let retry_leaf_parents = match store.types.get(retry_leaf_info) {
+            Type::ClassInfo(info) => info
+                .parents
+                .iter()
+                .map(|parent| info_pair_type_symbol(&store, *parent).unwrap())
+                .collect::<Vec<_>>(),
+            _ => panic!("retried ChainLeaf owns ClassInfo"),
+        };
+        assert_eq!(retry_leaf_parents, [middle]);
+        assert_eq!(
+            resolver
+                .resolve_member_with_semantic_class(&mut store, &leaf_request, &leaf_name)
+                .unwrap(),
+            Some(retry_leaf)
+        );
+        assert_eq!(resolver.session.resolved.get(&middle_name), Some(&middle));
+        assert_eq!(store.symbols.get(middle).owner, Some(parent_package));
+        assert_eq!(store.symbols.get(parent_root).kind, SymbolKind::Trait);
     }
 
     #[test]
