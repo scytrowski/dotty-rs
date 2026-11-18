@@ -1249,3 +1249,11 @@ erased parameter and return type `java.lang.Object`. The producer verifies
 the binder and the returned parameter symbol before emitting `aload_1` and
 `areturn`. The class-file interface exposes the erased descriptor. The Scala
 type parameter and contextual clause are available through the semantic pickler.
+
+A method returning `Int ?=> Int` can return a unary context lambda directly.
+Its evidence parameter occupies the slot after the enclosing method's zero or
+one ordinary `Int` parameter. Supported bodies return a parameter or add two
+parameters using the canonical `Int.+`. Captured reads must match the closure
+environment. In the source pipeline, `def closure: Int ?=> Int` emits `(I)I`
+and `def capture(x: Int): Int ?=> Int` emits `(II)I`, matching Scala 3.9's
+integration of direct context-function results into the enclosing method.

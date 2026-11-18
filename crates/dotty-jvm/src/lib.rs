@@ -24,6 +24,7 @@ mod call_target;
 mod constructor;
 mod constructor_call;
 mod constructor_initializers;
+mod context_result;
 mod descriptor;
 pub use constructor::{
     JvmConstructorAccessorBinding, JvmConstructorArgumentBinding, JvmConstructorIssue,
@@ -307,6 +308,7 @@ pub struct JvmLocalLayout {
 /// JVM method identity and parameter layout for an ordinary instance method.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JvmMethodMetadata {
+    context_result: Option<context_result::ContextResult>,
     symbol: SymbolId,
     name: String,
     descriptor: JvmMethodDescriptor,
@@ -1223,6 +1225,11 @@ pub enum JvmCodegenError {
     FieldTypedAstRequired { class: SymbolId },
     /// A method body's typed root does not belong to the supplied arena.
     UnknownBodyRoot {
+        method: SymbolId,
+        tree: TreeId<Typed>,
+    },
+    /// A context-function result has unsupported captures or inconsistent declaration links.
+    InvalidContextFunctionResult {
         method: SymbolId,
         tree: TreeId<Typed>,
     },

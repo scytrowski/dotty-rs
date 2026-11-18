@@ -737,7 +737,23 @@ fn compile_source_batch_with_typer_failure_observer(
                             return Err(PipelineFailure::Typer(error));
                         }
                     };
-                    match typer.type_expression(rhs, context) {
+                    // Direct lambda results need their declared function type as the expected type.
+                    let declared_result = match typer.store().symbols.info(source_method.symbol) {
+                        SymbolInfo::Complete(ty) => match typer.store().types.try_get(*ty) {
+                            Some(Type::Method(method)) => Some(method.result),
+                            Some(Type::Applied { .. }) => Some(*ty),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    let typed_body = match (&parsed.ast.get(rhs).kind, declared_result) {
+                        (
+                            TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::Function(_)),
+                            Some(expected),
+                        ) => typer.type_expression_expected(rhs, context, expected),
+                        _ => typer.type_expression(rhs, context),
+                    };
+                    match typed_body {
                         Ok(body) => Some(body),
                         Err(error) => {
                             if let Some(observer) = observe_typer_failure.as_mut() {
@@ -31765,4 +31781,59 @@ fn curried_contextual_calls_flatten_into_one_jvm_invocation() {
             String::from_utf8_lossy(&result.stderr)
         );
     }
+}
+
+#[test]
+fn context_function_results_use_the_lambda_evidence_and_captured_parameter() {
+    let output = TestOutputDirectory::new("context-function-results");
+    let emitted = compile_source(
+        "package scala; class ContextResults { def closure: Int ?=> Int = (n: Int) ?=> n; def capture(x: Int): Int ?=> Int = (n: Int) ?=> n + x; def shadow(x: Int): Int ?=> Int = (x: Int) ?=> x; def empty(): Int ?=> Int = (n: Int) ?=> n }",
+        "ContextResults.scala", output.path(),
+    ).unwrap();
+    let mut reader = Reader::new(emitted.class.bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+    assert_opcode_sequence(emitted_method_code(&class, "closure"), &[0x1b, 0xac]);
+    assert_opcode_sequence(
+        emitted_method_code(&class, "capture"),
+        &[0x1c, 0x1b, 0x60, 0xac],
+    );
+    assert_opcode_sequence(emitted_method_code(&class, "shadow"), &[0x1c, 0xac]);
+    assert_opcode_sequence(emitted_method_code(&class, "empty"), &[0x1b, 0xac]);
+    if require_jdk_or_skip() {
+        let harness = output.path().join("Run.java");
+        fs::write(&harness, "class Run { public static void main(String[] args) { var c = new scala.ContextResults(); if (c.closure(37) != 37 || c.capture(19, 23) != 42 || c.shadow(1, 5) != 5 || c.empty(17) != 17) throw new AssertionError(); } }").unwrap();
+        let result = Command::new("java")
+            .arg("-Xverify:all")
+            .arg("-classpath")
+            .arg(output.path())
+            .arg(harness)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+#[test]
+fn context_function_results_reject_another_methods_closure_root() {
+    let output = TestOutputDirectory::new("context-function-foreign-root");
+    let mut expected = None;
+    let mut change = |unit: &mut JvmCompilationUnit<'_>, _: &Definitions| {
+        let methods = &mut unit.classes[0].methods;
+        let root = methods[1].body.unwrap();
+        expected = Some((methods[0].method, root));
+        methods[0].body = Some(root);
+    };
+    let failure = compile_source_batch_observed(
+        "package scala; class Foreign { def first: Int ?=> Int = (n: Int) ?=> n; def second: Int ?=> Int = (n: Int) ?=> n }",
+        "Foreign.scala", output.path(), SourceId::from_index(1), SourceUnitCardinality::ExactlyOne, Some(&mut change)
+    ).unwrap_err();
+    assert!(
+        matches!(failure, PipelineFailure::Codegen(JvmCodegenError::InvalidContextFunctionResult { method, tree }) if Some((method, tree)) == expected),
+        "{failure:?}"
+    );
+    assert!(!output.path().join("scala/Foreign.class").exists());
 }

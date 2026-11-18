@@ -321,9 +321,15 @@ pub(super) fn lower_method_body(
     {
         return Ok(code);
     }
+    let expression = match method.context_result {
+        Some(result) => {
+            result.standalone_body(store, typed_ast, method.symbol(), body, definitions)?
+        }
+        None => body,
+    };
     let mut code = CodeBuilder::new();
     let mut context = JvmLoweringContext::new(store, typed_ast, definitions, method);
-    let flow = emit_expression(&mut context, body, &mut code, 0)?;
+    let flow = emit_expression(&mut context, expression, &mut code, 0)?;
     append_method_return(None, definitions, method, body, flow, &mut code)?;
     Ok(code)
 }
@@ -373,13 +379,17 @@ pub(super) fn lower_planned_method_body(
     let mut context = JvmLoweringContext::new(unit.store, unit.typed_ast, definitions, method);
     context.local_layout = Some(&local_layout);
     context.call_context = Some((unit, class, &metadata));
-    let flow = emit_expression_with_expected(
-        &mut context,
-        body,
-        source_method_result_type(unit.store, method.symbol()),
-        &mut code,
-        0,
-    )?;
+    let (expression, expected) = match method.context_result {
+        Some(result) if result.root == body => (result.closure.body, Some(result.closure.result)),
+        Some(_) => {
+            return Err(JvmCodegenError::InvalidContextFunctionResult {
+                method: method.symbol(),
+                tree: body,
+            });
+        }
+        None => (body, source_method_result_type(unit.store, method.symbol())),
+    };
+    let flow = emit_expression_with_expected(&mut context, expression, expected, &mut code, 0)?;
     append_method_return(Some(unit), definitions, method, body, flow, &mut code)?;
     // Branched references are checked after all symbolic references have been
     // staged in ClassFileBuilder. Its encode preflight analyzes CFG states and
@@ -696,8 +706,13 @@ fn parameter_value_type(
         });
     }
     let parameter_symbol = context.store.symbols.get(symbol);
+    let owner = context
+        .method
+        .context_result
+        .filter(|result| result.closure.parameter == symbol)
+        .map_or(context.method.symbol(), |result| result.closure.method);
     if parameter_symbol.kind != dotty_core::symbols::SymbolKind::Parameter
-        || parameter_symbol.owner != Some(context.method.symbol())
+        || parameter_symbol.owner != Some(owner)
     {
         return Err(JvmCodegenError::InvalidParameterReference {
             tree,
@@ -4833,6 +4848,7 @@ mod tests {
             );
             let descriptor = MethodDescriptor::parse(&descriptor_text).unwrap();
             let method = JvmMethodMetadata {
+                context_result: None,
                 symbol: method_symbol,
                 name: "value".to_owned(),
                 descriptor: JvmMethodDescriptor {
