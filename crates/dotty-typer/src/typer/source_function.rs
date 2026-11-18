@@ -711,6 +711,72 @@ impl SourceTyper<'_> {
         Ok(class)
     }
 
+    pub(crate) fn synthesized_context_function_arity(&self, class: SymbolId) -> Option<usize> {
+        if !self.store.symbols.contains(class) {
+            return None;
+        }
+        let entry = self.store.symbols.get(class);
+        if entry.origin != SymbolOrigin::Synthetic
+            || entry.kind != SymbolKind::Trait
+            || self.package_path(entry.owner?) != ["scala"]
+        {
+            return None;
+        }
+        let name = self.store.names.resolve(entry.name.text());
+        let arity = name
+            .strip_prefix("ContextFunction")?
+            .parse::<usize>()
+            .ok()?;
+        (arity <= MAX_SOURCE_FUNCTION_ARITY
+            && name == SourceFunctionKind::Contextual.class_name(arity))
+        .then_some(arity)
+    }
+
+    /// The synthesizer represents the ordered class parameters directly in the
+    /// apply declaration. Recover that order across typer sessions sharing a store.
+    pub(crate) fn context_function_parameters(
+        &self,
+        class: SymbolId,
+        scope: &Scope,
+    ) -> Option<Vec<dotty_core::ClassTypeParameter>> {
+        let arity = self.synthesized_context_function_arity(class)?;
+        let name = Name::new(self.store.names.get("apply")?, Namespace::Term);
+        let [apply] = scope.lookup_all(&name) else {
+            return None;
+        };
+        if !self.store.symbols.contains(*apply) {
+            return None;
+        }
+        let entry = self.store.symbols.get(*apply);
+        if entry.owner != Some(class)
+            || entry.kind != SymbolKind::Method
+            || entry.origin != SymbolOrigin::Synthetic
+        {
+            return None;
+        }
+        let SymbolInfo::Complete(info) = entry.info else {
+            return None;
+        };
+        let Type::Method(method) = self.store.types.try_get(info)? else {
+            return None;
+        };
+        if method.kind != MethodKind::Contextual || method.params.len() != arity {
+            return None;
+        }
+        method.params.iter().map(|p|(p.ty,Variance::Contravariant)).chain(std::iter::once((method.result,Variance::Covariant))).map(|(ty,variance)| {
+            let Type::TypeRef {prefix,target:TypeRefTarget::Symbol(symbol)}=self.store.types.try_get(ty)? else {return None;};
+            matches!(self.store.types.try_get(*prefix),Some(Type::ThisType{class:owner}) if *owner==class).then_some(dotty_core::ClassTypeParameter {symbol:*symbol,variance:Some(variance)})
+        }).collect()
+    }
+
+    pub(super) fn is_applied_context_function(&self, ty: TypeId) -> bool {
+        let Some(Type::Applied { tycon, args }) = self.store.types.try_get(ty) else {
+            return false;
+        };
+        matches!(self.store.types.try_get(*tycon),Some(Type::TypeRef{target:TypeRefTarget::Symbol(class),..})
+            if self.synthesized_context_function_arity(*class).is_some_and(|arity|args.len()==arity+1))
+    }
+
     /// Dotty 3.9 installs a synthesizer on `scala` for `ContextFunctionN`:
     /// these traits have no classpath files. Keep the synthesized declaration
     /// in the shared semantic store and package scope so every later lookup

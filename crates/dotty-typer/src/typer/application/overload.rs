@@ -1349,7 +1349,7 @@ impl SourceTyper<'_> {
             if let Err(TyperError::AmbiguousOverloadApplication {
                 candidates: tied, ..
             }) = &resolution
-                && let Some(expected) = self.contextual_overload_expected_at(tree_index)
+                && let Some(expected) = self.expected_value_at(tree_index)
             {
                 let signatures: Vec<_> = candidates
                     .iter()

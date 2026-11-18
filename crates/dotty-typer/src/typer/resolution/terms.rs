@@ -31,7 +31,7 @@ impl SourceTyper<'_> {
             info_journal,
         )?;
         if candidates.len() > 1
-            && let Some(expected) = self.contextual_overload_expected_at(tree_index)
+            && let Some(expected) = self.expected_value_at(tree_index)
             && candidates
                 .iter()
                 .all(|s| self.store.symbols.get(*s).kind == SymbolKind::Method)

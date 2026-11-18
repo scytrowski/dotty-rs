@@ -465,7 +465,7 @@ impl SourceTyper<'_> {
         Ok(())
     }
 
-    fn resolve_apply_function(
+    pub(super) fn resolve_apply_function(
         &mut self,
         function: TreeId<Typed>,
         callable: TypeId,
@@ -534,7 +534,7 @@ impl SourceTyper<'_> {
                 if matches!(
                     class_origin,
                     SymbolOrigin::Source(_) | SymbolOrigin::Tasty(_)
-                ) =>
+                ) || self.synthesized_context_function_arity(class).is_some() =>
             {
                 receiver
             }

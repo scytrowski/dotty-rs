@@ -1741,9 +1741,11 @@ Missing parameter types, parameter modifiers, annotations, and duplicate
 parameter names remain explicit errors. Inferred one- and multi-parameter
 lambdas report `UnsupportedFunctionLiteralParameter`; this remains outside
 the increment even when the audit moves those inputs past the generic
-`UnsupportedExpression::Function` blocker. Contextual function types project
-to `ContextFunctionN`, but expression application, contextual argument search,
-and contextual lambda expressions are still unsupported. Captures requiring
+`UnsupportedExpression::Function` blocker. The contextual-argument increment also types explicit `?=>` lambdas,
+including a single unannotated parameter with a contextual expectation. Its
+synthetic method owns the evidence parameters used in the body. Values of the
+canonical synthesized `ContextFunctionN` call the instantiated `apply` method
+with explicit or searched arguments. Captures requiring
 an environment are rejected explicitly; references to shared object-owned
 values do not count as closure captures. Failed lambda typing rolls back its
 synthetic method, parameter symbols, scopes, typed nodes, and source mappings. The pinned

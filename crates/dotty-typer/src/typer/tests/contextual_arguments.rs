@@ -720,3 +720,57 @@ fn context_lambda_owns_the_evidence_used_by_its_body() {
         assert_eq!(reference(&typer, call.args[0]), param);
     }
 }
+
+#[test]
+fn applied_context_function_uses_its_instantiated_apply_signature() {
+    let text = "package scala; class C { def supplied(f: Int ?=> Boolean): Boolean = f(using 3); def auto(f: Int ?=> Boolean)(using n: Int): Boolean = f; def missing(f: Int ?=> Boolean): Boolean = f; def kept(f: Int ?=> Boolean): Int ?=> Boolean = f }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for name in ["supplied", "auto", "missing", "kept"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let result = typer.type_method_definition(definition_tree(&index, method));
+        if name == "missing" {
+            assert!(
+                matches!(result,Err(TyperError::MissingContextualArgument{expected,..}) if expected==definitions.int),
+                "{result:?}"
+            );
+            continue;
+        }
+        result.unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        let typed = typer.typed_index.get(source, rhs).unwrap();
+        if name == "kept" {
+            assert_eq!(
+                reference(&typer, typed),
+                method_parameter_symbol(&parsed, &index, source, method, 0)
+            );
+            continue;
+        }
+        let TreeKind::Apply(call) = &typer.typed_ast().get(typed).kind else {
+            panic!()
+        };
+        let TreeKind::Select(selected) = &typer.typed_ast().get(call.function).kind else {
+            panic!()
+        };
+        assert_eq!(typer.store.names.resolve(selected.name.text()), "apply");
+        assert_eq!(
+            reference(&typer, selected.qualifier),
+            method_parameter_symbol(&parsed, &index, source, method, 0)
+        );
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.boolean);
+        assert_eq!(
+            call.kind,
+            if name == "supplied" {
+                ApplyKind::Using
+            } else {
+                ApplyKind::Regular
+            }
+        );
+    }
+}

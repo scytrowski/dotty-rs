@@ -35,6 +35,52 @@ struct ContextualScope {
 }
 
 impl SourceTyper<'_> {
+    pub(super) fn apply_context_function_at_value(
+        &mut self,
+        source_tree: TreeId<Untyped>,
+        mut adapted: TreeId<Typed>,
+        context: ExpressionContext,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let own_type = self.typed_arena.get(adapted).ty;
+        let declared = match self.store.types.try_get(own_type) {
+            Some(Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            }) if self.store.symbols.contains(*symbol) => {
+                match self.store.symbols.get(*symbol).info {
+                    SymbolInfo::Complete(info) => info,
+                    _ => own_type,
+                }
+            }
+            _ => own_type,
+        };
+        if self.is_applied_context_function(declared)
+            && !self
+                .expected_value_at(source_tree.index())
+                .is_some_and(|expected| self.is_applied_context_function(expected))
+        {
+            let callable = self.widen_expression_type_journaled(own_type, info_journal, 0)?;
+            let request = ApplicationRequest {
+                function_tree: source_tree,
+                argument_trees: &[],
+                application_kind: ApplyKind::Using,
+                context,
+                tree_index: source_tree.index(),
+            };
+            let (selected, signature) =
+                self.resolve_apply_function(adapted, callable, request, info_journal)?;
+            adapted = self.supply_contextual_clauses(
+                source_tree,
+                selected,
+                signature,
+                context,
+                info_journal,
+            )?;
+        }
+        Ok(adapted)
+    }
+
     pub(super) fn apply_contextual_arguments(
         &mut self,
         source_tree: TreeId<Untyped>,
@@ -1055,8 +1101,8 @@ impl SourceTyper<'_> {
         symbols
     }
 
-    pub(super) fn contextual_overload_expected_at(&self, tree_index: u32) -> Option<TypeId> {
-        self.contextual_overload_expectation
+    pub(super) fn expected_value_at(&self, tree_index: u32) -> Option<TypeId> {
+        self.value_expectation
             .filter(|(tree, _)| tree.index() == tree_index)
             .map(|(_, ty)| ty)
     }

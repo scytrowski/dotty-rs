@@ -151,6 +151,8 @@ impl SourceTyper<'_> {
         let typed =
             self.adapt_java_nullary_method_value(source_tree, typed, info_journal, new_mappings)?;
         let adapted = self.apply_contextual_arguments(source_tree, typed, context, info_journal)?;
+        let adapted =
+            self.apply_context_function_at_value(source_tree, adapted, context, info_journal)?;
         if adapted != typed {
             self.record_adapted_value(source_tree, adapted, new_mappings)?;
         }
@@ -1399,7 +1401,7 @@ impl SourceTyper<'_> {
             });
         }
         if candidates.len() > 1
-            && let Some(expected) = self.contextual_overload_expected_at(tree_index)
+            && let Some(expected) = self.expected_value_at(tree_index)
             && candidates
                 .iter()
                 .all(|m| self.store.symbols.get(m.symbol).kind == SymbolKind::Method)

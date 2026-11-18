@@ -702,12 +702,10 @@ impl SourceTyper<'_> {
                     new_mappings,
                 )?,
             TreeKind::Ident(_) | TreeKind::Select(_) | TreeKind::Apply(_) => {
-                let saved = self
-                    .contextual_overload_expectation
-                    .replace((tree, expected));
+                let saved = self.value_expectation.replace((tree, expected));
                 let result =
                     self.type_value_expression_inner(tree, context, info_journal, new_mappings);
-                self.contextual_overload_expectation = saved;
+                self.value_expectation = saved;
                 return result;
             }
             _ => {
