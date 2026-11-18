@@ -225,7 +225,10 @@ impl ClassLoadError {
             Self::Io(_, source) => source.category(),
             Self::InvalidClassFile(
                 _,
-                ClassFileError::Attribute(AttributeError::TooDeeplyNestedAnnotation),
+                ClassFileError::Attribute(
+                    AttributeError::TooDeeplyNestedAnnotation
+                    | AttributeError::TooDeeplyNestedAttribute,
+                ),
             ) => C::UnsupportedFeatureOrVersion,
             Self::InvalidClassFile(_, _) => C::MalformedArtifact,
             Self::UnsupportedClassVersion(_, _) | Self::InheritanceDepthExceeded(_) => {
@@ -460,10 +463,6 @@ mod tests {
                 found: '?',
             },
         );
-        let annotation = ClassLoadError::InvalidClassFile(
-            name,
-            ClassFileError::Attribute(AttributeError::TooDeeplyNestedAnnotation),
-        );
 
         assert_eq!(
             signature.category(),
@@ -473,10 +472,17 @@ mod tests {
             invalid_signature.category(),
             ClassLoadCategory::MalformedArtifact
         );
-        assert_eq!(
-            annotation.category(),
-            ClassLoadCategory::UnsupportedFeatureOrVersion
-        );
+        for error in [
+            AttributeError::TooDeeplyNestedAnnotation,
+            AttributeError::TooDeeplyNestedAttribute,
+        ] {
+            let error =
+                ClassLoadError::InvalidClassFile(name.clone(), ClassFileError::Attribute(error));
+            assert_eq!(
+                error.category(),
+                ClassLoadCategory::UnsupportedFeatureOrVersion
+            );
+        }
     }
 
     #[test]

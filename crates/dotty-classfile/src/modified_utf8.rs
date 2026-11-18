@@ -11,41 +11,45 @@ use crate::encode_error::EncodeError;
 /// unpaired UTF-16 surrogates. Such raw UTF-16 payloads cannot be round-tripped
 /// through this API and remain rejected by the existing reader.
 pub fn encode_modified_utf8(value: &str) -> Result<Vec<u8>, EncodeError> {
-    let mut bytes = Vec::new();
-
-    for character in value.chars() {
-        let mut utf16_units = [0; 2];
-        for unit in character.encode_utf16(&mut utf16_units).iter().copied() {
-            let encoded = if (1..=0x7F).contains(&unit) {
-                [unit as u8, 0, 0]
-            } else if unit <= 0x7FF {
-                [0xC0 | ((unit >> 6) as u8), 0x80 | ((unit & 0x3F) as u8), 0]
-            } else {
-                [
-                    0xE0 | ((unit >> 12) as u8),
-                    0x80 | (((unit >> 6) & 0x3F) as u8),
-                    0x80 | ((unit & 0x3F) as u8),
-                ]
-            };
-            let encoded_len = if unit <= 0x7F && unit != 0 {
-                1
-            } else if unit <= 0x7FF {
-                2
-            } else {
-                3
-            };
-            let byte_len = bytes.len() + encoded_len;
-            if byte_len > usize::from(u16::MAX) {
-                return Err(EncodeError::Utf8LengthOverflow {
-                    byte_len,
-                    max: u16::MAX,
-                });
-            }
-            bytes.extend_from_slice(&encoded[..encoded_len]);
-        }
-    }
-
+    let length = modified_utf8_len(value)?;
+    let mut bytes = Vec::with_capacity(usize::from(length));
+    append_modified_utf8(value, &mut bytes);
     Ok(bytes)
+}
+
+pub(crate) fn modified_utf8_len(value: &str) -> Result<u16, EncodeError> {
+    value.encode_utf16().try_fold(0u16, |length, unit| {
+        let width = match unit {
+            1..=0x7f => 1,
+            0..=0x7ff => 2,
+            _ => 3,
+        };
+        crate::writer::checked_utf8_len(usize::from(length) + width)
+    })
+}
+
+// Only NUL and supplementary characters differ from standard UTF-8.
+pub(crate) fn append_modified_utf8(value: &str, bytes: &mut Vec<u8>) {
+    let mut start = 0;
+    for (offset, ch) in value.char_indices() {
+        if ch != '\0' && ch.len_utf8() <= 3 {
+            continue;
+        }
+        bytes.extend_from_slice(&value.as_bytes()[start..offset]);
+        if ch == '\0' {
+            bytes.extend_from_slice(&[0xc0, 0x80]);
+        } else {
+            for &unit in ch.encode_utf16(&mut [0; 2]).iter() {
+                bytes.extend_from_slice(&[
+                    0xe0 | (unit >> 12) as u8,
+                    0x80 | ((unit >> 6) & 0x3f) as u8,
+                    0x80 | (unit & 0x3f) as u8,
+                ]);
+            }
+        }
+        start = offset + ch.len_utf8();
+    }
+    bytes.extend_from_slice(&value.as_bytes()[start..]);
 }
 
 #[cfg(test)]
@@ -68,6 +72,12 @@ mod tests {
         assert_eq!(
             encode_modified_utf8("😀"),
             Ok(vec![0xED, 0xA0, 0xBD, 0xED, 0xB8, 0x80])
+        );
+        assert_eq!(
+            encode_modified_utf8("é\0😀水"),
+            Ok(vec![
+                0xc3, 0xa9, 0xc0, 0x80, 0xed, 0xa0, 0xbd, 0xed, 0xb8, 0x80, 0xe6, 0xb0, 0xb4
+            ])
         );
     }
 
@@ -117,6 +127,23 @@ mod tests {
                 max: u16::MAX,
             })
         );
+    }
+
+    #[test]
+    fn overflow_reports_the_first_utf16_unit_that_crosses_the_limit() {
+        let max = usize::from(u16::MAX);
+        for (prefix, byte_len) in [(max - 2, max + 1), (max - 3, max + 3)] {
+            let value = "a".repeat(prefix) + "😀suffix";
+            let expected = EncodeError::Utf8LengthOverflow {
+                byte_len,
+                max: u16::MAX,
+            };
+            let mut writer = Writer::new();
+            writer.write_u1(42);
+            assert_eq!(encode_modified_utf8(&value), Err(expected));
+            assert_eq!(writer.write_modified_utf8(&value), Err(expected));
+            assert_eq!(writer.into_bytes(), [42]);
+        }
     }
 
     #[test]

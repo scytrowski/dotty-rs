@@ -381,15 +381,16 @@ where
         }
 
         self.consume_control_newlines();
-        let first_body_token = self.first_catch_handler_token();
-        let requests_feedback_region = first_body_token.kind
-            == TokenKind::Keyword(dotty_core::HardKeyword::Case)
+        let first = self.first_catch_handler_token();
+        let (kind, start) = (first.kind, first.span.start());
+        let requests_feedback_region = kind == TokenKind::Keyword(dotty_core::HardKeyword::Case)
             && self
-                .has_physical_line_break(self.current().span.end(), first_body_token.span.start());
+                .line_break_in_gap(self.current().span.end(), start)
+                .unwrap_or(true);
         let case_region = if requests_feedback_region {
             self.observe_match_cases_indented()
-        } else if first_body_token.kind == TokenKind::Indent {
-            Some((first_body_token.span.start(), false))
+        } else if kind == TokenKind::Indent {
+            Some((start, false))
         } else {
             None
         };
@@ -1855,6 +1856,31 @@ mod tests {
             TreeKind::CaseDef(_)
         ));
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn braced_catch_does_not_scan_its_handler_to_decide_layout() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "catch { case e => f }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Catch), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 6, 7),
+                token(TokenKind::Keyword(HardKeyword::Case), 8, 12),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::Operator, 15, 17),
+                token(TokenKind::Identifier, 18, 19),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 20, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+        parser.cursor.lookahead_budget = 6;
+        assert_eq!(parser.accept_catch_keyword(), Some(None));
+        assert_eq!(
+            parser.current().kind,
+            TokenKind::Punctuation(Punctuation::LeftBrace)
+        );
     }
 
     #[test]

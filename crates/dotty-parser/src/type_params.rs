@@ -19,7 +19,10 @@ where
     /// polymorphic function literal. Future definition parsers can reuse this
     /// entry point without introducing a second square-bracket grammar.
     pub(crate) fn parse_type_param_clause(&mut self, owner: ParamOwner) -> Vec<TreeId<Untyped>> {
-        self.with_param_owner(Some(owner), |parser| parser.type_param_clause())
+        self.with_nesting(ParseKind::Type, |parser| {
+            parser.with_param_owner(Some(owner), |parser| parser.type_param_clause())
+        })
+        .unwrap_or_else(|error| vec![error])
     }
 
     /// Removes context-bound wrappers after a `=>>` arrow has established a
@@ -641,6 +644,92 @@ mod tests {
         ContextBoundTypeTree, ContextBounds, TypeBoundsTree, TypeDef, UntypedNode,
     };
     use dotty_core::{NameInterner, TextRange, Token, TokenValue};
+
+    #[test]
+    fn nested_type_parameter_clauses_share_the_nesting_limit_and_preserve_siblings() {
+        use crate::parser::MAX_TREE_NESTING;
+        for depth in [MAX_TREE_NESTING, MAX_TREE_NESTING + 2] {
+            let source = format!(
+                "[{}A{},B][C]",
+                "F[".repeat(depth - 1),
+                "]".repeat(depth - 1)
+            );
+            let mut tokens: Vec<_> = source
+                .char_indices()
+                .map(|(offset, ch)| {
+                    let kind = match ch {
+                        '[' => TokenKind::Punctuation(Punctuation::LeftBracket),
+                        ']' => TokenKind::Punctuation(Punctuation::RightBracket),
+                        ',' => TokenKind::Punctuation(Punctuation::Comma),
+                        _ => TokenKind::Identifier,
+                    };
+                    token(kind, offset as u32, offset as u32 + 1)
+                })
+                .collect();
+            let end = source.len() as u32;
+            tokens.push(token(TokenKind::Eof, end, end));
+            let mut names = NameInterner::new();
+            let mut parser = parser_for(&source, tokens, &mut names);
+            let params = parser.parse_type_param_clause(ParamOwner::Class);
+            assert_eq!(params.len(), 2);
+            let TreeKind::TypeDef(sibling) = &parser.ast().get(params[1]).kind else {
+                panic!("expected the sibling type parameter");
+            };
+            assert_eq!(parser.names.resolve(sibling.name.as_name().text()), "B");
+            let sibling_start = source.find('B').unwrap() as u32;
+            assert_eq!(
+                parser.ast().get(params[1]).position.unwrap().span().range(),
+                TextRange::new(sibling_start, sibling_start + 1).unwrap()
+            );
+            assert_eq!(parser.context.param_owner, None);
+            let following = parser.parse_type_param_clause(ParamOwner::Def);
+            assert_eq!(following.len(), 1);
+            assert!(matches!(
+                parser.ast().get(following[0]).kind,
+                TreeKind::TypeDef(_)
+            ));
+            assert_eq!(parser.current().kind, TokenKind::Eof);
+            if depth <= MAX_TREE_NESTING {
+                assert!(
+                    parser.diagnostics().is_empty(),
+                    "{:?}",
+                    parser.diagnostics()
+                );
+            } else {
+                let [diagnostic] = parser.diagnostics() else {
+                    panic!(
+                        "expected one nesting diagnostic, got {:?}",
+                        parser.diagnostics()
+                    );
+                };
+                assert_eq!(
+                    diagnostic.issue(),
+                    &ParseIssue::NestingLimitExceeded {
+                        kind: ParseKind::Type,
+                        limit: MAX_TREE_NESTING,
+                    }
+                );
+                let rejected_start = 2 * MAX_TREE_NESTING as u32;
+                assert_eq!(
+                    diagnostic.span(),
+                    TextRange::new(rejected_start, rejected_start + 1).unwrap()
+                );
+                let mut inner = params[0];
+                while let TreeKind::TypeDef(param) = &parser.ast().get(inner).kind {
+                    let TreeKind::LambdaTypeTree(lambda) = &parser.ast().get(param.rhs).kind else {
+                        panic!("expected a nested higher-kinded parameter");
+                    };
+                    inner = lambda.type_params[0];
+                }
+                assert!(matches!(
+                    parser.ast().get(inner).kind,
+                    TreeKind::PhaseSpecific(UntypedNode::Error(dotty_core::ast::ErrorNode {
+                        kind: dotty_core::ast::ErrorNodeKind::MissingType
+                    }))
+                ));
+            }
+        }
+    }
 
     #[test]
     fn parses_an_unbounded_type_parameter() {

@@ -1,10 +1,10 @@
-//! Confirms that decoding a complete `ClassFile` never panics, whatever
-//! bytes it is given — malformed input must produce a typed error, not a
-//! crash (`AGENTS.md`: "Library code must not panic on malformed TASTy
-//! input"; the same principle applies here).
+//! Checks EOF diagnostics for truncated class files and exercises decoding
+//! across deterministic byte mutations.
 
-use dotty_classfile::class_file::ClassFile;
-use dotty_classfile::reader::Reader;
+use dotty_classfile::classfile::{
+    AttributeError, ClassFile, ClassFileError, ClassFileHeaderError, ConstantPoolError, ReadError,
+    Reader,
+};
 
 const POOL_SAMPLE_CLASS: &[u8] = include_bytes!("fixtures/pool_sample/PoolSample.class");
 const NESTED_SAMPLE: &[u8] = include_bytes!("fixtures/nested_sample/NestedSample.class");
@@ -30,10 +30,31 @@ fn decode(bytes: &[u8]) {
 }
 
 #[test]
-fn rejects_every_truncated_fixture_prefix_without_panicking() {
+fn every_truncated_fixture_prefix_reports_the_missing_bytes() {
     for fixture in FIXTURES {
-        for length in 0..=fixture.len() {
-            decode(&fixture[..length]);
+        let mut full = Reader::new(fixture);
+        ClassFile::decode(&mut full).unwrap();
+        assert!(full.is_at_end());
+
+        for length in 0..fixture.len() {
+            let error = ClassFile::decode(&mut Reader::new(&fixture[..length])).unwrap_err();
+            let read_error = match error {
+                ClassFileError::Read(error)
+                | ClassFileError::Header(ClassFileHeaderError::Read(error))
+                | ClassFileError::ConstantPool(ConstantPoolError::Read(error))
+                | ClassFileError::Attribute(AttributeError::Read(error)) => error,
+                other => panic!("expected EOF for prefix of {length} bytes, got {other:?}"),
+            };
+            let ReadError::UnexpectedEof {
+                offset,
+                needed,
+                remaining,
+            } = read_error
+            else {
+                panic!("expected EOF for prefix of {length} bytes, got {read_error:?}");
+            };
+            assert_eq!(offset + remaining, length);
+            assert!(needed > remaining);
         }
     }
 }

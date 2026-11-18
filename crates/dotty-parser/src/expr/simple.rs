@@ -825,7 +825,8 @@ where
             if (self.cursor.at(TokenKind::Punctuation(Punctuation::Dot))
                 || starts_new_dedented_expression)
                 && self
-                    .has_physical_line_break(self.last_real_token_end, self.current().span.start())
+                    .line_break_in_gap(self.last_real_token_end, self.current().span.start())
+                    .unwrap_or(true)
             {
                 // A leading selector continues an expression unless it
                 // dedents out of an active layout body. Likewise, a parenthesis

@@ -11,6 +11,7 @@ pub const MAX_ARRAY_DIMENSIONS: usize = 255;
 /// operation only shrinks `remaining` from the front and only splits on
 /// single-byte ASCII needles, so slicing is always on a valid UTF-8 char
 /// boundary regardless of what adversarial input contains.
+#[derive(Clone)]
 pub(crate) struct Cursor<'a> {
     original_len: usize,
     remaining: &'a str,

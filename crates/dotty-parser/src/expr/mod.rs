@@ -21,6 +21,10 @@ where
 {
     /// Parses a complete expression at the `Expr` grammar boundary.
     pub(crate) fn expr(&mut self) -> TreeId<Untyped> {
+        self.with_tree_nesting(crate::ParseKind::Expr, Self::expr_inner)
+    }
+
+    fn expr_inner(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
         let saved_placeholders = std::mem::take(&mut self.placeholder_params);
         let tree = if self.starts_poly_function() {
@@ -130,8 +134,8 @@ where
                 TokenKind::Keyword(dotty_core::HardKeyword::Match) if nesting == [0, 0, 0] => {
                     return true;
                 }
-                TokenKind::Eof
-                | TokenKind::Newline
+                TokenKind::Eof => return false,
+                TokenKind::Newline
                 | TokenKind::Newlines
                 | TokenKind::Indent
                 | TokenKind::Outdent
@@ -213,6 +217,14 @@ where
 
     fn expr1_rest(&mut self, lhs: TreeId<Untyped>) -> TreeId<Untyped> {
         if self.current_is_bare_assignment() {
+            let assignable = is_assignable_lhs(&self.ast.get(lhs).kind);
+            if !assignable {
+                self.report_issue(ParseIssue::Expression(
+                    ExpressionIssue::UnassignableAssignmentTarget {
+                        found: self.current().kind,
+                    },
+                ));
+            }
             let assignment_end = self.current().span.end();
             let feedback_indent = self.observe_definition_rhs_indentation();
             self.advance();
@@ -230,10 +242,8 @@ where
                     Location::Elsewhere | Location::InBlock
                 )
                 && self
-                    .source
-                    .as_str()
-                    .get(assignment_end as usize..self.current().span.start() as usize)
-                    .is_some_and(|gap| gap.chars().any(dotty_core::is_line_break_char));
+                    .line_break_in_gap(assignment_end, self.current().span.start())
+                    .unwrap_or(false);
             let rhs = if let Some(start) = missing_rhs_start {
                 self.report_issue(ParseIssue::Expression(
                     ExpressionIssue::MissingAssignmentRhs {
@@ -250,19 +260,12 @@ where
             } else {
                 self.expr()
             };
-            if !is_assignable_lhs(&self.ast.get(lhs).kind) {
-                self.report_issue(ParseIssue::Expression(
-                    ExpressionIssue::UnassignableAssignmentTarget {
-                        found: self.current().kind,
-                    },
-                ));
-                self.last_advance_consumed_statement_separator |= consumed_statement_separator;
-                return lhs;
-            }
-
-            let assignment = self.alloc_assign(lhs, rhs);
             self.last_advance_consumed_statement_separator |= consumed_statement_separator;
-            return assignment;
+            return if assignable {
+                self.alloc_assign(lhs, rhs)
+            } else {
+                lhs
+            };
         }
 
         if self.current().kind == TokenKind::ColonFollow && self.colon_followed_by_indented_lambda()
@@ -512,12 +515,6 @@ fn is_assignable_lhs(kind: &TreeKind<Untyped>) -> bool {
             | TreeKind::PhaseSpecific(UntypedNode::PrefixOp(_))
             | TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_))
     )
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PendingOperator {
-    name: dotty_core::Name,
-    offset: u32,
 }
 
 // A nested layout body can leave one or more outdents before its enclosing
