@@ -397,6 +397,69 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
             self.assertEqual(live["two_pass_equal"], "true")
             self.assertEqual(baseline.read_bytes(), baseline_bytes)
 
+    def test_live_cohort_receipt_reconciles_issue_2354_movement_without_rewriting_baseline(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        baseline = repository / "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv"
+        baseline_bytes = baseline.read_bytes()
+        receipt_rows = gate.read_tsv(baseline)[1]
+        overrides = {
+            gate.PREDEF_CHAR_AT_IDENTITY: ("typed", gate.PREDEF_CHAR_AT_LIVE_RESULT),
+            gate.ARRAY_BUFFER_VIEW_APPLY_IDENTITY: (
+                gate.ARRAY_BUFFER_VIEW_APPLY_LIVE_BLOCKER,
+                "not_available",
+            ),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reports = self.cohort_reports(receipt_rows, root, overrides)
+            output = root / "live.tsv"
+            gate.validate_cohorts(repository, reports, output, baseline)
+            live_rows = gate.read_tsv(output)[1]
+            by_identity = {row["identity"]: row for row in live_rows}
+
+            predef = by_identity[gate.PREDEF_CHAR_AT_IDENTITY]
+            self.assertEqual(predef["cohort"], "main")
+            self.assertEqual(predef["source_tree"], "614")
+            self.assertEqual(predef["first_status"], "typed")
+            self.assertEqual(predef["second_status"], "typed")
+            self.assertEqual(predef["actual_result"], "Char")
+            self.assertEqual(predef["protected_success"], "false")
+            self.assertEqual(predef["two_pass_equal"], "true")
+
+            array_buffer = by_identity[gate.ARRAY_BUFFER_VIEW_APPLY_IDENTITY]
+            self.assertEqual(array_buffer["cohort"], "analysis")
+            self.assertEqual(array_buffer["source_tree"], "1537")
+            self.assertEqual(array_buffer["first_status"], gate.ARRAY_BUFFER_VIEW_APPLY_LIVE_BLOCKER)
+            self.assertEqual(array_buffer["second_status"], gate.ARRAY_BUFFER_VIEW_APPLY_LIVE_BLOCKER)
+            self.assertEqual(array_buffer["actual_result"], "not_available")
+            self.assertEqual(array_buffer["protected_success"], "false")
+            self.assertEqual(array_buffer["two_pass_equal"], "true")
+            self.assertEqual(baseline.read_bytes(), baseline_bytes)
+
+    def test_live_cohort_receipt_rejects_unmeasured_issue_2354_movement(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        baseline = repository / "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv"
+        receipt_rows = gate.read_tsv(baseline)[1]
+        invalid_overrides = (
+            (gate.PREDEF_CHAR_AT_IDENTITY, ("typed", "scala.Any")),
+            (gate.PREDEF_CHAR_AT_IDENTITY, ("blocked::DifferentFailure", "not_available")),
+            (
+                gate.ARRAY_BUFFER_VIEW_APPLY_IDENTITY,
+                ("blocked::MemberLookup(SourceClassCompletion { different blocker })", "not_available"),
+            ),
+            (gate.ARRAY_BUFFER_VIEW_APPLY_IDENTITY, ("typed", "A")),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index, (identity, override) in enumerate(invalid_overrides):
+                reports = self.cohort_reports(receipt_rows, root, {identity: override})
+                with self.subTest(identity=identity, override=override), self.assertRaisesRegex(
+                    gate.ReceiptError, identity
+                ):
+                    gate.validate_cohorts(
+                        repository, reports, root / f"live-{index}.tsv", baseline
+                    )
+
     def test_live_cohort_receipt_rejects_unmeasured_enumeration_drift(self) -> None:
         repository = Path(__file__).resolve().parents[2]
         baseline = repository / "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv"

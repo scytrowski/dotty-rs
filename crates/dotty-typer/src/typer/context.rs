@@ -76,7 +76,65 @@ impl SourceTyper<'_> {
         self.local_methods
             .parameter_context(parameter)
             .or_else(|| self.local_methods.type_parameter_context(parameter))
+            .or_else(|| self.private_constructor_parameter_type_context(parameter))
             .or_else(|| self.index.declaration_context_of(parameter))
+    }
+
+    fn private_constructor_parameter_type_context(
+        &self,
+        parameter: SymbolId,
+    ) -> Option<SourceContextId> {
+        if !self.is_source_private_constructor_parameter(parameter) {
+            return None;
+        }
+        let class = self.store.symbols.get(parameter).owner?;
+        let constructor_context = self.index.declaration_context_of(parameter)?;
+        let constructor_source_context = self.index.try_source_context(constructor_context)?;
+        let constructor = constructor_source_context.owner;
+        if !self.store.symbols.contains(constructor)
+            || self.store.symbols.get(constructor).kind != SymbolKind::Constructor
+            || self.store.symbols.get(constructor).owner != Some(class)
+        {
+            return None;
+        }
+        let SourceDefinition::Canonical {
+            source: constructor_source,
+            tree: constructor_tree,
+        } = self.index.definition_of(constructor)?
+        else {
+            return None;
+        };
+        if constructor_source != self.source
+            || self.index.symbol_at(constructor_source, constructor_tree) != Some(constructor)
+        {
+            return None;
+        }
+        let SourceDefinition::Canonical {
+            source: class_source,
+            tree: class_tree,
+        } = self.index.definition_of(class)?
+        else {
+            return None;
+        };
+        if class_source != self.source
+            || self.index.symbol_at(class_source, class_tree) != Some(class)
+        {
+            return None;
+        }
+        let TreeKind::TypeDef(class_definition) = &self.arena.try_get(class_tree)?.kind else {
+            return None;
+        };
+        let TreeKind::Template(template) = &self.arena.try_get(class_definition.rhs)?.kind else {
+            return None;
+        };
+        if template.constructor != constructor_tree {
+            return None;
+        }
+        let class_context = constructor_source_context.parent?;
+        let class_source_context = self.index.try_source_context(class_context)?;
+        (class_source_context.owner == class
+            && Some(class_source_context.lexical_scope) == self.index.scope_of(class))
+        .then_some(class_context)
     }
 
     /// Builds the lexical context for a method or constructor body from the

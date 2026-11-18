@@ -1,0 +1,209 @@
+--------------------------------------------------------------------------------
+scala39/example/PairFactory.tasty
+--------------------------------------------------------------------------------
+Header:
+  version: 28.9.0
+  tooling: Scala 3.9.0-bin-SNAPSHOT-git-777528f
+     UUID: 00b1e7f0-b631-62da-0009-dc6190e83f29
+
+Names (371 bytes, starting from 60):
+     0: ASTs
+     1: example
+     2: PairFactory
+     3: <init>
+     4: java
+     5: lang
+     6: java[Qualified . lang]
+     7: Object
+     8: java[Qualified . lang][Qualified . Object]
+     9: <init>[Signed Signature(List(),java.lang.Object) @<init>]
+    10: Unit
+    11: scala
+    12: create
+    13: firstSeed
+    14: Int
+    15: secondSeed
+    16: chooseSecond
+    17: Boolean
+    18: nextValue
+    19: Pair
+    20: example[Qualified . Pair]
+    21: Counter
+    22: example[Qualified . Counter]
+    23: <init>[Signed Signature(List(example.Counter, example.Counter),example.Pair) @<init>]
+    24: first
+    25: scala[Qualified . Int]
+    26: <init>[Signed Signature(List(scala.Int),example.Counter) @<init>]
+    27: second
+    28: selected
+    29: set
+    30: scala[Qualified . Unit]
+    31: set[Signed Signature(List(scala.Int),scala.Unit) @set]
+    32: SourceFile
+    33: annotation
+    34: scala[Qualified . annotation]
+    35: internal
+    36: scala[Qualified . annotation][Qualified . internal]
+    37: scala[Qualified . annotation][Qualified . internal][Qualified . SourceFile]
+    38: String
+    39: java[Qualified . lang][Qualified . String]
+    40: <init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]
+    41: ConditionalMutableReferenceAssignment.scala
+    42: Positions
+    43: Comments
+    44: Attributes
+
+Trees (197 bytes, starting from 434):
+     0: PACKAGE(194)
+     3:   TERMREFpkg 1 [example]
+     5:   TYPEDEF(189) 2 [PairFactory]
+     9:     TEMPLATE(165)
+    12:       APPLY(10)
+    14:         SELECTin(8) 9 [<init>[Signed Signature(List(),java.lang.Object) @<init>]]
+    17:           NEW
+    18:             TYPEREF 7 [Object]
+    20:               TERMREFpkg 6 [java[Qualified . lang]]
+    22:           SHAREDtype 18
+    24:       DEFDEF(7) 3 [<init>]
+    27:         EMPTYCLAUSE
+    28:         TYPEREF 10 [Unit]
+    30:           TERMREFpkg 11 [scala]
+    32:         STABLE
+    33:       DEFDEF(141) 12 [create]
+    37:         PARAM(7) 13 [firstSeed]
+    40:           IDENTtpt 14 [Int]
+    42:             TYPEREF 14 [Int]
+    44:               TERMREFpkg 11 [scala]
+    46:         PARAM(5) 15 [secondSeed]
+    49:           IDENTtpt 14 [Int]
+    51:             SHAREDtype 42
+    53:         PARAM(7) 16 [chooseSecond]
+    56:           IDENTtpt 17 [Boolean]
+    58:             TYPEREF 17 [Boolean]
+    60:               SHAREDtype 44
+    62:         PARAM(5) 18 [nextValue]
+    65:           IDENTtpt 14 [Int]
+    67:             SHAREDtype 42
+    69:         IDENTtpt 19 [Pair]
+    71:           TYPEREF 19 [Pair]
+    73:             TERMREFpkg 1 [example]
+    75:         BLOCK(100)
+    77:           APPLY(14)
+    79:             SELECTin(8) 23 [<init>[Signed Signature(List(example.Counter, example.Counter),example.Pair) @<init>]]
+    82:               NEW
+    83:                 IDENTtpt 19 [Pair]
+    85:                   SHAREDtype 71
+    87:               SHAREDtype 71
+    89:             TERMREFdirect 93
+    91:             TERMREFdirect 116
+    93:           VALDEF(21) 24 [first]
+    96:             IDENTtpt 21 [Counter]
+    98:               TYPEREF 21 [Counter]
+   100:                 SHAREDtype 73
+   102:             APPLY(12)
+   104:               SELECTin(8) 26 [<init>[Signed Signature(List(scala.Int),example.Counter) @<init>]]
+   107:                 NEW
+   108:                   IDENTtpt 21 [Counter]
+   110:                     SHAREDtype 98
+   112:                 SHAREDtype 98
+   114:               TERMREFdirect 37
+   116:           VALDEF(19) 27 [second]
+   119:             IDENTtpt 21 [Counter]
+   121:               SHAREDtype 98
+   123:             APPLY(12)
+   125:               SELECTin(8) 26 [<init>[Signed Signature(List(scala.Int),example.Counter) @<init>]]
+   128:                 NEW
+   129:                   IDENTtpt 21 [Counter]
+   131:                     SHAREDtype 98
+   133:                 SHAREDtype 98
+   135:               TERMREFdirect 46
+   137:           VALDEF(8) 28 [selected]
+   140:             IDENTtpt 21 [Counter]
+   142:               SHAREDtype 98
+   144:             SHAREDtype 89
+   146:             MUTABLE
+   147:           IF(16)
+   149:             TERMREFdirect 53
+   151:             ASSIGN(5)
+   153:               TERMREFdirect 137
+   156:               SHAREDtype 91
+   158:             ASSIGN(5)
+   160:               SHAREDtype 153
+   163:               SHAREDtype 89
+   165:           APPLY(10)
+   167:             SELECTin(6) 31 [set[Signed Signature(List(scala.Int),scala.Unit) @set]]
+   170:               SHAREDtype 153
+   173:               SHAREDtype 98
+   175:             TERMREFdirect 62
+   177:     ANNOTATION(18)
+   179:       TYPEREF 32 [SourceFile]
+   181:         TERMREFpkg 36 [scala[Qualified . annotation][Qualified . internal]]
+   183:       APPLY(12)
+   185:         SELECTin(8) 40 [<init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]]
+   188:           NEW
+   189:             SHAREDtype 179
+   192:           SHAREDtype 179
+   195:         STRINGconst 41 [ConditionalMutableReferenceAssignment.scala]
+   197:
+
+Positions (202 bytes, starting from 634):
+  lines: 25
+  line sizes:
+     15, 0, 26, 34, 26, 45, 0, 44, 35, 37, 35, 37, 0, 18, 92, 47, 49, 33, 24, 23
+     8, 22, 27, 27, 0
+  positions:
+     0: 0 .. 727
+     5: 347 .. 727
+     9: 368 .. 727
+    18: 353 .. 353
+    24: 368 .. 368
+    28: 368 .. 368
+    33: 368 .. 727
+    37: 379 .. 393
+    40: 390 .. 393
+    46: 395 .. 410
+    49: 407 .. 410
+    53: 412 .. 433
+    56: 426 .. 433
+    62: 435 .. 449
+    65: 446 .. 449
+    69: 452 .. 456
+    77: 704 .. 727
+    83: 708 .. 712
+    89: 713 .. 718
+    91: 720 .. 726
+    93: 463 .. 506
+    96: 474 .. 481
+   102: 484 .. 506
+   108: 488 .. 495
+   114: 496 .. 505
+   116: 511 .. 556
+   119: 523 .. 530
+   123: 533 .. 556
+   129: 537 .. 544
+   135: 545 .. 555
+   137: 561 .. 590
+   140: 575 .. 582
+   144: 585 .. 590
+   147: 595 .. 671
+   149: 598 .. 610
+   153: 622 .. 630
+   156: 633 .. 639
+   160: 655 .. 663
+   163: 666 .. 671
+   165: 676 .. 699
+   167: 676 .. 688
+   170: 676 .. 684
+   175: 689 .. 698
+   183: 347 .. 727
+   189: 347 .. 347
+   195: 347 .. 347
+
+  source paths:
+     0: 41 [ConditionalMutableReferenceAssignment.scala]
+
+Attributes (2 bytes, starting from 840):
+  SOURCEFILEattr 41 [ConditionalMutableReferenceAssignment.scala]
+
+
+--------------------------------------------------------------------------------

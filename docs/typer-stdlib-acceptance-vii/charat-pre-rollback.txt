@@ -1,0 +1,40 @@
+# Pre-rollback receipt for the unchanged charAt root
+
+Captured by the test-only `transaction_failure_error_observer` callback while
+`type_method_definition` was handling the original Scala 3.9.0
+`Predef.scala#tree=614` failure and before transaction rollback. The observer
+asserts tree 611, the `sequenceOfChars` term name, and that the canonical
+constructor parameter is absent from every live lexical/local lookup bucket.
+The test also asserts the method still fails at this first `TermNameNotFound`.
+IDs below are session-local; source tree numbers, spans, and symbol path are
+the stable identities.
+
+```text
+root=library/src/scala/Predef.scala#tree=614 method_span=TextRange { start: 20020, end: 20096 }
+failure=TermNameNotFound { source: SourceId(0), tree_index: 611, name: Name { text: NameId(162), namespace: Term }, position: Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 20074, end: 20089 }, point: None } }) }
+declaration_context=ExpressionContext { lexical: SourceContextId(47), owner: SymbolId(196), local_scopes: None }
+live_expression_context=ExpressionContext { lexical: SourceContextId(47), owner: SymbolId(196), local_scopes: Some(ExpressionScopeId { owner: 1, index: 0 }) }
+lexical_chain=[SourceContextId(47), SourceContextId(11), SourceContextId(10), SourceContextId(9), SourceContextId(8), SourceContextId(7), SourceContextId(6), SourceContextId(5), SourceContextId(4), SourceContextId(3), SourceContextId(2), SourceContextId(1), SourceContextId(0)]
+canonical_parameter=SymbolId(192) path=.scala.Predef$.SeqCharSequence.sequenceOfChars symbol={ kind: Parameter, visibility: Private, info: Missing, position: 19860..19910 }
+parameter_source_declaration="sequenceOfChars: scala.collection.IndexedSeq[Char]"
+parameter_type_state=Missing
+lexical_scope depth=0 context=SourceContextId(47) owner=SymbolId(80) scope=ScopeId(34) import=None candidates=[]
+lexical_scope depth=1 context=SourceContextId(11) owner=SymbolId(42) scope=ScopeId(8) import=None candidates=[]
+lexical_scope depth=2 context=SourceContextId(10) owner=SymbolId(40) scope=ScopeId(7) import=Some(import tree) candidates=[]
+lexical_scope depth=3 context=SourceContextId(9) owner=SymbolId(40) scope=ScopeId(7) import=Some(import tree) candidates=[]
+lexical_scope depth=4 context=SourceContextId(8) owner=SymbolId(40) scope=ScopeId(7) import=Some(import tree) candidates=[]
+lexical_scope depth=5 context=SourceContextId(7) owner=SymbolId(40) scope=ScopeId(7) import=Some(import tree) candidates=[]
+lexical_scope depth=6 context=SourceContextId(6) owner=SymbolId(40) scope=ScopeId(7) import=Some(import tree) candidates=[]
+lexical_scope depth=7 context=SourceContextId(5) owner=SymbolId(40) scope=ScopeId(7) import=Some(import tree) candidates=[]
+lexical_scope depth=8 context=SourceContextId(4) owner=SymbolId(40) scope=ScopeId(7) import=Some(import tree) candidates=[]
+lexical_scope depth=9 context=SourceContextId(3) owner=SymbolId(40) scope=ScopeId(7) import=Some(import tree) candidates=[]
+lexical_scope depth=10 context=SourceContextId(2) owner=SymbolId(40) scope=ScopeId(7) import=Some(import tree) candidates=[]
+lexical_scope depth=11 context=SourceContextId(1) owner=SymbolId(40) scope=ScopeId(7) import=Some(import tree) candidates=[]
+lexical_scope depth=12 context=SourceContextId(0) owner=SymbolId(40) scope=ScopeId(7) import=Some(import tree) candidates=[]
+local_scope frame=0 id=ExpressionScopeId { owner: 1, index: 0 } parent=None block=false case=false scope=ScopeId(91) imports=0 candidates=[]
+canonical_parameter_visible_in_live_lookup_buckets=false
+```
+
+The earlier direct symbol listing from the audit runner is a **pre-attempt
+identity dump**; it is not evidence of lookup state at failure. The receipt
+above is the live transaction-failure observation.

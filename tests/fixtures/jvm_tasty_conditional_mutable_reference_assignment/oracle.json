@@ -1,0 +1,261 @@
+{
+  "schema_version": 1,
+  "purpose": "Official Scala 3.9.0/JDK 21 evidence and current Rust paired-producer boundary for issue #2345. scala39/ files are official Scala outputs.",
+  "repository_baseline": {
+    "integration_base_sha": "ab25b31acf4cc1d2307220bbe72d5133334190be"
+  },
+  "source": {
+    "path": "ConditionalMutableReferenceAssignment.scala",
+    "sha256": "ca118afbee8cc160757baceb4666720d46db871f31d3a72c237993c3181ca4e5",
+    "java_probe_path": "RuntimeProbe.java",
+    "java_probe_sha256": "d1a394efbd062104d72033b06d8a7eb56a5883f7b41c52067af6b3eb21951aad"
+  },
+  "toolchain": {
+    "scala": {
+      "source_revision": "777528f19a58e794c9954a42f433373472ec57f8",
+      "version": "3.9.0-bin-SNAPSHOT-git-777528f",
+      "sbt_version": "1.12.1",
+      "build_command": "sbt --batch 'dist/universal:stage'",
+      "with_compiler_jar_sha256": "b420ed6e938960c2ed20162f151fc614ff9c44be1f35e5edec1230fafd24d4b7"
+    },
+    "rust": "rustc 1.98.1",
+    "jdk": {
+      "vendor": "Eclipse Adoptium",
+      "version": "21.0.13+9",
+      "release": 21,
+      "java_sha256": "9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155",
+      "release_file_sha256": "f83f6dcc966043c93cd498ac8e7ee7c310852074970d62c702e4ad2710002898"
+    }
+  },
+  "commands": {
+    "compile": "scalac -Werror -release 21 -Vprint:typer -color:never -d scala39 ConditionalMutableReferenceAssignment.scala",
+    "runtime_probe_compile": "javac --release 21 -cp scala39 -d <managed-scratch>/probe-classes RuntimeProbe.java",
+    "runtime_probe_run": "java -Xverify:all -ea -cp <managed-scratch>/probe-classes:scala39 example.RuntimeProbe",
+    "javap": "javap -v -c -p -classpath scala39 example.PairFactory",
+    "print_tasty": "scalac -color:never -print-tasty scala39/example/PairFactory.tasty",
+    "decompile": "scalac -color:never -decompile scala39/example/PairFactory.tasty"
+  },
+  "observed": {
+    "descriptor": "(IIZI)Lexample/Pair;",
+    "classfile_major": 65,
+    "counter_allocations": 2,
+    "conditional_jump": "ifeq 35 at bytecode offset 25",
+    "branch_assignments": [
+      "chooseSecond=true: aload 6; astore 7",
+      "chooseSecond=false: aload 5; astore 7"
+    ],
+    "selected_setter": "one invokevirtual example/Counter.set:(I)V at offset 43 with receiver aload 7",
+    "pair_constructor_arguments": "aload 5 then aload 6 before Pair.<init>(Counter,Counter)",
+    "stack_map_table": [
+      "append frame at offset 35 with locals Counter, Counter, Counter",
+      "same frame at offset 39"
+    ],
+    "tasty_version": "28.9.0",
+    "tasty_uuid": "00b1e7f0-b631-62da-0009-dc6190e83f29",
+    "tasty_block": {
+      "address": 75,
+      "stat_order": [
+        "VALDEF@93 first",
+        "VALDEF@116 second",
+        "mutable VALDEF@137 selected",
+        "IF@147 with ASSIGN@151 then and ASSIGN@158 else",
+        "APPLY@165 selected.set(nextValue)"
+      ],
+      "result": "APPLY@77 Pair(first, second)",
+      "if_result": "Both arms are ASSIGN; no TYPED or explicit Unit wrapper is emitted",
+      "if_condition": "TERMREFdirect@149 -> chooseSecond PARAM@53",
+      "then_assignment": "ASSIGN@151; target TERMREFdirect@153 -> selected VALDEF@137; RHS SHAREDtype@156 -> TERMREFdirect@91 -> second VALDEF@116",
+      "else_assignment": "ASSIGN@158; target SHAREDtype@160 -> TERMREFdirect@153 -> selected VALDEF@137; RHS SHAREDtype@163 -> TERMREFdirect@89 -> first VALDEF@93",
+      "setter_receiver": "SHAREDtype@170 -> TERMREFdirect@153 -> selected VALDEF@137",
+      "pair_arguments": [
+        "TERMREFdirect@89 -> first VALDEF@93",
+        "TERMREFdirect@91 -> second VALDEF@116"
+      ]
+    },
+    "runtime_probe": "conditional mutable reference assignment true=7/42,false=42/3,signed=-9/11,11/42,equal=7/42,42/7 distinct=true"
+  },
+  "artifacts": [
+    {
+      "path": "scala39/example/Counter.class",
+      "sha256": "64391b776f7ae07fd264da6027fc0f7164b41b13e300a4282d437fe91d08a3e5",
+      "classfile_major": 65
+    },
+    {
+      "path": "scala39/example/Counter.tasty",
+      "sha256": "b4ad339fc6f0bb5154f1da7daeec4444d2541d7521c910a67651dd8d79c6a7e8",
+      "tasty_version": "28.9.0"
+    },
+    {
+      "path": "scala39/example/Pair.class",
+      "sha256": "2bc0a577fc0e9c40c8d0a9c0b8a016c7842cc958095bd77160568124794c0b22",
+      "classfile_major": 65
+    },
+    {
+      "path": "scala39/example/Pair.tasty",
+      "sha256": "8f22420b93d0438bd99f4bd1629f228584345e3a494f8f6feda28d0f513649ce",
+      "tasty_version": "28.9.0"
+    },
+    {
+      "path": "scala39/example/PairFactory.class",
+      "sha256": "007590db44d542f32122dadcf67d0c8c7104cc80a63ef5de18682a41d4a5e494",
+      "classfile_major": 65
+    },
+    {
+      "path": "scala39/example/PairFactory.tasty",
+      "sha256": "91135b1423d72269690c6425a5c8f0a91712e3cc1734f8b4eafcadb4ee2b2124",
+      "tasty_version": "28.9.0",
+      "tasty_uuid": "00b1e7f0-b631-62da-0009-dc6190e83f29"
+    }
+  ],
+  "snapshots": [
+    {
+      "path": "oracle/PairFactory.javap.txt",
+      "sha256": "4ac7e077d034a10acbc37b8304b4705129a338feab537bbab45028052d9dfb69",
+      "workspace_path_header_normalized": true
+    },
+    {
+      "path": "oracle/PairFactory.print-tasty.txt",
+      "sha256": "56a9f1e7f0e817b199fe60d93141cd5b1e0fd31fc75d4e222ffa819c548ead2f",
+      "workspace_path_header_normalized": true
+    },
+    {
+      "path": "oracle/PairFactory.decompile.txt",
+      "sha256": "3353acf3b8207a4fb0fa8f60c2874942d47a31b1bbfed1d288fa33f439ba40a8",
+      "workspace_path_header_normalized": true
+    },
+    {
+      "path": "oracle/typer.txt",
+      "sha256": "d845b3248d2401a01076a16060a3c9d43a54f8b48631eee51f50941af3716b7b"
+    },
+    {
+      "path": "oracle/RuntimeProbe.stdout.txt",
+      "sha256": "61622775276e2132029d1e0b34c0961d5411ef7c33791e9ee98f58d5f8bd924f"
+    }
+  ],
+  "control_matrix": [
+    {
+      "control": "rename all three locals",
+      "scala": "valid",
+      "rust_producer": "deferred at cross-class constructor-call identity proof with SourceShape: four-formal candidate requires two initialized locals, selected IF, one setter, then Pair"
+    },
+    {
+      "control": "reverse first/second declarations",
+      "scala": "valid",
+      "rust_producer": "deferred at the same first rejection"
+    },
+    {
+      "control": "immutable selected target",
+      "scala": "invalid E052",
+      "rust_producer": "rejected during method body typing: AssignmentTargetImmutable"
+    },
+    {
+      "control": "foreign unresolved reference",
+      "scala": "invalid E119",
+      "rust_producer": "rejected during method body typing: TermNameNotFound"
+    },
+    {
+      "control": "forward uninitialized reference",
+      "scala": "invalid E039",
+      "rust_producer": "rejected during method body typing: TermNameNotFound"
+    },
+    {
+      "control": "assign Int to Counter",
+      "scala": "invalid E007",
+      "rust_producer": "rejected during method body typing: ExpectedExpressionTypeMismatch"
+    },
+    {
+      "control": "extra assignment after IF",
+      "scala": "valid",
+      "rust_producer": "deferred at the same first rejection"
+    },
+    {
+      "control": "nested IF",
+      "scala": "valid",
+      "rust_producer": "deferred at the same first rejection"
+    },
+    {
+      "control": "allocation in branch",
+      "scala": "valid",
+      "rust_producer": "deferred at the same first rejection"
+    },
+    {
+      "control": "loop containing assignment",
+      "scala": "valid",
+      "rust_producer": "deferred at the same first rejection"
+    },
+    {
+      "control": "missing else",
+      "scala": "valid",
+      "rust_producer": "deferred at the same first rejection"
+    },
+    {
+      "control": "wrong semantic owner",
+      "scala": "not expressible as a Scala source control",
+      "rust_producer": "invalid proof input; existing mutable-reassignment proof test rejects WrongOwner"
+    }
+  ],
+  "rust_frontend": {
+    "pipeline": "ContextualScanner -> parser -> namer -> SourceTyper",
+    "test": "tests/jvm_tasty_conditional_mutable_reference_assignment_proof.rs",
+    "identity_evidence": [
+      "three distinct local SymbolIds are canonical definitions in this SourceId and owned by PairFactory.create",
+      "the source If and typed If retain an exact SourceTypedIndex edge and Unit result type",
+      "both source branches are Assign; each typed Assign maps both operands through exact source/typed edges",
+      "then lhs resolves by TermRef symbol identity to selected and rhs to second; else lhs resolves to selected and rhs to first",
+      "the later setter receiver resolves to selected and Pair constructor arguments resolve to first then second"
+    ],
+    "paired_producer_first_rejection": {
+      "stage": "cross-class constructor-call identity proof",
+      "error": "SourceShape(\"four-formal candidate requires two initialized locals, selected IF, one setter, then Pair\")",
+      "callback_reached": false,
+      "artifact_batch_returned": false,
+      "partial_artifacts": 0
+    }
+  },
+  "control_sources": [
+    {
+      "path": "controls/AllocationInBranch.scala",
+      "sha256": "824a1db0ebb129ee5bc170911417b92d299f6f95b567076a3defae26291809a6"
+    },
+    {
+      "path": "controls/ExtraAssignment.scala",
+      "sha256": "64b0bcbb90ed8d1d6c2bacd78cdaf3bbfd11382b09f2fb3e62e9bc05a37fd643"
+    },
+    {
+      "path": "controls/ForeignReference.scala",
+      "sha256": "058540a46d1a8e19cefb2b252ef6f4f62004b34f511e0973cea753b4bbf83916"
+    },
+    {
+      "path": "controls/ImmutableSelected.scala",
+      "sha256": "6f9847c7e3ffa01544da8d2d0f62b0cc4cd6c5a30490c970d73404c0eff55b7a"
+    },
+    {
+      "path": "controls/Loop.scala",
+      "sha256": "10153f4ad68b8eabed078172e72bf798976dab360e6660f0a0e30407cf76e824"
+    },
+    {
+      "path": "controls/MissingElse.scala",
+      "sha256": "cdde2d51be2a811b8784e10f4799ed7c8a4afeb457e9b85f1d100fe997c3f252"
+    },
+    {
+      "path": "controls/NestedIf.scala",
+      "sha256": "c3404d4bc47381a822783472b0f4c0638463f5b4a033038cac963fd0dd31ae27"
+    },
+    {
+      "path": "controls/RenamedLocals.scala",
+      "sha256": "9575b95c9dc94b59d621bedda7deca7875fc4ecee554997aa377ea7f95e697ef"
+    },
+    {
+      "path": "controls/ReversedDeclarations.scala",
+      "sha256": "d614167946d62b4b4ecb0d6bdaaeddec6bd6d770fbf90c573f0826f96310a721"
+    },
+    {
+      "path": "controls/UninitializedReference.scala",
+      "sha256": "485eb1a2c648bb4ed13f8e29d2d8c9e6946f2c89f5bc1fdd99366e1d4f414297"
+    },
+    {
+      "path": "controls/WrongType.scala",
+      "sha256": "41186f7bc0c6f48ceea60f841282002b8401a5fce204b3e143a8286d6b604f5d"
+    }
+  ]
+}

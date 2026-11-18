@@ -1,4 +1,6 @@
-use super::{audit_classpath_from_environment, audit_symbol_path, git_revision};
+use super::{
+    audit_classpath_from_environment, audit_symbol_path, git_revision, semantic_type_shape,
+};
 use dotty_classloader::classloader::{ClasspathSymbolResolver, LoadingSession};
 use dotty_core::ast::{Modifier, TreeKind, Untyped, UntypedNode};
 use dotty_core::types::{TermRefTarget, Type, TypeRefTarget};
@@ -696,8 +698,9 @@ pub(super) fn run() {
             attempts += 1;
             if identity == "library/src/scala/Option.scala#tree=214"
                 || identity == "library/src/scala/Tuple.scala#tree=23"
+                || identity == "library/src/scala/Predef.scala#tree=614"
             {
-                println!("TARGET_SOURCE_IDENTITY_BEGIN\t{identity}");
+                println!("PRE_ATTEMPT_SOURCE_IDENTITY_BEGIN\t{identity}");
                 println!("source\t{source:?}");
                 println!(
                     "method\t{method:?}\t{:?}",
@@ -709,11 +712,24 @@ pub(super) fn run() {
                     for (candidate_tree, _) in parsed.ast.iter() {
                         if let Some(candidate_symbol) = index.symbol_at(source, candidate_tree) {
                             let candidate = typer.store().symbols.get(candidate_symbol);
+                            if candidate_symbol == owner {
+                                println!("owner_source_tree\t{candidate_tree:?}");
+                            }
                             if candidate.owner == Some(owner)
-                                && candidate.kind == SymbolKind::TypeParameter
+                                && (identity == "library/src/scala/Predef.scala#tree=614"
+                                    || candidate.kind == SymbolKind::TypeParameter)
                             {
+                                let name = typer.store().names.resolve(candidate.name.text());
+                                let source_excerpt = candidate
+                                    .position
+                                    .and_then(|position| {
+                                        let range = position.span().range();
+                                        text.get(range.start() as usize..range.end() as usize)
+                                    })
+                                    .unwrap_or("");
                                 println!(
-                                    "owner_type_parameter\t{candidate_symbol:?}\t{candidate:?}"
+                                    "owner_source_member\t{candidate_tree:?}\t{candidate_symbol:?}\t{name}\t{candidate:?}\tinfo={:?}\tsource={source_excerpt}",
+                                    typer.store().symbols.info(candidate_symbol),
                                 );
                             }
                         }
@@ -727,7 +743,7 @@ pub(super) fn run() {
                         );
                     }
                 }
-                println!("TARGET_SOURCE_IDENTITY_END\t{identity}");
+                println!("PRE_ATTEMPT_SOURCE_IDENTITY_END\t{identity}");
             }
             let outcome = typer.type_method_definition(tree);
             let mut typed_tree_identity = String::new();
@@ -764,6 +780,17 @@ pub(super) fn run() {
                                 typer.source_typed_index().get(source, *parameter).is_some()
                             });
                     if complete {
+                        println!(
+                            "ACCEPTED_DEFDEF\t{identity}\tmethod={method:?}\towner={:?}\tsignature={:?}\tsignature_shape={}\tsource_tree={tree:?}\ttyped_tree={typed_tree:?}\ttyped_root_type={:?}",
+                            owner.map(|owner| (owner, typer.store().symbols.get(owner))),
+                            typer.store().symbols.info(method),
+                            match typer.store().symbols.info(method) {
+                                SymbolInfo::Complete(signature) =>
+                                    semantic_type_shape(typer.store(), *signature, 0,),
+                                _ => "<missing>".to_owned(),
+                            },
+                            typer.store().types.get(typed_root.ty),
+                        );
                         typed += 1;
                         typed_tree_identity = typed_tree.index().to_string();
                         format!(
