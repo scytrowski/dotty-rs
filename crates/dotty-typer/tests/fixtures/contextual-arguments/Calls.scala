@@ -43,3 +43,9 @@ object Result:
 class Recovery:
   def read(using r: Result): Int = 1
   def healed(using a: Dependency, b: Dependency): Int = read
+
+class Callable:
+  def apply(i: Int): Int = i
+class ResultApplication:
+  def provider(using n: Int): Callable = new Callable
+  def run(using n: Int): Int = provider(2)

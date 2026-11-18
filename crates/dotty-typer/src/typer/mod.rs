@@ -26806,7 +26806,7 @@ mod tests {
     }
 
     #[test]
-    fn local_contextual_search_remains_outside_declaration_typing() {
+    fn parentheses_apply_to_the_result_after_supplying_the_local_given() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class C { def need(using value: Int): Int = value; def use: Int = { given local: Int = 1; need() } }",
         );
@@ -26823,11 +26823,7 @@ mod tests {
 
         assert!(matches!(
             typer.type_expression(rhs, context),
-            Err(TyperError::ApplicationMethodKindMismatch {
-                application_kind: ApplyKind::Regular,
-                method_kind: MethodKind::Contextual,
-                ..
-            })
+            Err(TyperError::ApplicationCalleeNotMethod { .. })
         ));
     }
 
@@ -38466,7 +38462,7 @@ mod tests {
     }
 
     #[test]
-    fn regular_application_rejects_a_contextual_clause() {
+    fn positional_arguments_do_not_substitute_for_missing_contextual_values() {
         let source_text = "class C { def f(using x: Int): Int = x; def use: Int = f(1) }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
@@ -38486,11 +38482,7 @@ mod tests {
 
         assert!(matches!(
             typer.type_expression(rhs, context),
-            Err(TyperError::ApplicationMethodKindMismatch {
-                application_kind: ApplyKind::Regular,
-                method_kind: MethodKind::Contextual,
-                ..
-            })
+            Err(TyperError::MissingContextualArgument { expected, .. }) if expected == definitions.int
         ));
     }
 

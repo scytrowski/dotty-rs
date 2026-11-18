@@ -984,3 +984,44 @@ fn an_equally_ranked_provider_preserves_the_ambiguous_dependency() {
     );
     assert_eq!(typer.store.checkpoint(), checkpoint);
 }
+
+#[test]
+fn positional_arguments_apply_to_a_contextual_methods_returned_value() {
+    let text = include_str!("../../../tests/fixtures/contextual-arguments/Calls.scala");
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "run");
+    let param = method_parameter_symbol(&parsed, &index, source, method, 0);
+    let apply = method_symbol(&parsed, &store, &index, source, "apply");
+    let provider = method_symbol(&parsed, &store, &index, source, "provider");
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    typer
+        .type_method_definition(definition_tree(&index, method))
+        .unwrap();
+    let TreeKind::Apply(outer) = &typer
+        .typed_ast()
+        .get(typer.typed_index.get(source, rhs).unwrap())
+        .kind
+    else {
+        panic!()
+    };
+    assert_eq!(reference(&typer, outer.function), apply);
+    let TreeKind::Select(selected) = &typer.typed_ast().get(outer.function).kind else {
+        panic!()
+    };
+    let TreeKind::Apply(inner) = &typer.typed_ast().get(selected.qualifier).kind else {
+        panic!()
+    };
+    assert_eq!(reference(&typer, inner.function), provider);
+    assert_eq!(reference(&typer, inner.args[0]), param);
+    assert!(matches!(
+        typer.typed_ast().get(outer.args[0]).kind,
+        TreeKind::Literal(_)
+    ));
+}

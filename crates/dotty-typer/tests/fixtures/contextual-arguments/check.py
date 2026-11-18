@@ -31,7 +31,7 @@ def main():
                 "def read: Base = this.need(this.broad)",
                 "this.absent(scala.util.NotGiven.value)",
                 "def pick(using n: Int): Int = this.one(n)", "this.from(1)(b)",
-                "this.read(Result.direct)",
+                "this.read(Result.direct)", "this.provider(n).apply(2)",
                 "Implicit parameters should be provided with a `using` clause",
             )),
             ("Inherited.scala", 0, ("this.need(TC.instance[Int])",)),

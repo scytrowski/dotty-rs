@@ -252,11 +252,23 @@ impl SourceTyper<'_> {
                 (function, callable, None, None)
             };
         let (function, callable) = if application.kind == ApplyKind::Regular
-            && matches!(self.store.types.try_get(callable), Some(Type::Method(clause)) if clause.kind == MethodKind::Contextual && matches!(self.store.types.try_get(clause.result), Some(Type::Method(_))))
-        {
-            let adapted =
-                self.supply_contextual_clauses(tree, function, callable, context, info_journal)?;
-            (adapted, self.typed_arena.get(adapted).ty)
+            && let Some(Type::Method(clause)) = self.store.types.try_get(callable)
+            && clause.kind == MethodKind::Contextual
+            && (!is_constructor_application
+                || matches!(
+                    self.store.types.try_get(clause.result),
+                    Some(Type::Method(_))
+                )) {
+            let adapted = self.supply_contextual_clauses(
+                application.function,
+                function,
+                callable,
+                context,
+                info_journal,
+            )?;
+            let result_type = self.typed_arena.get(adapted).ty;
+            let result_type = self.widen_expression_type_journaled(result_type, info_journal, 0)?;
+            self.resolve_apply_function(adapted, result_type, request, info_journal)?
         } else {
             (function, callable)
         };
