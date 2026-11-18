@@ -30,6 +30,8 @@ fn repeated_method_bodies() {
         "try a catch { case e => b }",
         "a match {\ncase b => b\n}",
         "a match\n  case b => b",
+        "a match\ncase b => b",
+        "try a catch\ncase e => b",
     ] {
         for count in [250, 500, 1000, 2000] {
             let mut source = String::from("object A {\n");

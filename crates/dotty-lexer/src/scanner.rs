@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use dotty_core::diagnostics::DiagnosticSeverity;
 use dotty_core::source::{
     LineIndex, SourceTextError, TextRange, TextRangeError, is_line_break_char,
@@ -21,6 +23,9 @@ pub struct ContextualScanner {
     source: String,
     indentation: IndentationIndex,
     tokens: TokenBuffer,
+    /// Depth after each source brace, keyed by its end offset. Layout feedback
+    /// preserves source braces, so this lazy index survives token insertions.
+    brace_depths: OnceLock<Vec<(u32, usize)>>,
     position: usize,
     diagnostics: Vec<LexerDiagnostic>,
     feedback_regions: Vec<FeedbackRegion>,
@@ -74,6 +79,7 @@ impl ContextualScanner {
             source: source.to_owned(),
             indentation,
             tokens,
+            brace_depths: OnceLock::new(),
             position: 0,
             diagnostics,
             feedback_regions: Vec::new(),
@@ -543,14 +549,27 @@ impl ContextualScanner {
     }
 
     fn has_open_brace_before(&self, index: usize) -> bool {
-        self.tokens
-            .range(0..index)
-            .fold(0usize, |depth, token| match token.kind {
-                TokenKind::Punctuation(Punctuation::LeftBrace) => depth.saturating_add(1),
-                TokenKind::Punctuation(Punctuation::RightBrace) => depth.saturating_sub(1),
-                _ => depth,
-            })
-            > 0
+        let depths = self.brace_depths.get_or_init(|| {
+            let mut depth = 0usize;
+            self.tokens
+                .iter()
+                .filter_map(|token| {
+                    match token.kind {
+                        TokenKind::Punctuation(Punctuation::LeftBrace) => depth += 1,
+                        TokenKind::Punctuation(Punctuation::RightBrace) => {
+                            depth = depth.saturating_sub(1);
+                        }
+                        _ => return None,
+                    }
+                    Some((token.span.end(), depth))
+                })
+                .collect()
+        });
+        let offset = self.tokens[index].span.start();
+        let after = depths.partition_point(|(end, _)| *end <= offset);
+        after
+            .checked_sub(1)
+            .is_some_and(|index| depths[index].1 > 0)
     }
 
     fn current_starts_match_case(&self) -> bool {
@@ -3324,6 +3343,51 @@ mod tests {
         assert_eq!(scanner.lookahead(1).kind, TokenKind::Indent);
         scanner.advance();
         assert_eq!(scanner.current().kind, TokenKind::Indent);
+    }
+
+    #[test]
+    fn brace_depth_lookup_matches_source_delimiters_after_layout_feedback() {
+        for source in [
+            "",
+            "} } value match\ncase A => a",
+            "{ {} { value match\ncase A => a\n} } after",
+            "{\n  value match\n  case A => first\n  after\n}",
+            "{\n  value match\n  case A => first\n  after",
+            r#"val s = "{}"; val c = '}'; val `}λ{` = 1 /* { */ // }
+value match
+case A => a"#,
+            r#"s"${ { x } }"; value match
+case A => a"#,
+        ] {
+            let mut scanner = ContextualScanner::new(source).unwrap();
+            // Populate the index before feedback changes logical token indices.
+            scanner.has_open_brace_before(0);
+            while scanner.current().kind != TokenKind::Eof {
+                if scanner.current().kind == TokenKind::Keyword(HardKeyword::Match) {
+                    scanner.observe(ScannerEvent::MatchCasesIndented);
+                }
+                scanner.advance();
+            }
+            // Query in reverse order to also exercise lookahead-independent reads.
+            for index in (0..scanner.tokens.len()).rev() {
+                let expected =
+                    scanner
+                        .tokens
+                        .range(0..index)
+                        .fold(0usize, |depth, token| match token.kind {
+                            TokenKind::Punctuation(Punctuation::LeftBrace) => depth + 1,
+                            TokenKind::Punctuation(Punctuation::RightBrace) => {
+                                depth.saturating_sub(1)
+                            }
+                            _ => depth,
+                        });
+                assert_eq!(
+                    scanner.has_open_brace_before(index),
+                    expected > 0,
+                    "{source}, token {index}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -367,6 +367,11 @@ constructing `ContextualScanner`. This keeps the state machine small while the
 raw/scanner contract is still being stabilized. It can later be replaced by
 incremental buffering without changing parser-facing token kinds or ranges.
 
+Brace-depth queries for same-indent case regions use a lazy index keyed by
+source brace end offsets. Building the index takes one token traversal, and
+subsequent queries use binary search. Layout feedback preserves source braces,
+so inserted and removed layout tokens leave the index valid.
+
 Parser feedback edits a gap buffer, with the prefix in source order
 and the suffix in reverse order. Moving between edit positions transfers only
 the intervening tokens. Logical lookahead leaves the gap in place. The public
