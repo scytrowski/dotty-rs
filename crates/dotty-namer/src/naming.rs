@@ -2743,6 +2743,17 @@ impl Namer<'_> {
                     )?;
                     private_local_parameters.push(parameter_symbol);
                 } else {
+                    if self
+                        .store
+                        .symbols
+                        .get(symbol)
+                        .flags
+                        .contains(SymbolFlags::GIVEN)
+                        && spec.flags.contains(SymbolFlags::GIVEN)
+                        && spec.visibility == Visibility::Public
+                    {
+                        spec.visibility = Visibility::Protected;
+                    }
                     let field = self.enter_symbol(
                         *parameter_tree,
                         *parameter.name.as_name(),
@@ -2847,6 +2858,67 @@ impl Namer<'_> {
             }
         }
 
+        if self.store.symbols.get(symbol).kind == SymbolKind::Class
+            && self
+                .store
+                .symbols
+                .get(symbol)
+                .flags
+                .contains(SymbolFlags::GIVEN)
+            && let Some(SourceDefinition::Canonical { tree, .. }) = self.index.definition_of(symbol)
+            && let Some(factory) = self
+                .store
+                .symbols
+                .owner(symbol)
+                .and_then(|owner| self.index.derived_symbol_at(owner, self.source, tree))
+        {
+            let factory_scope =
+                self.index
+                    .scope_of(factory)
+                    .ok_or(NamerError::MalformedAstShape {
+                        tree_index: tree.index(),
+                        expected: "structural given factory scope",
+                    })?;
+            let factory_context = self.index.declaration_context_of(factory).ok_or(
+                NamerError::MalformedAstShape {
+                    tree_index: tree.index(),
+                    expected: "structural given factory context",
+                },
+            )?;
+            let mut anonymous = 0;
+            for parameter in &constructor.type_params {
+                let TreeKind::TypeDef(parameter) = &self.arena.get(*parameter).kind else {
+                    continue;
+                };
+                for (bound, name) in self.context_bound_witnesses(parameter, &mut anonymous)? {
+                    let spec = SymbolSpec {
+                        kind: SymbolKind::Field,
+                        flags: SymbolFlags::GIVEN,
+                        visibility: Visibility::Private,
+                    };
+                    let field = self.enter_symbol(bound, *name.as_name(), symbol, scope, spec)?;
+                    self.index
+                        .record_declaration_context(field, class_source_context)?;
+                    for (owner, scope, context) in [
+                        (constructor_symbol, constructor_scope, constructor_context),
+                        (factory, factory_scope, factory_context),
+                    ] {
+                        let copy = self.enter_derived_symbol(
+                            bound,
+                            *name.as_name(),
+                            owner,
+                            scope,
+                            SymbolSpec {
+                                kind: SymbolKind::Parameter,
+                                flags: SymbolFlags::GIVEN,
+                                visibility: Visibility::Public,
+                            },
+                        )?;
+                        self.index.record_declaration_context(copy, context)?;
+                    }
+                }
+            }
+        }
         let mut nested_headers = Vec::new();
         let mut active_source_context = class_source_context;
         let is_enum_class = self
@@ -3387,6 +3459,49 @@ impl Namer<'_> {
         })
     }
 
+    fn context_bound_witnesses(
+        &mut self,
+        parameter: &dotty_core::ast::TypeDef<Untyped>,
+        anonymous_witnesses: &mut usize,
+    ) -> Result<Vec<(TreeId<Untyped>, dotty_core::TermName)>, NamerError> {
+        let mut witnesses = Vec::new();
+        let bounds_tree =
+            self.arena
+                .try_get(parameter.rhs)
+                .ok_or(NamerError::MalformedAstShape {
+                    tree_index: parameter.rhs.index(),
+                    expected: "method type parameter bounds",
+                })?;
+        if let TreeKind::PhaseSpecific(UntypedNode::ContextBounds(bounds)) = &bounds_tree.kind {
+            for &tree in &bounds.context_bounds {
+                let Some(TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(bound))) =
+                    self.arena.try_get(tree).map(|node| &node.kind)
+                else {
+                    return Err(NamerError::MalformedAstShape {
+                        tree_index: tree.index(),
+                        expected: "context bound on method type parameter",
+                    });
+                };
+                if bound.parameter != parameter.name {
+                    return Err(NamerError::MalformedAstShape {
+                        tree_index: tree.index(),
+                        expected: "context bound of its enclosing type parameter",
+                    });
+                }
+                let name = bound.name.unwrap_or_else(|| {
+                    *anonymous_witnesses += 1;
+                    dotty_core::TermName::new(
+                        self.store
+                            .names
+                            .intern(&format!("evidence${anonymous_witnesses}")),
+                    )
+                });
+                witnesses.push((tree, name));
+            }
+        }
+        Ok(witnesses)
+    }
+
     fn scan_method_parameters(
         &mut self,
         tree: TreeId<Untyped>,
@@ -3424,51 +3539,20 @@ impl Namer<'_> {
             )?;
             self.index
                 .record_declaration_context(parameter_symbol, method_context)?;
-            let bounds_tree =
-                self.arena
-                    .try_get(parameter.rhs)
-                    .ok_or(NamerError::MalformedAstShape {
-                        tree_index: parameter.rhs.index(),
-                        expected: "method type parameter bounds",
-                    })?;
-            if let TreeKind::PhaseSpecific(UntypedNode::ContextBounds(bounds)) = &bounds_tree.kind {
-                for &tree in &bounds.context_bounds {
-                    let Some(TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(bound))) =
-                        self.arena.try_get(tree).map(|node| &node.kind)
-                    else {
-                        return Err(NamerError::MalformedAstShape {
-                            tree_index: tree.index(),
-                            expected: "context bound on method type parameter",
-                        });
-                    };
-                    if bound.parameter != parameter.name {
-                        return Err(NamerError::MalformedAstShape {
-                            tree_index: tree.index(),
-                            expected: "context bound of its enclosing type parameter",
-                        });
-                    }
-                    let name = bound.name.unwrap_or_else(|| {
-                        anonymous_witnesses += 1;
-                        dotty_core::TermName::new(
-                            self.store
-                                .names
-                                .intern(&format!("evidence${anonymous_witnesses}")),
-                        )
-                    });
-                    let witness = self.enter_symbol(
-                        tree,
-                        *name.as_name(),
-                        method,
-                        method_scope,
-                        SymbolSpec {
-                            kind: SymbolKind::Parameter,
-                            flags: witness_flag,
-                            visibility: Visibility::Public,
-                        },
-                    )?;
-                    self.index
-                        .record_declaration_context(witness, method_context)?;
-                }
+            for (tree, name) in self.context_bound_witnesses(parameter, &mut anonymous_witnesses)? {
+                let witness = self.enter_symbol(
+                    tree,
+                    *name.as_name(),
+                    method,
+                    method_scope,
+                    SymbolSpec {
+                        kind: SymbolKind::Parameter,
+                        flags: witness_flag,
+                        visibility: Visibility::Public,
+                    },
+                )?;
+                self.index
+                    .record_declaration_context(witness, method_context)?;
             }
         }
         for clause in &definition.value_param_clauses {

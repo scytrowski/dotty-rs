@@ -1122,3 +1122,107 @@ fn imported_structural_given_builds_the_factory_call_and_selects_the_implementat
         ));
     }
 }
+
+#[test]
+fn structural_context_bound_owns_distinct_class_constructor_and_factory_witnesses() {
+    let fixture =
+        include_str!("../../../tests/fixtures/contextual-arguments/StructuralBound.scala");
+    let text = format!(
+        "{fixture}\nclass Missing {{ import Builders.given; def needBox(using t:TC[Box[Int]]):Int=1; def missing:Int=needBox }}"
+    );
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(&text);
+    let class = class_symbol(&parsed, &store, &index, source, "boxes");
+    let tree = definition_tree(&index, class);
+    let factory = index
+        .derived_symbol_at(store.symbols.owner(class).unwrap(), source, tree)
+        .unwrap();
+    let bound = parsed
+        .ast
+        .iter()
+        .find_map(|(id, node)| {
+            matches!(
+                node.kind,
+                TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(_))
+            )
+            .then_some(id)
+        })
+        .unwrap();
+    let TreeKind::TypeDef(definition) = &parsed.ast.get(tree).kind else {
+        panic!()
+    };
+    let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind else {
+        panic!()
+    };
+    let ctor = index.symbol_at(source, template.constructor).unwrap();
+    let class_witness = index.symbol_at(source, bound).unwrap();
+    assert_eq!(
+        store.symbols.get(class_witness).visibility,
+        Visibility::Private
+    );
+    for (owner, witness) in [
+        (class, class_witness),
+        (ctor, index.derived_symbol_at(ctor, source, bound).unwrap()),
+        (
+            factory,
+            index.derived_symbol_at(factory, source, bound).unwrap(),
+        ),
+    ] {
+        assert_eq!(store.symbols.owner(witness), Some(owner));
+        assert!(
+            store
+                .symbols
+                .get(witness)
+                .flags
+                .contains(SymbolFlags::GIVEN)
+        );
+    }
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    let (missing, _) = method_definition_and_rhs(&parsed, typer.store(), &index, source, "missing");
+    let before = typer.store.checkpoint();
+    assert!(matches!(
+        typer.type_method_definition(definition_tree(&index, missing)),
+        Err(TyperError::MissingContextualArgument { .. })
+    ));
+    assert_eq!(typer.store.checkpoint(), before);
+    assert!(typer.typed_index.is_empty());
+    for symbol in [ctor, factory, class_witness] {
+        typer.complete_symbol(symbol).unwrap();
+    }
+    let own_tag = typer
+        .store
+        .scopes
+        .get(index.scope_of(class).unwrap())
+        .lookup_all(&Name::new(
+            typer.store.names.get("tag").unwrap(),
+            dotty_core::Namespace::Term,
+        ))[0];
+    typer
+        .type_method_definition(definition_tree(&index, own_tag))
+        .unwrap();
+    let (method, rhs) =
+        method_definition_and_rhs(&parsed, typer.store(), &index, source, "inferred");
+    typer
+        .type_method_definition(definition_tree(&index, method))
+        .unwrap();
+    let TreeKind::Apply(need) = &typer
+        .typed_ast()
+        .get(typer.typed_index.get(source, rhs).unwrap())
+        .kind
+    else {
+        panic!()
+    };
+    let TreeKind::Apply(call) = &typer.typed_ast().get(need.args[0]).kind else {
+        panic!()
+    };
+    assert_eq!(
+        reference(&typer, call.args[0]),
+        method_parameter_symbol(&parsed, &index, source, method, 0)
+    );
+}

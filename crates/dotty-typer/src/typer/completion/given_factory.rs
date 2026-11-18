@@ -24,7 +24,7 @@ impl SourceTyper<'_> {
         .then_some(class)
     }
 
-    pub(super) fn is_structural_factory_parameter(&self, symbol: SymbolId) -> bool {
+    pub(super) fn is_structural_given_parameter_copy(&self, symbol: SymbolId) -> bool {
         let entry = self.store.symbols.get(symbol);
         if !matches!(
             entry.kind,
@@ -35,6 +35,14 @@ impl SourceTyper<'_> {
         let Some(method) = entry.owner else {
             return false;
         };
+        if self.store.symbols.get(method).kind == SymbolKind::Constructor
+            && self.store.symbols.owner(method).is_some_and(|class| {
+                let entry = self.store.symbols.get(class);
+                entry.kind == SymbolKind::Class && entry.flags.contains(SymbolFlags::GIVEN)
+            })
+        {
+            return matches!(self.index.definition_of(symbol), Some(SourceDefinition::Derived { source, .. }) if source == self.source);
+        }
         let Some(SourceDefinition::Derived { source, tree }) = self.index.definition_of(method)
         else {
             return false;

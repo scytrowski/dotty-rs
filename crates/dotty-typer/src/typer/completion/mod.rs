@@ -55,10 +55,10 @@ impl SourceTyper<'_> {
         symbol: SymbolId,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
-        if self.is_structural_factory_parameter(symbol) {
-            // The same parser tree also represents the constructor parameter
-            // and the class accessor. Only their canonical projection belongs
-            // in the source type index. Resolve this copy in the factory scope.
+        if self.is_structural_given_parameter_copy(symbol) {
+            // Constructor and factory binders share syntax with the canonical
+            // class declaration. Project each copy in its own lexical scope
+            // without publishing those types under the shared source tree.
             let canonical = std::mem::take(&mut self.type_index);
             let result = self.complete_symbol_inner_body(symbol, info_journal);
             self.type_index = canonical;
@@ -309,7 +309,7 @@ impl SourceTyper<'_> {
                 TreeKind::ValDef(definition),
             ) => Some(definition.tpt),
             (
-                SymbolKind::Parameter,
+                SymbolKind::Parameter | SymbolKind::Field,
                 TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(_)),
             ) => Some(tree),
             (SymbolKind::Method | SymbolKind::Constructor, TreeKind::DefDef(_)) => None,

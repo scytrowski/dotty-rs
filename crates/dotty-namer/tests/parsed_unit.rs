@@ -634,6 +634,14 @@ fn structural_given_factory_and_its_binders_have_distinct_source_identities() {
             .index
             .symbol_at(named.source, parts.constructor_tree)
             .unwrap();
+        let field = named
+            .index
+            .symbol_at(named.source, parts.value_param_clauses[0][0])
+            .unwrap();
+        assert_eq!(
+            named.store.symbols.get(field).visibility,
+            dotty_core::Visibility::Protected
+        );
         for (tree, kind) in [
             (parts.type_params[0], SymbolKind::TypeParameter),
             (parts.value_param_clauses[0][0], SymbolKind::Parameter),
