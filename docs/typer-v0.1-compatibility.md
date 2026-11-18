@@ -1439,6 +1439,9 @@ contextual or legacy implicit clause can be supplied by monomorphic context
 parameters, local aliases or directly declared lexical members. For supported
 monomorphic values, the nearer matching scope takes precedence. At one level
 a strictly more general matching declared type wins, in line with Scala 3.9.
+Contextual lookup also reads named imports, exclusions, legacy implicit wildcard
+imports, and unbounded or nominally bounded given selectors. Imported
+values retain their receiver in the typed selection.
 Each inserted ordinary typed application
 retains the exact selected parameter reference. Missing and ambiguous evidence
 report the expected type and source site. Explicit `using` keeps its own kind.

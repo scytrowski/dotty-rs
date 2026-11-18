@@ -1404,13 +1404,9 @@ impl SourceTyper<'_> {
             let bound = selector
                 .bound
                 .map(|tree| {
-                    self.type_import_selector_child(
-                        tree,
-                        context.lexical,
-                        tree.index(),
-                        info_journal,
-                        new_mappings,
-                    )
+                    let ty =
+                        self.type_of_tpt_inner_journaled(tree, context.lexical, info_journal)?;
+                    self.reify_type_argument(tree, ty, new_mappings)
                 })
                 .transpose()?;
             selectors.push(dotty_core::ast::ImportSelector {

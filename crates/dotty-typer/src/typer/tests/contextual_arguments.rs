@@ -169,3 +169,114 @@ fn same_level_contextual_ranking_prefers_more_general_result_regardless_of_order
         );
     }
 }
+
+#[test]
+fn imported_values_retain_the_qualifier_and_selector_filter() {
+    for (selector, selected) in [
+        ("given", Some("modern")),
+        ("given Int", Some("modern")),
+        ("modern", Some("modern")),
+        ("{modern as renamed}", Some("modern")),
+        ("{modern as _, given}", None),
+        ("*", None),
+    ] {
+        let text = format!(
+            "object Instances {{ given modern: Int = 7; given flag: Boolean = true }}; class C {{ def need(using n: Int): Int = n; def use: Int = {{ import Instances.{selector}; need }} }}"
+        );
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(&text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+            panic!()
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let result = typer.type_method_definition(definition_tree(&index, method));
+        if let Some(name) = selected {
+            result.unwrap_or_else(|e| panic!("{selector}: {e:?}"));
+            let call = typer.typed_index.get(source, block.expr).unwrap();
+            let TreeKind::Apply(app) = &typer.typed_ast().get(call).kind else {
+                panic!()
+            };
+            let TreeKind::Select(select) = &typer.typed_ast().get(app.args[0]).kind else {
+                panic!("missing imported receiver")
+            };
+            let symbol = reference(&typer, app.args[0]);
+            let receiver = reference(&typer, select.qualifier);
+            assert_eq!(
+                typer
+                    .store
+                    .names
+                    .resolve(typer.store.symbols.get(symbol).name.text()),
+                name
+            );
+            assert_eq!(
+                typer
+                    .store
+                    .names
+                    .resolve(typer.store.symbols.get(receiver).name.text()),
+                "Instances"
+            );
+        } else {
+            assert!(
+                matches!(result, Err(TyperError::MissingContextualArgument { .. })),
+                "{selector}: {result:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn imports_from_distinct_instances_keep_distinct_evidence_paths() {
+    let text = "class Provider { given value: Int = 1 }; class C { def need(using n: Int): Int = n; def ok(p: Provider): Int = { import p.given; need }; def latest(a: Provider, b: Provider): Int = { import a.given; import b.given; need } }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, "ok");
+    typer
+        .type_method_definition(definition_tree(&index, method))
+        .unwrap();
+    let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+        panic!()
+    };
+    let call = typer.typed_index.get(source, block.expr).unwrap();
+    let TreeKind::Apply(app) = &typer.typed_ast().get(call).kind else {
+        panic!()
+    };
+    let TreeKind::Select(selection) = &typer.typed_ast().get(app.args[0]).kind else {
+        panic!()
+    };
+    assert_eq!(
+        reference(&typer, selection.qualifier),
+        method_parameter_symbol(&parsed, &index, source, method, 0)
+    );
+    let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, "latest");
+    typer
+        .type_method_definition(definition_tree(&index, method))
+        .unwrap();
+    let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+        panic!()
+    };
+    let call = typer.typed_index.get(source, block.expr).unwrap();
+    let TreeKind::Apply(app) = &typer.typed_ast().get(call).kind else {
+        panic!()
+    };
+    let TreeKind::Select(select) = &typer.typed_ast().get(app.args[0]).kind else {
+        panic!()
+    };
+    assert_eq!(
+        reference(&typer, select.qualifier),
+        method_parameter_symbol(&parsed, &index, source, method, 1)
+    );
+}
