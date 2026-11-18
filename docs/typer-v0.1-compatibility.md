@@ -6,6 +6,44 @@ snapshots from the source parser/namer/Typer and the TASTy unpickler. They do
 not compare arena IDs, scope IDs, TASTy addresses, source positions, or
 allocation order.
 
+## Contextual arguments in Scala 3.9
+
+At the start of this work, the frontend preserved contextual clause kinds and
+typed a number of explicit `using` applications. It could complete the
+signature of `def read(using n: Int): Int` but a bare `read` could not
+generally supply evidence. The implementation now runs the following sequence
+through ordinary expression and method-definition typing.
+
+| Increment | Observable behavior | Acceptance check |
+| --- | --- | --- |
+| 1. Clause application | Explicit `using`, omitted evidence and positional arguments to a legacy `implicit` clause preserve their distinct behavior. | `read` forwards the caller's parameter, `read(using 9)` overrides an ambiguous environment, and a positional legacy call emits the migration warning. |
+| 2. Candidate discovery | Search parameters, block values, members, imports and nominal companions. Retain the receiver of each selection. | A nested local wins over an outer candidate. Bounded imports filter declarations, and a selected provider retains its type parameters at other use sites. |
+| 3. Conditional evidence | Infer first-order provider type arguments from the goal, including instantiated parent types. Resolve each dependency transactionally before committing the chosen tree. | A `TC[Box[Int]]` goal builds a type application for `Int` and a call with `TC[Int]`. A failed probe can be retried. Tests distinguish missing evidence, ambiguous dependencies and divergence. |
+| 4. Language entry points | The same search serves ordinary context bounds, curried methods, constructors, context functions and the supported library helpers. Overload resolution can use the expected result before evidence search. | Named witnesses have method-owned symbols. The body of a context lambda sees its own parameters. When evidence is absent, `NotGiven` selects the library companion's own `value` symbol. |
+| 5. Separate compilation and execution | The classloader exposes binary providers. The JVM and semantic pickler consume already typed arguments in their supported method subsets. | A Rust-typed client selects a conditional Scala provider and its leaf from binary TASTy. Separate tests execute a Rust-emitted class and compile and execute a Scala client of Rust-emitted TASTy. |
+
+Focused tests live in the typer’s [source search tests](../crates/dotty-typer/src/typer/tests/contextual_arguments.rs)
+and [binary search tests](../crates/dotty-typer/src/typer/tests/contextual_binary.rs).
+The [Scala controls](../crates/dotty-typer/tests/fixtures/contextual-arguments/check.py)
+check compiler-printed applications, negative diagnostics and the provenance
+of the binary evidence. Run them with `JAVA_HOME`, `SCALA39_ROOT` and
+`COURSIER_MAVEN_ROOT` as in the pickler oracle. The output contracts are documented in the
+[JVM backend](jvm-backend.md) and [semantic pickler](tasty-pickler-design.md#contextual-method-parameters).
+
+### Further compatibility increments
+
+The following cases require additional representation or typing work. Each
+row gives a boundary that can be exercised separately against the pinned compiler.
+
+| Increment | Implementation dependency | First acceptance test |
+| --- | --- | --- |
+| Parameterized structural givens | Enter and link the term factory and its implementation class in the source semantic index. Complete the factory with its own type and evidence parameters. | An imported generic structural given produces a term application whose type arguments, receiver and selected method agree with Scala TASTy. |
+| Default contextual parameters | Index default getters and earlier parameter clauses. Reuse that identity after a missing-evidence search, preserving the receiver and argument evaluation order. | Supplied evidence wins over a default. A missing instance invokes the default once, and an ambiguity is diagnosed. |
+| Recursive by-name evidence | Represent the lazy dictionary and backreferences used by a successful recursive search. Include dictionary state in speculative rollback. | A recursive derivation crosses a by-name boundary and shares a dictionary. The strict version diverges and a failed alternative leaves no dictionary. |
+| More implicit scopes and dependent types | Extend the existing type relation, anchor collection and binder substitution to the relevant alias, opaque and dependent forms. | Two distinct stable paths with the same member spelling select their own evidence and preserve their different result types. |
+| Other implicit searches | Integrate the completed argument search with extension selection, contextual extractor clauses and conversion insertion one consumer at a time. | Establish separate positive, shadowing and ambiguity controls for each consumer before expanding classpath coverage. |
+| Wider producer coverage | Add pickler and JVM validation for each newly admitted curried, polymorphic or closure shape. | A standalone Scala client consumes each new TASTy shape and a JDK 21 harness executes each new JVM shape. |
+
 ## Reproduction and oracle
 
 Run the deterministic parity suite with:
@@ -1444,7 +1482,8 @@ parameters, local aliases or directly declared lexical members. For supported
 monomorphic values, the nearer matching scope takes precedence. At one level
 a strictly more general matching declared type wins, in line with Scala 3.9.
 Contextual lookup also reads named imports, exclusions, legacy implicit wildcard
-imports, and unbounded or nominally bounded given selectors. Imported
+imports, and unbounded or nominally bounded given selectors. A bounded selector tests
+the declaration and preserves its polymorphism for later searches. Imported
 values retain their receiver in the typed selection. After lexical search finds
 no candidate, applied types contribute their constructor and argument anchors;
 nominal anchors contribute their linked companion and base classes. Candidates
@@ -1453,9 +1492,11 @@ bounds enter a witness parameter for each source bound. Named and aggregate
 bounds preserve order. The witnesses precede the first term clause whose
 parameter type mentions them, merge into a trailing contextual clause, or
 form a final clause. Conditional providers with inferable
-result-type binders build a typed type application and recursively supply their
+result-type binders can infer through instantiated nominal parents. They build
+a typed type application and recursively supply their
 contextual clauses. Missing or cyclic dependencies can eliminate a candidate;
-ambiguity in a dependency propagates. Search has explicit depth and work limits.
+ambiguity in a dependency propagates unless a strictly better viable provider
+resolves the search. Search has explicit depth and work limits.
 Each inserted ordinary typed application
 retains the exact selected parameter reference. Missing and ambiguous evidence
 report the expected type and source site. The binary Scala library's

@@ -859,11 +859,9 @@ a same-class method. Preserve method and parameter declaration order.
 | Same-class reference or call | Require resolved `TermRefTarget::Symbol`, same-class owner, supported completed signature and canonical `this` prefix; positional arguments match clause arity/order. The observed forward `SELECT second` stays a named `this`-qualified edge. | Overload ambiguity, external/name-designed/unresolved target, unsupported signature or argument mismatch: scoped `UnsupportedConstruct`, `UnsupportedTypeReference` or `InvalidBinding`. |
 | Ordinary declarations | Public named package/class/method, no type params; result and accepted parameter types are canonical Int. | Other types, modifiers, annotations, visibility, polymorphism, fields, extra classes/objects/traits or nested packages: `UnsupportedConstruct` with offending symbol/tree. |
 
-Named arguments and external calls remain deferred, as do multiple clauses,
-contextual clauses and non-Int types even where Scala accepts them. This audit
-freezes the inputs for implementation issues; it does not authorize a serializer
-implementation or production API changes.
-
+This audit covered plain clauses. The contextual method increment below extends
+that subset. Named arguments, external calls, multiple clauses and non-Int
+types remain outside this producer contract.
 
 ### Contextual method parameters
 
