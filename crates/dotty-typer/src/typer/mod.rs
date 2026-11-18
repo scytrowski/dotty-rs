@@ -817,6 +817,12 @@ impl<'a> SourceTyper<'a> {
         self.typed_arena
     }
 
+    /// Transfers the accumulated session arena and this source unit's mappings.
+    /// The caller can retain the index while passing the arena to the next typer.
+    pub fn into_typed_ast_and_index(self) -> (AstArena<Typed>, SourceTypedIndex) {
+        (self.typed_arena, self.typed_index)
+    }
+
     /// Returns this driver's source type cache.
     pub fn source_type_index(&self) -> &SourceTypeIndex {
         &self.type_index
@@ -1506,7 +1512,7 @@ mod tests {
         let mut typer = SourceTyper::new(&first.ast, a, &ai, &mut store, definitions, &packages);
         let context = typer.expression_context_for(f).unwrap();
         let first_root = typer.type_expression(a_rhs, context).unwrap();
-        let output = typer.into_typed_ast();
+        let (output, first_index) = typer.into_typed_ast_and_index();
         let checkpoint = output.checkpoint();
         let mut typer = SourceTyper::new_with_typed_ast(
             &second.ast,
@@ -1527,7 +1533,10 @@ mod tests {
 
         let second_root = typer.type_expression(b_rhs, context).unwrap();
         assert_ne!(first_root, second_root);
-        let output = typer.into_typed_ast();
+        let (output, second_index) = typer.into_typed_ast_and_index();
+        assert_eq!(first_index.get(a, a_rhs), Some(first_root));
+        assert_eq!(second_index.get(b, b_rhs), Some(second_root));
+        assert_eq!(second_index.get(a, a_rhs), None);
         assert_eq!(
             output.get(first_root).position,
             first.ast.get(a_rhs).position

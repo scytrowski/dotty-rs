@@ -108,17 +108,8 @@ fn compile(files: [(SourceId, &str, &str); 2]) -> Vec<GeneratedClass> {
     }
 
     let mut output = AstArena::new();
-    let mut classes = Vec::new();
+    let mut typed_units = Vec::new();
     for unit in &units {
-        let TreeKind::DefDef(method) = &unit.ast.get(unit.method).kind else {
-            panic!("expected method")
-        };
-        let parameters = method
-            .value_param_clauses
-            .iter()
-            .flatten()
-            .map(|&tree| unit.index.symbol_at(unit.source, tree).unwrap())
-            .collect();
         let mut typer = SourceTyper::new_with_typed_ast(
             &unit.ast,
             unit.source,
@@ -129,20 +120,28 @@ fn compile(files: [(SourceId, &str, &str); 2]) -> Vec<GeneratedClass> {
             output,
         );
         let root = typer.type_method_definition(unit.method).unwrap();
-        let TreeKind::DefDef(typed) = &typer.typed_ast().get(root).kind else {
+        let (arena, index) = typer.into_typed_ast_and_index();
+        output = arena;
+        typed_units.push((root, index));
+    }
+
+    let mut classes = Vec::new();
+    for (unit, (root, index)) in units.iter().zip(typed_units) {
+        let TreeKind::DefDef(method) = &unit.ast.get(unit.method).kind else {
+            panic!("expected method")
+        };
+        let parameters = method
+            .value_param_clauses
+            .iter()
+            .flatten()
+            .map(|&tree| unit.index.symbol_at(unit.source, tree).unwrap())
+            .collect();
+        let TreeKind::DefDef(typed) = &output.get(root).kind else {
             panic!("expected typed method")
         };
         let body = typed.rhs.unwrap();
-        assert_eq!(
-            typer
-                .source_typed_index()
-                .get(unit.source, method.rhs.unwrap()),
-            Some(body)
-        );
-        assert_eq!(
-            typer.typed_ast().get(body).position.unwrap().source(),
-            unit.source
-        );
+        assert_eq!(index.get(unit.source, method.rhs.unwrap()), Some(body));
+        assert_eq!(output.get(body).position.unwrap().source(), unit.source);
         classes.push(JvmClassPlan {
             class: unit.class,
             fields: vec![],
@@ -154,7 +153,6 @@ fn compile(files: [(SourceId, &str, &str); 2]) -> Vec<GeneratedClass> {
                 locals: vec![],
             }],
         });
-        output = typer.into_typed_ast();
     }
     let plan = JvmCompilationUnit {
         store: &store,
