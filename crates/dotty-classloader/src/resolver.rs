@@ -3400,6 +3400,16 @@ fn is_nested_class_indexed_in_package(
         }
 
         let enclosing_name = store.names.resolve(enclosing.name.text());
+        // Module class names already carry the JVM separator. A class
+        // declared in Holder$ is indexed in the package as Holder$Inner.
+        let enclosing_name = if enclosing.kind == SymbolKind::ModuleClass {
+            let Some(base) = enclosing_name.strip_suffix('$') else {
+                return false;
+            };
+            base
+        } else {
+            enclosing_name
+        };
         let member_name = store.names.resolve(symbol.name.text());
         if !member_name
             .strip_prefix(enclosing_name)
@@ -14644,17 +14654,13 @@ mod tests {
         assert_eq!(store.symbols.get(identity).owner, Some(module.module_class));
         assert_eq!(store.symbols.get(identity).info, SymbolInfo::Missing);
 
-        let mut loader = crate::loader::ClassLoader::with_definitions(
-            class_path,
-            &mut store,
-            definitions,
-            session,
+        let mut resolver = ClasspathSymbolResolver::new(class_path, definitions, session);
+        assert!(
+            resolver
+                .complete_class(&mut store, identity)
+                .expect("a published module-owned identity should complete through SymbolResolver")
         );
-        let loaded = loader
-            .load_class(&nested_name)
-            .expect("the identity shell should still complete through class loading");
-        drop(loader);
-
+        let loaded = resolver.session.identified[&nested_name];
         assert_eq!(store.symbols.get(identity).owner, Some(module.module_class));
         assert_eq!(
             loaded, identity,
