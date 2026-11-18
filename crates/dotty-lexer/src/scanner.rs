@@ -200,6 +200,16 @@ impl ContextualScanner {
 
     fn insert_match_case_indent_after_current(&mut self) -> bool {
         let index = self.current_index();
+        // A directly following, deeper case opens the same region in both
+        // paths below. Decide it locally before searching enclosing regions.
+        if self
+            .tokens
+            .get(index + 1)
+            .is_some_and(|next| next.kind == TokenKind::Keyword(HardKeyword::Case))
+            && self.insert_indent_after_current()
+        {
+            return true;
+        }
         if self.next_line_starts_same_indent_cases(index)
             || self.next_line_starts_cases_in_enclosing_region(index)
         {

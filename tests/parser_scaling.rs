@@ -25,7 +25,12 @@ fn median_parse(source: &str) -> Duration {
 #[test]
 #[ignore = "manual release-mode parser scaling benchmark"]
 fn repeated_method_bodies() {
-    for body in [r#"s"amount $$5 $x""#, "try a catch { case e => b }"] {
+    for body in [
+        r#"s"amount $$5 $x""#,
+        "try a catch { case e => b }",
+        "a match {\ncase b => b\n}",
+        "a match\n  case b => b",
+    ] {
         for count in [250, 500, 1000, 2000] {
             let mut source = String::from("object A {\n");
             for i in 0..count {
