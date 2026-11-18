@@ -4704,6 +4704,47 @@ fn rejects_unit_parameters_polymorphic_methods_and_curried_results() {
 }
 
 #[test]
+fn curried_contextual_descriptor_rejects_swapped_same_typed_formals() {
+    let mut fixture = SignatureFixture::new(2);
+    let method = fixture.method;
+    let SymbolInfo::Complete(original) = *fixture.store.symbols.info(method) else {
+        panic!()
+    };
+    let Type::Method(flat) = fixture.store.types.get(original).clone() else {
+        panic!()
+    };
+    let tail = fixture.store.types.alloc(Type::Method(MethodType {
+        params: flat.params[1..].to_vec(),
+        result: flat.result,
+        kind: MethodKind::Contextual,
+    }));
+    let outer = fixture.store.types.alloc(Type::Method(MethodType {
+        params: flat.params[..1].to_vec(),
+        result: tail,
+        kind: MethodKind::Plain,
+    }));
+    fixture
+        .store
+        .symbols
+        .set_info(method, SymbolInfo::Complete(outer));
+    fixture
+        .store
+        .symbols
+        .get_mut(fixture.plan.parameters[1])
+        .flags = SymbolFlags::GIVEN;
+    assert_eq!(fixture.descriptor().unwrap().as_str(), "(II)I");
+    fixture.plan.parameters.swap(0, 1);
+    assert_eq!(
+        fixture.descriptor(),
+        Err(JvmCodegenError::UnsupportedMethodParameter {
+            method,
+            index: 0,
+            kind: crate::UnsupportedMethodParameterKind::ClauseBinding
+        })
+    );
+}
+
+#[test]
 fn rejects_alias_class_object_and_type_parameter_values_without_object_fallback() {
     let cases = [
         (SymbolKind::TypeAlias, UnsupportedJvmTypeKind::Alias),

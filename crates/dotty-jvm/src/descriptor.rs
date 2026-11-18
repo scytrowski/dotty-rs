@@ -95,6 +95,25 @@ pub(super) fn descriptor_for(
     descriptor_for_with_references(plan, store, owner, definitions, constructor, None)
 }
 
+/// The supported second clause is erased into the same JVM method. Keeping
+/// the clauses separate here lets the call validator check the intermediate
+/// application against the canonical contextual binder.
+pub(super) fn contextual_tail<'a>(
+    store: &'a SemanticStore,
+    outer: &dotty_core::types::MethodType,
+) -> Option<&'a dotty_core::types::MethodType> {
+    match store.types.try_get(outer.result) {
+        Some(Type::Method(tail))
+            if outer.kind == MethodKind::Plain
+                && tail.kind != MethodKind::Plain
+                && !tail.params.is_empty() =>
+        {
+            Some(tail)
+        }
+        _ => None,
+    }
+}
+
 fn descriptor_for_with_references(
     plan: &JvmMethodPlan,
     store: &SemanticStore,
@@ -182,7 +201,12 @@ fn descriptor_for_with_references(
             kind: UnsupportedMethodShapeKind::NonPlainClause,
         });
     }
-    if method_type.params.len() != plan.parameters.len() {
+    let tail = (!constructor)
+        .then(|| contextual_tail(store, method_type))
+        .flatten();
+    let parameter_count = method_type.params.len() + tail.map_or(0, |tail| tail.params.len());
+    let result_type = tail.map_or(method_type.result, |tail| tail.result);
+    if parameter_count != plan.parameters.len() {
         return Err(JvmCodegenError::UnsupportedMethodShape {
             method: plan.method,
             ty: method_type_id,
@@ -196,7 +220,7 @@ fn descriptor_for_with_references(
     // parameter uses at least one slot, this lower bound also keeps the output
     // allocation bounded before any per-parameter projection work.
     let receiver_slots = usize::from(!method.flags.contains(SymbolFlags::STATIC));
-    let minimum_slots = method_type.params.len().checked_add(receiver_slots).ok_or(
+    let minimum_slots = parameter_count.checked_add(receiver_slots).ok_or(
         JvmCodegenError::TooManyParameterSlots {
             method: plan.method,
             slots: usize::MAX,
@@ -230,11 +254,15 @@ fn descriptor_for_with_references(
         unit: builtin_symbol(store, definitions.unit, PrimitiveBuiltin::Unit)?,
     };
 
-    let mut parameters = Vec::with_capacity(method_type.params.len());
+    let mut parameters = Vec::with_capacity(parameter_count);
     let mut parameter_slots = receiver_slots;
     let mut seen_parameters = HashSet::new();
-    for (index, (method_param, parameter_id)) in
-        method_type.params.iter().zip(&plan.parameters).enumerate()
+    for (index, (method_param, parameter_id)) in method_type
+        .params
+        .iter()
+        .chain(tail.into_iter().flat_map(|tail| &tail.params))
+        .zip(&plan.parameters)
+        .enumerate()
     {
         if !seen_parameters.insert(*parameter_id) {
             return Err(JvmCodegenError::DuplicateParameter {
@@ -277,6 +305,25 @@ fn descriptor_for_with_references(
                 expected: plan.method,
                 actual: parameter.owner,
             });
+        }
+
+        if let Some(tail) = tail {
+            let flags = if index < method_type.params.len() {
+                SymbolFlags::EMPTY
+            } else if tail.kind == MethodKind::Contextual {
+                SymbolFlags::GIVEN
+            } else {
+                SymbolFlags::IMPLICIT
+            };
+            if parameter.name != *method_param.name.as_name()
+                || parameter.flags & (SymbolFlags::GIVEN | SymbolFlags::IMPLICIT) != flags
+            {
+                return Err(JvmCodegenError::UnsupportedMethodParameter {
+                    method: plan.method,
+                    index,
+                    kind: UnsupportedMethodParameterKind::ClauseBinding,
+                });
+            }
         }
 
         let symbol_type = complete_info(store, *parameter_id)?;
@@ -333,7 +380,7 @@ fn descriptor_for_with_references(
     } else {
         match primitive_result_type(
             store,
-            method_type.result,
+            result_type,
             plan.method,
             definitions,
             &primitive_symbols,

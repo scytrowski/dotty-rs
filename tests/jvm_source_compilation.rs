@@ -31660,3 +31660,28 @@ fn contextual_parameters_are_passed_in_verified_instance_calls() {
         );
     }
 }
+
+#[test]
+fn curried_contextual_calls_flatten_into_one_jvm_invocation() {
+    let output = TestOutputDirectory::new("curried-contextual");
+    compile_source(
+        "class Curried { def pick(x: Int)(using n: Int): Int = x - n; def use(x: Int)(using n: Int): Int = pick(x); def supplied(x: Int, y: Int): Int = pick(x)(using y) }",
+        "Curried.scala", output.path(),
+    ).unwrap();
+    if require_jdk_or_skip() {
+        let harness = output.path().join("Run.java");
+        fs::write(&harness, "class Run { public static void main(String[] args) { var c = new Curried(); if (c.use(41, 7) != 34 || c.supplied(19, 3) != 16) throw new AssertionError(); } }").unwrap();
+        let result = Command::new("java")
+            .arg("-Xverify:all")
+            .arg("-classpath")
+            .arg(output.path())
+            .arg(harness)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}

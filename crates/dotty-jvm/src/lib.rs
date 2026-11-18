@@ -195,6 +195,7 @@ pub enum JvmConstructorInvocationKind {
 /// receiver can be that class or its validated direct subclass.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JvmCallTarget {
+    prior_application: Option<TreeId<Typed>>,
     owner_internal_name: String,
     method_name: String,
     descriptor: JvmMethodDescriptor,
@@ -1910,6 +1911,8 @@ pub enum PrimitiveBuiltin {
 /// An unsupported method parameter modifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnsupportedMethodParameterKind {
+    /// The supplied ordered parameter is not the formal of this contextual clause.
+    ClauseBinding,
     Erased,
     Varargs,
 }

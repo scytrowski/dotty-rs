@@ -103,12 +103,30 @@ fn append_current_receiver(
             kind: UnsupportedJvmCallShapeKind::NotApplication,
         });
     };
-    let function = typed_ast.try_get(application.function).ok_or(
+    let source_function = typed_ast.try_get(application.function).ok_or(
         JvmCodegenError::UnsupportedTypedExpression {
             tree: application.function,
             node: "missing tree",
         },
     )?;
+    let function = if let Some(prior) = target.prior_application {
+        match &source_function.kind {
+            TreeKind::Apply(previous) if prior == application.function => typed_ast
+                .try_get(previous.function)
+                .ok_or(JvmCodegenError::UnsupportedTypedExpression {
+                    tree: previous.function,
+                    node: "missing tree",
+                })?,
+            _ => {
+                return Err(JvmCodegenError::UnsupportedJvmCallShape {
+                    tree: call_id,
+                    kind: UnsupportedJvmCallShapeKind::NestedApplication,
+                });
+            }
+        }
+    } else {
+        source_function
+    };
     if let TreeKind::Select(select) = &function.kind {
         let receiver = typed_ast.try_get(select.qualifier).ok_or(
             JvmCodegenError::UnsupportedTypedExpression {
@@ -1118,7 +1136,11 @@ fn source_method_type(
 }
 
 fn source_method_result_type(store: &SemanticStore, method: SymbolId) -> Option<TypeId> {
-    source_method_type(store, method).map(|signature| signature.result)
+    source_method_type(store, method).map(|signature| {
+        crate::descriptor::contextual_tail(store, signature)
+            .unwrap_or(signature)
+            .result
+    })
 }
 
 fn source_method_parameter_type(
@@ -1127,7 +1149,12 @@ fn source_method_parameter_type(
     index: usize,
 ) -> Option<TypeId> {
     source_method_type(store, method)
-        .and_then(|signature| signature.params.get(index))
+        .and_then(|signature| {
+            signature.params.get(index).or_else(|| {
+                let tail = crate::descriptor::contextual_tail(store, signature)?;
+                tail.params.get(index.checked_sub(signature.params.len())?)
+            })
+        })
         .map(|parameter| parameter.ty)
 }
 
@@ -2647,6 +2674,10 @@ fn emit_apply(
         return emit_direct_super_call(context, tree_id, function, &arguments, code, depth);
     }
 
+    if matches!(context.tree(function)?.kind, TreeKind::Apply(_)) {
+        return emit_planned_apply(context, tree_id, function, arguments, code, depth);
+    }
+
     let reference_identity = crate::resolve_reference_identity_operator(
         context.store,
         context.typed_ast,
@@ -2703,6 +2734,17 @@ fn emit_apply(
         );
     }
 
+    emit_planned_apply(context, tree_id, function, arguments, code, depth)
+}
+
+fn emit_planned_apply(
+    context: &mut JvmLoweringContext<'_>,
+    tree_id: TreeId<Typed>,
+    mut function: TreeId<Typed>,
+    mut arguments: Vec<TreeId<Typed>>,
+    code: &mut CodeBuilder,
+    depth: usize,
+) -> Result<Flow, JvmCodegenError> {
     let Some((unit, class, _)) = context.call_context else {
         return Err(JvmCodegenError::JvmCallContextUnavailable {
             tree: tree_id,
@@ -2718,6 +2760,17 @@ fn emit_apply(
         tree_id,
         context.definitions,
     )?;
+    if let Some(prior) = target.prior_application {
+        context.visit(prior, depth + 1)?;
+        let TreeKind::Apply(previous) = &context.tree(prior)?.kind else {
+            return Err(JvmCodegenError::UnsupportedTypedExpression {
+                tree: prior,
+                node: "curried call",
+            });
+        };
+        arguments.splice(0..0, previous.args.iter().copied());
+        function = previous.function;
+    }
     let parameters = target.descriptor().parameters().to_vec();
     if arguments.len() != parameters.len() {
         return Err(JvmCodegenError::JvmCallArityMismatch {

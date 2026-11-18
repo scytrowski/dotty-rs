@@ -1235,3 +1235,11 @@ clause uses the ordinary JVM parameter descriptor and slots. A typed call
 carries its explicit or synthesized argument trees. The source execution
 regression forwards a context parameter and invokes an implicit method with
 explicit `using`, then checks both results under JDK 21 verification.
+
+An ordinary instance method may also take one plain clause followed by a
+nonempty `using` or legacy `implicit` clause. The descriptor lists both
+clauses in source order. At a fully applied call the backend checks the
+intermediate method type, each clause's arity and the ordered parameter
+bindings, then evaluates the receiver and both sets of arguments in order
+and emits one virtual invocation. The JDK test covers explicit and inferred
+evidence with different argument values.
