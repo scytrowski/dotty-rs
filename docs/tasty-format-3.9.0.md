@@ -512,7 +512,8 @@ be preserved.
 Structured definition bodies retain their leading `NameRef`. `DefinitionBody`
 and `DefDefBody` expose it through `name()` and can be re-encoded with
 `encode_self()`, so structural decoding no longer loses the definition name.
-`DefDefBody::header_items` additionally retains the wire order of parameter
+`DefDefBody::header_items` is the editable sequence behind the
+`parameters()` and `clauses()` iterators. It retains the wire order of parameter
 nodes and `EMPTYCLAUSE`/`SPLITCLAUSE` markers, which is required for lossless
 round-trips when clause markers occur between parameter groups.
 

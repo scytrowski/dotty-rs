@@ -176,10 +176,10 @@ pub fn assert_expectations_cover_selected_fixtures(
                     fixture_path.display()
                 )
             });
-            let count = if body.parameters.is_empty() && body.clauses.is_empty() {
+            let count = if body.header_items.is_empty() {
                 0
             } else {
-                body.clauses.len() + 1
+                body.clauses().count() + 1
             };
             *actual_parameter_clause_counts
                 .entry(count.to_string())

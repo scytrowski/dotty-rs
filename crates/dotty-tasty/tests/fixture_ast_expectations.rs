@@ -368,10 +368,11 @@ fn simple_def_fixture_has_identity_signature_and_rhs() {
             let StructuredNode::DefDef(body) = structured else {
                 panic!("identity is not a DefDef");
             };
-            assert_eq!(body.parameters.len(), 1);
-            assert_eq!(body.parameters[0].tag(), PARAM_TAG);
-            assert_eq!(wire_name(file, body.parameters[0].name()), "x");
-            assert!(body.clauses.is_empty());
+            let parameters = body.parameters().collect::<Vec<_>>();
+            assert_eq!(parameters.len(), 1);
+            assert_eq!(parameters[0].tag(), PARAM_TAG);
+            assert_eq!(wire_name(file, parameters[0].name()), "x");
+            assert!(body.clauses().next().is_none());
             let Some(RawTree::Leaf(term)) = body.rhs else {
                 panic!("identity has no direct parameter RHS");
             };
@@ -389,9 +390,10 @@ fn simple_def_fixture_has_add_signature_and_application_rhs() {
             let StructuredNode::DefDef(body) = structured else {
                 panic!("add is not a DefDef");
             };
-            assert_eq!(body.parameters.len(), 2);
-            assert_eq!(wire_name(file, body.parameters[0].name()), "a");
-            assert_eq!(wire_name(file, body.parameters[1].name()), "b");
+            let parameters = body.parameters().collect::<Vec<_>>();
+            assert_eq!(parameters.len(), 2);
+            assert_eq!(wire_name(file, parameters[0].name()), "a");
+            assert_eq!(wire_name(file, parameters[1].name()), "b");
             let Some(RawTree::LengthNode(node)) = body.rhs else {
                 panic!("add has no application RHS");
             };
@@ -488,8 +490,9 @@ fn block_fixture_has_two_local_bindings_and_returns_the_second() {
             let StructuredNode::DefDef(body) = structured else {
                 panic!("compute is not a DefDef");
             };
-            assert_eq!(body.parameters.len(), 1);
-            assert_eq!(wire_name(file, body.parameters[0].name()), "x");
+            let parameters = body.parameters().collect::<Vec<_>>();
+            assert_eq!(parameters.len(), 1);
+            assert_eq!(wire_name(file, parameters[0].name()), "x");
             let Some(RawTree::LengthNode(node)) = body.rhs else {
                 panic!("compute has no block RHS");
             };
@@ -627,13 +630,14 @@ fn bounds_fixture_has_a_type_parameter_with_an_upper_bound() {
             let StructuredNode::DefDef(body) = structured else {
                 panic!("accept is not a DefDef");
             };
-            assert_eq!(body.parameters.len(), 2);
-            assert_eq!(body.parameters[0].tag(), TYPEPARAM_TAG);
-            assert_eq!(wire_name(file, body.parameters[0].name()), "A");
-            assert_eq!(body.parameters[1].tag(), PARAM_TAG);
-            assert_eq!(wire_name(file, body.parameters[1].name()), "value");
+            let parameters = body.parameters().collect::<Vec<_>>();
+            assert_eq!(parameters.len(), 2);
+            assert_eq!(parameters[0].tag(), TYPEPARAM_TAG);
+            assert_eq!(wire_name(file, parameters[0].name()), "A");
+            assert_eq!(parameters[1].tag(), PARAM_TAG);
+            assert_eq!(wire_name(file, parameters[1].name()), "value");
 
-            let type_parameter = body.parameters[0].decode_body().unwrap();
+            let type_parameter = parameters[0].decode_body().unwrap();
             let RawTree::LengthNode(bounds_node) = type_parameter.type_tree else {
                 panic!("type parameter A has no TypeBoundsTpt body");
             };
@@ -750,11 +754,12 @@ fn generic_fixture_has_identity_signature() {
             let StructuredNode::DefDef(body) = structured else {
                 panic!("identity is not a DefDef");
             };
-            assert_eq!(body.parameters.len(), 2);
-            assert_eq!(body.parameters[0].tag(), TYPEPARAM_TAG);
-            assert_eq!(wire_name(file, body.parameters[0].name()), "A");
-            assert_eq!(body.parameters[1].tag(), PARAM_TAG);
-            assert_eq!(wire_name(file, body.parameters[1].name()), "value");
+            let parameters = body.parameters().collect::<Vec<_>>();
+            assert_eq!(parameters.len(), 2);
+            assert_eq!(parameters[0].tag(), TYPEPARAM_TAG);
+            assert_eq!(wire_name(file, parameters[0].name()), "A");
+            assert_eq!(parameters[1].tag(), PARAM_TAG);
+            assert_eq!(wire_name(file, parameters[1].name()), "value");
         });
     });
 }
@@ -767,14 +772,15 @@ fn generic_fixture_has_pair_signature() {
             let StructuredNode::DefDef(body) = structured else {
                 panic!("pair is not a DefDef");
             };
-            assert_eq!(body.parameters.len(), 4);
-            for (parameter, expected) in body.parameters.iter().zip(["A", "B", "a", "b"]) {
+            let parameters = body.parameters().collect::<Vec<_>>();
+            assert_eq!(parameters.len(), 4);
+            for (parameter, expected) in parameters.iter().zip(["A", "B", "a", "b"]) {
                 assert_eq!(wire_name(file, parameter.name()), expected);
             }
-            assert_eq!(body.parameters[0].tag(), TYPEPARAM_TAG);
-            assert_eq!(body.parameters[1].tag(), TYPEPARAM_TAG);
-            assert_eq!(body.parameters[2].tag(), PARAM_TAG);
-            assert_eq!(body.parameters[3].tag(), PARAM_TAG);
+            assert_eq!(parameters[0].tag(), TYPEPARAM_TAG);
+            assert_eq!(parameters[1].tag(), TYPEPARAM_TAG);
+            assert_eq!(parameters[2].tag(), PARAM_TAG);
+            assert_eq!(parameters[3].tag(), PARAM_TAG);
         });
     });
 }
@@ -832,9 +838,10 @@ fn inline_fixture_marks_method_and_parameter_inline() {
                 panic!("twice is not a DefDef");
             };
             assert!(has_modifier(&body.tail, INLINE_TAG));
-            assert_eq!(body.parameters.len(), 1);
-            assert_eq!(wire_name(file, body.parameters[0].name()), "x");
-            let parameter_body = body.parameters[0].decode_body().unwrap();
+            let parameters = body.parameters().collect::<Vec<_>>();
+            assert_eq!(parameters.len(), 1);
+            assert_eq!(wire_name(file, parameters[0].name()), "x");
+            let parameter_body = parameters[0].decode_body().unwrap();
             assert!(has_modifier(&parameter_body.tail, INLINE_TAG));
 
             let Some(RawTree::LengthNode(rhs_node)) = body.rhs else {
@@ -875,15 +882,17 @@ fn opaque_fixture_has_apply_and_extension_methods() {
             let StructuredNode::DefDef(body) = structured else {
                 panic!("apply is not a DefDef");
             };
-            assert_eq!(body.parameters.len(), 1);
-            assert_eq!(wire_name(file, body.parameters[0].name()), "value");
+            let parameters = body.parameters().collect::<Vec<_>>();
+            assert_eq!(parameters.len(), 1);
+            assert_eq!(wire_name(file, parameters[0].name()), "value");
         });
         assert_named_definition(file, &index, DEFDEF_TAG, "value", |structured| {
             let StructuredNode::DefDef(body) = structured else {
                 panic!("value is not a DefDef");
             };
-            assert_eq!(body.parameters.len(), 1);
-            assert_eq!(wire_name(file, body.parameters[0].name()), "id");
+            let parameters = body.parameters().collect::<Vec<_>>();
+            assert_eq!(parameters.len(), 1);
+            assert_eq!(wire_name(file, parameters[0].name()), "id");
             assert!(has_modifier(&body.tail, EXTENSION_TAG));
         });
     });
@@ -936,8 +945,9 @@ fn extension_fixture_marks_squared_as_an_extension_method() {
                 panic!("squared is not a DefDef");
             };
             assert!(has_modifier(&body.tail, EXTENSION_TAG));
-            assert_eq!(body.parameters.len(), 1);
-            assert_eq!(wire_name(file, body.parameters[0].name()), "value");
+            let parameters = body.parameters().collect::<Vec<_>>();
+            assert_eq!(parameters.len(), 1);
+            assert_eq!(wire_name(file, parameters[0].name()), "value");
         });
     });
 }
@@ -956,7 +966,7 @@ fn animal_fixture_is_a_trait_with_sound_method() {
             let StructuredNode::DefDef(body) = structured else {
                 panic!("sound is not a DefDef");
             };
-            assert!(body.parameters.is_empty());
+            assert!(body.parameters().next().is_none());
         });
     });
 }
@@ -998,10 +1008,11 @@ fn inline_match_fixture_marks_classify_and_its_parameter_inline() {
                 panic!("classify is not a DefDef");
             };
             assert!(has_modifier(&body.tail, INLINE_TAG));
-            assert_eq!(body.parameters.len(), 1);
-            assert_eq!(wire_name(file, body.parameters[0].name()), "value");
+            let parameters = body.parameters().collect::<Vec<_>>();
+            assert_eq!(parameters.len(), 1);
+            assert_eq!(wire_name(file, parameters[0].name()), "value");
             assert!(has_modifier(
-                &body.parameters[0].decode_body().unwrap().tail,
+                &parameters[0].decode_body().unwrap().tail,
                 INLINE_TAG
             ));
         });
@@ -1026,7 +1037,7 @@ fn aged_fixture_is_a_trait_with_age_method() {
             let StructuredNode::DefDef(body) = structured else {
                 panic!("age is not a DefDef");
             };
-            assert!(body.parameters.is_empty());
+            assert!(body.parameters().next().is_none());
         });
     });
 }
@@ -1045,7 +1056,7 @@ fn named_fixture_is_a_trait_with_name_method() {
             let StructuredNode::DefDef(body) = structured else {
                 panic!("name is not a DefDef");
             };
-            assert!(body.parameters.is_empty());
+            assert!(body.parameters().next().is_none());
         });
     });
 }
@@ -1058,8 +1069,9 @@ fn intersection_fixture_has_a_named_and_aged_parameter() {
             let StructuredNode::DefDef(body) = structured else {
                 panic!("describe is not a DefDef");
             };
-            assert_eq!(body.parameters.len(), 1);
-            assert_eq!(wire_name(file, body.parameters[0].name()), "value");
+            let parameters = body.parameters().collect::<Vec<_>>();
+            assert_eq!(parameters.len(), 1);
+            assert_eq!(wire_name(file, parameters[0].name()), "value");
         });
     });
 }
@@ -1135,8 +1147,9 @@ fn path_dependent_fixture_gets_a_container_parameter() {
             let StructuredNode::DefDef(body) = structured else {
                 panic!("get is not a DefDef");
             };
-            assert_eq!(body.parameters.len(), 1);
-            assert_eq!(wire_name(file, body.parameters[0].name()), "container");
+            let parameters = body.parameters().collect::<Vec<_>>();
+            assert_eq!(parameters.len(), 1);
+            assert_eq!(wire_name(file, parameters[0].name()), "container");
         });
     });
 }
@@ -1149,8 +1162,9 @@ fn product_match_fixture_first_takes_a_tuple_parameter() {
             let StructuredNode::DefDef(body) = structured else {
                 panic!("first is not a DefDef");
             };
-            assert_eq!(body.parameters.len(), 1);
-            assert_eq!(wire_name(file, body.parameters[0].name()), "value");
+            let parameters = body.parameters().collect::<Vec<_>>();
+            assert_eq!(parameters.len(), 1);
+            assert_eq!(wire_name(file, parameters[0].name()), "value");
         });
     });
 }
@@ -1213,7 +1227,7 @@ fn trait_fixture_is_a_trait_with_name_method() {
             let StructuredNode::DefDef(body) = structured else {
                 panic!("name is not a DefDef");
             };
-            assert!(body.parameters.is_empty());
+            assert!(body.parameters().next().is_none());
         });
     });
 }
@@ -1276,8 +1290,9 @@ fn union_fixture_has_string_or_int_alias_and_value_method() {
             let StructuredNode::DefDef(body) = structured else {
                 panic!("value is not a DefDef");
             };
-            assert_eq!(body.parameters.len(), 1);
-            assert_eq!(wire_name(file, body.parameters[0].name()), "flag");
+            let parameters = body.parameters().collect::<Vec<_>>();
+            assert_eq!(parameters.len(), 1);
+            assert_eq!(wire_name(file, parameters[0].name()), "flag");
         });
     });
 }
@@ -1317,14 +1332,15 @@ fn using_fixture_render_has_value_and_using_parameters() {
             let StructuredNode::DefDef(body) = structured else {
                 panic!("render is not a DefDef");
             };
-            assert_eq!(body.parameters.len(), 3);
-            for (parameter, expected) in body.parameters.iter().zip(["A", "value", "show"]) {
+            let parameters = body.parameters().collect::<Vec<_>>();
+            assert_eq!(parameters.len(), 3);
+            for (parameter, expected) in parameters.iter().zip(["A", "value", "show"]) {
                 assert_eq!(wire_name(file, parameter.name()), expected);
             }
-            assert_eq!(body.parameters[0].tag(), TYPEPARAM_TAG);
-            assert_eq!(body.parameters[1].tag(), PARAM_TAG);
-            assert_eq!(body.parameters[2].tag(), PARAM_TAG);
-            assert!(!body.clauses.is_empty());
+            assert_eq!(parameters[0].tag(), TYPEPARAM_TAG);
+            assert_eq!(parameters[1].tag(), PARAM_TAG);
+            assert_eq!(parameters[2].tag(), PARAM_TAG);
+            assert!(body.clauses().next().is_some());
         });
     });
 }

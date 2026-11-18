@@ -775,7 +775,11 @@ fn rust_two_local_graph(
         .unwrap()
         .decode_defdef_body()
         .expect("decode create signature");
-    assert_eq!(body.parameters.len(), 2, "create retains both Int formals");
+    assert_eq!(
+        body.parameters().count(),
+        2,
+        "create retains both Int formals"
+    );
     let parameter_addresses = index
         .iter_nodes_with_tag(PARAM_TAG)
         .filter(|node| {
@@ -1357,7 +1361,11 @@ fn alias_local_graph_named(
         .unwrap()
         .decode_defdef_body()
         .unwrap();
-    assert_eq!(body.parameters.len(), 2, "create retains both Int formals");
+    assert_eq!(
+        body.parameters().count(),
+        2,
+        "create retains both Int formals"
+    );
     let block = index
         .iter_nodes_with_tag(BLOCK_TAG)
         .find(|node| {

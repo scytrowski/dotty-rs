@@ -461,12 +461,15 @@ fn scala_39_oracle_pins_private_reference_val_tasty_and_jvm_abi() {
         .unwrap()
         .decode_defdef_body()
         .unwrap();
-    assert_eq!(constructor_body.parameters.len(), 1);
-    assert_eq!(constructor_body.parameters[0].tag(), PARAM_TAG);
+    assert_eq!(constructor_body.parameters().count(), 1);
+    assert_eq!(
+        constructor_body.parameters().next().unwrap().tag(),
+        PARAM_TAG
+    );
     assert_eq!(
         owner_tasty
             .names()
-            .render(constructor_body.parameters[0].name())
+            .render(constructor_body.parameters().next().unwrap().name())
             .unwrap(),
         "seed"
     );

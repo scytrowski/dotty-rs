@@ -8,8 +8,8 @@ use dotty_core::{SymbolFlags, SymbolKind};
 use dotty_tasty::tasty::{
     ABSTRACT_TAG, APPLIEDTPT_TAG, APPLIEDTYPE_TAG, ARTIFACT_TAG, AppliedTypeNode, ApplyNode,
     AstError, BYNAMETPT_TAG, CASEACCESSOR_TAG, CONTRAVARIANT_TAG, COVARIANT_TAG, DEFDEF_TAG,
-    DefDefBody, DefinitionBody, DefinitionTail, EMPTYCLAUSE_TAG, FIELDACCESSOR_TAG, FINAL_TAG,
-    IDENTTPT_TAG, IdentNode, LOCAL_TAG, MUTABLE_TAG, NEW_TAG, OBJECT_TAG, PACKAGE_TAG, PRIVATE_TAG,
+    DefinitionBody, DefinitionTail, EMPTYCLAUSE_TAG, FIELDACCESSOR_TAG, FINAL_TAG, IDENTTPT_TAG,
+    IdentNode, LOCAL_TAG, MUTABLE_TAG, NEW_TAG, OBJECT_TAG, PACKAGE_TAG, PRIVATE_TAG,
     PRIVATEQUALIFIED_TAG, PROTECTED_TAG, PROTECTEDQUALIFIED_TAG, ParameterNode, RawName, RawTree,
     Reader, ReferenceNode, RenderedSignedName, SELECTIN_TAG, SHAREDTERM_TAG, SHAREDTYPE_TAG,
     STABLE_TAG, STATIC_TAG, SYNTHETIC_TAG, SelectNode, StandardSection, StructuredNode,
@@ -2978,23 +2978,15 @@ fn decode_members(
                 });
             }
             DEFDEF_TAG => {
-                let StructuredNode::DefDef(DefDefBody {
-                    name,
-                    parameters,
-                    clauses,
-                    return_type,
-                    tail,
-                    ..
-                }) = node.decode_structured()?
-                else {
+                let StructuredNode::DefDef(body) = node.decode_structured()? else {
                     continue;
                 };
-                let Some(method_name) = wire_name(file, name) else {
+                let Some(method_name) = wire_name(file, body.name) else {
                     continue;
                 };
 
-                let type_parameter_addresses = parameters
-                    .iter()
+                let type_parameter_addresses = body
+                    .parameters()
                     .filter(|parameter| matches!(parameter, ParameterNode::TypeParam { .. }))
                     .map(|parameter| {
                         let payload = parameter.payload();
@@ -3016,8 +3008,8 @@ fn decode_members(
                         Some((address, u32::try_from(index).ok()?))
                     })
                     .collect::<HashMap<_, _>>();
-                let type_parameters = parameters
-                    .iter()
+                let type_parameters = body
+                    .parameters()
                     .filter(|parameter| matches!(parameter, ParameterNode::TypeParam { .. }))
                     .map(|parameter| {
                         decode_tasty_type_parameter(
@@ -3034,8 +3026,8 @@ fn decode_members(
                     continue;
                 };
 
-                let mut decoded_parameters = Vec::with_capacity(parameters.len());
-                for parameter in &parameters {
+                let mut decoded_parameters = Vec::new();
+                for parameter in body.parameters() {
                     let ParameterNode::TermParam {
                         name: parameter_name,
                         ..
@@ -3077,7 +3069,7 @@ fn decode_members(
                 } else {
                     decode_tasty_member_type(
                         file,
-                        &return_type,
+                        &body.return_type,
                         package,
                         &type_parameters_by_address,
                         class_type_parameters,
@@ -3085,14 +3077,14 @@ fn decode_members(
                         0,
                     )
                 };
-                let has_term_clause = parameters
-                    .iter()
+                let has_term_clause = body
+                    .parameters()
                     .any(|parameter| matches!(parameter, ParameterNode::TermParam { .. }))
-                    || clauses.contains(&EMPTYCLAUSE_TAG);
+                    || body.clauses().any(|tag| tag == EMPTYCLAUSE_TAG);
 
                 methods.push(DecodedTastyMethod {
                     name: method_name,
-                    flags: decode_method_flags(&tail),
+                    flags: decode_method_flags(&body.tail),
                     type_parameters,
                     parameters: decoded_parameters,
                     has_term_clause,

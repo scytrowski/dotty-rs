@@ -333,7 +333,7 @@ fn create_formal_addresses(tasty_bytes: &[u8]) -> (u32, u32) {
                 .then_some((node.offset as u32, body))
         })
         .expect("PairFactory TASTy declares wrap");
-    assert_eq!(body.parameters.len(), 2);
+    assert_eq!(body.parameters().count(), 2);
     let parameters = index
         .iter_nodes_with_tag(PARAM_TAG)
         .filter(|candidate| {

@@ -1915,7 +1915,10 @@ fn operations_source_preserves_canonical_references_and_runs_from_fresh_scala_cl
         receiver_class.reference,
         first.output.declarations()[0].address
     );
-    assert_eq!(method_declarations[4].2.clauses, [EMPTYCLAUSE_TAG]);
+    assert_eq!(
+        method_declarations[4].2.clauses().collect::<Vec<_>>(),
+        [EMPTYCLAUSE_TAG]
+    );
     assert!(matches!(
         method_declarations[4].2.rhs,
         Some(RawTree::Leaf(SimpleTerm {

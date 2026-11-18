@@ -211,8 +211,8 @@ fn scala_39_factory_oracle_pins_descriptors_constructor_wire_and_sidecar_links()
     );
     let (create_address, create) = method(&factory_tasty, "create");
     assert_eq!(create_address, 30, "pinned factory method address");
-    assert_eq!(create.parameters.len(), 1);
-    let seed = &create.parameters[0];
+    assert_eq!(create.parameters().count(), 1);
+    let seed = create.parameters().next().unwrap();
     assert_eq!(seed.tag(), PARAM_TAG);
     assert_eq!(factory_tasty.names().render(seed.name()).unwrap(), "seed");
     let seed_address = parameter_address(&address_index, create_address);
@@ -289,8 +289,8 @@ fn scala_39_factory_oracle_pins_descriptors_constructor_wire_and_sidecar_links()
     assert_eq!(identity_body.return_type.ast_refs()[0].address, 38);
     assert_eq!(counter_formal_address, 33);
     assert_counter_type_ref(&identity_body.return_type, &identity_index, &identity_tasty);
-    assert_eq!(identity_body.parameters.len(), 1);
-    let counter_formal = &identity_body.parameters[0];
+    assert_eq!(identity_body.parameters().count(), 1);
+    let counter_formal = identity_body.parameters().next().unwrap();
     assert_eq!(counter_formal.tag(), PARAM_TAG);
     assert_eq!(
         identity_tasty

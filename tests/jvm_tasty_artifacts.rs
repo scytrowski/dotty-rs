@@ -7630,10 +7630,9 @@ fn dual_reference_forwarding_emits_six_linked_artifacts_with_ordered_formal_load
         );
         if index == 2 {
             let (wrap_address, wrap) = tasty_method_body(&tasty, "wrap");
-            assert_eq!(wrap.parameters.len(), 2);
+            assert_eq!(wrap.parameters().count(), 2);
             assert_eq!(
-                wrap.parameters
-                    .iter()
+                wrap.parameters()
                     .map(|parameter| tasty.names().render(parameter.name()).unwrap())
                     .collect::<Vec<_>>(),
                 ["first", "second"]
@@ -8155,11 +8154,10 @@ fn mixed_constructor_pair_emits_both_original_argument_orientations() {
             classes.push(class);
             if index == 2 {
                 let (method_address, method) = tasty_method_body(&tasty, method_name);
-                assert_eq!(method.parameters.len(), 2);
+                assert_eq!(method.parameters().count(), 2);
                 assert_eq!(
                     method
-                        .parameters
-                        .iter()
+                        .parameters()
                         .map(|parameter| tasty.names().render(parameter.name()).unwrap())
                         .collect::<Vec<_>>(),
                     ["existing", "seed"]

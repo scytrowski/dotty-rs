@@ -733,13 +733,8 @@ pub enum DefDefHeaderItem<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefDefBody<'a> {
     pub name: u32,
-    pub parameters: Vec<ParameterNode<'a>>,
-    pub clauses: Vec<u8>,
-    /// Original wire order of parameters and clause markers.
-    ///
-    /// `parameters` and `clauses` remain available as convenient grouped
-    /// views. This sequence is used by the encoder when the body came from a
-    /// decoder, because TASTy permits clause markers between parameter nodes.
+    /// Parameters and clause markers in wire order. Edit this sequence to
+    /// change the encoded header.
     pub header_items: Vec<DefDefHeaderItem<'a>>,
     pub return_type: RawTree<'a>,
     pub rhs: Option<RawTree<'a>>,
@@ -1996,8 +1991,8 @@ fn collect_parameter_body_nodes<'a>(
     )
 }
 
-fn collect_parameters_nodes<'a>(
-    parameters: &[ParameterNode<'a>],
+fn collect_parameters_nodes<'a: 'p, 'p>(
+    parameters: impl IntoIterator<Item = &'p ParameterNode<'a>>,
     source: &[u8],
     base: usize,
     context: &AstIndexContext,
@@ -2142,7 +2137,7 @@ fn collect_structured_nodes<'a>(
         }
         StructuredNode::ValDef(body) | StructuredNode::TypeDef(body) => definition_body!(body),
         StructuredNode::DefDef(body) => {
-            parameters!(&body.parameters);
+            parameters!(body.parameters());
             tree!(&body.return_type);
             if let Some(rhs) = &body.rhs {
                 tree!(rhs);
@@ -2614,8 +2609,6 @@ impl<'a> RawNode<'a> {
 
         let mut reader = self.reader();
         let name = reader.read_nat()?;
-        let mut parameters = Vec::new();
-        let mut clauses = Vec::new();
         let mut header_items = Vec::new();
 
         while !reader.is_at_end() {
@@ -2625,13 +2618,11 @@ impl<'a> RawNode<'a> {
                         RawTree::LengthNode(raw) => raw.decode_parameter()?,
                         _ => unreachable!("parameter tags are category-five tags"),
                     };
-                    header_items.push(DefDefHeaderItem::Parameter(parameter.clone()));
-                    parameters.push(parameter);
+                    header_items.push(DefDefHeaderItem::Parameter(parameter));
                 }
                 EMPTYCLAUSE_TAG | SPLITCLAUSE_TAG => {
                     let clause = reader.read_u8()?;
                     header_items.push(DefDefHeaderItem::Clause(clause));
-                    clauses.push(clause);
                 }
                 _ => break,
             }
@@ -2647,8 +2638,6 @@ impl<'a> RawNode<'a> {
 
         Ok(DefDefBody {
             name,
-            parameters,
-            clauses,
             header_items,
             return_type,
             rhs,
@@ -4176,6 +4165,22 @@ impl<'a> DefinitionBody<'a> {
 }
 
 impl<'a> DefDefBody<'a> {
+    /// Iterates over type and term parameters in declaration order.
+    pub fn parameters(&self) -> impl DoubleEndedIterator<Item = &ParameterNode<'a>> {
+        self.header_items.iter().filter_map(|item| match item {
+            DefDefHeaderItem::Parameter(parameter) => Some(parameter),
+            DefDefHeaderItem::Clause(_) => None,
+        })
+    }
+
+    /// Iterates over the explicit clause markers in wire order.
+    pub fn clauses(&self) -> impl Iterator<Item = u8> + '_ {
+        self.header_items.iter().filter_map(|item| match item {
+            DefDefHeaderItem::Clause(tag) => Some(*tag),
+            DefDefHeaderItem::Parameter(_) => None,
+        })
+    }
+
     pub fn name(&self) -> u32 {
         self.name
     }
@@ -4187,19 +4192,10 @@ impl<'a> DefDefBody<'a> {
     pub fn encode(&self, name: u32, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(DEFDEF_TAG, writer, |payload| {
             payload.write_nat(name);
-            if self.header_items.is_empty() {
-                for parameter in &self.parameters {
-                    parameter.encode(payload)?;
-                }
-                for clause in &self.clauses {
-                    encode_defdef_clause(*clause, payload)?;
-                }
-            } else {
-                for item in &self.header_items {
-                    match item {
-                        DefDefHeaderItem::Parameter(parameter) => parameter.encode(payload)?,
-                        DefDefHeaderItem::Clause(clause) => encode_defdef_clause(*clause, payload)?,
-                    }
+            for item in &self.header_items {
+                match item {
+                    DefDefHeaderItem::Parameter(parameter) => parameter.encode(payload)?,
+                    DefDefHeaderItem::Clause(clause) => encode_defdef_clause(*clause, payload)?,
                 }
             }
             self.return_type.encode(payload)?;
@@ -5220,8 +5216,8 @@ fn collect_parameter_refs<'a>(
     Ok(())
 }
 
-fn collect_parameters_refs<'a>(
-    parameters: &[ParameterNode<'a>],
+fn collect_parameters_refs<'a: 'p, 'p>(
+    parameters: impl IntoIterator<Item = &'p ParameterNode<'a>>,
     items: &mut Vec<ReferenceItem<'a>>,
 ) -> Result<(), AstError> {
     for parameter in parameters {
@@ -5258,7 +5254,7 @@ fn collect_structured_refs<'a>(
         }
         StructuredNode::DefDef(body) => {
             items.push(ReferenceItem::Reference(WireReference::Name(body.name())));
-            collect_parameters_refs(&body.parameters, items)?;
+            collect_parameters_refs(body.parameters(), items)?;
             collect_tree_refs(&body.return_type, items);
             if let Some(rhs) = &body.rhs {
                 collect_tree_refs(rhs, items);
@@ -6725,8 +6721,8 @@ mod tests {
         let body = nodes.get(0).unwrap().decode_defdef_body().unwrap();
 
         assert_eq!(body.name(), 1);
-        assert_eq!(body.parameters.len(), 1);
-        assert_eq!(body.clauses, vec![45]);
+        assert_eq!(body.parameters().count(), 1);
+        assert_eq!(body.clauses().collect::<Vec<_>>(), vec![45]);
         assert!(matches!(body.return_type, RawTree::Leaf(_)));
         assert!(body.rhs.is_none());
         assert_eq!(body.tail, vec![DefinitionTail::Modifier(17)]);
@@ -6760,16 +6756,16 @@ mod tests {
         let nodes = RawNodes::decode(&mut reader).unwrap();
         let body = nodes.get(0).unwrap().decode_defdef_body().unwrap();
 
-        assert_eq!(body.parameters.len(), 2);
+        assert_eq!(body.parameters().count(), 2);
         assert!(matches!(
-            body.parameters[0],
+            body.parameters().next().unwrap(),
             ParameterNode::TypeParam { .. }
         ));
         assert!(matches!(
-            body.parameters[1],
+            body.parameters().nth(1).unwrap(),
             ParameterNode::TermParam { .. }
         ));
-        assert_eq!(body.clauses, vec![SPLITCLAUSE_TAG]);
+        assert_eq!(body.clauses().collect::<Vec<_>>(), vec![SPLITCLAUSE_TAG]);
         assert!(matches!(
             body.header_items.as_slice(),
             [
@@ -6783,6 +6779,61 @@ mod tests {
         assert!(
             matches!(body.tail.as_slice(), [DefinitionTail::Annotation(annotation)] if annotation.tag == 173)
         );
+    }
+
+    #[test]
+    fn defdef_header_edits_drive_parameter_views_and_encoding() {
+        let node = RawNode {
+            tag: DEFDEF_TAG,
+            offset: 0,
+            payload: &[
+                0x80,
+                PARAM_TAG,
+                0x82,
+                0x81,
+                2,
+                SPLITCLAUSE_TAG,
+                PARAM_TAG,
+                0x82,
+                0x82,
+                2,
+                2,
+            ],
+        };
+        let mut body = node.decode_defdef_body().unwrap();
+        body.header_items.swap(0, 2);
+        assert_eq!(
+            body.parameters()
+                .map(ParameterNode::name)
+                .collect::<Vec<_>>(),
+            [2, 1]
+        );
+        let mut writer = Writer::new();
+        body.encode_self(&mut writer).unwrap();
+        let nodes = RawNodes::decode(&mut Reader::new(writer.as_slice())).unwrap();
+        assert_eq!(
+            nodes.get(0).unwrap().payload,
+            &[
+                0x80,
+                PARAM_TAG,
+                0x82,
+                0x82,
+                2,
+                SPLITCLAUSE_TAG,
+                PARAM_TAG,
+                0x82,
+                0x81,
+                2,
+                2
+            ]
+        );
+        body.header_items.clear();
+        assert_eq!(body.parameters().count(), 0);
+        assert_eq!(body.clauses().count(), 0);
+        let mut writer = Writer::new();
+        body.encode_self(&mut writer).unwrap();
+        let nodes = RawNodes::decode(&mut Reader::new(writer.as_slice())).unwrap();
+        assert_eq!(nodes.get(0).unwrap().payload, &[0x80, 2]);
     }
 
     #[test]

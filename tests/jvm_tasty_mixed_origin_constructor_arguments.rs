@@ -258,16 +258,14 @@ fn assert_mixed_wire(source: &str, source_id: u32, method: &str, expected: [&str
     let tasty = tasty(bytes);
     let (method_address, body) = method_body(&tasty, method);
     assert_eq!(
-        body.parameters
-            .iter()
+        body.parameters()
             .map(|parameter| tasty.names().render(parameter.name()).unwrap())
             .collect::<Vec<_>>(),
         ["existing", "seed"]
     );
-    assert_eq!(body.parameters.len(), 2);
+    assert_eq!(body.parameters().count(), 2);
     assert_eq!(
-        body.parameters
-            .iter()
+        body.parameters()
             .map(|parameter| {
                 parameter
                     .decode_body()
