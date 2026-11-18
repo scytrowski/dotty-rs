@@ -318,6 +318,109 @@ fn constructor_parameter_is_not_visible_in_an_unrelated_class() {
 }
 
 #[test]
+fn plain_constructor_parameter_cannot_be_selected_on_another_instance() {
+    let text = "class C(xs: Int) { def read(other: C): Int = other.xs }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let method = method_tree(&parsed, &store, "read");
+    let selection = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::Select(selection) if store.names.resolve(selection.name.text()) == "xs" => {
+                Some(tree)
+            }
+            _ => None,
+        })
+        .expect("other-instance constructor-parameter selection");
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+
+    let error = typer
+        .type_method_definition(method)
+        .expect_err("a plain constructor parameter is private to its owning instance");
+    assert!(
+        matches!(
+            error,
+            TyperError::MemberNotFound { tree_index, .. }
+                if tree_index == selection.index()
+        ),
+        "other-instance selection should fail as an unavailable member, got {error:?}"
+    );
+    assert_eq!(typer.source_typed_index().get(source, method), None);
+}
+
+#[test]
+fn constructor_parameter_is_not_visible_without_an_owning_class_context() {
+    let text = "object O { def read: Int = xs }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let method = method_tree(&parsed, &store, "read");
+    let ident = ident_in_method(&parsed, method, "xs", &store);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+
+    assert!(matches!(
+        typer.type_method_definition(method),
+        Err(TyperError::TermNameNotFound { tree_index, .. }) if tree_index == ident.index()
+    ));
+    assert_eq!(typer.source_typed_index().get(source, method), None);
+    assert_eq!(typer.source_typed_index().get(source, ident), None);
+}
+
+#[test]
+fn constructor_parameter_term_name_does_not_resolve_in_type_namespace() {
+    let text = "class C(T: Int) { def value: Int = T; def typeValue: T = ??? }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let class = class_symbol(&parsed, &store, &index, source, "C");
+    let parameter = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::ValDef(definition)
+                if store.names.resolve(definition.name.as_name().text()) == "T"
+                    && index.symbol_at(source, tree).is_some_and(|symbol| {
+                        store.symbols.get(symbol).owner == Some(class)
+                            && store.symbols.get(symbol).kind == SymbolKind::Parameter
+                    }) =>
+            {
+                index.symbol_at(source, tree)
+            }
+            _ => None,
+        })
+        .expect("plain constructor parameter source symbol");
+    let value = method_tree(&parsed, &store, "value");
+    let value_ident = ident_in_method(&parsed, value, "T", &store);
+    let type_value = method_tree(&parsed, &store, "typeValue");
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+
+    typer.type_method_definition(value).unwrap();
+    assert_eq!(typed_ident_target(&typer, source, value_ident), parameter);
+    assert!(matches!(
+        typer.type_method_definition(type_value),
+        Err(TyperError::TypeNameNotFound { .. })
+    ));
+    assert_eq!(typer.source_typed_index().get(source, type_value), None);
+}
+
+#[test]
 fn nested_class_can_access_lexically_enclosing_constructor_parameter() {
     let text = "class Outer(xs: Int) { class Inner { def read: Int = xs } }";
     let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
