@@ -2252,6 +2252,38 @@ impl<'a> EncodingContext<'a> {
         self.type_order.push((ty, label));
         Ok(label)
     }
+    pub(crate) fn scala_named_type(&mut self, name: &str) -> Result<AstLabel, PickleError> {
+        self.run(|c| {
+            let package = c.utf8("scala")?;
+            let prefix = c.leaf(TERMREFPKG_TAG, TermValue::NameRef(package))?;
+            let name = c.utf8(name)?;
+            c.wire
+                .push(AstNode::NatAst {
+                    tag: TYPEREF_TAG,
+                    value: AstOperand::Nat(name),
+                    child: prefix,
+                })
+                .map_err(construction)
+        })
+    }
+
+    pub(crate) fn method_type_parameter_syntax(
+        &mut self,
+        parameter: SymbolId,
+    ) -> Result<AstLabel, PickleError> {
+        self.run(|c| {
+            let name = c.intern_name(c.symbol(parameter)?.name)?;
+            let child = c.local_inner(parameter, None, 0)?;
+            c.wire
+                .push(AstNode::NatAst {
+                    tag: IDENTTPT_TAG,
+                    value: AstOperand::Nat(name),
+                    child,
+                })
+                .map_err(construction)
+        })
+    }
+
     /// An explicit Int result syntax wrapper, distinct from its semantic type.
     pub fn int_type_syntax(&mut self) -> Result<AstLabel, PickleError> {
         self.run(|c| {

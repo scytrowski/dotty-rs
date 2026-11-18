@@ -883,3 +883,9 @@ at least one is contextual or legacy implicit. Each nonempty term clause
 followed by another nonempty term clause emits a `SPLITCLAUSE`. An empty
 clause emits `EMPTYCLAUSE`. A separately compiled Scala 3.9 client exercises
 both inferred and explicit evidence for these method declarations.
+
+A method of the form `def evidence[A](using a: A): A = a` can also be
+exported. The type parameter has the default `Nothing` and `Any` bounds.
+Both type references point to the emitted type parameter, and the body
+refers directly to the evidence parameter owned by the same method.
+The Scala client checks independent `Int` and reference instantiations.

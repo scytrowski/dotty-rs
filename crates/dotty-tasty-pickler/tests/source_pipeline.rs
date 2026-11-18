@@ -1241,9 +1241,14 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
             definitions.int
         };
         let body = definition.rhs.map(|rhs| {
-            typer
-                .type_expression_expected(rhs, context, expected_result)
-                .unwrap()
+            if !definition.type_params.is_empty() {
+                typer.type_method_definition(tree).unwrap();
+                typer.source_typed_index().get(source, rhs).unwrap()
+            } else {
+                typer
+                    .type_expression_expected(rhs, context, expected_result)
+                    .unwrap()
+            }
         });
         if let (Some(rhs), Some(body)) = (definition.rhs, body) {
             assert_eq!(typer.source_typed_index().get(source, rhs), Some(body));
@@ -3405,6 +3410,65 @@ fn curried_contextual_parameters_preserve_clause_boundaries_in_scala() {
         output.bytes(),
         "val c = new example.Curried; given Int = 42; assert(c.pick(1) == 42); assert(c.pick(1)(using 7) == 7); assert(c.empty() == 42)",
     );
+}
+
+#[test]
+fn polymorphic_evidence_result_preserves_its_own_type_binder() {
+    use dotty_tasty::tasty::*;
+    let source = "package example; class Generic { def evidence[A](using a: A): A = a }";
+    let (_, output) = source_outputs_named(source, "Generic.scala", |_| {}).unwrap();
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let index = file.ast_address_index().unwrap();
+    let method = index
+        .iter()
+        .filter(|node| node.tag == DEFDEF_TAG)
+        .filter_map(|node| node.decode_defdef_body().ok())
+        .find(|d| file.render_name(d.name).unwrap() == "evidence")
+        .unwrap();
+    let [tparam, evidence] = method.parameters.as_slice() else {
+        panic!("expected type and term parameter")
+    };
+    assert_eq!(file.render_name(tparam.name()).unwrap(), "A");
+    assert_eq!(
+        evidence.decode_body().unwrap().tail,
+        [DefinitionTail::Modifier(GIVEN_TAG)]
+    );
+    verify_contextual_client(
+        "Generic",
+        output.bytes(),
+        "val c = new example.Generic; given String = new String(\"evidence\"); assert(c.evidence[String] eq summon[String]); assert(c.evidence[Int](using 42) == 42)",
+    );
+}
+
+#[test]
+fn generic_evidence_output_rejects_another_methods_evidence_symbol() {
+    let source = "package example; class Generic { def first[A](using x: A): A = x; def second[A](using x: A): A = x }";
+    let error = source_outputs_named_with_tree_edits(
+        source,
+        "Generic.scala",
+        ValidationLimits::default(),
+        |untyped, typed, bindings, store| {
+            let rhs = |name: &str| {
+                let tree = untyped
+                    .iter()
+                    .find_map(|(_, node)| match &node.kind {
+                        TreeKind::DefDef(def)
+                            if store.names.resolve(def.name.as_name().text()) == name =>
+                        {
+                            def.rhs
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                bindings.get(SourceId::from_index(7), tree).unwrap()
+            };
+            let foreign = typed.get(rhs("second")).ty;
+            typed.get_mut(rhs("first")).ty = foreign;
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(error, PickleError::Owner { .. }), "{error:?}");
 }
 
 fn verify_contextual_client(class: &str, bytes: &[u8], main_body: &str) {

@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 mod class_state;
+mod contextual_poly;
 mod expression_validation;
 mod source_binding;
 
@@ -2303,7 +2304,7 @@ impl<'a> Validator<'_, 'a> {
         }
         self.metadata(&definition.metadata, method.symbol)?;
         if !definition.type_params.is_empty() {
-            return Err(self.unsupported(UnsupportedFeature::TypeParameters, Some(method.symbol)));
+            return self.polymorphic_evidence_method(definition, method, signature_only);
         }
         self.parameters(method.symbol, definition, &method.parameter_clauses)?;
         let mutable_rebinding_method = self
