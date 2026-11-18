@@ -12,3 +12,11 @@ class Calls:
     given one: Int = 1
     given two: Int = 2
     need(using 9)
+
+class Base
+class Child extends Base
+class Priority:
+  given broad: Base = new Base
+  given narrow: Child = new Child
+  def need(using x: Base): Base = x
+  def read: Base = need

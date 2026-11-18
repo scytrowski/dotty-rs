@@ -89,63 +89,136 @@ impl SourceTyper<'_> {
         tree_index: u32,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<SymbolId, TyperError> {
-        let mut candidates = Vec::new();
         self.validate_expression_scope_stack(context.local_scopes)?;
+        let mut scopes = Vec::new();
         let mut stack = context.local_scopes;
         while let Some(id) = stack {
             let frame = &self.expression_scopes[id.index()];
+            scopes.push(frame.scope);
             stack = frame.parent;
-            let mut symbols: Vec<_> = self
-                .store
-                .scopes
-                .get(frame.scope)
-                .entered_symbols()
-                .filter(|symbol| {
-                    let entry = self.store.symbols.get(*symbol);
-                    matches!(entry.kind, SymbolKind::Parameter | SymbolKind::Local)
-                        && !self.initializing_local_symbols.contains(symbol)
-                        && (entry.flags.contains(SymbolFlags::GIVEN)
-                            || entry.flags.contains(SymbolFlags::IMPLICIT))
-                })
-                .collect();
-            symbols.sort_by_key(|symbol| {
-                let entry = self.store.symbols.get(*symbol);
-                (
-                    entry.position.map(|p| p.span().range().start()),
-                    self.store.names.resolve(entry.name.text()),
-                )
-            });
-            symbols.dedup();
-            for symbol in symbols {
-                let actual = self.completed_expression_symbol_info(symbol, journal)?;
-                if self.conforms(actual, expected).map_err(|error| {
-                    TyperError::ExpectedExpressionConformanceUnsupported {
-                        source: self.source,
-                        tree_index,
-                        actual,
-                        expected,
-                        error: Box::new(error),
-                    }
-                })? {
-                    candidates.push(symbol);
-                }
-            }
-            if !candidates.is_empty() {
-                break;
+        }
+        for id in self.source_context_chain(context.lexical, tree_index)? {
+            let scope = self.index.source_context(id).lexical_scope;
+            if !scopes.contains(&scope) {
+                scopes.push(scope);
             }
         }
-        match candidates.as_slice() {
-            [symbol] => Ok(*symbol),
-            [] => Err(TyperError::MissingContextualArgument {
+        for scope in scopes {
+            let symbols = self.contextual_symbols(scope);
+            let mut candidates = Vec::new();
+            for symbol in symbols {
+                let entry = self.store.symbols.get(symbol);
+                if self.initializing_local_symbols.contains(&symbol) {
+                    continue;
+                }
+                if !matches!(
+                    entry.kind,
+                    SymbolKind::Field
+                        | SymbolKind::Parameter
+                        | SymbolKind::Local
+                        | SymbolKind::Value
+                ) {
+                    return Err(TyperError::UsingApplicationDeferred {
+                        source: self.source,
+                        tree_index,
+                    });
+                }
+                let reference =
+                    self.expression_type_of_symbol(symbol, context.owner, tree_index, journal)?;
+                let actual = self.widen_expression_type_journaled(reference, journal, 0)?;
+                if self.contextual_conforms(actual, expected, tree_index, journal)? {
+                    candidates.push((symbol, actual));
+                }
+            }
+            if let Some(winner) =
+                self.choose_contextual_candidate(&candidates, expected, tree_index, journal)?
+            {
+                return Ok(winner);
+            }
+        }
+        Err(TyperError::MissingContextualArgument {
+            source: self.source,
+            tree_index,
+            expected,
+        })
+    }
+
+    fn contextual_symbols(&self, scope: ScopeId) -> Vec<SymbolId> {
+        let mut symbols: Vec<_> = self
+            .store
+            .scopes
+            .get(scope)
+            .entered_symbols()
+            .filter(|symbol| {
+                let entry = self.store.symbols.get(*symbol);
+                entry.name.is_term()
+                    && (entry.flags.contains(SymbolFlags::GIVEN)
+                        || entry.flags.contains(SymbolFlags::IMPLICIT))
+            })
+            .collect();
+        symbols.sort_by_key(|symbol| {
+            let entry = self.store.symbols.get(*symbol);
+            (
+                entry.position.map(|p| p.span().range().start()),
+                self.store.names.resolve(entry.name.text()),
+            )
+        });
+        symbols.dedup();
+        symbols
+    }
+
+    fn contextual_conforms(
+        &mut self,
+        actual: TypeId,
+        expected: TypeId,
+        tree_index: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<bool, TyperError> {
+        let mut prepared = HashSet::new();
+        self.complete_relation_type(actual, journal, &mut prepared, 0)?;
+        self.complete_relation_type(expected, journal, &mut prepared, 0)?;
+        self.conforms(actual, expected).map_err(|error| {
+            TyperError::ExpectedExpressionConformanceUnsupported {
                 source: self.source,
                 tree_index,
+                actual,
                 expected,
-            }),
+                error: Box::new(error),
+            }
+        })
+    }
+
+    fn choose_contextual_candidate(
+        &mut self,
+        candidates: &[(SymbolId, TypeId)],
+        expected: TypeId,
+        tree_index: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Option<SymbolId>, TyperError> {
+        let mut maxima = Vec::new();
+        for &(symbol, actual) in candidates {
+            let mut dominated = false;
+            for &(other, rival) in candidates {
+                if other != symbol
+                    && self.contextual_conforms(actual, rival, tree_index, journal)?
+                    && !self.contextual_conforms(rival, actual, tree_index, journal)?
+                {
+                    dominated = true;
+                    break;
+                }
+            }
+            if !dominated {
+                maxima.push(symbol);
+            }
+        }
+        match maxima.as_slice() {
+            [] => Ok(None),
+            [winner] => Ok(Some(*winner)),
             _ => Err(TyperError::AmbiguousContextualArgument {
                 source: self.source,
                 tree_index,
                 expected,
-                candidates,
+                candidates: maxima,
             }),
         }
     }

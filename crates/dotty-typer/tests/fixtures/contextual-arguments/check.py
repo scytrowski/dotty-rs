@@ -17,6 +17,7 @@ def main():
                 "def forward(using n: Int): Int = this.need(n)",
                 "def explicit(using n: Int): Int = this.need(using n)",
                 "this.f(1)(instance)", "this.legacy(9)", "this.need(using 9)",
+                "def read: Base = this.need(this.broad)",
                 "Implicit parameters should be provided with a `using` clause",
             )),
             ("Invalid.scala", 1, (

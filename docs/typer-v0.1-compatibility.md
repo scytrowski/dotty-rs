@@ -1436,7 +1436,9 @@ and matching applied-type constraints also participate in overload selection.
 Curried plain-then-contextual calls continue from the exact result callable of
 the first clause, including after generic inference. At a value use, a remaining
 contextual or legacy implicit clause can be supplied by monomorphic context
-parameters or named contextual values in the enclosing expression scopes.
+parameters, local aliases or directly declared lexical members. For supported
+monomorphic values, the nearer matching scope takes precedence. At one level
+a strictly more general matching declared type wins, in line with Scala 3.9.
 Each inserted ordinary typed application
 retains the exact selected parameter reference. Missing and ambiguous evidence
 report the expected type and source site. Explicit `using` keeps its own kind.

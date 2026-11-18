@@ -130,3 +130,42 @@ fn nested_local_evidence_is_applied_in_clause_and_parameter_order() {
         TreeKind::Apply(_)
     ));
 }
+
+#[test]
+fn same_level_contextual_ranking_prefers_more_general_result_regardless_of_order() {
+    for entries in [
+        "given broad: Base = new Base; given narrow: Child = new Child",
+        "given narrow: Child = new Child; given broad: Base = new Base",
+    ] {
+        let text = format!(
+            "class Base; class Child extends Base; class C {{ {entries}; def need(using b: Base): Base = b; def call: Base = need }}"
+        );
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(&text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "call");
+        let (broad, _, _) = val_definition_and_rhs(&parsed, &store, &index, source, "broad");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        typer
+            .type_method_definition(definition_tree(&index, method))
+            .unwrap();
+        let rhs = typer.source_typed_index().get(source, rhs).unwrap();
+        let TreeKind::Apply(app) = &typer.typed_ast().get(rhs).kind else {
+            panic!()
+        };
+        assert_eq!(reference(&typer, app.args[0]), broad);
+        let Type::TermRef { prefix, .. } =
+            typer.store.types.get(typer.typed_ast().get(app.args[0]).ty)
+        else {
+            panic!()
+        };
+        assert!(
+            matches!(typer.store.types.get(*prefix), Type::ThisType { class } if Some(*class) == typer.store.symbols.get(method).owner)
+        );
+    }
+}
