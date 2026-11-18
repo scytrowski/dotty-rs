@@ -1,7 +1,8 @@
-//! Value adaptation through the canonical scala.Conversion type.
+//! Value adaptation through scala.Conversion instances and unary implicit methods.
 
 use super::*;
 use crate::typer::application::ApplicationRequest;
+use crate::typer::contextual::{ConversionGoal, ConversionTarget};
 
 impl SourceTyper<'_> {
     pub(in crate::typer) fn try_implicit_conversion(
@@ -50,46 +51,58 @@ impl SourceTyper<'_> {
             expected,
         };
         let name = Name::new(self.store.names.intern("Conversion"), Namespace::Type);
-        let Some(class) = self.lookup_default_type_import(name, tree_index, None)? else {
-            return Err(missing);
-        };
-        let entry = self.store.symbols.get(class);
-        if entry.kind != SymbolKind::Class
-            || entry.name != name
-            || !entry
-                .owner
-                .is_some_and(|package| self.package_path(package) == ["scala"])
-        {
-            return Err(missing);
-        }
-        let prefix = self.type_symbol_prefix(class);
-        let tycon = self.store.types.alloc(Type::type_ref(prefix, class));
-        let goal = self.store.types.alloc(Type::Applied {
-            tycon,
-            args: vec![actual, expected],
+        let class = self
+            .lookup_default_type_import(name, tree_index, None)?
+            .filter(|class| {
+                let entry = self.store.symbols.get(*class);
+                entry.kind == SymbolKind::Class
+                    && entry.name == name
+                    && entry
+                        .owner
+                        .is_some_and(|package| self.package_path(package) == ["scala"])
+            });
+        let instance = class.map(|class| {
+            let prefix = self.type_symbol_prefix(class);
+            let tycon = self.store.types.alloc(Type::type_ref(prefix, class));
+            self.store.types.alloc(Type::Applied {
+                tycon,
+                args: vec![actual, expected],
+            })
         });
-        let evidence = self.search_contextual_argument(
-            &dotty_core::types::MethodParam {
-                name: dotty_core::TermName::new(name.text()),
-                ty: goal,
-                erased: false,
-                varargs: false,
+        let Some(target) = self.conversion_target(
+            ConversionGoal {
+                instance,
+                actual,
+                expected,
             },
             context,
             tree_index,
             journal,
-        )?;
-        let evidence_type =
-            self.widen_expression_type_journaled(self.typed_arena.get(evidence).ty, journal, 0)?;
-        let request = ApplicationRequest {
-            function_tree: source_tree,
-            argument_trees: std::slice::from_ref(&source_tree),
-            application_kind: ApplyKind::Regular,
-            context,
-            tree_index,
+        )?
+        else {
+            return Err(missing);
         };
-        let (function, callable) =
-            self.resolve_apply_function(evidence, evidence_type, request, journal)?;
+        let (function, callable) = match target {
+            ConversionTarget::Method {
+                function,
+                signature,
+            } => (function, signature),
+            ConversionTarget::Instance(evidence) => {
+                let evidence_type = self.widen_expression_type_journaled(
+                    self.typed_arena.get(evidence).ty,
+                    journal,
+                    0,
+                )?;
+                let request = ApplicationRequest {
+                    function_tree: source_tree,
+                    argument_trees: std::slice::from_ref(&source_tree),
+                    application_kind: ApplyKind::Regular,
+                    context,
+                    tree_index,
+                };
+                self.resolve_apply_function(evidence, evidence_type, request, journal)?
+            }
+        };
         let Some(Type::Method(method)) = self.store.types.try_get(callable).cloned() else {
             return Err(missing);
         };
@@ -99,24 +112,8 @@ impl SourceTyper<'_> {
         if method.kind != MethodKind::Plain
             || parameter.erased
             || parameter.varargs
-            || !self.conforms(actual, parameter.ty).map_err(|e| {
-                TyperError::ExpectedExpressionConformanceUnsupported {
-                    source: self.source,
-                    tree_index,
-                    actual,
-                    expected: parameter.ty,
-                    error: Box::new(e),
-                }
-            })?
-            || !self.conforms(method.result, expected).map_err(|e| {
-                TyperError::ExpectedExpressionConformanceUnsupported {
-                    source: self.source,
-                    tree_index,
-                    actual: method.result,
-                    expected,
-                    error: Box::new(e),
-                }
-            })?
+            || !self.contextual_conforms(actual, parameter.ty, tree_index, journal)?
+            || !self.contextual_conforms(method.result, expected, tree_index, journal)?
         {
             return Err(missing);
         }

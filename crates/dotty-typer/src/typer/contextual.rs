@@ -5,6 +5,8 @@ use super::*;
 mod dictionary;
 use dictionary::Dictionary;
 
+mod conversions;
+pub(super) use conversions::{ConversionGoal, ConversionTarget};
 mod defaults;
 mod extension;
 
@@ -1379,7 +1381,7 @@ impl SourceTyper<'_> {
         Ok(winner)
     }
 
-    fn contextual_conforms(
+    pub(super) fn contextual_conforms(
         &mut self,
         actual: TypeId,
         expected: TypeId,

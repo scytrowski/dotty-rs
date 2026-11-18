@@ -16,6 +16,8 @@ def main():
         for sources, status, expected in [
             (["Conversions.scala"], 0, "this.accept(inner.apply(x))"),
             (["Conversions.scala", "ConversionsAmbiguous.scala"], 1, "implicit conversions cannot be applied because they are ambiguous"),
+            (["LegacyConversions.scala"], 0, "this.old(x)"),
+            (["LegacyConversions.scala", "LegacyConversionsAmbiguous.scala"], 1, "implicit conversions cannot be applied because they are ambiguous"),
             (["Extensions.scala"], 0, "inner.render(box)(3)(fmt)"),
             (["Extensions.scala", "ExtensionsAmbiguous.scala"], 1, "implicit extension methods cannot be applied because they are ambiguous"),
             (["Extractors.scala"], 0, "case contextualextractors.Allowed()(inner, mode)"),
