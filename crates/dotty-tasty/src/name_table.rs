@@ -519,10 +519,12 @@ impl NameTable {
         reference: NameRef,
         include_signature_entries: bool,
     ) -> Result<String, NameRenderError> {
-        let root_index = usize::try_from(reference)
-            .ok()
-            .filter(|index| *index < self.entries.len())
+        let root = self
+            .get(reference)
             .ok_or(NameRenderError::InvalidReference { reference })?;
+        if let RawName::Utf8(value) = root {
+            return Ok(value.clone());
+        }
         let order = self
             .dependency_order(reference)
             .ok_or(NameRenderError::InvalidReference { reference })?;
@@ -627,8 +629,8 @@ impl NameTable {
             rendered[index] = Some(value);
         }
 
-        rendered[root_index]
-            .clone()
+        rendered[reference as usize]
+            .take()
             .ok_or(NameRenderError::InvalidReference { reference })
     }
 
