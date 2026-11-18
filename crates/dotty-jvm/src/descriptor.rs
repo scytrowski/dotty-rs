@@ -173,7 +173,9 @@ fn descriptor_for_with_references(
         }
     };
 
-    if method_type.kind != MethodKind::Plain {
+    if method_type.kind != MethodKind::Plain
+        && (method.kind == SymbolKind::Constructor || method_type.params.is_empty())
+    {
         return Err(JvmCodegenError::UnsupportedMethodShape {
             method: plan.method,
             ty: method_type_id,

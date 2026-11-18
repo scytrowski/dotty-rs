@@ -197,13 +197,6 @@ fn resolve_instance_call_body(
             ));
         }
     };
-    if apply_kind != ApplyKind::Regular {
-        return Err(unsupported_call(
-            call,
-            UnsupportedJvmCallShapeKind::UsingClause,
-        ));
-    }
-
     let function_tree = tree(unit.store, unit.typed_ast, function_id)?;
     let (receiver_tree, receiver_class, direct_super_parent) = match &function_tree.kind {
         TreeKind::Ident(_) if invocation == JvmInvocationKind::Virtual => {
@@ -269,6 +262,15 @@ fn resolve_instance_call_body(
             expected: SymbolRole::Method,
             found: method_symbol.kind,
         });
+    }
+    if apply_kind == ApplyKind::Using
+        && !matches!(method_symbol.info, dotty_core::SymbolInfo::Complete(ty)
+            if matches!(unit.store.types.try_get(ty), Some(Type::Method(signature)) if signature.kind != dotty_core::MethodKind::Plain))
+    {
+        return Err(unsupported_call(
+            call,
+            UnsupportedJvmCallShapeKind::UsingClause,
+        ));
     }
     let method_owner = method_symbol.owner.ok_or(JvmCodegenError::WrongOwner {
         symbol: method,

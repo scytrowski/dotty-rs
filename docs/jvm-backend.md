@@ -1229,3 +1229,9 @@ zero-partial-artifact checks for invalid batches. This does not add support for
 private cross-class access, inherited accessor call-site lowering,
 child-declared accessors above an accessor-bearing parent, traits, generics, or
 general combined Scala ABI/TASTy output outside the audited Counter pair path.
+
+A monomorphic instance method with one nonempty contextual or legacy implicit
+clause uses the ordinary JVM parameter descriptor and slots. A typed call
+carries its explicit or synthesized argument trees. The source execution
+regression forwards a context parameter and invokes an implicit method with
+explicit `using`, then checks both results under JDK 21 verification.

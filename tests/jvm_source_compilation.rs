@@ -31635,3 +31635,28 @@ fn mixed_origin_pair_proof_preserves_renamed_and_reordered_identities() {
     .expect("renamed and reordered classes remain valid in one source session");
     assert!(observed);
 }
+
+#[test]
+fn contextual_parameters_are_passed_in_verified_instance_calls() {
+    let output = TestOutputDirectory::new("context-parameter-forwarding");
+    compile_source(
+        "class ContextCalls { def read(using n: Int): Int = n; def forward(using n: Int): Int = read; def legacy(implicit n: Int): Int = n; def explicit(value: Int): Int = legacy(using value) }",
+        "ContextCalls.scala", output.path(),
+    ).unwrap();
+    if require_jdk_or_skip() {
+        let harness = output.path().join("Run.java");
+        fs::write(&harness, "class Run { public static void main(String[] args) { var c = new ContextCalls(); if (c.forward(41) != 41 || c.explicit(17) != 17) throw new AssertionError(); } }").unwrap();
+        let result = Command::new("java")
+            .arg("-Xverify:all")
+            .arg("-classpath")
+            .arg(output.path())
+            .arg(harness)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
