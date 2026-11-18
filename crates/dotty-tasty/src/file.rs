@@ -301,7 +301,7 @@ impl TastyFileBuilder {
     ) -> Result<(), TastyFileError> {
         let file = self.build()?;
         file.header.validate_scala_3_9()?;
-        file.validate_with_max_ast_index_depth(max_depth)
+        file.validate_scala_contents(max_depth)
     }
 
     /// Validate the file against a compiler version using TASTy's
@@ -485,7 +485,7 @@ impl<'a> TastyFile<'a> {
         max_depth: usize,
     ) -> Result<Self, TastyFileError> {
         let file = Self::parse_scala_3_9(bytes)?;
-        file.validate_with_max_ast_index_depth(max_depth)?;
+        file.validate_scala_contents(max_depth)?;
         Ok(file)
     }
 
@@ -580,6 +580,11 @@ impl<'a> TastyFile<'a> {
             compiler_minor,
             compiler_experimental,
         )?;
+        self.validate_scala_contents(max_depth)
+    }
+
+    fn validate_scala_contents(&self, max_depth: usize) -> Result<(), TastyFileError> {
+        self.names.validate_scala_order()?;
         self.validate_with_max_ast_index_depth(max_depth)
     }
 
@@ -2233,6 +2238,37 @@ mod tests {
         assert_eq!(
             file.encode_validated_compatible_with(28, 9, 0).unwrap(),
             bytes
+        );
+    }
+
+    #[test]
+    fn scala_validation_requires_name_dependencies_in_wire_order() {
+        let file = TastyFile::parse(include_bytes!(
+            "../tests/fixtures/simple_def/SimpleDef.tasty"
+        ))
+        .unwrap();
+        let names = NameTable::from_entries(vec![
+            crate::RawName::Utf8("ASTs".into()),
+            crate::RawName::ObjectClass { underlying: 2 },
+            crate::RawName::Utf8("Module".into()),
+        ])
+        .unwrap();
+        let builder = super::TastyFileBuilder::new(file.header().clone(), names)
+            .with_section(EncodedSection::raw(0, []));
+        let bytes = builder.encode().unwrap();
+        assert_eq!(TastyFile::parse(&bytes).unwrap().encode().unwrap(), bytes);
+        let error = TastyFileError::Names(crate::NameTableError::ForwardReference {
+            reference: 2,
+            entry_index: 1,
+        });
+        assert_eq!(builder.validate_scala_3_9(), Err(error.clone()));
+        assert_eq!(
+            builder.encode_validated_compatible_with(28, 9, 0),
+            Err(error.clone())
+        );
+        assert_eq!(
+            TastyFile::parse_and_validate_scala_3_9(&bytes).unwrap_err(),
+            error
         );
     }
 

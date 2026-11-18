@@ -253,6 +253,13 @@ pub enum NameTableError {
         /// Number of entries in the table.
         entry_count: usize,
     },
+    /// A Scala reader would encounter a dependency before its definition.
+    ForwardReference {
+        /// Referenced entry.
+        reference: NameRef,
+        /// Zero-based entry containing the reference.
+        entry_index: usize,
+    },
     /// A signed-name parameter has an invalid raw value.
     InvalidParamSig {
         /// Invalid raw parameter-signature value.
@@ -297,6 +304,13 @@ impl fmt::Display for NameTableError {
             } => write!(
                 formatter,
                 "invalid name reference {reference} in entry {entry_index}; name table contains {entry_count} entries"
+            ),
+            Self::ForwardReference {
+                reference,
+                entry_index,
+            } => write!(
+                formatter,
+                "Scala name entry {entry_index} refers to later entry {reference}"
             ),
             Self::InvalidParamSig { value, entry_index } => write!(
                 formatter,
@@ -767,6 +781,24 @@ impl NameTable {
         };
 
         Ok(name)
+    }
+
+    pub(crate) fn validate_scala_order(&self) -> Result<(), NameTableError> {
+        for (entry_index, entry) in self.entries.iter().enumerate() {
+            let mut forward = None;
+            entry.visit_references(&mut |reference| {
+                if reference as usize >= entry_index {
+                    forward.get_or_insert(reference);
+                }
+            });
+            if let Some(reference) = forward {
+                return Err(NameTableError::ForwardReference {
+                    reference,
+                    entry_index,
+                });
+            }
+        }
+        Ok(())
     }
 
     fn validate_references(&self) -> Result<(), NameTableError> {

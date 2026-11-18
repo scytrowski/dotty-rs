@@ -225,7 +225,9 @@ form such as `name[with sig result()]`; this form is intended for inspection,
 not as a replacement for the raw signature fields.
 
 Name references are range-checked, and cyclic name-entry dependencies are
-rejected by the validated name-table model.
+rejected by the validated name-table model. Eager Scala compatibility validation
+also requires every dependency to precede its owning entry in wire order.
+Structural decoding and raw encoding preserve acyclic forward references.
 
 Unknown name tags are preserved as raw length-delimited entries. Programmatic
 construction rejects tags already assigned to a known name-entry grammar so
