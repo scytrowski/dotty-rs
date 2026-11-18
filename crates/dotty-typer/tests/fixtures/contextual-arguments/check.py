@@ -29,6 +29,10 @@ def main():
                 if (Path(output) / fixture).read_bytes() != (HERE / "binary" / fixture).read_bytes():
                     raise SystemExit(f"{fixture} differs from the pinned Scala compiler output")
         for source, code, required in (
+            ("StructuralClauses.scala", 0, (
+                "this.box(structuralclauses.Makers.simple[Int])",
+                "this.mark(structuralclauses.Makers.mono(seed))",
+            )),
             ("Calls.scala", 0, (
                 "def forward(using n: Int): Int = this.need(n)",
                 "def explicit(using n: Int): Int = this.need(using n)",

@@ -1058,6 +1058,56 @@ fn malformed_contextual_import_rename_rolls_back_with_the_import_location() {
 }
 
 #[test]
+fn structural_factories_preserve_type_only_and_context_only_clause_shapes() {
+    let text = include_str!("../../../tests/fixtures/contextual-arguments/StructuralClauses.scala");
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for (client_name, implementation_name) in [("typeOnly", "simple"), ("contextOnly", "mono")] {
+        let class = class_symbol(&parsed, typer.store(), &index, source, implementation_name);
+        let factory = index
+            .derived_symbol_at(
+                typer.store.symbols.owner(class).unwrap(),
+                source,
+                definition_tree(&index, class),
+            )
+            .unwrap();
+        let (client, rhs) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, client_name);
+        typer
+            .type_method_definition(definition_tree(&index, client))
+            .unwrap_or_else(|e| panic!("{client_name}: {e:?}"));
+        let root = typer.typed_index.get(source, rhs).unwrap();
+        let TreeKind::Apply(request) = &typer.typed_ast().get(root).kind else {
+            panic!("expected evidence application")
+        };
+        let selected = match &typer.typed_ast().get(request.args[0]).kind {
+            TreeKind::TypeApply(app) if client_name == "typeOnly" => {
+                assert_eq!(app.args.len(), 1);
+                assert_eq!(typer.typed_ast().get(app.args[0]).ty, definitions.int);
+                app.function
+            }
+            TreeKind::Apply(app) if client_name == "contextOnly" => {
+                assert_eq!(app.args.len(), 1);
+                assert_eq!(
+                    reference(&typer, app.args[0]),
+                    method_parameter_symbol(&parsed, &index, source, client, 0)
+                );
+                app.function
+            }
+            other => panic!("{client_name}: {other:?}"),
+        };
+        assert_eq!(reference(&typer, selected), factory);
+    }
+}
+
+#[test]
 fn imported_structural_given_builds_the_factory_call_and_selects_the_implementation_method() {
     let text = include_str!("../../../tests/fixtures/contextual-arguments/Structural.scala");
     let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
