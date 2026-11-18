@@ -20,9 +20,11 @@ sbt --error 'run path/to/input.scala'
 The output is tab-separated and has one row per compiler token:
 
 ```text
-token\tstart\tend\tline_start\tname\tstring_value\tbase
+token\tstart\tend\tline_start\tname\tstring_value\tbase\tlexical_kind
 ```
 
+The optional value in the final column distinguishes shared display names using
+compiler token IDs, identifier names, and the current interpolation region.
 The final `EOF` row is included. Token ends are the start of the following
 scanner token, which also makes zero-width compiler-inserted tokens visible.
 Fields are escaped using a small JSON-style escape set (`\\`, tab, newline,

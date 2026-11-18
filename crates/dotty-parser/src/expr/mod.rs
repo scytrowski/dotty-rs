@@ -325,7 +325,7 @@ where
 
         let arrow = self.cursor.lookahead(offset).clone();
         if arrow.kind != TokenKind::Operator
-            || !matches!(self.source.slice(arrow.span).ok(), Some("=>" | "?=>"))
+            || !matches!(self.source.slice(arrow.span).ok(), Some("=>" | "⇒" | "?=>"))
         {
             return false;
         }

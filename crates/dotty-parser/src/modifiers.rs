@@ -203,34 +203,19 @@ where
             return None;
         }
 
-        let qualifier = match self.current().kind {
-            TokenKind::Keyword(HardKeyword::This) => self
-                .intern_current_term_name()
+        let qualifier = if self.current().kind == TokenKind::Keyword(HardKeyword::This)
+            || self.current_is_type_reference_name()
+        {
+            self.intern_current_term_name()
                 .ok()
-                .map(|name| *name.as_name()),
-            TokenKind::Identifier | TokenKind::BackquotedIdentifier => self
-                .intern_current_term_name()
-                .ok()
-                .map(|name| *name.as_name()),
-            TokenKind::Operator | TokenKind::ColonOp
-                if ![
-                    "=", "=>", "=>>", "<-", "<:", "<%", ">:", "?=>", ":", "@", "#",
-                ]
-                .iter()
-                .any(|reserved| self.current_text_is(reserved)) =>
-            {
-                self.intern_current_term_name()
-                    .ok()
-                    .map(|name| *name.as_name())
-            }
-            _ => {
-                self.report_issue(ParseIssue::Modifier(
-                    ModifierIssue::ExpectedVisibilityQualifier {
-                        found: self.current().kind,
-                    },
-                ));
-                None
-            }
+                .map(|name| *name.as_name())
+        } else {
+            self.report_issue(ParseIssue::Modifier(
+                ModifierIssue::ExpectedVisibilityQualifier {
+                    found: self.current().kind,
+                },
+            ));
+            None
         };
         if qualifier.is_some() {
             self.advance();

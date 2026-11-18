@@ -124,7 +124,7 @@ where
         // boundaries remain malformed-body recovery cases.
         let case_indent = self.source_line_indent_prefix(case_start);
         let body_indent = self.source_line_indent_prefix(body_start);
-        body_indent.len() < case_indent.len() && case_indent.starts_with(&body_indent)
+        body_indent.len() < case_indent.len() && case_indent.starts_with(body_indent)
     }
 
     /// Parses a consecutive case list, leaving its enclosing `}`/`Outdent` untouched.
@@ -358,7 +358,11 @@ where
             (mark, stats, expr)
         };
 
-        self.alloc_from(block_mark, TreeKind::Block(Block { stats, expr }))
+        if stats.is_empty() && matches!(self.ast.get(expr).kind, TreeKind::Block(_)) {
+            expr
+        } else {
+            self.alloc_from(block_mark, TreeKind::Block(Block { stats, expr }))
+        }
     }
 
     fn consume_case_newlines(&mut self) {
@@ -428,6 +432,43 @@ mod tests {
         fn observe(&mut self, event: ScannerEvent) {
             self.observed.borrow_mut().push(event);
         }
+    }
+
+    #[test]
+    fn preserves_a_single_explicit_case_body_block_and_its_span() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "case e => { b }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Case), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 10, 11),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 14, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+        let id = parser.case_clause(false);
+        let TreeKind::CaseDef(case) = &parser.ast().get(id).kind else {
+            panic!("expected a case definition");
+        };
+        let body = parser.ast().get(case.body);
+        let TreeKind::Block(block) = &body.kind else {
+            panic!("expected a block body");
+        };
+        assert!(block.stats.is_empty());
+        assert!(matches!(
+            parser.ast().get(block.expr).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(
+            body.position.unwrap().span().range(),
+            TextRange::new(10, 15).unwrap()
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]

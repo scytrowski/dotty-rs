@@ -23,6 +23,8 @@ pub enum LexerIssue {
     UnterminatedBackquotedIdentifier,
     /// A backquoted identifier was empty or consisted only of `_`.
     EmptyOrUnderscoreBackquotedIdentifier,
+    /// A backquoted name decodes to an unpaired surrogate outside the UTF-8 name model.
+    NonScalarBackquotedIdentifier,
     /// Two indentation prefixes made of spaces and tabs that are incomparable
     /// by prefix ordering.
     IncompatibleIndentationPrefixes,
@@ -46,6 +48,7 @@ impl LexerIssue {
             Self::EmptyOrUnderscoreBackquotedIdentifier => {
                 "lexer.empty_or_underscore_backquoted_identifier"
             }
+            Self::NonScalarBackquotedIdentifier => "lexer.non_scalar_backquoted_identifier",
             Self::IncompatibleIndentationPrefixes => "lexer.incompatible_indentation_prefixes",
         }
     }
@@ -326,6 +329,7 @@ mod tests {
             LexerIssue::UnterminatedBlockComment,
             LexerIssue::UnterminatedBackquotedIdentifier,
             LexerIssue::EmptyOrUnderscoreBackquotedIdentifier,
+            LexerIssue::NonScalarBackquotedIdentifier,
             LexerIssue::IncompatibleIndentationPrefixes,
         ];
 
@@ -373,6 +377,7 @@ mod tests {
             "lexer.unterminated_block_comment",
             "lexer.unterminated_backquoted_identifier",
             "lexer.empty_or_underscore_backquoted_identifier",
+            "lexer.non_scalar_backquoted_identifier",
             "lexer.incompatible_indentation_prefixes",
         ];
 

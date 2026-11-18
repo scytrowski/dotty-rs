@@ -1,5 +1,10 @@
+val adjacent = s"$a$b"
+val quoted = raw"say \"hi\""
+val regex = re"\d+"
 val escapedDollar = s"cost $$5"
 val escapedDollarName = s"$$name"
 val underscoreSplice = s"$_value"
 val unicodeSplice = s"$λ"
 val bracedBlock = s"${if ready then { value } else fallback}"
+
+val keywordParts = s"$this $end"

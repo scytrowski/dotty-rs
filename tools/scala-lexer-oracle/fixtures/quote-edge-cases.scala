@@ -8,3 +8,5 @@ val operatorQuote = +'
 val quotedLegacy = 'name'
 val adjacentQuotes = '''value
 val spliceQuote = '{ ${value} }
+val quotedOperator = '++
+val nameEndingInDigit = 'x1'
