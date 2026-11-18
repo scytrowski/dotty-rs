@@ -204,6 +204,21 @@ impl ContextualScanner {
 
     fn insert_match_case_indent_after_current(&mut self) -> bool {
         let index = self.current_index();
+        let mut insert_index = index + 1;
+        while self
+            .tokens
+            .get(insert_index)
+            .is_some_and(|token| matches!(token.kind, TokenKind::Newline | TokenKind::Newlines))
+        {
+            insert_index += 1;
+        }
+        if self
+            .tokens
+            .get(insert_index)
+            .is_some_and(|token| token.kind == TokenKind::Indent)
+        {
+            return false;
+        }
         // A directly following, deeper case opens the same region in both
         // paths below. Decide it locally before searching enclosing regions.
         if self
@@ -228,14 +243,6 @@ impl ContextualScanner {
             );
             true
         } else {
-            let mut insert_index = index + 1;
-            while self
-                .tokens
-                .get(insert_index)
-                .is_some_and(|token| matches!(token.kind, TokenKind::Newline | TokenKind::Newlines))
-            {
-                insert_index += 1;
-            }
             let Some(next) = self.tokens.get(insert_index) else {
                 return false;
             };
@@ -3362,6 +3369,72 @@ mod tests {
 
         assert_eq!(scanner.current().kind, TokenKind::Outdent);
         assert!(scanner.feedback_regions.is_empty());
+    }
+
+    #[test]
+    fn repeated_match_case_feedback_preserves_tokens_and_region_ownership() {
+        for source in [
+            "{\n  value match\n  case A => first\n  after\n}",
+            "{\n  value match\n    case A => first\n  after\n}",
+            "{\n  try value catch\n  case A => first\n  after\n}",
+            "{\n  def f(\n      x: X) = x match\n    case A => first\n  after\n}",
+        ] {
+            let mut scanner = ContextualScanner::new(source).unwrap();
+            let offset = scanner
+                .tokens()
+                .iter()
+                .position(|token| {
+                    matches!(
+                        token.kind,
+                        TokenKind::Keyword(HardKeyword::Match | HardKeyword::Catch)
+                    )
+                })
+                .unwrap();
+            scanner.observe_at(offset, ScannerEvent::MatchCasesIndented);
+            let tokens = scanner.tokens().to_vec();
+            let regions = scanner.feedback_regions.clone();
+            assert_eq!(regions.len(), 1, "{source}");
+            let case_offset = source.find("case").unwrap() as u32;
+            assert_eq!(regions[0].indent_offset, case_offset);
+            assert_eq!(
+                tokens
+                    .iter()
+                    .filter(|token| token.kind == TokenKind::Indent
+                        && token.span == TextRange::new(case_offset, case_offset).unwrap())
+                    .count(),
+                1,
+            );
+
+            scanner.observe_at(offset, ScannerEvent::MatchCasesIndented);
+            assert_eq!(scanner.position, 0);
+            assert_eq!(scanner.tokens(), tokens, "{source}");
+            assert_eq!(scanner.feedback_regions, regions, "{source}");
+
+            for _ in 0..offset {
+                scanner.advance();
+            }
+            scanner.observe(ScannerEvent::MatchCasesIndented);
+            assert_eq!(scanner.tokens(), tokens, "{source}");
+            assert_eq!(scanner.feedback_regions, regions, "{source}");
+            assert!(scanner.diagnostics().is_empty(), "{source}");
+        }
+    }
+
+    #[test]
+    fn match_case_feedback_preserves_an_eager_indent() {
+        let source = "if ready then\n  value match\n    case A => first\nnext";
+        let mut scanner = ContextualScanner::new(source).unwrap();
+        while scanner.current().kind != TokenKind::Keyword(HardKeyword::Match) {
+            scanner.advance();
+        }
+        assert_eq!(scanner.lookahead(1).kind, TokenKind::Indent);
+        let tokens = scanner.tokens().to_vec();
+
+        scanner.observe(ScannerEvent::MatchCasesIndented);
+
+        assert_eq!(scanner.tokens(), tokens);
+        assert!(scanner.feedback_regions.is_empty());
+        assert!(scanner.diagnostics().is_empty());
     }
 
     #[test]
