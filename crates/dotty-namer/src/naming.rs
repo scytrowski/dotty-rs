@@ -1144,6 +1144,28 @@ impl Namer<'_> {
 
         let scope = self.store.scopes.alloc(Scope::new(Some(symbol)));
         self.index.record_scope(symbol, scope)?;
+        if flags.contains(SymbolFlags::GIVEN)
+            && kind == SymbolKind::Class
+            && (!constructor.type_params.is_empty() || !constructor.value_param_clauses.is_empty())
+        {
+            let factory = self.enter_derived_symbol(
+                tree,
+                *dotty_core::TermName::new(name.text()).as_name(),
+                owner_context.owner,
+                owner_context.scope,
+                SymbolSpec {
+                    kind: SymbolKind::Method,
+                    flags: SymbolFlags::GIVEN | SymbolFlags::FINAL | (flags & SymbolFlags::INLINE),
+                    visibility: mapped.visibility,
+                },
+            )?;
+            self.enter_factory_parameters(
+                factory,
+                owner_context.source_context,
+                &constructor.type_params,
+                constructor.value_param_clauses.iter().flatten().copied(),
+            )?;
+        }
         Ok(Some(EnteredHeader::ClassLike {
             tree,
             symbol,
@@ -2361,54 +2383,76 @@ impl Namer<'_> {
             class_tree,
             apply,
         )?;
-        let apply_scope = self.store.scopes.alloc(Scope::new(Some(apply)));
-        self.index.record_scope(apply, apply_scope)?;
-        let apply_context =
-            self.child_source_context(apply, apply_scope, Some(declaration_context));
-        self.index
-            .record_declaration_context(apply, apply_context)?;
+        self.enter_factory_parameters(
+            apply,
+            declaration_context,
+            type_parameters,
+            value_parameters.iter().copied(),
+        )
+    }
+
+    fn enter_factory_parameters(
+        &mut self,
+        factory: SymbolId,
+        declaration_context: SourceContextId,
+        type_parameters: &[TreeId<Untyped>],
+        value_parameters: impl Iterator<Item = TreeId<Untyped>>,
+    ) -> Result<(), NamerError> {
+        let scope = self.store.scopes.alloc(Scope::new(Some(factory)));
+        self.index.record_scope(factory, scope)?;
+        let context = self.child_source_context(factory, scope, Some(declaration_context));
+        self.index.record_declaration_context(factory, context)?;
 
         for parameter_tree in type_parameters {
             let TreeKind::TypeDef(parameter) = &self.arena.get(*parameter_tree).kind else {
                 return Err(NamerError::MalformedAstShape {
                     tree_index: parameter_tree.index(),
-                    expected: "case class type parameter TypeDef",
+                    expected: "factory type parameter TypeDef",
                 });
             };
             let symbol = self.enter_derived_symbol(
                 *parameter_tree,
                 *parameter.name.as_name(),
-                apply,
-                apply_scope,
+                factory,
+                scope,
                 SymbolSpec {
                     kind: SymbolKind::TypeParameter,
                     flags: SymbolFlags::EMPTY,
                     visibility: Visibility::Public,
                 },
             )?;
-            self.index
-                .record_declaration_context(symbol, apply_context)?;
+            self.index.record_declaration_context(symbol, context)?;
         }
         for parameter_tree in value_parameters {
-            let TreeKind::ValDef(parameter) = &self.arena.get(*parameter_tree).kind else {
+            let TreeKind::ValDef(parameter) = &self.arena.get(parameter_tree).kind else {
                 return Err(NamerError::MalformedAstShape {
                     tree_index: parameter_tree.index(),
-                    expected: "case class constructor parameter ValDef",
+                    expected: "factory value parameter ValDef",
                 });
             };
             let symbol = self.enter_derived_symbol(
-                *parameter_tree,
+                parameter_tree,
                 *parameter.name.as_name(),
-                apply,
-                apply_scope,
+                factory,
+                scope,
                 SymbolSpec {
                     kind: SymbolKind::Parameter,
-                    flags: SymbolFlags::EMPTY,
+                    flags: if self
+                        .store
+                        .symbols
+                        .get(factory)
+                        .flags
+                        .contains(SymbolFlags::GIVEN)
+                    {
+                        Self::source_flags(&parameter.metadata.modifiers)
+                            & (SymbolFlags::GIVEN | SymbolFlags::IMPLICIT | SymbolFlags::ERASED)
+                    } else {
+                        SymbolFlags::EMPTY
+                    },
                     visibility: Visibility::Public,
                 },
             )?;
-            self.index
-                .record_declaration_context(symbol, apply_context)?;
+            self.index.record_declaration_context(symbol, context)?;
         }
         Ok(())
     }

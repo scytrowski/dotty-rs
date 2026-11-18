@@ -597,6 +597,67 @@ fn anonymous_parameterized_structural_given_uses_a_type_namespace_name() {
     );
 }
 
+#[test]
+fn structural_given_factory_and_its_binders_have_distinct_source_identities() {
+    for declaration in [
+        "given boxes: [A] => (base: TC[A]) => TC[Box[A]]:\n  def tag = 1",
+        "given [A] => (base: TC[A]) => TC[Box[A]]:\n  def tag = 1",
+    ] {
+        let named = named_source(declaration, 109);
+        let parts = primary_constructor_parts(&named);
+        let class = named
+            .index
+            .symbol_at(named.source, parts.class_tree)
+            .unwrap();
+        let class_entry = named.store.symbols.get(class);
+        let owner = class_entry.owner.unwrap();
+        let factory = named
+            .index
+            .derived_symbol_at(owner, named.source, parts.class_tree)
+            .unwrap();
+        let entry = named.store.symbols.get(factory);
+        assert_eq!(entry.kind, SymbolKind::Method);
+        assert_eq!(entry.name.text(), class_entry.name.text());
+        assert!(entry.name.is_term());
+        assert_eq!(entry.owner, Some(owner));
+        assert_eq!(entry.visibility, class_entry.visibility);
+        assert!(
+            entry
+                .flags
+                .contains(SymbolFlags::GIVEN | SymbolFlags::FINAL)
+        );
+        let scope = named.store.scopes.get(named.index.scope_of(owner).unwrap());
+        assert_eq!(scope.lookup_all(&entry.name), &[factory]);
+        assert_eq!(scope.lookup_all(&class_entry.name), &[class]);
+
+        let ctor = named
+            .index
+            .symbol_at(named.source, parts.constructor_tree)
+            .unwrap();
+        for (tree, kind) in [
+            (parts.type_params[0], SymbolKind::TypeParameter),
+            (parts.value_param_clauses[0][0], SymbolKind::Parameter),
+        ] {
+            let copy = named
+                .index
+                .derived_symbol_at(factory, named.source, tree)
+                .unwrap();
+            let param = named.store.symbols.get(copy);
+            assert_eq!(param.owner, Some(factory));
+            assert_eq!(param.kind, kind);
+            assert_eq!(
+                param.flags.contains(SymbolFlags::GIVEN),
+                kind == SymbolKind::Parameter
+            );
+            assert_ne!(Some(copy), named.index.symbol_at(named.source, tree));
+            assert_ne!(
+                Some(copy),
+                named.index.derived_symbol_at(ctor, named.source, tree)
+            );
+        }
+    }
+}
+
 struct PrimaryConstructorParts {
     class_tree: dotty_core::TreeId<dotty_core::Untyped>,
     constructor_tree: dotty_core::TreeId<dotty_core::Untyped>,
