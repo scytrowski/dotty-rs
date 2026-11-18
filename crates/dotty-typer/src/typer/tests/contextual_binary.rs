@@ -11,20 +11,7 @@ fn separate_compilation_finds_the_binary_conditional_and_its_companion_leaf() {
     let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
         panic!()
     };
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let resolver = ClasspathSymbolResolver::new(
-        CompositeClassPath::new(vec![
-            Box::new(DirectoryClassPath::new(
-                root.join("tests/fixtures/contextual-arguments/binary"),
-            )),
-            Box::new(DirectoryClassPath::new(
-                root.join("../dotty-tasty/tests/fixtures/scala3-library"),
-            )),
-            Box::new(JavaObjectStubPath),
-        ]),
-        definitions,
-        LoadingSession::with_packages(packages.snapshot()),
-    );
+    let resolver = contextual_fixture_resolver(definitions, &packages);
     let mut typer = SourceTyper::new(
         &parsed.ast,
         source,
@@ -63,6 +50,108 @@ fn separate_compilation_finds_the_binary_conditional_and_its_companion_leaf() {
         );
         assert!(!typer.is_current_source_symbol(*symbol));
     }
+}
+
+fn contextual_fixture_resolver(
+    definitions: Definitions,
+    packages: &Packages,
+) -> ClasspathSymbolResolver<CompositeClassPath> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    ClasspathSymbolResolver::new(
+        CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(
+                root.join("tests/fixtures/contextual-arguments/binary"),
+            )),
+            Box::new(DirectoryClassPath::new(
+                root.join("../dotty-tasty/tests/fixtures/scala3-library"),
+            )),
+            Box::new(JavaObjectStubPath),
+        ]),
+        definitions,
+        LoadingSession::with_packages(packages.snapshot()),
+    )
+}
+
+#[test]
+fn imported_binary_structural_given_infers_the_implementation_type_and_passes_evidence() {
+    let text = "package consumer; import structural.{Builders, Box, TC}; class Consumer { import Builders.given; def need(using x: TC[Box[Int]]):Int=x.tag; def use(using leaf:TC[Int]):Int=need }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+    let leaf = method_parameter_symbol(&parsed, &index, source, method, 0);
+    let resolver = contextual_fixture_resolver(definitions, &packages);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(resolver));
+    let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+        panic!()
+    };
+    typer.type_method_definition(tree).unwrap();
+    let TreeKind::Apply(call) = &typer
+        .typed_ast()
+        .get(typer.typed_index.get(source, rhs).unwrap())
+        .kind
+    else {
+        panic!()
+    };
+    let result = typer.typed_ast().get(call.args[0]);
+    let TreeKind::Apply(factory) = &result.kind else {
+        panic!()
+    };
+    let Type::Applied { tycon, args } = typer.store.types.get(result.ty) else {
+        panic!()
+    };
+    assert_eq!(args, &[definitions.int]);
+    let Type::TypeRef {
+        target: TypeRefTarget::Symbol(class),
+        ..
+    } = typer.store.types.get(*tycon)
+    else {
+        panic!()
+    };
+    let TreeKind::TypeApply(applied) = &typer.typed_ast().get(factory.function).kind else {
+        panic!()
+    };
+    assert_eq!(typer.typed_ast().get(applied.args[0]).ty, definitions.int);
+    let get_ref = |tree| match typer.store.types.get(typer.typed_ast().get(tree).ty) {
+        Type::TermRef {
+            target: TermRefTarget::Symbol(s),
+            ..
+        } => *s,
+        other => panic!("expected reference, found {other:?}"),
+    };
+    assert_eq!(get_ref(factory.args[0]), leaf);
+    let factory = typer.store.symbols.get(get_ref(applied.function));
+    let TreeKind::Select(selection) = &typer.typed_ast().get(applied.function).kind else {
+        panic!("expected Builders.boxes")
+    };
+    let object = get_ref(selection.qualifier);
+    assert_eq!(
+        typer
+            .store
+            .names
+            .resolve(typer.store.symbols.get(object).name.text()),
+        "Builders"
+    );
+    assert_eq!(
+        factory.owner,
+        Some(typer.module_class_of_object(object).unwrap())
+    );
+    let implementation = typer.store.symbols.get(*class);
+    assert_eq!(implementation.kind, SymbolKind::Class);
+    assert_eq!(factory.kind, SymbolKind::Method);
+    assert_eq!(factory.owner, implementation.owner);
+    assert_eq!(
+        typer.store.names.resolve(implementation.name.text()),
+        "Builders$boxes"
+    );
+    assert_eq!(typer.store.names.resolve(factory.name.text()), "boxes");
+    assert!(matches!(factory.origin, SymbolOrigin::Tasty(_)));
 }
 
 #[test]

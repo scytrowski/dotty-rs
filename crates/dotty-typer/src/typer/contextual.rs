@@ -666,6 +666,32 @@ impl SourceTyper<'_> {
             depth += 1;
             result = method.result;
         }
+        // A binary factory can publish a reference to its implementation
+        // before that class's parents and ordered parameters have been loaded.
+        if matches!(
+            self.store.symbols.get(reference.symbol).origin,
+            SymbolOrigin::Tasty(_)
+        ) {
+            let tycon = match self.store.types.try_get(result) {
+                Some(Type::Applied { tycon, .. }) => *tycon,
+                _ => result,
+            };
+            if let Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(class),
+                ..
+            }) = self.store.types.try_get(tycon)
+                && self.store.symbols.contains(*class)
+                && matches!(
+                    self.store.symbols.get(*class).kind,
+                    SymbolKind::Class | SymbolKind::Trait
+                )
+                && !matches!(self.store.symbols.get(*class).origin, SymbolOrigin::Builtin)
+                && matches!(self.store.symbols.info(*class), SymbolInfo::Missing)
+            {
+                self.class_info(*class, journal)
+                    .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+            }
+        }
         let mut callable = signature;
         let mut type_arguments = Vec::new();
         if let Some(poly) = poly {
@@ -1034,6 +1060,21 @@ impl SourceTyper<'_> {
             _ => return Ok(()),
         };
         let mut scopes = self.scopes_of(receiver);
+        if self.store.symbols.get(receiver).kind == SymbolKind::Object
+            && matches!(
+                self.store.symbols.get(receiver).origin,
+                SymbolOrigin::Tasty(_)
+            )
+        {
+            let module = self.module_class_of_object(receiver)?;
+            let scope = self
+                .class_info(module, journal)
+                .map_err(|error| TyperError::MemberLookup(Box::new(error)))?
+                .declarations;
+            if !scopes.contains(&scope) {
+                scopes.push(scope);
+            }
+        }
         if let Some(qualifier) = qualified {
             let prefix = self.typed_arena.get(qualifier).ty;
             self.require_stable_selection_prefix(prefix, tree_index)?;

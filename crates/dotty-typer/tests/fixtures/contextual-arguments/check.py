@@ -18,11 +18,15 @@ def main():
         verify_rust_library(toolchain, Path(sys.argv[1]).resolve())
         return
     with tempfile.TemporaryDirectory() as output:
-        toolchain.compiler(["-sourceroot", ".", "-d", output, "Evidence.scala"], cwd=HERE)
-        for fixture in ("Box.tasty", "TC.tasty"):
-            generated = Path(output) / "evidence" / fixture
-            if generated.read_bytes() != (HERE / "binary/evidence" / fixture).read_bytes():
-                raise SystemExit(f"{fixture} differs from the pinned Scala compiler output")
+        for source, package, classes in (
+            ("Evidence.scala", "evidence", ("Box.tasty", "TC.tasty")),
+            ("Structural.scala", "structural", ("Box.tasty", "TC.tasty", "Builders.tasty", "Builders$boxes.class")),
+        ):
+            toolchain.compiler(["-sourceroot", ".", "-d", output, source], cwd=HERE)
+            for name in classes:
+                fixture = Path(package, name)
+                if (Path(output) / fixture).read_bytes() != (HERE / "binary" / fixture).read_bytes():
+                    raise SystemExit(f"{fixture} differs from the pinned Scala compiler output")
         for source, code, required in (
             ("Calls.scala", 0, (
                 "def forward(using n: Int): Int = this.need(n)",
@@ -39,6 +43,11 @@ def main():
                 "new structural.Builders.boxes[A](using base)()",
                 "this.need(structural.Builders.boxes[Int](leaf))",
                 "structural.Builders.boxes[Int](using leaf).tag",
+            )),
+            ("StructuralBound.scala", 0, (
+                "private[this] given val base: bound.TC[A]",
+                "final given def boxes[A",
+                "this.need(bound.Builders.boxes[Int](leaf))",
             )),
             ("Inherited.scala", 0, ("this.need(TC.instance[Int])",)),
             ("Invalid.scala", 1, (
