@@ -1352,6 +1352,54 @@ fn defaults_use_original_receiver_and_earlier_arguments_only_after_missing_evide
 }
 
 #[test]
+fn legacy_default_preserves_ambiguity_and_rolls_back_the_failed_call() {
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(include_str!(
+        "../../../tests/fixtures/contextual-arguments/LegacyDefaultAmbiguous.scala"
+    ));
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "ambiguous");
+    let formals: Vec<_> = (0..2)
+        .map(|i| method_parameter_symbol(&parsed, &index, source, method, i))
+        .collect();
+    let legacy = method_symbol(&parsed, &store, &index, source, "legacy");
+    let getter = store
+        .default_getter(legacy, 0)
+        .expect("named legacy default getter");
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    let checkpoint = typer.store().checkpoint();
+
+    for _ in 0..2 {
+        let error = typer
+            .type_method_definition(definition_tree(&index, method))
+            .unwrap_err();
+        let TyperError::AmbiguousContextualArgument {
+            source: at_source,
+            tree_index,
+            expected,
+            candidates,
+        } = error
+        else {
+            panic!("expected ambiguous legacy default: {error:?}")
+        };
+        assert_eq!(
+            (at_source, tree_index, expected),
+            (source, rhs.index(), definitions.int)
+        );
+        assert_eq!(candidates, formals);
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert_eq!(typer.store().default_getter(legacy, 0), Some(getter));
+        assert!(typer.source_typed_index().is_empty());
+        assert_eq!(typer.typed_ast().iter().count(), 0);
+    }
+}
+
+#[test]
 fn default_getter_types_its_body_in_the_scope_of_its_own_parameter_copies() {
     let text =
         "class R { def f[A](x: A)(using n: A = x): A = n; def bad(using n: Int = false): Int = n }";

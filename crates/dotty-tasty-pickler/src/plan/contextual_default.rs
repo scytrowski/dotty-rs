@@ -62,7 +62,10 @@ impl Validator<'_, '_> {
         };
         let int = p.definitions.int;
         if !def.type_params.is_empty()
-            || self.symbol(defaulted)?.flags != SymbolFlags::GIVEN
+            || !matches!(
+                self.symbol(defaulted)?.flags,
+                SymbolFlags::GIVEN | SymbolFlags::IMPLICIT
+            )
             || self.complete(defaulted)? != int
         {
             return Err(unsupported());

@@ -32299,3 +32299,43 @@ fn contextual_literal_default_rejects_an_explicit_application_of_its_parameterle
     .unwrap();
     assert!(checked);
 }
+
+#[test]
+fn legacy_default_getter_runs_only_for_missing_implicit_evidence() {
+    let output = TestOutputDirectory::new("legacy-implicit-default");
+    let source = include_str!(
+        "../crates/dotty-typer/tests/fixtures/contextual-arguments/LegacyDefaults.scala"
+    );
+    let artifact = compile_source(source, "LegacyDefaults.scala", output.path()).unwrap();
+    let class = ClassFile::decode(&mut Reader::new(artifact.class.bytes())).unwrap();
+    assert_invoked_method_names(
+        &class,
+        emitted_method_code(&class, "fallback"),
+        &["legacy$default$1", "legacy"],
+    );
+    for name in ["supplied", "explicit"] {
+        assert_invoked_method_names(&class, emitted_method_code(&class, name), &["legacy"]);
+    }
+    if require_jdk_or_skip() {
+        let harness = output.path().join("Run.java");
+        fs::write(&harness, r#"class Run {
+            public static void main(String[] args) {
+                var reader = new example.LegacyDefaults();
+                if (reader.fallback() != 7 || reader.supplied(11) != 11 || reader.explicit(1, 2) != 9)
+                    throw new AssertionError();
+            }
+        }"#).unwrap();
+        let result = Command::new("java")
+            .arg("-Xverify:all")
+            .arg("-classpath")
+            .arg(output.path())
+            .arg(harness)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}

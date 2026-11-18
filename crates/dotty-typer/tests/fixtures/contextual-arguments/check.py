@@ -78,6 +78,17 @@ def main():
                 "r.offset(x)(using r.offset$default$2(x))",
                 "this.need(this.box(using this.box$default$1))",
             )),
+            ("LegacyDefaults.scala", 0, (
+                "def legacy$default$1: Int @uncheckedVariance = 7",
+                "def fallback(): Int = this.legacy(using this.legacy$default$1)",
+                "def supplied(using chosen: Int): Int = this.legacy(chosen)",
+                "def explicit(using a: Int, b: Int): Int = this.legacy(9)",
+                "Implicit parameters should be provided with a `using` clause",
+            )),
+            ("LegacyDefaultAmbiguous.scala", 1, (
+                "[E172]", "Ambiguous given instances",
+                "both parameter b and parameter a match type Int of parameter n of method legacy",
+            )),
             ("Inherited.scala", 0, ("this.need(TC.instance[Int])",)),
             ("Invalid.scala", 1, (
                 "[E050]", "[E172]", "does not take more parameters",

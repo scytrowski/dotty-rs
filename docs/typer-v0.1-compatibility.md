@@ -49,7 +49,10 @@ Higher-kinded inference and general proofs from opaque bounds remain open.
 For a classpath method, replay uses the link between a defaulted parameter
 and its getter in the same TASTy template. The typer checks the copied clauses
 and the result type before accepting the default. The binary Reader fixture
-checks both a parameterless getter and a getter that reuses an earlier argument. Combining a default with a synthesized context-bound clause
+checks both a parameterless getter and a getter that reuses an earlier argument.
+A legacy `implicit` clause also falls back only for missing evidence. Ambiguity
+retains both candidates and rolls back the failed application.
+Combining a default with a synthesized context-bound clause
 still reports a typing error. Conversion insertion covers value adaptation to
 a known expected type. This includes ordinary method arguments. Searching for
 a conversion solely because a member is missing, and instantiating generic

@@ -1291,3 +1291,9 @@ JVM local slot, because evaluating it early cannot cause a side effect.
 General lazy initializers remain unsupported. The JDK 21 test overrides the
 getter and checks that calls with this local evidence and with an explicit
 `using 9` leave its invocation count unchanged.
+
+A first `implicit` clause uses the same JVM calling convention. The
+`LegacyDefaults.scala` fixture runs through the Scala 3.9 typer and the Rust
+source-to-JVM pipeline. On the JVM, an inferred or positional argument goes
+straight to `legacy(I)I`. A call with no evidence first invokes
+`legacy$default$1()I`.

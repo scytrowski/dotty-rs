@@ -936,3 +936,8 @@ encodes the getter result as `Int @uncheckedVariance` and the body as
 to the source literal before emission. A separate Scala client exercises the
 fallback, a local given and an explicitly supplied argument on the same
 receiver.
+
+A legacy `implicit` clause supports the same two default forms. The parameter
+carries `IMPLICIT` followed by `HASDEFAULT`. A Scala 3.9 client tests
+`def legacy(implicit n: Int = 7): Int = n` with missing, locally supplied,
+explicit, and ambiguous evidence.

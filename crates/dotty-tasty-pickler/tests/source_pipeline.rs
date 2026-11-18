@@ -3416,6 +3416,47 @@ fn contextual_parameters_retain_their_wire_flags_and_reference_identity() {
 }
 
 #[test]
+fn legacy_default_preserves_implicit_marker_and_separate_client_resolution() {
+    use dotty_tasty::tasty::*;
+    let text = "package example; class LegacyDefaults { def legacy(implicit n: Int = 7): Int = n; def offset(x: Int)(implicit n: Int = x): Int = n }";
+    let (_, output) = source_outputs_named(text, "LegacyDefaults.scala", |_| {}).unwrap();
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let index = file.ast_address_index().unwrap();
+    let declaration = index
+        .iter()
+        .filter(|node| node.tag == DEFDEF_TAG)
+        .map(|node| node.decode_defdef_body().unwrap())
+        .find(|method| file.names().get_utf8(method.name) == Some("legacy"))
+        .unwrap();
+    assert_eq!(
+        declaration.parameters[0].decode_body().unwrap().tail,
+        [
+            DefinitionTail::Modifier(IMPLICIT_TAG),
+            DefinitionTail::Modifier(HASDEFAULT_TAG),
+        ]
+    );
+    verify_contextual_client(
+        "LegacyDefaults",
+        output.bytes(),
+        r#"
+        val library = new example.LegacyDefaults
+        assert(library.legacy == 7)
+        assert(library.offset(17) == 17)
+        locally { implicit val chosen: Int = 11; assert(library.legacy == 11) }
+        assert(library.legacy(using 9) == 9)
+        val errors = scala.compiletime.testing.typeCheckErrors(
+          """{
+            implicit val first: Int = 1
+            implicit val second: Int = 2
+            (new example.LegacyDefaults).legacy
+          }"""
+        )
+        assert(errors.exists(_.message.contains("Ambiguous given instances")), errors)
+    "#,
+    );
+}
+
+#[test]
 fn curried_contextual_parameters_preserve_clause_boundaries_in_scala() {
     use dotty_tasty::tasty::*;
     let source = "package example; class Curried { def pick(first: Int)(using second: Int): Int = second; def empty()(using second: Int): Int = second }";
