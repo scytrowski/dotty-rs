@@ -2888,7 +2888,7 @@ fn staged_factory_scope_controls_report_their_first_typed_gate() {
         18407,
         "using helper parameter",
         "method body typing",
-        "ApplicationArgumentConformanceUnsupported",
+        "MissingContextualArgument",
     );
 
     let external_helper = SOURCE
