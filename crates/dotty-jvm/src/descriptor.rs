@@ -1,6 +1,8 @@
 //! Bounded projection from canonical primitive semantic types to JVM
 //! descriptors. This deliberately does not implement general Scala erasure.
 
+pub(super) mod contextual_poly;
+
 use dotty_classfile::descriptor::{FieldType, MethodDescriptor};
 use dotty_core::definitions::Definitions;
 use dotty_core::ids::{SymbolId, TypeId};
@@ -169,6 +171,9 @@ fn descriptor_for_with_references(
     let method_type_id = complete_info(store, plan.method)?;
     let method_type = match store.types.try_get(method_type_id) {
         Some(Type::Method(method_type)) => method_type,
+        Some(Type::Poly(poly)) if !constructor => {
+            return contextual_poly::descriptor(plan, store, definitions, method_type_id, poly);
+        }
         Some(Type::Poly(_)) => {
             return Err(JvmCodegenError::UnsupportedMethodShape {
                 method: plan.method,

@@ -316,6 +316,11 @@ pub(super) fn lower_method_body(
     method: &JvmMethodMetadata,
     body: TreeId<Typed>,
 ) -> Result<CodeBuilder, JvmCodegenError> {
+    if let Some(code) =
+        crate::descriptor::contextual_poly::lower_body(store, typed_ast, method, body, definitions)?
+    {
+        return Ok(code);
+    }
     let mut code = CodeBuilder::new();
     let mut context = JvmLoweringContext::new(store, typed_ast, definitions, method);
     let flow = emit_expression(&mut context, body, &mut code, 0)?;
@@ -356,6 +361,15 @@ pub(super) fn lower_planned_method_body(
         definitions,
         &metadata,
     )?;
+    if let Some(code) = crate::descriptor::contextual_poly::lower_body(
+        unit.store,
+        unit.typed_ast,
+        method,
+        body,
+        definitions,
+    )? {
+        return Ok(code);
+    }
     let mut context = JvmLoweringContext::new(unit.store, unit.typed_ast, definitions, method);
     context.local_layout = Some(&local_layout);
     context.call_context = Some((unit, class, &metadata));

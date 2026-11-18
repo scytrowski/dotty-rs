@@ -1243,3 +1243,9 @@ intermediate method type, each clause's arity and the ordered parameter
 bindings, then evaluates the receiver and both sets of arguments in order
 and emits one virtual invocation. The JDK test covers explicit and inferred
 evidence with different argument values.
+
+A method `def evidence[A](using a: A): A = a` with default type bounds has
+erased parameter and return type `java.lang.Object`. The producer verifies
+the binder and the returned parameter symbol before emitting `aload_1` and
+`areturn`. The class-file interface exposes the erased descriptor. The Scala
+type parameter and contextual clause are available through the semantic pickler.

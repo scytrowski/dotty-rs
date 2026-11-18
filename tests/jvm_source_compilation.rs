@@ -31662,6 +31662,87 @@ fn contextual_parameters_are_passed_in_verified_instance_calls() {
 }
 
 #[test]
+fn polymorphic_contextual_identity_erases_to_object_and_preserves_reference() {
+    let output = TestOutputDirectory::new("polymorphic-contextual");
+    let artifacts = compile_source(
+        "class Generic { def evidence[A](using a: A): A = a }",
+        "Generic.scala",
+        output.path(),
+    )
+    .unwrap();
+    let mut reader = Reader::new(artifacts.class.bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+    assert_opcode_sequence(emitted_method_code(&class, "evidence"), &[0x2b, 0xb0]);
+    if require_jdk_or_skip() {
+        let harness = output.path().join("Run.java");
+        fs::write(&harness, "class Run { public static void main(String[] args) throws Exception { var method = Generic.class.getDeclaredMethod(\"evidence\", Object.class); var token = new Object(); if (method.getReturnType() != Object.class || new Generic().evidence(token) != token) throw new AssertionError(); } }").unwrap();
+        let result = Command::new("java")
+            .arg("-Xverify:all")
+            .arg("-classpath")
+            .arg(output.path())
+            .arg(harness)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+#[test]
+fn polymorphic_contextual_identity_rejects_another_methods_type_parameter() {
+    let output = TestOutputDirectory::new("polymorphic-contextual-binder");
+    let mut expected = None;
+    let mut change_binder = |ast: &AstArena<Untyped>,
+                             source: SourceId,
+                             index: &SourceSemanticIndex,
+                             store: &mut SemanticStore| {
+        let evidence = |name: &str| {
+            ast.iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::DefDef(def)
+                        if store.names.resolve(def.name.as_name().text()) == name =>
+                    {
+                        Some((
+                            index.symbol_at(source, tree).unwrap(),
+                            index
+                                .symbol_at(source, def.value_param_clauses[0][0])
+                                .unwrap(),
+                        ))
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let (first, a) = evidence("first");
+        let (_, b) = evidence("second");
+        let foreign = store.symbols.info(b).clone();
+        store.symbols.set_info(a, foreign);
+        expected = Some(first);
+    };
+    let failure = compile_source_batch_with_typer_failure_observer(
+        "class Generic { def first[A](using a: A): A = a; def second[A](using a: A): A = a }",
+        "Generic.scala",
+        output.path(),
+        SourceId::from_index(1),
+        SourceUnitCardinality::ExactlyOne,
+        SourceBatchObservers {
+            source_store_mutator: Some(&mut change_binder),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(failure, PipelineFailure::Codegen(JvmCodegenError::UnsupportedMethodShape {
+        method, kind: dotty_jvm::UnsupportedMethodShapeKind::Polymorphic, ..
+    }) if Some(method) == expected)
+    );
+    assert!(!output.path().join("Generic.class").exists());
+}
+
+#[test]
 fn curried_contextual_calls_flatten_into_one_jvm_invocation() {
     let output = TestOutputDirectory::new("curried-contextual");
     compile_source(
