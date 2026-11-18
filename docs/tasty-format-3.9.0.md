@@ -503,7 +503,10 @@ that no longer target visible nodes after a size change. When a caller
 intentionally changes node sizes, `EncodedSection::structured_asts_relocated()`
 can relocate references from the original AST payload to the new layout. The
 relocation is iterative because changing the width of an address can move
-later nodes; opaque unknown nodes are rejected if their positions change.
+later nodes. Relocation requires the same parent/child topology and rejects
+moving opaque nodes. Without an explicit identity map, editing two siblings
+with the same tag can also mean swapping their reference targets. The encoder
+returns `AmbiguousRelocation` in that case. Padding alone does not count as an edit.
 `TastyFile::encode_structured_relocated()` applies the same mapping to the
 `Positions` and `Comments` sections and validates the complete resulting file.
 Use the raw AST-section builders when exact bytes and original addresses must

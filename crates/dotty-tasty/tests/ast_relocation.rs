@@ -96,3 +96,44 @@ fn relocation_converges_when_canonical_padding_cancels_an_edit() {
     assert_eq!(refs.len(), 1);
     assert_eq!(refs[0].address as usize, nodes.get(2).unwrap().offset);
 }
+
+#[test]
+fn relocation_rejects_swapped_declarations_even_with_the_same_name() {
+    use dotty_tasty::{
+        AstError, BLOCK_TAG, EncodedSection, INTCONST_TAG, RawNodes, Reader, TERMREFDIRECT_TAG,
+        TYPEREFPKG_TAG, TermEncodeError, VALDEF_TAG,
+    };
+
+    for second_name in [0x81, 0x82] {
+        let bytes = [
+            BLOCK_TAG,
+            0x90,
+            TERMREFDIRECT_TAG,
+            0x84,
+            VALDEF_TAG,
+            0x85,
+            0x81,
+            TYPEREFPKG_TAG,
+            0x83,
+            INTCONST_TAG,
+            0xa9,
+            VALDEF_TAG,
+            0x85,
+            second_name,
+            TYPEREFPKG_TAG,
+            0x83,
+            INTCONST_TAG,
+            0xaa,
+        ];
+        let raw = RawNodes::decode(&mut Reader::new(&bytes)).unwrap();
+        let mut block = raw.get(0).unwrap().decode_block().unwrap();
+        block.stats.swap(0, 1);
+        assert_eq!(
+            EncodedSection::structured_asts_relocated(0, &bytes, &[StructuredNode::Block(block)]),
+            Err(TermEncodeError::Ast(AstError::AmbiguousRelocation {
+                tag: VALDEF_TAG,
+                offset: 11
+            }))
+        );
+    }
+}

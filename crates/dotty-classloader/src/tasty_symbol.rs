@@ -609,6 +609,7 @@ fn ast_error_code(error: &AstError) -> &'static str {
     use dotty_tasty::term::TermError;
     match error {
         AstError::UnsupportedCategory { .. } => "tasty.ast.unsupported_category",
+        AstError::AmbiguousRelocation { .. } => "tasty.ast.ambiguous_relocation",
         AstError::UnsupportedRelocation { .. } => "tasty.ast.unsupported_relocation",
         AstError::RecursionLimit { .. } => "tasty.ast.recursion_limit",
         AstError::Term(TermError::UnsupportedCategory { .. }) => "tasty.term.unsupported_category",
@@ -626,6 +627,7 @@ fn ast_error_category(error: &AstError) -> ClassLoadCategory {
     use dotty_tasty::term::TermError;
     match error {
         AstError::UnsupportedCategory { .. }
+        | AstError::AmbiguousRelocation { .. }
         | AstError::UnsupportedRelocation { .. }
         | AstError::RecursionLimit { .. }
         | AstError::Term(

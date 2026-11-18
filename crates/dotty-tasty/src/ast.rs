@@ -1279,6 +1279,10 @@ pub enum AstError {
         expected: usize,
         actual: usize,
     },
+    AmbiguousRelocation {
+        tag: u8,
+        offset: usize,
+    },
     UnsupportedRelocation {
         tag: u8,
         offset: usize,
@@ -1319,6 +1323,10 @@ impl fmt::Display for AstError {
             Self::AstNodeCountMismatch { expected, actual } => write!(
                 formatter,
                 "AST relocation changed the visible node count from {expected} to {actual}"
+            ),
+            Self::AmbiguousRelocation { tag, offset } => write!(
+                formatter,
+                "cannot establish the identity of AST tag {tag} at offset {offset} after editing its siblings"
             ),
             Self::UnsupportedRelocation { tag, offset } => write!(
                 formatter,

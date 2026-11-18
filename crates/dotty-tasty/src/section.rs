@@ -3,7 +3,7 @@ use crate::ast::{
 };
 use crate::name_table::NameRef;
 use crate::reader::{ReadError, Reader};
-use crate::term::TermEncodeError;
+use crate::term::{AstTreeNode, RawTree, TermEncodeError};
 use crate::writer::{WriteError, Writer};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -859,7 +859,9 @@ impl EncodedSection {
     /// Relocation is iterative because changing the width of an address can
     /// change the address of a later node. Opaque unknown nodes are rejected
     /// when their position changes because their hidden reference grammar is
-    /// not available to the structural encoder.
+    /// not available to the structural encoder. Edits must preserve tree
+    /// topology. Changing multiple siblings with the same tag is ambiguous
+    /// because structured trees do not carry stable identities.
     pub fn structured_asts_relocated(
         name: NameRef,
         original_payload: &[u8],
@@ -976,6 +978,27 @@ impl EncodedAstSection {
                 }
             }
 
+            if iteration == 0 && original_payload != bytes {
+                let root = |node: &crate::RawNode<'_>| AstTreeNode {
+                    tag: node.tag,
+                    offset: node.offset,
+                };
+                let mut pending = changed_relocation_siblings(
+                    original_payload,
+                    original_top_level.iter().map(root),
+                    &bytes,
+                    encoded_nodes.iter().map(root),
+                )?;
+                while let Some((old, new)) = pending.pop() {
+                    pending.extend(changed_relocation_siblings(
+                        original_payload,
+                        original_index.children_of(ast_address_from_offset(old.offset)?),
+                        &bytes,
+                        encoded_index.children_of(ast_address_from_offset(new.offset)?),
+                    )?);
+                }
+            }
+
             let next_map = original_visible
                 .iter()
                 .zip(&encoded_visible)
@@ -1066,6 +1089,75 @@ fn ast_address_from_offset(offset: usize) -> Result<u32, TermEncodeError> {
         let value = u64::try_from(offset).unwrap_or(u64::MAX);
         WriteError::NatOverflow { value }.into()
     })
+}
+
+// Compare before rewriting addresses. Rewritten operands are consequences
+// of relocation and must not be mistaken for edits to sibling identity.
+fn changed_relocation_siblings(
+    old_bytes: &[u8],
+    mut old: impl Iterator<Item = AstTreeNode>,
+    new_bytes: &[u8],
+    mut new: impl Iterator<Item = AstTreeNode>,
+) -> Result<Vec<(AstTreeNode, AstTreeNode)>, TermEncodeError> {
+    let mut changed = Vec::new();
+    loop {
+        let (before, after) = match (old.next(), new.next()) {
+            (None, None) => break,
+            (Some(before), Some(after)) if before.tag == after.tag => (before, after),
+            (Some(node), _) | (None, Some(node)) => {
+                return Err(AstError::AmbiguousRelocation {
+                    tag: node.tag,
+                    offset: node.offset,
+                }
+                .into());
+            }
+        };
+        let old_tree = relocation_tree_bytes(old_bytes, before)?;
+        let new_tree = relocation_tree_bytes(new_bytes, after)?;
+        if old_tree == new_tree {
+            continue;
+        }
+        changed.push((before, after, old_tree, new_tree));
+    }
+
+    // A changed length prefix or padded operand can encode the same tree.
+    // Only pay for normalization when several siblings would be ambiguous.
+    let mut candidates = [0u8; 256];
+    for (node, ..) in &changed {
+        candidates[node.tag as usize] = candidates[node.tag as usize].saturating_add(1);
+    }
+    let mut edited = [false; 256];
+    for (node, _, old_tree, new_tree) in &changed {
+        let tag = node.tag as usize;
+        if candidates[tag] > 1
+            && canonical_relocation_tree(old_tree)? != canonical_relocation_tree(new_tree)?
+            && std::mem::replace(&mut edited[tag], true)
+        {
+            return Err(AstError::AmbiguousRelocation {
+                tag: node.tag,
+                offset: node.offset,
+            }
+            .into());
+        }
+    }
+    Ok(changed
+        .into_iter()
+        .map(|(old, new, _, _)| (old, new))
+        .collect())
+}
+
+fn relocation_tree_bytes(bytes: &[u8], node: AstTreeNode) -> Result<&[u8], TermEncodeError> {
+    let mut reader = Reader::new(&bytes[node.offset..]);
+    RawTree::decode(&mut reader).map_err(AstError::from)?;
+    Ok(&bytes[node.offset..node.offset + reader.position()])
+}
+
+fn canonical_relocation_tree(bytes: &[u8]) -> Result<Vec<u8>, TermEncodeError> {
+    let mut writer = Writer::with_ast_address_map(BTreeMap::new());
+    RawTree::decode(&mut Reader::new(bytes))
+        .map_err(AstError::from)?
+        .encode(&mut writer)?;
+    Ok(writer.into_inner())
 }
 
 fn ast_index<'a>(bytes: &'a [u8]) -> Result<AstAddressIndex<'a>, TermEncodeError> {
