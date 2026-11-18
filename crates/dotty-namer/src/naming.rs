@@ -760,7 +760,20 @@ impl Namer<'_> {
             return Ok(());
         };
         self.collect_wrapped_type_names()?;
-        self.scan_entered_header(root)?;
+        let mut pending = vec![(root, None)];
+        while let Some((header, boundary)) = pending.pop() {
+            self.package_private_boundary = boundary;
+            let children = self.scan_entered_header(header)?;
+            // Descendants inherit a wrapper's access boundary. Siblings
+            // retain the boundary captured when their headers were queued.
+            let child_boundary = self.package_private_boundary;
+            pending.extend(
+                children
+                    .into_iter()
+                    .rev()
+                    .map(|child| (child, child_boundary)),
+            );
+        }
         self.link_companions()
     }
 
@@ -966,27 +979,13 @@ impl Namer<'_> {
         stats: &[ContextualStat],
         context: &NamingContext,
         package_symbol: SymbolId,
-    ) -> Result<(), NamerError> {
-        let previous_boundary = self.package_private_boundary;
+    ) -> Result<Vec<EnteredHeader>, NamerError> {
         self.package_private_boundary = Some((context.owner, package_symbol));
         let mut headers = Vec::new();
         for stat in stats {
-            match self.enter_wrapped_stat_headers(*stat, context) {
-                Ok(entered) => headers.extend(entered),
-                Err(error) => {
-                    self.package_private_boundary = previous_boundary;
-                    return Err(error);
-                }
-            }
+            headers.extend(self.enter_wrapped_stat_headers(*stat, context)?);
         }
-        for header in headers {
-            if let Err(error) = self.scan_entered_header(header) {
-                self.package_private_boundary = previous_boundary;
-                return Err(error);
-            }
-        }
-        self.package_private_boundary = previous_boundary;
-        Ok(())
+        Ok(headers)
     }
 
     fn enter_wrapped_stat_headers(
@@ -1415,11 +1414,14 @@ impl Namer<'_> {
         }))
     }
 
-    fn scan_entered_header(&mut self, header: EnteredHeader) -> Result<(), NamerError> {
+    fn scan_entered_header(
+        &mut self,
+        header: EnteredHeader,
+    ) -> Result<Vec<EnteredHeader>, NamerError> {
         let (tree, symbol, scope, package_path, declaration_context) = match header {
             EnteredHeader::Package { tree, context } => {
                 let TreeKind::PackageDef(package) = &self.arena.get(tree).kind else {
-                    return Ok(());
+                    return Ok(Vec::new());
                 };
                 let stats = package.stats.clone();
                 let partition = self.partition_package_stats(&stats, &context);
@@ -1460,10 +1462,7 @@ impl Namer<'_> {
                         self.enter_source_package_wrapper(&context, partition.wrapped_stats)?,
                     );
                 }
-                for header in headers {
-                    self.scan_entered_header(header)?;
-                }
-                return Ok(());
+                return Ok(headers);
             }
             EnteredHeader::SourcePackageWrapper {
                 stats,
@@ -1515,7 +1514,8 @@ impl Namer<'_> {
                 if let Some(clauses) = extension_prefix_clauses {
                     self.scan_extension_prefix_parameters(symbol, scope, &clauses, method_context)?;
                 }
-                return self.scan_method_parameters(tree, symbol, scope, method_context);
+                self.scan_method_parameters(tree, symbol, scope, method_context)?;
+                return Ok(Vec::new());
             }
             EnteredHeader::SecondaryConstructor {
                 tree,
@@ -1525,15 +1525,16 @@ impl Namer<'_> {
             } => {
                 let constructor_context =
                     self.child_source_context(symbol, scope, Some(declaration_context));
-                return self.scan_constructor_parameters(tree, symbol, scope, constructor_context);
+                self.scan_constructor_parameters(tree, symbol, scope, constructor_context)?;
+                return Ok(Vec::new());
             }
             EnteredHeader::Field { tree, symbol } | EnteredHeader::TypeAlias { tree, symbol } => {
                 let _entered_identity = (tree, symbol);
-                return Ok(());
+                return Ok(Vec::new());
             }
         };
         let TreeKind::TypeDef(definition) = &self.arena.get(tree).kind else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         if definition.metadata.modifiers.contains(&Modifier::Enum) {
             self.ensure_enum_companion(tree, symbol, declaration_context)?;
@@ -2784,9 +2785,9 @@ impl Namer<'_> {
         scope: ScopeId,
         package_path: Vec<String>,
         declaration_context: SourceContextId,
-    ) -> Result<(), NamerError> {
+    ) -> Result<Vec<EnteredHeader>, NamerError> {
         let TreeKind::Template(template) = &self.arena.get(template_tree).kind else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         let TreeKind::DefDef(constructor) = &self.arena.get(template.constructor).kind else {
             return Err(NamerError::MalformedAstShape {
@@ -3168,10 +3169,7 @@ impl Namer<'_> {
                 _ => {}
             }
         }
-        for header in nested_headers {
-            self.scan_entered_header(header)?;
-        }
-        Ok(())
+        Ok(nested_headers)
     }
 
     fn enter_enum_case_class_header(
@@ -3948,33 +3946,35 @@ impl Namer<'_> {
         })
     }
 
-    fn flatten_package_name(&self, tree: TreeId<Untyped>) -> Result<Vec<String>, NamerError> {
+    fn flatten_package_name(&self, mut tree: TreeId<Untyped>) -> Result<Vec<String>, NamerError> {
         let mut segments = Vec::new();
-        self.flatten_package_name_into(tree, &mut segments)?;
-        Ok(segments)
-    }
-
-    fn flatten_package_name_into(
-        &self,
-        tree: TreeId<Untyped>,
-        segments: &mut Vec<String>,
-    ) -> Result<(), NamerError> {
-        match &self.arena.get(tree).kind {
-            TreeKind::Ident(ident) => {
-                segments.push(self.store.names.resolve(ident.name.text()).to_owned());
-                Ok(())
+        let mut seen = HashSet::new();
+        loop {
+            if !seen.insert(tree) {
+                return Err(NamerError::MalformedAstShape {
+                    tree_index: tree.index(),
+                    expected: "acyclic qualified package name",
+                });
             }
-            TreeKind::Select(Select {
-                qualifier, name, ..
-            }) => {
-                self.flatten_package_name_into(*qualifier, segments)?;
-                segments.push(self.store.names.resolve(name.text()).to_owned());
-                Ok(())
+            match &self.arena.get(tree).kind {
+                TreeKind::Ident(ident) => {
+                    segments.push(self.store.names.resolve(ident.name.text()).to_owned());
+                    segments.reverse();
+                    return Ok(segments);
+                }
+                TreeKind::Select(Select {
+                    qualifier, name, ..
+                }) => {
+                    segments.push(self.store.names.resolve(name.text()).to_owned());
+                    tree = *qualifier;
+                }
+                _ => {
+                    return Err(NamerError::MalformedAstShape {
+                        tree_index: tree.index(),
+                        expected: "Ident or qualified Select package name",
+                    });
+                }
             }
-            _ => Err(NamerError::MalformedAstShape {
-                tree_index: tree.index(),
-                expected: "Ident or qualified Select package name",
-            }),
         }
     }
 }
@@ -4920,6 +4920,106 @@ mod tests {
                 .names
                 .resolve(store.symbols.get(named_package.symbol).name.text()),
             "<empty>"
+        );
+    }
+
+    #[test]
+    fn deeply_nested_class_headers_preserve_the_owner_chain() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let mut classes = Vec::new();
+        let mut body = Vec::new();
+        for _ in 0..2048 {
+            let class = class_definition(&mut arena, &mut store, "Nested", vec![], body, None);
+            classes.push(class);
+            body = vec![class];
+        }
+        let name = ident(&mut arena, &mut store, "deep");
+        let root = package(&mut arena, name, body);
+        let mut packages = Packages::new();
+        let source = SourceId::from_index(81);
+
+        let index = name_package(&arena, root, 81, &mut store, &mut packages).unwrap();
+        let mut owner = index.symbol_at(source, root).unwrap();
+        for tree in classes.into_iter().rev() {
+            let class = index.symbol_at(source, tree).unwrap();
+            assert_eq!(store.symbols.get(class).owner, Some(owner));
+            assert_eq!(
+                store.scopes.get(index.scope_of(class).unwrap()).owner,
+                Some(class)
+            );
+            owner = class;
+        }
+    }
+
+    #[test]
+    fn deeply_qualified_malformed_package_name_is_rejected_atomically() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let invalid = type_tree(&mut arena);
+        let mut name = invalid;
+        for _ in 0..16384 {
+            name = select(&mut arena, name, &mut store, "segment");
+        }
+        let root = package(&mut arena, name, vec![]);
+        let mut packages = Packages::new();
+        let checkpoint = store.checkpoint();
+        let mark = packages.mark();
+
+        assert_eq!(
+            name_package(&arena, root, 82, &mut store, &mut packages).unwrap_err(),
+            NamerError::MalformedAstShape {
+                tree_index: invalid.index(),
+                expected: "Ident or qualified Select package name",
+            }
+        );
+        assert_eq!(store.checkpoint(), checkpoint);
+        assert_eq!(packages.mark(), mark);
+    }
+
+    #[test]
+    fn cyclic_package_name_rolls_back_and_can_be_retried_after_repair() {
+        let mut store = SemanticStore::new();
+        let mut packages = Packages::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let name = ident(&mut arena, &mut store, "existing");
+        let original = package(&mut arena, name, vec![]);
+        name_package(&arena, original, 83, &mut store, &mut packages).unwrap();
+        let existing = packages.get(&["existing"]).unwrap();
+        let qualified = select(&mut arena, name, &mut store, "child");
+        let TreeKind::Select(selection) = &mut arena.get_mut(qualified).kind else {
+            unreachable!()
+        };
+        selection.qualifier = qualified;
+        let root = package(&mut arena, qualified, vec![]);
+        let checkpoint = store.checkpoint();
+        let mark = packages.mark();
+
+        assert_eq!(
+            name_package(&arena, root, 84, &mut store, &mut packages).unwrap_err(),
+            NamerError::MalformedAstShape {
+                tree_index: qualified.index(),
+                expected: "acyclic qualified package name",
+            }
+        );
+        assert_eq!(store.checkpoint(), checkpoint);
+        assert_eq!(packages.mark(), mark);
+        assert_eq!(packages.get(&["existing"]), Some(existing));
+        assert_eq!(
+            store.scopes.get(existing.scope).entered_symbols().count(),
+            0
+        );
+
+        let TreeKind::Select(selection) = &mut arena.get_mut(qualified).kind else {
+            unreachable!()
+        };
+        selection.qualifier = name;
+        let index = name_package(&arena, root, 84, &mut store, &mut packages).unwrap();
+        let child = packages.get(&["existing", "child"]).unwrap();
+        assert_eq!(store.symbols.get(child.symbol).owner, Some(existing.symbol));
+        assert_eq!(
+            index.symbol_at(SourceId::from_index(84), root),
+            Some(child.symbol)
         );
     }
 
