@@ -1235,17 +1235,31 @@ impl SourceTyper<'_> {
             });
         }
         let scope = frame.scope;
-        let name = *definition.name.as_name();
+        let mut local_name = definition.name;
         if symbol_flags.contains(SymbolFlags::GIVEN)
-            && self.store.names.resolve(name.text()).is_empty()
+            && self
+                .store
+                .names
+                .resolve(local_name.as_name().text())
+                .is_empty()
         {
-            return Err(local_value_modifier_error(
-                self.source,
-                tree,
-                &definition.metadata.modifiers,
-                "anonymous given has no local term identity",
-            ));
+            let suffix = given_name::extract_given_type_name(
+                self.arena,
+                &self.store.names,
+                definition.tpt,
+                true,
+            )
+            .map_err(|reason| {
+                local_value_modifier_error(
+                    self.source,
+                    tree,
+                    &definition.metadata.modifiers,
+                    reason.kind,
+                )
+            })?;
+            local_name = TermName::new(self.store.names.intern(&format!("given_{suffix}")));
         }
+        let name = *local_name.as_name();
         let preindexed_symbol = self.local_symbols.get(&(self.source, tree)).copied();
         let existing_symbols = self.store.scopes.get(scope).lookup_all(&name);
         if existing_symbols
@@ -1365,7 +1379,7 @@ impl SourceTyper<'_> {
         };
         Ok(self.typed_arena.alloc(Tree {
             kind: TreeKind::ValDef(ValDef {
-                name: definition.name,
+                name: local_name,
                 tpt: typed_tpt,
                 rhs: Some(typed_rhs),
                 metadata: (),

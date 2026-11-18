@@ -26526,9 +26526,9 @@ mod tests {
     }
 
     #[test]
-    fn anonymous_local_given_without_a_term_identity_remains_deferred() {
+    fn anonymous_local_given_has_the_canonical_invented_term_name() {
         let (parsed, mut store, packages, definitions, index, source) =
-            parse_and_name("class C { def use: Int = { given Int = 1; 0 } }");
+            parse_and_name("class C { def use: Int = { given Int = 1; given_Int } }");
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
         let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
             unreachable!();
@@ -26544,16 +26544,20 @@ mod tests {
         );
 
         let context = typer.expression_context_for(method).unwrap();
-        assert!(matches!(
-            typer.type_expression(rhs, context),
-            Err(TyperError::LocalValueModifierDeferred {
-                tree_index,
-                classification: "anonymous given has no local term identity",
-                ..
-            }) if tree_index == given.index()
-        ));
-        assert!(typer.local_symbol_at(source, given).is_none());
-        assert!(typer.typed_ast().iter().next().is_none());
+        typer.type_expression(rhs, context).unwrap();
+        let symbol = typer.local_symbol_at(source, given).unwrap();
+        assert_eq!(
+            typer
+                .store
+                .names
+                .resolve(typer.store.symbols.get(symbol).name.text()),
+            "given_Int"
+        );
+        let typed = typer.typed_index.get(source, block.expr).unwrap();
+        assert!(
+            matches!(typer.store.types.get(typer.typed_arena.get(typed).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(found), .. } if *found == symbol)
+        );
     }
 
     #[test]

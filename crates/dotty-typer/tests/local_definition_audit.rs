@@ -8147,7 +8147,7 @@ fn pinned_scala39_local_definition_audit() {
             .failures
             .get("LocalValueModifierDeferred::anonymous given has no local term identity")
             .map_or(0, |bucket| bucket.count),
-        4
+        0
     );
     assert_eq!(
         audit.local_method_signature_profile.total, local_method_signature_failure_count,

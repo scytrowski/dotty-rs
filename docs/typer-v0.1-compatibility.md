@@ -852,8 +852,8 @@ aggregate temporaries retain only `SYNTHETIC`.
 measured source carry `FINAL | LAZY`). Explicit references after the
 declaration use ordinary local-scope lookup. Contextual declarations enter the
 scope only after their initializer and type checks succeed; their initializer
-does not see the new local as already initialized. Anonymous givens remain
-deferred when their AST has no authoritative local term name. The preserved
+does not see the new local as already initialized. Anonymous local alias givens use the same type-derived names as member givens;
+the local symbol and typed declaration carry the invented name. The preserved
 `LAZY` flag on named givens does not enable general lazy-value typing or runtime
 lowering. Local contextual and lazy values with source annotations or explicit
 visibility modifiers return `LocalValueMetadataDeferred` before symbol
