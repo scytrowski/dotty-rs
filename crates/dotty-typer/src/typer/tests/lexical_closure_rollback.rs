@@ -475,3 +475,69 @@ fn scala_invalid_qualification_and_deferred_member_forms_rollback() {
         "by-name capture must be an explicit deferred feature: {by_name_diagnostic}"
     );
 }
+
+#[test]
+fn checked_context_closure_preserves_binders_and_rejects_another_owner() {
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+        "package scala; class C { def make(x: Int): Int ?=> Int = (n: Int) ?=> n + x }",
+    );
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    typer
+        .type_method_definition(method_tree_for(&parsed, &index, source, method))
+        .unwrap();
+    let root = typer.source_typed_index().get(source, rhs).unwrap();
+    let SymbolInfo::Complete(info) = typer.store.symbols.get(method).info else {
+        panic!()
+    };
+    let Type::Method(sig) = typer.store.types.get(info) else {
+        panic!()
+    };
+    let declared = sig.result;
+    let project = |owner| {
+        dotty_core::checked_unary_context_closure(
+            typer.store(),
+            &definitions,
+            typer.typed_ast(),
+            owner,
+            root,
+            declared,
+        )
+    };
+    let closure = project(method).expect("consistent source and closure result types");
+    assert_eq!(closure.input, definitions.int);
+    assert_eq!(closure.result, definitions.int);
+    assert_eq!(
+        typer
+            .source_typed_index()
+            .synthetic_definition_symbol(closure.definition),
+        Some(closure.method)
+    );
+    assert_eq!(
+        typer
+            .source_typed_index()
+            .synthetic_definition_symbol(closure.parameter_tree),
+        Some(closure.parameter)
+    );
+    assert_eq!(project(closure.method), None);
+    // The same nominal spelling cannot replace the compiler-synthesized trait.
+    typer.store.symbols.get_mut(closure.constructor).origin = dotty_core::SymbolOrigin::Builtin;
+    assert_eq!(
+        dotty_core::checked_unary_context_closure(
+            typer.store(),
+            &definitions,
+            typer.typed_ast(),
+            method,
+            root,
+            declared,
+        ),
+        None
+    );
+}
