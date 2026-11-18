@@ -729,6 +729,15 @@ fn source_trait_parent_product1_defers_multi_parent_selector_shape() {
         .iter()
         .find_map(|(tree, _)| session.index.derived_symbol_at(class, source, tree))
         .unwrap();
+    let Some(dotty_core::SourceDefinition::Derived {
+        tree: selector_tree,
+        ..
+    }) = session.index.definition_of(selector)
+    else {
+        panic!("selector should derive from its constructor field")
+    };
+    let context = session.index.declaration_context_of(selector).unwrap();
+    assert_eq!(session.index.source_context(context).owner, class);
     session.with_typer(|_, _, _, _, typer| {
         let class_info = typer
             .complete_symbol(class)
@@ -754,11 +763,25 @@ fn source_trait_parent_product1_defers_multi_parent_selector_shape() {
                     _ => false,
                 })
         );
-        assert!(matches!(
-            typer.complete_symbol(selector),
-            Err(TyperError::DeclarationContextMissing { .. })
-        ));
-        assert_eq!(*typer.store().symbols.info(selector), SymbolInfo::Missing);
+        let checkpoint = typer.store().checkpoint();
+        for _ in 0..2 {
+            let error = typer.complete_symbol(selector).unwrap_err();
+            let TyperError::SymbolSourceKindMismatch {
+                source: error_source,
+                tree_index,
+                symbol,
+                kind,
+            } = error
+            else {
+                panic!("expected unsupported selector source shape, got {error:?}")
+            };
+            assert_eq!(error_source, source);
+            assert_eq!(tree_index, selector_tree.index());
+            assert_eq!(symbol, selector);
+            assert_eq!(kind, SymbolKind::Method);
+            assert_eq!(*typer.store().symbols.info(selector), SymbolInfo::Missing);
+            assert_eq!(typer.store().checkpoint(), checkpoint);
+        }
     });
 }
 
