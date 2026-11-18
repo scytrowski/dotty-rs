@@ -173,3 +173,46 @@ The audit began at integration base
 `main` at `94cba0df6077c1196b055f441eca471326d6ae27` so the hosted focused gate
 can validate its ancestry. The updated published candidate HEAD is verified in
 the associated pull request. No historical comparator input was regenerated.
+
+## Checkpoint 4: selected Chain failure, rollback and retry (B4)
+
+The B4 regression uses the original `semantic_chain_3_9_0` resources without
+editing them. Their checked-in SHA-256 digests remain the three values in
+Checkpoint 1. The selected leaf request runs in a canonical resolver/store
+session after committing authentic `Open` and bootstrapping `Object`, `Unit`,
+and `Int`. A disposable `SelectedResourceControl` winner supplies either no
+resource or three malformed bytes for exactly one dependency; the original
+resource is restored before retry.
+
+| Selected failure | First typed error before public mapping | Discovery boundary |
+| --- | --- | --- |
+| Missing `ChainMiddle` | `SemanticMemberLoadFailure { binary_name: convergence/ChainMiddle, source: ClassLoad(NotFound(convergence/ChainMiddle)) }` | Middle lookup fails before semantic entry. |
+| Truncated `ChainMiddle` | `PairUnitFailure { binary_name: convergence/ChainMiddle, format: Tasty, origin: <malformed-ChainMiddle>, cause: ClassLoad(InvalidTastyFile(convergence/ChainMiddle, ...)) }` | Middle parsing fails before semantic entry. |
+| Missing `ChainRoot` after authentic Middle discovery | `SemanticMemberLoadFailure { binary_name: convergence/ChainRoot, source: ClassLoad(NotFound(convergence/ChainRoot)) }` | Middle bytes are read and parsed; Root lookup then fails before semantic entry. |
+| Truncated `ChainRoot` after authentic Middle discovery | `PairUnitFailure { binary_name: convergence/ChainRoot, format: Tasty, origin: <malformed-ChainRoot>, cause: ClassLoad(InvalidTastyFile(convergence/ChainRoot, ...)) }` | Middle bytes are read and parsed; Root parsing then fails before semantic entry. |
+
+Before each failure, the test snapshots store and session checkpoints, positive
+identity/resolution/origin maps, metadata and type-parameter cache keys,
+module-negative and decoded-module caches, package declarations, and the
+committed `Open` and canonical builtin information. Each failure leaves those
+snapshots unchanged and publishes no Chain root, scope, origin, or cache entry.
+Restoring the original dependency resource in the same session then completes
+all three roots with the original `Directory` origin, the exact
+`Leaf -> Middle -> Root` parent graph, one package declaration per root, and
+stable same-session repeated identities.
+
+The successful-load outer transaction test commits the same Chain and then
+rolls back the resolver journal before the `SemanticStore` checkpoint. Its
+first regression run found that TASTy-entered Chain roots had package-scope
+links outside the resolver's `PackageRegistry` undo journal. The selected
+semantic handoff now adopts newly resolved roots through the existing
+`track_existing_class` journal. The test confirms the package links, session
+maps, origins and new symbols are removed while earlier `Open` and builtins
+survive, then retries the authentic Chain in the same resolver and verifies
+canonical repeats and provenance. This is a bounded journal handoff repair; no
+new transaction or dependency-scheduling mechanism was added.
+
+The targeted regression names are
+`resolver::tests::selected_chain_dependency_failures_preserve_committed_state_and_retry`
+and
+`resolver::tests::selected_chain_outer_rollback_restores_prior_state_and_retries_canonically`.
