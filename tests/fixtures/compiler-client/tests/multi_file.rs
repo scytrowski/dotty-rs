@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use dotty::core::{
     AstArena, Definitions, Packages, SemanticStore, SourceId, SourceSemanticIndex, SymbolFlags,
@@ -285,31 +286,37 @@ fn emit_batch(
     prepared: &PreparedJvmEmission<'_>,
     classes: &[JvmClassPlan],
     workers: usize,
-) -> Vec<GeneratedClass> {
+) -> (Vec<GeneratedClass>, Duration) {
     let chunk_size = classes.len().div_ceil(workers).max(1);
     std::thread::scope(|scope| {
         let tasks: Vec<_> = classes
             .chunks(chunk_size)
             .map(|chunk| {
                 scope.spawn(|| {
-                    chunk
+                    let start = Instant::now();
+                    let artifacts = chunk
                         .iter()
                         .map(|class| prepared.emit_class(class.class).unwrap())
-                        .collect::<Vec<_>>()
+                        .collect::<Vec<_>>();
+                    (artifacts, start.elapsed())
                 })
             })
             .collect();
-        tasks
-            .into_iter()
-            .flat_map(|task| task.join().unwrap())
-            .collect()
+        let mut artifacts = Vec::with_capacity(classes.len());
+        let mut worker_time = Duration::ZERO;
+        for task in tasks {
+            let (chunk, elapsed) = task.join().unwrap();
+            artifacts.extend(chunk);
+            worker_time += elapsed;
+        }
+        (artifacts, worker_time)
     })
 }
 
 fn compile(files: [(SourceId, &str, &str); 2]) -> Vec<GeneratedClass> {
     with_plan(&files, |plan, definitions| {
         let prepared = plan.prepare_emission(definitions).unwrap();
-        let concurrent = emit_batch(&prepared, &plan.classes, 2);
+        let (concurrent, _) = emit_batch(&prepared, &plan.classes, 2);
         for (class, artifact) in plan.classes.iter().zip(&concurrent) {
             assert_eq!(
                 &emit_class(plan, class.class, definitions).unwrap(),

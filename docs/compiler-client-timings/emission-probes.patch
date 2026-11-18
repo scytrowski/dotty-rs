@@ -1,0 +1,301 @@
+--- a/crates/dotty-jvm/src/emission.rs
++++ b/crates/dotty-jvm/src/emission.rs
+@@ -62,6 +62,33 @@
+     metadata: Vec<crate::JvmClassMetadata>,
+     identities: Vec<crate::JvmClassIdentity>,
+     verification: Result<ClassHierarchy, ClassHierarchyError>,
++}
++
++#[derive(Default)]
++pub(crate) struct SemanticWork {
++    pub hierarchies: u128,
++    pub hierarchy_ns: u128,
++    pub validations: u128,
++    pub metadata_builds: u128,
++    pub projected: u128,
++    pub assignable: u128,
++}
++
++std::thread_local! {
++    pub(crate) static WORK: std::cell::RefCell<SemanticWork> = Default::default();
++    static STAGES: std::cell::Cell<[u128; 7]> = const { std::cell::Cell::new([0; 7]) };
++}
++
++/// Reads this worker's accumulated class timings after its last class.
++pub fn take_worker_probe() -> [u128; 18] {
++    let [classes, plan, constructor, setup, methods, encode, method_hierarchies] = STAGES.take();
++    let work = WORK.take();
++    let [verify, serialize, linear_methods, branched_methods, verifier_hierarchy] =
++        dotty_classfile::class_file_builder::take_encode_probe();
++    [classes, plan, constructor, setup, methods, encode, verify, serialize,
++     work.hierarchies, work.hierarchy_ns, work.validations, work.metadata_builds,
++     work.projected, work.assignable, method_hierarchies, linear_methods, branched_methods,
++     verifier_hierarchy]
+ }
+
+ impl JvmCompilationUnit<'_> {
+@@ -106,6 +133,7 @@
+     class_symbol: SymbolId,
+     tasty_link: Option<TastyLinkId>,
+ ) -> Result<GeneratedClass, JvmCodegenError> {
++    let start = std::time::Instant::now();
+     let unit = prepared.unit;
+     let definitions = prepared.definitions;
+     let (plan, metadata) = unit
+@@ -132,6 +160,7 @@
+         superclass,
+     )?;
+
++    let valid = std::time::Instant::now();
+     let constructor_initializers = match &plan.initialization {
+         JvmClassInitializationPlan::ImplicitNoArg
+         | JvmClassInitializationPlan::PrimaryConstructor(_) => {
+@@ -150,6 +179,7 @@
+         }
+     };
+
++    let initialized = std::time::Instant::now();
+     let mut builder = ClassFileBuilder::new(
+         metadata.identity().internal_name(),
+         ClassFileVersion {
+@@ -199,6 +229,7 @@
+             .map_err(|error| class_file_error(class_symbol, None, error))?;
+     }
+
++    let staged = std::time::Instant::now();
+     match constructor_initializers {
+         Some(initializers) => {
+             let (descriptor, access_flags, constructor_symbol) = match &plan.initialization {
+@@ -343,6 +374,8 @@
+         }
+     }
+
++    let hierarchies_before_methods = WORK.with_borrow(|w| w.hierarchies);
++    let constructors_done = std::time::Instant::now();
+     for (method_plan, method_metadata) in plan.methods.iter().zip(metadata.methods()) {
+         let body = method_plan.body.ok_or(JvmCodegenError::MissingTypedBody {
+             method: method_plan.method,
+@@ -365,9 +398,19 @@
+             .map_err(|error| class_file_error(class_symbol, Some(method_plan.method), error))?;
+     }
+
++    let methods_done = std::time::Instant::now();
++    let method_hierarchies = WORK.with_borrow(|w| w.hierarchies) - hierarchies_before_methods;
+     let bytes = builder
+         .encode()
+         .map_err(|error| class_file_error(class_symbol, None, error))?;
++    let encoded = std::time::Instant::now();
++    let intervals = [1, (valid-start).as_nanos(),
++        ((initialized-valid)+(constructors_done-staged)).as_nanos(),
++        (staged-initialized).as_nanos(), (methods_done-constructors_done).as_nanos(),
++        (encoded-methods_done).as_nanos(), method_hierarchies];
++    let mut totals = STAGES.get();
++    for (total, value) in totals.iter_mut().zip(intervals) { *total += value; }
++    STAGES.set(totals);
+     Ok(GeneratedClass {
+         internal_name: metadata.identity().internal_name().to_owned(),
+         bytes,
+--- a/crates/dotty-jvm/src/lib.rs
++++ b/crates/dotty-jvm/src/lib.rs
+@@ -37,6 +37,7 @@
+ };
+ mod emission;
+ pub use emission::PreparedJvmEmission;
++pub use emission::take_worker_probe;
+ mod expression;
+ mod identity;
+ mod locals;
+@@ -2979,6 +2980,7 @@
+     /// then typed-arena allocation order. Symbol identity is always the
+     /// canonical [`SymbolId`]; equal names never substitute for identity.
+     pub fn validate(&self) -> Result<(), JvmCodegenError> {
++        emission::WORK.with_borrow_mut(|w| w.validations += 1);
+         let mut seen_classes = HashSet::new();
+         let mut seen_methods = HashSet::new();
+         let mut seen_fields = HashSet::new();
+--- a/crates/dotty-jvm/src/identity.rs
++++ b/crates/dotty-jvm/src/identity.rs
+@@ -170,6 +170,20 @@
+ }
+
+ pub(super) fn unit_hierarchy(
++    unit: &crate::JvmCompilationUnit<'_>,
++    definitions: &Definitions,
++) -> Result<crate::JvmClassHierarchy, JvmCodegenError> {
++    let start = std::time::Instant::now();
++    let result = build_hierarchy(unit, definitions);
++    let elapsed = start.elapsed();
++    crate::emission::WORK.with_borrow_mut(|w| {
++        w.hierarchies += 1;
++        w.hierarchy_ns += elapsed.as_nanos();
++    });
++    result
++}
++
++fn build_hierarchy(
+     unit: &crate::JvmCompilationUnit<'_>,
+     definitions: &Definitions,
+ ) -> Result<crate::JvmClassHierarchy, JvmCodegenError> {
+@@ -1419,6 +1433,7 @@
+ ) -> Result<Vec<JvmClassMetadata>, JvmCodegenError> {
+     #[cfg(test)]
+     METADATA_BUILDS.with(|count| count.set(count.get() + 1));
++    crate::emission::WORK.with_borrow_mut(|w| w.metadata_builds += 1);
+     let class_identities = unit_class_identities(unit)?;
+     let mut metadata = Vec::with_capacity(unit.classes.len());
+     for class_plan in &unit.classes {
+--- a/crates/dotty-jvm/src/reference.rs
++++ b/crates/dotty-jvm/src/reference.rs
+@@ -81,6 +81,7 @@
+ ) -> Result<bool, JvmCodegenError> {
+     if found == expected {
+         if let (JvmType::Reference(class), Some(unit)) = (found, unit) {
++            crate::emission::WORK.with_borrow_mut(|w| w.assignable += 1);
+             let hierarchy = unit.class_hierarchy(definitions)?;
+             if !hierarchy
+                 .superclasses()
+@@ -516,6 +517,7 @@
+         let hierarchy = match scope.hierarchy {
+             Some(hierarchy) => hierarchy,
+             None => {
++                crate::emission::WORK.with_borrow_mut(|w| w.projected += 1);
+                 owned = scope.unit.class_hierarchy(definitions)?;
+                 &owned
+             }
+--- a/crates/dotty-classfile/src/class_file_builder.rs
++++ b/crates/dotty-classfile/src/class_file_builder.rs
+@@ -342,6 +342,12 @@
+     attributes: Vec<OwnedClassAttribute>,
+ }
+
++std::thread_local! {
++    static ENCODE_TIMES: std::cell::Cell<[u128; 5]> = const { std::cell::Cell::new([0; 5]) };
++}
++
++pub fn take_encode_probe() -> [u128; 5] { ENCODE_TIMES.take() }
++
+ impl ClassFileBuilder {
+     /// Creates a class builder with an explicit class internal name and
+     /// class-file version.
+@@ -666,6 +672,7 @@
+             self.super_class.as_deref(),
+             self.access_flags.is_interface(),
+         )?;
++        let hierarchy_start = std::time::Instant::now();
+         let verification_hierarchy = if let Some(super_class) = self.super_class.as_deref() {
+             self.verification_hierarchy
+                 .with_edge(&self.class_name, super_class)
+@@ -674,6 +681,7 @@
+         } else {
+             self.verification_hierarchy.clone()
+         };
++        let verifier_hierarchy = hierarchy_start.elapsed();
+         if self
+             .methods
+             .iter()
+@@ -764,6 +772,7 @@
+         // interned before the final pool is frozen; the append-only builder
+         // guarantees these indices remain stable afterward.
+         let preview_pool = pool_builder.clone().finish()?;
++        let preflight_start = std::time::Instant::now();
+         if !self.access_flags.contains(ACC_SUPER) {
+             for resolved in resolved_code.iter().flatten() {
+                 for (instruction, operation) in resolved_code_instructions(resolved)? {
+@@ -815,6 +824,9 @@
+                 crate::bytecode::stack_map_frames::frame_class_identities(&flow),
+             );
+         }
++        let mut verify = preflight_start.elapsed();
++        let mut linear_methods = 0;
++        let mut branched_methods = 0;
+         let frame_classes = frame_class_identities
+             .into_iter()
+             .map(|identity| {
+@@ -895,6 +907,7 @@
+                 ) => {
+                     let bytes = crate::bytecode::assemble_validated(&instructions, &constant_pool)
+                         .map_err(ClassFileBuildError::Assemble)?;
++                    let verify_start = std::time::Instant::now();
+                     let descriptor = crate::descriptor::MethodDescriptor::parse(&method.descriptor)
+                         .map_err(AnalysisError::InvalidMethodDescriptor)
+                         .map_err(ClassFileBuildError::Analysis)?;
+@@ -938,6 +951,8 @@
+                         )
+                     }
+                     .map_err(ClassFileBuildError::Analysis)?;
++                    verify += verify_start.elapsed();
++                    linear_methods += 1;
+                     Ok(Some(OwnedCode {
+                         max_stack: analysis.max_stack,
+                         max_locals: analysis.max_locals,
+@@ -946,6 +961,7 @@
+                     }))
+                 }
+                 (Some(OwnedMethodCode::Built(_)), Some(ResolvedMethodCode::Branched(sequence))) => {
++                    branched_methods += 1;
+                     let name_index =
+                         stack_map_table_name.ok_or(ClassFileBuildError::InvalidCodePlan)?;
+                     let graph = ControlFlowGraph::build(&sequence)
+@@ -1079,7 +1095,14 @@
+             methods,
+             attributes: class_attributes,
+         };
+-        class_file.encode().map_err(ClassFileBuildError::Encode)
++        let serialize_start = std::time::Instant::now();
++        let bytes = class_file.encode().map_err(ClassFileBuildError::Encode);
++        let serialize = serialize_start.elapsed();
++        let mut totals = ENCODE_TIMES.get();
++        for (total, value) in totals.iter_mut().zip([verify.as_nanos(), serialize.as_nanos(),
++            linear_methods, branched_methods, verifier_hierarchy.as_nanos()]) { *total += value; }
++        ENCODE_TIMES.set(totals);
++        bytes
+     }
+ }
+
+--- a/tests/fixtures/compiler-client/tests/multi_file.rs
++++ b/tests/fixtures/compiler-client/tests/multi_file.rs
+@@ -282,6 +282,10 @@
+     classes
+ }
+
++std::thread_local! {
++    static EMISSION_SAMPLE: std::cell::Cell<[u128; 18]> = const { std::cell::Cell::new([0; 18]) };
++}
++
+ fn emit_batch(
+     prepared: &PreparedJvmEmission<'_>,
+     classes: &[JvmClassPlan],
+@@ -298,17 +302,20 @@
+                         .iter()
+                         .map(|class| prepared.emit_class(class.class).unwrap())
+                         .collect::<Vec<_>>();
+-                    (artifacts, start.elapsed())
++                    (artifacts, start.elapsed(), dotty::jvm::take_worker_probe())
+                 })
+             })
+             .collect();
+         let mut artifacts = Vec::with_capacity(classes.len());
+         let mut worker_time = Duration::ZERO;
++        let mut totals = [0; 18];
+         for task in tasks {
+-            let (chunk, elapsed) = task.join().unwrap();
++            let (chunk, elapsed, probe) = task.join().unwrap();
++            for (total, value) in totals.iter_mut().zip(probe) { *total += value; }
+             artifacts.extend(chunk);
+             worker_time += elapsed;
+         }
++        EMISSION_SAMPLE.set(totals);
+         (artifacts, worker_time)
+     })
+ }
+--- a/tests/fixtures/compiler-client/tests/support/pipeline_timing.rs
++++ b/tests/fixtures/compiler-client/tests/support/pipeline_timing.rs
+@@ -94,6 +94,8 @@
+     let prepared_at = Instant::now();
+     let (artifacts, emit_workers) = emit_batch(&prepared, &plan.classes, workers);
+     let end = Instant::now();
++    let totals = super::EMISSION_SAMPLE.take();
++    eprintln!("emit_probe,{},{}: {:?}", files.len(), workers, totals);
+     (
+         artifacts,
+         Timings {

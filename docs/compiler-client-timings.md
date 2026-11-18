@@ -1,11 +1,11 @@
 # Compiling dependent Scala sources through the public library
 
 The standalone client compiles 16, 64 or 256 in-memory sources in a fresh
-semantic session. Each workload consists of independent chains of four classes. Each
-method has an inferred result. A leaf adds an integer to a local value. The
-other methods call through a receiver declared in another file. Input order places the last
-caller first in each chain, exercising completion of missing method signatures
-and retries in the owning sources.
+semantic session. Each group of four classes contains a leaf that adds an
+integer to a local value and three callers with inferred results. The original
+layout uses independent chains. A second layout shares three receiver types
+across all groups. Callers precede their group's leaf in both layouts.
+[Emission measurements for both layouts](compiler-client-emission-profile.md)
 
 Run the measurement from the repository root with the pinned Rust toolchain.
 
@@ -22,7 +22,7 @@ and body typing run on the calling thread. The interval starts before creating
 the session and ends when the ordered class bytes are available. Source
 generation, disk I/O, Java execution and artifact comparison are outside the
 interval. Every sample compares the ordered class names and byte arrays against
-the one-worker reference for its input size.
+the one-worker reference for its size and layout.
 
 The harness warms up both worker counts for each size. Over nine pairs it
 alternates the worker order and rotates which size runs first. It prints raw
