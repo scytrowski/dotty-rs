@@ -3391,6 +3391,144 @@ fn enum_companions_do_not_cross_source_file_boundaries() {
 }
 
 #[test]
+fn cyclic_pattern_is_rejected_atomically_and_can_be_retried() {
+    use dotty_core::ast::{Parens, UntypedNode};
+    let (mut parsed, source, mut store) = parsed_source("val (a, b) = pair", 403);
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        unreachable!()
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) =
+        &parsed.ast.get(package.stats[0]).kind
+    else {
+        unreachable!()
+    };
+    let pattern = definition.patterns[0];
+    let original_kind = parsed.ast.get(pattern).kind.clone();
+    parsed.ast.get_mut(pattern).kind =
+        TreeKind::PhaseSpecific(UntypedNode::Parens(Parens { inner: pattern }));
+    let mut packages = Packages::new();
+    let checkpoint = store.checkpoint();
+    let mark = packages.mark();
+    assert_eq!(
+        name_compilation_unit(
+            &parsed.ast,
+            parsed.root,
+            source,
+            "Pattern.scala",
+            &mut store,
+            &mut packages,
+        )
+        .unwrap_err(),
+        NamerError::MalformedAstShape {
+            tree_index: pattern.index(),
+            expected: "acyclic pattern tree",
+        }
+    );
+    assert_eq!(store.checkpoint(), checkpoint);
+    assert_eq!(packages.mark(), mark);
+
+    parsed.ast.get_mut(pattern).kind = original_kind;
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Pattern.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) = &parsed.ast.get(pattern).kind else {
+        unreachable!()
+    };
+    let first = index.symbol_at(source, tuple.elements[0]).unwrap();
+    let second = index.symbol_at(source, tuple.elements[1]).unwrap();
+    assert_eq!(
+        store.symbols.get(first).owner,
+        store.symbols.get(second).owner
+    );
+    assert_eq!(
+        store.names.resolve(store.symbols.get(first).name.text()),
+        "a"
+    );
+    assert_eq!(
+        store.names.resolve(store.symbols.get(second).name.text()),
+        "b"
+    );
+}
+
+#[test]
+fn shared_pattern_subtrees_preserve_the_first_binding_identities() {
+    use dotty_core::ast::{Tuple, UntypedNode};
+    let (mut parsed, source, mut store) = parsed_source("val (a, b) = pair", 404);
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        unreachable!()
+    };
+    let declaration = package.stats[0];
+    let TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) =
+        &parsed.ast.get(declaration).kind
+    else {
+        unreachable!()
+    };
+    let mut pattern = definition.patterns[0];
+    let TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) = &parsed.ast.get(pattern).kind else {
+        unreachable!()
+    };
+    let bindings = tuple.elements.clone();
+    for _ in 0..64 {
+        pattern = parsed.ast.alloc(dotty_core::Tree {
+            kind: TreeKind::PhaseSpecific(UntypedNode::Tuple(Tuple {
+                elements: vec![pattern, pattern],
+            })),
+            position: None,
+            ty: (),
+        });
+    }
+    let TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) =
+        &mut parsed.ast.get_mut(declaration).kind
+    else {
+        unreachable!()
+    };
+    definition.patterns = vec![pattern];
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Pattern.scala",
+        &mut store,
+        &mut Packages::new(),
+    )
+    .unwrap();
+    let symbols: Vec<_> = bindings
+        .iter()
+        .map(|tree| index.symbol_at(source, *tree).unwrap())
+        .collect();
+    let owner = store.symbols.get(symbols[0]).owner.unwrap();
+    assert_eq!(
+        store
+            .scopes
+            .get(index.scope_of(owner).unwrap())
+            .entered_symbols()
+            .count(),
+        symbols.len()
+    );
+    for (symbol, name) in symbols.into_iter().zip(["a", "b"]) {
+        assert_eq!(store.symbols.get(symbol).owner, Some(owner));
+        assert_eq!(
+            store
+                .scopes
+                .get(index.scope_of(owner).unwrap())
+                .lookup(&store.symbols.get(symbol).name),
+            Some(symbol)
+        );
+        assert_eq!(
+            store.names.resolve(store.symbols.get(symbol).name.text()),
+            name
+        );
+        assert!(index.declaration_context_of(symbol).is_some());
+    }
+}
+
+#[test]
 fn parsed_pattern_val_binders_are_fields_of_the_source_wrapper() {
     use dotty_core::ast::UntypedNode;
     use dotty_core::{SymbolKind, TermName};

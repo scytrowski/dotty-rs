@@ -1104,19 +1104,46 @@ impl Namer<'_> {
     fn collect_pattern_bindings(
         &self,
         patterns: &[TreeId<Untyped>],
-    ) -> Vec<(TreeId<Untyped>, dotty_core::Name)> {
+    ) -> Result<Vec<(TreeId<Untyped>, dotty_core::Name)>, NamerError> {
+        enum Task {
+            Visit(TreeId<Untyped>),
+            Finish(TreeId<Untyped>),
+        }
+
         let mut bindings = Vec::new();
         let mut names = HashSet::new();
         let mut pending = Vec::new();
         for &root in patterns {
+            // Shared subtrees contribute their bindings once per root. Track
+            // the active path separately so a cycle remains an error.
+            let mut active = HashSet::new();
+            let mut complete = HashSet::new();
             // A direct (possibly typed) identifier in a val/var declaration
             // declares its name even when capitalized or backquoted.
             let direct_ident = match &self.arena.get(root).kind {
                 TreeKind::Typed(typed) => typed.expr,
                 _ => root,
             };
-            pending.push(root);
-            while let Some(tree) = pending.pop() {
+            pending.push(Task::Visit(root));
+            while let Some(task) = pending.pop() {
+                let tree = match task {
+                    Task::Finish(tree) => {
+                        active.remove(&tree);
+                        complete.insert(tree);
+                        continue;
+                    }
+                    Task::Visit(tree) => tree,
+                };
+                if complete.contains(&tree) {
+                    continue;
+                }
+                if !active.insert(tree) {
+                    return Err(NamerError::MalformedAstShape {
+                        tree_index: tree.index(),
+                        expected: "acyclic pattern tree",
+                    });
+                }
+                pending.push(Task::Finish(tree));
                 match &self.arena.get(tree).kind {
                     TreeKind::Ident(ident) => {
                         let text = self.store.names.resolve(ident.name.text());
@@ -1136,40 +1163,42 @@ impl Namer<'_> {
                         {
                             bindings.push((tree, binding.name));
                         }
-                        pending.push(binding.body);
+                        pending.push(Task::Visit(binding.body));
                     }
-                    TreeKind::NamedArg(arg) => pending.push(arg.arg),
+                    TreeKind::NamedArg(arg) => pending.push(Task::Visit(arg.arg)),
                     TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(string)) => {
-                        pending.extend(string.parts.iter().rev().copied());
+                        pending.extend(string.parts.iter().rev().copied().map(Task::Visit));
                     }
-                    TreeKind::Block(block) if block.stats.is_empty() => pending.push(block.expr),
-                    TreeKind::Typed(typed) => pending.push(typed.expr),
+                    TreeKind::Block(block) if block.stats.is_empty() => {
+                        pending.push(Task::Visit(block.expr))
+                    }
+                    TreeKind::Typed(typed) => pending.push(Task::Visit(typed.expr)),
                     TreeKind::Apply(application) => {
-                        pending.extend(application.args.iter().rev().copied());
+                        pending.extend(application.args.iter().rev().copied().map(Task::Visit));
                     }
                     TreeKind::Alternative(alternative) => {
                         if let Some(first) = alternative.alternatives.first() {
-                            pending.push(*first);
+                            pending.push(Task::Visit(*first));
                         }
                     }
                     TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => {
-                        pending.push(parens.inner)
+                        pending.push(Task::Visit(parens.inner))
                     }
                     TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) => {
-                        pending.extend(tuple.elements.iter().rev().copied());
+                        pending.extend(tuple.elements.iter().rev().copied().map(Task::Visit));
                     }
                     TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => {
-                        pending.push(infix.right);
-                        pending.push(infix.left);
+                        pending.push(Task::Visit(infix.right));
+                        pending.push(Task::Visit(infix.left));
                     }
                     TreeKind::UnApply(unapply) => {
-                        pending.extend(unapply.patterns.iter().rev().copied());
+                        pending.extend(unapply.patterns.iter().rev().copied().map(Task::Visit));
                     }
                     _ => {}
                 }
             }
         }
-        bindings
+        Ok(bindings)
     }
 
     fn enter_pattern_binding_headers(
@@ -1184,7 +1213,7 @@ impl Namer<'_> {
             return Ok(Vec::new());
         }
 
-        let bindings = self.collect_pattern_bindings(&definition.patterns);
+        let bindings = self.collect_pattern_bindings(&definition.patterns)?;
         if bindings.is_empty() {
             return Ok(Vec::new());
         }
