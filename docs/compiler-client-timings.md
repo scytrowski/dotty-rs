@@ -5,7 +5,7 @@ semantic session. Each group of four classes contains a leaf that adds an
 integer to a local value and three callers with inferred results. The original
 layout uses independent chains. A second layout shares three receiver types
 across all groups. Callers precede their group's leaf in both layouts.
-[Emission measurements for both layouts](compiler-client-emission-profile.md)
+[Emission measurements for both layouts](compiler-client-emission-profile.md) · [Cross-file signature scheduling](compiler-client-signature-order.md)
 
 Run the measurement from the repository root with the pinned Rust toolchain.
 

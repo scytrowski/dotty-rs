@@ -1,4 +1,7 @@
 //! In-memory compilation from source text through the complete batch of class files.
+#[path = "signature_order.rs"]
+mod signature_order;
+
 use std::time::{Duration, Instant};
 
 use super::{class_plans, complete_signatures, emit_batch, name_units, parsing, type_bodies};
@@ -71,6 +74,19 @@ fn compile_timed(
     files: &[(SourceId, &str, &str)],
     workers: usize,
 ) -> (Vec<GeneratedClass>, Timings) {
+    compile_with_signatures(files, workers, complete_signatures)
+}
+
+fn compile_with_signatures(
+    files: &[(SourceId, &str, &str)],
+    workers: usize,
+    complete: impl FnOnce(
+        &[super::NamedUnit],
+        &mut SemanticStore,
+        Definitions,
+        &Packages,
+    ) -> Result<(), super::TyperError>,
+) -> (Vec<GeneratedClass>, Timings) {
     let start = Instant::now();
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
@@ -80,7 +96,7 @@ fn compile_timed(
     let parsed_at = Instant::now();
     let units = name_units(files, parsed, &mut store, &mut packages);
     let named = Instant::now();
-    complete_signatures(&units, &mut store, definitions, &packages).unwrap();
+    complete(&units, &mut store, definitions, &packages).unwrap();
     let completed = Instant::now();
     let (arena, typed) = type_bodies(&units, &mut store, definitions, &packages);
     let typed_at = Instant::now();

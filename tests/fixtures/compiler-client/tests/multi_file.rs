@@ -125,14 +125,28 @@ fn complete_signatures(
     definitions: Definitions,
     packages: &Packages,
 ) -> Result<(), TyperError> {
+    complete_signatures_in_order(units, units, store, definitions, packages, |_, _| {})
+}
+
+fn complete_signatures_in_order<'a>(
+    units: &'a [NamedUnit],
+    roots: impl IntoIterator<Item = &'a NamedUnit>,
+    store: &mut SemanticStore,
+    definitions: Definitions,
+    packages: &Packages,
+    mut observe: impl FnMut(SymbolId, Option<&TyperError>),
+) -> Result<(), TyperError> {
     let mut owners = HashMap::new();
     for unit in units {
-        unit.typer(store, definitions, packages)
-            .complete_symbol(unit.class)?;
+        let header = unit
+            .typer(store, definitions, packages)
+            .complete_symbol(unit.class);
+        observe(unit.class, header.as_ref().err());
+        header?;
         owners.insert(unit.method_symbol(), unit);
     }
 
-    for root in units {
+    for root in roots {
         let symbol = root.method_symbol();
         if matches!(store.symbols.info(symbol), SymbolInfo::Complete(_)) {
             continue;
@@ -144,6 +158,7 @@ fn complete_signatures(
             let completion = unit
                 .typer(store, definitions, packages)
                 .complete_symbol(symbol);
+            observe(symbol, completion.as_ref().err());
             match completion {
                 Ok(_) => {
                     pending.pop();
@@ -441,25 +456,35 @@ fn cross_file_inference_cycle_reports_the_reentered_method_and_rolls_back() {
         "class B { def right(a: A) = a.left(this) }",
     );
     for files in [[a, b], [b, a]] {
-        let mut store = SemanticStore::new();
-        let definitions = Definitions::bootstrap(&mut store);
-        let mut packages = Packages::new();
-        let units = name_units(
-            &files,
-            parsing::parse_files(&files, 4),
-            &mut store,
-            &mut packages,
-        );
-        let error = complete_signatures(&units, &mut store, definitions, &packages).unwrap_err();
-        assert!(
-            matches!(error, TyperError::RecursiveInferredMethodResult { symbol } if symbol == units[0].method_symbol()),
-            "{error:?}"
-        );
-        for unit in &units {
-            assert!(matches!(
-                store.symbols.info(unit.method_symbol()),
-                SymbolInfo::Missing
-            ));
+        for first in [0, 1] {
+            let mut store = SemanticStore::new();
+            let definitions = Definitions::bootstrap(&mut store);
+            let mut packages = Packages::new();
+            let units = name_units(
+                &files,
+                parsing::parse_files(&files, 4),
+                &mut store,
+                &mut packages,
+            );
+            let error = complete_signatures_in_order(
+                &units,
+                [&units[first], &units[1 - first]],
+                &mut store,
+                definitions,
+                &packages,
+                |_, _| {},
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, TyperError::RecursiveInferredMethodResult { symbol } if symbol == units[first].method_symbol()),
+                "{error:?}"
+            );
+            for unit in &units {
+                assert!(matches!(
+                    store.symbols.info(unit.method_symbol()),
+                    SymbolInfo::Missing
+                ));
+            }
         }
     }
 }
