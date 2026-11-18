@@ -226,3 +226,154 @@ fn shared_match_case_keeps_its_wire_node_and_relocates_to_the_case() {
         }))
     );
 }
+
+#[test]
+fn explicit_identities_follow_both_reordered_subtrees_across_address_width_changes() {
+    use dotty_tasty::tasty::*;
+    // Both definitions have the same name and tag. Only the supplied identities
+    // tell the encoder which definition the expression names.
+    // The preceding tree puts the definitions on either side of address 128.
+    let mut bytes = vec![ALTERNATIVE_TAG, 0xf6];
+    bytes.extend(std::iter::repeat_n(UNITCONST_TAG, 118));
+    bytes.extend([
+        BLOCK_TAG,
+        0x90,
+        TERMREFDIRECT_TAG,
+        0xfc,
+        VALDEF_TAG,
+        0x85,
+        0x81,
+        TYPEREFPKG_TAG,
+        0x83,
+        INTCONST_TAG,
+        0xa9,
+        VALDEF_TAG,
+        0x85,
+        0x81,
+        TYPEREFPKG_TAG,
+        0x83,
+        INTCONST_TAG,
+        0xaa,
+    ]);
+    let raw = RawNodes::decode(&mut Reader::new(&bytes)).unwrap();
+    let mut block = raw.get(1).unwrap().decode_block().unwrap();
+    block.stats.swap(0, 1);
+    let roots = [
+        raw.get(0).unwrap().decode_structured().unwrap(),
+        StructuredNode::Block(block),
+    ];
+    let order = AstNodeIdentityMap::from_edited_order(
+        [0].into_iter()
+            .chain(2..120)
+            .chain([120, 122, 131, 134, 136, 124, 127, 129]),
+    );
+    let section =
+        EncodedSection::structured_asts_relocated_with_identities(0, &bytes, &roots, &order)
+            .unwrap();
+    let parsed = RawNodes::decode(&mut Reader::new(section.payload())).unwrap();
+    let block = parsed.get(1).unwrap();
+    let result = block.decode_block().unwrap();
+    let RawTree::LengthNode(a) = &result.stats[1] else {
+        panic!("expected VALDEF")
+    };
+    assert_eq!(a.offset, 10);
+    assert_eq!(
+        block.ast_refs().unwrap(),
+        [AstRef {
+            kind: AstRefKind::TermRefDirect,
+            address: 132
+        }]
+    );
+    assert_eq!(a.payload.last(), Some(&0xa9));
+}
+
+#[test]
+fn rejects_incomplete_or_inconsistent_explicit_identities() {
+    use dotty_tasty::tasty::*;
+    let bytes = [
+        APPLY_TAG,
+        0x81,
+        UNITCONST_TAG,
+        APPLY_TAG,
+        0x81,
+        UNITCONST_TAG,
+    ];
+    let raw = RawNodes::decode(&mut Reader::new(&bytes)).unwrap();
+    let roots: Vec<_> = raw.iter().map(|n| n.decode_structured().unwrap()).collect();
+    let run = |ids: &[u32]| {
+        EncodedSection::structured_asts_relocated_with_identities(
+            0,
+            &bytes,
+            &roots,
+            &AstNodeIdentityMap::from_edited_order(ids.iter().copied()),
+        )
+    };
+    assert_eq!(
+        run(&[0, 2, 3]),
+        Err(TermEncodeError::Ast(AstError::AstNodeCountMismatch {
+            expected: 4,
+            actual: 3
+        }))
+    );
+    assert_eq!(
+        run(&[0, 2, 3, 4]),
+        Err(TermEncodeError::Ast(AstError::InvalidAstReference {
+            address: 4
+        }))
+    );
+    assert_eq!(
+        run(&[0, 2, 3, 2]),
+        Err(TermEncodeError::DuplicateNodeIdentity { address: 2 })
+    );
+    assert_eq!(
+        run(&[0, 5, 3, 2]),
+        Err(TermEncodeError::RelocationParentMismatch { address: 5 })
+    );
+    assert!(matches!(
+        run(&[2, 0, 3, 5]),
+        Err(TermEncodeError::Ast(AstError::UnexpectedTag { .. }))
+    ));
+    assert_eq!(run(&[0, 2, 3, 5]).unwrap().payload(), bytes);
+}
+
+#[test]
+fn explicit_relocation_validates_operands_in_the_original_address_space() {
+    use dotty_tasty::tasty::*;
+    // Address 4 is inside the old integer operand but becomes a new tree start.
+    let bytes = [APPLY_TAG, 0x85, INTCONST_TAG, 0, 0xbf, SHAREDTERM_TAG, 0x84];
+    let raw = RawNodes::decode(&mut Reader::new(&bytes)).unwrap();
+    let roots = [raw.get(0).unwrap().decode_structured().unwrap()];
+    let order = AstNodeIdentityMap::from_edited_order([0, 2, 5]);
+    assert_eq!(
+        EncodedSection::structured_asts_relocated_with_identities(0, &bytes, &roots, &order),
+        Err(TermEncodeError::Ast(AstError::InvalidAstReference {
+            address: 4
+        }))
+    );
+}
+
+#[test]
+fn explicit_relocation_rejects_hidden_operands_even_in_stationary_opaque_nodes() {
+    use dotty_tasty::tasty::*;
+    let bytes = [
+        200,
+        0x80,
+        APPLY_TAG,
+        0x81,
+        UNITCONST_TAG,
+        APPLY_TAG,
+        0x81,
+        TRUECONST_TAG,
+    ];
+    let raw = RawNodes::decode(&mut Reader::new(&bytes)).unwrap();
+    let mut roots: Vec<_> = raw.iter().map(|n| n.decode_structured().unwrap()).collect();
+    roots.swap(1, 2);
+    let order = AstNodeIdentityMap::from_edited_order([0, 5, 7, 2, 4]);
+    assert_eq!(
+        EncodedSection::structured_asts_relocated_with_identities(0, &bytes, &roots, &order),
+        Err(TermEncodeError::Ast(AstError::UnsupportedRelocation {
+            tag: 200,
+            offset: 0
+        }))
+    );
+}

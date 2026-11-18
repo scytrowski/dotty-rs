@@ -104,10 +104,10 @@ pub use name_table::{
 };
 pub use reader::{ReadError, Reader};
 pub use section::{
-    Attribute, CAPTURECHECKED_ATTR, Comment, EXPLICITNULLS_ATTR, EncodedAstSection, EncodedSection,
-    JAVA_ATTR, OUTLINE_ATTR, PositionCoordinate, PositionEntry, PositionSection, ResolvedPosition,
-    ResolvedPositionEntry, SCALA2STANDARDLIBRARY_ATTR, SOURCEFILE_ATTR, Section, SectionError,
-    SectionTable, StandardSection, WITHPUREFUNS_ATTR,
+    AstNodeIdentityMap, Attribute, CAPTURECHECKED_ATTR, Comment, EXPLICITNULLS_ATTR,
+    EncodedAstSection, EncodedSection, JAVA_ATTR, OUTLINE_ATTR, PositionCoordinate, PositionEntry,
+    PositionSection, ResolvedPosition, ResolvedPositionEntry, SCALA2STANDARDLIBRARY_ATTR,
+    SOURCEFILE_ATTR, Section, SectionError, SectionTable, StandardSection, WITHPUREFUNS_ATTR,
 };
 pub use term::{
     AstRef, AstRefKind, AstTreeNode, BYTECONST_TAG, CHARCONST_TAG, ConstantValue,

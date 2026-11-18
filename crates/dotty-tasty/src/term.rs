@@ -230,6 +230,16 @@ pub enum TermError {
 /// Errors returned while encoding a raw term tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TermEncodeError {
+    /// Multiple edited nodes claim the same original identity.
+    DuplicateNodeIdentity {
+        /// Repeated original AST address.
+        address: u32,
+    },
+    /// The supplied identity would put a node under a different parent.
+    RelocationParentMismatch {
+        /// Original address of the node whose parent changed.
+        address: u32,
+    },
     /// A binary writer failed.
     Write(WriteError),
     /// An AST reference or raw AST node failed validation.
@@ -249,6 +259,14 @@ pub enum TermEncodeError {
 impl fmt::Display for TermEncodeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::DuplicateNodeIdentity { address } => write!(
+                formatter,
+                "duplicate original AST identity at address {address}"
+            ),
+            Self::RelocationParentMismatch { address } => write!(
+                formatter,
+                "relocation changes the parent of original AST node {address}"
+            ),
             Self::Write(error) => error.fmt(formatter),
             Self::Ast(error) => error.fmt(formatter),
             Self::InvalidTag { tag } => write!(formatter, "invalid term tag {tag} for encoding"),

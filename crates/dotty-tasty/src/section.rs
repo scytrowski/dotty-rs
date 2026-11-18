@@ -48,6 +48,53 @@ pub struct EncodedAstSection {
     ast_address_map: BTreeMap<u32, u32>,
 }
 
+/// Original AST addresses in the wire order of the edited visible nodes.
+/// Each original node (including nested leaves) must occur exactly once.
+/// Start with [`AstAddressIndex::node_addresses`] and apply the same
+/// sibling-subtree permutations as the edit. Addresses in reference operands
+/// still refer to the original section. The encoder computes final addresses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AstNodeIdentityMap {
+    original_addresses: Vec<u32>,
+}
+
+impl AstNodeIdentityMap {
+    /// Associates each edited node, in increasing wire offset order, with
+    /// its original address. Relocation validates the map against both trees.
+    pub fn from_edited_order(addresses: impl IntoIterator<Item = u32>) -> Self {
+        Self {
+            original_addresses: addresses.into_iter().collect(),
+        }
+    }
+
+    fn original_nodes(
+        &self,
+        index: &AstAddressIndex<'_>,
+    ) -> Result<Vec<AstTreeNode>, TermEncodeError> {
+        let count = index.iter_nodes().count();
+        if self.original_addresses.len() != count {
+            return Err(AstError::AstNodeCountMismatch {
+                expected: count,
+                actual: self.original_addresses.len(),
+            }
+            .into());
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        self.original_addresses
+            .iter()
+            .map(|&address| {
+                let node = index
+                    .get_node(address)
+                    .ok_or(AstError::InvalidAstReference { address })?;
+                if !seen.insert(address) {
+                    return Err(TermEncodeError::DuplicateNodeIdentity { address });
+                }
+                Ok(node)
+            })
+            .collect()
+    }
+}
+
 /// Identifies one of the standard TASTy sections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StandardSection {
@@ -878,7 +925,25 @@ impl EncodedSection {
         original_payload: &[u8],
         nodes: &[StructuredNode<'_>],
     ) -> Result<EncodedAstSection, TermEncodeError> {
-        EncodedAstSection::from_structured_relocated(name, original_payload, nodes)
+        EncodedAstSection::from_structured_relocated(name, original_payload, nodes, None)
+    }
+
+    /// Relocates an edited AST section using the supplied node identities.
+    /// Nodes can change size and siblings can change order. Node tags and
+    /// original parent identities must match. A moved reference target
+    /// requires all potentially reference-bearing nodes to be understood.
+    pub fn structured_asts_relocated_with_identities(
+        name: NameRef,
+        original_payload: &[u8],
+        nodes: &[StructuredNode<'_>],
+        identities: &AstNodeIdentityMap,
+    ) -> Result<EncodedAstSection, TermEncodeError> {
+        EncodedAstSection::from_structured_relocated(
+            name,
+            original_payload,
+            nodes,
+            Some(identities),
+        )
     }
 
     /// Returns the zero-based section name index.
@@ -933,10 +998,11 @@ impl EncodedAstSection {
         })
     }
 
-    fn from_structured_relocated(
+    pub(crate) fn from_structured_relocated(
         name: NameRef,
         original_payload: &[u8],
         nodes: &[StructuredNode<'_>],
+        identities: Option<&AstNodeIdentityMap>,
     ) -> Result<Self, TermEncodeError> {
         let (original_top_level, original_index) = ast_index_with_nodes(original_payload)?;
         if original_top_level.len() != nodes.len() {
@@ -947,7 +1013,10 @@ impl EncodedAstSection {
             .into());
         }
 
-        let original_visible = original_index.iter_nodes().collect::<Vec<_>>();
+        let original_visible = match identities {
+            Some(map) => map.original_nodes(&original_index)?,
+            None => original_index.iter_nodes().collect(),
+        };
         let mut address_map = BTreeMap::new();
 
         for iteration in 0..MAX_AST_RELOCATION_ITERATIONS {
@@ -984,7 +1053,7 @@ impl EncodedAstSection {
                 }
             }
 
-            if iteration == 0 && original_payload != bytes {
+            if iteration == 0 && identities.is_none() && original_payload != bytes {
                 let root = |node: &crate::RawNode<'_>| AstTreeNode {
                     tag: node.tag,
                     offset: node.offset,
@@ -1016,10 +1085,33 @@ impl EncodedAstSection {
                 })
                 .collect::<Result<BTreeMap<_, _>, TermEncodeError>>()?;
 
+            if identities.is_some() && iteration == 0 {
+                // Edited reference operands are still in the original coordinate
+                // system. An invalid old operand could happen to be a new address.
+                validate_indexed_ast_references(&encoded_nodes, &original_index)?;
+            }
+            if identities.is_some() {
+                for (old, new) in original_visible.iter().zip(&encoded_visible) {
+                    let address = ast_address_from_offset(old.offset)?;
+                    let expected_parent = original_index.parent_of(address).map(|p| {
+                        let parent = p.offset as u32;
+                        next_map.get(&parent).copied().unwrap_or(parent)
+                    });
+                    let actual_parent =
+                        encoded_index.parent_of(ast_address_from_offset(new.offset)?);
+                    if expected_parent != actual_parent.map(|p| p.offset as u32) {
+                        return Err(TermEncodeError::RelocationParentMismatch { address });
+                    }
+                }
+            }
+
             for node in original_index.iter() {
                 let old_address = ast_address_from_offset(node.offset)?;
                 let new_address = next_map.get(&old_address).copied().unwrap_or(old_address);
-                if !node.is_known() && new_address != old_address {
+                if !node.is_known()
+                    && (new_address != old_address
+                        || (identities.is_some() && !next_map.is_empty()))
+                {
                     return Err(AstError::UnsupportedRelocation {
                         tag: node.tag,
                         offset: node.offset,
