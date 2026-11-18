@@ -66,6 +66,10 @@ const MAX_DEPTH: usize = 512;
 pub enum TypeRebindError {
     /// `source` is not a [`Type::TypeLambda`].
     NotATypeLambda { source: TypeId },
+    /// The supplied binder is not a method, or the argument count differs.
+    InvalidMethodApplication { source: TypeId },
+    /// A referenced method argument does not denote a stable path.
+    MissingMethodArgumentPath { binder: TypeId, index: u32 },
     /// `source` is not a [`Type::Poly`].
     NotAPoly { source: TypeId },
     /// Explicit type arguments do not match the polymorphic binder's arity.
@@ -136,6 +140,16 @@ impl fmt::Display for TypeRebindError {
                     id.index()
                 )
             }
+            Self::InvalidMethodApplication { source } => write!(
+                formatter,
+                "method binder {} has an incompatible argument list",
+                source.index()
+            ),
+            Self::MissingMethodArgumentPath { binder, index } => write!(
+                formatter,
+                "method binder {} requires a stable argument at index {index}",
+                binder.index()
+            ),
             Self::NotATypeLambda { source } => {
                 write!(formatter, "type {} is not a type lambda", source.index())
             }
@@ -276,6 +290,39 @@ pub struct InstantiatedTypeLambda {
     pub result: TypeId,
     /// Instantiated bounds in the same order as the original parameters.
     pub bounds: Vec<TypeId>,
+}
+
+/// Substitutes the supplied paths for term parameter references in a method
+/// result, including references inside later clauses. Unreferenced arguments
+/// need no path. Each reference is matched by its binder and position.
+pub fn instantiate_method_result(
+    store: &mut SemanticStore,
+    source: TypeId,
+    paths: &[Option<TypeId>],
+) -> Result<TypeId, TypeRebindError> {
+    let Some(Type::Method(method)) = store.types.try_get(source) else {
+        return Err(TypeRebindError::InvalidMethodApplication { source });
+    };
+    if method.params.len() != paths.len() {
+        return Err(TypeRebindError::InvalidMethodApplication { source });
+    }
+    let result = method.result;
+    for &path in paths.iter().flatten() {
+        if !store.types.contains(path) {
+            return Err(TypeRebindError::InvalidType { id: path });
+        }
+        if !store.types.is_filled(path) {
+            return Err(TypeRebindError::UnfilledType { id: path });
+        }
+    }
+    let checkpoint = store.checkpoint();
+    let mut rebinder = Rebinder::new(store);
+    rebinder.method_arguments = Some((source, paths.to_vec()));
+    let result = rebinder.ty(result);
+    if result.is_err() {
+        store.rollback_to(checkpoint);
+    }
+    result
 }
 
 /// Instantiates a polymorphic semantic type with explicit positional type
@@ -1013,6 +1060,7 @@ struct Rebinder<'a> {
     /// new binder. `None` outside a close-over call.
     close_over: Option<(SymbolId, TypeId)>,
     this_prefix: Option<(SymbolId, TypeId)>,
+    method_arguments: Option<(TypeId, Vec<Option<TypeId>>)>,
     /// The one `RecThis` [`close_over`](Self::close_over) has allocated so
     /// far, made on first use and reused for every later occurrence.
     close_over_rec_this: Option<TypeId>,
@@ -1036,6 +1084,7 @@ impl<'a> Rebinder<'a> {
             lambda_source: None,
             close_over: None,
             this_prefix: None,
+            method_arguments: None,
             close_over_rec_this: None,
             in_progress: HashSet::new(),
             depth: 0,
@@ -1357,7 +1406,15 @@ impl<'a> Rebinder<'a> {
             }
             Type::TypeLambda(lambda) => self.lambda(id, &lambda, None)?,
             Type::ParamRef { binder, index } => {
-                if self.poly_source == Some(binder) {
+                if let Some((owner, paths)) = &self.method_arguments
+                    && *owner == binder
+                {
+                    paths
+                        .get(index as usize)
+                        .copied()
+                        .flatten()
+                        .ok_or(TypeRebindError::MissingMethodArgumentPath { binder, index })?
+                } else if self.poly_source == Some(binder) {
                     self.poly_arguments.get(&index).copied().ok_or(
                         TypeRebindError::InvalidPolyParamRef {
                             binder,
@@ -2967,6 +3024,40 @@ mod tests {
             Type::Recursive { parent } => *parent,
             other => panic!("not recursive: {other:?}"),
         }
+    }
+
+    #[test]
+    fn instantiate_method_result_checks_only_consumed_paths_and_preserves_the_original_binder() {
+        let mut f = Fixture::new();
+        let first = SymbolId::new(30);
+        let second = SymbolId::new(31);
+        let leaf = f.leaf;
+        let params = [
+            method_param(&mut f, first, "a", leaf),
+            method_param(&mut f, second, "b", leaf),
+        ];
+        let selected = term_ref_to(&mut f, second);
+        let result = f.applied(&[selected]);
+        let method =
+            method_type_from_symbols(&mut f.store, &params, result, MethodKind::Contextual)
+                .unwrap();
+        let original_result = get_method(&f, method).result;
+        let before = type_count(&mut f);
+        assert_eq!(
+            instantiate_method_result(&mut f.store, method, &[Some(leaf), None]),
+            Err(TypeRebindError::MissingMethodArgumentPath {
+                binder: method,
+                index: 1
+            })
+        );
+        assert_eq!(type_count(&mut f), before + 1);
+        let instantiated =
+            instantiate_method_result(&mut f.store, method, &[None, Some(leaf)]).unwrap();
+        let Type::Applied { args, .. } = f.store.types.get(instantiated) else {
+            panic!("applied result")
+        };
+        assert_eq!(args, &[leaf]);
+        assert_eq!(get_method(&f, method).result, original_result);
     }
 
     #[test]
