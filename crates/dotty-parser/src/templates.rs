@@ -303,20 +303,19 @@ where
                 self.feedback_template_outdent(body_indent);
             }
             if self.current().kind == TokenKind::EndMarker {
-                if expected_end_marker
-                    .is_some_and(|owner| self.current_end_marker_matches_name(owner))
-                    || self.current_end_marker_matches_ancestor()
-                    || self.current_end_marker_matches_active_construct()
-                {
-                    // A named marker may immediately follow a parsed member.
-                    // Hand it to the owning template before requiring a
-                    // separator between members.
-                    break;
-                }
                 if self.end_marker_matches_next(members.last().copied()) {
                     if !self.consume_end_marker(members.last().copied()) {
                         return TemplateBodyResult { self_val, members };
                     }
+                } else if expected_end_marker
+                    .is_some_and(|owner| self.current_end_marker_matches_name(owner))
+                    || self.current_end_marker_matches_ancestor()
+                    || self.current_end_marker_matches_active_construct()
+                {
+                    // A completed member can share the enclosing template's
+                    // name. Give that member its marker before considering
+                    // the active owners, as at the start of this loop.
+                    break;
                 } else if !self.consume_end_marker(members.last().copied()) {
                     return TemplateBodyResult { self_val, members };
                 }
@@ -740,6 +739,84 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn a_nested_same_name_end_marker_keeps_following_members_in_the_outer_template() {
+        let source = "object O:\n  object O:\n    val x = 1\n  end O\n  object S {}\nend O";
+        let t = |kind, spelling, occurrence| source_token(source, kind, spelling, occurrence);
+        let inner_start = source.find("  object").unwrap() as u32 + 2;
+        let val_start = source.find("val").unwrap() as u32;
+        let inner_end = source.find("end O").unwrap() as u32;
+        let outer_end = source.rfind("end O").unwrap() as u32;
+        let tokens = vec![
+            t(TokenKind::Keyword(HardKeyword::Object), "object", 0),
+            t(TokenKind::Identifier, "O", 0),
+            t(TokenKind::ColonEol, ":", 0),
+            token(TokenKind::Indent, inner_start, inner_start),
+            t(TokenKind::Keyword(HardKeyword::Object), "object", 1),
+            t(TokenKind::Identifier, "O", 1),
+            t(TokenKind::ColonEol, ":", 1),
+            token(TokenKind::Indent, val_start, val_start),
+            t(TokenKind::Keyword(HardKeyword::Val), "val", 0),
+            t(TokenKind::Identifier, "x", 0),
+            t(TokenKind::Operator, "=", 0),
+            t(TokenKind::IntegerLiteral, "1", 0),
+            token(TokenKind::Outdent, inner_end, inner_end),
+            t(TokenKind::EndMarker, "end", 0),
+            t(TokenKind::Identifier, "O", 2),
+            t(TokenKind::Newline, "\n", 3),
+            t(TokenKind::Keyword(HardKeyword::Object), "object", 2),
+            t(TokenKind::Identifier, "S", 0),
+            t(TokenKind::Punctuation(Punctuation::LeftBrace), "{", 0),
+            t(TokenKind::Punctuation(Punctuation::RightBrace), "}", 0),
+            token(TokenKind::Outdent, outer_end, outer_end),
+            t(TokenKind::EndMarker, "end", 1),
+            t(TokenKind::Identifier, "O", 3),
+            token(TokenKind::Eof, source.len() as u32, source.len() as u32),
+        ];
+        let mut names = NameInterner::new();
+        let result = parser_for(source, tokens, &mut names).source_compilation_unit();
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected the source root");
+        };
+        assert_eq!(package.stats.len(), 1);
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(outer)) =
+            &result.ast.get(package.stats[0]).kind
+        else {
+            panic!("expected the outer object");
+        };
+        let TreeKind::Template(template) = &result.ast.get(outer.template).kind else {
+            panic!("expected the outer template");
+        };
+        assert_eq!(template.body.len(), 2);
+        assert_eq!(
+            result
+                .ast
+                .get(template.body[0])
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(inner_start, inner_end + 5).unwrap()
+        );
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(sibling)) =
+            &result.ast.get(template.body[1]).kind
+        else {
+            panic!("expected the following member object");
+        };
+        assert_eq!(names.resolve(sibling.name.as_name().text()), "S");
+        assert_eq!(
+            result
+                .ast
+                .get(package.stats[0])
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(0, source.len() as u32).unwrap()
+        );
     }
 
     struct YieldTemplateTokenSource {

@@ -1513,17 +1513,17 @@ mod tests {
             let mut source = String::new();
             if indented {
                 for layer in 0..depth {
-                    source.push_str(&format!("{}object O{layer}:\n", "  ".repeat(layer)));
+                    source.push_str(&format!("{}object O:\n", "  ".repeat(layer)));
                 }
                 source.push_str(&format!("{}val value = 1\n", "  ".repeat(depth)));
                 if end_markers {
                     for layer in (1..depth).rev() {
-                        source.push_str(&format!("{}end O{layer}\n", "  ".repeat(layer)));
+                        source.push_str(&format!("{}end O\n", "  ".repeat(layer)));
                     }
                 }
                 source.push_str("  object S {}\n");
                 if end_markers {
-                    source.push_str("end O0\n");
+                    source.push_str("end O\n");
                 }
                 source.push_str("object N {}\n");
             } else {
