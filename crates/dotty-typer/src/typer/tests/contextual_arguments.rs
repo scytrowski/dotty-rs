@@ -792,3 +792,55 @@ fn applied_context_function_uses_its_instantiated_apply_signature() {
         );
     }
 }
+
+#[test]
+fn by_name_contexts_search_the_result_type_without_eager_evaluation() {
+    let text = "class A; class B; object B { implicit def provide(implicit a: => A): B = new B }; class C { def read(using n: => A): A=n; def ask(using b:B):B=b; def forward(using a:A): A=read; def nested(using a:A): B=ask; def missing:B=ask }; class Loop; object Loop { implicit def cycle(implicit x: => Loop):Loop = x }; class D { def accept(using x:Loop):Loop=x; def cycleUse:Loop=accept }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for name in ["forward", "missing", "nested", "cycleUse"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let result = typer.type_method_definition(definition_tree(&index, method));
+        if name == "cycleUse" {
+            assert!(
+                matches!(result, Err(TyperError::UsingApplicationDeferred { .. })),
+                "{result:?}"
+            );
+            continue;
+        }
+        if name == "missing" {
+            assert!(
+                matches!(result, Err(TyperError::MissingContextualArgument { .. })),
+                "{result:?}"
+            );
+            continue;
+        }
+        result.unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        let TreeKind::Apply(call) = &typer
+            .typed_ast()
+            .get(typer.typed_index.get(source, rhs).unwrap())
+            .kind
+        else {
+            panic!()
+        };
+        let value = if name == "nested" {
+            let TreeKind::Apply(provider) = &typer.typed_ast().get(call.args[0]).kind else {
+                panic!()
+            };
+            provider.args[0]
+        } else {
+            call.args[0]
+        };
+        assert_eq!(
+            reference(&typer, value),
+            method_parameter_symbol(&parsed, &index, source, method, 0)
+        );
+    }
+}

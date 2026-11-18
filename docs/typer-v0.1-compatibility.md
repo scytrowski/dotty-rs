@@ -649,9 +649,10 @@ no-applicable errors retain candidate identities and rejection reasons.
 Inference for raw generic `new` is supported when a generic primary constructor
 wins. If a raw generic `new` selects a secondary constructor, typing is
 explicitly rejected because its signature has not been adapted using inferred
-owner type arguments. Expected-type inference, automatic contextual constructor
-argument insertion, and implicit search remain explicit deferrals; explicit
-constructor `using` clauses are checked and can contribute inference constraints.
+owner type arguments. Explicit constructor `using` clauses can contribute
+inference constraints. Calls also insert monomorphic contextual arguments in
+normalized constructor clause order, including the empty clause generated
+for a context-only constructor. Expected-type constructor inference remains deferred.
 
 A secondary constructor in a generic class keeps the enclosing class's type
 parameters in its result, for example `C[A]`; those parameters remain owned by
@@ -1466,7 +1467,10 @@ failed candidate probes, including ambiguity in a nested search for `T`,
 produce a reference to the linked companion’s `value` method. Explicit `using` keeps its own kind.
 See the Scala 3.9 controls under `tests/fixtures/contextual-arguments` in the
 typer crate. Erased
-parameters remain unsupported for explicit application. Bounded by-name
+parameters remain unsupported for explicit application. A by-name contextual
+formal searches for evidence of its result type and keeps the argument
+expression under the by-name clause. Recursive by-name dictionaries remain
+explicitly deferred. Bounded by-name
 formals use their result type for argument conformance and retain the source
 argument node in the typed `Apply`; polymorphic inference and overload sets
 containing by-name candidates remain deferred. The Scala

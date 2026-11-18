@@ -24,7 +24,9 @@ struct Provider {
 
 #[derive(Default)]
 struct SearchHistory {
-    active: Vec<(ContextualRef, TypeId)>,
+    active: Vec<(ContextualRef, TypeId, usize)>,
+    by_name_depth: usize,
+    current_goal_by_name: bool,
     attempts: usize,
     divergences: usize,
 }
@@ -179,20 +181,8 @@ impl SourceTyper<'_> {
             }
             let mut arguments = Vec::with_capacity(method.params.len());
             for parameter in method.params {
-                if parameter.erased
-                    || parameter.varargs
-                    || matches!(
-                        self.store.types.try_get(parameter.ty),
-                        Some(Type::ByName { .. })
-                    )
-                {
-                    return Err(TyperError::UsingApplicationDeferred {
-                        source: self.source,
-                        tree_index,
-                    });
-                }
-                arguments.push(self.contextual_value(
-                    parameter.ty,
+                arguments.push(self.contextual_parameter_value(
+                    &parameter,
                     context,
                     tree_index,
                     &mut SearchHistory::default(),
@@ -330,6 +320,32 @@ impl SourceTyper<'_> {
         )
     }
 
+    fn contextual_parameter_value(
+        &mut self,
+        parameter: &dotty_core::types::MethodParam,
+        context: ExpressionContext,
+        tree_index: u32,
+        history: &mut SearchHistory,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        if parameter.erased || parameter.varargs {
+            return Err(TyperError::UsingApplicationDeferred {
+                source: self.source,
+                tree_index,
+            });
+        }
+        let (expected, by_name) = match self.store.types.try_get(parameter.ty) {
+            Some(Type::ByName { result }) => (*result, true),
+            _ => (parameter.ty, false),
+        };
+        let saved = std::mem::replace(&mut history.current_goal_by_name, by_name);
+        history.by_name_depth += usize::from(by_name);
+        let result = self.contextual_value(expected, context, tree_index, history, journal);
+        history.by_name_depth -= usize::from(by_name);
+        history.current_goal_by_name = saved;
+        result
+    }
+
     fn contextual_value(
         &mut self,
         expected: TypeId,
@@ -338,6 +354,18 @@ impl SourceTyper<'_> {
         history: &mut SearchHistory,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TreeId<Typed>, TyperError> {
+        // A recursive by-name dependency needs a shared lazy dictionary.
+        // Preserve this boundary even if a competing candidate could succeed.
+        for &(_, ancestor, depth) in history.active.iter().rev() {
+            if history.by_name_depth > depth
+                && self.contextual_conforms(ancestor, expected, tree_index, journal)?
+            {
+                return Err(TyperError::UsingApplicationDeferred {
+                    source: self.source,
+                    tree_index,
+                });
+            }
+        }
         let divergences = history.divergences;
         self.validate_expression_scope_stack(context.local_scopes)?;
         let mut scopes = Vec::new();
@@ -587,13 +615,7 @@ impl SourceTyper<'_> {
             if method.kind == MethodKind::Plain {
                 return Ok(None);
             }
-            if depth >= crate::types::MAX_TYPE_NORMALIZATION_DEPTH
-                || method.params.iter().any(|p| {
-                    p.erased
-                        || p.varargs
-                        || matches!(self.store.types.try_get(p.ty), Some(Type::ByName { .. }))
-                })
-            {
+            if depth >= crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
                 return Err(TyperError::UsingApplicationDeferred {
                     source: self.source,
                     tree_index,
@@ -685,7 +707,7 @@ impl SourceTyper<'_> {
                 tree_index,
             });
         }
-        for &(reference, ancestor) in &history.active {
+        for &(reference, ancestor, _) in &history.active {
             if reference == provider.reference
                 && self.contextual_conforms(expected, ancestor, tree_index, journal)?
                 && self.contextual_conforms(ancestor, expected, tree_index, journal)?
@@ -698,7 +720,11 @@ impl SourceTyper<'_> {
                 });
             }
         }
-        history.active.push((provider.reference, expected));
+        history.active.push((
+            provider.reference,
+            expected,
+            history.by_name_depth - usize::from(history.current_goal_by_name),
+        ));
         let result = self.build_provider(provider, context, tree_index, history, journal);
         history.active.pop();
         result
@@ -735,7 +761,9 @@ impl SourceTyper<'_> {
             }
             let mut args = Vec::new();
             for param in method.params {
-                args.push(self.contextual_value(param.ty, context, tree_index, history, journal)?);
+                args.push(
+                    self.contextual_parameter_value(&param, context, tree_index, history, journal)?,
+                );
             }
             tree = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply(
                 tree,
