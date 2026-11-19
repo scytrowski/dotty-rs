@@ -9015,6 +9015,8 @@ fn unsupported_top_level_case_class_apply_shapes_keep_the_class_and_defer_apply(
 
     let sources = [
         "case class Node(value: Int = 1)",
+        "case class Node[A: TC](value: A)(tag: Int)",
+        "case class Node[A: TC](value: A)(using trace: Trace = log)",
         "case class Node(value: Int)(tag: Int)",
         "case class Node()",
         "case class Node[A <: AnyRef](value: A)",

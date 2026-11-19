@@ -1559,7 +1559,13 @@ impl Namer<'_> {
                 ));
             }
         }
-        let value_parameters = if constructor.value_param_clauses.len() == 1
+        let has_witnesses = constructor.context_bound_trees(self.arena).next().is_some();
+        let has_second_clause = has_witnesses
+            && matches!(
+                constructor.value_param_clauses.as_slice(),
+                [_, second] if !second.is_empty()
+            );
+        let value_parameters = if (constructor.value_param_clauses.len() == 1 || has_second_clause)
             && (!top_level || !leading_clause.is_empty())
         {
             leading_clause
@@ -1607,44 +1613,50 @@ impl Namer<'_> {
                 synthesize_apply = false;
             }
         }
-        for parameter_tree in constructor
-            .value_param_clauses
-            .iter()
-            .flat_map(|clause| clause.iter())
-        {
-            let TreeKind::ValDef(parameter) = &self.arena.get(*parameter_tree).kind else {
-                return Err(NamerError::MalformedAstShape {
-                    tree_index: parameter_tree.index(),
-                    expected: "case class constructor parameter ValDef",
-                });
+        for (clause_index, clause) in constructor.value_param_clauses.iter().enumerate() {
+            let expected_modifiers: &[_] = if clause_index == 0 {
+                &[Modifier::ParamAccessor]
+            } else {
+                &[
+                    Modifier::Given,
+                    Modifier::ParamAccessor,
+                    Modifier::PrivateLocal,
+                ]
             };
-            if parameter.rhs.is_some()
-                || parameter.metadata.visibility.is_some()
-                || !parameter.metadata.annotations.is_empty()
-                || parameter.metadata.modifiers != [Modifier::ParamAccessor]
-            {
-                synthesize_apply = false;
-            }
-            if matches!(
-                self.arena.get(parameter.tpt).kind,
-                TreeKind::ByNameTypeTree(_)
-            ) {
-                if top_level {
+            for parameter_tree in clause {
+                let TreeKind::ValDef(parameter) = &self.arena.get(*parameter_tree).kind else {
+                    return Err(NamerError::MalformedAstShape {
+                        tree_index: parameter_tree.index(),
+                        expected: "case class constructor parameter ValDef",
+                    });
+                };
+                if parameter.rhs.is_some()
+                    || parameter.metadata.visibility.is_some()
+                    || !parameter.metadata.annotations.is_empty()
+                    || parameter.metadata.modifiers != expected_modifiers
+                {
                     synthesize_apply = false;
-                } else {
-                    return Err(unsupported(
-                        "by-name constructor parameters are invalid for case classes",
-                    ));
+                }
+                if matches!(
+                    self.arena.get(parameter.tpt).kind,
+                    TreeKind::ByNameTypeTree(_)
+                ) {
+                    if top_level {
+                        synthesize_apply = false;
+                    } else {
+                        return Err(unsupported(
+                            "by-name constructor parameters are invalid for case classes",
+                        ));
+                    }
+                }
+                if matches!(
+                    self.arena.get(parameter.tpt).kind,
+                    TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_))
+                ) {
+                    synthesize_apply = false;
                 }
             }
-            if matches!(
-                self.arena.get(parameter.tpt).kind,
-                TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_))
-            ) {
-                synthesize_apply = false;
-            }
         }
-
         let owner =
             self.store
                 .symbols
@@ -1823,12 +1835,16 @@ impl Namer<'_> {
             }
         };
         let class_clauses = constructor.context_bound_clauses(self.arena, &self.store.names);
-        let has_witnesses = constructor.context_bound_trees(self.arena).next().is_some();
+        if has_second_clause && class_clauses.len() != 2 {
+            // A dependency on a named witness can require its own earlier clause.
+            synthesize_apply = false;
+        }
         if has_witnesses && class_clauses.first().map(Vec::as_slice) != Some(leading_clause) {
             // A public case accessor cannot expose a path through the private witness.
             synthesize_apply = false;
         }
         if has_witnesses
+            && !has_second_clause
             && synthesize_apply
             && !template.body.iter().chain(leading_clause).any(|&member| {
                 let name = match &self.arena.get(member).kind {

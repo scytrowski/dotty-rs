@@ -3024,3 +3024,93 @@ fn envelope_constructor_merges_searched_and_explicit_arguments_in_scala_order() 
         assert_eq!(typer.store.symbols.get(ctor).kind, SymbolKind::Constructor);
     }
 }
+
+/// Check both sides of a generated factory's call to the primary constructor.
+fn assert_envelope_forwarding(
+    typer: &SourceTyper<'_>,
+    body: TreeId<Typed>,
+    factory: SymbolId,
+    class: SymbolId,
+) {
+    let TreeKind::Apply(using) = &typer.typed_ast().get(body).kind else {
+        panic!("missing forwarded using")
+    };
+    assert_eq!(using.kind, ApplyKind::Using);
+    let TreeKind::Apply(ordinary) = &typer.typed_ast().get(using.function).kind else {
+        panic!("missing forwarded values")
+    };
+    let ctor = reference(typer, ordinary.function);
+    assert_eq!(typer.store.symbols.owner(ctor), Some(class));
+    assert_eq!(typer.store.symbols.get(ctor).kind, SymbolKind::Constructor);
+    let Some(SourceDefinition::Canonical { tree, .. }) = typer.index.definition_of(ctor) else {
+        panic!("constructor source")
+    };
+    let TreeKind::DefDef(def) = &typer.arena.get(tree).kind else {
+        panic!("constructor")
+    };
+    let bound = def.context_bound_trees(typer.arena).next().unwrap();
+    let trace = def.value_param_clauses[1][0];
+    assert_eq!(ordinary.args.len(), 1);
+    assert_eq!(using.args.len(), 2);
+    for (arg, tree) in [
+        (ordinary.args[0], def.value_param_clauses[0][0]),
+        (using.args[0], bound),
+        (using.args[1], trace),
+    ] {
+        let symbol = reference(typer, arg);
+        assert_eq!(
+            typer.index.derived_symbol_at(factory, typer.source, tree),
+            Some(symbol)
+        );
+        assert_eq!(typer.store.symbols.owner(symbol), Some(factory));
+        let formal = typer
+            .index
+            .derived_symbol_at(ctor, typer.source, tree)
+            .unwrap();
+        assert_eq!(typer.store.symbols.owner(formal), Some(ctor));
+    }
+}
+
+#[test]
+fn envelope_apply_passes_both_context_arguments_to_the_constructor() {
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(ENVELOPE);
+    let class = class_symbol(&parsed, &store, &index, source, "Envelope");
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "build");
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    typer
+        .type_method_definition(definition_tree(&index, method))
+        .unwrap();
+    let apply = index
+        .generated_case_class_method(class, dotty_core::GeneratedCaseClassMethodRole::Apply)
+        .unwrap();
+    let typed = typer.typed_index.get(source, rhs).unwrap();
+    let TreeKind::Apply(using) = &typer.typed_ast().get(typed).kind else {
+        panic!("expected contextual apply")
+    };
+    assert_eq!(
+        using
+            .args
+            .iter()
+            .map(|&arg| reference(&typer, arg))
+            .collect::<Vec<_>>(),
+        (0..2)
+            .map(|i| method_parameter_symbol(&parsed, &index, source, method, i))
+            .collect::<Vec<_>>()
+    );
+    let TreeKind::Apply(ordinary) = &typer.typed_ast().get(using.function).kind else {
+        panic!("expected ordinary apply")
+    };
+    assert_eq!(reference(&typer, ordinary.function), apply);
+    assert!(
+        matches!(typer.store.types.get(typer.typed_ast().get(typed).ty), Type::Applied{tycon,args} if args == &[definitions.int] && typer.store.types.get(*tycon).reference_symbol() == Some(class))
+    );
+    let body = typer.type_generated_case_class_apply_body(apply).unwrap();
+    assert_envelope_forwarding(&typer, body, apply, class);
+}
