@@ -1,4 +1,4 @@
-//! Assemble field and method plans for a simple source class with an implicit no-arg constructor.
+//! Assemble field and method plans for a simple source class with a public primary constructor.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -6,10 +6,11 @@ use std::fmt;
 use crate::core::{
     AstArena, Modifier, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex,
     SourceTypedIndex, SymbolFlags, SymbolId, SymbolKind, SymbolOrigin, Template, TreeId, TreeKind,
-    Typed, Untyped, ValDef, Visibility, VisibilitySyntax,
+    Typed, Untyped, UntypedNode, ValDef, Visibility, VisibilitySyntax,
 };
 use crate::jvm::{
-    JvmClassInitializationPlan, JvmClassPlan, JvmFieldPlan, JvmFieldSourceVisibility, JvmMethodPlan,
+    JvmClassInitializationPlan, JvmClassPlan, JvmFieldPlan, JvmFieldSourceVisibility,
+    JvmMethodPlan, JvmPrimaryConstructorPlan,
 };
 
 /// Result of typing one field RHS and the index from that typing operation.
@@ -61,8 +62,13 @@ pub enum ClassPlanError {
     SourceClass(SymbolId),
     /// The class has an explicit parent, self type, derives or uses clause.
     UnsupportedTemplate(SymbolId),
-    /// The primary constructor has parameters.
+    /// The primary constructor has unsupported parameter clauses or formals.
     ConstructorParameters(SymbolId),
+    /// An ordinary constructor parameter supplies an unsupported default value.
+    DefaultConstructorParameter {
+        class: SymbolId,
+        tree: TreeId<Untyped>,
+    },
     /// The primary constructor is missing, restricted, generic or has a body.
     UnsupportedConstructor(SymbolId),
     /// This statement is outside the selected class planning subset.
@@ -120,7 +126,7 @@ impl<'a> JvmClassPlanner<'a> {
         Self { store, ast, index }
     }
 
-    /// Proves the public no-argument initialization shape and assembles the
+    /// Plans a public primary constructor with zero or one ordinary parameter list and assembles the
     /// supplied method plans in source declaration order. Each source method
     /// requires exactly one plan from the caller.
     pub fn plan(
@@ -214,7 +220,7 @@ impl<'a> JvmClassPlanner<'a> {
         ) -> Result<(), ClassPlanError>,
     ) -> Result<JvmClassPlan, ClassPlanError> {
         let (source, template) = self.template(class)?;
-        self.check_constructor(class, source, template)?;
+        let initialization = self.constructor_plan(class, source, template)?;
 
         let mut positions = HashMap::with_capacity(template.body.len());
         let mut slots = Vec::with_capacity(template.body.len());
@@ -257,7 +263,7 @@ impl<'a> JvmClassPlanner<'a> {
             class,
             methods,
             fields: Vec::new(),
-            initialization: JvmClassInitializationPlan::ImplicitNoArg,
+            initialization,
         })
     }
 
@@ -311,12 +317,12 @@ impl<'a> JvmClassPlanner<'a> {
         Ok((source, template))
     }
 
-    fn check_constructor(
+    fn constructor_plan(
         &self,
         class: SymbolId,
         source: SourceId,
         template: &Template<Untyped>,
-    ) -> Result<(), ClassPlanError> {
+    ) -> Result<JvmClassInitializationPlan, ClassPlanError> {
         let error = ClassPlanError::UnsupportedConstructor(class);
         let tree = template.constructor;
         let constructor = self
@@ -326,13 +332,6 @@ impl<'a> JvmClassPlanner<'a> {
         else {
             return Err(error);
         };
-        if definition
-            .value_param_clauses
-            .iter()
-            .any(|clause| !clause.is_empty())
-        {
-            return Err(ClassPlanError::ConstructorParameters(class));
-        }
         if self.store.symbols.get(constructor).visibility != Visibility::Public
             || definition.metadata.visibility.is_some()
             || !definition.type_params.is_empty()
@@ -340,7 +339,46 @@ impl<'a> JvmClassPlanner<'a> {
         {
             return Err(error);
         }
-        Ok(())
+        let unsupported = ClassPlanError::ConstructorParameters(class);
+        let clause = match definition.value_param_clauses.as_slice() {
+            [] => return Ok(JvmClassInitializationPlan::ImplicitNoArg),
+            [clause] if clause.is_empty() => return Ok(JvmClassInitializationPlan::ImplicitNoArg),
+            [clause] => clause,
+            _ => return Err(unsupported),
+        };
+        let mut parameters = Vec::with_capacity(clause.len());
+        for &tree in clause {
+            let Some(TreeKind::ValDef(param)) = self.ast.try_get(tree).map(|node| &node.kind)
+            else {
+                return Err(unsupported);
+            };
+            if param.rhs.is_some() {
+                return Err(ClassPlanError::DefaultConstructorParameter { class, tree });
+            }
+            if param.metadata.modifiers != [Modifier::ParamAccessor, Modifier::PrivateLocal]
+                || matches!(
+                    &self.ast.try_get(param.tpt).ok_or(unsupported)?.kind,
+                    TreeKind::ByNameTypeTree(_)
+                        | TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_))
+                )
+            {
+                return Err(unsupported);
+            }
+            let parameter = self
+                .index
+                .derived_symbol_at(constructor, source, tree)
+                .ok_or(unsupported)?;
+            parameters.push(parameter);
+        }
+        let proof = JvmPrimaryConstructorPlan::from_source(
+            class,
+            constructor,
+            parameters,
+            self.ast,
+            self.index,
+        )
+        .map_err(|_| unsupported)?;
+        Ok(JvmClassInitializationPlan::PrimaryConstructor(proof))
     }
 
     fn member(

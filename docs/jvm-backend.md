@@ -75,8 +75,16 @@ accepts the retained bindings and the session's extended typed arena.
 
 For an ordinary top-level source class, the facade also provides
 `jvm_class_plan::JvmClassPlanner::new(&store, &source_ast, &source_index)`.
-Its `plan(class_symbol, method_plans)` checks the public parameterless primary
-constructor and the method-only template before selecting `ImplicitNoArg`.
+Use `plan(class_symbol, method_plans)` for a method-only template.
+Both planning entry points accept a public primary constructor with zero or
+one value parameter list. An empty signature selects `ImplicitNoArg`. For
+ordinary parameters, the planner looks up each constructor-owned formal in
+source declaration order and builds a `JvmPrimaryConstructorPlan`. Complete
+the constructor signature in the typer before backend validation. A private
+field initializer can read a constructor parameter without emitting a field for
+the parameter itself. Constructor accessors, contextual, by-name, repeated and
+defaulted parameters are outside this facade's scope. A default yields
+`ClassPlanError::DefaultConstructorParameter` with the parameter's source tree.
 For a class with ordinary unqualified `private val` or `private var` fields, use
 `plan_with_fields(class_symbol, method_plans, &typed_ast, initializers)`.
 Each `TypedFieldInitializer` supplies a field symbol, its typed RHS root and

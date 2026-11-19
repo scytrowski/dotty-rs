@@ -38,6 +38,7 @@ struct NamedUnit {
 
 struct NamedClass {
     symbol: SymbolId,
+    constructor: SymbolId,
     method_range: Range<usize>,
     fields: Vec<(SymbolId, TreeId<Untyped>)>,
 }
@@ -132,6 +133,7 @@ fn enter(
         }
         classes.push(NamedClass {
             symbol: index.symbol_at(id, tree).unwrap(),
+            constructor: index.symbol_at(id, template.constructor).unwrap(),
             method_range: start..methods.len(),
             fields,
         });
@@ -296,6 +298,9 @@ fn type_bodies(
     let mut output = AstArena::new();
     let mut typed_classes = Vec::new();
     for (unit, class) in named_classes(units) {
+        unit.typer(store, definitions, packages)
+            .complete_symbol(class.constructor)
+            .unwrap();
         let mut fields = Vec::with_capacity(class.fields.len());
         for &(field, rhs) in &class.fields {
             let mut typer = SourceTyper::new_with_typed_ast(
