@@ -1974,6 +1974,15 @@ session's header bindings under the derived source ID. A type mismatch in the
 argument remains a typing error. Earlier applications and their typed arena
 remain available for planning.
 
+After headers, `dotty::try_complete_class_field_signatures` visits class-owned
+constructor fields followed by public fields declared in the class body. For
+`val answer = provider.value()`, `BlockedOn { field, dependency }` identifies
+`answer` and the missing method in the provider's file. The client completes
+that method and retries the class. Completed fields retain their types across
+retries. A field error includes the class and field symbols and the original
+`TyperError`. The later `type_class_body` call produces the typed initializers
+used by the backend.
+
 For `A.f(b: B) = b.g()`, the external client observes the symbol of `B.g`,
 completes it and retries `A.f`. A call to the same zero-argument method with
 one argument produces `ApplicationArityMismatch` at the call site after the

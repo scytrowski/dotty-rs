@@ -39,6 +39,11 @@ pub use dotty_tasty_unpickler::tasty_unpickler;
 mod class_header;
 pub use class_header::try_complete_class_header;
 
+mod class_field_signatures;
+pub use class_field_signatures::{
+    ClassFieldSignatureCompletion, ClassFieldSignatureError, try_complete_class_field_signatures,
+};
+
 mod class_body;
 pub use class_body::{ClassBodyError, type_class_body};
 

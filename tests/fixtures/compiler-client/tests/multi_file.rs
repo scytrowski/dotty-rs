@@ -137,6 +137,7 @@ struct TypedHeaders {
 #[derive(Debug)]
 enum SignatureError {
     Typing(TyperError),
+    Field(dotty::ClassFieldSignatureError),
     HeaderCycle(Vec<SymbolId>),
 }
 
@@ -203,19 +204,6 @@ fn complete_headers(
             }
         }
     }
-    for unit in units {
-        let mut typer = unit.typer(store, definitions, packages);
-        for class in &unit.classes {
-            for &field in &class.constructor_fields {
-                typer.complete_symbol(field)?;
-            }
-            for field in class.fields().map(|decl| decl.symbol) {
-                if typer.store().symbols.get(field).visibility == dotty::core::Visibility::Public {
-                    typer.complete_symbol(field)?;
-                }
-            }
-        }
-    }
     Ok(headers)
 }
 
@@ -260,36 +248,69 @@ fn complete_methods_in_order(
         .flat_map(|unit| unit.method_symbols().map(move |symbol| (symbol, unit)))
         .collect();
 
-    for symbol in roots {
-        if matches!(store.symbols.info(symbol), SymbolInfo::Complete(_)) {
-            continue;
+    for (unit, class) in named_classes(units) {
+        while let dotty::ClassFieldSignatureCompletion::BlockedOn { field, dependency } =
+            dotty::try_complete_class_field_signatures(
+                class.symbol,
+                &unit.ast,
+                &unit.index,
+                store,
+                definitions,
+                packages,
+                |dep| owners.contains_key(&dep),
+            )
+            .map_err(SignatureError::Field)?
+        {
+            observe(field, SignatureCompletion::BlockedOn(dependency));
+            complete_method(
+                dependency,
+                &owners,
+                store,
+                definitions,
+                packages,
+                &mut observe,
+            )?;
         }
-        let mut pending = vec![symbol];
-        let mut active = HashSet::from([symbol]);
-        while let Some(&symbol) = pending.last() {
-            let unit = owners[&symbol];
-            let completion = unit
-                .typer(store, definitions, packages)
-                .try_complete_signature(symbol, |dependency| owners.contains_key(&dependency))?;
-            observe(symbol, completion);
-            match completion {
-                SignatureCompletion::Complete(_) => {
-                    pending.pop();
-                    active.remove(&symbol);
+    }
+    for symbol in roots {
+        complete_method(symbol, &owners, store, definitions, packages, &mut observe)?;
+    }
+    Ok(headers)
+}
+
+fn complete_method(
+    symbol: SymbolId,
+    owners: &HashMap<SymbolId, &NamedUnit>,
+    store: &mut SemanticStore,
+    definitions: Definitions,
+    packages: &Packages,
+    observe: &mut impl FnMut(SymbolId, SignatureCompletion),
+) -> Result<(), TyperError> {
+    if matches!(store.symbols.info(symbol), SymbolInfo::Complete(_)) {
+        return Ok(());
+    }
+    let mut pending = vec![symbol];
+    let mut active = HashSet::from([symbol]);
+    while let Some(&symbol) = pending.last() {
+        let unit = owners[&symbol];
+        let completion = unit
+            .typer(store, definitions, packages)
+            .try_complete_signature(symbol, |dependency| owners.contains_key(&dependency))?;
+        observe(symbol, completion);
+        match completion {
+            SignatureCompletion::Complete(_) => {
+                pending.pop();
+                active.remove(&symbol);
+            }
+            SignatureCompletion::BlockedOn(dependency) => {
+                if !active.insert(dependency) {
+                    return Err(TyperError::RecursiveInferredMethodResult { symbol: dependency });
                 }
-                SignatureCompletion::BlockedOn(dependency) => {
-                    if !active.insert(dependency) {
-                        return Err(TyperError::RecursiveInferredMethodResult {
-                            symbol: dependency,
-                        }
-                        .into());
-                    }
-                    pending.push(dependency);
-                }
+                pending.push(dependency);
             }
         }
     }
-    Ok(headers)
+    Ok(())
 }
 
 fn with_plan<R>(

@@ -2,7 +2,7 @@
 
 use crate::core::{
     AstArena, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex, SymbolFlags,
-    SymbolId, SymbolKind, SymbolOrigin, Template, Tree, TreeId, TreeKind, Untyped,
+    SymbolId, SymbolKind, SymbolOrigin, Template, Tree, TreeId, TreeKind, Untyped, Visibility,
 };
 use std::fmt;
 
@@ -179,6 +179,28 @@ pub(crate) fn named_class_template<'a>(
     (symbol == class).then_some((reader, template))
 }
 
+/// Collects the canonical constructor fields and public body fields in declaration order.
+pub(crate) fn signature_fields(
+    class: SymbolId,
+    ast: &AstArena<Untyped>,
+    index: &SourceSemanticIndex,
+    store: &SemanticStore,
+) -> Option<(SourceId, Vec<SymbolId>)> {
+    let SourceDefinition::Canonical { source, tree } = index.definition_of(class)? else {
+        return None;
+    };
+    let (reader, template) = named_class_template(class, tree, ast, source, index, store)?;
+    let (_, mut fields) = reader.constructor(class, template.constructor).ok()?;
+    for &tree in &template.body {
+        if let ClassMember::Field(field) = reader.body_member(tree, class).ok()?
+            && store.symbols.get(field.symbol).visibility == Visibility::Public
+        {
+            fields.push(field.symbol);
+        }
+    }
+    Some((source, fields))
+}
+
 pub(crate) struct Reader<'a> {
     ast: &'a AstArena<Untyped>,
     source: SourceId,
@@ -243,9 +265,31 @@ impl<'a> Reader<'a> {
         tree: TreeId<Untyped>,
         owner: SymbolId,
     ) -> Result<SourceClass, DeclarationError> {
-        let source = self.source;
         let (class, template) = self.class_template(tree, owner)?;
-        let ctor_tree = template.constructor;
+        let (constructor, constructor_fields) = self.constructor(class, template.constructor)?;
+        for &parent in &template.parents {
+            self.node(parent)?;
+        }
+        let mut members = Vec::with_capacity(template.body.len());
+        for &tree in &template.body {
+            members.push(self.body_member(tree, class)?);
+        }
+        Ok(SourceClass {
+            symbol: class,
+            tree,
+            constructor,
+            constructor_fields,
+            parents: template.parents.clone(),
+            members,
+        })
+    }
+
+    fn constructor(
+        &self,
+        class: SymbolId,
+        ctor_tree: TreeId<Untyped>,
+    ) -> Result<(SymbolId, Vec<SymbolId>), DeclarationError> {
+        let source = self.source;
         let ctor_error = DeclarationError::InvalidBinding {
             source,
             tree: ctor_tree,
@@ -270,21 +314,7 @@ impl<'a> Reader<'a> {
                 _ => return Err(DeclarationError::InvalidBinding { source, tree }),
             }
         }
-        for &parent in &template.parents {
-            self.node(parent)?;
-        }
-        let mut members = Vec::with_capacity(template.body.len());
-        for &tree in &template.body {
-            members.push(self.body_member(tree, class)?);
-        }
-        Ok(SourceClass {
-            symbol: class,
-            tree,
-            constructor,
-            constructor_fields,
-            parents: template.parents.clone(),
-            members,
-        })
+        Ok((constructor, constructor_fields))
     }
 
     fn body_member(

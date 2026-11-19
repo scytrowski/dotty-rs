@@ -480,6 +480,150 @@ class Counter(start: Int):
   var count: Int = start
 ";
 
+fn field_signature_units(
+    consumer: &str,
+    provider_first: bool,
+    store: &mut SemanticStore,
+    packages: &mut Packages,
+) -> Vec<NamedUnit> {
+    let mut files = [
+        (SourceId::from_index(3), "Consumer.scala", consumer),
+        (
+            SourceId::from_index(8),
+            "Provider.scala",
+            "class Provider { def value() = 40 }",
+        ),
+    ];
+    if provider_first {
+        files.reverse();
+    }
+    name_units(&files, parsing::parse_files(&files, 2), store, packages)
+}
+
+#[test]
+fn field_signature_retries_foreign_method_and_infers_int_in_both_orders() {
+    use dotty::ClassFieldSignatureCompletion::{BlockedOn, Complete};
+    use dotty::core::SymbolInfo;
+    let consumer = "class Consumer(val provider: Provider) { private val hidden = 1; val answer = provider.value() }";
+    for provider_first in [false, true] {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let units = field_signature_units(consumer, provider_first, &mut store, &mut packages);
+        let consumer = &units[usize::from(provider_first)];
+        let provider = &units[usize::from(!provider_first)];
+        let class = &consumer.classes[0];
+        let fields: Vec<_> = class.fields().collect();
+        let answer = fields[1].symbol;
+        let value = provider.method_symbol();
+        super::complete_headers(&units, &mut store, defs, &packages, &mut |_, _| {}).unwrap();
+        let attempt = |store: &mut SemanticStore, schedule_value: bool| {
+            dotty::try_complete_class_field_signatures(
+                class.symbol,
+                &consumer.ast,
+                &consumer.index,
+                store,
+                defs,
+                &packages,
+                |dep| schedule_value && dep == value,
+            )
+        };
+        if !provider_first {
+            assert_eq!(
+                attempt(&mut store, true).unwrap(),
+                BlockedOn {
+                    field: answer,
+                    dependency: value
+                }
+            );
+            let error = attempt(&mut store, false).unwrap_err();
+            assert!(matches!(error, dotty::ClassFieldSignatureError::Field {
+                field, error: dotty::typer::TyperError::MemberTypeUnavailable { symbol }, ..
+            } if field == answer && symbol == value));
+            assert_eq!(store.symbols.info(answer), &SymbolInfo::Missing);
+            assert!(matches!(
+                store.symbols.info(class.constructor_fields[0]),
+                SymbolInfo::Complete(_)
+            ));
+            // The field itself must make the client schedule value and retry answer.
+            super::complete_methods_in_order(&units, [], &mut store, defs, &packages, |_, _| {})
+                .unwrap();
+            assert_eq!(store.symbols.info(answer), &SymbolInfo::Complete(defs.int));
+        } else {
+            provider
+                .typer(&mut store, defs, &packages)
+                .complete_symbol(value)
+                .unwrap();
+        }
+        assert_eq!(attempt(&mut store, true).unwrap(), Complete);
+        assert_eq!(store.symbols.info(answer), &SymbolInfo::Complete(defs.int));
+        assert_eq!(store.symbols.info(fields[0].symbol), &SymbolInfo::Missing);
+    }
+}
+
+#[test]
+fn field_scheduler_preserves_arity_error_after_completing_dependency() {
+    use dotty::ClassFieldSignatureError;
+    use dotty::typer::{SignatureCompletion, TyperError};
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let units = field_signature_units(
+        "class Consumer(provider: Provider) { val answer = provider.value(1) }",
+        false,
+        &mut store,
+        &mut packages,
+    );
+    let consumer = &units[0];
+    let class = &consumer.classes[0];
+    let answer = class.fields().next().unwrap();
+    let value = units[1].method_symbol();
+    let TreeKind::ValDef(def) = &consumer.ast.get(answer.tree).kind else {
+        panic!("expected answer field")
+    };
+    let rhs = def.rhs.unwrap();
+    let mut edges = Vec::new();
+    let error = super::complete_methods_in_order(
+        &units,
+        [],
+        &mut store,
+        defs,
+        &packages,
+        |symbol, result| {
+            if let SignatureCompletion::BlockedOn(dep) = result {
+                edges.push((symbol, dep));
+            }
+        },
+    )
+    .unwrap_err();
+    assert_eq!(edges, [(answer.symbol, value)]);
+    let super::SignatureError::Field(ClassFieldSignatureError::Field {
+        class: owner,
+        field,
+        error:
+            TyperError::ApplicationArityMismatch {
+                source,
+                tree_index,
+                expected,
+                actual,
+            },
+    }) = error
+    else {
+        panic!("unexpected error for answer: {error:?}")
+    };
+    assert_eq!((owner, field), (class.symbol, answer.symbol));
+    assert_eq!((source, tree_index), (consumer.source, rhs.index()));
+    assert_eq!((expected, actual), (0, 1));
+    assert!(matches!(
+        store.symbols.info(value),
+        dotty::core::SymbolInfo::Complete(_)
+    ));
+    assert_eq!(
+        store.symbols.info(answer.symbol),
+        &dotty::core::SymbolInfo::Missing
+    );
+}
+
 #[test]
 fn public_body_fields_emit_accessors_and_work_in_both_file_orders_on_jdk21() {
     let counter = (SourceId::from_index(0), "Counter.scala", BODY_COUNTER);
