@@ -12,6 +12,14 @@ import tempfile
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[4]
 MODULE = "typer::tests::contextual_v1::"
+CLASS_BOUND_CONTROLS = (
+    "typer::tests::contextual_arguments::ordinary_class_bound_uses_private_evidence_in_the_body_and_caller_evidence_at_new",
+    "typer::tests::contextual_arguments::ordinary_class_bound_reports_missing_and_ambiguous_evidence_at_new",
+    "typer::tests::contextual_arguments::case_class_bound_infers_int_and_passes_the_callers_witness_to_apply",
+    "typer::tests::contextual_arguments::case_class_bound_reports_missing_and_ambiguous_evidence_at_apply",
+    "typer::tests::contextual_arguments::case_class_copy_defaults_the_field_and_forwards_the_call_site_witness",
+    "typer::tests::contextual_arguments::case_class_copy_reports_missing_and_ambiguous_call_site_evidence",
+)
 
 
 def cases():
@@ -49,6 +57,35 @@ def check_compiler(tc, path, expected_exit, needles, out):
 
 def check_controls(tc, checkout):
     controls = [
+        ("CaseClassCopy.scala", 0, [
+            "def copy[A](value: A)(using evidence$1: TC[A]): Box[A] = new Box[A](value)(using evidence$1)",
+            "def copy$default$1[A]: A = Box.this.value",
+            "Box.apply[Int](1)(using initial)",
+            "box.copy[Int](box.copy$default$1[Int])(current)",
+        ]),
+        ("CaseClassCopyMissing.scala", 1, ["[E172]", "No given instance of type TC[Int] was found "
+          "for a context parameter of method copy in class Box", "1 error found"]),
+        ("CaseClassCopyAmbiguous.scala", 1, ["[E172]", "both parameter second and parameter first "
+          "match type TC[Int] of a context parameter of method copy in class Box", "1 error found"]),
+        ("CaseClassBound.scala", 0, [
+            "def apply[A](value: A)(using evidence$1: TC[A]): Box[A] = new Box[A](value)(using evidence$1)",
+            "def evidence: TC[Box.this.A] = Box.this.evidence$1",
+            "def make(using leaf: TC[Int]): Box[Int] = Box.apply[Int](1)(leaf)",
+        ]),
+        ("CaseClassBoundMissing.scala", 1, ["[E172]", "No given instance of type TC[Int] was found "
+          "for a context parameter of method apply in object Box", "1 error found"]),
+        ("CaseClassBoundAmbiguous.scala", 1, ["[E172]", "both parameter second and parameter first "
+          "match type TC[Int] of a context parameter of method apply in object Box", "1 error found"]),
+        ("ClassBound.scala", 0, [
+            "class Box[A >: Nothing <: Any](using evidence$1: TC[A])",
+            "private[this] given val evidence$1: TC[A]",
+            "def evidence: TC[Box.this.A] = Box.this.evidence$1",
+            "new Box[Int](leaf)()",
+        ]),
+        ("ClassBoundMissing.scala", 1, ["[E172]", "No given instance of type TC[Int] was found "
+          "for a context parameter of constructor Box in class Box", "1 error found"]),
+        ("ClassBoundAmbiguous.scala", 1, ["[E172]", "both parameter second and parameter first "
+          "match type TC[Int] of a context parameter of constructor Box in class Box", "1 error found"]),
         ("CurriedDefault.scala", 0, ["this.narrow(c)(this.narrow$default$2(c))",
           "def narrow$default$2(using c: Int): Int @uncheckedVariance = this.root(c)"]),
         ("DependentWitnessDefault.scala", 0, [
@@ -93,15 +130,15 @@ def check_controls(tc, checkout):
 def rust_observations(tc, rows):
     env = {**os.environ, "SCALA39_CLASSPATH": tc.runtime_classpath}
     result = subprocess.run(
-        ["cargo", "test", "--locked", "-p", "dotty-typer", "--lib", MODULE, "--",
-         "--ignored", "--show-output", "--test-threads=1"],
+        ["cargo", "test", "--locked", "-p", "dotty-typer", "--lib", "--",
+         "--include-ignored", "--show-output", "--test-threads=1", MODULE, *CLASS_BOUND_CONTROLS],
         cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
     passed = set(re.findall(r"^test (\S+) \.\.\. ok$", result.stdout, re.MULTILINE))
     sources = set(re.findall(r"^AUDIT_SOURCE\t(\S+)\t(\S+)$", result.stdout, re.MULTILINE))
     outcomes = re.findall(r"^AUDIT_OUTCOME\t(\S+)\t(\S+)$", result.stdout, re.MULTILINE)
     statuses = dict(outcomes)
-    if (result.returncode or passed != rows.keys()
+    if (result.returncode or passed != rows.keys() | set(CLASS_BOUND_CONTROLS)
             or sources != {(name, row[0]) for name, row in rows.items()}
             or len(outcomes) != len(rows) or statuses.keys() != rows.keys()
             or not set(statuses.values()) <= {"match", "typer-gap", "blocked"}):
@@ -127,6 +164,7 @@ def main():
     statuses = rust_observations(tc, rows)
     for name, (source, _, _) in rows.items():
         print(f"{statuses[name]:10} {name.rsplit('::', 1)[1]:32} {source}")
+    print("3 ordinary-class, 3 case-class apply and 3 case-class copy controls matched")
     open_rows = sum(s in {"typer-gap", "blocked"} for s in statuses.values())
     print(f"{len(rows)} observations verified; {open_rows} open for v1")
     return int(args.require_parity and open_rows > 0)

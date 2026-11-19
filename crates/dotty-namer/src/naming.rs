@@ -1593,7 +1593,13 @@ impl Namer<'_> {
             {
                 synthesize_apply = false;
             }
-            let TreeKind::TypeBoundsTree(bounds) = &self.arena.get(parameter.rhs).kind else {
+            let bounds_tree = match &self.arena.get(parameter.rhs).kind {
+                TreeKind::PhaseSpecific(UntypedNode::ContextBounds(bounds)) => bounds.bounds,
+                _ => parameter.rhs,
+            };
+            let Some(TreeKind::TypeBoundsTree(bounds)) =
+                self.arena.try_get(bounds_tree).map(|tree| &tree.kind)
+            else {
                 synthesize_apply = false;
                 continue;
             };
@@ -1816,12 +1822,38 @@ impl Namer<'_> {
                 ));
             }
         };
-        let case_class_shape_supported = synthesize_apply;
-        let explicit_apply_comparison = if top_level && synthesize_apply {
+        let class_clauses = constructor.context_bound_clauses(self.arena, &self.store.names);
+        let has_witnesses = constructor.context_bound_trees(self.arena).next().is_some();
+        if has_witnesses && class_clauses.first().map(Vec::as_slice) != Some(leading_clause) {
+            // A public case accessor cannot expose a path through the private witness.
+            synthesize_apply = false;
+        }
+        if has_witnesses
+            && synthesize_apply
+            && !template.body.iter().chain(leading_clause).any(|&member| {
+                let name = match &self.arena.get(member).kind {
+                    TreeKind::DefDef(def) => def.name,
+                    TreeKind::ValDef(def) => def.name,
+                    TreeKind::PhaseSpecific(UntypedNode::ModuleDef(def)) => def.name,
+                    _ => return false,
+                };
+                self.store.names.resolve(name.as_name().text()) == "copy"
+            })
+        {
+            self.enter_case_class_copy(
+                tree,
+                class_symbol,
+                declaration_context,
+                constructor,
+                &class_clauses,
+            )?;
+        }
+        let product_shape_supported = synthesize_apply && !has_witnesses;
+        let explicit_apply_comparison = if (top_level || has_witnesses) && synthesize_apply {
             self.explicit_companion_apply_collides(
                 companion_module_class,
                 &constructor.type_params,
-                value_parameters,
+                &class_clauses,
             )
         } else {
             Some(false)
@@ -1840,12 +1872,12 @@ impl Namer<'_> {
                 class_symbol,
                 companion_module_class,
                 declaration_context,
-                &constructor.type_params,
-                value_parameters,
+                constructor,
+                &class_clauses,
             )?;
         }
         let synthesize_product_selectors = top_level
-            && case_class_shape_supported
+            && product_shape_supported
             && constructor.type_params.is_empty()
             && constructor.value_param_clauses.len() == 1
             && (value_parameters.len() == 1
@@ -1856,7 +1888,7 @@ impl Namer<'_> {
                     value_parameters,
                 ));
         let generic_product1_source_shape = top_level
-            && case_class_shape_supported
+            && product_shape_supported
             && constructor.value_param_clauses.len() == 1
             && self.is_generic_product1_source_shape(
                 tree,
@@ -2193,7 +2225,7 @@ impl Namer<'_> {
         &self,
         companion_module_class: SymbolId,
         class_type_parameters: &[TreeId<Untyped>],
-        class_value_parameters: &[TreeId<Untyped>],
+        class_clauses: &[Vec<TreeId<Untyped>>],
     ) -> Option<bool> {
         let Some(SourceDefinition::Derived { source, tree }) =
             self.index.definition_of(companion_module_class)
@@ -2217,14 +2249,25 @@ impl Namer<'_> {
             };
             if self.store.names.resolve(method.name.as_name().text()) != "apply"
                 || method.type_params.len() != class_type_parameters.len()
-                || method.value_param_clauses.len() != 1
-                || method.value_param_clauses[0].len() != class_value_parameters.len()
             {
+                continue;
+            }
+            let method_clauses = method.context_bound_clauses(self.arena, &self.store.names);
+            if !method_clauses
+                .iter()
+                .map(Vec::len)
+                .eq(class_clauses.iter().map(Vec::len))
+            {
+                continue;
+            }
+            if class_clauses.len() != 1 || method.value_param_clauses.len() != 1 {
+                // Comparing evidence types across declaration scopes needs type completion.
+                unsupported_comparison = true;
                 continue;
             }
             let comparison = method.value_param_clauses[0]
                 .iter()
-                .zip(class_value_parameters)
+                .zip(&class_clauses[0])
                 .map(|(method_parameter, class_parameter)| {
                     let (TreeKind::ValDef(method_parameter), TreeKind::ValDef(class_parameter)) = (
                         &self.arena.get(*method_parameter).kind,
@@ -2368,8 +2411,8 @@ impl Namer<'_> {
         class_symbol: SymbolId,
         companion_module_class: SymbolId,
         declaration_context: SourceContextId,
-        type_parameters: &[TreeId<Untyped>],
-        value_parameters: &[TreeId<Untyped>],
+        constructor: &dotty_core::ast::DefDef<Untyped>,
+        clauses: &[Vec<TreeId<Untyped>>],
     ) -> Result<(), NamerError> {
         let companion_scope =
             self.index
@@ -2400,10 +2443,87 @@ impl Namer<'_> {
         self.enter_derived_method_parameters(
             apply,
             declaration_context,
-            type_parameters,
-            value_parameters.iter().copied(),
-            None,
+            &constructor.type_params,
+            clauses.iter().flatten().copied(),
+            Some(self.context_bound_flag(constructor)),
         )
+    }
+
+    fn enter_case_class_copy(
+        &mut self,
+        tree: TreeId<Untyped>,
+        class: SymbolId,
+        declaration_context: SourceContextId,
+        constructor: &dotty_core::ast::DefDef<Untyped>,
+        clauses: &[Vec<TreeId<Untyped>>],
+    ) -> Result<(), NamerError> {
+        let scope = self
+            .index
+            .scope_of(class)
+            .ok_or(NamerError::MalformedAstShape {
+                tree_index: tree.index(),
+                expected: "case class declaration scope",
+            })?;
+        let context = self.child_source_context(class, scope, Some(declaration_context));
+        let spec = SymbolSpec {
+            kind: SymbolKind::Method,
+            flags: SymbolFlags::SYNTHETIC,
+            visibility: Visibility::Public,
+        };
+        let name = *dotty_core::TermName::new(self.store.names.intern("copy")).as_name();
+        let copy = self.enter_derived_symbol(tree, name, class, scope, spec)?;
+        self.index.record_generated_case_class_method(
+            class,
+            GeneratedCaseClassMethodRole::Copy,
+            self.source,
+            tree,
+            copy,
+        )?;
+        self.enter_derived_method_parameters(
+            copy,
+            context,
+            &constructor.type_params,
+            clauses.iter().flatten().copied(),
+            Some(self.context_bound_flag(constructor)),
+        )?;
+        for (ordinal, &param) in constructor.value_param_clauses[0].iter().enumerate() {
+            let name = *dotty_core::TermName::new(
+                self.store
+                    .names
+                    .intern(&format!("copy$default${}", ordinal + 1)),
+            )
+            .as_name();
+            // Generated default getters are selectable by compiler identity only.
+            let getter = self.allocate_source_symbol(tree, name, class, spec);
+            self.index.record_generated_case_class_method(
+                class,
+                GeneratedCaseClassMethodRole::CopyDefault(ordinal),
+                self.source,
+                tree,
+                getter,
+            )?;
+            self.enter_derived_method_parameters(
+                getter,
+                context,
+                &constructor.type_params,
+                std::iter::empty(),
+                None,
+            )?;
+            let parameter = self
+                .index
+                .derived_symbol_at(copy, self.source, param)
+                .ok_or(NamerError::MalformedAstShape {
+                    tree_index: param.index(),
+                    expected: "copy parameter",
+                })?;
+            self.store
+                .record_default_getter(copy, ordinal, parameter, getter)
+                .map_err(|_| NamerError::MalformedAstShape {
+                    tree_index: param.index(),
+                    expected: "unique copy default getter",
+                })?;
+        }
+        Ok(())
     }
 
     fn enter_derived_method_parameters(
@@ -2884,33 +3004,33 @@ impl Namer<'_> {
             }
         }
 
-        if self.store.symbols.get(symbol).kind == SymbolKind::Class
-            && self
-                .store
-                .symbols
-                .get(symbol)
-                .flags
-                .contains(SymbolFlags::GIVEN)
-            && let Some(SourceDefinition::Canonical { tree, .. }) = self.index.definition_of(symbol)
-            && let Some(factory) = self
-                .store
-                .symbols
-                .owner(symbol)
-                .and_then(|owner| self.index.derived_symbol_at(owner, self.source, tree))
-        {
-            let factory_scope =
-                self.index
-                    .scope_of(factory)
-                    .ok_or(NamerError::MalformedAstShape {
+        let class = self.store.symbols.get(symbol);
+        if class.kind == SymbolKind::Class && !class.flags.contains(SymbolFlags::ENUM) {
+            let factory = if class.flags.contains(SymbolFlags::GIVEN)
+                && let Some(SourceDefinition::Canonical { tree, .. }) =
+                    self.index.definition_of(symbol)
+                && let Some(factory) = class
+                    .owner
+                    .and_then(|owner| self.index.derived_symbol_at(owner, self.source, tree))
+            {
+                let factory_scope =
+                    self.index
+                        .scope_of(factory)
+                        .ok_or(NamerError::MalformedAstShape {
+                            tree_index: tree.index(),
+                            expected: "structural given factory scope",
+                        })?;
+                let factory_context = self.index.declaration_context_of(factory).ok_or(
+                    NamerError::MalformedAstShape {
                         tree_index: tree.index(),
-                        expected: "structural given factory scope",
-                    })?;
-            let factory_context = self.index.declaration_context_of(factory).ok_or(
-                NamerError::MalformedAstShape {
-                    tree_index: tree.index(),
-                    expected: "structural given factory context",
-                },
-            )?;
+                        expected: "structural given factory context",
+                    },
+                )?;
+                Some((factory, factory_scope, factory_context))
+            } else {
+                None
+            };
+            let witness_flag = self.context_bound_flag(&constructor);
             let mut anonymous = 0;
             for parameter in &constructor.type_params {
                 let TreeKind::TypeDef(parameter) = &self.arena.get(*parameter).kind else {
@@ -2919,16 +3039,14 @@ impl Namer<'_> {
                 for (bound, name) in self.context_bound_witnesses(parameter, &mut anonymous)? {
                     let spec = SymbolSpec {
                         kind: SymbolKind::Field,
-                        flags: SymbolFlags::GIVEN,
+                        flags: witness_flag,
                         visibility: Visibility::Private,
                     };
                     let field = self.enter_symbol(bound, *name.as_name(), symbol, scope, spec)?;
                     self.index
                         .record_declaration_context(field, class_source_context)?;
-                    for (owner, scope, context) in [
-                        (constructor_symbol, constructor_scope, constructor_context),
-                        (factory, factory_scope, factory_context),
-                    ] {
+                    let ctor = (constructor_symbol, constructor_scope, constructor_context);
+                    for (owner, scope, context) in std::iter::once(ctor).chain(factory) {
                         let copy = self.enter_derived_symbol(
                             bound,
                             *name.as_name(),
@@ -2936,7 +3054,7 @@ impl Namer<'_> {
                             scope,
                             SymbolSpec {
                                 kind: SymbolKind::Parameter,
-                                flags: SymbolFlags::GIVEN,
+                                flags: witness_flag,
                                 visibility: Visibility::Public,
                             },
                         )?;

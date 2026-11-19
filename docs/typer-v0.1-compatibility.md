@@ -37,6 +37,9 @@ of the binary evidence. Run them with `JAVA_HOME`, `SCALA39_ROOT` and
 
 | Increment | Supported behavior | Regression control |
 | --- | --- | --- |
+| Case-class context bounds | For `case class Box[A: TC](value: A)`, `Box(1)` infers `A = Int` and supplies the caller’s `TC[Int]` to the generated companion method. `SourceTyper::type_generated_case_class_apply_body` types its constructor call using the value and witness parameters owned by `apply`. | The Scala 3.9 controls check both calls and the class-body witness. Missing and ambiguous evidence are diagnosed at `Box(1)`. Coverage is for generated `apply` with one written ordinary clause. |
+| Case-class copy with context bounds | For the same single ordinary constructor clause, a generated instance `copy` defaults omitted trailing values to fields on the original receiver. Type inference uses the receiver’s field types and any supplied values. The constructor takes the copy method’s contextual parameters. | For `box: Box[Int]`, a unique caller witness supplies `box.copy[Int](box.copy$default$1[Int])(current)`. Zero or two witnesses produce a diagnostic at `box.copy()`. |
+| Ordinary class context bounds | For `class Box[A: TC]`, `summon[TC[A]]` in a member resolves to the class's private witness. The primary constructor takes a separately bound `TC[A]` parameter. | With `leaf: TC[Int]` in scope, `new Box[Int]` types as `new Box[Int](leaf)()`. Missing and ambiguous evidence fail at the constructor selection. The Rust tests and pinned Scala controls use the same three sources. |
 | Parameterized structural givens | A factory, its implementation class and its constructor have separately owned binders. The factory result retains the implementation type. | A client imports `Builders.given`, infers `boxes[Int]` and supplies its own leaf. Explicit selection of `.tag` works from source and from a Scala-generated TASTy/class-file pair. Type-only and contextual-only factories preserve their respective clauses. |
 | Contextual defaults | A missing argument can invoke the indexed default getter of a source method, a source conditional provider, or a method loaded from Scala TASTy. The getter receives the original receiver and earlier clauses. | Tests check the getter's parameter identity, supplied evidence, rejection of ambiguity, rejection of an ill-typed default, and single evaluation of effectful operands. |
 | Recursive by-name evidence | A successful recursive search across a by-name parameter creates a shared dictionary. Its synthetic definitions and references have canonical identities. | Two recursive dependencies refer to the same field. The strict variant diverges. Discarding a failed candidate rolls back its dictionary and symbols. |
@@ -1747,7 +1750,7 @@ are ready:
 - expected-type-driven constructor inference, selecting constructor overloads, and
   anonymous-class lowering;
 - enum semantics, case-class synthetic APIs, and `derives`;
-- context-bound witnesses on constructors and polymorphic function literals;
+- context-bound witnesses on traits, enums and polymorphic function literals;
 - default imports and general standard-library member lookup;
 - ordinary and bounded contextual source function types are projected as
   canonical applied function-class types (#827 below). Refined types, type

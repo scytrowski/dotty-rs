@@ -895,6 +895,152 @@ fn primary_constructor_parts(named: &NamedSource) -> PrimaryConstructorParts {
     }
 }
 
+#[test]
+fn ordinary_class_bounds_enter_private_fields_and_distinct_constructor_parameters() {
+    for (tail, flag) in [
+        ("", SymbolFlags::GIVEN),
+        ("(implicit n: Int)", SymbolFlags::IMPLICIT),
+    ] {
+        let named = named_source(&format!("class Box[A: {{ TC as tc, Show }}]{tail}"), 402);
+        let parts = primary_constructor_parts(&named);
+        let class = named
+            .index
+            .symbol_at(named.source, parts.class_tree)
+            .unwrap();
+        let ctor = named
+            .index
+            .symbol_at(named.source, parts.constructor_tree)
+            .unwrap();
+        let TreeKind::DefDef(def) = &named.parsed.ast.get(parts.constructor_tree).kind else {
+            panic!("expected primary constructor")
+        };
+        let clauses = def.context_bound_clauses(&named.parsed.ast, &named.store.names);
+        for (bound, name) in clauses[0][..2].iter().zip(["tc", "evidence$1"]) {
+            let field = named.index.symbol_at(named.source, *bound).unwrap();
+            let parameter = named
+                .index
+                .derived_symbol_at(ctor, named.source, *bound)
+                .unwrap();
+            assert_ne!(field, parameter);
+            for (id, owner, kind, visibility) in [
+                (field, class, SymbolKind::Field, Visibility::Private),
+                (parameter, ctor, SymbolKind::Parameter, Visibility::Public),
+            ] {
+                let entry = named.store.symbols.get(id);
+                assert_eq!(
+                    (entry.owner, entry.kind, entry.visibility),
+                    (Some(owner), kind, visibility)
+                );
+                assert!(entry.flags.contains(flag));
+                assert_eq!(named.store.names.resolve(entry.name.text()), name);
+                let scope = named.store.scopes.get(named.index.scope_of(owner).unwrap());
+                assert_eq!(scope.lookup_all(&entry.name), &[id]);
+            }
+        }
+    }
+}
+
+#[test]
+fn case_class_bound_enters_separate_witnesses_and_compares_effective_companion_clauses() {
+    for (companion, generated) in [
+        ("", true),
+        ("object Box { def apply[A](x: A): A = x }", true),
+        (
+            "object Box { def apply[A](x: A)(using e: TC[A]): A = x }",
+            false,
+        ),
+    ] {
+        let named = named_source(
+            &format!("case class Box[A: TC as tc](value: A); {companion}"),
+            403,
+        );
+        let parts = primary_constructor_parts(&named);
+        let class = named
+            .index
+            .symbol_at(named.source, parts.class_tree)
+            .unwrap();
+        let ctor = named
+            .index
+            .symbol_at(named.source, parts.constructor_tree)
+            .unwrap();
+        let TreeKind::DefDef(def) = &named.parsed.ast.get(parts.constructor_tree).kind else {
+            panic!("expected constructor")
+        };
+        let bound = def.context_bound_trees(&named.parsed.ast).next().unwrap();
+        let field = named.index.symbol_at(named.source, bound).unwrap();
+        let formal = named
+            .index
+            .derived_symbol_at(ctor, named.source, bound)
+            .unwrap();
+        assert_eq!(named.store.symbols.owner(field), Some(class));
+        assert_eq!(
+            named.store.symbols.get(field).visibility,
+            Visibility::Private
+        );
+        assert_eq!(named.store.symbols.owner(formal), Some(ctor));
+        let factory = named
+            .index
+            .generated_case_class_method(class, GeneratedCaseClassMethodRole::Apply);
+        assert_eq!(factory.is_some(), generated);
+        if let Some(factory) = factory {
+            let copy = named
+                .index
+                .derived_symbol_at(factory, named.source, bound)
+                .unwrap();
+            let entry = named.store.symbols.get(copy);
+            assert_eq!(entry.owner, Some(factory));
+            assert!(entry.flags.contains(SymbolFlags::GIVEN));
+            assert_eq!(named.store.names.resolve(entry.name.text()), "tc");
+        }
+    }
+}
+
+#[test]
+fn case_class_copy_indexes_only_the_ordinary_defaults_on_the_instance() {
+    let named = named_source("case class Pair[A: TC as tc](left: A, right: A)", 404);
+    let parts = primary_constructor_parts(&named);
+    let class = named
+        .index
+        .symbol_at(named.source, parts.class_tree)
+        .unwrap();
+    let copy = named
+        .index
+        .generated_case_class_method(class, GeneratedCaseClassMethodRole::Copy)
+        .unwrap();
+    assert_eq!(named.store.symbols.owner(copy), Some(class));
+    let scope = named.store.scopes.get(named.index.scope_of(class).unwrap());
+    assert_eq!(
+        scope.lookup_all(&named.store.symbols.get(copy).name),
+        &[copy]
+    );
+    for (ordinal, param) in parts.value_param_clauses[0].iter().enumerate() {
+        let getter = named.store.default_getter(copy, ordinal).unwrap();
+        assert_eq!(
+            named.index.generated_case_class_method(
+                class,
+                GeneratedCaseClassMethodRole::CopyDefault(ordinal)
+            ),
+            Some(getter)
+        );
+        assert_eq!(
+            named.store.default_getter_origin(getter),
+            Some((copy, ordinal))
+        );
+        assert_eq!(named.store.symbols.owner(getter), Some(class));
+        assert!(
+            scope
+                .lookup_all(&named.store.symbols.get(getter).name)
+                .is_empty()
+        );
+        let copy_param = named
+            .index
+            .derived_symbol_at(copy, named.source, *param)
+            .unwrap();
+        assert_eq!(named.store.symbols.owner(copy_param), Some(copy));
+    }
+    assert_eq!(named.store.default_getter(copy, 2), None);
+}
+
 struct VecTokenSource {
     tokens: Vec<Token>,
     index: usize,
@@ -9347,7 +9493,7 @@ fn valid_nested_case_class_shapes_defer_apply_without_losing_the_companion_or_si
         "object Owners { case class Node private (value: Int); def unrelated: Int = 1 }",
         "object Owners { case class Node(value: Int) { def this() = this(0) }; def unrelated: Int = 1 }",
         "object Owners { case class Node[A <: AnyRef](value: A); def unrelated: Int = 1 }",
-        "object Owners { case class Node[A: Ordering](value: A); def unrelated: Int = 1 }",
+        "object Owners { case class Node[A <: AnyRef: Ordering](value: A); def unrelated: Int = 1 }",
         "object Owners { case class Node(private val value: Int); def unrelated: Int = 1 }",
         "object Owners { abstract case class Node(value: Int); def unrelated: Int = 1 }",
     ];

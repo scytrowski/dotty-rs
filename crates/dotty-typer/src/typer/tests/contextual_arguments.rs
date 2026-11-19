@@ -723,6 +723,183 @@ fn inherited_given_priority_uses_declaring_classes_in_a_diamond() {
 }
 
 #[test]
+fn ordinary_class_bound_uses_private_evidence_in_the_body_and_caller_evidence_at_new() {
+    let text = include_str!("../../../tests/fixtures/contextual-v1/controls/ClassBound.scala");
+    for constructor_first in [false, true] {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+        let bound = parsed
+            .ast
+            .iter()
+            .find_map(|(id, node)| {
+                matches!(
+                    node.kind,
+                    TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(_))
+                )
+                .then_some(id)
+            })
+            .unwrap();
+        let field = index.symbol_at(source, bound).unwrap();
+        let resolver = super::contextual_binary::library_resolver(definitions, &packages);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+        let order = if constructor_first {
+            ["make", "evidence"]
+        } else {
+            ["evidence", "make"]
+        };
+        for name in order {
+            let (method, rhs) =
+                method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+            typer
+                .type_method_definition(definition_tree(&index, method))
+                .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            let typed = typer.typed_index.get(source, rhs).unwrap();
+            if name == "evidence" {
+                assert_eq!(reference(&typer, typed), field);
+            } else {
+                let TreeKind::Apply(empty) = &typer.typed_ast().get(typed).kind else {
+                    panic!("expected final empty argument list")
+                };
+                assert!(empty.args.is_empty());
+                let TreeKind::Apply(call) = &typer.typed_ast().get(empty.function).kind else {
+                    panic!("expected contextual constructor call")
+                };
+                let [arg] = call.args[..] else {
+                    panic!("expected one constructor witness")
+                };
+                assert_eq!(
+                    reference(&typer, arg),
+                    method_parameter_symbol(&parsed, &index, source, method, 0)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn ordinary_class_bound_follows_written_arguments_and_merges_with_using_or_implicit() {
+    let text = "trait TC[A]
+        class Data[A: TC](val value: A)
+        class Merged[A: TC as tc](using n: Int)
+        class Legacy[A: TC](implicit n: Int)
+        class Client {
+          def trailing(using leaf: TC[Int]): Data[Int] = new Data[Int](1)
+          def merged(using leaf: TC[Int], n: Int): Merged[Int] = new Merged[Int](using leaf, n)
+          def legacy(using leaf: TC[Int], n: Int): Legacy[Int] = new Legacy[Int]
+        }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for name in ["trailing", "merged", "legacy"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        typer
+            .type_method_definition(definition_tree(&index, method))
+            .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let typed = typer.typed_index.get(source, rhs).unwrap();
+        let TreeKind::Apply(outer) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected constructor call")
+        };
+        let TreeKind::Apply(inner) = &typer.typed_ast().get(outer.function).kind else {
+            panic!("expected constructor call")
+        };
+        let args = match name {
+            "merged" => {
+                assert!(outer.args.is_empty());
+                &inner.args
+            }
+            "legacy" => {
+                assert!(inner.args.is_empty());
+                &outer.args
+            }
+            _ => {
+                assert_eq!(inner.args.len(), 1);
+                &outer.args
+            }
+        };
+        let expected_count = if name == "trailing" { 1 } else { 2 };
+        assert_eq!(args.len(), expected_count);
+        for (i, arg) in args.iter().enumerate() {
+            assert_eq!(
+                reference(&typer, *arg),
+                method_parameter_symbol(&parsed, &index, source, method, i)
+            );
+        }
+    }
+}
+
+#[test]
+fn ordinary_class_bound_reports_missing_and_ambiguous_evidence_at_new() {
+    for (name, text) in [
+        (
+            "missing",
+            include_str!("../../../tests/fixtures/contextual-v1/controls/ClassBoundMissing.scala"),
+        ),
+        (
+            "ambiguous",
+            include_str!(
+                "../../../tests/fixtures/contextual-v1/controls/ClassBoundAmbiguous.scala"
+            ),
+        ),
+    ] {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, name);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let TreeKind::Apply(allocation) = &parsed.ast.get(rhs).kind else {
+            panic!("expected constructor application")
+        };
+        assert!(typer.is_constructor_selection(allocation.function));
+        let site = allocation.function.index();
+        let before = typer.store.checkpoint();
+        match typer.type_method_definition(definition_tree(&index, method)) {
+            Err(TyperError::MissingContextualArgument {
+                source: at,
+                tree_index,
+                ..
+            }) if name == "missing" => {
+                assert_eq!((at, tree_index), (source, site));
+            }
+            Err(TyperError::AmbiguousContextualArgument {
+                source: at,
+                tree_index,
+                candidates,
+                ..
+            }) if name == "ambiguous" => {
+                assert_eq!((at, tree_index), (source, site));
+                assert_eq!(
+                    candidates,
+                    (0..2)
+                        .map(|i| method_parameter_symbol(&parsed, &index, source, method, i))
+                        .collect::<Vec<_>>()
+                );
+            }
+            other => panic!("{name}: {other:?}"),
+        }
+        assert_eq!(typer.store.checkpoint(), before);
+        assert!(typer.typed_index.is_empty());
+    }
+}
+
+#[test]
 fn constructor_contexts_follow_normalized_scala_clause_order() {
     let text = "class Context(using n:Int); class Old(implicit n:Int); class Pair(x:Int)(using n:Int); class C { def implicitCtor(using n:Int):Context=new Context; def explicitCtor(using n:Int):Context=new Context(using n); def legacy(using n:Int):Old=new Old; def trailing(using n:Int):Pair=new Pair(1) }";
     let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
@@ -2345,5 +2522,458 @@ fn dependent_read_rejects_a_value_from_an_independent_witness() {
         );
         assert_eq!(typer.store().checkpoint(), before);
         assert!(typer.source_typed_index().is_empty());
+    }
+}
+
+#[test]
+fn case_class_bound_infers_int_and_passes_the_callers_witness_to_apply() {
+    let text = include_str!("../../../tests/fixtures/contextual-v1/controls/CaseClassBound.scala");
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let class = class_symbol(&parsed, &store, &index, source, "Box");
+    let apply = index
+        .generated_case_class_method(class, dotty_core::GeneratedCaseClassMethodRole::Apply)
+        .unwrap();
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+    let resolver = super::contextual_binary::library_resolver(definitions, &packages);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(resolver));
+    typer
+        .type_method_definition(definition_tree(&index, method))
+        .unwrap();
+    let typed = typer.typed_index.get(source, rhs).unwrap();
+    let TreeKind::Apply(evidence) = &typer.typed_ast().get(typed).kind else {
+        panic!("missing evidence clause")
+    };
+    assert_eq!(
+        reference(&typer, evidence.args[0]),
+        method_parameter_symbol(&parsed, &index, source, method, 0)
+    );
+    let TreeKind::Apply(values) = &typer.typed_ast().get(evidence.function).kind else {
+        panic!("missing value clause")
+    };
+    assert_eq!(reference(&typer, values.function), apply);
+    assert!(
+        matches!(typer.store.types.get(typer.typed_ast().get(typed).ty), Type::Applied {tycon,args}
+        if args == &[definitions.int] && typer.store.types.get(*tycon).reference_symbol() == Some(class))
+    );
+
+    let body = typer.type_generated_case_class_apply_body(apply).unwrap();
+    assert_eq!(
+        typer.type_generated_case_class_apply_body(apply).unwrap(),
+        body
+    );
+    let TreeKind::Apply(forward) = &typer.typed_ast().get(body).kind else {
+        panic!("missing forwarded witness")
+    };
+    let TreeKind::Apply(init) = &typer.typed_ast().get(forward.function).kind else {
+        panic!("missing forwarded value")
+    };
+    assert_eq!(forward.kind, ApplyKind::Using);
+    let witness = reference(&typer, forward.args[0]);
+    let value = reference(&typer, init.args[0]);
+    let constructor = reference(&typer, init.function);
+    assert_eq!(
+        typer.store.symbols.get(constructor).kind,
+        SymbolKind::Constructor
+    );
+    assert_eq!(typer.store.symbols.owner(constructor), Some(class));
+    for target in [value, witness] {
+        let Some(SourceDefinition::Derived { tree, .. }) = index.definition_of(target) else {
+            panic!("expected a copied parameter")
+        };
+        assert_eq!(index.derived_symbol_at(apply, source, tree), Some(target));
+        assert_eq!(typer.store.symbols.owner(target), Some(apply));
+        assert!(
+            index
+                .derived_symbol_at(constructor, source, tree)
+                .is_some_and(|formal| formal != target)
+        );
+    }
+    assert!(
+        typer
+            .store
+            .symbols
+            .get(witness)
+            .flags
+            .contains(SymbolFlags::GIVEN)
+    );
+    let (inside, rhs) =
+        method_definition_and_rhs(&parsed, typer.store(), &index, source, "evidence");
+    typer
+        .type_method_definition(definition_tree(&index, inside))
+        .unwrap();
+    let field = reference(&typer, typer.typed_index.get(source, rhs).unwrap());
+    assert_eq!(typer.store.symbols.owner(field), Some(class));
+    assert_eq!(
+        typer.store.symbols.get(field).visibility,
+        Visibility::Private
+    );
+}
+
+#[test]
+fn case_class_bound_reports_missing_and_ambiguous_evidence_at_apply() {
+    for (name, text) in [
+        (
+            "missing",
+            include_str!(
+                "../../../tests/fixtures/contextual-v1/controls/CaseClassBoundMissing.scala"
+            ),
+        ),
+        (
+            "ambiguous",
+            include_str!(
+                "../../../tests/fixtures/contextual-v1/controls/CaseClassBoundAmbiguous.scala"
+            ),
+        ),
+    ] {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, name);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let before = typer.store.checkpoint();
+        match typer.type_method_definition(definition_tree(&index, method)) {
+            Err(TyperError::MissingContextualArgument {
+                source: at,
+                tree_index,
+                ..
+            }) if name == "missing" => assert_eq!((at, tree_index), (source, rhs.index())),
+            Err(TyperError::AmbiguousContextualArgument {
+                source: at,
+                tree_index,
+                candidates,
+                ..
+            }) if name == "ambiguous" => {
+                assert_eq!((at, tree_index), (source, rhs.index()));
+                assert_eq!(
+                    candidates,
+                    (0..2)
+                        .map(|i| method_parameter_symbol(&parsed, &index, source, method, i))
+                        .collect::<Vec<_>>()
+                );
+            }
+            other => panic!("{name}: {other:?}"),
+        }
+        assert_eq!(typer.store.checkpoint(), before);
+        assert!(typer.typed_index.is_empty());
+    }
+}
+
+#[test]
+fn case_class_apply_forwards_each_named_witness_in_declaration_order() {
+    let text =
+        "trait TC[A]; object Owner { case class Pair[A: {TC as left, TC as right}](value: A) }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let class = class_symbol(&parsed, &store, &index, source, "Pair");
+    let apply = index
+        .generated_case_class_method(class, dotty_core::GeneratedCaseClassMethodRole::Apply)
+        .unwrap();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    let body = typer.type_generated_case_class_apply_body(apply).unwrap();
+    let TreeKind::Apply(call) = &typer.typed_ast().get(body).kind else {
+        panic!("expected forwarded witnesses")
+    };
+    assert_eq!(call.kind, ApplyKind::Using);
+    assert_eq!(call.args.len(), 2);
+    for (&arg, name) in call.args.iter().zip(["left", "right"]) {
+        let id = reference(&typer, arg);
+        assert_eq!(typer.store.symbols.owner(id), Some(apply));
+        assert_eq!(
+            typer
+                .store
+                .names
+                .resolve(typer.store.symbols.get(id).name.text()),
+            name
+        );
+    }
+}
+
+#[test]
+fn case_class_copy_defaults_the_field_and_forwards_the_call_site_witness() {
+    let text = include_str!("../../../tests/fixtures/contextual-v1/controls/CaseClassCopy.scala");
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let class = class_symbol(&parsed, &store, &index, source, "Box");
+    let copy = index
+        .generated_case_class_method(class, dotty_core::GeneratedCaseClassMethodRole::Copy)
+        .unwrap();
+    let getter = store.default_getter(copy, 0).unwrap();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    let (original, rhs) =
+        method_definition_and_rhs(&parsed, typer.store(), &index, source, "original");
+    typer
+        .type_method_definition(definition_tree(&index, original))
+        .unwrap();
+    let TreeKind::Apply(created) = &typer
+        .typed_ast()
+        .get(typer.typed_index.get(source, rhs).unwrap())
+        .kind
+    else {
+        panic!("factory evidence")
+    };
+    let initial = method_parameter_symbol(&parsed, &index, source, original, 0);
+    assert_eq!(reference(&typer, created.args[0]), initial);
+
+    let (duplicate, rhs) =
+        method_definition_and_rhs(&parsed, typer.store(), &index, source, "duplicate");
+    let def_tree = definition_tree(&index, duplicate);
+    let TreeKind::DefDef(def) = &parsed.ast.get(def_tree).kind else {
+        panic!()
+    };
+    let current = index
+        .symbol_at(source, def.value_param_clauses[1][0])
+        .unwrap();
+    typer.type_method_definition(def_tree).unwrap();
+    let TreeKind::Apply(evidence) = &typer
+        .typed_ast()
+        .get(typer.typed_index.get(source, rhs).unwrap())
+        .kind
+    else {
+        panic!("copy evidence")
+    };
+    assert_eq!(reference(&typer, evidence.args[0]), current);
+    assert_ne!(current, initial);
+    let TreeKind::Apply(values) = &typer.typed_ast().get(evidence.function).kind else {
+        panic!("copy values")
+    };
+    let TreeKind::TypeApply(target) = &typer.typed_ast().get(values.function).kind else {
+        panic!("inferred copy argument")
+    };
+    let TreeKind::TypeApply(default) = &typer.typed_ast().get(values.args[0]).kind else {
+        panic!("polymorphic default getter")
+    };
+    assert_eq!(reference(&typer, target.function), copy);
+    assert_eq!(reference(&typer, default.function), getter);
+    assert_eq!(target.args, default.args);
+    assert_eq!(typer.typed_ast().get(target.args[0]).ty, definitions.int);
+    let TreeKind::Select(target) = &typer.typed_ast().get(target.function).kind else {
+        panic!()
+    };
+    let TreeKind::Select(default) = &typer.typed_ast().get(default.function).kind else {
+        panic!()
+    };
+    assert_eq!(target.qualifier, default.qualifier);
+    assert_eq!(
+        reference(&typer, target.qualifier),
+        method_parameter_symbol(&parsed, &index, source, duplicate, 0)
+    );
+
+    let body = typer.type_generated_case_class_copy_body(copy).unwrap();
+    let TreeKind::Apply(forward) = &typer.typed_ast().get(body).kind else {
+        panic!()
+    };
+    assert_eq!(forward.kind, ApplyKind::Using);
+    let witness = reference(&typer, forward.args[0]);
+    assert_eq!(typer.store.symbols.owner(witness), Some(copy));
+    assert!(
+        typer
+            .store
+            .symbols
+            .get(witness)
+            .flags
+            .contains(SymbolFlags::GIVEN)
+    );
+    let TreeKind::Apply(init) = &typer.typed_ast().get(forward.function).kind else {
+        panic!()
+    };
+    let constructor = reference(&typer, init.function);
+    assert_eq!(
+        typer.store.symbols.get(constructor).kind,
+        SymbolKind::Constructor
+    );
+    assert_eq!(typer.store.symbols.owner(constructor), Some(class));
+    let value = reference(&typer, init.args[0]);
+    let Some(SourceDefinition::Derived { tree, .. }) = index.definition_of(value) else {
+        panic!()
+    };
+    let field = index.symbol_at(source, tree).unwrap();
+    let default_body = typer.type_generated_copy_default_body(getter).unwrap();
+    assert_eq!(reference(&typer, default_body), field);
+    let TreeKind::Select(read) = &typer.typed_ast().get(default_body).kind else {
+        panic!()
+    };
+    assert!(matches!(
+        typer.typed_ast().get(read.qualifier).kind,
+        TreeKind::This(_)
+    ));
+}
+
+#[test]
+fn case_class_copy_reports_missing_and_ambiguous_call_site_evidence() {
+    for (ambiguous, text) in [
+        (
+            false,
+            include_str!(
+                "../../../tests/fixtures/contextual-v1/controls/CaseClassCopyMissing.scala"
+            ),
+        ),
+        (
+            true,
+            include_str!(
+                "../../../tests/fixtures/contextual-v1/controls/CaseClassCopyAmbiguous.scala"
+            ),
+        ),
+    ] {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "duplicate");
+        let method = definition_tree(&index, method);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let before = typer.store.checkpoint();
+        match typer.type_method_definition(method) {
+            Err(TyperError::MissingContextualArgument {
+                source: at,
+                tree_index,
+                ..
+            }) if !ambiguous => assert_eq!((at, tree_index), (source, rhs.index())),
+            Err(TyperError::AmbiguousContextualArgument {
+                source: at,
+                tree_index,
+                candidates,
+                ..
+            }) if ambiguous => {
+                assert_eq!((at, tree_index), (source, rhs.index()));
+                let TreeKind::DefDef(def) = &parsed.ast.get(method).kind else {
+                    panic!()
+                };
+                assert_eq!(
+                    candidates,
+                    def.value_param_clauses[1]
+                        .iter()
+                        .map(|&p| index.symbol_at(source, p).unwrap())
+                        .collect::<Vec<_>>()
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(typer.store.checkpoint(), before);
+        assert!(typer.typed_index.is_empty());
+    }
+}
+
+#[test]
+fn case_class_copy_checks_the_receiver_field_before_using_explicit_evidence() {
+    let text = "trait TC[A]; case class Box[A: TC](value: A); class Client {
+        def bad(box: Box[Int])(using e: TC[Boolean]): Box[Boolean] = box.copy[Boolean]()
+        def choose(box: Box[Int])(using one: TC[Int], two: TC[Int]): Box[Int] = box.copy()(using two)
+        def change(box: Box[Int])(using e: TC[Boolean]): Box[Boolean] = box.copy(true)
+    }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for name in ["bad", "choose", "change"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let def_tree = definition_tree(&index, method);
+        let checkpoint = typer.store.checkpoint();
+        let outcome = typer.type_method_definition(def_tree);
+        if name == "bad" {
+            assert!(
+                matches!(outcome,Err(TyperError::ExpectedExpressionTypeMismatch{actual,expected,..}) if actual==definitions.int && expected==definitions.boolean),
+                "{outcome:?}"
+            );
+            assert_eq!(typer.store.checkpoint(), checkpoint);
+        } else {
+            outcome.unwrap();
+            let TreeKind::Apply(call) = &typer
+                .typed_ast()
+                .get(typer.typed_index.get(source, rhs).unwrap())
+                .kind
+            else {
+                panic!()
+            };
+            let TreeKind::DefDef(def) = &parsed.ast.get(def_tree).kind else {
+                panic!()
+            };
+            assert_eq!(
+                reference(&typer, call.args[0]),
+                index
+                    .symbol_at(source, *def.value_param_clauses[1].last().unwrap())
+                    .unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn case_class_copy_reuses_one_receiver_for_multiple_default_getters() {
+    let text = "trait TC[A]; case class Pair[A: TC](left: A, right: A)
+        class Client {
+          def load(input: Pair[Int]): Pair[Int] = input
+          def duplicate(input: Pair[Int])(using e: TC[Int]): Pair[Int] = load(input).copy()
+        }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "duplicate");
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    typer
+        .type_method_definition(definition_tree(&index, method))
+        .unwrap();
+    let root = typer.typed_index.get(source, rhs).unwrap();
+    let TreeKind::Apply(context) = &typer.typed_ast().get(root).kind else {
+        panic!("outer context call")
+    };
+    let TreeKind::Block(block) = &typer.typed_ast().get(context.function).kind else {
+        panic!("shared receiver")
+    };
+    assert_eq!(block.stats.len(), 1);
+    let saved = typer
+        .typed_index
+        .synthetic_definition_symbol(block.stats[0])
+        .unwrap();
+    let TreeKind::Apply(call) = &typer.typed_ast().get(block.expr).kind else {
+        panic!("copy")
+    };
+    assert_eq!(call.args.len(), 2);
+    for tree in [call.function, call.args[0], call.args[1]] {
+        let TreeKind::TypeApply(tapp) = &typer.typed_ast().get(tree).kind else {
+            panic!()
+        };
+        let TreeKind::Select(sel) = &typer.typed_ast().get(tapp.function).kind else {
+            panic!()
+        };
+        assert_eq!(reference(&typer, sel.qualifier), saved);
     }
 }

@@ -30,13 +30,10 @@ impl SourceTyper<'_> {
                 clause_index,
             )?));
         }
+        let class = self.store.symbols.get(owner);
         let term_clauses = if is_primary
-            && self
-                .store
-                .symbols
-                .get(owner)
-                .flags
-                .contains(SymbolFlags::GIVEN)
+            && class.kind == SymbolKind::Class
+            && !class.flags.contains(SymbolFlags::ENUM)
         {
             self.context_bound_clauses(definition)
         } else {

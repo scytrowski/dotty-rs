@@ -79,6 +79,10 @@ and context-bound witnesses have distinct symbols for the class, constructor
 and factory. The typer can therefore complete each signature in its own scope.
 A factory with only a type clause has no synthetic empty term clause.
 
+For ordinary classes, a context bound enters a private contextual field in the
+class scope and a distinct parameter in the primary constructor scope. Both
+bindings point to the same source bound. A named bound keeps its source name.
+
 An anonymous given with a constructor parent takes its name from the
 instantiated parent type. For example, `given Context("alpha")` introduces
 `given_Context`, and `given Container[String]("alpha")(2)` introduces
@@ -107,19 +111,29 @@ original constructor parameter trees in declaration order. This keeps the
 generic source relationships recoverable without fabricating completed
 `SymbolInfo` or performing type resolution.
 
+For a case class with one ordinary clause and context bounds, the companion’s
+generated `apply` owns a separate parameter for each constructor witness. The
+class field, constructor parameter and factory parameter share the source
+bound tree. A case class in this subset without an explicit `copy` member
+also gets an instance method with separately owned parameters. The default
+getter for each ordinary copy parameter is indexed by method and position.
+The witness clause has no defaults. An explicit companion method with different effective clause
+arities can coexist with the generated factory. When contextual signatures
+have matching arities and the namer cannot compare their types, it defers
+factory synthesis.
+
 Abstract case classes, constructor defaults, contextual/repeated or otherwise
-modified parameters, bounds/context bounds on type parameters, non-public
-constructors, secondary constructors, and conflicting same-name declarations
-are rejected with a typed Namer error. Abstract case classes do not receive a
+modified parameters, explicit lower or upper type bounds, non-public
+constructors and secondary constructors remain outside the generated factory
+subset. Abstract case classes do not receive a
 generated `apply` in the pinned Scala 3.9.0 implementation.
 Erased and by-name case-class parameters are currently rejected by the parser
 and do not reach this Namer path. Ordinary nested classes do not receive
 case-class companions. The Scala 3.9.0 oracle fixture
 `tools/typer-classpath-corpus-audit/either-companion-oracle` verifies nested
-owners, explicit overloads, and negative call controls. This bounded increment
-does not synthesize `unapply` or `copy`, lower constructor calls, or claim
-Typer support. The corpus figures above are the checked-in measurement from
-revision `5edd6ee`; this focused change has not regenerated that full report.
+owners, explicit overloads, and negative call controls. The typer compatibility
+contract describes the generated factory body for context-bounded classes.
+The corpus figures above were recorded at revision `5edd6ee`.
 
 ## Export handoff
 

@@ -4,6 +4,28 @@ use crate::{Name, NameInterner, TermName, TreeId};
 use std::collections::HashSet;
 
 impl DefDef<Untyped> {
+    /// Context-bound witness trees on this definition's type parameters, in source order.
+    pub fn context_bound_trees<'a>(
+        &'a self,
+        arena: &'a AstArena<Untyped>,
+    ) -> impl Iterator<Item = TreeId<Untyped>> + 'a {
+        self.type_params
+            .iter()
+            .filter_map(|tree| {
+                let TreeKind::TypeDef(param) = &arena.try_get(*tree)?.kind else {
+                    return None;
+                };
+                let TreeKind::PhaseSpecific(UntypedNode::ContextBounds(bounds)) =
+                    &arena.try_get(param.rhs)?.kind
+                else {
+                    return None;
+                };
+                Some(bounds.context_bounds.as_slice())
+            })
+            .flatten()
+            .copied()
+    }
+
     /// Scala 3.9 Desugar.fitEvidenceParams. Keep the source-bound tree as the
     /// identity of each witness across naming, signature completion and DefDef typing.
     pub fn context_bound_clauses(
@@ -14,26 +36,19 @@ impl DefDef<Untyped> {
         let mut witnesses = Vec::new();
         let mut names = HashSet::new();
         let mut anonymous = 0;
-        for parameter in &self.type_params {
-            if let Some(TreeKind::TypeDef(td)) = arena.try_get(*parameter).map(|n| &n.kind)
-                && let Some(TreeKind::PhaseSpecific(UntypedNode::ContextBounds(bounds))) =
-                    arena.try_get(td.rhs).map(|n| &n.kind)
+        for tree in self.context_bound_trees(arena) {
+            witnesses.push(tree);
+            if let Some(TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(bound))) =
+                arena.try_get(tree).map(|n| &n.kind)
             {
-                for &tree in &bounds.context_bounds {
-                    witnesses.push(tree);
-                    if let Some(TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(bound))) =
-                        arena.try_get(tree).map(|n| &n.kind)
-                    {
-                        let name = bound.name.or_else(|| {
-                            anonymous += 1;
-                            interner
-                                .get(&format!("evidence${anonymous}"))
-                                .map(TermName::new)
-                        });
-                        if let Some(name) = name {
-                            names.insert(*name.as_name());
-                        }
-                    }
+                let name = bound.name.or_else(|| {
+                    anonymous += 1;
+                    interner
+                        .get(&format!("evidence${anonymous}"))
+                        .map(TermName::new)
+                });
+                if let Some(name) = name {
+                    names.insert(*name.as_name());
                 }
             }
         }

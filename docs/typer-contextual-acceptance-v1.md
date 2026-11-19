@@ -46,6 +46,17 @@ the last column help locate a failure and carry no additional acceptance votes.
 | `tests/run/curried-using-threading.scala` · `narrow()` | The call and its ordinary default getter receive the same contextual argument. | **Match.** Rust resolves the constructor-form given to `given_Context`. The call of `narrow` and the call of `narrow$default$2` reuse the same evidence. The getter body calls `root` with its own copy of the contextual parameter. |
 | `tests/pos/i8491.scala` · `Test.qux2` | The synthesized witness precedes `B` in the implicit clause and the getter is `qux2$default$2`. | **Match.** The complete definition returns its `B` parameter. The polymorphic getter takes only the type parameter. Its default constructs a fresh anonymous class owned by the getter, with parents `Object` and `Bar`, and widens the result to `Bar`. |
 
+The audit also runs three project controls for an ordinary `class Box[A: TC]`.
+The positive control checks the private witness used by `summon[TC[A]]` in
+the class and the caller's witness passed to `new Box[Int]`. Two negative
+controls check missing and ambiguous constructor evidence on the same source
+in each compiler. Three corresponding case-class controls check inference at
+`Box(1)`, forwarding from the generated companion `apply` to the primary
+constructor, and the two evidence errors at the factory call. Three copy
+controls compare the receiver’s default field, the new witness passed from
+the caller through `copy` to the constructor, and the missing and ambiguous
+evidence diagnostics at `box.copy()`.
+
 The existing contextual argument and consumer fixtures provide additional
 controls for structural givens, dependent argument paths, contextual defaults,
 nested context functions, conversions, extensions, extractors, and binary
