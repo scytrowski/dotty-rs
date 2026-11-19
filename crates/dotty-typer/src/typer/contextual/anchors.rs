@@ -186,6 +186,25 @@ impl SourceTyper<'_> {
         Ok(tree)
     }
 
+    /// An optional adaptation cannot select a unique candidate from an incomplete
+    /// companion scope. Let the caller retain its ordinary lookup or type error.
+    pub(super) fn adaptation_companion_refs(
+        &mut self,
+        anchor: TypeId,
+        tree_index: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Option<Vec<ContextualRef>>, TyperError> {
+        match self.companion_refs(anchor, tree_index, journal) {
+            Ok(refs) => Ok(Some(refs)),
+            Err(TyperError::MemberLookup(error))
+                if matches!(*error, MemberLookupError::ExternalClassCompletion { .. }) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Collect nominal anchors and their parent scopes only after lexical search
     /// has no winner. Each companion contributes a stable term prefix.
     pub(super) fn companion_refs(

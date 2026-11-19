@@ -39,16 +39,9 @@ impl SourceTyper<'_> {
         };
         let mut refs = Vec::new();
         for &anchor in anchors {
-            let candidates = match self.companion_refs(anchor, tree_index, journal) {
-                Ok(candidates) => candidates,
-                // A failed speculative conversion must retain the mismatch at the call.
-                // An incomplete binary scope cannot establish a unique conversion.
-                Err(TyperError::MemberLookup(error))
-                    if matches!(*error, MemberLookupError::ExternalClassCompletion { .. }) =>
-                {
-                    return Ok(None);
-                }
-                Err(error) => return Err(error),
+            let Some(candidates) = self.adaptation_companion_refs(anchor, tree_index, journal)?
+            else {
+                return Ok(None);
             };
             for candidate in candidates {
                 if !refs.contains(&candidate) {

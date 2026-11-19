@@ -21,7 +21,9 @@ impl SourceTyper<'_> {
                 return Ok(Some(method));
             }
         }
-        let refs = self.companion_refs(receiver, tree_index, journal)?;
+        let Some(refs) = self.adaptation_companion_refs(receiver, tree_index, journal)? else {
+            return Ok(None);
+        };
         self.extension_from_refs(refs, name, receiver, context, tree_index, journal)
     }
 
