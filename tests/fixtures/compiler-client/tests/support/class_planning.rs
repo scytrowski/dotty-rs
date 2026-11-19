@@ -116,3 +116,131 @@ fn class_planner_requires_a_public_constructor_and_an_implicit_parent() {
         Err(ClassPlanError::UnsupportedTemplate(child.symbol))
     );
 }
+
+#[test]
+fn private_field_initializers_follow_declarations_and_reject_same_type_substitution() {
+    use dotty::jvm_class_plan::TypedFieldInitializer;
+
+    let (mut store, defs, packages, unit) = named(
+        "class Pair { private val base: Int = 40; private val answer: Int = base + 2 }\nclass Other { private val base: Int = 1 }",
+    );
+    let class = unit.classes[0].symbol;
+    let mut typer = unit.typer(&mut store, defs, &packages);
+    let mut roots = Vec::new();
+    for &(field, rhs) in unit.classes.iter().flat_map(|class| &class.fields) {
+        let ty = typer.complete_symbol(field).unwrap();
+        let ctx = typer.field_initializer_context_for(field).unwrap();
+        let root = typer.type_expression_expected(rhs, ctx, ty).unwrap();
+        roots.push((field, root));
+    }
+    let (arena, index) = typer.into_typed_ast_and_index();
+    let [a, b, foreign] = roots[..] else {
+        panic!("expected three fields")
+    };
+    let input = |(field, root)| TypedFieldInitializer {
+        field,
+        root,
+        index: &index,
+    };
+    let planner = JvmClassPlanner::new(&store, &unit.ast, &unit.index);
+    let empty_index = dotty::core::SourceTypedIndex::new();
+    assert_eq!(
+        planner.plan_with_fields(
+            class,
+            [],
+            &arena,
+            [TypedFieldInitializer {
+                index: &empty_index,
+                ..input(a)
+            }]
+        ),
+        Err(ClassPlanError::InvalidFieldInitializer { field: a.0 })
+    );
+    let plan = planner
+        .plan_with_fields(class, [], &arena, [input(b), input(a)])
+        .unwrap();
+    assert_eq!(
+        plan.fields
+            .iter()
+            .map(|p| (p.field, p.initializer.unwrap()))
+            .collect::<Vec<_>>(),
+        [a, b]
+    );
+    assert_eq!(
+        planner.plan_with_fields(class, [], &arena, [input(a), input((b.0, a.1))]),
+        Err(ClassPlanError::FieldInitializerMismatch {
+            field: b.0,
+            expected: b.1,
+            actual: a.1
+        })
+    );
+    assert_eq!(
+        planner.plan_with_fields(class, [], &arena, [input(a), input(foreign)]),
+        Err(ClassPlanError::UnexpectedField {
+            class,
+            field: foreign.0
+        })
+    );
+    assert_eq!(
+        planner.plan_with_fields(class, [], &arena, [input(b)]),
+        Err(ClassPlanError::MissingField { class, field: a.0 })
+    );
+    assert_eq!(
+        planner.plan_with_fields(class, [], &arena, [input(a), input(a)]),
+        Err(ClassPlanError::DuplicateField { class, field: a.0 })
+    );
+}
+
+#[test]
+fn dependent_private_vals_initialize_in_source_order_on_jdk21() {
+    let (mut store, defs, packages, unit) = named(include_str!("../../Counter.scala"));
+    let units = [unit];
+    complete_signatures(&units, &mut store, defs, &packages).unwrap();
+    let (arena, mut bindings) = type_bodies(&units, &mut store, defs, &packages);
+    bindings[0].fields.reverse();
+    let classes = class_plans(&units, bindings, &arena, &store).unwrap();
+    let class = classes[0].class;
+    let unit = dotty::jvm::JvmCompilationUnit {
+        store: &store,
+        typed_ast: &arena,
+        classes,
+    };
+    let artifact = unit
+        .prepare_emission(&defs)
+        .unwrap()
+        .emit_class(class)
+        .unwrap();
+    assert_eq!(
+        super::run_java_client("private-vals", "CounterClient", &[artifact]).trim(),
+        "42"
+    );
+}
+
+#[test]
+fn field_planning_rejects_mutable_public_qualified_and_lazy_fields() {
+    for declaration in [
+        "private var n: Int = 1",
+        "val n: Int = 1",
+        "private[this] val n: Int = 1",
+        "private lazy val n: Int = 1",
+    ] {
+        let (store, _, _, unit) = named(&format!("class C {{ {declaration} }}"));
+        let class = &unit.classes[0];
+        let field = class.fields[0].0;
+        let Some(dotty::core::SourceDefinition::Canonical { tree, .. }) =
+            unit.index.definition_of(field)
+        else {
+            panic!("expected field declaration")
+        };
+        let expected = Err(ClassPlanError::UnsupportedStatement {
+            class: class.symbol,
+            tree,
+        });
+        let planner = JvmClassPlanner::new(&store, &unit.ast, &unit.index);
+        assert_eq!(
+            planner.plan_with_fields(class.symbol, [], &dotty::core::AstArena::new(), []),
+            expected,
+            "{declaration}"
+        );
+    }
+}

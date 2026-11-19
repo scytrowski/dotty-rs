@@ -1,13 +1,58 @@
-//! Assemble method plans for a simple source class with an implicit no-arg constructor.
+//! Assemble field and method plans for a simple source class with an implicit no-arg constructor.
 
 use std::collections::HashMap;
 use std::fmt;
 
 use crate::core::{
-    AstArena, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex, SymbolFlags,
-    SymbolId, SymbolKind, SymbolOrigin, Template, TreeId, TreeKind, Untyped, Visibility,
+    AstArena, Modifier, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex,
+    SourceTypedIndex, SymbolFlags, SymbolId, SymbolKind, SymbolOrigin, Template, TreeId, TreeKind,
+    Typed, Untyped, ValDef, Visibility, VisibilitySyntax,
 };
-use crate::jvm::{JvmClassInitializationPlan, JvmClassPlan, JvmMethodPlan};
+use crate::jvm::{
+    JvmClassInitializationPlan, JvmClassPlan, JvmFieldPlan, JvmFieldSourceVisibility, JvmMethodPlan,
+};
+
+/// Result of typing one field RHS and the index from that typing operation.
+#[derive(Clone, Copy)]
+pub struct TypedFieldInitializer<'a> {
+    /// Canonical field in the class being planned.
+    pub field: SymbolId,
+    /// Typed root returned for this field's source RHS.
+    pub root: TreeId<Typed>,
+    /// Source-to-typed bindings from the same session arena.
+    pub index: &'a SourceTypedIndex,
+}
+
+impl TypedFieldInitializer<'_> {
+    fn checked_root(
+        self,
+        source: SourceId,
+        rhs: TreeId<Untyped>,
+        ast: &AstArena<Untyped>,
+        typed_ast: &AstArena<Typed>,
+    ) -> Result<TreeId<Typed>, ClassPlanError> {
+        let field = self.field;
+        let invalid = ClassPlanError::InvalidFieldInitializer { field };
+        let expected = self.index.get(source, rhs).ok_or(invalid)?;
+        if expected != self.root {
+            return Err(ClassPlanError::FieldInitializerMismatch {
+                field,
+                expected,
+                actual: self.root,
+            });
+        }
+        let source_rhs = ast.try_get(rhs).ok_or(invalid)?;
+        let typed_rhs = typed_ast.try_get(self.root).ok_or(invalid)?;
+        if !source_rhs
+            .position
+            .is_some_and(|pos| pos.source() == source)
+            || typed_rhs.position != source_rhs.position
+        {
+            return Err(invalid);
+        }
+        Ok(self.root)
+    }
+}
 
 /// The source shape or supplied methods cannot form a simple class plan.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,10 +65,24 @@ pub enum ClassPlanError {
     ConstructorParameters(SymbolId),
     /// The primary constructor is missing, restricted, generic or has a body.
     UnsupportedConstructor(SymbolId),
-    /// This template statement is outside the concrete-method subset.
+    /// This statement is outside the selected class planning subset.
     UnsupportedStatement {
         class: SymbolId,
         tree: TreeId<Untyped>,
+    },
+    /// A field input has no matching class-body declaration.
+    UnexpectedField { class: SymbolId, field: SymbolId },
+    /// An initialized private val has no input.
+    MissingField { class: SymbolId, field: SymbolId },
+    /// Two inputs refer to the same field.
+    DuplicateField { class: SymbolId, field: SymbolId },
+    /// The source RHS has no usable binding in the supplied typer output.
+    InvalidFieldInitializer { field: SymbolId },
+    /// The supplied typed root differs from the canonical binding for this RHS.
+    FieldInitializerMismatch {
+        field: SymbolId,
+        expected: TreeId<Typed>,
+        actual: TreeId<Typed>,
     },
     /// A supplied plan has no corresponding concrete method in this class.
     UnexpectedMethod { class: SymbolId, method: SymbolId },
@@ -42,7 +101,7 @@ impl fmt::Display for ClassPlanError {
 }
 impl std::error::Error for ClassPlanError {}
 
-/// Read-only planner for top-level classes containing only concrete methods.
+/// Read-only planner for top-level classes with concrete methods and ordinary private vals.
 /// Provide canonical AST, symbols and method plans from the same session.
 /// The backend validates the assembled unit before emission.
 pub struct JvmClassPlanner<'a> {
@@ -69,6 +128,87 @@ impl<'a> JvmClassPlanner<'a> {
         class: SymbolId,
         methods: impl IntoIterator<Item = JvmMethodPlan>,
     ) -> Result<JvmClassPlan, ClassPlanError> {
+        self.assemble(class, methods, |_, tree, _| {
+            Err(ClassPlanError::UnsupportedStatement { class, tree })
+        })
+    }
+
+    /// Assembles ordinary private instance vals and concrete methods. Supply
+    /// the fields in any order and keep all typed roots in the same session
+    /// arena used for emission. The plan initializes fields in template order.
+    pub fn plan_with_fields<'t>(
+        &self,
+        class: SymbolId,
+        methods: impl IntoIterator<Item = JvmMethodPlan>,
+        typed_ast: &AstArena<Typed>,
+        initializers: impl IntoIterator<Item = TypedFieldInitializer<'t>>,
+    ) -> Result<JvmClassPlan, ClassPlanError> {
+        let mut fields = Vec::new();
+        let mut declarations = HashMap::new();
+        let mut plan = self.assemble(class, methods, |source, tree, definition| {
+            let error = ClassPlanError::UnsupportedStatement { class, tree };
+            let field = self
+                .member(class, source, tree, SymbolKind::Field)
+                .ok_or(error)?;
+            let symbol = self.store.symbols.get(field);
+            if symbol.visibility != Visibility::Private
+                || !symbol.flags.difference(SymbolFlags::FINAL).is_empty()
+                || definition.metadata.visibility
+                    != Some(VisibilitySyntax::Private { qualifier: None })
+                || !definition
+                    .metadata
+                    .modifiers
+                    .iter()
+                    .all(|m| *m == Modifier::Final)
+                || !definition.metadata.annotations.is_empty()
+            {
+                return Err(error);
+            }
+            let rhs = definition.rhs.ok_or(error)?;
+            if declarations
+                .insert(field, (source, rhs, fields.len()))
+                .is_some()
+            {
+                return Err(error);
+            }
+            fields.push(JvmFieldPlan {
+                field,
+                source_visibility: JvmFieldSourceVisibility::PlainPrivate,
+                initializer: None,
+            });
+            Ok(())
+        })?;
+        for input in initializers {
+            let field = input.field;
+            let &(source, rhs, position) = declarations
+                .get(&field)
+                .ok_or(ClassPlanError::UnexpectedField { class, field })?;
+            let slot = &mut fields[position];
+            if slot.initializer.is_some() {
+                return Err(ClassPlanError::DuplicateField { class, field });
+            }
+            slot.initializer = Some(input.checked_root(source, rhs, self.ast, typed_ast)?);
+        }
+        if let Some(missing) = fields.iter().find(|plan| plan.initializer.is_none()) {
+            return Err(ClassPlanError::MissingField {
+                class,
+                field: missing.field,
+            });
+        }
+        plan.fields = fields;
+        Ok(plan)
+    }
+
+    fn assemble(
+        &self,
+        class: SymbolId,
+        methods: impl IntoIterator<Item = JvmMethodPlan>,
+        mut visit_field: impl FnMut(
+            SourceId,
+            TreeId<Untyped>,
+            &ValDef<Untyped>,
+        ) -> Result<(), ClassPlanError>,
+    ) -> Result<JvmClassPlan, ClassPlanError> {
         let (source, template) = self.template(class)?;
         self.check_constructor(class, source, template)?;
 
@@ -76,9 +216,13 @@ impl<'a> JvmClassPlanner<'a> {
         let mut slots = Vec::with_capacity(template.body.len());
         for &tree in &template.body {
             let error = ClassPlanError::UnsupportedStatement { class, tree };
-            let Some(TreeKind::DefDef(definition)) = self.ast.try_get(tree).map(|node| &node.kind)
-            else {
-                return Err(error);
+            let definition = match &self.ast.try_get(tree).ok_or(error)?.kind {
+                TreeKind::DefDef(definition) => definition,
+                TreeKind::ValDef(field) => {
+                    visit_field(source, tree, field)?;
+                    continue;
+                }
+                _ => return Err(error),
             };
             let method = self
                 .member(class, source, tree, SymbolKind::Method)

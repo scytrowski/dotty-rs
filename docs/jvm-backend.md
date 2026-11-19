@@ -76,10 +76,16 @@ accepts the retained bindings and the session's extended typed arena.
 For an ordinary top-level source class, the facade also provides
 `jvm_class_plan::JvmClassPlanner::new(&store, &source_ast, &source_index)`.
 Its `plan(class_symbol, method_plans)` checks the public parameterless primary
-constructor and the template before selecting `ImplicitNoArg`. This planner
-covers classes with an implicit parent and only concrete method declarations.
-An explicit parent, a field or a template initialization expression requires
-a different class plan. The planner matches the supplied methods by canonical
+constructor and the method-only template before selecting `ImplicitNoArg`.
+For a class with ordinary unqualified `private val` fields, use
+`plan_with_fields(class_symbol, method_plans, &typed_ast, initializers)`.
+Each `TypedFieldInitializer` supplies a field symbol, its typed RHS root and
+the source-to-typed index from that typing operation. The planner checks the
+field owner, declaration, exact RHS mapping and source position. It accepts
+inputs in any order and returns fields in template order for initialization.
+The class must have an implicit parent. A mutable field, public accessor or
+standalone initializer expression requires a different plan.
+The planner matches the supplied methods by canonical
 symbol and returns them in source order. Unexpected, repeated and missing
 method plans produce distinct errors before emission. All plans and IDs must
 belong to the same session.

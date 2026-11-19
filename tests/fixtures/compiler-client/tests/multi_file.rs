@@ -20,7 +20,7 @@ use dotty::core::{
 use dotty::jvm::{
     GeneratedClass, JvmClassPlan, JvmCompilationUnit, PreparedJvmEmission, emit_class,
 };
-use dotty::jvm_class_plan::{ClassPlanError, JvmClassPlanner};
+use dotty::jvm_class_plan::{ClassPlanError, JvmClassPlanner, TypedFieldInitializer};
 use dotty::jvm_method_plan::JvmMethodPlanner;
 use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty::parser::{DetachedParse, ParseResult};
@@ -39,6 +39,7 @@ struct NamedUnit {
 struct NamedClass {
     symbol: SymbolId,
     method_range: Range<usize>,
+    fields: Vec<(SymbolId, TreeId<Untyped>)>,
 }
 
 impl NamedUnit {
@@ -110,15 +111,29 @@ fn enter(
             panic!("expected template")
         };
         let start = methods.len();
-        methods.extend(template.body.iter().copied().filter(|&tree| {
-            matches!(&ast.get(tree).kind, TreeKind::DefDef(method) if method.rhs.is_some())
-                && index.symbol_at(id, tree).is_some_and(|symbol| {
-                    store.symbols.get(symbol).kind == dotty::core::SymbolKind::Method
-                })
-        }));
+        let mut fields = Vec::new();
+        for &member in &template.body {
+            let Some(symbol) = index.symbol_at(id, member) else {
+                continue;
+            };
+            match (&ast.get(member).kind, store.symbols.get(symbol).kind) {
+                (TreeKind::DefDef(method), dotty::core::SymbolKind::Method)
+                    if method.rhs.is_some() =>
+                {
+                    methods.push(member)
+                }
+                (TreeKind::ValDef(field), dotty::core::SymbolKind::Field) => {
+                    if let Some(rhs) = field.rhs {
+                        fields.push((symbol, rhs));
+                    }
+                }
+                _ => {}
+            }
+        }
         classes.push(NamedClass {
             symbol: index.symbol_at(id, tree).unwrap(),
             method_range: start..methods.len(),
+            fields,
         });
     }
     NamedUnit {
@@ -250,6 +265,17 @@ fn with_plan<R>(
     run(&plan, &definitions)
 }
 
+struct ClassBindings {
+    methods: Vec<MethodBindings>,
+    fields: Vec<FieldBindings>,
+}
+
+struct FieldBindings {
+    field: SymbolId,
+    root: TreeId<Typed>,
+    index: SourceTypedIndex,
+}
+
 struct MethodBindings {
     index: SourceTypedIndex,
     locals: Vec<TypedLocalBinding>,
@@ -266,10 +292,28 @@ fn type_bodies(
     store: &mut SemanticStore,
     definitions: Definitions,
     packages: &Packages,
-) -> (AstArena<Typed>, Vec<Vec<MethodBindings>>) {
+) -> (AstArena<Typed>, Vec<ClassBindings>) {
     let mut output = AstArena::new();
     let mut typed_classes = Vec::new();
     for (unit, class) in named_classes(units) {
+        let mut fields = Vec::with_capacity(class.fields.len());
+        for &(field, rhs) in &class.fields {
+            let mut typer = SourceTyper::new_with_typed_ast(
+                &unit.ast,
+                unit.source,
+                &unit.index,
+                store,
+                definitions,
+                packages,
+                output,
+            );
+            let ty = typer.complete_symbol(field).unwrap();
+            let context = typer.field_initializer_context_for(field).unwrap();
+            let root = typer.type_expression_expected(rhs, context, ty).unwrap();
+            let (arena, index) = typer.into_typed_ast_and_index();
+            output = arena;
+            fields.push(FieldBindings { field, root, index });
+        }
         let mut methods = Vec::with_capacity(class.method_range.len());
         for &method in &unit.methods[class.method_range.clone()] {
             let mut typer = SourceTyper::new_with_typed_ast(
@@ -290,7 +334,7 @@ fn type_bodies(
             });
         }
 
-        typed_classes.push(methods);
+        typed_classes.push(ClassBindings { methods, fields });
     }
 
     (output, typed_classes)
@@ -298,16 +342,16 @@ fn type_bodies(
 
 fn class_plans(
     units: &[NamedUnit],
-    typed_classes: Vec<Vec<MethodBindings>>,
+    typed_classes: Vec<ClassBindings>,
     output: &AstArena<Typed>,
     store: &SemanticStore,
 ) -> Result<Vec<JvmClassPlan>, ClassPlanError> {
     let mut classes = Vec::new();
     for ((unit, class), typed) in named_classes(units).zip(typed_classes) {
-        assert_eq!(class.method_range.len(), typed.len());
+        assert_eq!(class.method_range.len(), typed.methods.len());
         let methods = unit.methods[class.method_range.clone()]
             .iter()
-            .zip(typed)
+            .zip(typed.methods)
             .map(|(&tree, typed)| {
                 JvmMethodPlanner {
                     store,
@@ -320,8 +364,19 @@ fn class_plans(
                 .plan(unit.symbol(tree))
                 .unwrap()
             });
-        classes
-            .push(JvmClassPlanner::new(store, &unit.ast, &unit.index).plan(class.symbol, methods)?);
+        let fields = typed.fields.iter().map(|binding| TypedFieldInitializer {
+            field: binding.field,
+            root: binding.root,
+            index: &binding.index,
+        });
+        classes.push(
+            JvmClassPlanner::new(store, &unit.ast, &unit.index).plan_with_fields(
+                class.symbol,
+                methods,
+                output,
+                fields,
+            )?,
+        );
     }
     Ok(classes)
 }
