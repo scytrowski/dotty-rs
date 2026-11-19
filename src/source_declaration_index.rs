@@ -102,4 +102,10 @@ impl SourceDeclarationIndex {
     pub fn get(&self, symbol: SymbolId) -> Option<SourceDeclaration> {
         self.declarations.get(&symbol).copied()
     }
+
+    /// Returns an indexed field or method eligible for individual signature completion.
+    pub fn member(&self, symbol: SymbolId) -> Option<SourceDeclaration> {
+        self.get(symbol)
+            .filter(|d| matches!(d.kind, SymbolKind::Method | SymbolKind::Field))
+    }
 }

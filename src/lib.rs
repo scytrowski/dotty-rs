@@ -44,6 +44,9 @@ pub use class_field_signatures::{
     ClassFieldSignatureCompletion, ClassFieldSignatureError, try_complete_class_field_signatures,
 };
 
+mod member_signature;
+pub use member_signature::{MemberSignatureError, try_complete_member_signature};
+
 mod class_body;
 pub use class_body::{ClassBodyError, type_class_body};
 

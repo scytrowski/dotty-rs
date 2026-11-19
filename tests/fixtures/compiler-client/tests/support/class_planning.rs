@@ -79,6 +79,52 @@ fn declaration_index_routes_identically_named_fields_to_their_own_class_and_file
 }
 
 #[test]
+fn member_signature_rejects_the_other_seed_before_and_after_completion() {
+    use dotty::core::SymbolInfo;
+    use dotty::typer::SignatureCompletion;
+    use dotty::{MemberSignatureError, try_complete_member_signature};
+
+    let (mut store, defs, packages, units) = body_units(VALID_B);
+    let sources = SignatureSources::new(&units, &store);
+    super::complete_headers(&sources, &mut store, defs, &packages, &mut |_, _| {}).unwrap();
+    let (a, b) = (&units[0], &units[1]);
+    let seed = a.classes[0].fields().next().unwrap().symbol;
+    let other = b.classes[0].fields().next().unwrap().symbol;
+    for expected in [SymbolInfo::Missing, SymbolInfo::Complete(defs.int)] {
+        let checkpoint = store.checkpoint();
+        for (ast, index) in [(&b.ast, &b.index), (&b.ast, &a.index), (&a.ast, &b.index)] {
+            let error = try_complete_member_signature(
+                seed,
+                &sources.declarations,
+                ast,
+                index,
+                &mut store,
+                defs,
+                &packages,
+            )
+            .unwrap_err();
+            assert!(matches!(error, MemberSignatureError::InvalidMember(id) if id == seed));
+            assert_eq!(store.checkpoint(), checkpoint);
+            assert_eq!(store.symbols.info(seed), &expected);
+            assert_eq!(store.symbols.info(other), &SymbolInfo::Missing);
+        }
+        assert_eq!(
+            try_complete_member_signature(
+                seed,
+                &sources.declarations,
+                &a.ast,
+                &a.index,
+                &mut store,
+                defs,
+                &packages
+            )
+            .unwrap(),
+            SignatureCompletion::Complete(defs.int)
+        );
+    }
+}
+
+#[test]
 fn bodies_recorded_b_then_a_plan_and_execute_a_then_b() {
     let (mut store, defs, packages, mut units) = body_units(VALID_B);
     let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
@@ -610,6 +656,74 @@ fn field_signature_retries_foreign_method_and_infers_int_in_both_orders() {
 const CONSUMER_OF_SEED: &str = "class Consumer(provider: Provider) { val answer = provider.seed }";
 
 #[test]
+fn field_method_field_chain_infers_int_in_both_file_orders() {
+    use dotty::core::{SymbolInfo, Type};
+    use dotty::typer::SignatureCompletion;
+
+    let consumer = (
+        SourceId::from_index(2),
+        "Consumer.scala",
+        "class Consumer(provider: Provider) { val answer = provider.value() }",
+    );
+    let provider = (
+        SourceId::from_index(4),
+        "Provider.scala",
+        "class Provider(val seeds: Seeds) { def value() = seeds.seed }",
+    );
+    let seeds = (
+        SourceId::from_index(6),
+        "Seeds.scala",
+        "class Seeds { val seed = 40 }",
+    );
+    for files in [[consumer, provider, seeds], [seeds, provider, consumer]] {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let units = name_units(
+            &files,
+            parsing::parse_files(&files, 3),
+            &mut store,
+            &mut packages,
+        );
+        let consumer_first = files[0].0 == consumer.0;
+        let (caller, leaves) = if consumer_first {
+            (&units[0], &units[2])
+        } else {
+            (&units[2], &units[0])
+        };
+        let answer = caller.classes[0].fields().next().unwrap().symbol;
+        let value = units[1].method_symbol();
+        let seed = leaves.classes[0].fields().next().unwrap().symbol;
+        let mut edges = Vec::new();
+        super::complete_signatures_in_order(
+            &units,
+            &units,
+            &mut store,
+            defs,
+            &packages,
+            |symbol, attempt| {
+                if let SignatureCompletion::BlockedOn(dep) = attempt {
+                    edges.push((symbol, dep));
+                }
+            },
+        )
+        .unwrap();
+        if consumer_first {
+            assert_eq!(edges, [(answer, value), (value, seed)]);
+        } else {
+            assert_eq!(edges, [(answer, value)]);
+        }
+        for field in [answer, seed] {
+            assert_eq!(store.symbols.info(field), &SymbolInfo::Complete(defs.int));
+        }
+        let SymbolInfo::Complete(ty) = *store.symbols.info(value) else {
+            panic!("missing value signature")
+        };
+        assert!(matches!(store.types.get(ty), Type::Method(method) if method.result == defs.int));
+    }
+}
+
+#[test]
 fn public_field_dependency_infers_both_signatures_in_either_file_order() {
     use dotty::core::SymbolInfo;
     use dotty::typer::SignatureCompletion;
@@ -700,6 +814,24 @@ fn public_field_dependency_outside_the_batch_keeps_the_original_error() {
         error: dotty::typer::TyperError::MemberTypeUnavailable { symbol }
     } if owner == class.symbol && field == answer && symbol == seed)
     );
+    let batch = dotty::SourceDeclarationIndex::from_classes(&store, [class]).unwrap();
+    let checkpoint = store.checkpoint();
+    let error = dotty::try_complete_member_signature(
+        answer,
+        &batch,
+        &consumer.ast,
+        &consumer.index,
+        &mut store,
+        defs,
+        &packages,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, dotty::MemberSignatureError::Typing { member, declaration,
+        error: dotty::typer::TyperError::MemberTypeUnavailable { symbol }
+    } if member == answer && declaration.class == class.symbol && symbol == seed)
+    );
+    assert_eq!(store.checkpoint(), checkpoint);
     for field in [answer, seed] {
         assert_eq!(store.symbols.info(field), &SymbolInfo::Missing);
     }
@@ -794,9 +926,9 @@ fn field_scheduler_preserves_arity_error_after_completing_dependency() {
     )
     .unwrap_err();
     assert_eq!(edges, [(answer.symbol, value)]);
-    let super::SignatureError::Field(ClassFieldSignatureError::Field {
-        class: owner,
-        field,
+    let super::SignatureError::Member(dotty::MemberSignatureError::Typing {
+        declaration,
+        member,
         error:
             TyperError::ApplicationArityMismatch {
                 source,
@@ -808,7 +940,15 @@ fn field_scheduler_preserves_arity_error_after_completing_dependency() {
     else {
         panic!("unexpected error for answer: {error:?}")
     };
-    assert_eq!((owner, field), (class.symbol, answer.symbol));
+    assert_eq!(
+        declaration,
+        dotty::SourceDeclaration {
+            class: class.symbol,
+            source: consumer.source,
+            kind: dotty::core::SymbolKind::Field
+        }
+    );
+    assert_eq!(member, answer.symbol);
     assert_eq!((source, tree_index), (consumer.source, rhs.index()));
     assert_eq!((expected, actual), (0, 1));
     assert!(matches!(
@@ -818,6 +958,14 @@ fn field_scheduler_preserves_arity_error_after_completing_dependency() {
     assert_eq!(
         store.symbols.info(answer.symbol),
         &dotty::core::SymbolInfo::Missing
+    );
+    // With the dependency already complete, the class's initial field pass sees the same error.
+    let retry = complete_signatures(&units, &mut store, defs, &packages).unwrap_err();
+    assert!(
+        matches!(retry, super::SignatureError::Field(ClassFieldSignatureError::Field {
+        class: owner, field, error: TyperError::ApplicationArityMismatch {
+            source, tree_index, expected: 0, actual: 1
+        }}) if owner == class.symbol && field == answer.symbol && source == consumer.source && tree_index == rhs.index())
     );
 }
 

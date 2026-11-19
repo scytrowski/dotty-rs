@@ -1954,19 +1954,22 @@ root and its source attribution.
 
 The standalone compiler client names the sources and completes their constructor
 signatures. It uses `dotty::try_complete_class_header` for class headers and
-`SourceTyper::try_complete_signature(symbol, in_batch)` for individual member
+`dotty::try_complete_member_signature` for individual member
 signatures. The client builds one `dotty::SourceDeclarationIndex` from the
 batch's named classes. Looking up a blocked symbol gives its source ID,
 declaring class and symbol kind. The header phase accepts indexed classes and
 the member phase accepts indexed fields and methods. The client uses the source
-ID to select the AST and semantic index for the next attempt.
+ID to select the AST and semantic index for the next attempt. The member API
+checks the declaration against these inputs even for a cached signature. An
+invalid target or a mismatched unit returns `MemberSignatureError::InvalidMember`.
 
 - `Ok(SignatureCompletion::Complete(ty))` gives the canonical signature.
 - `Ok(SignatureCompletion::BlockedOn(dependency))` identifies a missing method
   or public field signature or, during header completion, a class header in a
   different source of the batch. The attempt has rolled back. The client can
   complete the dependency in its owning source and retry the original request.
-- `Err(TyperError)` preserves the underlying failure. An unavailable class
+- A member typing failure preserves the original `TyperError` along with the
+  requested symbol and its indexed declaration. An unavailable class
   outside the batch retains `NewClassInfoUnavailable`, and an unavailable
   method or public field outside the batch retains `MemberTypeUnavailable`.
 

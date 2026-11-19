@@ -165,6 +165,8 @@ fn declaration_index_covers_class_constructor_fields_and_methods_in_the_batch() 
                 kind
             })
         );
+        let expected_member = matches!(kind, SymbolKind::Field | SymbolKind::Method);
+        assert_eq!(batch.member(symbol).is_some(), expected_member);
     }
     assert_eq!(batch.get(classes[1].symbol), None);
 }

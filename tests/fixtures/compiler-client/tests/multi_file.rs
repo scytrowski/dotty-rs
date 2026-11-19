@@ -139,6 +139,7 @@ struct TypedHeaders {
 enum SignatureError {
     Typing(TyperError),
     Field(dotty::ClassFieldSignatureError),
+    Member(dotty::MemberSignatureError),
     HeaderCycle(Vec<SymbolId>),
     MemberCycle(Vec<SymbolId>),
 }
@@ -166,12 +167,6 @@ impl<'a> SignatureSources<'a> {
             )
             .expect("valid named class views"),
         }
-    }
-
-    fn includes_member(&self, id: SymbolId) -> bool {
-        self.declarations
-            .get(id)
-            .is_some_and(|d| matches!(d.kind, SymbolKind::Field | SymbolKind::Method))
     }
 }
 
@@ -285,7 +280,7 @@ fn complete_methods_in_order(
                 store,
                 definitions,
                 packages,
-                |dep| sources.includes_member(dep),
+                |dep| sources.declarations.member(dep).is_some(),
             )
             .map_err(SignatureError::Field)?
         {
@@ -328,20 +323,16 @@ fn complete_member_path(
     while let Some(&symbol) = pending.last() {
         let member = sources.declarations.get(symbol).expect("indexed member");
         let unit = sources.by_source[&member.source];
-        let attempt = unit
-            .typer(store, definitions, packages)
-            .try_complete_signature(symbol, |dep| sources.includes_member(dep));
-        let completion = attempt.map_err(|error| {
-            if member.kind == SymbolKind::Field {
-                SignatureError::Field(dotty::ClassFieldSignatureError::Field {
-                    class: member.class,
-                    field: symbol,
-                    error,
-                })
-            } else {
-                SignatureError::Typing(error)
-            }
-        })?;
+        let completion = dotty::try_complete_member_signature(
+            symbol,
+            &sources.declarations,
+            &unit.ast,
+            &unit.index,
+            store,
+            definitions,
+            packages,
+        )
+        .map_err(SignatureError::Member)?;
         observe(symbol, completion);
         match completion {
             SignatureCompletion::Complete(_) => {
@@ -773,8 +764,8 @@ fn cross_file_bad_call_reports_arity_at_the_call_after_dependency_completion() {
     .unwrap_err();
     assert_eq!(dependencies, [(f, g)]);
     assert!(
-        matches!(err, SignatureError::Typing(TyperError::ApplicationArityMismatch { source, tree_index, expected: 0, actual: 1 })
-        if source == caller.source && tree_index == call.index()),
+        matches!(err, SignatureError::Member(dotty::MemberSignatureError::Typing { member, declaration, error: TyperError::ApplicationArityMismatch { source, tree_index, expected: 0, actual: 1 } })
+        if member == f && declaration.class == caller.classes[0].symbol && source == caller.source && tree_index == call.index()),
         "{err:?}"
     );
     assert!(matches!(store.symbols.info(f), SymbolInfo::Missing));

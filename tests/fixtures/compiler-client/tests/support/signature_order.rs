@@ -60,6 +60,9 @@ fn ready_widths(
             .complete_symbol(class.symbol)
             .unwrap();
     }
+    let declarations =
+        dotty::SourceDeclarationIndex::from_classes(store, units.iter().flat_map(|u| &u.classes))
+            .unwrap();
     let mut edges = HashMap::new();
     let mut remaining: HashSet<_> = units.iter().map(NamedUnit::method_symbol).collect();
     let mut visited = HashSet::new();
@@ -67,10 +70,15 @@ fn ready_widths(
         for unit in units.iter().skip(level).step_by(4) {
             let method = unit.method_symbol();
             visited.insert(method);
-            match unit
-                .typer(store, defs, packages)
-                .try_complete_signature(method, |symbol| remaining.contains(&symbol))
-            {
+            match dotty::try_complete_member_signature(
+                method,
+                &declarations,
+                &unit.ast,
+                &unit.index,
+                store,
+                defs,
+                packages,
+            ) {
                 Ok(SignatureCompletion::Complete(_)) => assert_eq!(level, 3),
                 Ok(SignatureCompletion::BlockedOn(symbol)) => {
                     assert!(level < 3 && remaining.contains(&symbol) && !visited.contains(&symbol));
