@@ -13,6 +13,8 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[4]
 MODULE = "typer::tests::contextual_v1::"
 CLASS_BOUND_CONTROLS = (
+    "typer::tests::contextual_arguments::envelope_copy_reads_the_original_field_and_forwards_two_new_witnesses",
+    "typer::tests::contextual_arguments::envelope_calls_diagnose_each_context_argument_at_the_call_site",
     "typer::tests::contextual_arguments::envelope_apply_passes_both_context_arguments_to_the_constructor",
     "typer::tests::contextual_arguments::envelope_constructor_merges_searched_and_explicit_arguments_in_scala_order",
     "typer::tests::contextual_arguments::ordinary_class_bound_uses_private_evidence_in_the_body_and_caller_evidence_at_new",
@@ -63,6 +65,11 @@ def check_controls(tc, checkout):
             "def apply[A](value: A)(using evidence$1: TC[A], trace: Trace): Envelope[A] = "
             "new Envelope[A](value)(using evidence$1, trace)",
             "Envelope.apply[Int](1)(tc, log)",
+            "def copy[A](value: A)(using evidence$1: TC[A], trace: Trace): Envelope[A] = "
+            "new Envelope[A](value)(using evidence$1, trace)",
+            "def copy$default$1[A]: A = Envelope.this.value",
+            "Envelope.apply[Int](1)(using initial, previous)",
+            "original.copy[Int](original.copy$default$1[Int])(current, active)",
             "new Envelope[Int](1)(tc, log)",
             "new Envelope[Int](1)(using tc, log)",
         ]),
@@ -114,6 +121,17 @@ def check_controls(tc, checkout):
           "instance a2 in object Cases match type A of parameter a of method g in object Cases",
           "1 error found"]),
     ]
+    for file, message in [
+        ("EnvelopeMissing.scala", "No given instance of type {goal} was found for {param} of {callee}"),
+        ("EnvelopeAmbiguous.scala", "both parameter second and parameter first match type {goal} of {param} of {callee}"),
+    ]:
+        messages = [
+            message.format(goal=goal, param=param, callee=callee)
+            for goal, param in [("TC[Int]", "a context parameter"), ("Trace", "parameter trace")]
+            for callee in ["constructor Envelope in class Envelope", "method apply in object Envelope",
+                           "method copy in class Envelope"]
+        ]
+        controls.append((file, 1, ["[E172]", "6 errors found", *messages]))
     for file, code, needles in controls:
         with tempfile.TemporaryDirectory() as out:
             check_compiler(tc, HERE / "controls" / file, code, needles, out)
@@ -173,7 +191,7 @@ def main():
     statuses = rust_observations(tc, rows)
     for name, (source, _, _) in rows.items():
         print(f"{statuses[name]:10} {name.rsplit('::', 1)[1]:32} {source}")
-    print("3 ordinary-class, 3 case-class apply and 3 case-class copy controls matched")
+    print("3 ordinary-class, 3 case-class apply and 3 case-class copy controls matched; Envelope new/apply/copy and all 12 error sites matched")
     open_rows = sum(s in {"typer-gap", "blocked"} for s in statuses.values())
     print(f"{len(rows)} observations verified; {open_rows} open for v1")
     return int(args.require_parity and open_rows > 0)

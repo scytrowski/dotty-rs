@@ -115,7 +115,7 @@ For a case class with one ordinary clause and context bounds, the companion’s
 generated `apply` owns a separate parameter for each constructor witness. The
 class field, constructor parameter and factory parameter share the source
 bound tree. A trailing written `(using trace: Trace)` also contributes a
-parameter to the generated `apply`, after the synthesized witness.
+parameter to the generated `apply` and `copy`, after the synthesized witness.
 A case class in this subset without an explicit `copy` member
 also gets an instance method with separately owned parameters. The default
 getter for each ordinary copy parameter is indexed by method and position.

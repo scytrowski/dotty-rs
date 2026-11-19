@@ -3114,3 +3114,154 @@ fn envelope_apply_passes_both_context_arguments_to_the_constructor() {
     let body = typer.type_generated_case_class_apply_body(apply).unwrap();
     assert_envelope_forwarding(&typer, body, apply, class);
 }
+
+#[test]
+fn envelope_copy_reads_the_original_field_and_forwards_two_new_witnesses() {
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(ENVELOPE);
+    let class = class_symbol(&parsed, &store, &index, source, "Envelope");
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "duplicate");
+    let tree = definition_tree(&index, method);
+    let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+        panic!()
+    };
+    let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+        panic!()
+    };
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    typer.type_method_definition(tree).unwrap();
+    let copy = index
+        .generated_case_class_method(class, dotty_core::GeneratedCaseClassMethodRole::Copy)
+        .unwrap();
+    let getter = typer.store.default_getter(copy, 0).unwrap();
+    assert_eq!(typer.store.default_getter(copy, 1), None);
+    assert_eq!(typer.store.default_getter(copy, 2), None);
+    let original = typer.local_symbol_at(source, block.stats[0]).unwrap();
+    let TreeKind::ValDef(local) = &parsed.ast.get(block.stats[0]).kind else {
+        panic!()
+    };
+    for (expr, clause) in [(local.rhs.unwrap(), 0), (block.expr, 1)] {
+        let typed = typer.typed_index.get(source, expr).unwrap();
+        let TreeKind::Apply(context) = &typer.typed_ast().get(typed).kind else {
+            panic!("context arguments")
+        };
+        assert_eq!(
+            context
+                .args
+                .iter()
+                .map(|&arg| reference(&typer, arg))
+                .collect::<Vec<_>>(),
+            def.value_param_clauses[clause]
+                .iter()
+                .map(|&p| index.symbol_at(source, p).unwrap())
+                .collect::<Vec<_>>()
+        );
+        if clause == 1 {
+            let TreeKind::Apply(values) = &typer.typed_ast().get(context.function).kind else {
+                panic!("copy values")
+            };
+            assert_eq!(values.args.len(), 1);
+            for (target, symbol) in [(values.function, copy), (values.args[0], getter)] {
+                let TreeKind::TypeApply(applied) = &typer.typed_ast().get(target).kind else {
+                    panic!("copy type application")
+                };
+                assert_eq!(reference(&typer, applied.function), symbol);
+                let TreeKind::Select(select) = &typer.typed_ast().get(applied.function).kind else {
+                    panic!("copy receiver")
+                };
+                assert_eq!(reference(&typer, select.qualifier), original);
+            }
+        }
+    }
+    let body = typer.type_generated_case_class_copy_body(copy).unwrap();
+    assert_envelope_forwarding(&typer, body, copy, class);
+}
+
+#[test]
+fn envelope_calls_diagnose_each_context_argument_at_the_call_site() {
+    for (text, ambiguous) in [
+        (
+            include_str!("../../../tests/fixtures/contextual-v1/controls/EnvelopeMissing.scala"),
+            false,
+        ),
+        (
+            include_str!("../../../tests/fixtures/contextual-v1/controls/EnvelopeAmbiguous.scala"),
+            true,
+        ),
+    ] {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        for (suffix, type_name) in [("Tc", "TC"), ("Trace", "Trace")] {
+            let goal_class = class_symbol(&parsed, typer.store(), &index, source, type_name);
+            for path in ["new", "apply", "copy"] {
+                let name = format!("{path}{suffix}");
+                let (method, rhs) =
+                    method_definition_and_rhs(&parsed, typer.store(), &index, source, &name);
+                let tree = definition_tree(&index, method);
+                let before = typer.store.checkpoint();
+                let node = parsed.ast.get(tree);
+                let TreeKind::DefDef(def) = &node.kind else {
+                    panic!("method")
+                };
+                // Inspect the failed goal while its instantiated type is still in the arena.
+                let result = typer.run_expression_transaction(|typer, journal, mappings| {
+                    let error = typer
+                        .type_source_method_definition(tree, def, node.position, journal, mappings)
+                        .unwrap_err();
+                    let (at, site, expected) = match &error {
+                        TyperError::MissingContextualArgument {
+                            source,
+                            tree_index,
+                            expected,
+                        } if !ambiguous => (source, tree_index, expected),
+                        TyperError::AmbiguousContextualArgument {
+                            source,
+                            tree_index,
+                            expected,
+                            candidates,
+                        } if ambiguous => {
+                            assert_eq!(
+                                *candidates,
+                                def.value_param_clauses.last().unwrap()[1..]
+                                    .iter()
+                                    .map(|&p| index.symbol_at(*source, p).unwrap())
+                                    .collect::<Vec<_>>()
+                            );
+                            (source, tree_index, expected)
+                        }
+                        other => panic!("{name}: {other:?}"),
+                    };
+                    assert_eq!((*at, *site), (source, rhs.index()), "{name}");
+                    let ty = typer.store.types.get(*expected);
+                    let head = if suffix == "Tc" {
+                        let Type::Applied { tycon, args } = ty else {
+                            panic!("expected TC[Int], got {ty:?}")
+                        };
+                        assert_eq!(args, &[definitions.int]);
+                        typer.store.types.get(*tycon)
+                    } else {
+                        ty
+                    };
+                    assert_eq!(head.reference_symbol(), Some(goal_class), "{name}");
+                    Err::<(), _>(error)
+                });
+                assert!(result.is_err());
+                assert_eq!(typer.store.checkpoint(), before);
+                assert!(typer.typed_index.is_empty());
+            }
+        }
+    }
+}

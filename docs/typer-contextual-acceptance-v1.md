@@ -57,6 +57,12 @@ controls compare the receiver’s default field, the new witness passed from
 the caller through `copy` to the constructor, and the missing and ambiguous
 evidence diagnostics at `box.copy()`.
 
+For `case class Envelope[A: TC](value: A)(using trace: Trace)`, the audit
+checks the argument order at direct construction and generated `apply` and
+`copy` calls. The copy reads the original field and forwards both witnesses
+from the copy site. Twelve negative sites cover missing and ambiguous
+`TC[Int]` and `Trace` independently at each of the three entry points.
+
 The existing contextual argument and consumer fixtures provide additional
 controls for structural givens, dependent argument paths, contextual defaults,
 nested context functions, conversions, extensions, extractors, and binary

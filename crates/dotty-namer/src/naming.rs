@@ -1844,17 +1844,20 @@ impl Namer<'_> {
             synthesize_apply = false;
         }
         if has_witnesses
-            && !has_second_clause
             && synthesize_apply
-            && !template.body.iter().chain(leading_clause).any(|&member| {
-                let name = match &self.arena.get(member).kind {
-                    TreeKind::DefDef(def) => def.name,
-                    TreeKind::ValDef(def) => def.name,
-                    TreeKind::PhaseSpecific(UntypedNode::ModuleDef(def)) => def.name,
-                    _ => return false,
-                };
-                self.store.names.resolve(name.as_name().text()) == "copy"
-            })
+            && !template
+                .body
+                .iter()
+                .chain(constructor.value_param_clauses.iter().flatten())
+                .any(|&member| {
+                    let name = match &self.arena.get(member).kind {
+                        TreeKind::DefDef(def) => def.name,
+                        TreeKind::ValDef(def) => def.name,
+                        TreeKind::PhaseSpecific(UntypedNode::ModuleDef(def)) => def.name,
+                        _ => return false,
+                    };
+                    self.store.names.resolve(name.as_name().text()) == "copy"
+                })
         {
             self.enter_case_class_copy(
                 tree,
