@@ -1,5 +1,7 @@
 //! Class plans built through the single-dependency client's public API.
-use super::{NamedUnit, class_plans, complete_signatures, name_units, parsing, type_bodies};
+use super::{
+    NamedUnit, SignatureSources, class_plans, complete_signatures, name_units, parsing, type_bodies,
+};
 use dotty::core::{Definitions, Packages, SemanticStore, SourceId, TreeKind};
 use dotty::jvm_class_plan::{ClassPlanError, JvmClassPlanner};
 use dotty::jvm_method_plan::JvmMethodPlanner;
@@ -41,6 +43,40 @@ fn body_units(b_source: &str) -> (SemanticStore, Definitions, Packages, Vec<Name
 
 const VALID_B: &str =
     "package demo\nclass B { private val seed: Int = 7; def value(): Int = { val n = seed; n } }";
+
+#[test]
+fn declaration_index_routes_identically_named_fields_to_their_own_class_and_file() {
+    use dotty::core::SymbolKind;
+    use dotty::{SourceDeclaration, SourceDeclarationIndex};
+
+    let (store, _, _, units) = body_units(VALID_B);
+    let index = SourceDeclarationIndex::from_classes(
+        &store,
+        units.iter().rev().flat_map(|unit| &unit.classes),
+    )
+    .unwrap();
+    let seeds: Vec<_> = units
+        .iter()
+        .map(|unit| {
+            let class = &unit.classes[0];
+            let seed = class.fields().next().unwrap().symbol;
+            assert_eq!(
+                store.names.resolve(store.symbols.get(seed).name.text()),
+                "seed"
+            );
+            assert_eq!(
+                index.get(seed),
+                Some(SourceDeclaration {
+                    source: unit.source,
+                    class: class.symbol,
+                    kind: SymbolKind::Field,
+                })
+            );
+            seed
+        })
+        .collect();
+    assert_ne!(seeds[0], seeds[1]);
+}
 
 #[test]
 fn bodies_recorded_b_then_a_plan_and_execute_a_then_b() {
@@ -519,7 +555,14 @@ fn field_signature_retries_foreign_method_and_infers_int_in_both_orders() {
         let fields: Vec<_> = class.fields().collect();
         let answer = fields[1].symbol;
         let value = provider.method_symbol();
-        super::complete_headers(&units, &mut store, defs, &packages, &mut |_, _| {}).unwrap();
+        super::complete_headers(
+            &SignatureSources::new(&units, &store),
+            &mut store,
+            defs,
+            &packages,
+            &mut |_, _| {},
+        )
+        .unwrap();
         let attempt = |store: &mut SemanticStore, schedule_value: bool| {
             dotty::try_complete_class_field_signatures(
                 class.symbol,
@@ -630,7 +673,14 @@ fn public_field_dependency_outside_the_batch_keeps_the_original_error() {
         &mut store,
         &mut packages,
     );
-    super::complete_headers(&units, &mut store, defs, &packages, &mut |_, _| {}).unwrap();
+    super::complete_headers(
+        &SignatureSources::new(&units, &store),
+        &mut store,
+        defs,
+        &packages,
+        &mut |_, _| {},
+    )
+    .unwrap();
     let consumer = &units[0];
     let class = &consumer.classes[0];
     let answer = class.fields().next().unwrap().symbol;
@@ -1178,7 +1228,7 @@ fn header_chain_follows_dependencies_and_executes_in_both_file_orders() {
         );
         let mut attempts = Vec::new();
         super::complete_headers(
-            &units,
+            &SignatureSources::new(&units, &store),
             &mut store,
             defs,
             &packages,
@@ -1372,13 +1422,18 @@ fn wrong_parent_argument_reports_the_same_error_in_both_file_orders() {
         let child = &units[child_index].classes[0];
         let parent = units[parent_index].classes[0].symbol;
         let mut blocked = Vec::new();
-        let error =
-            super::complete_headers(&units, &mut store, defs, &packages, &mut |class, result| {
+        let error = super::complete_headers(
+            &SignatureSources::new(&units, &store),
+            &mut store,
+            defs,
+            &packages,
+            &mut |class, result| {
                 if let SignatureCompletion::BlockedOn(dependency) = result {
                     blocked.push((class, dependency));
                 }
-            })
-            .unwrap_err();
+            },
+        )
+        .unwrap_err();
 
         if child_index == 0 {
             assert_eq!(blocked, [(child.symbol, parent)]);

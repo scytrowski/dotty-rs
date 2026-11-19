@@ -12,6 +12,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use dotty::SourceDeclarationIndex;
 use dotty::core::{
     AstArena, Definitions, Packages, SemanticStore, SourceId, SourceSemanticIndex, SymbolId,
     SymbolInfo, SymbolKind, TreeKind, Typed, Untyped,
@@ -148,34 +149,58 @@ impl From<TyperError> for SignatureError {
     }
 }
 
+struct SignatureSources<'a> {
+    units: &'a [NamedUnit],
+    by_source: HashMap<SourceId, &'a NamedUnit>,
+    declarations: SourceDeclarationIndex,
+}
+
+impl<'a> SignatureSources<'a> {
+    fn new(units: &'a [NamedUnit], store: &SemanticStore) -> Self {
+        Self {
+            units,
+            by_source: units.iter().map(|unit| (unit.source, unit)).collect(),
+            declarations: SourceDeclarationIndex::from_classes(
+                store,
+                units.iter().flat_map(|unit| &unit.classes),
+            )
+            .expect("valid named class views"),
+        }
+    }
+
+    fn includes_member(&self, id: SymbolId) -> bool {
+        self.declarations
+            .get(id)
+            .is_some_and(|d| matches!(d.kind, SymbolKind::Field | SymbolKind::Method))
+    }
+}
+
 fn complete_headers(
-    units: &[NamedUnit],
+    sources: &SignatureSources,
     store: &mut SemanticStore,
     definitions: Definitions,
     packages: &Packages,
     observe: &mut impl FnMut(SymbolId, SignatureCompletion),
 ) -> Result<TypedHeaders, SignatureError> {
     // Parent applications need the declaring file's constructor signature.
-    for unit in units {
+    for unit in sources.units {
         let mut typer = unit.typer(store, definitions, packages);
         for class in &unit.classes {
             typer.complete_symbol(class.constructor)?;
         }
     }
-    let owners: HashMap<_, _> = named_classes(units)
-        .map(|(unit, class)| (class.symbol, unit))
-        .collect();
     let mut headers = TypedHeaders::default();
     let mut path = Vec::new();
     let mut active = HashMap::new();
-    for (_, root) in named_classes(units) {
+    for (_, root) in named_classes(sources.units) {
         if matches!(store.symbols.info(root.symbol), SymbolInfo::Complete(_)) {
             continue;
         }
         path.push(root.symbol);
         active.insert(root.symbol, 0);
         while let Some(&symbol) = path.last() {
-            let unit = owners[&symbol];
+            let header = sources.declarations.get(symbol).expect("indexed class");
+            let unit = sources.by_source[&header.source];
             let completion = dotty::try_complete_class_header(
                 symbol,
                 &unit.ast,
@@ -185,7 +210,12 @@ fn complete_headers(
                 packages,
                 &mut headers.arena,
                 &mut headers.bindings,
-                |dep| owners.contains_key(&dep),
+                |dep| {
+                    sources
+                        .declarations
+                        .get(dep)
+                        .is_some_and(|d| d.kind == SymbolKind::Class)
+                },
             )?;
             observe(symbol, completion);
             match completion {
@@ -243,22 +273,8 @@ fn complete_methods_in_order(
     packages: &Packages,
     mut observe: impl FnMut(SymbolId, SignatureCompletion),
 ) -> Result<TypedHeaders, SignatureError> {
-    let headers = complete_headers(units, store, definitions, packages, &mut observe)?;
-    let owners: HashMap<_, _> = named_classes(units)
-        .flat_map(|(unit, class)| {
-            class
-                .constructor_fields
-                .iter()
-                .copied()
-                .chain(
-                    class
-                        .fields()
-                        .chain(class.methods())
-                        .map(|decl| decl.symbol),
-                )
-                .map(move |symbol| (symbol, unit))
-        })
-        .collect();
+    let sources = SignatureSources::new(units, store);
+    let headers = complete_headers(&sources, store, definitions, packages, &mut observe)?;
 
     for (unit, class) in named_classes(units) {
         while let dotty::ClassFieldSignatureCompletion::BlockedOn { field, dependency } =
@@ -269,14 +285,14 @@ fn complete_methods_in_order(
                 store,
                 definitions,
                 packages,
-                |dep| owners.contains_key(&dep),
+                |dep| sources.includes_member(dep),
             )
             .map_err(SignatureError::Field)?
         {
             observe(field, SignatureCompletion::BlockedOn(dependency));
             complete_member_path(
                 &[field, dependency],
-                &owners,
+                &sources,
                 store,
                 definitions,
                 packages,
@@ -288,7 +304,7 @@ fn complete_methods_in_order(
         if !matches!(store.symbols.info(symbol), SymbolInfo::Complete(_)) {
             complete_member_path(
                 &[symbol],
-                &owners,
+                &sources,
                 store,
                 definitions,
                 packages,
@@ -301,7 +317,7 @@ fn complete_methods_in_order(
 
 fn complete_member_path(
     path: &[SymbolId],
-    owners: &HashMap<SymbolId, &NamedUnit>,
+    sources: &SignatureSources,
     store: &mut SemanticStore,
     definitions: Definitions,
     packages: &Packages,
@@ -310,15 +326,15 @@ fn complete_member_path(
     let mut pending = path.to_vec();
     let mut active: HashMap<_, _> = path.iter().enumerate().map(|(i, &id)| (id, i)).collect();
     while let Some(&symbol) = pending.last() {
-        let unit = owners[&symbol];
+        let member = sources.declarations.get(symbol).expect("indexed member");
+        let unit = sources.by_source[&member.source];
         let attempt = unit
             .typer(store, definitions, packages)
-            .try_complete_signature(symbol, |dependency| owners.contains_key(&dependency));
+            .try_complete_signature(symbol, |dep| sources.includes_member(dep));
         let completion = attempt.map_err(|error| {
-            let member = store.symbols.get(symbol);
             if member.kind == SymbolKind::Field {
                 SignatureError::Field(dotty::ClassFieldSignatureError::Field {
-                    class: member.owner.expect("named class field"),
+                    class: member.class,
                     field: symbol,
                     error,
                 })
@@ -335,10 +351,12 @@ fn complete_member_path(
             SignatureCompletion::BlockedOn(dependency) => {
                 if let Some(start) = active.insert(dependency, pending.len()) {
                     let cycle = &pending[start..];
-                    if cycle
-                        .iter()
-                        .any(|&id| store.symbols.get(id).kind == SymbolKind::Field)
-                    {
+                    if cycle.iter().any(|&id| {
+                        sources
+                            .declarations
+                            .get(id)
+                            .is_some_and(|d| d.kind == SymbolKind::Field)
+                    }) {
                         let mut path = cycle.to_vec();
                         path.push(dependency);
                         return Err(SignatureError::MemberCycle(path));

@@ -67,3 +67,8 @@ pub mod jvm_tasty_artifacts;
 
 /// Source declarations available after naming.
 pub mod source_declarations;
+
+mod source_declaration_index;
+pub use source_declaration_index::{
+    SourceDeclaration, SourceDeclarationIndex, SourceDeclarationIndexError,
+};

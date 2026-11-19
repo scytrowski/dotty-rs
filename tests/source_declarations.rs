@@ -141,3 +141,48 @@ fn a_member_bound_to_another_class_reports_its_declaration_tree() {
         DeclarationError::InvalidBinding { source, tree }
     );
 }
+
+#[test]
+fn declaration_index_covers_class_constructor_fields_and_methods_in_the_batch() {
+    use dotty::{SourceDeclaration, SourceDeclarationIndex};
+    let (parsed, source, store, index) =
+        named("class A(val id: Int) { val seed = 1; def read() = seed }; class Outside");
+    let classes = source_classes(&parsed.ast, parsed.root, source, &index, &store).unwrap();
+    let class = &classes[0];
+    let batch = SourceDeclarationIndex::from_classes(&store, [class]).unwrap();
+    for (symbol, kind) in [
+        (class.symbol, SymbolKind::Class),
+        (class.constructor, SymbolKind::Constructor),
+        (class.constructor_fields[0], SymbolKind::Field),
+        (class.fields().next().unwrap().symbol, SymbolKind::Field),
+        (class.methods().next().unwrap().symbol, SymbolKind::Method),
+    ] {
+        assert_eq!(
+            batch.get(symbol),
+            Some(SourceDeclaration {
+                source,
+                class: class.symbol,
+                kind
+            })
+        );
+    }
+    assert_eq!(batch.get(classes[1].symbol), None);
+}
+
+#[test]
+fn declaration_index_rejects_duplicate_classes_and_a_substituted_field() {
+    use dotty::{SourceDeclarationIndex, SourceDeclarationIndexError};
+    let (parsed, source, store, index) = named("class A(val seed: Int); class B(val seed: Int)");
+    let mut classes = source_classes(&parsed.ast, parsed.root, source, &index, &store).unwrap();
+    let a = &classes[0];
+    assert_eq!(
+        SourceDeclarationIndex::from_classes(&store, [a, a]).unwrap_err(),
+        SourceDeclarationIndexError::DuplicateDeclaration(a.symbol)
+    );
+    let foreign = classes[1].constructor_fields[0];
+    classes[0].constructor_fields[0] = foreign;
+    assert_eq!(
+        SourceDeclarationIndex::from_classes(&store, [&classes[0]]).unwrap_err(),
+        SourceDeclarationIndexError::InvalidDeclaration(foreign)
+    );
+}

@@ -1955,8 +1955,11 @@ root and its source attribution.
 The standalone compiler client names the sources and completes their constructor
 signatures. It uses `dotty::try_complete_class_header` for class headers and
 `SourceTyper::try_complete_signature(symbol, in_batch)` for individual member
-signatures. Each phase supplies a membership predicate for the declarations it
-can schedule.
+signatures. The client builds one `dotty::SourceDeclarationIndex` from the
+batch's named classes. Looking up a blocked symbol gives its source ID,
+declaring class and symbol kind. The header phase accepts indexed classes and
+the member phase accepts indexed fields and methods. The client uses the source
+ID to select the AST and semantic index for the next attempt.
 
 - `Ok(SignatureCompletion::Complete(ty))` gives the canonical signature.
 - `Ok(SignatureCompletion::BlockedOn(dependency))` identifies a missing method
