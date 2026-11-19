@@ -360,11 +360,11 @@ fn class_planner_rejects_template_initializer() {
 }
 
 #[test]
-fn class_planner_requires_a_public_constructor_and_an_implicit_parent() {
-    let (store, _, _, unit) = named("class A()\nclass B private ()\nclass C extends A");
+fn class_planner_requires_a_public_constructor() {
+    let (store, _, _, unit) = named("class A()\nclass B private ()");
     let planner = JvmClassPlanner::new(&store, &unit.ast, &unit.index);
-    let [plain, private, child] = unit.classes.as_slice() else {
-        panic!("expected three classes")
+    let [plain, private] = unit.classes.as_slice() else {
+        panic!("expected two classes")
     };
     let plan = planner.plan(plain.symbol, []).unwrap();
     assert_eq!(
@@ -376,10 +376,109 @@ fn class_planner_requires_a_public_constructor_and_an_implicit_parent() {
         planner.plan(private.symbol, []),
         Err(ClassPlanError::UnsupportedConstructor(private.symbol))
     );
+}
+
+#[test]
+fn class_planner_rejects_parent_arguments_even_after_type_resolution() {
+    let (mut store, defs, packages, unit) =
+        named("class Base(x: Int)\nclass Derived extends Base(1)");
+    complete_signatures(std::slice::from_ref(&unit), &mut store, defs, &packages).unwrap();
+    let child = unit.classes[1].symbol;
+    let planner = JvmClassPlanner::new(&store, &unit.ast, &unit.index);
     assert_eq!(
-        planner.plan(child.symbol, []),
-        Err(ClassPlanError::UnsupportedTemplate(child.symbol))
+        planner.plan(child, []),
+        Err(ClassPlanError::UnsupportedTemplate(child))
     );
+}
+
+#[test]
+fn bare_parent_requires_an_available_no_arg_constructor_before_emission() {
+    use dotty::jvm::{JvmCodegenError, JvmSuperclassIssue};
+    let files = [(
+        SourceId::from_index(0),
+        "Classes.scala",
+        "class Base(x: Int)\nclass Derived extends Base",
+    )];
+    super::with_plan(&files, |unit, definitions| {
+        let [base, derived] = unit.classes.as_slice() else {
+            panic!("expected two classes")
+        };
+        assert_eq!(
+            unit.prepare_emission(definitions).err(),
+            Some(JvmCodegenError::InvalidJvmSuperclass {
+                class: derived.class,
+                parent: Some(base.class),
+                issue: JvmSuperclassIssue::ParentConstructorUnavailable
+            })
+        );
+    });
+}
+
+#[test]
+fn bare_parent_constructor_and_virtual_dispatch_work_in_both_file_orders_on_jdk21() {
+    use dotty::classfile::{Attribute, ClassFile, ConstantPoolEntry, ConstantPoolIndex, Reader};
+    let base = (
+        SourceId::from_index(0),
+        "Base.scala",
+        "package demo
+class Base:
+  private val seed: Int = 1
+  def initialized(): Int = seed
+  def value(): Int = seed
+  def read(): Int = value()
+",
+    );
+    let derived = (
+        SourceId::from_index(1),
+        "Derived.scala",
+        "package demo
+class Derived extends Base:
+  override def value(): Int = 7
+",
+    );
+    let first = super::compile([base, derived]);
+    let second = super::compile([derived, base]);
+    assert!(first.iter().eq(second.iter().rev()));
+    for artifacts in [first, second] {
+        let artifact = artifacts
+            .iter()
+            .find(|a| a.internal_name() == "demo/Derived")
+            .unwrap();
+        let class = ClassFile::decode(&mut Reader::new(artifact.bytes())).unwrap();
+        let pool = &class.constant_pool;
+        assert_eq!(pool.class_name(class.super_class.unwrap()), Ok("demo/Base"));
+        let constructor = class
+            .methods
+            .iter()
+            .find(|m| pool.utf8(m.name_index) == Ok("<init>"))
+            .unwrap();
+        assert_eq!(pool.utf8(constructor.descriptor_index), Ok("()V"));
+        let [Attribute::Code(code)] = constructor.attributes.as_slice() else {
+            panic!("expected constructor code")
+        };
+        let [0x2a, 0xb7, hi, lo, 0xb1] = code.code else {
+            panic!("expected aload_0, invokespecial, return")
+        };
+        let reference = ConstantPoolIndex(u16::from_be_bytes([*hi, *lo]));
+        let Some(ConstantPoolEntry::Methodref {
+            class_index,
+            name_and_type_index,
+        }) = pool.get(reference)
+        else {
+            panic!("invokespecial must reference a class method")
+        };
+        assert_eq!(pool.class_name(*class_index), Ok("demo/Base"));
+        assert_eq!(
+            pool.name_and_type(*name_and_type_index),
+            Ok(("<init>", "()V"))
+        );
+        assert_eq!(
+            super::run_java_client("inheritance", "InheritanceClient", &artifacts)
+                .lines()
+                .collect::<Vec<_>>(),
+            ["1", "1", "7"]
+        );
+    }
 }
 
 #[test]

@@ -5,8 +5,9 @@ use std::fmt;
 
 use crate::core::{
     AstArena, Modifier, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex,
-    SourceTypedIndex, SymbolFlags, SymbolId, SymbolKind, SymbolOrigin, Template, TreeId, TreeKind,
-    Typed, Untyped, UntypedNode, ValDef, Visibility, VisibilitySyntax,
+    SourceTypedIndex, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, Template,
+    TreeId, TreeKind, Type, TypeRefTarget, Typed, Untyped, UntypedNode, ValDef, Visibility,
+    VisibilitySyntax,
 };
 use crate::jvm::{
     JvmClassInitializationPlan, JvmClassPlan, JvmFieldPlan, JvmFieldSourceVisibility,
@@ -60,7 +61,7 @@ impl TypedFieldInitializer<'_> {
 pub enum ClassPlanError {
     /// The symbol does not identify an ordinary concrete top-level source class.
     SourceClass(SymbolId),
-    /// The class has an explicit parent, self type, derives or uses clause.
+    /// The parent is unsupported or unresolved, or the template has a self type, derives or uses clause.
     UnsupportedTemplate(SymbolId),
     /// The primary constructor has unsupported parameter clauses or formals.
     ConstructorParameters(SymbolId),
@@ -329,14 +330,49 @@ impl<'a> JvmClassPlanner<'a> {
         else {
             return Err(error);
         };
-        if !template.parents.is_empty()
-            || template.self_val.is_some()
+        if template.self_val.is_some()
             || !template.metadata.derives.is_empty()
             || !template.metadata.uses.is_empty()
         {
             return Err(ClassPlanError::UnsupportedTemplate(class));
         }
+        match template.parents.as_slice() {
+            [] => {}
+            [parent] if self.is_bare_source_parent(class, *parent) => {}
+            _ => return Err(ClassPlanError::UnsupportedTemplate(class)),
+        }
         Ok((source, template))
+    }
+
+    // ClassInfo retains the resolved parent type even for `extends Base(1)`.
+    // Check the original syntax before letting the JVM unit select Base.<init>()V.
+    fn is_bare_source_parent(&self, class: SymbolId, tree: TreeId<Untyped>) -> bool {
+        if !matches!(self.ast.try_get(tree).map(|node| &node.kind),
+            Some(TreeKind::Ident(ident)) if ident.name.is_type())
+        {
+            return false;
+        }
+        let SymbolInfo::Complete(info) = *self.store.symbols.info(class) else {
+            return false;
+        };
+        let Some(Type::ClassInfo(info)) = self.store.types.try_get(info) else {
+            return false;
+        };
+        let [parent] = info.parents.as_slice() else {
+            return false;
+        };
+        let Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(parent),
+            ..
+        }) = self.store.types.try_get(*parent)
+        else {
+            return false;
+        };
+        if info.class != class || !self.store.symbols.contains(*parent) {
+            return false;
+        }
+        let symbol = self.store.symbols.get(*parent);
+        symbol.kind == SymbolKind::Class && matches!(symbol.origin, SymbolOrigin::Source(_))
     }
 
     fn constructor_plan(

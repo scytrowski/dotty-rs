@@ -102,9 +102,18 @@ inputs in any order and returns fields in template order for initialization.
 For an ordinary public body field the planner builds a
 `JvmPublicBodyFieldSourceProof` from its declaration and typed initializer.
 The backend emits private storage, a public getter and, for a `var`, a public
-setter. The class must have an implicit parent. Explicitly modified public
+setter. Explicitly modified public
 fields (such as `lazy val` or `final val`) and standalone initializer
 expressions are outside this planner's scope.
+
+Both entry points also accept a single bare type identifier in `extends Base`.
+Complete the child class header first so its `ClassInfo` identifies the source
+class that the typer resolved as the parent. Include both class plans in the
+same JVM unit. Unit validation checks the direct parent and its public
+no-argument constructor before emission. An explicit parent application such
+as `extends Base(1)` yields `ClassPlanError::UnsupportedTemplate`, even when
+its resolved parent type is also `Base`.
+
 The planner matches the supplied methods by canonical
 symbol and returns them in source order. Unexpected, repeated and missing
 method plans produce distinct errors before emission. All plans and IDs must
