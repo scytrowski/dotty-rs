@@ -796,6 +796,14 @@ fn nested_import_evidence_keeps_the_whole_qualifier_at_local_and_member_use_site
             panic!("lost selected receiver in {name}")
         };
         assert_eq!(typer.store.names.resolve(nested.name.text()), "Nested");
+        let Type::TermRef { prefix, .. } = typer
+            .store
+            .types
+            .get(typer.typed_ast().get(evidence.qualifier).ty)
+        else {
+            panic!("expected a stable nested object")
+        };
+        assert_eq!(*prefix, typer.typed_ast().get(nested.qualifier).ty);
         let outer = reference(&typer, nested.qualifier);
         assert_eq!(
             typer

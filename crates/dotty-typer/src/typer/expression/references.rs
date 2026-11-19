@@ -546,6 +546,17 @@ impl SourceTyper<'_> {
         tree_index: u32,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
+        self.term_reference_type(symbol, None, expression_owner, tree_index, info_journal)
+    }
+
+    pub(in crate::typer) fn term_reference_type(
+        &mut self,
+        symbol: SymbolId,
+        selected_prefix: Option<TypeId>,
+        expression_owner: SymbolId,
+        tree_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
         if !self.store.symbols.contains(symbol) {
             return Err(TyperError::UnknownSymbol { symbol });
         }
@@ -615,8 +626,12 @@ impl SourceTyper<'_> {
                 });
             }
         }
-        let prefix =
-            self.expression_term_prefix(symbol, expression_owner, tree_index, info_journal)?;
+        let prefix = match selected_prefix {
+            Some(prefix) => prefix,
+            None => {
+                self.expression_term_prefix(symbol, expression_owner, tree_index, info_journal)?
+            }
+        };
         Ok(self.store.types.alloc(Type::TermRef {
             prefix,
             target: TermRefTarget::Symbol(symbol),

@@ -1470,18 +1470,7 @@ impl SourceTyper<'_> {
                 source: self.source,
                 import_tree_index,
             })?;
-        let ty = self.import_qualifier_type(
-            symbol,
-            context.owner,
-            tree.index(),
-            import_tree_index,
-            info_journal,
-        )?;
-        let typed = match source_node.kind {
-            TreeKind::Ident(ident) => {
-                TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
-                    .ident_with_backquoted(ident.name, ident.backquoted, ty, source_node.position)
-            }
+        let (name, backquoted, qualifier) = match source_node.kind {
             TreeKind::Select(selection) => {
                 let qualifier = self.type_import_qualifier(
                     selection.qualifier,
@@ -1490,20 +1479,30 @@ impl SourceTyper<'_> {
                     info_journal,
                     new_mappings,
                 )?;
-                TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).select(
-                    qualifier,
-                    selection.name,
-                    selection.backquoted,
-                    ty,
-                    source_node.position,
-                )
+                (selection.name, selection.backquoted, Some(qualifier))
             }
+            TreeKind::Ident(ident) => (ident.name, ident.backquoted, None),
             _ => {
                 return Err(TyperError::MalformedSourceImport {
                     source: self.source,
                     import_tree_index,
                 });
             }
+        };
+        let ty = self.import_qualifier_type(
+            symbol,
+            qualifier.map(|tree| self.typed_arena.get(tree).ty),
+            context.owner,
+            tree.index(),
+            import_tree_index,
+            info_journal,
+        )?;
+        let mut builder = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types);
+        let typed = match qualifier {
+            Some(qualifier) => {
+                builder.select(qualifier, name, backquoted, ty, source_node.position)
+            }
+            None => builder.ident_with_backquoted(name, backquoted, ty, source_node.position),
         };
         self.typed_index
             .insert(self.source, tree, typed)
@@ -1520,6 +1519,7 @@ impl SourceTyper<'_> {
     fn import_qualifier_type(
         &mut self,
         symbol: SymbolId,
+        qualifier: Option<TypeId>,
         owner: SymbolId,
         tree_index: u32,
         import_tree_index: u32,
@@ -1533,7 +1533,12 @@ impl SourceTyper<'_> {
             | SymbolKind::Value
             | SymbolKind::Parameter
             | SymbolKind::Local => {
-                let ty = self.expression_type_of_symbol(symbol, owner, tree_index, info_journal)?;
+                let prefix = match qualifier {
+                    Some(prefix) if self.is_stable_selection_prefix(prefix)? => Some(prefix),
+                    _ => None,
+                };
+                let ty =
+                    self.term_reference_type(symbol, prefix, owner, tree_index, info_journal)?;
                 if self
                     .require_stable_selection_prefix(ty, tree_index)
                     .is_err()

@@ -33,17 +33,29 @@ impl SourceTyper<'_> {
                 return Ok(Some(target));
             }
         }
-        let refs = if let Some(instance) = goal.instance {
-            self.companion_refs(instance, tree_index, journal)?
-        } else {
-            let mut refs = self.companion_refs(goal.actual, tree_index, journal)?;
-            for r in self.companion_refs(goal.expected, tree_index, journal)? {
-                if !refs.contains(&r) {
-                    refs.push(r);
+        let anchors: &[TypeId] = match &goal.instance {
+            Some(instance) => std::slice::from_ref(instance),
+            None => &[goal.actual, goal.expected],
+        };
+        let mut refs = Vec::new();
+        for &anchor in anchors {
+            let candidates = match self.companion_refs(anchor, tree_index, journal) {
+                Ok(candidates) => candidates,
+                // A failed speculative conversion must retain the mismatch at the call.
+                // An incomplete binary scope cannot establish a unique conversion.
+                Err(TyperError::MemberLookup(error))
+                    if matches!(*error, MemberLookupError::ExternalClassCompletion { .. }) =>
+                {
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            };
+            for candidate in candidates {
+                if !refs.contains(&candidate) {
+                    refs.push(candidate);
                 }
             }
-            refs
-        };
+        }
         self.conversion_from_refs(refs, goal, context, tree_index, journal)
     }
 
