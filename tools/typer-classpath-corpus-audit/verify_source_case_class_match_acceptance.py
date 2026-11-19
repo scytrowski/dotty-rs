@@ -63,6 +63,12 @@ ARRAY_BUFFER_VIEW_APPLY_LIVE_BLOCKER = (
     'names=[\\"IndexedSeq\\", \\"collection\\", \\"scala\\"], raw=AppliedType(tycon=NatAst(tag=113, '
     'child=NatAst(tag=112, child=Leaf(tag=61))), arguments=1)" } } })'
 )
+SORTED_MAP_UNSORTED_IDENTITY = "library/src/scala/collection/immutable/SortedMap.scala#tree=51"
+SORTED_MAP_UNSORTED_BLOCKER = (
+    "blocked::ExpectedExpressionConformanceUnsupported {{ source: SourceId(0), tree_index: 50, "
+    "actual: TypeId({actual}), expected: TypeId({expected}), "
+    "error: ClassInfoUnavailable {{ symbol: SymbolId(43), state: Missing }} }}"
+)
 PRODUCT2_FIXTURE = Path("crates/dotty-typer/tests/fixtures/source-case-class-product2-3.9.0")
 PRODUCT2_SOURCE_SHA256 = "4b144913df1d2021359c44633dc2a23f21bf6288bf2528c86cc6f53d79b8ee31"
 SCALA_MATRIX_CASES = {
@@ -1396,6 +1402,15 @@ def validate_cohorts(root: Path, reports: list[Path], output: Path, baseline_rec
     for wanted, found in zip(expected, recorded_rows, strict=True):
         if wanted == found:
             continue
+        if wanted["identity"] == SORTED_MAP_UNSORTED_IDENTITY:
+            # Both sessions still compare SortedMap.this with Map[K, V]. Only
+            # these two arena slots moved after contextual argument support.
+            old = SORTED_MAP_UNSORTED_BLOCKER.format(actual=1714, expected=1713)
+            new = SORTED_MAP_UNSORTED_BLOCKER.format(actual=1718, expected=1717)
+            if found["first_status"] == found["second_status"] == old and wanted == {
+                **found, "first_status": new, "second_status": new
+            }:
+                continue
         if wanted["identity"] == EITHER_SWAP_IDENTITY:
             # Keep the checked-in 2026-09 receipt immutable. Permit only the
             # measured pinned Either.swap completion, while requiring every

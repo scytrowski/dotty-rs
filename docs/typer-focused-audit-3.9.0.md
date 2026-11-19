@@ -22,6 +22,13 @@ baseline records the additional resolver requests made before reaching those
 blockers, including contextual lookups. Two fresh runs produced identical
 normalized reports.
 
+In the separate 25 + 25 ordinary-method check, Scala's `SortedMap.unsorted`
+still reaches tree 50 and compares `SortedMap.this` with `Map[K, V]`.
+Both revisions report missing class information for the same source symbol.
+The receipt verifier accepts the measured change in the two session-local type
+IDs, from 1714/1713 to 1718/1717, and checks every other field against the
+frozen receipt. Both live passes must agree.
+
 Two frozen method cohorts are available:
 
 | Name | Frozen rows | Stable identity | Use |

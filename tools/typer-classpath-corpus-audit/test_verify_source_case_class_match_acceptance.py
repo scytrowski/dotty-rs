@@ -324,6 +324,25 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
             gate.validate_cohorts(repository, reports, output, baseline)
             self.assertEqual(gate.read_tsv(output), gate.read_tsv(baseline))
 
+    def test_sorted_map_unsorted_preserves_its_blocker_across_arena_renumbering(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        baseline = repository / "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv"
+        rows = gate.read_tsv(baseline)[1]
+        identity = gate.SORTED_MAP_UNSORTED_IDENTITY
+        historical = next(row["first_status"] for row in rows if row["identity"] == identity)
+        live = historical.replace("TypeId(1714)", "TypeId(1718)").replace("TypeId(1713)", "TypeId(1717)")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "live.tsv"
+            reports = self.cohort_reports(rows, root, {identity: (live, "not_available")})
+            gate.validate_cohorts(repository, reports, output, baseline)
+            observed = next(row for row in gate.read_tsv(output)[1] if row["identity"] == identity)
+            self.assertEqual(observed["first_status"], live)
+            for wrong in (live.replace("1718", "1719"), live.replace("SymbolId(43)", "SymbolId(44)")):
+                reports = self.cohort_reports(rows, root, {identity: (wrong, "not_available")})
+                with self.subTest(status=wrong), self.assertRaisesRegex(gate.ReceiptError, identity):
+                    gate.validate_cohorts(repository, reports, output, baseline)
+
     def test_live_cohort_receipt_accepts_only_measured_either_swap_completion(self) -> None:
         repository = Path(__file__).resolve().parents[2]
         baseline = repository / "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv"
