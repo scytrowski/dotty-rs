@@ -2977,3 +2977,50 @@ fn case_class_copy_reuses_one_receiver_for_multiple_default_getters() {
         assert_eq!(reference(&typer, sel.qualifier), saved);
     }
 }
+
+const ENVELOPE: &str =
+    include_str!("../../../tests/fixtures/contextual-v1/controls/Envelope.scala");
+
+#[test]
+fn envelope_constructor_merges_searched_and_explicit_arguments_in_scala_order() {
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(ENVELOPE);
+    let class = class_symbol(&parsed, &store, &index, source, "Envelope");
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for name in ["allocation", "explicit"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        typer
+            .type_method_definition(definition_tree(&index, method))
+            .unwrap();
+        let typed = typer.typed_index.get(source, rhs).unwrap();
+        let TreeKind::Apply(using) = &typer.typed_ast().get(typed).kind else {
+            panic!("missing constructor context")
+        };
+        if name == "explicit" {
+            assert_eq!(using.kind, ApplyKind::Using);
+        }
+        assert_eq!(
+            using
+                .args
+                .iter()
+                .map(|&arg| reference(&typer, arg))
+                .collect::<Vec<_>>(),
+            (0..2)
+                .map(|i| method_parameter_symbol(&parsed, &index, source, method, i))
+                .collect::<Vec<_>>()
+        );
+        let TreeKind::Apply(values) = &typer.typed_ast().get(using.function).kind else {
+            panic!("missing ordinary clause")
+        };
+        assert_eq!(values.args.len(), 1);
+        let ctor = reference(&typer, values.function);
+        assert_eq!(typer.store.symbols.owner(ctor), Some(class));
+        assert_eq!(typer.store.symbols.get(ctor).kind, SymbolKind::Constructor);
+    }
+}

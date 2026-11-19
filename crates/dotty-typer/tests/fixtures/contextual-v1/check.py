@@ -13,6 +13,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[4]
 MODULE = "typer::tests::contextual_v1::"
 CLASS_BOUND_CONTROLS = (
+    "typer::tests::contextual_arguments::envelope_constructor_merges_searched_and_explicit_arguments_in_scala_order",
     "typer::tests::contextual_arguments::ordinary_class_bound_uses_private_evidence_in_the_body_and_caller_evidence_at_new",
     "typer::tests::contextual_arguments::ordinary_class_bound_reports_missing_and_ambiguous_evidence_at_new",
     "typer::tests::contextual_arguments::case_class_bound_infers_int_and_passes_the_callers_witness_to_apply",
@@ -57,6 +58,10 @@ def check_compiler(tc, path, expected_exit, needles, out):
 
 def check_controls(tc, checkout):
     controls = [
+        ("Envelope.scala", 0, [
+            "new Envelope[Int](1)(tc, log)",
+            "new Envelope[Int](1)(using tc, log)",
+        ]),
         ("CaseClassCopy.scala", 0, [
             "def copy[A](value: A)(using evidence$1: TC[A]): Box[A] = new Box[A](value)(using evidence$1)",
             "def copy$default$1[A]: A = Box.this.value",
