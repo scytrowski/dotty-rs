@@ -13,6 +13,15 @@ are relative to the pinned Scala checkout and are validated against
 `library/src` and `compiler/src`. Blank lines and comments are ignored;
 duplicate paths are deduplicated and the selected paths are sorted.
 
+The profiling resolvers forward the classpath loader's ordered type parameters
+and variance. This lets member lookup traverse applied parents such as
+`Comparable[String]` when typing `String.length()`. With that metadata enabled
+on both `main` at `0a4dec01f2` and the contextual-arguments branch, all 31
+smoke methods had identical typing outcomes and first blockers. The updated
+baseline records the additional resolver requests made before reaching those
+blockers, including contextual lookups. Two fresh runs produced identical
+normalized reports.
+
 Two frozen method cohorts are available:
 
 | Name | Frozen rows | Stable identity | Use |

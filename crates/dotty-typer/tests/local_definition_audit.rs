@@ -604,6 +604,17 @@ impl<E: ClassPathEntry> CounterResolver<E> {
 }
 
 impl<E: ClassPathEntry> SymbolResolver for CounterResolver<E> {
+    fn class_type_parameters(
+        &self,
+        store: &SemanticStore,
+        class: SymbolId,
+    ) -> Option<Vec<dotty_core::ClassTypeParameter>> {
+        self.inner
+            .as_ref()
+            .expect("counter resolver is available")
+            .class_type_parameters(store, class)
+    }
+
     fn package_object_collision(
         &mut self,
         store: &mut SemanticStore,
@@ -1119,6 +1130,17 @@ impl<E: ClassPathEntry> Drop for TimingOnlyResolver<E> {
 }
 
 impl<E: ClassPathEntry> SymbolResolver for TimingOnlyResolver<E> {
+    fn class_type_parameters(
+        &self,
+        store: &SemanticStore,
+        class: SymbolId,
+    ) -> Option<Vec<dotty_core::ClassTypeParameter>> {
+        self.inner
+            .as_ref()
+            .expect("timing-only resolver is available")
+            .class_type_parameters(store, class)
+    }
+
     fn package_object_collision(
         &mut self,
         store: &mut SemanticStore,
@@ -1630,6 +1652,14 @@ fn counter_resolver_tracks_calls_and_outcomes_without_request_identities() {
 }
 
 impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
+    fn class_type_parameters(
+        &self,
+        store: &SemanticStore,
+        class: SymbolId,
+    ) -> Option<Vec<dotty_core::ClassTypeParameter>> {
+        self.resolver().class_type_parameters(store, class)
+    }
+
     // Module-port maintenance contract: module_class_of_object and
     // complete_module_class are forwarded here. The trait also has default
     // hooks, so changes to module-specific SymbolResolver operations must be
