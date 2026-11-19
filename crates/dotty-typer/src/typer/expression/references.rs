@@ -1182,7 +1182,7 @@ impl SourceTyper<'_> {
                 tree_index: tree.index(),
             });
         }
-        let qualifier_candidate = self.type_selection_qualifier(
+        let qualifier = self.type_selection_qualifier(
             selection.qualifier,
             context,
             tree.index(),
@@ -1190,11 +1190,6 @@ impl SourceTyper<'_> {
             info_journal,
             new_mappings,
         )?;
-        let qualifier = if let Some(qualifier) = qualifier_candidate {
-            qualifier
-        } else {
-            self.type_expression_inner(selection.qualifier, context, info_journal, new_mappings)?
-        };
         let receiver_type = self.typed_arena.get(qualifier).ty;
         if matches!(self.typed_arena.get(qualifier).kind, TreeKind::Super(_)) {
             return self.type_super_selected_member(
@@ -2137,8 +2132,8 @@ impl SourceTyper<'_> {
         Ok(true)
     }
 
-    /// Type a selection qualifier without treating a package path as a value.
-    /// The resulting source mappings still retain every node in the path.
+    /// Supply omitted contextual method clauses before looking up a term member.
+    /// Packages and Java classes can also qualify a selection.
     pub(in crate::typer) fn type_selection_qualifier(
         &mut self,
         tree: TreeId<Untyped>,
@@ -2146,6 +2141,50 @@ impl SourceTyper<'_> {
         tree_index: u32,
         position: Option<SourceSpan>,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        if let Some(path) =
+            self.try_type_namespace_qualifier(tree, context, tree_index, position, new_mappings)?
+        {
+            return Ok(path);
+        }
+        let raw = self.type_expression_inner(tree, context, info_journal, new_mappings)?;
+        // An instantiated method exposes its remaining clause directly. Probing
+        // the signatures of unrelated TermRefs here would change which ordinary
+        // method references qualify as stable receivers.
+        let receiver_type = self.typed_arena.get(raw).ty;
+        if !matches!(self.store.types.try_get(receiver_type), Some(Type::Method(m)) if m.kind != MethodKind::Plain)
+        {
+            return Ok(raw);
+        }
+
+        // Parens share the enclosed expression's typed identity. Adapt the
+        // inner call at its own source location and keep those mappings together.
+        let mut inner = tree;
+        let mut parens = Vec::new();
+        while let TreeKind::PhaseSpecific(UntypedNode::Parens(wrapper)) =
+            &self.arena.get(inner).kind
+            && self.typed_index.get(self.source, wrapper.inner) == Some(raw)
+        {
+            parens.push(inner);
+            inner = wrapper.inner;
+        }
+        let qualifier = self.apply_contextual_arguments(inner, raw, context, info_journal)?;
+        if qualifier != raw {
+            self.record_adapted_value(inner, qualifier, new_mappings)?;
+            for wrapper in parens {
+                self.record_adapted_value(wrapper, qualifier, new_mappings)?;
+            }
+        }
+        Ok(qualifier)
+    }
+
+    fn try_type_namespace_qualifier(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: ExpressionContext,
+        tree_index: u32,
+        position: Option<SourceSpan>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<Option<TreeId<Typed>>, TyperError> {
         if let Some(typed) = self.typed_index.get(self.source, tree) {
@@ -2160,11 +2199,6 @@ impl SourceTyper<'_> {
                 tree_index: tree.index(),
             });
         };
-        if let TreeKind::Select(_) = node.kind {
-            return self
-                .type_expression_inner(tree, context, info_journal, new_mappings)
-                .map(Some);
-        }
         let TreeKind::Ident(ident) = &node.kind else {
             return Ok(None);
         };

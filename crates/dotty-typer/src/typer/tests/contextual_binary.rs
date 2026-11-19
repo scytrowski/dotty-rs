@@ -236,6 +236,132 @@ fn predef_context_methods_use_the_library_symbol_and_keep_local_shadowing() {
     }
 }
 
+#[test]
+fn summoned_value_is_the_receiver_of_selections_and_method_calls() {
+    let text = "trait A { def show: Int; def at(i: Int): Int }
+        class Use {
+          def selected(using a: A): Int = summon[A].show
+          def called(using a: A): Int = ((summon[A])).at(4)
+        }";
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let class = class_symbol(&parsed, &store, &index, source, "A");
+    let resolver = library_resolver(defs, &packages);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages)
+        .with_resolver(Box::new(resolver));
+    for (name, member) in [("selected", "show"), ("called", "at")] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let expected = method_named_on_class(&parsed, typer.store(), &index, source, member, class);
+        let evidence = method_parameter_symbol(&parsed, &index, source, method, 0);
+        let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+            panic!("source method")
+        };
+        typer.type_method_definition(tree).unwrap();
+        let source_select = match &parsed.ast.get(rhs).kind {
+            TreeKind::Apply(call) => call.function,
+            _ => rhs,
+        };
+        let TreeKind::Select(select) = &parsed.ast.get(source_select).kind else {
+            panic!("member selection")
+        };
+        let typed = typer
+            .source_typed_index()
+            .get(source, source_select)
+            .unwrap();
+        let node = typer.typed_ast().get(typed);
+        let TreeKind::Select(member) = &node.kind else {
+            panic!("typed member selection")
+        };
+        assert_eq!(
+            typer.store.types.get(node.ty).reference_symbol(),
+            Some(expected)
+        );
+        let mut receiver = select.qualifier;
+        loop {
+            assert_eq!(
+                typer.source_typed_index().get(source, receiver),
+                Some(member.qualifier)
+            );
+            let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) =
+                &parsed.ast.get(receiver).kind
+            else {
+                break;
+            };
+            receiver = parens.inner;
+        }
+        assert_eq!(
+            typer
+                .store
+                .types
+                .get(typer.typed_ast().get(member.qualifier).ty)
+                .reference_symbol(),
+            Some(evidence)
+        );
+    }
+}
+
+#[test]
+fn failed_summon_and_failed_member_lookup_report_their_own_sites_and_roll_back() {
+    let text = "trait A { def show: Int }
+        class Use {
+          def missing: Int = summon[A].show
+          def ambiguous(using x: A, y: A): Int = (summon[A]).show
+          def unknown(using a: A): Int = summon[A].absent
+        }";
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let resolver = library_resolver(defs, &packages);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages)
+        .with_resolver(Box::new(resolver));
+    for name in ["missing", "ambiguous", "unknown"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let TreeKind::Select(select) = &parsed.ast.get(rhs).kind else {
+            panic!("source selection")
+        };
+        let summon = match &parsed.ast.get(select.qualifier).kind {
+            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => parens.inner,
+            _ => select.qualifier,
+        };
+        let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+            panic!("source method")
+        };
+        let checkpoint = typer.store().checkpoint();
+        for _ in 0..2 {
+            let error = typer.type_method_definition(tree).unwrap_err();
+            match error {
+                TyperError::MissingContextualArgument {
+                    source: at,
+                    tree_index,
+                    ..
+                } if name == "missing" => {
+                    assert_eq!((at, tree_index), (source, summon.index()));
+                }
+                TyperError::AmbiguousContextualArgument {
+                    source: at,
+                    tree_index,
+                    candidates,
+                    ..
+                } if name == "ambiguous" => {
+                    assert_eq!((at, tree_index), (source, summon.index()));
+                    assert_eq!(
+                        candidates,
+                        [0, 1].map(|i| method_parameter_symbol(&parsed, &index, source, method, i))
+                    );
+                }
+                TyperError::MemberNotFound {
+                    source: at,
+                    tree_index,
+                    name: member,
+                    ..
+                } if name == "unknown" => {
+                    assert_eq!((at, tree_index, member), (source, rhs.index(), select.name));
+                }
+                other => panic!("{name}: {other:?}"),
+            }
+            assert_eq!(typer.store().checkpoint(), checkpoint);
+            assert!(typer.source_typed_index().is_empty());
+        }
+    }
+}
+
 pub(super) fn library_resolver(
     definitions: Definitions,
     packages: &Packages,

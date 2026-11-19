@@ -579,7 +579,7 @@ impl SourceTyper<'_> {
                 )
             }
             TreeKind::Select(selection) if selection.name.is_term() => {
-                let qualifier_candidate = self.type_selection_qualifier(
+                let qualifier = self.type_selection_qualifier(
                     selection.qualifier,
                     context,
                     function_tree.index(),
@@ -587,16 +587,6 @@ impl SourceTyper<'_> {
                     info_journal,
                     new_mappings,
                 )?;
-                let qualifier = if let Some(qualifier) = qualifier_candidate {
-                    qualifier
-                } else {
-                    self.type_expression_inner(
-                        selection.qualifier,
-                        context,
-                        info_journal,
-                        new_mappings,
-                    )?
-                };
                 let receiver_type = self.typed_arena.get(qualifier).ty;
                 let receiver =
                     self.widen_expression_type_journaled(receiver_type, info_journal, 0)?;

@@ -1,9 +1,9 @@
 # Acceptance audit of contextual argument typing, v1
 
-**Keep the typer milestone open.** Eight of the eleven selected upstream sites
-agree with Scala 3.9. These include both top-level methods that previously
-stopped at file-owner lookup. Two in-scope sites remain blocked. One site
-exercises a previously documented unsupported combination.
+**Keep the typer milestone open.** Nine of the eleven selected upstream sites
+agree with Scala 3.9, including member selection on a summoned value. The
+curried call with an ordinary default is the remaining in-scope blocker.
+One site exercises a previously documented unsupported combination.
 
 ## What the audit measures
 
@@ -41,7 +41,7 @@ the last column help locate a failure and carry no additional acceptance votes.
 | `tests/pos/byname-implicits-1.scala` · `implicitly[Foo]` | A lazy dictionary entry calls `Foo.foo` with itself. | **Match.** The provider call references the source method. Its recursive argument and the final result refer to the same synthetic field. |
 | `tests/pos/given-priority.scala` · first `summon[A]` | Selects `NormalImplicits.g2` after `import NormalImplicits.given`. | **Match.** The original import and initializer resolve to the source symbol for `g2` in both language modes. Typing the entire method subsequently encounters a separate `DuplicateLocalValue` on the second wildcard value declaration. |
 | `tests/neg/byname-implicits-11.scala` · `implicitly[Foo[Int]]` | E172, missing evidence for `Foo[Int]`. The failed provider would require `=> Foo[Foo[Int]]`. | **Match.** Rust reports `MissingContextualArgument` at the original call for the exact `Foo[Int]` goal. Scala also prints the failed nested dependency. |
-| `tests/run/implicit-disambiguation.scala` · `M.f` | The inner `a` supplies `summon[A].show`. Its initializer uses the parameter of type `B`. | **Blocked at member selection.** Rust reports `UnstableSelectionPrefix` on `.show`. Returning just `summon[A]` confirms both symbol choices in the original lexical scope. |
+| `tests/run/implicit-disambiguation.scala` · `M.f` | The inner `a` supplies `summon[A].show`. Its initializer uses the parameter of type `B`. | **Match.** The initializer of the local `a` refers to the method parameter of type `B`. In the complete method body, `summon[A]` resolves to that same `a`, and the selection resolves to `A.show` with result `String`. |
 | `tests/neg/given-ambiguous-2.scala` · RHS of top-level `f` | E172 names the conflicting `a1` and `a2` at the call of `g`. | **Match.** Typing the original method reports ambiguity at its call to `g` and identifies the source declarations `a1` and `a2`. |
 | `tests/pos/i5295.scala` · top-level `foo` | The inline accessor for `bar` applies the context function with explicit argument `4`. | **Match.** In the original inline method body, Rust resolves the source `bar` and `ContextFunction1.apply`, keeps the explicit argument `4` and produces the declared `String` result. The comparison covers the source application before inline-accessor lowering. |
 | `tests/run/curried-using-threading.scala` · `narrow()` | The call and its ordinary default getter receive the same contextual argument. | **Blocked in the namer.** Anonymous `given Context("alpha")` produces `UnsupportedGivenNameShape(New)`. A class-member control reaches a second obstacle. Rust requires an ordinary argument where Scala calls the getter. |
@@ -56,12 +56,10 @@ describes their coverage and the separate output contracts for JVM and TASTy.
 
 ## Work required for closure
 
-1. **Type member selection on the result of `summon`.** Retest the full `.show`
-   expression while retaining the nested-scope evidence check.
-2. **Name the anonymous constructor-form given, then retest the curried call.**
-   Once the namer admits the file, verify that both the call and its ordinary
-   default getter reuse the contextual argument. The reduced case makes the
-   ordinary-default dependency independently observable.
+**Name the anonymous constructor-form given, then retest the curried call.**
+Once the namer admits the file, verify that both the call and its ordinary
+default getter reuse the contextual argument. The reduced case makes the
+ordinary-default dependency independently observable.
 
 Close v1 when the original in-scope sites meet their Scala observations and
 the existing focused regressions remain green. Keep the context-bound/default

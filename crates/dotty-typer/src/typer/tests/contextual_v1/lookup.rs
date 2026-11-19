@@ -120,38 +120,53 @@ fn lookup_nested_priority() {
         let resolver = audit_resolver(defs, &packages);
         let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages)
             .with_resolver(Box::new(resolver));
-        let result = typer.type_method_definition(declaration(&index, f));
+        let typed_method = typer
+            .type_method_definition(declaration(&index, f))
+            .unwrap();
+        let [given] = block.stats.as_slice() else {
+            panic!("expected local given a")
+        };
+        let evidence = typer.local_symbol_at(source, *given).unwrap();
+        assert_eq!(typer.store().symbols.owner(evidence), Some(f));
+        let session = typer.source_typed_index();
+        let TreeKind::ValDef(local) = &parsed.ast.get(*given).kind else {
+            panic!("expected given definition")
+        };
+        let initializer = session.get(source, local.rhs.unwrap()).unwrap();
+        assert_eq!(
+            referent(&typer, initializer),
+            method_parameter_symbol(&parsed, &index, source, f, 0)
+        );
+
+        let typed = session.get(source, block.expr).unwrap();
         if complete {
-            assert!(
-                matches!(&parsed.ast.get(block.expr).kind,TreeKind::Select(sel) if typer.store().names.resolve(sel.name.text()) == "show")
-            );
-            assert!(
-                matches!(result,Err(TyperError::UnstableSelectionPrefix{source:s,tree_index,..}) if s==source && tree_index==block.expr.index()),
-                "{result:?}"
-            );
-        } else {
-            // A separate control retains both method parameters and the local given.
-            // Only the non-contextual member selection and its result type change.
-            result.unwrap();
-            let [given] = block.stats.as_slice() else {
-                panic!("expected local given a")
+            let TreeKind::Select(selection) = &typer.typed_ast().get(typed).kind else {
+                panic!("expected a.show")
             };
-            let evidence = typer.local_symbol_at(source, *given).unwrap();
-            let session = typer.source_typed_index();
-            let typed = session.get(source, block.expr).unwrap();
-            assert_eq!(referent(&typer, typed), evidence);
-            assert_eq!(typer.store().symbols.owner(evidence), Some(f));
-            let TreeKind::ValDef(local) = &parsed.ast.get(*given).kind else {
-                panic!("expected given definition")
+            let class = class_symbol(&parsed, typer.store(), &index, source, "A");
+            let show = method_named_on_class(&parsed, typer.store(), &index, source, "show", class);
+            assert_eq!(referent(&typer, typed), show);
+            assert_eq!(referent(&typer, selection.qualifier), evidence);
+            let TreeKind::Select(original) = &parsed.ast.get(block.expr).kind else {
+                panic!("source selection")
             };
-            let initializer = session.get(source, local.rhs.unwrap()).unwrap();
             assert_eq!(
-                referent(&typer, initializer),
-                method_parameter_symbol(&parsed, &index, source, f, 0)
+                session.get(source, original.qualifier),
+                Some(selection.qualifier)
             );
+            let TreeKind::DefDef(def) = &typer.typed_ast().get(typed_method).kind else {
+                panic!("typed M.f")
+            };
+            let result = typer.typed_ast().get(def.tpt).ty;
+            let selected = typer.typed_ast().get(typed).ty;
+            let widened = typer.widen_expression_type(selected).unwrap();
+            assert!(typer.is_subtype(widened, result).unwrap());
+            assert!(typer.is_subtype(result, widened).unwrap());
+        } else {
+            assert_eq!(referent(&typer, typed), evidence);
         }
     }
-    outcome("blocked");
+    outcome("match");
 }
 
 #[test]
