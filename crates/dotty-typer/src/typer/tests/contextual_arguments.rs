@@ -544,6 +544,46 @@ fn inherited_contextual_members_remain_on_the_lexical_or_imported_receiver() {
 }
 
 #[test]
+fn inherited_given_priority_uses_declaring_classes_in_a_diamond() {
+    let text = "class A; class B extends A;
+        trait Base { given base: A = new A };
+        trait Left extends Base { given left: B = new B };
+        trait Right extends Base { given right: B = new B };
+        class Child extends Left; class Both extends Left with Right;
+        class Client {
+          def need(using n: A): A = n;
+          def pick(c: Child): A = { import c.given; need };
+          def tie(c: Both): A = { import c.given; need }
+        }";
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let left = val_symbol(&parsed, &store, &index, source, "left").0;
+    let right = val_symbol(&parsed, &store, &index, source, "right").0;
+    let (pick, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "pick");
+    let tie = method_symbol(&parsed, &store, &index, source, "tie");
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    typer
+        .type_method_definition(definition_tree(&index, pick))
+        .unwrap();
+    let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+        panic!("import block")
+    };
+    let selected = typer.typed_index.get(source, block.expr).unwrap();
+    let TreeKind::Apply(call) = &typer.typed_ast().get(selected).kind else {
+        panic!("need")
+    };
+    assert_eq!(reference(&typer, call.args[0]), left);
+
+    let err = typer
+        .type_method_definition(definition_tree(&index, tie))
+        .unwrap_err();
+    let TyperError::AmbiguousContextualArgument { candidates, .. } = err else {
+        panic!("{err:?}")
+    };
+    assert_eq!(candidates.len(), 2);
+    assert!(candidates.contains(&left) && candidates.contains(&right));
+}
+
+#[test]
 fn constructor_contexts_follow_normalized_scala_clause_order() {
     let text = "class Context(using n:Int); class Old(implicit n:Int); class Pair(x:Int)(using n:Int); class C { def implicitCtor(using n:Int):Context=new Context; def explicitCtor(using n:Int):Context=new Context(using n); def legacy(using n:Int):Old=new Old; def trailing(using n:Int):Pair=new Pair(1) }";
     let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);

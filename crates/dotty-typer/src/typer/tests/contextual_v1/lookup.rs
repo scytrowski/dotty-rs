@@ -166,16 +166,15 @@ fn lookup_inherited_priority() {
         let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
             panic!("expected test1 block")
         };
-        let first_summon = block
-            .stats
-            .iter()
-            .find_map(|id| match &parsed.ast.get(*id).kind {
-                TreeKind::ValDef(val) if store.names.resolve(val.name.as_name().text()) == "x" => {
-                    val.rhs
-                }
-                _ => None,
-            })
-            .unwrap();
+        let [import, first_val, ..] = block.stats.as_slice() else {
+            panic!("import and first val")
+        };
+        assert!(matches!(parsed.ast.get(*import).kind, TreeKind::Import(_)));
+        let TreeKind::ValDef(x) = &parsed.ast.get(*first_val).kind else {
+            panic!("expected val x")
+        };
+        assert_eq!(store.names.resolve(x.name.as_name().text()), "x");
+        let first_summon = x.rhs.unwrap();
         let given = |spelling: &str| {
             parsed
                 .ast
@@ -198,21 +197,27 @@ fn lookup_inherited_priority() {
         let resolver = audit_resolver(defs, &packages);
         let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages)
             .with_resolver(Box::new(resolver));
-        let err = typer
-            .type_method_definition(declaration(&index, test1))
-            .unwrap_err();
-        let TyperError::AmbiguousContextualArgument {
-            source: s,
-            tree_index,
-            candidates,
-            ..
-        } = err
-        else {
-            panic!("expected ambiguity, got {err:?}")
-        };
-        assert_eq!((s, tree_index), (source, first_summon.index()));
-        assert_eq!(candidates.len(), 2);
-        assert!(candidates.contains(&g1) && candidates.contains(&g2));
+        // Type through the audited initializer with its original import.
+        // Later wildcard val declarations are outside the selected site.
+        let context = typer.expression_context_for(test1).unwrap();
+        typer
+            .type_block_expression(
+                rhs,
+                dotty_core::ast::Block {
+                    stats: vec![*import],
+                    expr: first_summon,
+                },
+                parsed.ast.get(rhs).position,
+                context,
+                &mut Vec::new(),
+                &mut Vec::new(),
+            )
+            .unwrap();
+        let selected = typer
+            .source_typed_index()
+            .get(source, first_summon)
+            .unwrap();
+        assert_eq!(referent(&typer, selected), g2);
     }
-    outcome("typer-gap");
+    outcome("match");
 }

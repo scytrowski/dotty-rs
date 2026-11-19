@@ -1253,25 +1253,13 @@ impl SourceTyper<'_> {
         }
         let error = |e| TyperError::MemberLookup(Box::new(e));
         let receiver = self.store.types.alloc(Type::ThisType { class });
-        let mut pending = self.class_info(class, journal).map_err(error)?.parents;
-        let mut seen = HashSet::from([class]);
         let mut names = HashSet::new();
-        // Enumerate names on ancestors, then use ordinary member lookup so an
-        // overriding non-given member can hide its inherited namesake.
-        while let Some(parent) = pending.pop() {
-            let parent =
-                super::lookup::class_symbol_for_type(self.store, parent, true).map_err(error)?;
-            if !seen.insert(parent) || parent == self.definitions.object_class {
-                continue;
-            }
-            if seen.len() > MAX_TYPE_RELATION_VIEWS {
-                return Err(error(MemberLookupError::TooDeep));
-            }
-            let info = self.class_info(parent, journal).map_err(error)?;
-            for symbol in self.contextual_symbols(info.declarations) {
+        // Use ordinary lookup for each inherited name so a non-given override
+        // can still hide the inherited declaration.
+        for (_, scope) in self.contextual_ancestors(class, journal)? {
+            for symbol in self.contextual_symbols(scope) {
                 names.insert(self.store.symbols.get(symbol).name);
             }
-            pending.extend(info.parents);
         }
         let mut names: Vec<_> = names.into_iter().collect();
         names.sort_by_key(|name| self.store.names.resolve(name.text()));
@@ -1292,6 +1280,42 @@ impl SourceTyper<'_> {
             }
         }
         Ok(symbols)
+    }
+
+    fn contextual_ancestors(
+        &mut self,
+        class: SymbolId,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Vec<(SymbolId, ScopeId)>, TyperError> {
+        let error = |e| TyperError::MemberLookup(Box::new(e));
+        let mut pending = self.class_info(class, journal).map_err(error)?.parents;
+        let mut seen = HashSet::from([class]);
+        let mut ancestors = Vec::new();
+        while let Some(parent) = pending.pop() {
+            let parent =
+                super::lookup::class_symbol_for_type(self.store, parent, true).map_err(error)?;
+            if !seen.insert(parent) || parent == self.definitions.object_class {
+                continue;
+            }
+            if seen.len() > MAX_TYPE_RELATION_VIEWS {
+                return Err(error(MemberLookupError::TooDeep));
+            }
+            let info = self.class_info(parent, journal).map_err(error)?;
+            ancestors.push((parent, info.declarations));
+            pending.extend(info.parents);
+        }
+        Ok(ancestors)
+    }
+
+    fn given_class_owner(&self, provider: &Provider) -> Option<SymbolId> {
+        let symbol = self.store.symbols.get(provider.reference.symbol);
+        let owner = symbol.owner?;
+        (symbol.flags.contains(SymbolFlags::GIVEN)
+            && matches!(
+                self.store.symbols.get(owner).kind,
+                SymbolKind::Class | SymbolKind::ModuleClass | SymbolKind::Trait
+            ))
+        .then_some(owner)
     }
 
     fn contextual_symbols(&self, scope: ScopeId) -> Vec<SymbolId> {
@@ -1386,12 +1410,35 @@ impl SourceTyper<'_> {
         tree_index: u32,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Option<Provider>, TyperError> {
+        let mut ancestors = HashMap::new();
         let mut maxima = Vec::new();
         for (index, (candidate, _)) in candidates.iter().enumerate() {
             let mut dominated = false;
             for (rival, _) in &candidates {
                 if self.same_contextual_ref(rival.reference, candidate.reference) {
                     continue;
+                }
+                // Scala 3.9 gives the declaring owner's inheritance priority
+                // over result specificity when comparing two modern givens.
+                if let (Some(own), Some(other)) = (
+                    self.given_class_owner(candidate),
+                    self.given_class_owner(rival),
+                ) && own != other
+                {
+                    for class in [own, other] {
+                        if let std::collections::hash_map::Entry::Vacant(slot) =
+                            ancestors.entry(class)
+                        {
+                            slot.insert(self.contextual_ancestors(class, journal)?);
+                        }
+                    }
+                    if ancestors[&other].iter().any(|(base, _)| *base == own) {
+                        dominated = true;
+                        break;
+                    }
+                    if ancestors[&own].iter().any(|(base, _)| *base == other) {
+                        continue;
+                    }
                 }
                 let is_method = |p: &Provider| {
                     !p.type_arguments.is_empty()
