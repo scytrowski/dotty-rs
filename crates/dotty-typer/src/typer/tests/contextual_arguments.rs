@@ -18,6 +18,73 @@ fn reference(typer: &SourceTyper<'_>, tree: TreeId<Typed>) -> SymbolId {
 }
 
 #[test]
+fn anonymous_constructor_given_supplies_its_module_with_the_declared_parent() {
+    let text = "class Context(val n: Int)
+        given Context(7)
+        def need(using c: Context): Context = c
+        def chosen: Context = need";
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let parent = class_symbol(&parsed, &store, &index, source, "Context");
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "chosen");
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("package root")
+    };
+    let given = package.stats[1];
+    let object = index.symbol_at(source, given).unwrap();
+    let owner = store.symbols.owner(object).unwrap();
+    let module = index.derived_symbol_at(owner, source, given).unwrap();
+    let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(def)) = &parsed.ast.get(given).kind else {
+        panic!("given object")
+    };
+    let TreeKind::Template(template) = &parsed.ast.get(def.template).kind else {
+        panic!("given template")
+    };
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    typer
+        .type_method_definition(definition_tree(&index, method))
+        .unwrap();
+    let selected = typer.source_typed_index().get(source, rhs).unwrap();
+    let TreeKind::Apply(call) = &typer.typed_ast().get(selected).kind else {
+        panic!("contextual application")
+    };
+    let [argument] = call.args[..] else {
+        panic!("expected one Context")
+    };
+    assert_eq!(reference(&typer, argument), object);
+    let info = typer.complete_symbol(module).unwrap();
+    let Type::ClassInfo(class) = typer.store().types.get(info) else {
+        panic!("module ClassInfo")
+    };
+    let [parent_type] = class.parents[..] else {
+        panic!("one class parent")
+    };
+    assert_eq!(
+        typer.store().types.get(parent_type).reference_symbol(),
+        Some(parent)
+    );
+    let init = typer
+        .source_typed_index()
+        .get(source, template.parents[0])
+        .unwrap();
+    let TreeKind::Apply(init) = &typer.typed_ast().get(init).kind else {
+        panic!("Context(7)")
+    };
+    let constructor = reference(&typer, init.function);
+    assert_eq!(
+        typer.store().symbols.get(constructor).kind,
+        SymbolKind::Constructor
+    );
+    assert_eq!(typer.store().symbols.owner(constructor), Some(parent));
+    let [arg] = init.args[..] else {
+        panic!("one constructor argument")
+    };
+    assert!(
+        matches!(&typer.typed_ast().get(arg).kind, TreeKind::Literal(lit)
+        if lit.value == dotty_core::Constant::Int(7))
+    );
+}
+
+#[test]
 fn top_level_calls_resolve_the_file_owner_and_preserve_contextual_precedence() {
     let text = "package example
         object Imported { given imported: Int = 2 }

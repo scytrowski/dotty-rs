@@ -44,7 +44,7 @@ the last column help locate a failure and carry no additional acceptance votes.
 | `tests/run/implicit-disambiguation.scala` · `M.f` | The inner `a` supplies `summon[A].show`. Its initializer uses the parameter of type `B`. | **Match.** The initializer of the local `a` refers to the method parameter of type `B`. In the complete method body, `summon[A]` resolves to that same `a`, and the selection resolves to `A.show` with result `String`. |
 | `tests/neg/given-ambiguous-2.scala` · RHS of top-level `f` | E172 names the conflicting `a1` and `a2` at the call of `g`. | **Match.** Typing the original method reports ambiguity at its call to `g` and identifies the source declarations `a1` and `a2`. |
 | `tests/pos/i5295.scala` · top-level `foo` | The inline accessor for `bar` applies the context function with explicit argument `4`. | **Match.** In the original inline method body, Rust resolves the source `bar` and `ContextFunction1.apply`, keeps the explicit argument `4` and produces the declared `String` result. The comparison covers the source application before inline-accessor lowering. |
-| `tests/run/curried-using-threading.scala` · `narrow()` | The call and its ordinary default getter receive the same contextual argument. | **Blocked in the namer.** Anonymous `given Context("alpha")` produces `UnsupportedGivenNameShape(New)`. A class-member control reaches a second obstacle. Rust requires an ordinary argument where Scala calls the getter. |
+| `tests/run/curried-using-threading.scala` · `narrow()` | The call and its ordinary default getter receive the same contextual argument. | **Blocked at the ordinary argument.** Rust names the top-level evidence `given_Context` and reports `ApplicationArityMismatch` at `narrow()`. The class-member control reaches the same error. |
 | `tests/pos/i8491.scala` · `Test.qux2` | The synthesized witness precedes `B` in the implicit clause and the getter is `qux2$default$2`. | **Outside the documented v1 subset.** Rust completes the two-parameter signature but rejects the definition with `UsingApplicationDeferred` at `B`. The combination of a synthesized context bound and a default was already listed as unsupported. |
 
 The existing contextual argument and consumer fixtures provide additional
@@ -56,9 +56,8 @@ describes their coverage and the separate output contracts for JVM and TASTy.
 
 ## Work required for closure
 
-**Name the anonymous constructor-form given, then retest the curried call.**
-Once the namer admits the file, verify that both the call and its ordinary
-default getter reuse the contextual argument. The reduced case makes the
+**Supply the ordinary default after a contextual clause.** Verify that both
+the call and its ordinary default getter reuse the contextual argument. The reduced case makes the
 ordinary-default dependency independently observable.
 
 Close v1 when the original in-scope sites meet their Scala observations and

@@ -166,13 +166,13 @@ pub fn extract_given_type_name(
                 }
                 pending.push(Task::Visit(applied.tpt, follow_args));
             }
-            // Structural given parents currently use Apply in the parser.
+            // A constructor application contributes the instantiated parent
+            // type. Only AppliedTypeTree arguments are part of its name.
             TreeKind::Apply(applied) => {
-                if follow_args && !applied.args.is_empty() {
-                    pending.push(Task::Arguments(&applied.args));
-                    pending.push(Task::Text("_"));
-                }
                 pending.push(Task::Visit(applied.function, follow_args));
+            }
+            TreeKind::New(new_tree) => {
+                pending.push(Task::Visit(new_tree.tpt, follow_args));
             }
             TreeKind::LambdaTypeTree(lambda) => {
                 pending.push(Task::Visit(lambda.body, follow_args));

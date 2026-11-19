@@ -4,60 +4,49 @@ use super::*;
 #[ignore = "requires pinned Scala 3.9 sources"]
 fn c1_curried_threading_default() {
     let text = upstream("tests/run/curried-using-threading.scala");
-    let source = SourceId::from_index(11);
-    let mut store = SemanticStore::new();
-    Definitions::bootstrap(&mut store);
-    let parsed = dotty_parser::parse_compilation_unit(
-        SourceText::new(&text).unwrap(),
-        source,
-        ContextualScanner::new(&text).unwrap(),
-        &mut store.names,
-    );
-    assert!(parsed.diagnostics.is_empty());
-    let err = name_compilation_unit(
-        &parsed.ast,
-        parsed.root,
-        source,
-        "curried-using-threading.scala",
-        &mut store,
-        &mut Packages::new(),
-    )
-    .unwrap_err();
-    let dotty_namer::NamerError::UnsupportedGivenNameShape {
-        tree_index,
-        position: Some(position),
-        unsupported_tree_index,
-        unsupported_kind: "New",
-    } = err
-    else {
-        panic!("unexpected naming error {err:?}")
-    };
-    assert_eq!(position.source(), source);
-    let range = position.span().range();
+    let (parsed, mut store, packages, defs, index, source) =
+        parse_and_name_file(&text, "curried-using-threading.scala");
+    let test = method_symbol(&parsed, &store, &index, source, "Test");
+    let narrow = method_symbol(&parsed, &store, &index, source, "narrow");
+    let given = parsed
+        .ast
+        .iter()
+        .find_map(|(id, node)| {
+            let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) = &node.kind else {
+                return None;
+            };
+            module
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::Given)
+                .then(|| index.symbol_at(source, id).unwrap())
+        })
+        .unwrap();
     assert_eq!(
-        &text[range.start() as usize..range.end() as usize],
-        "given Context(\"alpha\")"
+        store.names.resolve(store.symbols.get(given).name.text()),
+        "given_Context"
     );
-    assert_eq!(
-        parsed
-            .ast
-            .iter()
-            .find(|(t, _)| t.index() == tree_index)
-            .unwrap()
-            .1
-            .position,
-        Some(position)
+    assert_eq!(store.symbols.owner(given), store.symbols.owner(narrow));
+    let mut sites = parsed.ast.iter().filter_map(|(id, node)| {
+        let TreeKind::Apply(call) = &node.kind else {
+            return None;
+        };
+        let span = node.position?.span().range();
+        (call.args.is_empty() && &text[span.start() as usize..span.end() as usize] == "narrow()")
+            .then_some(id)
+    });
+    let site = sites.next().expect("original narrow() in Test");
+    assert!(sites.next().is_none());
+    let resolver = audit_resolver(defs, &packages);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages)
+        .with_resolver(Box::new(resolver));
+    let ctx = typer.expression_context_for(test).unwrap();
+    let result = typer.type_expression(site, ctx);
+    assert!(
+        matches!(result, Err(TyperError::ApplicationArityMismatch { source: at, tree_index, expected: 1, actual: 0 })
+            if at == source && tree_index == site.index()),
+        "{result:?}"
     );
-    assert!(matches!(
-        &parsed
-            .ast
-            .iter()
-            .find(|(t, _)| t.index() == unsupported_tree_index)
-            .unwrap()
-            .1
-            .kind,
-        TreeKind::New(_)
-    ));
     reduced_ordinary_default_after_using();
     outcome("blocked");
 }

@@ -537,6 +537,46 @@ fn anonymous_structural_module_given_derives_object_and_module_class_names() {
 }
 
 #[test]
+fn anonymous_given_constructor_parent_keeps_type_arguments_and_ignores_value_arguments() {
+    let named = named_source(
+        r#"class Context(val str: String)
+           class Container[T](val t: T)(val count: Int)
+           object Values { val name = "alpha" }
+           given Context("alpha")
+           given Container[String](Values.name)(2)"#,
+        116,
+    );
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("expected a package");
+    };
+    let [_, _, _, context, container] = package.stats[..] else {
+        panic!("expected two anonymous constructor givens");
+    };
+    for (given, expected) in [
+        (context, "given_Context"),
+        (container, "given_Container_String"),
+    ] {
+        let object = named.index.symbol_at(named.source, given).unwrap();
+        let owner = named.store.symbols.owner(object).unwrap();
+        let module = named
+            .index
+            .derived_symbol_at(owner, named.source, given)
+            .unwrap();
+        let symbol = named.store.symbols.get(object);
+        assert_eq!(symbol.kind, SymbolKind::Object);
+        assert!(symbol.flags.contains(SymbolFlags::GIVEN));
+        assert_eq!(named.store.names.resolve(symbol.name.text()), expected);
+        let module = named.store.symbols.get(module);
+        assert_eq!(module.kind, SymbolKind::ModuleClass);
+        assert_eq!(module.owner, Some(owner));
+        assert_eq!(
+            named.store.names.resolve(module.name.text()),
+            format!("{expected}$")
+        );
+    }
+}
+
+#[test]
 fn anonymous_structural_given_joins_multiple_parent_names_in_source_order() {
     let named = named_source("given First with Second:\n  def value = result", 111);
     let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
