@@ -55,9 +55,9 @@ fn ready_widths(
     defs: Definitions,
     packages: &Packages,
 ) -> Vec<usize> {
-    for unit in units {
+    for (unit, class) in crate::named_classes(units) {
         unit.typer(store, defs, packages)
-            .complete_symbol(unit.class)
+            .complete_symbol(class.symbol)
             .unwrap();
     }
     let mut edges = HashMap::new();

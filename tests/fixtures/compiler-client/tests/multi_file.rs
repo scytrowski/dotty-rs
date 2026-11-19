@@ -6,6 +6,7 @@ mod pipeline_timing;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::ops::Range;
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -28,8 +29,13 @@ struct NamedUnit {
     source: SourceId,
     ast: AstArena<Untyped>,
     index: SourceSemanticIndex,
-    class: SymbolId,
+    classes: Vec<NamedClass>,
     methods: Vec<TreeId<Untyped>>,
+}
+
+struct NamedClass {
+    symbol: SymbolId,
+    method_range: Range<usize>,
 }
 
 impl NamedUnit {
@@ -91,22 +97,27 @@ fn enter(
     let TreeKind::PackageDef(package) = &ast.get(parsed.root).kind else {
         panic!("expected package")
     };
-    let [class_tree] = package.stats[..] else {
-        panic!("expected one class")
-    };
-    let TreeKind::TypeDef(class) = &ast.get(class_tree).kind else {
-        panic!("expected class")
-    };
-    let TreeKind::Template(template) = &ast.get(class.rhs).kind else {
-        panic!("expected template")
-    };
-    let methods = template.body.clone();
-    let class = index.symbol_at(id, class_tree).unwrap();
+    let mut methods = Vec::new();
+    let mut classes = Vec::with_capacity(package.stats.len());
+    for &tree in &package.stats {
+        let TreeKind::TypeDef(class) = &ast.get(tree).kind else {
+            panic!("expected class")
+        };
+        let TreeKind::Template(template) = &ast.get(class.rhs).kind else {
+            panic!("expected template")
+        };
+        let start = methods.len();
+        methods.extend_from_slice(&template.body);
+        classes.push(NamedClass {
+            symbol: index.symbol_at(id, tree).unwrap(),
+            method_range: start..methods.len(),
+        });
+    }
     NamedUnit {
         source: id,
         ast,
         index: *index,
-        class,
+        classes,
         methods,
     }
 }
@@ -166,10 +177,12 @@ fn complete_methods_in_order(
 ) -> Result<(), TyperError> {
     let mut owners = HashMap::new();
     for unit in units {
-        let header = unit
-            .typer(store, definitions, packages)
-            .complete_symbol(unit.class)?;
-        observe(unit.class, SignatureCompletion::Complete(header));
+        for class in &unit.classes {
+            let header = unit
+                .typer(store, definitions, packages)
+                .complete_symbol(class.symbol)?;
+            observe(class.symbol, SignatureCompletion::Complete(header));
+        }
         owners.extend(unit.method_symbols().map(|method| (method, unit)));
     }
 
@@ -219,8 +232,8 @@ fn with_plan<R>(
     );
     complete_signatures(&units, &mut store, definitions, &packages).unwrap();
 
-    let (output, typed_units) = type_bodies(&units, &mut store, definitions, &packages);
-    let classes = class_plans(&units, typed_units, &output, &store);
+    let (output, typed_classes) = type_bodies(&units, &mut store, definitions, &packages);
+    let classes = class_plans(&units, typed_classes, &output, &store);
     let plan = JvmCompilationUnit {
         store: &store,
         typed_ast: &output,
@@ -235,6 +248,12 @@ struct TypedMethod {
     locals: Vec<TypedLocalBinding>,
 }
 
+fn named_classes(units: &[NamedUnit]) -> impl Iterator<Item = (&NamedUnit, &NamedClass)> {
+    units
+        .iter()
+        .flat_map(|unit| unit.classes.iter().map(move |class| (unit, class)))
+}
+
 fn type_bodies(
     units: &[NamedUnit],
     store: &mut SemanticStore,
@@ -242,10 +261,10 @@ fn type_bodies(
     packages: &Packages,
 ) -> (AstArena<Typed>, Vec<Vec<TypedMethod>>) {
     let mut output = AstArena::new();
-    let mut typed_units = Vec::new();
-    for unit in units {
-        let mut methods = Vec::with_capacity(unit.methods.len());
-        for &method in &unit.methods {
+    let mut typed_classes = Vec::new();
+    for (unit, class) in named_classes(units) {
+        let mut methods = Vec::with_capacity(class.method_range.len());
+        for &method in &unit.methods[class.method_range.clone()] {
             let mut typer = SourceTyper::new_with_typed_ast(
                 &unit.ast,
                 unit.source,
@@ -265,23 +284,22 @@ fn type_bodies(
             });
         }
 
-        typed_units.push(methods);
+        typed_classes.push(methods);
     }
 
-    (output, typed_units)
+    (output, typed_classes)
 }
 
 fn class_plans(
     units: &[NamedUnit],
-    typed_units: Vec<Vec<TypedMethod>>,
+    typed_classes: Vec<Vec<TypedMethod>>,
     output: &AstArena<Typed>,
     store: &SemanticStore,
 ) -> Vec<JvmClassPlan> {
     let mut classes = Vec::new();
-    for (unit, typed) in units.iter().zip(typed_units) {
-        assert_eq!(unit.methods.len(), typed.len());
-        let methods = unit
-            .methods
+    for ((unit, class), typed) in named_classes(units).zip(typed_classes) {
+        assert_eq!(class.method_range.len(), typed.len());
+        let methods = unit.methods[class.method_range.clone()]
             .iter()
             .zip(typed)
             .map(|(&tree, typed)| {
@@ -324,7 +342,7 @@ fn class_plans(
             })
             .collect();
         classes.push(JvmClassPlan {
-            class: unit.class,
+            class: class.symbol,
             fields: vec![],
             initialization: JvmClassInitializationPlan::ImplicitNoArg,
             methods,
@@ -400,18 +418,47 @@ fn separate_sources_compile_in_either_order_and_execute_on_jdk21() {
     );
     assert!(first.iter().eq(second.iter().rev()));
 
+    assert_eq!(run_java_client("separate", "Client", &first).trim(), "7");
+}
+
+#[test]
+fn same_named_methods_in_one_source_execute_on_jdk21_in_either_file_order() {
+    let providers = (
+        SourceId::from_index(0),
+        "Providers.scala",
+        include_str!("../Providers.scala"),
+    );
+    let consumer = (
+        SourceId::from_index(1),
+        "Use.scala",
+        include_str!("../Use.scala"),
+    );
+    for (order, files) in [
+        ("providers-first", [providers, consumer]),
+        ("consumer-first", [consumer, providers]),
+    ] {
+        let classes = compile(files);
+        let mut names: Vec<_> = classes.iter().map(|class| class.internal_name()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["demo/A", "demo/B", "demo/Use"], "{order}");
+        let stdout = run_java_client(order, "ProviderClient", &classes);
+        assert_eq!(stdout.lines().collect::<Vec<_>>(), ["17", "42"], "{order}");
+    }
+}
+
+fn run_java_client(label: &str, main_class: &str, classes: &[GeneratedClass]) -> String {
     let output = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("compiler-client-{}", std::process::id()));
+        .join(format!("compiler-client-{label}-{}", std::process::id()));
     fs::create_dir(&output).unwrap();
     fs::create_dir(output.join("demo")).unwrap();
-    for class in first {
+    for class in classes {
         fs::write(
             output.join(format!("{}.class", class.internal_name())),
             class.bytes(),
         )
         .unwrap();
     }
-    let java_source = Path::new(env!("CARGO_MANIFEST_DIR")).join("Client.java");
+    let java_source = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("{main_class}.java"));
     let javac = Command::new("javac")
         .current_dir(&output)
         .args(["--release", "21", "-cp", ".", "-d", "."])
@@ -425,7 +472,7 @@ fn separate_sources_compile_in_either_order_and_execute_on_jdk21() {
     );
     let java = Command::new("java")
         .current_dir(&output)
-        .args(["-Xverify:all", "-cp", ".", "Client"])
+        .args(["-Xverify:all", "-cp", ".", main_class])
         .output()
         .unwrap();
     assert!(
@@ -433,8 +480,8 @@ fn separate_sources_compile_in_either_order_and_execute_on_jdk21() {
         "{}",
         String::from_utf8_lossy(&java.stderr)
     );
-    assert_eq!(String::from_utf8(java.stdout).unwrap().trim(), "7");
     fs::remove_dir_all(output).unwrap();
+    String::from_utf8(java.stdout).unwrap()
 }
 
 #[test]
