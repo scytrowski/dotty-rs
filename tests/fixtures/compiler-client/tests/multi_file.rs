@@ -1,5 +1,4 @@
-//! The consumer owns phase ordering, plans and output. Its two fixture classes
-//! each have a public no-arg constructor and a single method.
+//! The consumer owns phase ordering, plans and output for classes with a no-arg constructor.
 #[path = "support/parsing.rs"]
 mod parsing;
 #[path = "support/pipeline_timing.rs"]
@@ -28,12 +27,23 @@ struct NamedUnit {
     ast: AstArena<Untyped>,
     index: SourceSemanticIndex,
     class: SymbolId,
-    method: TreeId<Untyped>,
+    methods: Vec<TreeId<Untyped>>,
 }
 
 impl NamedUnit {
     fn method_symbol(&self) -> SymbolId {
-        self.index.symbol_at(self.source, self.method).unwrap()
+        let [method] = self.methods.as_slice() else {
+            panic!("expected one method")
+        };
+        self.symbol(*method)
+    }
+
+    fn symbol(&self, method: TreeId<Untyped>) -> SymbolId {
+        self.index.symbol_at(self.source, method).unwrap()
+    }
+
+    fn method_symbols(&self) -> impl Iterator<Item = SymbolId> + '_ {
+        self.methods.iter().map(|&method| self.symbol(method))
     }
 
     fn typer<'a>(
@@ -88,16 +98,14 @@ fn enter(
     let TreeKind::Template(template) = &ast.get(class.rhs).kind else {
         panic!("expected template")
     };
-    let [method] = template.body[..] else {
-        panic!("expected one method")
-    };
+    let methods = template.body.clone();
     let class = index.symbol_at(id, class_tree).unwrap();
     NamedUnit {
         source: id,
         ast,
         index: *index,
         class,
-        method,
+        methods,
     }
 }
 
@@ -143,11 +151,10 @@ fn complete_signatures_in_order<'a>(
             .complete_symbol(unit.class);
         observe(unit.class, header.as_ref().err());
         header?;
-        owners.insert(unit.method_symbol(), unit);
+        owners.extend(unit.method_symbols().map(|method| (method, unit)));
     }
 
-    for root in roots {
-        let symbol = root.method_symbol();
+    for symbol in roots.into_iter().flat_map(NamedUnit::method_symbols) {
         if matches!(store.symbols.info(symbol), SymbolInfo::Complete(_)) {
             continue;
         }
@@ -207,7 +214,7 @@ fn with_plan<R>(
     run(&plan, &definitions)
 }
 
-struct TypedUnit {
+struct TypedMethod {
     root: TreeId<Typed>,
     index: SourceTypedIndex,
     locals: Vec<TypedLocalBinding>,
@@ -218,27 +225,32 @@ fn type_bodies(
     store: &mut SemanticStore,
     definitions: Definitions,
     packages: &Packages,
-) -> (AstArena<Typed>, Vec<TypedUnit>) {
+) -> (AstArena<Typed>, Vec<Vec<TypedMethod>>) {
     let mut output = AstArena::new();
     let mut typed_units = Vec::new();
     for unit in units {
-        let mut typer = SourceTyper::new_with_typed_ast(
-            &unit.ast,
-            unit.source,
-            &unit.index,
-            store,
-            definitions,
-            packages,
-            output,
-        );
-        let root = typer.type_method_definition(unit.method).unwrap();
-        let result = typer.into_typed_output();
-        output = result.typed_ast;
-        typed_units.push(TypedUnit {
-            root,
-            index: result.source_typed_index,
-            locals: result.local_bindings,
-        });
+        let mut methods = Vec::with_capacity(unit.methods.len());
+        for &method in &unit.methods {
+            let mut typer = SourceTyper::new_with_typed_ast(
+                &unit.ast,
+                unit.source,
+                &unit.index,
+                store,
+                definitions,
+                packages,
+                output,
+            );
+            let root = typer.type_method_definition(method).unwrap();
+            let result = typer.into_typed_output();
+            output = result.typed_ast;
+            methods.push(TypedMethod {
+                root,
+                index: result.source_typed_index,
+                locals: result.local_bindings,
+            });
+        }
+
+        typed_units.push(methods);
     }
 
     (output, typed_units)
@@ -246,52 +258,61 @@ fn type_bodies(
 
 fn class_plans(
     units: &[NamedUnit],
-    typed_units: Vec<TypedUnit>,
+    typed_units: Vec<Vec<TypedMethod>>,
     output: &AstArena<Typed>,
     store: &SemanticStore,
 ) -> Vec<JvmClassPlan> {
     let mut classes = Vec::new();
     for (unit, typed) in units.iter().zip(typed_units) {
-        let TreeKind::DefDef(method) = &unit.ast.get(unit.method).kind else {
-            panic!("expected method")
-        };
-        let parameters = method
-            .value_param_clauses
+        assert_eq!(unit.methods.len(), typed.len());
+        let methods = unit
+            .methods
             .iter()
-            .flatten()
-            .map(|&tree| unit.index.symbol_at(unit.source, tree).unwrap())
+            .zip(typed)
+            .map(|(&tree, typed)| {
+                let TreeKind::DefDef(method) = &unit.ast.get(tree).kind else {
+                    panic!("expected method")
+                };
+                let parameters = method
+                    .value_param_clauses
+                    .iter()
+                    .flatten()
+                    .map(|&tree| unit.index.symbol_at(unit.source, tree).unwrap())
+                    .collect();
+                let TreeKind::DefDef(definition) = &output.get(typed.root).kind else {
+                    panic!("expected typed method")
+                };
+                let body = definition.rhs.unwrap();
+                assert_eq!(
+                    typed.index.get(unit.source, method.rhs.unwrap()),
+                    Some(body)
+                );
+                assert_eq!(output.get(body).position.unwrap().source(), unit.source);
+                JvmMethodPlan {
+                    method: unit.symbol(tree),
+                    parameters,
+                    body: Some(body),
+                    locals: typed
+                        .locals
+                        .into_iter()
+                        .map(|binding| {
+                            let symbol = store.symbols.get(binding.symbol());
+                            assert_eq!(symbol.owner, Some(unit.symbol(tree)));
+                            JvmLocalBinding {
+                                declaration: binding.declaration(),
+                                symbol: binding.symbol(),
+                                mutable: symbol.flags.contains(SymbolFlags::MUTABLE),
+                            }
+                        })
+                        .collect(),
+                }
+            })
             .collect();
-        let TreeKind::DefDef(definition) = &output.get(typed.root).kind else {
-            panic!("expected typed method")
-        };
-        let body = definition.rhs.unwrap();
-        assert_eq!(
-            typed.index.get(unit.source, method.rhs.unwrap()),
-            Some(body)
-        );
-        assert_eq!(output.get(body).position.unwrap().source(), unit.source);
         classes.push(JvmClassPlan {
             class: unit.class,
             fields: vec![],
             initialization: JvmClassInitializationPlan::ImplicitNoArg,
-            methods: vec![JvmMethodPlan {
-                method: unit.method_symbol(),
-                parameters,
-                body: Some(body),
-                locals: typed
-                    .locals
-                    .into_iter()
-                    .map(|binding| {
-                        let symbol = store.symbols.get(binding.symbol());
-                        assert_eq!(symbol.owner, Some(unit.method_symbol()));
-                        JvmLocalBinding {
-                            declaration: binding.declaration(),
-                            symbol: binding.symbol(),
-                            mutable: symbol.flags.contains(SymbolFlags::MUTABLE),
-                        }
-                    })
-                    .collect(),
-            }],
+            methods,
         });
     }
     classes

@@ -141,7 +141,7 @@ through the ordinary completion loop. When all signatures succeed, their
 actual completion order replaces the previous hint. Removed paths drop out
 and new paths follow the current input order. The fixture has one method per
 unique file path. A compiler using multiple methods per file would need to
-measure what a file-level hint buys on those sources. [Client implementation and tests](../tests/fixtures/compiler-client/tests/support/learned_order.rs)
+measure what a file-level hint buys on those sources. The [four-method experiment](compiler-client-multi-method-order.md) tests aligned, shared and opposing dependency orders. [Client implementation and tests](../tests/fixtures/compiler-client/tests/support/learned_order.rs)
 
 ### Matched builds
 

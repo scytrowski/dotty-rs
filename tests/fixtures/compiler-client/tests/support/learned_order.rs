@@ -6,11 +6,15 @@ use super::{
 };
 use dotty::core::{Definitions, Packages, SemanticStore, SourceId, SymbolInfo, Type};
 use dotty::jvm::GeneratedClass;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt::Debug;
+
+#[path = "multi_method_order.rs"]
+mod multi_method_order;
 
 type Input<'a> = (SourceId, &'a str, &'a str);
 
-// One method per fixture file. Only caller-owned file keys survive a session.
+// Record each file on its first successfully completed method. Only file keys survive a session.
 #[derive(Clone, Default, Debug, PartialEq)]
 struct LearnedOrder(Vec<String>);
 
@@ -27,13 +31,18 @@ impl LearnedOrder {
         let by_method: HashMap<_, _> = units
             .iter()
             .zip(files)
-            .map(|(unit, &(_, path, _))| (unit.method_symbol(), path))
+            .flat_map(|(unit, &(_, path, _))| {
+                unit.method_symbols().map(move |symbol| (symbol, path))
+            })
             .collect();
         let mut next = Vec::with_capacity(units.len());
+        let mut seen = HashSet::with_capacity(units.len());
         let observe = |symbol, error: Option<&TyperError>| match error {
             Some(TyperError::MemberTypeUnavailable { .. }) => on_blocked(),
             None => {
-                if let Some(&path) = by_method.get(&symbol) {
+                if let Some(&path) = by_method.get(&symbol)
+                    && seen.insert(path)
+                {
                     next.push(path.to_owned());
                 }
             }
@@ -87,8 +96,8 @@ fn probe(files: &[Input<'_>], history: &mut LearnedOrder) -> usize {
     history
         .complete(files, &units, &mut store, defs, &packages, || blocked += 1)
         .unwrap();
-    for unit in units {
-        let SymbolInfo::Complete(ty) = store.symbols.info(unit.method_symbol()) else {
+    for method in units.iter().flat_map(NamedUnit::method_symbols) {
+        let SymbolInfo::Complete(ty) = store.symbols.info(method) else {
             panic!("incomplete method")
         };
         let Type::Method(signature) = store.types.get(*ty) else {
@@ -210,21 +219,32 @@ enum Mode {
 #[test]
 #[ignore = "paired latency of learning, replaying and repairing signature order"]
 fn measure_learned_order() {
-    let cases: Vec<_> = [4, 16, 64]
-        .into_iter()
-        .flat_map(|groups| {
-            let layouts = [Layout::Chains, Layout::Shared].map(|layout| {
-                let sources = dependent_sources(groups, layout);
-                let files = inputs(&sources);
-                let reference = compile_timed(&files, 1).0;
-                let mut history = LearnedOrder::default();
-                assert_eq!(history.compile(&files, 4).0, reference);
-                (layout, sources, reference, history)
-            });
-            let edited = [layouts[1].3.clone(), layouts[0].3.clone()];
-            layouts.into_iter().zip(edited)
-        })
-        .collect();
+    measure_cases(
+        &[
+            (Layout::Chains, Layout::Shared),
+            (Layout::Shared, Layout::Chains),
+        ],
+        dependent_sources,
+    );
+}
+
+fn measure_cases<L: Copy + Debug>(
+    layouts: &[(L, L)],
+    generate: impl Fn(usize, L) -> Vec<(String, String)>,
+) {
+    let mut cases = Vec::new();
+    for groups in [4, 16, 64] {
+        for &(layout, previous) in layouts {
+            let sources = generate(groups, layout);
+            let files = inputs(&sources);
+            let reference = compile_timed(&files, 1).0;
+            let mut learned = LearnedOrder::default();
+            assert_eq!(learned.compile(&files, 4).0, reference);
+            let mut edited = LearnedOrder::default();
+            edited.compile(&inputs(&generate(groups, previous)), 4);
+            cases.push((layout, sources, reference, learned, edited));
+        }
+    }
     let modes = [Mode::Baseline, Mode::Learn, Mode::Replay, Mode::Edited];
     eprintln!("layout,files,round,workers,mode,signature_ns,total_ns");
     // Round zero warms every case. Balance position and preceding treatment
@@ -232,7 +252,7 @@ fn measure_learned_order() {
     for round in 0..=12 {
         for offset in 0..cases.len() {
             let case = (round + offset) % cases.len();
-            let ((layout, sources, reference, learned), edited) = &cases[case];
+            let (layout, sources, reference, learned, edited) = &cases[case];
             let files = inputs(sources);
             for workers in if round % 2 == 0 { [1, 4] } else { [4, 1] } {
                 let shift = (round + case + usize::from(workers == 4)) % 4;
