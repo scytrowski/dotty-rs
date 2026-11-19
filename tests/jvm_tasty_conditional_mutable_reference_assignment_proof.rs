@@ -1,3 +1,4 @@
+use dotty::jvm_tasty_artifacts::{PairedBatchArtifactError, emit_paired_jvm_tasty_batch};
 use dotty::jvm_tasty_cross_class::{
     ConditionalMutableReferenceAssignmentProofInput,
     validate_conditional_mutable_reference_assignment_proof,
@@ -1352,6 +1353,24 @@ fn source_if_preserves_both_assignment_identities_and_reaches_paired_contract() 
     assert!(
         found,
         "the paired plan retains the canonical assignment proof"
+    );
+}
+
+#[test]
+fn paired_batch_artifact_producer_defers_conditional_assignment_to_issue_2352() {
+    let error = emit_paired_jvm_tasty_batch(
+        SOURCE,
+        "ConditionalMutableReferenceAssignment.scala",
+        SourceId::from_index(23_452),
+    )
+    .expect_err("#2351 validates the shape but defers full artifact production to #2352");
+    let PairedBatchArtifactError::Plan(PairedPlanError::BatchUnit { phase, reason }) = error else {
+        panic!("conditional artifact production is rejected at its admission gate: {error:?}");
+    };
+    assert_eq!(phase, "artifact producer admission");
+    assert_eq!(
+        reason,
+        "conditional mutable assignment artifacts are deferred to issue #2352"
     );
 }
 
