@@ -1787,6 +1787,7 @@ struct MixedConstructorPairRef {
     local_receiver_call_pair: Option<[LocalReceiverUnitCallRef; 2]>,
     mutable_reassignment: Option<MutableReassignmentRef>,
     conditional_selection: Option<ConditionalSelectionRef>,
+    conditional_mutable_assignment: Option<ConditionalMutableAssignmentRef>,
     max_stack: u16,
     max_locals: u16,
 }
@@ -1796,6 +1797,14 @@ struct ConditionalSelectionRef {
     condition_local_slot: u16,
     first_target_local_slot: u16,
     second_target_local_slot: u16,
+    selected_local_slot: u16,
+}
+
+#[derive(Clone, Copy)]
+struct ConditionalMutableAssignmentRef {
+    condition_local_slot: u16,
+    then_rhs_local_slot: u16,
+    else_rhs_local_slot: u16,
     selected_local_slot: u16,
 }
 
@@ -1871,6 +1880,7 @@ fn paired_statement_kinds<P: AstPhase>(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn classify_paired_block_shape(
     source_kinds: &[PairedStatementKind],
     typed_kinds: &[PairedStatementKind],
@@ -2070,7 +2080,10 @@ fn validate_two_local_constructor_pair(
                 .typed_bindings
                 .mutable_counter_reference_assignment(source_id, caller)
                 .is_some(),
-            false,
+            tasty
+                .typed_bindings
+                .conditional_mutable_reference_assignment(source_id, caller)
+                .is_some(),
         ),
         _ => PairedBlockShape::Unclassified,
     };
@@ -2103,6 +2116,9 @@ fn validate_two_local_constructor_pair(
     let conditional_selection = tasty
         .typed_bindings
         .conditional_local_reference_selection(source_id, caller);
+    let conditional_mutable_assignment = tasty
+        .typed_bindings
+        .conditional_mutable_reference_assignment(source_id, caller);
     let has_conditional_selection = matches!(
         block_shape,
         PairedBlockShape::ThreeLocalsConditionalSelection
@@ -2110,6 +2126,10 @@ fn validate_two_local_constructor_pair(
     let has_mutable_reassignment = matches!(
         block_shape,
         PairedBlockShape::ThreeLocalsMutableReassignmentOneCall
+    );
+    let has_conditional_mutable_assignment = matches!(
+        block_shape,
+        PairedBlockShape::ThreeLocalsConditionalMutableAssignmentOneCall
     );
     let mutable_assignment = tasty
         .typed_bindings
@@ -2120,7 +2140,11 @@ fn validate_two_local_constructor_pair(
             && local_reference_alias.is_some());
     if initializers.len() != 2
         || locals.len()
-            != if has_alias || has_conditional_selection || has_mutable_reassignment {
+            != if has_alias
+                || has_conditional_selection
+                || has_mutable_reassignment
+                || has_conditional_mutable_assignment
+            {
                 3
             } else {
                 2
@@ -2138,6 +2162,11 @@ fn validate_two_local_constructor_pair(
         return Err(
             "three-local conditional selection receipt does not match its exact source shape"
                 .into(),
+        );
+    }
+    if has_conditional_mutable_assignment != conditional_mutable_assignment.is_some() {
+        return Err(
+            "conditional mutable assignment receipt does not match its exact source shape".into(),
         );
     }
     if let Some(alias) = local_reference_alias {
@@ -2387,19 +2416,21 @@ fn validate_two_local_constructor_pair(
         None
     };
 
-    let conditional_formals_match = if let Some(selection) = conditional_selection {
+    let conditional_condition_formal = conditional_selection
+        .map(|selection| selection.condition_formal)
+        .or_else(|| conditional_mutable_assignment.map(|assignment| assignment.condition_formal));
+    let conditional_formals_match = if let Some(condition_formal) = conditional_condition_formal {
         method.parameters().len() == 4
-            && method.parameters()[2].symbol() == selection.condition_formal
+            && method.parameters()[2].symbol() == condition_formal
             && method.parameters()[2].ty() == dotty_jvm::JvmType::Boolean
             && method.parameters()[2].slot() == 3
             && method.parameters()[3].ty() == dotty_jvm::JvmType::Int
             && method.parameters()[3].slot() == 4
-            && tasty.store.symbols.contains(selection.condition_formal)
-            && tasty.store.symbols.get(selection.condition_formal).kind == SymbolKind::Parameter
-            && tasty.store.symbols.get(selection.condition_formal).owner == Some(caller)
-            && tasty.store.symbols.get(selection.condition_formal).origin
-                == SymbolOrigin::Source(source_id)
-            && matches!(tasty.store.symbols.get(selection.condition_formal).info, SymbolInfo::Complete(ty) if ty == tasty.definitions.boolean)
+            && tasty.store.symbols.contains(condition_formal)
+            && tasty.store.symbols.get(condition_formal).kind == SymbolKind::Parameter
+            && tasty.store.symbols.get(condition_formal).owner == Some(caller)
+            && tasty.store.symbols.get(condition_formal).origin == SymbolOrigin::Source(source_id)
+            && matches!(tasty.store.symbols.get(condition_formal).info, SymbolInfo::Complete(ty) if ty == tasty.definitions.boolean)
             && tasty
                 .store
                 .symbols
@@ -2638,6 +2669,7 @@ fn validate_two_local_constructor_pair(
         local_class.ok_or_else(|| "two-local Counter class is absent".to_owned())?;
     let mut local_symbols = vec![initializers[0].local, initializers[1].local];
     let mut mutable_reassignment_ref = None;
+    let mut conditional_mutable_assignment_ref = None;
     if has_mutable_reassignment {
         let mutable = mutable_assignment.ok_or_else(|| {
             "mutable reassignment shape has no exact assignment receipt".to_owned()
@@ -2728,7 +2760,140 @@ fn validate_two_local_constructor_pair(
             assignment_rhs_slot,
         });
     }
+    if has_conditional_mutable_assignment {
+        let binding = conditional_mutable_assignment.ok_or_else(|| {
+            "conditional mutable assignment shape has no exact source proof".to_owned()
+        })?;
+        let selected = locals.get(2).ok_or_else(|| {
+            "conditional selected local is absent from canonical bindings".to_owned()
+        })?;
+        let first = initializers
+            .iter()
+            .find(|initializer| initializer.argument_formal == pair.method_formals[0])
+            .ok_or_else(|| "first seed formal has no original Counter initializer".to_owned())?;
+        let second = initializers
+            .iter()
+            .find(|initializer| initializer.argument_formal == pair.method_formals[1])
+            .ok_or_else(|| "second seed formal has no original Counter initializer".to_owned())?;
+        let source_if_id = *source_block
+            .stats
+            .get(3)
+            .ok_or_else(|| "conditional source If is missing".to_owned())?;
+        let typed_if_id = *typed_block
+            .stats
+            .get(3)
+            .ok_or_else(|| "conditional typed If is missing".to_owned())?;
+        let Some(TreeKind::If(source_if)) = tasty
+            .source_ast
+            .try_get(source_if_id)
+            .map(|tree| &tree.kind)
+        else {
+            return Err("conditional source statement is not the original If".into());
+        };
+        let Some(TreeKind::If(typed_if)) =
+            tasty.typed_ast.try_get(typed_if_id).map(|tree| &tree.kind)
+        else {
+            return Err("conditional typed statement is not the original If".into());
+        };
+        let targets = [second.local, first.local];
+        let arms_match = binding
+            .source_assignments
+            .iter()
+            .zip(binding.typed_assignments)
+            .zip(binding.source_lhss)
+            .zip(binding.typed_lhss)
+            .zip(binding.source_rhss)
+            .zip(binding.typed_rhss)
+            .zip(binding.rhs_locals)
+            .zip(targets)
+            .all(|(((((((source_assignment, typed_assignment), source_lhs), typed_lhs), source_rhs), typed_rhs), rhs_local), target)| {
+                let Some(TreeKind::Assign(source_assign)) = tasty
+                    .source_ast
+                    .try_get(*source_assignment)
+                    .map(|tree| &tree.kind)
+                else {
+                    return false;
+                };
+                let Some(TreeKind::Assign(typed_assign)) = tasty
+                    .typed_ast
+                    .try_get(typed_assignment)
+                    .map(|tree| &tree.kind)
+                else {
+                    return false;
+                };
+                source_if.then_branch == binding.source_assignments[0]
+                    && source_if.else_branch == binding.source_assignments[1]
+                    && typed_if.then_branch == binding.typed_assignments[0]
+                    && typed_if.else_branch == binding.typed_assignments[1]
+                    && source_assign.lhs == source_lhs
+                    && source_assign.rhs == source_rhs
+                    && typed_assign.lhs == typed_lhs
+                    && typed_assign.rhs == typed_rhs
+                    && tasty.typed_bindings.typed_at(source_id, *source_assignment)
+                        == Some(typed_assignment)
+                    && tasty.typed_bindings.typed_at(source_id, source_lhs) == Some(typed_lhs)
+                    && tasty.typed_bindings.typed_at(source_id, source_rhs) == Some(typed_rhs)
+                    && matches!(tasty.store.types.try_get(tasty.typed_ast.get(typed_lhs).ty), Some(Type::TermRef { prefix, target: TermRefTarget::Symbol(symbol) }) if *prefix == tasty.definitions.no_prefix && *symbol == binding.local)
+                    && matches!(tasty.store.types.try_get(tasty.typed_ast.get(typed_rhs).ty), Some(Type::TermRef { prefix, target: TermRefTarget::Symbol(symbol) }) if *prefix == tasty.definitions.no_prefix && *symbol == rhs_local && *symbol == target)
+                    && matches!(tasty.source_ast.try_get(source_lhs).map(|tree| &tree.kind), Some(TreeKind::Ident(ident)) if ident.name == tasty.store.symbols.get(binding.local).name)
+                    && matches!(tasty.source_ast.try_get(source_rhs).map(|tree| &tree.kind), Some(TreeKind::Ident(ident)) if ident.name == tasty.store.symbols.get(target).name)
+            });
+        let selected_initializer_matches = matches!(
+            tasty.typed_ast.try_get(selected.typed_declaration).map(|tree| &tree.kind),
+            Some(TreeKind::ValDef(value))
+                if value.rhs.is_some_and(|rhs| matches!(tasty.store.types.try_get(tasty.typed_ast.get(rhs).ty), Some(Type::TermRef { prefix, target: TermRefTarget::Symbol(symbol) }) if *prefix == tasty.definitions.no_prefix && *symbol == first.local))
+        );
+        let selected_slot = layout
+            .local(binding.local)
+            .map_err(|error| format!("conditional selected local has no JVM slot: {error:?}"))?;
+        if binding.source_id != source_id
+            || binding.owner != tasty.class
+            || binding.method != caller
+            || binding.source_block != source_rhs
+            || binding.typed_block != typed_rhs
+            || binding.source_if != source_if_id
+            || binding.typed_if != typed_if_id
+            || binding.rhs_locals != targets
+            || binding.local != selected.symbol
+            || selected_slot.declaration() != selected.typed_declaration
+            || !selected_slot.is_mutable()
+            || selected_slot.ty() != dotty_jvm::JvmType::Reference(counter_class)
+            || !selected_initializer_matches
+            || tasty.typed_ast.get(binding.typed_if).ty != tasty.definitions.unit
+            || !arms_match
+        {
+            return Err(
+                "conditional mutable assignment differs from its exact source/typed identities"
+                    .into(),
+            );
+        }
+        let condition_slot = method
+            .parameters()
+            .iter()
+            .find(|parameter| parameter.symbol() == binding.condition_formal)
+            .filter(|parameter| parameter.ty() == dotty_jvm::JvmType::Boolean)
+            .ok_or_else(|| "conditional assignment condition has no Boolean JVM formal".to_owned())?
+            .slot();
+        let then_rhs_slot = layout
+            .local(binding.rhs_locals[0])
+            .map_err(|error| format!("conditional THEN value has no JVM slot: {error:?}"))?
+            .slot();
+        let else_rhs_slot = layout
+            .local(binding.rhs_locals[1])
+            .map_err(|error| format!("conditional ELSE value has no JVM slot: {error:?}"))?
+            .slot();
+        local_slots.push(selected_slot.slot());
+        local_symbols.push(binding.local);
+        conditional_mutable_assignment_ref = Some(ConditionalMutableAssignmentRef {
+            condition_local_slot: condition_slot,
+            then_rhs_local_slot: then_rhs_slot,
+            else_rhs_local_slot: else_rhs_slot,
+            selected_local_slot: selected_slot.slot(),
+        });
+    }
     let conditional_selected = conditional_selection.map(|selection| selection.selected);
+    let conditional_mutable_selected =
+        conditional_mutable_assignment.map(|assignment| assignment.local);
     let local_alias_copy = local_reference_alias
         .map(|alias| {
             let source_index = local_symbols
@@ -2767,7 +2932,7 @@ fn validate_two_local_constructor_pair(
                                   required_receiver: Option<SymbolId>,
                                   required_formal: Option<SymbolId>|
      -> Result<LocalReceiverUnitCallRef, String> {
-        let call_prefix = if has_mutable_reassignment {
+        let call_prefix = if has_mutable_reassignment || has_conditional_mutable_assignment {
             4
         } else if has_alias || has_conditional_selection {
             3
@@ -2863,6 +3028,11 @@ fn validate_two_local_constructor_pair(
                     .map(|local| local.scope)
             })
             .or_else(|| {
+                conditional_mutable_assignment
+                    .filter(|assignment| assignment.local == binding.receiver)
+                    .map(|assignment| assignment.scope)
+            })
+            .or_else(|| {
                 has_mutable_reassignment
                     .then_some(binding.receiver)
                     .filter(|symbol| {
@@ -2890,6 +3060,12 @@ fn validate_two_local_constructor_pair(
                 );
             }
             slot.slot()
+        } else if conditional_mutable_selected == Some(binding.receiver) {
+            conditional_mutable_assignment_ref
+                .ok_or_else(|| {
+                    "conditional mutable receiver has no authenticated selected slot".to_owned()
+                })?
+                .selected_local_slot
         } else if conditional_selected == Some(binding.receiver) {
             conditional_selection_ref
                 .ok_or_else(|| {
@@ -2931,19 +3107,23 @@ fn validate_two_local_constructor_pair(
                         .map(|assignment| assignment.local)
                         .unwrap_or(pair_first_receiver)
                 } else {
-                    conditional_selected.unwrap_or(pair_first_receiver)
+                    conditional_mutable_selected
+                        .or(conditional_selected)
+                        .unwrap_or(pair_first_receiver)
                 }),
-                Some(if has_conditional_selection {
-                    method.parameters()[3].symbol()
-                } else if has_mutable_reassignment {
-                    tasty
-                        .typed_bindings
-                        .local_receiver_unit_call(source_id, caller)
-                        .map(|call| call.argument_formal)
-                        .unwrap_or(pair.method_formals[1])
-                } else {
-                    pair.method_formals[1]
-                }),
+                Some(
+                    if has_conditional_selection || has_conditional_mutable_assignment {
+                        method.parameters()[3].symbol()
+                    } else if has_mutable_reassignment {
+                        tasty
+                            .typed_bindings
+                            .local_receiver_unit_call(source_id, caller)
+                            .map(|call| call.argument_formal)
+                            .unwrap_or(pair.method_formals[1])
+                    } else {
+                        pair.method_formals[1]
+                    },
+                ),
             )
         })
         .transpose()?;
@@ -3023,7 +3203,7 @@ fn validate_two_local_constructor_pair(
         .internal_name();
     if outer_constructor.descriptor().as_str() != format!("(L{counter_name};L{counter_name};)V")
         || method.descriptor().as_str()
-            != if has_conditional_selection {
+            != if has_conditional_selection || has_conditional_mutable_assignment {
                 format!("(IIZI)L{};", outer_metadata.identity().internal_name())
             } else if has_mutable_reassignment {
                 format!("(III)L{};", outer_metadata.identity().internal_name())
@@ -3045,6 +3225,7 @@ fn validate_two_local_constructor_pair(
             | PairedBlockShape::TwoLocalsAliasTwoCalls
             | PairedBlockShape::ThreeLocalsConditionalSelection
             | PairedBlockShape::ThreeLocalsMutableReassignmentOneCall
+            | PairedBlockShape::ThreeLocalsConditionalMutableAssignmentOneCall
     ) {
         return Err(
             "two-local proof does not retain an accepted ordered statement/proof shape".into(),
@@ -3060,6 +3241,7 @@ fn validate_two_local_constructor_pair(
         local_receiver_call_pair,
         mutable_reassignment: mutable_reassignment_ref,
         conditional_selection: conditional_selection_ref,
+        conditional_mutable_assignment: conditional_mutable_assignment_ref,
         max_stack: 4,
         max_locals: layout.max_locals(),
     })
@@ -3556,6 +3738,7 @@ fn validate_formal_local_constructor_pair(
         local_receiver_call_pair: None,
         mutable_reassignment: None,
         conditional_selection: None,
+        conditional_mutable_assignment: None,
         max_stack: 4,
         max_locals: layout.max_locals(),
     })
@@ -4049,6 +4232,7 @@ fn validate_mixed_constructor_pair(
         local_receiver_call_pair: None,
         mutable_reassignment: None,
         conditional_selection: None,
+        conditional_mutable_assignment: None,
         max_stack,
         max_locals: 3,
     })
@@ -5777,6 +5961,9 @@ fn validate_cross_class_call_code(
                 }
                 take_factory_local(code.code, &mut pc, true, selection.selected_local_slot)?;
             }
+            if let Some(assignment) = mixed_pair.conditional_mutable_assignment {
+                validate_conditional_mutable_assignment_code(code.code, &mut pc, assignment)?;
+            }
             let local_receiver_calls = if let Some(calls) = &mixed_pair.local_receiver_call_pair {
                 calls.iter().collect::<Vec<_>>()
             } else {
@@ -6403,6 +6590,33 @@ fn take_factory_branch_target(
         .map_err(|_| "conditional branch offset exceeds address range".to_owned())?
         + i64::from(offset);
     usize::try_from(target).map_err(|_| "conditional branch target is outside code".to_owned())
+}
+
+fn validate_conditional_mutable_assignment_code(
+    code: &[u8],
+    pc: &mut usize,
+    assignment: ConditionalMutableAssignmentRef,
+) -> Result<(), String> {
+    take_int_local(code, pc, assignment.condition_local_slot)?;
+    let ifeq_pc = *pc;
+    take_factory_call_opcode(code, pc, 0x99, "ifeq")?;
+    let else_target = take_factory_branch_target(code, pc, ifeq_pc)?;
+    take_factory_local(code, pc, false, assignment.then_rhs_local_slot)?;
+    take_factory_local(code, pc, true, assignment.selected_local_slot)?;
+    let goto_pc = *pc;
+    take_factory_call_opcode(code, pc, 0xa7, "goto")?;
+    let join_target = take_factory_branch_target(code, pc, goto_pc)?;
+    if else_target != *pc {
+        return Err("conditional assignment branch does not target the original else arm".into());
+    }
+    take_factory_local(code, pc, false, assignment.else_rhs_local_slot)?;
+    take_factory_local(code, pc, true, assignment.selected_local_slot)?;
+    if join_target != *pc {
+        return Err(
+            "conditional assignment branch join does not follow the original else arm".into(),
+        );
+    }
+    Ok(())
 }
 
 fn take_factory_call_operand(
@@ -7060,7 +7274,10 @@ fn is_unit_type(definitions: &Definitions, ty: dotty_core::TypeId) -> bool {
 
 #[cfg(test)]
 mod paired_block_shape_tests {
-    use super::{PairedBlockShape, PairedStatementKind, classify_paired_block_shape};
+    use super::{
+        ConditionalMutableAssignmentRef, PairedBlockShape, PairedStatementKind,
+        classify_paired_block_shape, validate_conditional_mutable_assignment_code,
+    };
 
     use PairedStatementKind::{Apply, Assign, Other, ValDef};
 
@@ -7306,6 +7523,52 @@ mod paired_block_shape_tests {
                 true,
             ),
             PairedBlockShape::Unclassified
+        );
+    }
+
+    #[test]
+    fn conditional_assignment_bytecode_binds_both_rhs_and_stores_to_one_slot() {
+        // iload_3; ifeq else; aload 6; astore 7; goto join; aload 5; astore 7
+        let original = [
+            0x1d, 0x99, 0x00, 0x0a, 0x19, 0x06, 0x3a, 0x07, 0xa7, 0x00, 0x07, 0x19, 0x05, 0x3a,
+            0x07,
+        ];
+        let receipt = ConditionalMutableAssignmentRef {
+            condition_local_slot: 3,
+            then_rhs_local_slot: 6,
+            else_rhs_local_slot: 5,
+            selected_local_slot: 7,
+        };
+        let mut pc = 0;
+        validate_conditional_mutable_assignment_code(&original, &mut pc, receipt)
+            .expect("both branch stores and targets match the original receipt");
+        assert_eq!(pc, original.len());
+
+        for (name, index, replacement) in [
+            ("wrong THEN RHS", 5, 5),
+            ("wrong THEN selected slot", 7, 5),
+            ("wrong ELSE RHS", 12, 6),
+            ("wrong ELSE selected slot", 14, 5),
+            ("wrong else target", 3, 9),
+            ("missing ELSE store", 14, 0),
+        ] {
+            let mut changed = original;
+            changed[index] = replacement;
+            let mut pc = 0;
+            assert!(
+                validate_conditional_mutable_assignment_code(&changed, &mut pc, receipt).is_err(),
+                "{name} is rejected"
+            );
+        }
+
+        let mut missing_else = 0;
+        assert!(
+            validate_conditional_mutable_assignment_code(
+                &original[..13],
+                &mut missing_else,
+                receipt,
+            )
+            .is_err()
         );
     }
 }
