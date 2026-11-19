@@ -4,10 +4,10 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::core::{
-    AstArena, Modifier, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex,
-    SourceTypedIndex, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, Template,
-    TermRefTarget, TreeId, TreeKind, Type, TypeRefTarget, Typed, Untyped, UntypedNode, ValDef,
-    Visibility, VisibilitySyntax,
+    AstArena, ConflictingTypedTree, Modifier, SemanticStore, SourceDefinition, SourceId,
+    SourceSemanticIndex, SourceTypedIndex, SymbolFlags, SymbolId, SymbolInfo, SymbolKind,
+    SymbolOrigin, Template, TermRefTarget, TreeId, TreeKind, Type, TypeRefTarget, Typed, Untyped,
+    UntypedNode, ValDef, Visibility, VisibilitySyntax,
 };
 use crate::jvm::{
     JvmClassInitializationPlan, JvmClassPlan, JvmConstructorArgumentBinding, JvmFieldPlan,
@@ -18,6 +18,26 @@ use crate::jvm::{
 use crate::jvm_method_plan::{JvmMethodPlanner, MethodPlanError};
 use crate::source_declarations::{ClassMember, SourceClass};
 use crate::typer::{TypedLocalBinding, TypedSourceOutput};
+
+/// Source-to-typed bindings from successful class-header completions in one session.
+#[derive(Debug, Default)]
+pub struct ClassHeaderBindings {
+    index: SourceTypedIndex,
+}
+
+impl ClassHeaderBindings {
+    /// Retains all bindings from a successful attempt, including recursively
+    /// completed headers. Continue typing into the arena returned by that typer.
+    /// On a conflicting mapping, all previously recorded bindings are preserved.
+    pub fn record(&mut self, index: SourceTypedIndex) -> Result<(), ConflictingTypedTree> {
+        self.index.merge(index)
+    }
+
+    /// Looks up the exact typed node recorded for a tree in its source file.
+    pub fn get(&self, source: SourceId, tree: TreeId<Untyped>) -> Option<TreeId<Typed>> {
+        self.index.get(source, tree)
+    }
+}
 
 /// One class's source-to-typed mappings and locals, retained while later
 /// typers append to the session's typed arena.
@@ -186,8 +206,18 @@ impl<'a> JvmClassPlanner<'a> {
         self
     }
 
+    /// Uses the session's accumulated header bindings for any class in this source unit.
+    /// The typed arena must be the one extended throughout header and body typing.
+    pub fn with_header_bindings(
+        self,
+        typed_ast: &'a AstArena<Typed>,
+        bindings: &'a ClassHeaderBindings,
+    ) -> Self {
+        self.with_typed_header(typed_ast, &bindings.index)
+    }
+
     /// Plans every body member from one class's typer output and the current
-    /// session arena. Parent applications still use [`Self::with_typed_header`].
+    /// session arena. Parent applications use [`Self::with_header_bindings`].
     pub fn plan_typed_class(
         &self,
         class: &SourceClass,

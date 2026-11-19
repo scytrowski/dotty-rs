@@ -82,7 +82,7 @@ out the session arena and keeps the class symbol, source-to-typed index and
 local bindings together. Pass the arena to the next typer. Once typing is
 complete, call `plan_typed_class(class, &arena, &body)` for each class, using
 its original `SourceClass` and the final arena. For a parent application,
-supply the header mappings from signature completion via `with_typed_header`.
+supply the session’s header mappings via `with_header_bindings`.
 Field roots are looked up by source RHS and local declarations by method
 owner. A body retained for another class returns `ForeignClassBody`.
 
@@ -124,11 +124,16 @@ class that the typer resolved as the parent. Include both class plans in the
 same JVM unit. Unit validation checks the direct parent and its public
 no-argument constructor before emission.
 
-For `class Derived(start: Int) extends Base(start)`, retain the
-`SourceTypedIndex` from completing the child class header and keep its typed
-arena as the session arena for subsequent bodies and emission. Configure the
-planner with `with_typed_header(&typed_ast, &header_index)` before calling
-`plan` or `plan_with_fields`. The planner finds the parent application and
+For `class Derived(start: Int) extends Base(start)`, keep one
+`jvm_class_plan::ClassHeaderBindings` per session. After each successful class
+header completion, call `record(index)` with the index from
+`typer.into_typed_ast_and_index()` and pass the returned arena to the next
+typer. One attempt can also complete a parent in the same file. Recording
+once retains both applications, keyed by source and tree. A conflicting
+mapping returns `ConflictingTypedTree` and leaves the collection unchanged.
+The client schedules retries after `BlockedOn`.
+Configure each planner with `with_header_bindings(&typed_ast, &bindings)`
+using the final session arena. The planner finds the parent application and
 checks its single argument against the mapped reference to the child's own
 constructor parameter. Mismatched bindings yield
 `ClassPlanError::InvalidParentApplication`. Literal arguments such as

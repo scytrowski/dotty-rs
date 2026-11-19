@@ -65,6 +65,33 @@ impl SourceTypedIndex {
         Ok(())
     }
 
+    /// Adds mappings into the same session arena. On conflict the index is
+    /// unchanged and the first conflict in source and tree index order is returned.
+    pub fn merge(&mut self, other: Self) -> Result<(), ConflictingTypedTree> {
+        if self.is_empty() {
+            *self = other;
+            return Ok(());
+        }
+        let conflict = other
+            .trees
+            .iter()
+            .filter_map(|(&(source, untyped), &attempted)| {
+                let existing = self.get(source, untyped)?;
+                (existing != attempted).then_some(ConflictingTypedTree {
+                    source,
+                    untyped,
+                    existing,
+                    attempted,
+                })
+            })
+            .min_by_key(|error| (error.source.index(), error.untyped.index()));
+        if let Some(error) = conflict {
+            return Err(error);
+        }
+        self.trees.extend(other.trees);
+        Ok(())
+    }
+
     /// Removes the mapping for a source tree, if present.
     pub fn remove(&mut self, source: SourceId, untyped: TreeId<Untyped>) -> Option<TreeId<Typed>> {
         self.trees.remove(&(source, untyped))
@@ -150,6 +177,40 @@ mod tests {
         index.insert(source, source_tree, typed_tree).unwrap();
 
         assert_eq!(index.len(), 1);
+    }
+
+    #[test]
+    fn merging_indexes_preserves_source_identity_and_rejects_conflicts_atomically() {
+        let a = SourceId::from_index(0);
+        let b = SourceId::from_index(1);
+        let tree = TreeId::new(0);
+        let first = TreeId::new(1);
+        let second = TreeId::new(2);
+        let mut index = SourceTypedIndex::new();
+        index.insert(a, tree, first).unwrap();
+        let mut batch = SourceTypedIndex::new();
+        batch.insert(a, tree, first).unwrap();
+        batch.insert(b, tree, second).unwrap();
+        index.merge(batch).unwrap();
+        assert_eq!(index.get(a, tree), Some(first));
+        assert_eq!(index.get(b, tree), Some(second));
+
+        let mut conflicting = SourceTypedIndex::new();
+        conflicting.insert(b, tree, first).unwrap();
+        conflicting.insert(a, TreeId::new(7), second).unwrap();
+        conflicting.insert(a, tree, second).unwrap();
+        assert_eq!(
+            index.merge(conflicting),
+            Err(ConflictingTypedTree {
+                source: a,
+                untyped: tree,
+                existing: first,
+                attempted: second
+            })
+        );
+        assert_eq!(index.len(), 2);
+        assert_eq!(index.get(a, tree), Some(first));
+        assert_eq!(index.get(b, tree), Some(second));
     }
 
     #[test]

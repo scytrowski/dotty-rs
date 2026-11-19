@@ -547,7 +547,7 @@ fn class_planner_rejects_parent_arguments_even_after_type_resolution() {
     );
     assert_eq!(
         planner
-            .with_typed_header(&headers.arena, &headers.by_class[&child])
+            .with_header_bindings(&headers.arena, &headers.bindings)
             .plan(child, []),
         Err(ClassPlanError::UnsupportedTemplate(child))
     );
@@ -753,18 +753,86 @@ fn header_chain_follows_dependencies_and_executes_in_both_file_orders() {
 }
 
 #[test]
-fn completing_a_child_preserves_its_same_file_parents_typed_application() {
-    let (mut store, defs, packages, unit) = named(
-        "class Leaf(x: Int) extends Mid(x)\nclass Mid(y: Int) extends Base(y)\nclass Base(z: Int)",
+fn one_completion_supplies_both_same_file_parent_calls_for_deferred_planning() {
+    let derived = (
+        SourceId::from_index(1),
+        "Derived.scala",
+        "package demo
+class Leaf(x: Int) extends Mid(x)
+class Mid(y: Int) extends Base(y)",
     );
-    let headers =
-        complete_signatures(std::slice::from_ref(&unit), &mut store, defs, &packages).unwrap();
-    for class in &unit.classes[..2] {
-        let index = &headers.by_class[&class.symbol];
-        JvmClassPlanner::new(&store, &unit.ast, &unit.index)
-            .with_typed_header(&headers.arena, index)
-            .plan(class.symbol, [])
-            .unwrap();
+    let base = (
+        SourceId::from_index(0),
+        "Base.scala",
+        "package demo
+class Base(seed: Int) { private val initial = seed; def read(): Int = initial }",
+    );
+    for (files, derived_index) in [([derived, base], 0), ([base, derived], 1)] {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let units = name_units(
+            &files,
+            parsing::parse_files(&files, 2),
+            &mut store,
+            &mut packages,
+        );
+        let [leaf, mid] = units[derived_index].classes.as_slice() else {
+            panic!("expected Leaf and Mid in one file")
+        };
+        let base = units[1 - derived_index].classes[0].symbol;
+        let mut attempts = Vec::new();
+        let headers = super::complete_signatures_in_order(
+            &units,
+            &units,
+            &mut store,
+            defs,
+            &packages,
+            |symbol, outcome| {
+                if [leaf.symbol, mid.symbol, base].contains(&symbol) {
+                    let blocked = match outcome {
+                        dotty::typer::SignatureCompletion::BlockedOn(parent) => Some(parent),
+                        dotty::typer::SignatureCompletion::Complete(_) => None,
+                    };
+                    attempts.push((symbol, blocked));
+                }
+            },
+        )
+        .unwrap();
+        if derived_index == 0 {
+            assert_eq!(
+                attempts,
+                [(leaf.symbol, Some(base)), (base, None), (leaf.symbol, None)]
+            );
+        } else {
+            assert_eq!(attempts, [(base, None), (leaf.symbol, None)]);
+        }
+
+        let (output, bodies) = type_bodies(&units, &mut store, defs, &packages, headers);
+        let mut declarations: Vec<_> = super::named_classes(&units).zip(bodies).collect();
+        declarations.reverse(); // Plan Mid before Leaf from the same retained bindings.
+        let classes = declarations
+            .into_iter()
+            .map(|((unit, class), body)| {
+                JvmClassPlanner::new(&store, &unit.ast, &unit.index)
+                    .with_header_bindings(&output.arena, &output.bindings)
+                    .plan_typed_class(class, &output.arena, &body)
+                    .unwrap()
+            })
+            .collect();
+        let plan = dotty::jvm::JvmCompilationUnit {
+            store: &store,
+            typed_ast: &output.arena,
+            classes,
+        };
+        let prepared = plan.prepare_emission(&defs).unwrap();
+        let (artifacts, _) = super::emit_batch(&prepared, &plan.classes, 2);
+        assert_eq!(
+            super::run_java_client("shared-header-bindings", "HeaderChainClient", &artifacts)
+                .lines()
+                .collect::<Vec<_>>(),
+            ["40", "7"]
+        );
     }
 }
 
@@ -876,11 +944,8 @@ class Second(start: Int) extends Base(start)",
     let [_, first, second] = unit.classes.as_slice() else {
         panic!("expected three classes")
     };
-    let typed_call = |class: &super::SourceClass| {
-        headers.by_class[&class.symbol]
-            .get(unit.source, class.parents[0])
-            .unwrap()
-    };
+    let typed_call =
+        |class: &super::SourceClass| headers.bindings.get(unit.source, class.parents[0]).unwrap();
     let first_call = typed_call(first);
     let second_call = typed_call(second);
     let argument = |call| {
@@ -907,9 +972,9 @@ class Second(start: Int) extends Base(start)",
     let foreign = argument(second_call);
     assert_ne!(original, foreign);
     let planner = JvmClassPlanner::new(&store, &unit.ast, &unit.index);
-    let bindings = &headers.by_class[&first.symbol];
+    let bindings = &headers.bindings;
     planner
-        .with_typed_header(&headers.arena, bindings)
+        .with_header_bindings(&headers.arena, bindings)
         .plan(first.symbol, [])
         .unwrap();
     let TreeKind::Apply(app) = &mut headers.arena.get_mut(first_call).kind else {
@@ -918,7 +983,7 @@ class Second(start: Int) extends Base(start)",
     app.args[0] = foreign;
     assert_eq!(
         JvmClassPlanner::new(&store, &unit.ast, &unit.index)
-            .with_typed_header(&headers.arena, bindings)
+            .with_header_bindings(&headers.arena, bindings)
             .plan(first.symbol, []),
         Err(ClassPlanError::InvalidParentApplication {
             class: first.symbol,
@@ -955,7 +1020,7 @@ fn parent_constructor_must_belong_to_its_declaring_source() {
     store.symbols.get_mut(constructor).origin = dotty::core::SymbolOrigin::Source(derived);
     assert_eq!(
         JvmClassPlanner::new(&store, &unit.ast, &unit.index)
-            .with_typed_header(&headers.arena, &headers.by_class[&child.symbol])
+            .with_header_bindings(&headers.arena, &headers.bindings)
             .plan(child.symbol, []),
         Err(ClassPlanError::InvalidParentApplication {
             class: child.symbol,
@@ -1048,13 +1113,13 @@ fn private_fields_encode_mutability_and_keep_per_instance_state_on_jdk21() {
     let (mut store, defs, packages, unit) = named(include_str!("../../Counter.scala"));
     let mut units = [unit];
     let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
-    let (arena, bindings) = type_bodies(&units, &mut store, defs, &packages, headers);
+    let (output, bindings) = type_bodies(&units, &mut store, defs, &packages, headers);
     units[0].classes[0].members.reverse();
-    let classes = class_plans(&units, bindings, &arena, &store).unwrap();
+    let classes = class_plans(&units, bindings, &output, &store).unwrap();
     let class = classes[0].class;
     let unit = dotty::jvm::JvmCompilationUnit {
         store: &store,
-        typed_ast: &arena,
+        typed_ast: &output.arena,
         classes,
     };
     let artifact = unit

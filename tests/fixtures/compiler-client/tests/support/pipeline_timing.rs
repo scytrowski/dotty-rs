@@ -100,12 +100,12 @@ fn compile_with_signatures(
     let named = Instant::now();
     let headers = complete(&units, &mut store, definitions, &packages).unwrap();
     let completed = Instant::now();
-    let (arena, typed) = type_bodies(&units, &mut store, definitions, &packages, headers);
+    let (output, typed) = type_bodies(&units, &mut store, definitions, &packages, headers);
     let typed_at = Instant::now();
     let plan = JvmCompilationUnit {
-        classes: class_plans(&units, typed, &arena, &store).unwrap(),
+        classes: class_plans(&units, typed, &output, &store).unwrap(),
         store: &store,
-        typed_ast: &arena,
+        typed_ast: &output.arena,
     };
     let planned_at = Instant::now();
     let prepared = plan.prepare_emission(&definitions).unwrap();

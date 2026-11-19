@@ -19,12 +19,12 @@ use dotty::core::{
 use dotty::jvm::{
     GeneratedClass, JvmClassPlan, JvmCompilationUnit, PreparedJvmEmission, emit_class,
 };
-use dotty::jvm_class_plan::{ClassPlanError, JvmClassPlanner, TypedClassBody};
+use dotty::jvm_class_plan::{ClassHeaderBindings, ClassPlanError, JvmClassPlanner, TypedClassBody};
 use dotty::jvm_method_plan::JvmMethodPlanner;
 use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty::parser::{DetachedParse, ParseResult};
 use dotty::source_declarations::{Declaration, SourceClass, source_classes};
-use dotty::typer::{SignatureCompletion, SourceTypedIndex, SourceTyper, TyperError};
+use dotty::typer::{SignatureCompletion, SourceTyper, TyperError};
 
 struct NamedUnit {
     source: SourceId,
@@ -129,7 +129,7 @@ fn name_units(
 #[derive(Debug, Default)]
 struct TypedHeaders {
     arena: AstArena<Typed>,
-    by_class: HashMap<SymbolId, std::sync::Arc<SourceTypedIndex>>,
+    bindings: ClassHeaderBindings,
 }
 
 #[derive(Debug)]
@@ -190,19 +190,14 @@ fn complete_headers(
                 SignatureCompletion::Complete(_) => {
                     path.pop();
                     active.remove(&symbol);
-                    // Completing one header can also type a parent in the same file.
-                    if !index.is_empty() {
-                        let index = std::sync::Arc::new(index);
-                        for class in &unit.classes {
-                            if class
-                                .parents
-                                .iter()
-                                .any(|&tree| index.get(unit.source, tree).is_some())
-                            {
-                                headers.by_class.insert(class.symbol, index.clone());
-                            }
+                    headers.bindings.record(index).map_err(|error| {
+                        TyperError::ConflictingTypedExpression {
+                            source: error.source,
+                            tree_index: error.untyped.index(),
+                            existing: error.existing.index(),
+                            attempted: error.attempted.index(),
                         }
-                    }
+                    })?;
                 }
                 SignatureCompletion::BlockedOn(parent) => {
                     if let Some(&start) = active.get(&parent) {
@@ -324,15 +319,10 @@ fn with_plan<R>(
     let classes = class_plans(&units, typed_classes, &output, &store).unwrap();
     let plan = JvmCompilationUnit {
         store: &store,
-        typed_ast: &output,
+        typed_ast: &output.arena,
         classes,
     };
     run(&plan, &definitions)
-}
-
-struct ClassBindings {
-    header: Option<std::sync::Arc<SourceTypedIndex>>,
-    body: TypedClassBody,
 }
 
 fn named_classes(units: &[NamedUnit]) -> impl Iterator<Item = (&NamedUnit, &SourceClass)> {
@@ -346,12 +336,8 @@ fn type_bodies(
     store: &mut SemanticStore,
     definitions: Definitions,
     packages: &Packages,
-    headers: TypedHeaders,
-) -> (AstArena<Typed>, Vec<ClassBindings>) {
-    let TypedHeaders {
-        arena: mut output,
-        mut by_class,
-    } = headers;
+    mut headers: TypedHeaders,
+) -> (TypedHeaders, Vec<TypedClassBody>) {
     let mut typed_classes = Vec::new();
     for (unit, class) in named_classes(units) {
         let mut typer = SourceTyper::new_with_typed_ast(
@@ -361,7 +347,7 @@ fn type_bodies(
             store,
             definitions,
             packages,
-            output,
+            headers.arena,
         );
         for field in class.fields() {
             typer.type_field_initializer(field.symbol).unwrap();
@@ -370,29 +356,24 @@ fn type_bodies(
             typer.type_method_definition(method.tree).unwrap();
         }
         let (arena, body) = TypedClassBody::from_output(class, typer.into_typed_output());
-        output = arena;
-        typed_classes.push(ClassBindings {
-            body,
-            header: by_class.remove(&class.symbol),
-        });
+        headers.arena = arena;
+        typed_classes.push(body);
     }
 
-    (output, typed_classes)
+    (headers, typed_classes)
 }
 
 fn class_plans(
     units: &[NamedUnit],
-    typed_classes: Vec<ClassBindings>,
-    output: &AstArena<Typed>,
+    typed_classes: Vec<TypedClassBody>,
+    output: &TypedHeaders,
     store: &SemanticStore,
 ) -> Result<Vec<JvmClassPlan>, ClassPlanError> {
     let mut classes = Vec::new();
     for ((unit, class), typed) in named_classes(units).zip(typed_classes) {
-        let mut planner = JvmClassPlanner::new(store, &unit.ast, &unit.index);
-        if let Some(index) = &typed.header {
-            planner = planner.with_typed_header(output, index);
-        }
-        classes.push(planner.plan_typed_class(class, output, &typed.body)?);
+        let planner = JvmClassPlanner::new(store, &unit.ast, &unit.index)
+            .with_header_bindings(&output.arena, &output.bindings);
+        classes.push(planner.plan_typed_class(class, &output.arena, &typed)?);
     }
     Ok(classes)
 }
