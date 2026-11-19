@@ -4,7 +4,9 @@ Knowing the callee order in advance saved 0.46 ms in signature completion for
 256 files with independent call chains and four workers. With the same methods
 calling shared receivers it saved 0.02 ms, within the observed variation.
 The public typer already identifies the missing method by symbol. The cost
-depends on how often the client reaches an incomplete method.
+depends on how often the client reaches an incomplete method. The
+[follow-up experiment](#learning-the-order-from-a-previous-compilation) measures
+the cost of discovering and reusing an order in the external client.
 
 ## What changed between paired compilations
 
@@ -123,3 +125,107 @@ taskset -c 0-7 cargo test --release --locked --manifest-path tests/fixtures/comp
 taskset -c 0-7 cargo test --release --locked --manifest-path tests/fixtures/compiler-client/Cargo.toml \
   --target-dir target/compiler-client --test multi_file signature_order_probe -- --ignored --nocapture
 ```
+
+## Learning the order from a previous compilation
+
+A client using the public API saved a median of **400 µs** of signature time
+on a repeat compilation of 256 independent files with four workers. Learning
+the order on the first compilation cost **32 µs** in paired observations. On
+the shared-receiver layout, replay cost **48 µs** more than the ordinary
+client, even though it avoided all three retries.
+
+The client records the logical file path of each successfully completed
+method. On the next build it resolves those paths against freshly named units
+and requests signatures in the recorded order. Any missing dependency goes
+through the ordinary completion loop. When all signatures succeed, their
+actual completion order replaces the previous hint. Removed paths drop out
+and new paths follow the current input order. The fixture has one method per
+unique file path. A compiler using multiple methods per file would need to
+measure what a file-level hint buys on those sources. [Client implementation and tests](../tests/fixtures/compiler-client/tests/support/learned_order.rs)
+
+### Matched builds
+
+The baseline used the ordinary schedule and kept no history. **Learn** started
+with empty history. **Replay** started with a hint obtained from a successful
+compilation of the same sources. **Edited** started with a hint learned on the
+opposite call graph using the same paths. Each sample built a fresh semantic
+session from source through ordered class bytes. The measured signature phase
+includes constructing lookup tables, resolving old paths, completing all
+signatures, allocating the new path strings and replacing the old hint.
+Preparing an independent copy of the starting hint for each benchmark sample
+was outside the clock. The experiment used in-memory history.
+
+Rust 1.98.1 release builds ran on the shared Ryzen 9 7940HS, pinned to logical
+CPUs 0–7. Three processes each warmed all configurations and then ran twelve
+rounds. Each group of four rounds balanced the position of the four schedules
+and which schedule preceded another within a group of samples. Parsing and
+emission used one or four workers. Signature completion stayed sequential.
+Counts came from a separate run. Every timed sample checked ordered class
+names and bytes against a normal one-worker build. [All 1,728 latency observations](compiler-client-timings/learned-order-runs.csv)
+
+The four signature columns are separate medians in milliseconds. The paired
+saving is baseline minus replay within the same process, round and case, with
+linearly interpolated quartiles. The last column is the median paired
+percentage reduction in complete in-memory compilation time.
+
+| Files | Layout | Workers | Baseline (ms) | Learn (ms) | Replay (ms) | Edited (ms) | Paired signature saving (µs) [Q1, Q3] | Paired full saving |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 | Chains | 1 | 0.172 | 0.166 | 0.136 | 0.156 | +31 [+25, +54] | +4.6% |
+| 16 | Chains | 4 | 0.161 | 0.161 | 0.142 | 0.157 | +27 [-2, +34] | +2.6% |
+| 16 | Shared | 1 | 0.136 | 0.140 | 0.131 | 0.140 | +6 [0, +13] | -4.5% |
+| 16 | Shared | 4 | 0.140 | 0.151 | 0.132 | 0.142 | +5 [-3, +15] | -2.6% |
+| 64 | Chains | 1 | 0.619 | 0.774 | 0.543 | 0.652 | +101 [-155, +382] | +6.5% |
+| 64 | Chains | 4 | 0.599 | 0.613 | 0.475 | 0.609 | +109 [+101, +141] | +4.0% |
+| 64 | Shared | 1 | 0.507 | 0.523 | 0.628 | 0.676 | -24 [-318, +192] | -0.3% |
+| 64 | Shared | 4 | 0.473 | 0.477 | 0.477 | 0.488 | -4 [-43, +4] | -1.9% |
+| 256 | Chains | 1 | 2.320 | 2.444 | 1.891 | 2.346 | +417 [+107, +523] | +2.2% |
+| 256 | Chains | 4 | 2.265 | 2.324 | 1.851 | 2.377 | +400 [+160, +452] | +5.5% |
+| 256 | Shared | 1 | 1.879 | 1.873 | 1.998 | 1.944 | -77 [-319, +61] | -0.9% |
+| 256 | Shared | 4 | 1.804 | 1.913 | 1.912 | 1.862 | -48 [-312, -14] | -3.5% |
+
+At 256 files and four workers the paired signature saving for chains was
+18.8%. The corresponding full-pipeline saving was 5.5%, with the middle half
+of samples ranging from −0.5% to +11.8%. For shared receivers the full-pipeline
+saving ranged from −11.9% to +8.3% across the middle half. The phase-level
+effect is clearer than the effect on total time.
+
+For the same 256-file configuration, the estimated net signature saving over
+two builds was 348 µs for chains and −121 µs for shared receivers. This
+compares twice the baseline with Learn plus Replay within each matched group.
+Their interquartile ranges were respectively −211 to +429 µs and −518 to
+−22 µs. A single replay typically recovered the recording cost on chains,
+with considerable variation on this host.
+
+### Recovering after edits
+
+The probe counted reports of a missing method that trigger a retry. All
+successful schedules inferred the canonical session `Int` for every method.
+The fourth column gives retries on unchanged inputs. The last two columns show
+how the schedule adapts to the opposite graph in consecutive compilations.
+
+| Files | Current layout | Empty history | Replay | After graph change | Next replay |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 16 | Chains | 12 | 0 | 9 | 0 |
+| 16 | Shared | 3 | 0 | 3 | 0 |
+| 64 | Chains | 48 | 0 | 45 | 0 |
+| 64 | Shared | 3 | 0 | 3 | 0 |
+| 256 | Chains | 192 | 0 | 189 | 0 |
+| 256 | Shared | 3 | 0 | 3 | 0 |
+
+A separate edit regression reversed source registration, reassigned source
+IDs, removed four files, added a file and changed a caller to use the new
+method. The first rebuild retried once, produced the same bytes as the normal
+schedule and repaired the hint. Another test introduced a two-method cycle.
+The client reported the reentered method, left both signatures missing and
+retained the last successful hint.
+
+These results support using a scheduling hint in an external compiler that
+rebuilds similar dependency-heavy sources. A batch with few blocked requests
+has little work to recover. The number of observed retries is a candidate
+signal for deciding whether to retain a hint. A cutoff and its cost would
+need measurement on representative multi-method sources. The current typer
+API was sufficient throughout this experiment.
+
+To reproduce the measurements at this revision, run the release command
+above with `measure_learned_order` three times, then with `probe_learned_order`
+once.

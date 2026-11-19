@@ -1,4 +1,6 @@
 //! In-memory compilation from source text through the complete batch of class files.
+#[path = "learned_order.rs"]
+mod learned_order;
 #[path = "signature_order.rs"]
 mod signature_order;
 
