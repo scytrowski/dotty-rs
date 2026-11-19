@@ -192,7 +192,9 @@ fn private_field_initializers_follow_declarations_and_reject_same_type_substitut
 }
 
 #[test]
-fn dependent_private_vals_initialize_in_source_order_on_jdk21() {
+fn private_fields_encode_mutability_and_keep_per_instance_state_on_jdk21() {
+    use dotty::classfile::{ACC_FINAL, ACC_PRIVATE, ClassFile, FieldAccessFlags, Reader};
+
     let (mut store, defs, packages, unit) = named(include_str!("../../Counter.scala"));
     let units = [unit];
     complete_signatures(&units, &mut store, defs, &packages).unwrap();
@@ -210,16 +212,84 @@ fn dependent_private_vals_initialize_in_source_order_on_jdk21() {
         .unwrap()
         .emit_class(class)
         .unwrap();
+    let decoded = ClassFile::decode(&mut Reader::new(artifact.bytes())).unwrap();
+    let fields: Vec<_> = decoded
+        .fields
+        .iter()
+        .map(|field| {
+            (
+                decoded.constant_pool.utf8(field.name_index).unwrap(),
+                field.access_flags,
+            )
+        })
+        .collect();
     assert_eq!(
-        super::run_java_client("private-vals", "CounterClient", &[artifact]).trim(),
-        "42"
+        fields,
+        [
+            ("base", FieldAccessFlags(ACC_PRIVATE | ACC_FINAL)),
+            ("current", FieldAccessFlags(ACC_PRIVATE)),
+        ]
+    );
+    assert_eq!(
+        super::run_java_client("private-fields", "CounterClient", &[artifact])
+            .lines()
+            .collect::<Vec<_>>(),
+        ["42", "45", "44", "42"]
     );
 }
 
 #[test]
-fn field_planning_rejects_mutable_public_qualified_and_lazy_fields() {
+fn private_var_rejects_the_initializer_of_another_int_field() {
+    let (mut store, defs, packages, unit) = named(include_str!("../../Counter.scala"));
+    let units = [unit];
+    complete_signatures(&units, &mut store, defs, &packages).unwrap();
+    let (arena, mut bindings) = type_bodies(&units, &mut store, defs, &packages);
+    let [base, current] = bindings[0].fields.as_mut_slice() else {
+        panic!("expected two fields")
+    };
+    let error = ClassPlanError::FieldInitializerMismatch {
+        field: current.field,
+        expected: current.root,
+        actual: base.root,
+    };
+    current.root = base.root;
+    assert_eq!(class_plans(&units, bindings, &arena, &store), Err(error));
+}
+
+#[test]
+fn field_planning_rejects_a_mutability_mismatch_between_source_and_symbol() {
+    use dotty::core::SymbolFlags;
+
+    for (keyword, flags) in [("val", SymbolFlags::MUTABLE), ("var", SymbolFlags::EMPTY)] {
+        let (mut store, _, _, unit) = named(&format!("class C {{ private {keyword} n: Int = 1 }}"));
+        let class = &unit.classes[0];
+        let field = class.fields[0].0;
+        store.symbols.get_mut(field).flags = flags;
+        let Some(dotty::core::SourceDefinition::Canonical { tree, .. }) =
+            unit.index.definition_of(field)
+        else {
+            panic!("expected field declaration")
+        };
+        assert_eq!(
+            JvmClassPlanner::new(&store, &unit.ast, &unit.index).plan_with_fields(
+                class.symbol,
+                [],
+                &dotty::core::AstArena::new(),
+                []
+            ),
+            Err(ClassPlanError::UnsupportedStatement {
+                class: class.symbol,
+                tree
+            }),
+            "{keyword}"
+        );
+    }
+}
+
+#[test]
+fn field_planning_rejects_public_qualified_and_lazy_fields() {
     for declaration in [
-        "private var n: Int = 1",
+        "var n: Int = 1",
         "val n: Int = 1",
         "private[this] val n: Int = 1",
         "private lazy val n: Int = 1",

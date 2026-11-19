@@ -77,13 +77,14 @@ For an ordinary top-level source class, the facade also provides
 `jvm_class_plan::JvmClassPlanner::new(&store, &source_ast, &source_index)`.
 Its `plan(class_symbol, method_plans)` checks the public parameterless primary
 constructor and the method-only template before selecting `ImplicitNoArg`.
-For a class with ordinary unqualified `private val` fields, use
+For a class with ordinary unqualified `private val` or `private var` fields, use
 `plan_with_fields(class_symbol, method_plans, &typed_ast, initializers)`.
 Each `TypedFieldInitializer` supplies a field symbol, its typed RHS root and
 the source-to-typed index from that typing operation. The planner checks the
-field owner, declaration, exact RHS mapping and source position. It accepts
+field owner, declaration, exact RHS mapping and source position. The source
+`var` marker must agree with the canonical symbol's `MUTABLE` flag. It accepts
 inputs in any order and returns fields in template order for initialization.
-The class must have an implicit parent. A mutable field, public accessor or
+The class must have an implicit parent. A public accessor or
 standalone initializer expression requires a different plan.
 The planner matches the supplied methods by canonical
 symbol and returns them in source order. Unexpected, repeated and missing

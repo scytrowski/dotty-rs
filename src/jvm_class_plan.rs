@@ -72,7 +72,7 @@ pub enum ClassPlanError {
     },
     /// A field input has no matching class-body declaration.
     UnexpectedField { class: SymbolId, field: SymbolId },
-    /// An initialized private val has no input.
+    /// An initialized private field has no input.
     MissingField { class: SymbolId, field: SymbolId },
     /// Two inputs refer to the same field.
     DuplicateField { class: SymbolId, field: SymbolId },
@@ -101,7 +101,7 @@ impl fmt::Display for ClassPlanError {
 }
 impl std::error::Error for ClassPlanError {}
 
-/// Read-only planner for top-level classes with concrete methods and ordinary private vals.
+/// Read-only planner for top-level classes with concrete methods and ordinary private fields.
 /// Provide canonical AST, symbols and method plans from the same session.
 /// The backend validates the assembled unit before emission.
 pub struct JvmClassPlanner<'a> {
@@ -133,7 +133,7 @@ impl<'a> JvmClassPlanner<'a> {
         })
     }
 
-    /// Assembles ordinary private instance vals and concrete methods. Supply
+    /// Assembles ordinary private instance `val` and `var` fields and concrete methods. Supply
     /// the fields in any order and keep all typed roots in the same session
     /// arena used for emission. The plan initializes fields in template order.
     pub fn plan_with_fields<'t>(
@@ -151,15 +151,19 @@ impl<'a> JvmClassPlanner<'a> {
                 .member(class, source, tree, SymbolKind::Field)
                 .ok_or(error)?;
             let symbol = self.store.symbols.get(field);
+            let modifiers = &definition.metadata.modifiers;
+            let mutability_flag = if modifiers.contains(&Modifier::Var) {
+                SymbolFlags::MUTABLE
+            } else {
+                SymbolFlags::EMPTY
+            };
             if symbol.visibility != Visibility::Private
-                || !symbol.flags.difference(SymbolFlags::FINAL).is_empty()
+                || symbol.flags.difference(SymbolFlags::FINAL) != mutability_flag
                 || definition.metadata.visibility
                     != Some(VisibilitySyntax::Private { qualifier: None })
-                || !definition
-                    .metadata
-                    .modifiers
+                || !modifiers
                     .iter()
-                    .all(|m| *m == Modifier::Final)
+                    .all(|m| matches!(m, Modifier::Final | Modifier::Var))
                 || !definition.metadata.annotations.is_empty()
             {
                 return Err(error);
