@@ -56,6 +56,10 @@ impl SourceTyper<'_> {
         symbol: SymbolId,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
+        // File owners have a declaration scope but no source template.
+        if self.is_source_package_wrapper(symbol) {
+            return self.complete_synthetic_module_class(symbol, info_journal);
+        }
         let getter_projection = self.contextual_getter_source(symbol).is_some()
             || self
                 .store

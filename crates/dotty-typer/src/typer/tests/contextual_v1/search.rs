@@ -204,7 +204,7 @@ fn search_direct_ambiguity() {
     let text = upstream(AMBIGUOUS);
     let (parsed, mut store, packages, defs, index, source) =
         parse_and_name_file(&text, "given-ambiguous-2.scala");
-    let (f, _) = method_definition_and_rhs(&parsed, &store, &index, source, "f");
+    let (f, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "f");
     let g = method_symbol(&parsed, &store, &index, source, "g");
     let tree = declaration(&index, f);
     let wrapper = store.symbols.owner(f).unwrap();
@@ -213,24 +213,12 @@ fn search_direct_ambiguity() {
     let resolver = audit_resolver(defs, &packages);
     let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages)
         .with_resolver(Box::new(resolver));
+    let candidates =
+        ["a1", "a2"].map(|name| val_symbol(&parsed, typer.store(), &index, source, name).0);
     let error = typer.type_method_definition(tree).unwrap_err();
-    let TyperError::MemberLookup(lookup_error) = error else {
-        panic!("{error:?}")
-    };
-    assert!(
-        matches!(
-            *lookup_error,
-            MemberLookupError::ClassInfoUnavailable { symbol, state: crate::types::SymbolInfoState::Missing }
-                if symbol == wrapper
-        ),
-        "{lookup_error:?}"
-    );
-    assert!(matches!(
-        typer.complete_symbol(wrapper),
-        Err(TyperError::SourceProvenanceMissing { symbol }) if symbol == wrapper
-    ));
+    assert_ambiguity_at(error, source, rhs, candidates);
     check_ambiguity_with_source_owner();
-    outcome("blocked");
+    outcome("match");
 }
 
 /// Unscored control with an explicit source object owning the givens and methods.
@@ -244,6 +232,15 @@ fn check_ambiguity_with_source_owner() {
     let candidates = ["a1", "a2"].map(|name| val_symbol(&parsed, &store, &index, source, name).0);
     let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
     let error = typer.type_method_definition(tree).unwrap_err();
+    assert_ambiguity_at(error, source, rhs, candidates);
+}
+
+fn assert_ambiguity_at(
+    error: TyperError,
+    source: SourceId,
+    rhs: TreeId<Untyped>,
+    candidates: [SymbolId; 2],
+) {
     assert!(
         matches!(
             &error,

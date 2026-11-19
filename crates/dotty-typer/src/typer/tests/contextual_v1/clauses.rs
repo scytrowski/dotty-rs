@@ -151,28 +151,32 @@ fn c3_explicit_context_function() {
     let resolver = audit_resolver(defs, &packages);
     let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages)
         .with_resolver(Box::new(resolver));
-    // The real Scala/JDK classpath resolves the source types. Both public
-    // body entry points stop while looking up members of the top-level owner.
-    typer.complete_symbol(method).unwrap();
-    typer.complete_symbol(bar).unwrap();
-    let context = typer.expression_context_for(method).unwrap();
-    for result in [
-        typer.type_method_definition(declaration(&index, method)),
-        typer.type_expression(rhs, context),
-    ] {
-        let Err(TyperError::MemberLookup(lookup)) = result else {
-            panic!("{result:?}")
-        };
-        assert!(
-            matches!(*lookup, MemberLookupError::ClassInfoUnavailable { symbol, state:crate::types::SymbolInfoState::Missing } if symbol == wrapper),
-            "{lookup:?}"
-        );
-    }
-    assert!(
-        matches!(typer.complete_symbol(wrapper),Err(TyperError::SourceProvenanceMissing {symbol}) if symbol == wrapper)
+    let method_tree = declaration(&index, method);
+    let typed = typer.type_method_definition(method_tree).unwrap();
+    let TreeKind::DefDef(def) = &typer.typed_ast().get(typed).kind else {
+        panic!("typed foo")
+    };
+    let declared_result = typer.typed_ast().get(def.tpt).ty;
+    let typed_rhs = def.rhs.unwrap();
+    assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed_rhs));
+    let string = typer
+        .store
+        .types
+        .get(declared_result)
+        .reference_symbol()
+        .unwrap();
+    assert_eq!(
+        typer
+            .store
+            .names
+            .resolve(typer.store.symbols.get(string).name.text()),
+        "String"
     );
+    let context = typer.expression_context_for(method).unwrap();
+    assert_eq!(typer.type_expression(rhs, context).unwrap(), typed_rhs);
+    assert_explicit_application(&mut typer, rhs, typed_rhs, bar, declared_result);
     reduced_explicit_context_function_in_member();
-    outcome("blocked");
+    outcome("match");
 }
 
 fn reduced_ordinary_default_after_using() {
@@ -201,13 +205,28 @@ fn reduced_explicit_context_function_in_member() {
     typer
         .type_method_definition(declaration(&index, method))
         .unwrap();
+    let typed_rhs = typer.source_typed_index().get(source, rhs).unwrap();
+    assert_explicit_application(&mut typer, rhs, typed_rhs, bar, defs.int);
+}
+
+fn assert_explicit_application(
+    typer: &mut SourceTyper<'_>,
+    rhs: TreeId<Untyped>,
+    typed_rhs: TreeId<Typed>,
+    bar: SymbolId,
+    result: TypeId,
+) {
+    let family = typer
+        .source_function_class(SourceFunctionKind::Contextual, 1, rhs.index())
+        .unwrap();
     let ast = typer.typed_ast();
     let store = typer.store();
-    let node = ast.get(typer.source_typed_index().get(source, rhs).unwrap());
+    let node = ast.get(typed_rhs);
     let TreeKind::Apply(call) = &node.kind else {
         panic!("contextual application of bar")
     };
-    assert_eq!((node.ty, call.kind), (defs.int, ApplyKind::Using));
+    let application_result = node.ty;
+    assert_eq!(call.kind, ApplyKind::Using);
     let [literal] = call.args.as_slice() else {
         panic!("one explicit argument")
     };
@@ -235,9 +254,11 @@ fn reduced_explicit_context_function_in_member() {
     let Type::Applied { tycon, args } = store.types.get(*prefix) else {
         panic!("instantiated context function")
     };
-    assert_eq!(args, &[defs.int, defs.int]);
-    let family = store.types.get(*tycon).reference_symbol().unwrap();
-    assert_eq!(typer.synthesized_context_function_arity(family), Some(1));
+    let [parameter, function_result] = args[..] else {
+        panic!("context function takes Int and returns the declared result")
+    };
+    assert_eq!(parameter, typer.definitions.int);
+    assert_eq!(store.types.get(*tycon).reference_symbol(), Some(family));
     assert_eq!(store.symbols.owner(*apply), Some(family));
     let SymbolInfo::Complete(info) = *store.symbols.info(family) else {
         panic!("complete ContextFunction1")
@@ -256,4 +277,8 @@ fn reduced_explicit_context_function_in_member() {
         store.names.resolve(store.symbols.get(*apply).name.text()),
         "apply"
     );
+    for actual in [application_result, function_result] {
+        assert!(typer.is_subtype(actual, result).unwrap());
+        assert!(typer.is_subtype(result, actual).unwrap());
+    }
 }

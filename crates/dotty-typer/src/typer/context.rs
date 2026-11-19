@@ -172,13 +172,20 @@ impl SourceTyper<'_> {
                 actual: actual_owner,
             });
         }
-        self.push_local_scope(
-            ExpressionContext {
-                owner,
-                ..declaration_context
-            },
-            scope,
-        )
+        let mut context = ExpressionContext {
+            owner,
+            ..declaration_context
+        };
+        // Top-level declarations keep the lexical package context at their
+        // source position. Their shared file owner sits inside those imports
+        // and outside the method's parameters and block-local declarations.
+        if let Some(wrapper) = self.store.symbols.owner(owner)
+            && self.is_source_package_wrapper(wrapper)
+        {
+            let members = self.synthetic_module_scope(wrapper)?;
+            context = self.push_local_scope(context, members)?;
+        }
+        self.push_local_scope(context, scope)
     }
 
     /// Builds an expression context for an initialized field on an ordinary

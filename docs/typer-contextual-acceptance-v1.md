@@ -1,9 +1,9 @@
 # Acceptance audit of contextual argument typing, v1
 
-**Keep the typer milestone open.** Six of the eleven selected upstream sites
-agree with Scala 3.9, including the inherited given and growing by-name search
-that differed in the first audit. Four sites still stop before the intended
-observation. One exercises a previously documented unsupported combination.
+**Keep the typer milestone open.** Eight of the eleven selected upstream sites
+agree with Scala 3.9. These include both top-level methods that previously
+stopped at file-owner lookup. Two in-scope sites remain blocked. One site
+exercises a previously documented unsupported combination.
 
 ## What the audit measures
 
@@ -42,8 +42,8 @@ the last column help locate a failure and carry no additional acceptance votes.
 | `tests/pos/given-priority.scala` · first `summon[A]` | Selects `NormalImplicits.g2` after `import NormalImplicits.given`. | **Match.** The original import and initializer resolve to the source symbol for `g2` in both language modes. Typing the entire method subsequently encounters a separate `DuplicateLocalValue` on the second wildcard value declaration. |
 | `tests/neg/byname-implicits-11.scala` · `implicitly[Foo[Int]]` | E172, missing evidence for `Foo[Int]`. The failed provider would require `=> Foo[Foo[Int]]`. | **Match.** Rust reports `MissingContextualArgument` at the original call for the exact `Foo[Int]` goal. Scala also prints the failed nested dependency. |
 | `tests/run/implicit-disambiguation.scala` · `M.f` | The inner `a` supplies `summon[A].show`. Its initializer uses the parameter of type `B`. | **Blocked at member selection.** Rust reports `UnstableSelectionPrefix` on `.show`. Returning just `summon[A]` confirms both symbol choices in the original lexical scope. |
-| `tests/neg/given-ambiguous-2.scala` · RHS of top-level `f` | E172 names the conflicting `a1` and `a2` at the call of `g`. | **Blocked at owner lookup.** Rust lacks class information for the synthetic file owner. Moving the declarations into an object reproduces the expected ambiguity in both compilers. |
-| `tests/pos/i5295.scala` · top-level `foo` | The inline accessor for `bar` applies the context function with explicit argument `4`. | **Blocked at owner lookup.** The synthetic file owner lacks class information. In the class-member control, Rust resolves the source `bar`, the unary context function’s `apply` and the literal argument `4`. |
+| `tests/neg/given-ambiguous-2.scala` · RHS of top-level `f` | E172 names the conflicting `a1` and `a2` at the call of `g`. | **Match.** Typing the original method reports ambiguity at its call to `g` and identifies the source declarations `a1` and `a2`. |
+| `tests/pos/i5295.scala` · top-level `foo` | The inline accessor for `bar` applies the context function with explicit argument `4`. | **Match.** In the original inline method body, Rust resolves the source `bar` and `ContextFunction1.apply`, keeps the explicit argument `4` and produces the declared `String` result. The comparison covers the source application before inline-accessor lowering. |
 | `tests/run/curried-using-threading.scala` · `narrow()` | The call and its ordinary default getter receive the same contextual argument. | **Blocked in the namer.** Anonymous `given Context("alpha")` produces `UnsupportedGivenNameShape(New)`. A class-member control reaches a second obstacle. Rust requires an ordinary argument where Scala calls the getter. |
 | `tests/pos/i8491.scala` · `Test.qux2` | The synthesized witness precedes `B` in the implicit clause and the getter is `qux2$default$2`. | **Outside the documented v1 subset.** Rust completes the two-parameter signature but rejects the definition with `UsingApplicationDeferred` at `B`. The combination of a synthesized context bound and a default was already listed as unsupported. |
 
@@ -56,12 +56,9 @@ describes their coverage and the separate output contracts for JVM and TASTy.
 
 ## Work required for closure
 
-1. **Resolve the synthetic file owner.** Retest both top-level examples through
-   normal method typing. One must identify the two ambiguous declarations and
-   the other must apply the context function to `4`.
-2. **Type member selection on the result of `summon`.** Retest the full `.show`
+1. **Type member selection on the result of `summon`.** Retest the full `.show`
    expression while retaining the nested-scope evidence check.
-3. **Name the anonymous constructor-form given, then retest the curried call.**
+2. **Name the anonymous constructor-form given, then retest the curried call.**
    Once the namer admits the file, verify that both the call and its ordinary
    default getter reuse the contextual argument. The reduced case makes the
    ordinary-default dependency independently observable.

@@ -47,6 +47,8 @@ pub enum NamerError {
     DuplicateSourceExportSite { source: SourceId, tree_index: u32 },
     /// A semantic owner was assigned more than one declaration scope.
     DuplicateDeclarationScope { symbol: SymbolId },
+    /// The file and package disagree with an existing wrapper registration.
+    ConflictingSourcePackageWrapper { source: SourceId, package: SymbolId },
     /// A declaration symbol was assigned two different source contexts.
     DuplicateDeclarationContext {
         symbol: SymbolId,
@@ -142,6 +144,12 @@ impl fmt::Display for NamerError {
                     symbol.index()
                 )
             }
+            Self::ConflictingSourcePackageWrapper { source, package } => write!(
+                f,
+                "conflicting wrapper registration for source {} and package {}",
+                source.index(),
+                package.index()
+            ),
             Self::DuplicateDeclarationContext {
                 symbol,
                 existing,
@@ -268,6 +276,9 @@ impl From<SourceSemanticIndexError> for NamerError {
             },
             SourceSemanticIndexError::DuplicateDeclarationScope { symbol } => {
                 Self::DuplicateDeclarationScope { symbol }
+            }
+            SourceSemanticIndexError::ConflictingSourcePackageWrapper { source, package } => {
+                Self::ConflictingSourcePackageWrapper { source, package }
             }
             SourceSemanticIndexError::DuplicateDeclarationContext {
                 symbol,
@@ -489,7 +500,6 @@ fn run_name_compilation_unit(
             scope_insertions: Vec::new(),
             companion_links: Vec::new(),
             package_private_boundary: None,
-            source_package_wrappers: HashMap::new(),
             synthetic_enum_module_classes: HashSet::new(),
             wrapped_type_names: HashMap::new(),
             source_diagnostics_allowed,
@@ -523,7 +533,6 @@ struct Namer<'a> {
     scope_insertions: Vec<(ScopeId, SymbolId)>,
     companion_links: Vec<PendingCompanion>,
     package_private_boundary: Option<(SymbolId, SymbolId)>,
-    source_package_wrappers: HashMap<SymbolId, (SymbolId, ScopeId)>,
     synthetic_enum_module_classes: HashSet<SymbolId>,
     wrapped_type_names: HashMap<Vec<String>, HashSet<TypeName>>,
     source_diagnostics_allowed: bool,
@@ -697,10 +706,10 @@ impl Namer<'_> {
         package_context: &NamingContext,
         stats: Vec<ContextualStat>,
     ) -> Result<EnteredHeader, NamerError> {
-        if let Some((module_class, scope)) = self
-            .source_package_wrappers
-            .get(&package_context.owner)
-            .copied()
+        if let Some(module_class) = self
+            .index
+            .source_package_wrapper(self.source, package_context.owner)
+            && let Some(scope) = self.index.scope_of(module_class)
         {
             return Ok(EnteredHeader::SourcePackageWrapper {
                 stats,
@@ -751,9 +760,12 @@ impl Namer<'_> {
         });
         self.enter_in_scope(package_context.scope, module_class_name, module_class);
         let scope = self.store.scopes.alloc(Scope::new(Some(module_class)));
-        self.index.record_scope(module_class, scope)?;
-        self.source_package_wrappers
-            .insert(package_context.owner, (module_class, scope));
+        self.index.record_source_package_wrapper(
+            self.source,
+            package_context.owner,
+            module_class,
+            scope,
+        )?;
 
         Ok(EnteredHeader::SourcePackageWrapper {
             stats,

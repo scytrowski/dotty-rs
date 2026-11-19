@@ -4707,7 +4707,16 @@ fn wrapper_partition_uses_the_full_package_path_across_clauses() {
         SymbolKind::ModuleClass
     );
     assert_eq!(owner_of(first_stat(first_stat(*nested))), wrapped);
+    let package = named.index.symbol_at(named.source, *qualified).unwrap();
+    assert_eq!(
+        named.index.source_package_wrapper(named.source, package),
+        Some(wrapped)
+    );
     let ordinary = owner_of(first_stat(*unrelated));
+    assert_eq!(
+        named.index.source_package_wrapper(named.source, ordinary),
+        None
+    );
     assert_eq!(
         Some(ordinary),
         named.index.symbol_at(named.source, *unrelated)
@@ -4765,6 +4774,14 @@ fn source_wrappers_keep_distinct_file_stems_in_a_shared_package() {
                 .as_name(),
             )
             .unwrap();
+        assert_eq!(
+            index.source_package_wrapper(source, root_package.symbol),
+            Some(wrapper)
+        );
+        assert_eq!(
+            index.source_package_wrapper(SourceId::from_index(89), root_package.symbol),
+            None
+        );
         let symbol = index.symbol_at(source, method).unwrap();
         assert_eq!(store.symbols.get(symbol).owner, Some(wrapper));
         assert_eq!(

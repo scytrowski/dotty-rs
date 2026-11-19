@@ -20357,6 +20357,9 @@ fn classify_namer_error(error: &NamerError) -> FailureClassification {
             "NamerError::DuplicateExtensionPrefixClauses"
         }
         NamerError::DuplicateSourceExportSite { .. } => "NamerError::DuplicateSourceExportSite",
+        NamerError::ConflictingSourcePackageWrapper { .. } => {
+            "NamerError::ConflictingSourcePackageWrapper"
+        }
         NamerError::DuplicateDeclarationScope { .. } => "NamerError::DuplicateDeclarationScope",
         NamerError::DuplicateDeclarationContext { .. } => "NamerError::DuplicateDeclarationContext",
         NamerError::DuplicateFieldInitializerContext { .. } => {

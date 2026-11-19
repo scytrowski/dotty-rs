@@ -18,6 +18,78 @@ fn reference(typer: &SourceTyper<'_>, tree: TreeId<Typed>) -> SymbolId {
 }
 
 #[test]
+fn top_level_calls_resolve_the_file_owner_and_preserve_contextual_precedence() {
+    let text = "package example
+        object Imported { given imported: Int = 2 }
+        import Imported.given
+        given own: Int = 1
+        def need(using i: Int): Int = i
+        def fromFile: Int = need
+        def fromParameter(using local: Int): Int = need";
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let own = val_symbol(&parsed, &store, &index, source, "own").0;
+    let need = method_symbol(&parsed, &store, &index, source, "need");
+    let wrapper = store.symbols.owner(need).unwrap();
+    assert_eq!(store.symbols.owner(own), Some(wrapper));
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for name in ["fromFile", "fromParameter"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let expected = if name == "fromFile" {
+            own
+        } else {
+            method_parameter_symbol(&parsed, &index, source, method, 0)
+        };
+        typer
+            .type_method_definition(definition_tree(&index, method))
+            .unwrap();
+        let rhs = typer.source_typed_index().get(source, rhs).unwrap();
+        let TreeKind::Apply(call) = &typer.typed_ast().get(rhs).kind else {
+            panic!("expected contextual argument insertion")
+        };
+        assert_eq!(reference(&typer, call.function), need);
+        let [argument] = call.args[..] else {
+            panic!("expected one Int argument")
+        };
+        assert_eq!(reference(&typer, argument), expected);
+    }
+    let info = typer.complete_symbol(wrapper).unwrap();
+    assert_eq!(typer.complete_symbol(wrapper).unwrap(), info);
+    assert!(matches!(typer.store().types.get(info),
+        Type::ClassInfo(class) if class.class == wrapper
+        && Some(class.declarations) == index.scope_of(wrapper)
+        && class.parents == [defs.object_type]));
+}
+
+#[test]
+fn ambiguous_file_givens_roll_back_lazy_owner_completion() {
+    let text = "given first: Int = 1
+        given second: Int = 2
+        def need(using i: Int): Int = i
+        def ambiguous: Int = need";
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "ambiguous");
+    let candidates =
+        ["first", "second"].map(|name| val_symbol(&parsed, &store, &index, source, name).0);
+    let wrapper = store.symbols.owner(method).unwrap();
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let checkpoint = typer.store().checkpoint();
+    for _ in 0..2 {
+        let error = typer
+            .type_method_definition(definition_tree(&index, method))
+            .unwrap_err();
+        assert!(
+            matches!(&error, TyperError::AmbiguousContextualArgument { source: at, tree_index, expected, candidates: actual }
+            if *at == source && *tree_index == rhs.index() && *expected == defs.int && actual == &candidates),
+            "{error:?}"
+        );
+        assert_eq!(*typer.store().symbols.info(wrapper), SymbolInfo::Missing);
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert!(typer.source_typed_index().is_empty());
+        assert_eq!(typer.typed_ast().iter().count(), 0);
+    }
+}
+
+#[test]
 fn omitted_argument_forwards_the_canonical_parameter() {
     let (parsed, mut store, packages, definitions, index, source) = parse_and_name(include_str!(
         "../../../tests/fixtures/contextual-arguments/Calls.scala"

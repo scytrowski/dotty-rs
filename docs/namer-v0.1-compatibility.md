@@ -156,6 +156,11 @@ identity reuse. All reported semantic invariant failures and transaction
 residue counts are zero. Parser-recovered detached enum nodes are listed as
 parser-blocked rather than charged as Namer invariant failures.
 
+For top-level definitions, the index records the synthetic module class by
+source unit and package. Repeated clauses of that package in the unit share
+its declaration scope. Each wrapped declaration keeps its original lexical
+context, including the imports visible at that point.
+
 The current source semantic index is suitable for the first source typer
 milestone, with the deferred local-scope, annotation, synthetic-member, and
 forwarder work above kept explicit. This is a readiness statement about the
