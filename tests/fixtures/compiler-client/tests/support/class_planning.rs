@@ -482,17 +482,14 @@ class Counter(start: Int):
 
 fn field_signature_units(
     consumer: &str,
+    provider: &str,
     provider_first: bool,
     store: &mut SemanticStore,
     packages: &mut Packages,
 ) -> Vec<NamedUnit> {
     let mut files = [
         (SourceId::from_index(3), "Consumer.scala", consumer),
-        (
-            SourceId::from_index(8),
-            "Provider.scala",
-            "class Provider { def value() = 40 }",
-        ),
+        (SourceId::from_index(8), "Provider.scala", provider),
     ];
     if provider_first {
         files.reverse();
@@ -509,7 +506,13 @@ fn field_signature_retries_foreign_method_and_infers_int_in_both_orders() {
         let mut store = SemanticStore::new();
         let defs = Definitions::bootstrap(&mut store);
         let mut packages = Packages::new();
-        let units = field_signature_units(consumer, provider_first, &mut store, &mut packages);
+        let units = field_signature_units(
+            consumer,
+            "class Provider { def value() = 40 }",
+            provider_first,
+            &mut store,
+            &mut packages,
+        );
         let consumer = &units[usize::from(provider_first)];
         let provider = &units[usize::from(!provider_first)];
         let class = &consumer.classes[0];
@@ -561,6 +564,149 @@ fn field_signature_retries_foreign_method_and_infers_int_in_both_orders() {
     }
 }
 
+const CONSUMER_OF_SEED: &str = "class Consumer(provider: Provider) { val answer = provider.seed }";
+
+#[test]
+fn public_field_dependency_infers_both_signatures_in_either_file_order() {
+    use dotty::core::SymbolInfo;
+    use dotty::typer::SignatureCompletion;
+
+    for provider_first in [false, true] {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let units = field_signature_units(
+            CONSUMER_OF_SEED,
+            "class Provider { val seed = 40 }",
+            provider_first,
+            &mut store,
+            &mut packages,
+        );
+        let answer = units[usize::from(provider_first)].classes[0]
+            .fields()
+            .next()
+            .unwrap()
+            .symbol;
+        let seed = units[usize::from(!provider_first)].classes[0]
+            .fields()
+            .next()
+            .unwrap()
+            .symbol;
+        let mut edges = Vec::new();
+        super::complete_signatures_in_order(
+            &units,
+            &units,
+            &mut store,
+            defs,
+            &packages,
+            |symbol, attempt| {
+                if let SignatureCompletion::BlockedOn(dependency) = attempt {
+                    edges.push((symbol, dependency));
+                }
+            },
+        )
+        .unwrap();
+        if provider_first {
+            assert!(edges.is_empty());
+        } else {
+            assert_eq!(edges, [(answer, seed)]);
+        }
+        for field in [seed, answer] {
+            assert_eq!(store.symbols.info(field), &SymbolInfo::Complete(defs.int));
+        }
+    }
+}
+
+#[test]
+fn public_field_dependency_outside_the_batch_keeps_the_original_error() {
+    use dotty::core::SymbolInfo;
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let units = field_signature_units(
+        CONSUMER_OF_SEED,
+        "class Provider { val seed = 40 }",
+        false,
+        &mut store,
+        &mut packages,
+    );
+    super::complete_headers(&units, &mut store, defs, &packages, &mut |_, _| {}).unwrap();
+    let consumer = &units[0];
+    let class = &consumer.classes[0];
+    let answer = class.fields().next().unwrap().symbol;
+    let seed = units[1].classes[0].fields().next().unwrap().symbol;
+    let error = dotty::try_complete_class_field_signatures(
+        class.symbol,
+        &consumer.ast,
+        &consumer.index,
+        &mut store,
+        defs,
+        &packages,
+        |dep| dep != seed,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, dotty::ClassFieldSignatureError::Field { class: owner, field,
+        error: dotty::typer::TyperError::MemberTypeUnavailable { symbol }
+    } if owner == class.symbol && field == answer && symbol == seed)
+    );
+    for field in [answer, seed] {
+        assert_eq!(store.symbols.info(field), &SymbolInfo::Missing);
+    }
+}
+
+#[test]
+fn public_field_dependency_completes_only_the_requested_provider_field() {
+    use dotty::core::SymbolInfo;
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let units = field_signature_units(
+        CONSUMER_OF_SEED,
+        "class Provider(consumer: Consumer) { val echo = consumer.answer; val seed = 40 }",
+        false,
+        &mut store,
+        &mut packages,
+    );
+    // answer needs seed. Starting the entire Provider class here would revisit answer via echo.
+    complete_signatures(&units, &mut store, defs, &packages).unwrap();
+    for unit in &units {
+        for field in unit.classes[0].fields() {
+            assert_eq!(
+                store.symbols.info(field.symbol),
+                &SymbolInfo::Complete(defs.int)
+            );
+        }
+    }
+}
+
+#[test]
+fn public_field_cycle_reports_the_closed_symbol_path_in_either_order() {
+    use dotty::core::SymbolInfo;
+    for provider_first in [false, true] {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let units = field_signature_units(
+            CONSUMER_OF_SEED,
+            "class Provider(consumer: Consumer) { val seed = consumer.answer }",
+            provider_first,
+            &mut store,
+            &mut packages,
+        );
+        let first = units[0].classes[0].fields().next().unwrap().symbol;
+        let second = units[1].classes[0].fields().next().unwrap().symbol;
+        let error = complete_signatures(&units, &mut store, defs, &packages).unwrap_err();
+        let super::SignatureError::MemberCycle(path) = error else {
+            panic!("expected a field cycle, got {error:?}")
+        };
+        assert_eq!(path, [first, second, first]);
+        for field in [first, second] {
+            assert_eq!(store.symbols.info(field), &SymbolInfo::Missing);
+        }
+    }
+}
+
 #[test]
 fn field_scheduler_preserves_arity_error_after_completing_dependency() {
     use dotty::ClassFieldSignatureError;
@@ -570,6 +716,7 @@ fn field_scheduler_preserves_arity_error_after_completing_dependency() {
     let mut packages = Packages::new();
     let units = field_signature_units(
         "class Consumer(provider: Provider) { val answer = provider.value(1) }",
+        "class Provider { def value() = 40 }",
         false,
         &mut store,
         &mut packages,

@@ -6,7 +6,7 @@ mod parsing;
 #[path = "support/pipeline_timing.rs"]
 mod pipeline_timing;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use dotty::core::{
     AstArena, Definitions, Packages, SemanticStore, SourceId, SourceSemanticIndex, SymbolId,
-    SymbolInfo, TreeKind, Typed, Untyped,
+    SymbolInfo, SymbolKind, TreeKind, Typed, Untyped,
 };
 use dotty::jvm::{
     GeneratedClass, JvmClassPlan, JvmCompilationUnit, PreparedJvmEmission, emit_class,
@@ -139,6 +139,7 @@ enum SignatureError {
     Typing(TyperError),
     Field(dotty::ClassFieldSignatureError),
     HeaderCycle(Vec<SymbolId>),
+    MemberCycle(Vec<SymbolId>),
 }
 
 impl From<TyperError> for SignatureError {
@@ -243,9 +244,20 @@ fn complete_methods_in_order(
     mut observe: impl FnMut(SymbolId, SignatureCompletion),
 ) -> Result<TypedHeaders, SignatureError> {
     let headers = complete_headers(units, store, definitions, packages, &mut observe)?;
-    let owners: HashMap<_, _> = units
-        .iter()
-        .flat_map(|unit| unit.method_symbols().map(move |symbol| (symbol, unit)))
+    let owners: HashMap<_, _> = named_classes(units)
+        .flat_map(|(unit, class)| {
+            class
+                .constructor_fields
+                .iter()
+                .copied()
+                .chain(
+                    class
+                        .fields()
+                        .chain(class.methods())
+                        .map(|decl| decl.symbol),
+                )
+                .map(move |symbol| (symbol, unit))
+        })
         .collect();
 
     for (unit, class) in named_classes(units) {
@@ -262,8 +274,8 @@ fn complete_methods_in_order(
             .map_err(SignatureError::Field)?
         {
             observe(field, SignatureCompletion::BlockedOn(dependency));
-            complete_method(
-                dependency,
+            complete_member_path(
+                &[field, dependency],
                 &owners,
                 store,
                 definitions,
@@ -273,29 +285,47 @@ fn complete_methods_in_order(
         }
     }
     for symbol in roots {
-        complete_method(symbol, &owners, store, definitions, packages, &mut observe)?;
+        if !matches!(store.symbols.info(symbol), SymbolInfo::Complete(_)) {
+            complete_member_path(
+                &[symbol],
+                &owners,
+                store,
+                definitions,
+                packages,
+                &mut observe,
+            )?;
+        }
     }
     Ok(headers)
 }
 
-fn complete_method(
-    symbol: SymbolId,
+fn complete_member_path(
+    path: &[SymbolId],
     owners: &HashMap<SymbolId, &NamedUnit>,
     store: &mut SemanticStore,
     definitions: Definitions,
     packages: &Packages,
     observe: &mut impl FnMut(SymbolId, SignatureCompletion),
-) -> Result<(), TyperError> {
-    if matches!(store.symbols.info(symbol), SymbolInfo::Complete(_)) {
-        return Ok(());
-    }
-    let mut pending = vec![symbol];
-    let mut active = HashSet::from([symbol]);
+) -> Result<(), SignatureError> {
+    let mut pending = path.to_vec();
+    let mut active: HashMap<_, _> = path.iter().enumerate().map(|(i, &id)| (id, i)).collect();
     while let Some(&symbol) = pending.last() {
         let unit = owners[&symbol];
-        let completion = unit
+        let attempt = unit
             .typer(store, definitions, packages)
-            .try_complete_signature(symbol, |dependency| owners.contains_key(&dependency))?;
+            .try_complete_signature(symbol, |dependency| owners.contains_key(&dependency));
+        let completion = attempt.map_err(|error| {
+            let member = store.symbols.get(symbol);
+            if member.kind == SymbolKind::Field {
+                SignatureError::Field(dotty::ClassFieldSignatureError::Field {
+                    class: member.owner.expect("named class field"),
+                    field: symbol,
+                    error,
+                })
+            } else {
+                SignatureError::Typing(error)
+            }
+        })?;
         observe(symbol, completion);
         match completion {
             SignatureCompletion::Complete(_) => {
@@ -303,8 +333,19 @@ fn complete_method(
                 active.remove(&symbol);
             }
             SignatureCompletion::BlockedOn(dependency) => {
-                if !active.insert(dependency) {
-                    return Err(TyperError::RecursiveInferredMethodResult { symbol: dependency });
+                if let Some(start) = active.insert(dependency, pending.len()) {
+                    let cycle = &pending[start..];
+                    if cycle
+                        .iter()
+                        .any(|&id| store.symbols.get(id).kind == SymbolKind::Field)
+                    {
+                        let mut path = cycle.to_vec();
+                        path.push(dependency);
+                        return Err(SignatureError::MemberCycle(path));
+                    }
+                    return Err(
+                        TyperError::RecursiveInferredMethodResult { symbol: dependency }.into(),
+                    );
                 }
                 pending.push(dependency);
             }

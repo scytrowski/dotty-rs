@@ -15,7 +15,7 @@ use crate::typer::{SignatureCompletion, SourceTyper, TyperError};
 pub enum ClassFieldSignatureCompletion {
     /// All selected field types are complete in the session store.
     Complete,
-    /// This field needs a missing method signature in another source of the batch.
+    /// This field needs the signature of a method or public field in another source of the batch.
     BlockedOn {
         field: SymbolId,
         dependency: SymbolId,

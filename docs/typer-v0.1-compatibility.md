@@ -1950,21 +1950,22 @@ limits are p95 depth <= 6 and completed-class fanout <= 16. The
 incomplete until the manually initiated hosted audit reconciles every frozen
 root and its source attribution.
 
-### Class headers and inferred method results across source files
+### Class headers and inferred member signatures across source files
 
 The standalone compiler client names the sources and completes their constructor
 signatures. It uses `dotty::try_complete_class_header` for class headers and
-`SourceTyper::try_complete_signature(symbol, in_batch)` for method signatures.
-Each phase supplies a membership predicate for the declarations it can schedule.
+`SourceTyper::try_complete_signature(symbol, in_batch)` for individual member
+signatures. Each phase supplies a membership predicate for the declarations it
+can schedule.
 
 - `Ok(SignatureCompletion::Complete(ty))` gives the canonical signature.
 - `Ok(SignatureCompletion::BlockedOn(dependency))` identifies a missing method
-  signature or, during class header completion, a missing class header in a
+  or public field signature or, during header completion, a class header in a
   different source of the batch. The attempt has rolled back. The client can
   complete the dependency in its owning source and retry the original request.
 - `Err(TyperError)` preserves the underlying failure. An unavailable class
   outside the batch retains `NewClassInfoUnavailable`, and an unavailable
-  method outside the batch retains `MemberTypeUnavailable`.
+  method or public field outside the batch retains `MemberTypeUnavailable`.
 
 For `class Derived(start: Int) extends Base(start)`, the client can receive
 `BlockedOn` with the symbol of `Base` even when its constructor signature is
@@ -1978,10 +1979,14 @@ After headers, `dotty::try_complete_class_field_signatures` visits class-owned
 constructor fields followed by public fields declared in the class body. For
 `val answer = provider.value()`, `BlockedOn { field, dependency }` identifies
 `answer` and the missing method in the provider's file. The client completes
-that method and retries the class. Completed fields retain their types across
-retries. A field error includes the class and field symbols and the original
-`TyperError`. The later `type_class_body` call produces the typed initializers
-used by the backend.
+that method in its owning source. For `val answer = provider.seed`, the
+dependency is the symbol of the public field `seed`. With `val seed = 40`,
+both signatures complete as `Int` in either file order. The client follows
+individual member symbols, reports a closed path for cycles involving fields,
+and retries blocked fields after their dependencies complete. Completed fields
+retain their types across retries. A field error includes the class and field
+symbols and the original `TyperError`. The later `type_class_body` call
+produces the typed initializers used by the backend.
 
 For `A.f(b: B) = b.g()`, the external client observes the symbol of `B.g`,
 completes it and retries `A.f`. A call to the same zero-argument method with

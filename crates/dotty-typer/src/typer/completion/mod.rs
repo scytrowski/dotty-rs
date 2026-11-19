@@ -22,7 +22,7 @@ pub enum SignatureCompletion {
 impl SourceTyper<'_> {
     /// Attempts the same declaration completion as [`Self::complete_symbol`].
     ///
-    /// After rollback, a missing method signature or, during class header
+    /// After rollback, a missing method or public field signature or, during class header
     /// completion, a missing class header from another source can be returned
     /// as [`SignatureCompletion::BlockedOn`]. `in_batch` identifies declarations
     /// the caller can schedule in this session. Dependencies outside that set
@@ -68,24 +68,33 @@ impl SourceTyper<'_> {
             Ok(ty) => return Ok(SignatureCompletion::Complete(ty)),
             Err(error) => error,
         };
-        let (dependency, kind) = match error {
-            TyperError::MemberTypeUnavailable { symbol } => (symbol, SymbolKind::Method),
-            TyperError::NewClassInfoUnavailable { symbol: dependency }
-                if self.store.symbols.get(symbol).kind == SymbolKind::Class =>
-            {
-                (dependency, SymbolKind::Class)
-            }
+        let dependency = match error {
+            TyperError::MemberTypeUnavailable { symbol }
+            | TyperError::NewClassInfoUnavailable { symbol } => symbol,
             _ => return Err(error),
         };
-        if self.store.symbols.contains(dependency) {
-            let declaration = self.store.symbols.get(dependency);
-            if declaration.kind == kind
-                && matches!(declaration.origin, SymbolOrigin::Source(source) if source != self.source)
-                && matches!(declaration.info, SymbolInfo::Missing)
-                && in_batch(dependency)
-            {
-                return Ok(SignatureCompletion::BlockedOn(dependency));
+        if !self.store.symbols.contains(dependency) {
+            return Err(error);
+        }
+        let declaration = self.store.symbols.get(dependency);
+        let schedulable = match error {
+            TyperError::MemberTypeUnavailable { .. } => {
+                declaration.kind == SymbolKind::Method
+                    || (declaration.kind == SymbolKind::Field
+                        && declaration.visibility == Visibility::Public)
             }
+            TyperError::NewClassInfoUnavailable { .. } => {
+                self.store.symbols.get(symbol).kind == SymbolKind::Class
+                    && declaration.kind == SymbolKind::Class
+            }
+            _ => false,
+        };
+        if schedulable
+            && matches!(declaration.origin, SymbolOrigin::Source(source) if source != self.source)
+            && matches!(declaration.info, SymbolInfo::Missing)
+            && in_batch(dependency)
+        {
+            return Ok(SignatureCompletion::BlockedOn(dependency));
         }
         Err(error)
     }

@@ -1616,6 +1616,49 @@ mod tests {
     }
 
     #[test]
+    fn signature_attempt_blocks_on_an_in_batch_public_field_after_rollback() {
+        let (caller, mut store, mut packages, defs, index, source) =
+            parse_and_name("class Caller { def read(p: Provider) = p.seed }");
+        let provider_source = SourceId::from_index(12);
+        let (provider, provider_index) = parse_and_name_unit(
+            "class Provider { val seed = 40 }",
+            provider_source,
+            &mut store,
+            &mut packages,
+        );
+        let (read, rhs) = method_definition_and_rhs(&caller, &store, &index, source, "read");
+        let (seed, _) = val_symbol(&provider, &store, &provider_index, provider_source, "seed");
+        let owner = store.symbols.owner(seed).unwrap();
+        SourceTyper::new(
+            &provider.ast,
+            provider_source,
+            &provider_index,
+            &mut store,
+            defs,
+            &packages,
+        )
+        .complete_symbol(owner)
+        .unwrap();
+        let checkpoint = store.checkpoint();
+        let mut typer = SourceTyper::new(&caller.ast, source, &index, &mut store, defs, &packages);
+        let arena = typer.typed_ast().checkpoint();
+        assert!(matches!(typer.try_complete_signature(read, |_| false),
+            Err(TyperError::MemberTypeUnavailable { symbol }) if symbol == seed));
+        assert_eq!(
+            typer
+                .try_complete_signature(read, |dep| dep == seed)
+                .unwrap(),
+            SignatureCompletion::BlockedOn(seed)
+        );
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert_eq!(typer.typed_ast().checkpoint(), arena);
+        assert_eq!(typer.source_typed_index().get(source, rhs), None);
+        for symbol in [read, seed] {
+            assert_eq!(typer.store().symbols.info(symbol), &SymbolInfo::Missing);
+        }
+    }
+
+    #[test]
     fn signature_attempt_retries_a_class_header_after_its_foreign_parent_is_complete() {
         let (derived_unit, mut store, mut packages, defs, child_index, child_source) =
             parse_and_name("class Derived(start: Int) extends Base(start)");
