@@ -37,6 +37,7 @@ of the binary evidence. Run them with `JAVA_HOME`, `SCALA39_ROOT` and
 
 | Increment | Supported behavior | Regression control |
 | --- | --- | --- |
+| Ordinary class context bounds | For `class Box[A: TC]`, `summon[TC[A]]` in a member resolves to the class's private witness. The primary constructor takes a separately bound `TC[A]` parameter. | With `leaf: TC[Int]` in scope, `new Box[Int]` types as `new Box[Int](leaf)()`. Missing and ambiguous evidence fail at the constructor selection. The Rust tests and pinned Scala controls use the same three sources. |
 | Parameterized structural givens | A factory, its implementation class and its constructor have separately owned binders. The factory result retains the implementation type. | A client imports `Builders.given`, infers `boxes[Int]` and supplies its own leaf. Explicit selection of `.tag` works from source and from a Scala-generated TASTy/class-file pair. Type-only and contextual-only factories preserve their respective clauses. |
 | Contextual defaults | A missing argument can invoke the indexed default getter of a source method, a source conditional provider, or a method loaded from Scala TASTy. The getter receives the original receiver and earlier clauses. | Tests check the getter's parameter identity, supplied evidence, rejection of ambiguity, rejection of an ill-typed default, and single evaluation of effectful operands. |
 | Recursive by-name evidence | A successful recursive search across a by-name parameter creates a shared dictionary. Its synthetic definitions and references have canonical identities. | Two recursive dependencies refer to the same field. The strict variant diverges. Discarding a failed candidate rolls back its dictionary and symbols. |
@@ -1747,7 +1748,7 @@ are ready:
 - expected-type-driven constructor inference, selecting constructor overloads, and
   anonymous-class lowering;
 - enum semantics, case-class synthetic APIs, and `derives`;
-- context-bound witnesses on constructors and polymorphic function literals;
+- context-bound witnesses on traits, case classes, enums and polymorphic function literals;
 - default imports and general standard-library member lookup;
 - ordinary and bounded contextual source function types are projected as
   canonical applied function-class types (#827 below). Refined types, type
