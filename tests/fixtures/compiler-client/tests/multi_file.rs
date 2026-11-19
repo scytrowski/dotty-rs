@@ -189,13 +189,25 @@ struct TypedHeaders {
     by_class: HashMap<SymbolId, std::sync::Arc<SourceTypedIndex>>,
 }
 
+#[derive(Debug)]
+enum SignatureError {
+    Typing(TyperError),
+    HeaderCycle(Vec<SymbolId>),
+}
+
+impl From<TyperError> for SignatureError {
+    fn from(error: TyperError) -> Self {
+        Self::Typing(error)
+    }
+}
+
 fn complete_headers(
     units: &[NamedUnit],
     store: &mut SemanticStore,
     definitions: Definitions,
     packages: &Packages,
     observe: &mut impl FnMut(SymbolId, SignatureCompletion),
-) -> Result<TypedHeaders, TyperError> {
+) -> Result<TypedHeaders, SignatureError> {
     // Parent applications need the declaring file's constructor signature.
     for unit in units {
         let mut typer = unit.typer(store, definitions, packages);
@@ -203,19 +215,20 @@ fn complete_headers(
             typer.complete_symbol(class.constructor)?;
         }
     }
-    let in_batch: HashSet<_> = named_classes(units)
-        .map(|(_, class)| class.symbol)
+    let owners: HashMap<_, _> = named_classes(units)
+        .map(|(unit, class)| (class.symbol, unit))
         .collect();
     let mut headers = TypedHeaders::default();
-    let mut pending: Vec<_> = units
-        .iter()
-        .map(|unit| (unit, unit.classes.iter().collect::<Vec<_>>()))
-        .collect();
-    while !pending.is_empty() {
-        let mut next = Vec::new();
-        let mut progress = false;
-        let mut blocked = None;
-        for (unit, classes) in pending {
+    let mut path = Vec::new();
+    let mut active = HashMap::new();
+    for (_, root) in named_classes(units) {
+        if matches!(store.symbols.info(root.symbol), SymbolInfo::Complete(_)) {
+            continue;
+        }
+        path.push(root.symbol);
+        active.insert(root.symbol, 0);
+        while let Some(&symbol) = path.last() {
+            let unit = owners[&symbol];
             let mut typer = SourceTyper::new_with_typed_ast(
                 &unit.ast,
                 unit.source,
@@ -225,40 +238,39 @@ fn complete_headers(
                 packages,
                 headers.arena,
             );
-            let mut retry = Vec::new();
-            for class in classes {
-                let completion =
-                    typer.try_complete_signature(class.symbol, |dep| in_batch.contains(&dep))?;
-                observe(class.symbol, completion);
-                match completion {
-                    SignatureCompletion::Complete(_) => progress = true,
-                    SignatureCompletion::BlockedOn(dependency) => {
-                        blocked = Some(dependency);
-                        retry.push(class);
-                    }
-                }
-            }
+            let completion =
+                typer.try_complete_signature(symbol, |dep| owners.contains_key(&dep))?;
+            observe(symbol, completion);
             let (arena, index) = typer.into_typed_ast_and_index();
             headers.arena = arena;
-            if !index.is_empty() {
-                let index = std::sync::Arc::new(index);
-                for class in &unit.classes {
-                    if class
-                        .parent_application
-                        .is_some_and(|tree| index.get(unit.source, tree).is_some())
-                    {
-                        headers.by_class.insert(class.symbol, index.clone());
+            match completion {
+                SignatureCompletion::Complete(_) => {
+                    path.pop();
+                    active.remove(&symbol);
+                    // Completing one header can also type a parent in the same file.
+                    if !index.is_empty() {
+                        let index = std::sync::Arc::new(index);
+                        for class in &unit.classes {
+                            if class
+                                .parent_application
+                                .is_some_and(|tree| index.get(unit.source, tree).is_some())
+                            {
+                                headers.by_class.insert(class.symbol, index.clone());
+                            }
+                        }
                     }
                 }
-            }
-            if !retry.is_empty() {
-                next.push((unit, retry));
+                SignatureCompletion::BlockedOn(parent) => {
+                    if let Some(&start) = active.get(&parent) {
+                        let mut cycle = path[start..].to_vec();
+                        cycle.push(parent);
+                        return Err(SignatureError::HeaderCycle(cycle));
+                    }
+                    active.insert(parent, path.len());
+                    path.push(parent);
+                }
             }
         }
-        if !progress && let Some(symbol) = blocked {
-            return Err(TyperError::NewClassInfoUnavailable { symbol });
-        }
-        pending = next;
     }
     for unit in units {
         let mut typer = unit.typer(store, definitions, packages);
@@ -281,7 +293,7 @@ fn complete_signatures(
     store: &mut SemanticStore,
     definitions: Definitions,
     packages: &Packages,
-) -> Result<TypedHeaders, TyperError> {
+) -> Result<TypedHeaders, SignatureError> {
     complete_signatures_in_order(units, units, store, definitions, packages, |_, _| {})
 }
 
@@ -292,7 +304,7 @@ fn complete_signatures_in_order<'a>(
     definitions: Definitions,
     packages: &Packages,
     observe: impl FnMut(SymbolId, SignatureCompletion),
-) -> Result<TypedHeaders, TyperError> {
+) -> Result<TypedHeaders, SignatureError> {
     complete_methods_in_order(
         units,
         roots.into_iter().flat_map(NamedUnit::method_symbols),
@@ -310,7 +322,7 @@ fn complete_methods_in_order(
     definitions: Definitions,
     packages: &Packages,
     mut observe: impl FnMut(SymbolId, SignatureCompletion),
-) -> Result<TypedHeaders, TyperError> {
+) -> Result<TypedHeaders, SignatureError> {
     let headers = complete_headers(units, store, definitions, packages, &mut observe)?;
     let owners: HashMap<_, _> = units
         .iter()
@@ -338,7 +350,8 @@ fn complete_methods_in_order(
                     if !active.insert(dependency) {
                         return Err(TyperError::RecursiveInferredMethodResult {
                             symbol: dependency,
-                        });
+                        }
+                        .into());
                     }
                     pending.push(dependency);
                 }
@@ -526,7 +539,7 @@ fn emit_batch(
     })
 }
 
-fn compile(files: [(SourceId, &str, &str); 2]) -> Vec<GeneratedClass> {
+fn compile<const N: usize>(files: [(SourceId, &str, &str); N]) -> Vec<GeneratedClass> {
     with_plan(&files, |plan, definitions| {
         let prepared = plan.prepare_emission(definitions).unwrap();
         let (concurrent, _) = emit_batch(&prepared, &plan.classes, 2);
@@ -824,7 +837,7 @@ fn cross_file_bad_call_reports_arity_at_the_call_after_dependency_completion() {
     .unwrap_err();
     assert_eq!(dependencies, [(f, g)]);
     assert!(
-        matches!(err, TyperError::ApplicationArityMismatch { source, tree_index, expected: 0, actual: 1 }
+        matches!(err, SignatureError::Typing(TyperError::ApplicationArityMismatch { source, tree_index, expected: 0, actual: 1 })
         if source == caller.source && tree_index == call.index()),
         "{err:?}"
     );
@@ -865,7 +878,7 @@ fn cross_file_inference_cycle_reports_the_reentered_method_and_rolls_back() {
             )
             .unwrap_err();
             assert!(
-                matches!(error, TyperError::RecursiveInferredMethodResult { symbol } if symbol == units[first].method_symbol()),
+                matches!(error, SignatureError::Typing(TyperError::RecursiveInferredMethodResult { symbol }) if symbol == units[first].method_symbol()),
                 "{error:?}"
             );
             for unit in &units {

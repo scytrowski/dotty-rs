@@ -27,7 +27,7 @@ impl LearnedOrder {
         defs: Definitions,
         packages: &Packages,
         mut on_blocked: impl FnMut(),
-    ) -> Result<crate::TypedHeaders, TyperError> {
+    ) -> Result<crate::TypedHeaders, crate::SignatureError> {
         let by_method: HashMap<_, _> = units
             .iter()
             .zip(files)
@@ -170,7 +170,7 @@ fn failed_signature_pass_preserves_history_and_cycle_diagnostic() {
         .complete(&files, &units, &mut store, defs, &packages, || {})
         .unwrap_err();
     assert!(
-        matches!(error, TyperError::RecursiveInferredMethodResult {symbol} if symbol == units[1].method_symbol()),
+        matches!(error, crate::SignatureError::Typing(TyperError::RecursiveInferredMethodResult {symbol}) if symbol == units[1].method_symbol()),
         "{error:?}"
     );
     assert!(

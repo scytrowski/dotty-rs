@@ -525,6 +525,138 @@ class Derived(start: Int) extends Base(start)
 }
 
 #[test]
+fn header_chain_follows_dependencies_and_executes_in_both_file_orders() {
+    use dotty::typer::SignatureCompletion;
+
+    let base = (
+        SourceId::from_index(0),
+        "Base.scala",
+        "package demo\nclass Base(seed: Int):\n  private val initial: Int = seed\n  def read(): Int = initial",
+    );
+    let mid = (
+        SourceId::from_index(1),
+        "Mid.scala",
+        "package demo\nclass Mid(start: Int) extends Base(start)",
+    );
+    let leaf = (
+        SourceId::from_index(2),
+        "Leaf.scala",
+        "package demo\nclass Leaf(start: Int) extends Mid(start)",
+    );
+
+    for files in [[leaf, mid, base], [base, mid, leaf]] {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let units = name_units(
+            &files,
+            parsing::parse_files(&files, 2),
+            &mut store,
+            &mut packages,
+        );
+        let mut attempts = Vec::new();
+        super::complete_headers(
+            &units,
+            &mut store,
+            defs,
+            &packages,
+            &mut |symbol, outcome| {
+                let dependency = match outcome {
+                    SignatureCompletion::BlockedOn(parent) => Some(parent),
+                    SignatureCompletion::Complete(_) => None,
+                };
+                attempts.push((symbol, dependency));
+            },
+        )
+        .unwrap();
+        let first = units[0].classes[0].symbol;
+        let mid = units[1].classes[0].symbol;
+        let last = units[2].classes[0].symbol;
+        if files[0].0 == leaf.0 {
+            assert_eq!(
+                attempts,
+                [
+                    (first, Some(mid)),
+                    (mid, Some(last)),
+                    (last, None),
+                    (mid, None),
+                    (first, None)
+                ]
+            );
+        } else {
+            assert_eq!(attempts, [(first, None), (mid, None), (last, None)]);
+        }
+
+        let artifacts = super::compile(files);
+        assert_eq!(
+            super::run_java_client("header-chain", "HeaderChainClient", &artifacts)
+                .lines()
+                .collect::<Vec<_>>(),
+            ["40", "7"]
+        );
+    }
+}
+
+#[test]
+fn completing_a_child_preserves_its_same_file_parents_typed_application() {
+    let (mut store, defs, packages, unit) = named(
+        "class Leaf(x: Int) extends Mid(x)\nclass Mid(y: Int) extends Base(y)\nclass Base(z: Int)",
+    );
+    let headers =
+        complete_signatures(std::slice::from_ref(&unit), &mut store, defs, &packages).unwrap();
+    for class in &unit.classes[..2] {
+        let index = &headers.by_class[&class.symbol];
+        JvmClassPlanner::new(&store, &unit.ast, &unit.index)
+            .with_typed_header(&headers.arena, index)
+            .plan(class.symbol, [])
+            .unwrap();
+    }
+}
+
+#[test]
+fn header_cycle_reports_only_the_active_cycle_and_leaves_headers_incomplete() {
+    let leaf = (
+        SourceId::from_index(0),
+        "Leaf.scala",
+        "class Leaf(x: Int) extends A(x)",
+    );
+    let a = (
+        SourceId::from_index(1),
+        "A.scala",
+        "class A(x: Int) extends B(x)",
+    );
+    let b = (
+        SourceId::from_index(2),
+        "B.scala",
+        "class B(x: Int) extends A(x)",
+    );
+    for (files, cycle_start) in [([leaf, a, b], 1), ([b, a, leaf], 0)] {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let units = name_units(
+            &files,
+            parsing::parse_files(&files, 2),
+            &mut store,
+            &mut packages,
+        );
+        let error = complete_signatures(&units, &mut store, defs, &packages).unwrap_err();
+        let super::SignatureError::HeaderCycle(path) = error else {
+            panic!("expected a cycle, got {error:?}");
+        };
+        let first = units[cycle_start].classes[0].symbol;
+        let second = units[cycle_start + 1].classes[0].symbol;
+        assert_eq!(path, [first, second, first]);
+        for (_, class) in super::named_classes(&units) {
+            assert_eq!(
+                store.symbols.info(class.symbol),
+                &dotty::core::SymbolInfo::Missing
+            );
+        }
+    }
+}
+
+#[test]
 fn wrong_parent_argument_reports_the_same_error_in_both_file_orders() {
     use dotty::typer::{SignatureCompletion, TyperError};
 
@@ -565,9 +697,9 @@ fn wrong_parent_argument_reports_the_same_error_in_both_file_orders() {
             assert!(blocked.is_empty());
         }
         assert!(
-            matches!(error, TyperError::ApplicationArgumentTypeMismatch {
+            matches!(error, super::SignatureError::Typing(TyperError::ApplicationArgumentTypeMismatch {
             source, argument_index: 0, expected, ..
-        } if source == derived.0 && expected == defs.int),
+        }) if source == derived.0 && expected == defs.int),
             "{error:?}"
         );
         assert_eq!(

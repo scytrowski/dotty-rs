@@ -26,7 +26,7 @@ impl MethodHistory {
         defs: Definitions,
         packages: &Packages,
         mut blocked: impl FnMut(),
-    ) -> Result<crate::TypedHeaders, TyperError> {
+    ) -> Result<crate::TypedHeaders, crate::SignatureError> {
         let by_symbol: HashMap<_, _> = units
             .iter()
             .enumerate()
@@ -115,7 +115,7 @@ impl Strategy {
         defs: Definitions,
         packages: &Packages,
         mut blocked: impl FnMut(),
-    ) -> Result<crate::TypedHeaders, TyperError> {
+    ) -> Result<crate::TypedHeaders, crate::SignatureError> {
         match self {
             Self::Ordinary => {
                 complete_signatures_in_order(units, units, store, defs, packages, |_, outcome| {
@@ -270,7 +270,7 @@ fn introduced_cycle_reports_reentered_method_and_preserves_each_history() {
             .complete(&files, &units, &mut store, defs, &packages, || {})
             .unwrap_err();
         assert!(
-            matches!(err, TyperError::RecursiveInferredMethodResult { symbol } if symbol == units[expected].method_symbol()),
+            matches!(err, crate::SignatureError::Typing(TyperError::RecursiveInferredMethodResult { symbol }) if symbol == units[expected].method_symbol()),
             "{err:?}"
         );
         assert!(

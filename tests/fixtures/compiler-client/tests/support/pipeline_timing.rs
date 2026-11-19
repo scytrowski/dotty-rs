@@ -87,7 +87,7 @@ fn compile_with_signatures(
         &mut SemanticStore,
         Definitions,
         &Packages,
-    ) -> Result<crate::TypedHeaders, super::TyperError>,
+    ) -> Result<crate::TypedHeaders, super::SignatureError>,
 ) -> (Vec<GeneratedClass>, Timings) {
     let start = Instant::now();
     let mut store = SemanticStore::new();
