@@ -898,7 +898,14 @@ impl SourceTyper<'_> {
                     _ => None,
                 }
             };
-            let type_arguments = self.infer_poly_application_arguments(
+            let copy_defaults = self.copy_default_inference_types(
+                self.typed_arena.get(function).ty,
+                &poly,
+                arguments.len(),
+                tree_index,
+                info_journal,
+            )?;
+            let type_arguments = self.infer_poly_application_with_defaults(
                 PolyApplicationInference {
                     binder: callable,
                     poly: &poly,
@@ -907,6 +914,7 @@ impl SourceTyper<'_> {
                     tree_index,
                     unused_covariant_parameter,
                 },
+                copy_defaults.as_deref().unwrap_or_default(),
                 info_journal,
             )?;
             let instantiated =
@@ -967,6 +975,14 @@ impl SourceTyper<'_> {
                     },
                     error => error,
                 })?;
+            }
+            if copy_defaults.is_some() {
+                let mut b = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types);
+                let targs = type_arguments
+                    .iter()
+                    .map(|&ty| b.type_tree(ty, position))
+                    .collect();
+                function = b.type_apply(function, targs, instantiated.result, position);
             }
             callable = instantiated.result;
             typed_arguments = Some(arguments);

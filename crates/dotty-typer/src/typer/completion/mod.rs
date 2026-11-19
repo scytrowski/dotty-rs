@@ -3,6 +3,7 @@
 use super::*;
 
 mod case_class_apply;
+mod case_class_copy;
 mod constructors;
 mod declarations;
 mod default_getters;
@@ -164,7 +165,7 @@ impl SourceTyper<'_> {
         if source != self.source
             || method_source != source
             || self
-                .generated_case_class_for_apply(method, source, class_tree)
+                .generated_case_class_for_factory(method, source, class_tree)
                 .is_none()
             || self.index.derived_symbol_at(method, source, parameter_tree) != Some(symbol)
         {
@@ -347,13 +348,14 @@ impl SourceTyper<'_> {
                 None
             }
             (SymbolKind::Method, TreeKind::TypeDef(_))
-                if self.structural_given_class(symbol, tree).is_some() =>
+                if self.structural_given_class(symbol, tree).is_some()
+                    || self.copy_default_field(symbol).is_some() =>
             {
                 None
             }
             (SymbolKind::Method, TreeKind::TypeDef(_))
                 if self
-                    .generated_case_class_for_apply(symbol, source, tree)
+                    .generated_case_class_for_factory(symbol, source, tree)
                     .is_some() =>
             {
                 None
@@ -463,12 +465,27 @@ impl SourceTyper<'_> {
                     self.contextual_getter_source(symbol)
                 {
                     self.complete_contextual_getter(symbol, method, param, preceding, info_journal)?
+                } else if let Some((field, ctor)) = self.copy_default_field(symbol) {
+                    let parameters = self.type_parameter_specs(
+                        symbol,
+                        &ctor.type_params,
+                        true,
+                        info_journal,
+                        tree.index(),
+                        0,
+                    )?;
+                    let ty = self.complete_signature_parameter(field, info_journal)?;
+                    self.bind_method_clauses(
+                        vec![MethodClauseSpec::Types(parameters)],
+                        ty,
+                        tree.index(),
+                    )?
                 } else if let Some(class) = self.structural_given_class(symbol, tree) {
                     self.complete_structural_given_factory(symbol, class, tree, info_journal)?
                 } else if let Some(class) =
-                    self.generated_case_class_for_apply(symbol, source, tree)
+                    self.generated_case_class_for_factory(symbol, source, tree)
                 {
-                    self.complete_generated_case_class_apply_signature(
+                    self.complete_generated_case_class_factory_signature(
                         symbol,
                         class,
                         source,

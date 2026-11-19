@@ -995,6 +995,52 @@ fn case_class_bound_enters_separate_witnesses_and_compares_effective_companion_c
     }
 }
 
+#[test]
+fn case_class_copy_indexes_only_the_ordinary_defaults_on_the_instance() {
+    let named = named_source("case class Pair[A: TC as tc](left: A, right: A)", 404);
+    let parts = primary_constructor_parts(&named);
+    let class = named
+        .index
+        .symbol_at(named.source, parts.class_tree)
+        .unwrap();
+    let copy = named
+        .index
+        .generated_case_class_method(class, GeneratedCaseClassMethodRole::Copy)
+        .unwrap();
+    assert_eq!(named.store.symbols.owner(copy), Some(class));
+    let scope = named.store.scopes.get(named.index.scope_of(class).unwrap());
+    assert_eq!(
+        scope.lookup_all(&named.store.symbols.get(copy).name),
+        &[copy]
+    );
+    for (ordinal, param) in parts.value_param_clauses[0].iter().enumerate() {
+        let getter = named.store.default_getter(copy, ordinal).unwrap();
+        assert_eq!(
+            named.index.generated_case_class_method(
+                class,
+                GeneratedCaseClassMethodRole::CopyDefault(ordinal)
+            ),
+            Some(getter)
+        );
+        assert_eq!(
+            named.store.default_getter_origin(getter),
+            Some((copy, ordinal))
+        );
+        assert_eq!(named.store.symbols.owner(getter), Some(class));
+        assert!(
+            scope
+                .lookup_all(&named.store.symbols.get(getter).name)
+                .is_empty()
+        );
+        let copy_param = named
+            .index
+            .derived_symbol_at(copy, named.source, *param)
+            .unwrap();
+        assert_eq!(named.store.symbols.owner(copy_param), Some(copy));
+    }
+    assert_eq!(named.store.default_getter(copy, 2), None);
+}
+
 struct VecTokenSource {
     tokens: Vec<Token>,
     index: usize,

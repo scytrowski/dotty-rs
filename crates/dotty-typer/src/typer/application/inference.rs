@@ -249,6 +249,15 @@ impl SourceTyper<'_> {
         request: PolyApplicationInference<'_>,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Vec<TypeId>, TyperError> {
+        self.infer_poly_application_with_defaults(request, &[], info_journal)
+    }
+
+    pub(in crate::typer) fn infer_poly_application_with_defaults(
+        &mut self,
+        request: PolyApplicationInference<'_>,
+        defaults: &[TypeId],
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Vec<TypeId>, TyperError> {
         let PolyApplicationInference {
             binder,
             poly,
@@ -264,7 +273,7 @@ impl SourceTyper<'_> {
                 binder,
             });
         };
-        if method.params.len() != arguments.len() {
+        if method.params.len() != arguments.len() + defaults.len() {
             return Err(TyperError::ApplicationArityMismatch {
                 source: self.source,
                 tree_index,
@@ -291,12 +300,20 @@ impl SourceTyper<'_> {
         }
 
         let mut inferred = vec![None; poly.params.len()];
-        for (argument_index, (parameter, argument)) in
-            method.params.iter().zip(arguments).enumerate()
+        for (argument_index, (parameter, argument)) in method
+            .params
+            .iter()
+            .zip(
+                arguments
+                    .iter()
+                    .map(|a| a.widened_type)
+                    .chain(defaults.iter().copied()),
+            )
+            .enumerate()
         {
             self.infer_type_constraints(
                 parameter.ty,
-                argument.widened_type,
+                argument,
                 binder,
                 &mut inferred,
                 InferenceLocation {

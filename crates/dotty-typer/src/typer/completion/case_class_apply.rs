@@ -13,16 +13,38 @@ impl SourceTyper<'_> {
         if !self.store.symbols.contains(method) {
             return Err(TyperError::UnknownSymbol { symbol: method });
         }
-        if let Some(&body) = self.generated_apply_bodies.get(&method) {
+        if !matches!(self.index.generated_case_class_method_identity(method), Some(id) if id.role == dotty_core::GeneratedCaseClassMethodRole::Apply)
+        {
+            return Err(TyperError::SourceProvenanceMissing { symbol: method });
+        }
+        self.type_generated_factory_body(method)
+    }
+
+    /// Types the generated `copy` constructor call with the copy method's own parameters.
+    pub fn type_generated_case_class_copy_body(
+        &mut self,
+        method: SymbolId,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        if self.generated_case_class_for_copy(method).is_none() {
+            return Err(TyperError::SourceProvenanceMissing { symbol: method });
+        }
+        self.type_generated_factory_body(method)
+    }
+
+    fn type_generated_factory_body(
+        &mut self,
+        method: SymbolId,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        if let Some(&body) = self.generated_factory_bodies.get(&method) {
             return Ok(body);
         }
         let body =
-            self.run_atomic(|typer, journal| typer.build_case_class_apply_body(method, journal))?;
-        self.generated_apply_bodies.insert(method, body);
+            self.run_atomic(|typer, journal| typer.build_case_class_factory_body(method, journal))?;
+        self.generated_factory_bodies.insert(method, body);
         Ok(body)
     }
 
-    fn build_case_class_apply_body(
+    fn build_case_class_factory_body(
         &mut self,
         method: SymbolId,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
@@ -33,7 +55,7 @@ impl SourceTyper<'_> {
             return Err(provenance());
         };
         let class = self
-            .generated_case_class_for_apply(method, source, tree)
+            .generated_case_class_for_factory(method, source, tree)
             .ok_or_else(provenance)?;
         let TreeKind::TypeDef(class_def) = &self.arena.get(tree).kind else {
             return Err(provenance());

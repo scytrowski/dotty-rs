@@ -22,27 +22,10 @@ impl SourceTyper<'_> {
         };
         let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
             .type_tree(ty, source_node.position);
-        self.record_new_child(source_tree, typed, new_mappings)?;
+        self.record_typed_child(source_tree, typed, new_mappings)?;
         Ok(typed)
     }
 
-    fn record_new_child(
-        &mut self,
-        source_tree: TreeId<Untyped>,
-        typed: TreeId<Typed>,
-        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
-    ) -> Result<(), TyperError> {
-        self.typed_index
-            .insert(self.source, source_tree, typed)
-            .map_err(|error| TyperError::ConflictingTypedExpression {
-                source: error.source,
-                tree_index: error.untyped.index(),
-                existing: error.existing.index(),
-                attempted: error.attempted.index(),
-            })?;
-        new_mappings.push((self.source, source_tree));
-        Ok(())
-    }
     pub(in crate::typer) fn type_new_expression(
         &mut self,
         tree: TreeId<Untyped>,
@@ -110,8 +93,8 @@ impl SourceTyper<'_> {
             );
             self.typed_arena.get_mut(trees.template).position = self.arena.get(new.tpt).position;
             self.typed_arena.get_mut(trees.constructor).position = self.arena.get(ctor).position;
-            self.record_new_child(new.tpt, trees.template, new_mappings)?;
-            self.record_new_child(ctor, trees.constructor, new_mappings)?;
+            self.record_typed_child(new.tpt, trees.template, new_mappings)?;
+            self.record_typed_child(ctor, trees.constructor, new_mappings)?;
             let mut builder = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types);
             let widened = builder.typed_expr(trees.instance, typed_parent, parent_ty, position);
             return Ok(builder.block(vec![trees.definition], widened, parent_ty, position));

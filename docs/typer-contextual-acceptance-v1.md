@@ -52,7 +52,10 @@ the class and the caller's witness passed to `new Box[Int]`. Two negative
 controls check missing and ambiguous constructor evidence on the same source
 in each compiler. Three corresponding case-class controls check inference at
 `Box(1)`, forwarding from the generated companion `apply` to the primary
-constructor, and the two evidence errors at the factory call.
+constructor, and the two evidence errors at the factory call. Three copy
+controls compare the receiver’s default field, the new witness passed from
+the caller through `copy` to the constructor, and the missing and ambiguous
+evidence diagnostics at `box.copy()`.
 
 The existing contextual argument and consumer fixtures provide additional
 controls for structural givens, dependent argument paths, contextual defaults,

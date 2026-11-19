@@ -194,6 +194,44 @@ impl SourceTyper<'_> {
         .then_some(class)
     }
 
+    pub(in crate::typer) fn generated_case_class_for_copy(
+        &self,
+        method: SymbolId,
+    ) -> Option<SymbolId> {
+        let identity = self.index.generated_case_class_method_identity(method)?;
+        let class = identity.class;
+        let entry = self.store.symbols.get(method);
+        let SourceDefinition::Derived { source, tree } = self.index.definition_of(method)? else {
+            return None;
+        };
+        (source == self.source
+            && self.index.symbol_at(source, tree) == Some(class)
+            && self.index.derived_symbol_at(class, source, tree) == Some(method)
+            && self.store.symbols.get(class).kind == SymbolKind::Class
+            && identity.role == dotty_core::GeneratedCaseClassMethodRole::Copy
+            && entry.owner == Some(class)
+            && entry.kind == SymbolKind::Method
+            && entry.flags.contains(SymbolFlags::SYNTHETIC)
+            && entry.origin == SymbolOrigin::Source(self.source)
+            && self
+                .store
+                .symbols
+                .get(class)
+                .flags
+                .contains(SymbolFlags::CASE))
+        .then_some(class)
+    }
+
+    pub(in crate::typer) fn generated_case_class_for_factory(
+        &self,
+        method: SymbolId,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+    ) -> Option<SymbolId> {
+        self.generated_case_class_for_copy(method)
+            .or_else(|| self.generated_case_class_for_apply(method, source, tree))
+    }
+
     pub(in crate::typer) fn generated_case_class_for_apply(
         &self,
         method: SymbolId,
@@ -710,7 +748,7 @@ impl SourceTyper<'_> {
         }
     }
 
-    pub(super) fn complete_generated_case_class_apply_signature(
+    pub(super) fn complete_generated_case_class_factory_signature(
         &mut self,
         method: SymbolId,
         class: SymbolId,

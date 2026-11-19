@@ -760,6 +760,38 @@ impl SourceTyper<'_> {
                         return Ok(None);
                     }
                     if members.len() == 1 && !had_inaccessible_member {
+                        // Default replay binds a non-stable receiver before selecting
+                        // the copy getter(s). Keep the original polymorphic signature
+                        // until their result types participate in inference.
+                        if argument_trees.is_empty()
+                            && application_kind == ApplyKind::Regular
+                            && self
+                                .generated_case_class_for_copy(members[0].symbol)
+                                .is_some()
+                        {
+                            let callable =
+                                self.member_type_on_journaled(&members[0], info_journal)?;
+                            let reference = self
+                                .store
+                                .types
+                                .alloc(Type::term_ref(receiver_type, members[0].symbol));
+                            let typed =
+                                TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                                    .select(
+                                        qualifier,
+                                        selection.name,
+                                        selection.backquoted,
+                                        reference,
+                                        function_node.position,
+                                    );
+                            self.record_typed_child(function_tree, typed, new_mappings)?;
+                            return Ok(Some(ResolvedApplicationFunction {
+                                typed,
+                                callable,
+                                arguments: vec![],
+                                argument_trees: None,
+                            }));
+                        }
                         // Only a call to one already-applicable method may read
                         // a mutable local receiver; selecting a member as a value
                         // still requires the ordinary stable-prefix check.
@@ -1081,15 +1113,7 @@ impl SourceTyper<'_> {
                 )
             }
         };
-        self.typed_index
-            .insert(self.source, function_tree, function_type)
-            .map_err(|error| TyperError::ConflictingTypedExpression {
-                source: error.source,
-                tree_index: error.untyped.index(),
-                existing: error.existing.index(),
-                attempted: error.attempted.index(),
-            })?;
-        new_mappings.push((self.source, function_tree));
+        self.record_typed_child(function_tree, function_type, new_mappings)?;
         Ok(Some(ResolvedApplicationFunction {
             typed: function_type,
             callable: winner.callable,

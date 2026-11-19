@@ -1828,6 +1828,26 @@ impl Namer<'_> {
             // A public case accessor cannot expose a path through the private witness.
             synthesize_apply = false;
         }
+        if has_witnesses
+            && synthesize_apply
+            && !template.body.iter().chain(leading_clause).any(|&member| {
+                let name = match &self.arena.get(member).kind {
+                    TreeKind::DefDef(def) => def.name,
+                    TreeKind::ValDef(def) => def.name,
+                    TreeKind::PhaseSpecific(UntypedNode::ModuleDef(def)) => def.name,
+                    _ => return false,
+                };
+                self.store.names.resolve(name.as_name().text()) == "copy"
+            })
+        {
+            self.enter_case_class_copy(
+                tree,
+                class_symbol,
+                declaration_context,
+                constructor,
+                &class_clauses,
+            )?;
+        }
         let product_shape_supported = synthesize_apply && !has_witnesses;
         let explicit_apply_comparison = if (top_level || has_witnesses) && synthesize_apply {
             self.explicit_companion_apply_collides(
@@ -2427,6 +2447,83 @@ impl Namer<'_> {
             clauses.iter().flatten().copied(),
             Some(self.context_bound_flag(constructor)),
         )
+    }
+
+    fn enter_case_class_copy(
+        &mut self,
+        tree: TreeId<Untyped>,
+        class: SymbolId,
+        declaration_context: SourceContextId,
+        constructor: &dotty_core::ast::DefDef<Untyped>,
+        clauses: &[Vec<TreeId<Untyped>>],
+    ) -> Result<(), NamerError> {
+        let scope = self
+            .index
+            .scope_of(class)
+            .ok_or(NamerError::MalformedAstShape {
+                tree_index: tree.index(),
+                expected: "case class declaration scope",
+            })?;
+        let context = self.child_source_context(class, scope, Some(declaration_context));
+        let spec = SymbolSpec {
+            kind: SymbolKind::Method,
+            flags: SymbolFlags::SYNTHETIC,
+            visibility: Visibility::Public,
+        };
+        let name = *dotty_core::TermName::new(self.store.names.intern("copy")).as_name();
+        let copy = self.enter_derived_symbol(tree, name, class, scope, spec)?;
+        self.index.record_generated_case_class_method(
+            class,
+            GeneratedCaseClassMethodRole::Copy,
+            self.source,
+            tree,
+            copy,
+        )?;
+        self.enter_derived_method_parameters(
+            copy,
+            context,
+            &constructor.type_params,
+            clauses.iter().flatten().copied(),
+            Some(self.context_bound_flag(constructor)),
+        )?;
+        for (ordinal, &param) in constructor.value_param_clauses[0].iter().enumerate() {
+            let name = *dotty_core::TermName::new(
+                self.store
+                    .names
+                    .intern(&format!("copy$default${}", ordinal + 1)),
+            )
+            .as_name();
+            // Generated default getters are selectable by compiler identity only.
+            let getter = self.allocate_source_symbol(tree, name, class, spec);
+            self.index.record_generated_case_class_method(
+                class,
+                GeneratedCaseClassMethodRole::CopyDefault(ordinal),
+                self.source,
+                tree,
+                getter,
+            )?;
+            self.enter_derived_method_parameters(
+                getter,
+                context,
+                &constructor.type_params,
+                std::iter::empty(),
+                None,
+            )?;
+            let parameter = self
+                .index
+                .derived_symbol_at(copy, self.source, param)
+                .ok_or(NamerError::MalformedAstShape {
+                    tree_index: param.index(),
+                    expected: "copy parameter",
+                })?;
+            self.store
+                .record_default_getter(copy, ordinal, parameter, getter)
+                .map_err(|_| NamerError::MalformedAstShape {
+                    tree_index: param.index(),
+                    expected: "unique copy default getter",
+                })?;
+        }
+        Ok(())
     }
 
     fn enter_derived_method_parameters(

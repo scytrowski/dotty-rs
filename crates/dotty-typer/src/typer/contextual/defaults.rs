@@ -156,6 +156,13 @@ impl SourceTyper<'_> {
         clause: usize,
         ordinal: usize,
     ) -> Option<SymbolId> {
+        if self.generated_case_class_for_copy(method).is_some() {
+            return if clause == 0 {
+                self.store.default_getter(method, ordinal)
+            } else {
+                None
+            };
+        }
         let SourceDefinition::Canonical {
             source,
             tree: def_tree,
@@ -376,7 +383,7 @@ impl SourceTyper<'_> {
                 }
             }
         }
-        if binary {
+        if binary || self.copy_default_field(call.getter).is_some() {
             // A parameterless binary getter has ExprType and is selected without ().
             if let Some(Type::ByName { result }) = self.store.types.try_get(signature) {
                 signature = *result;

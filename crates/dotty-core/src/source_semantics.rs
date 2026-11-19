@@ -90,7 +90,7 @@ pub enum SourceDefinition {
     },
 }
 
-/// Generated case-class companion method that carries canonical class provenance.
+/// Generated case-class method that carries canonical class provenance.
 ///
 /// The role index is separate from [`SourceSemanticIndex::derived_symbol_at`]
 /// so multiple generated methods can point at the same source class tree
@@ -101,9 +101,13 @@ pub enum GeneratedCaseClassMethodRole {
     Apply,
     /// The synthetic companion extractor method.
     Unapply,
+    /// The instance method that constructs a copy.
+    Copy,
+    /// A copy default getter for the zero-based case parameter.
+    CopyDefault(usize),
 }
 
-/// Reverse provenance for a generated case-class companion method.
+/// Reverse provenance for a generated case-class method.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GeneratedCaseClassMethod {
     /// Canonical source case-class symbol.

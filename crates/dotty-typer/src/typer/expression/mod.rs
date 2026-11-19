@@ -23,6 +23,24 @@ pub(super) use function::{FunctionLiteralIndex, FunctionLiteralTypingContext};
 pub(in crate::typer) use references::SelectedMemberRequest;
 
 impl SourceTyper<'_> {
+    pub(in crate::typer) fn record_typed_child(
+        &mut self,
+        source_tree: TreeId<Untyped>,
+        typed: TreeId<Typed>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<(), TyperError> {
+        self.typed_index
+            .insert(self.source, source_tree, typed)
+            .map_err(|error| TyperError::ConflictingTypedExpression {
+                source: error.source,
+                tree_index: error.untyped.index(),
+                existing: error.existing.index(),
+                attempted: error.attempted.index(),
+            })?;
+        new_mappings.push((self.source, source_tree));
+        Ok(())
+    }
+
     /// Returns the canonical widened type for supported constants.
     pub(in crate::typer) fn constant_underlying_type(
         &mut self,
@@ -943,24 +961,34 @@ impl SourceTyper<'_> {
                     let receiver =
                         self.widen_expression_type_journaled(prefix, info_journal, depth + 1)?;
                     let receiver = self.this_type_receiver_view(receiver)?;
-                    let name = self.store.symbols.get(symbol).name;
+                    // Hidden copy getters use the declaring-class view of their copy method.
+                    let lookup_symbol = self
+                        .store
+                        .default_getter_origin(symbol)
+                        .filter(|(method, _)| self.generated_case_class_for_copy(*method).is_some())
+                        .map_or(symbol, |(method, _)| method);
+                    let name = self.store.symbols.get(lookup_symbol).name;
                     let candidates = self
                         .lookup_members_journaled(receiver, name, info_journal)
                         .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
                     let candidate = match candidates
                         .into_iter()
-                        .find(|candidate| candidate.symbol == symbol)
+                        .find(|candidate| candidate.symbol == lookup_symbol)
                     {
                         Some(candidate) => candidate,
                         None => self
                             .lookup_overload_members_journaled(receiver, name, info_journal)
                             .map_err(|error| TyperError::MemberLookup(Box::new(error)))?
                             .into_iter()
-                            .find(|candidate| candidate.symbol == symbol)
+                            .find(|candidate| candidate.symbol == lookup_symbol)
                             .ok_or(TyperError::TermReferencePrefixMismatch {
                                 symbol,
                                 prefix: receiver,
                             })?,
+                    };
+                    let candidate = crate::MemberCandidate {
+                        symbol,
+                        ..candidate
                     };
                     let member_type = self.member_type_on_journaled(&candidate, info_journal)?;
                     let member_type =

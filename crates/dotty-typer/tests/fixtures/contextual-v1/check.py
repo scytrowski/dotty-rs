@@ -17,6 +17,8 @@ CLASS_BOUND_CONTROLS = (
     "typer::tests::contextual_arguments::ordinary_class_bound_reports_missing_and_ambiguous_evidence_at_new",
     "typer::tests::contextual_arguments::case_class_bound_infers_int_and_passes_the_callers_witness_to_apply",
     "typer::tests::contextual_arguments::case_class_bound_reports_missing_and_ambiguous_evidence_at_apply",
+    "typer::tests::contextual_arguments::case_class_copy_defaults_the_field_and_forwards_the_call_site_witness",
+    "typer::tests::contextual_arguments::case_class_copy_reports_missing_and_ambiguous_call_site_evidence",
 )
 
 
@@ -55,6 +57,16 @@ def check_compiler(tc, path, expected_exit, needles, out):
 
 def check_controls(tc, checkout):
     controls = [
+        ("CaseClassCopy.scala", 0, [
+            "def copy[A](value: A)(using evidence$1: TC[A]): Box[A] = new Box[A](value)(using evidence$1)",
+            "def copy$default$1[A]: A = Box.this.value",
+            "Box.apply[Int](1)(using initial)",
+            "box.copy[Int](box.copy$default$1[Int])(current)",
+        ]),
+        ("CaseClassCopyMissing.scala", 1, ["[E172]", "No given instance of type TC[Int] was found "
+          "for a context parameter of method copy in class Box", "1 error found"]),
+        ("CaseClassCopyAmbiguous.scala", 1, ["[E172]", "both parameter second and parameter first "
+          "match type TC[Int] of a context parameter of method copy in class Box", "1 error found"]),
         ("CaseClassBound.scala", 0, [
             "def apply[A](value: A)(using evidence$1: TC[A]): Box[A] = new Box[A](value)(using evidence$1)",
             "def evidence: TC[Box.this.A] = Box.this.evidence$1",
@@ -152,7 +164,7 @@ def main():
     statuses = rust_observations(tc, rows)
     for name, (source, _, _) in rows.items():
         print(f"{statuses[name]:10} {name.rsplit('::', 1)[1]:32} {source}")
-    print("3 ordinary-class and 3 case-class context-bound controls matched")
+    print("3 ordinary-class, 3 case-class apply and 3 case-class copy controls matched")
     open_rows = sum(s in {"typer-gap", "blocked"} for s in statuses.values())
     print(f"{len(rows)} observations verified; {open_rows} open for v1")
     return int(args.require_parity and open_rows > 0)

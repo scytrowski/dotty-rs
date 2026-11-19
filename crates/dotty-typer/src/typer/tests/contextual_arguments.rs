@@ -2706,3 +2706,274 @@ fn case_class_apply_forwards_each_named_witness_in_declaration_order() {
         );
     }
 }
+
+#[test]
+fn case_class_copy_defaults_the_field_and_forwards_the_call_site_witness() {
+    let text = include_str!("../../../tests/fixtures/contextual-v1/controls/CaseClassCopy.scala");
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let class = class_symbol(&parsed, &store, &index, source, "Box");
+    let copy = index
+        .generated_case_class_method(class, dotty_core::GeneratedCaseClassMethodRole::Copy)
+        .unwrap();
+    let getter = store.default_getter(copy, 0).unwrap();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    let (original, rhs) =
+        method_definition_and_rhs(&parsed, typer.store(), &index, source, "original");
+    typer
+        .type_method_definition(definition_tree(&index, original))
+        .unwrap();
+    let TreeKind::Apply(created) = &typer
+        .typed_ast()
+        .get(typer.typed_index.get(source, rhs).unwrap())
+        .kind
+    else {
+        panic!("factory evidence")
+    };
+    let initial = method_parameter_symbol(&parsed, &index, source, original, 0);
+    assert_eq!(reference(&typer, created.args[0]), initial);
+
+    let (duplicate, rhs) =
+        method_definition_and_rhs(&parsed, typer.store(), &index, source, "duplicate");
+    let def_tree = definition_tree(&index, duplicate);
+    let TreeKind::DefDef(def) = &parsed.ast.get(def_tree).kind else {
+        panic!()
+    };
+    let current = index
+        .symbol_at(source, def.value_param_clauses[1][0])
+        .unwrap();
+    typer.type_method_definition(def_tree).unwrap();
+    let TreeKind::Apply(evidence) = &typer
+        .typed_ast()
+        .get(typer.typed_index.get(source, rhs).unwrap())
+        .kind
+    else {
+        panic!("copy evidence")
+    };
+    assert_eq!(reference(&typer, evidence.args[0]), current);
+    assert_ne!(current, initial);
+    let TreeKind::Apply(values) = &typer.typed_ast().get(evidence.function).kind else {
+        panic!("copy values")
+    };
+    let TreeKind::TypeApply(target) = &typer.typed_ast().get(values.function).kind else {
+        panic!("inferred copy argument")
+    };
+    let TreeKind::TypeApply(default) = &typer.typed_ast().get(values.args[0]).kind else {
+        panic!("polymorphic default getter")
+    };
+    assert_eq!(reference(&typer, target.function), copy);
+    assert_eq!(reference(&typer, default.function), getter);
+    assert_eq!(target.args, default.args);
+    assert_eq!(typer.typed_ast().get(target.args[0]).ty, definitions.int);
+    let TreeKind::Select(target) = &typer.typed_ast().get(target.function).kind else {
+        panic!()
+    };
+    let TreeKind::Select(default) = &typer.typed_ast().get(default.function).kind else {
+        panic!()
+    };
+    assert_eq!(target.qualifier, default.qualifier);
+    assert_eq!(
+        reference(&typer, target.qualifier),
+        method_parameter_symbol(&parsed, &index, source, duplicate, 0)
+    );
+
+    let body = typer.type_generated_case_class_copy_body(copy).unwrap();
+    let TreeKind::Apply(forward) = &typer.typed_ast().get(body).kind else {
+        panic!()
+    };
+    assert_eq!(forward.kind, ApplyKind::Using);
+    let witness = reference(&typer, forward.args[0]);
+    assert_eq!(typer.store.symbols.owner(witness), Some(copy));
+    assert!(
+        typer
+            .store
+            .symbols
+            .get(witness)
+            .flags
+            .contains(SymbolFlags::GIVEN)
+    );
+    let TreeKind::Apply(init) = &typer.typed_ast().get(forward.function).kind else {
+        panic!()
+    };
+    let constructor = reference(&typer, init.function);
+    assert_eq!(
+        typer.store.symbols.get(constructor).kind,
+        SymbolKind::Constructor
+    );
+    assert_eq!(typer.store.symbols.owner(constructor), Some(class));
+    let value = reference(&typer, init.args[0]);
+    let Some(SourceDefinition::Derived { tree, .. }) = index.definition_of(value) else {
+        panic!()
+    };
+    let field = index.symbol_at(source, tree).unwrap();
+    let default_body = typer.type_generated_copy_default_body(getter).unwrap();
+    assert_eq!(reference(&typer, default_body), field);
+    let TreeKind::Select(read) = &typer.typed_ast().get(default_body).kind else {
+        panic!()
+    };
+    assert!(matches!(
+        typer.typed_ast().get(read.qualifier).kind,
+        TreeKind::This(_)
+    ));
+}
+
+#[test]
+fn case_class_copy_reports_missing_and_ambiguous_call_site_evidence() {
+    for (ambiguous, text) in [
+        (
+            false,
+            include_str!(
+                "../../../tests/fixtures/contextual-v1/controls/CaseClassCopyMissing.scala"
+            ),
+        ),
+        (
+            true,
+            include_str!(
+                "../../../tests/fixtures/contextual-v1/controls/CaseClassCopyAmbiguous.scala"
+            ),
+        ),
+    ] {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "duplicate");
+        let method = definition_tree(&index, method);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let before = typer.store.checkpoint();
+        match typer.type_method_definition(method) {
+            Err(TyperError::MissingContextualArgument {
+                source: at,
+                tree_index,
+                ..
+            }) if !ambiguous => assert_eq!((at, tree_index), (source, rhs.index())),
+            Err(TyperError::AmbiguousContextualArgument {
+                source: at,
+                tree_index,
+                candidates,
+                ..
+            }) if ambiguous => {
+                assert_eq!((at, tree_index), (source, rhs.index()));
+                let TreeKind::DefDef(def) = &parsed.ast.get(method).kind else {
+                    panic!()
+                };
+                assert_eq!(
+                    candidates,
+                    def.value_param_clauses[1]
+                        .iter()
+                        .map(|&p| index.symbol_at(source, p).unwrap())
+                        .collect::<Vec<_>>()
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(typer.store.checkpoint(), before);
+        assert!(typer.typed_index.is_empty());
+    }
+}
+
+#[test]
+fn case_class_copy_checks_the_receiver_field_before_using_explicit_evidence() {
+    let text = "trait TC[A]; case class Box[A: TC](value: A); class Client {
+        def bad(box: Box[Int])(using e: TC[Boolean]): Box[Boolean] = box.copy[Boolean]()
+        def choose(box: Box[Int])(using one: TC[Int], two: TC[Int]): Box[Int] = box.copy()(using two)
+        def change(box: Box[Int])(using e: TC[Boolean]): Box[Boolean] = box.copy(true)
+    }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for name in ["bad", "choose", "change"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let def_tree = definition_tree(&index, method);
+        let checkpoint = typer.store.checkpoint();
+        let outcome = typer.type_method_definition(def_tree);
+        if name == "bad" {
+            assert!(
+                matches!(outcome,Err(TyperError::ExpectedExpressionTypeMismatch{actual,expected,..}) if actual==definitions.int && expected==definitions.boolean),
+                "{outcome:?}"
+            );
+            assert_eq!(typer.store.checkpoint(), checkpoint);
+        } else {
+            outcome.unwrap();
+            let TreeKind::Apply(call) = &typer
+                .typed_ast()
+                .get(typer.typed_index.get(source, rhs).unwrap())
+                .kind
+            else {
+                panic!()
+            };
+            let TreeKind::DefDef(def) = &parsed.ast.get(def_tree).kind else {
+                panic!()
+            };
+            assert_eq!(
+                reference(&typer, call.args[0]),
+                index
+                    .symbol_at(source, *def.value_param_clauses[1].last().unwrap())
+                    .unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn case_class_copy_reuses_one_receiver_for_multiple_default_getters() {
+    let text = "trait TC[A]; case class Pair[A: TC](left: A, right: A)
+        class Client {
+          def load(input: Pair[Int]): Pair[Int] = input
+          def duplicate(input: Pair[Int])(using e: TC[Int]): Pair[Int] = load(input).copy()
+        }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "duplicate");
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    typer
+        .type_method_definition(definition_tree(&index, method))
+        .unwrap();
+    let root = typer.typed_index.get(source, rhs).unwrap();
+    let TreeKind::Apply(context) = &typer.typed_ast().get(root).kind else {
+        panic!("outer context call")
+    };
+    let TreeKind::Block(block) = &typer.typed_ast().get(context.function).kind else {
+        panic!("shared receiver")
+    };
+    assert_eq!(block.stats.len(), 1);
+    let saved = typer
+        .typed_index
+        .synthetic_definition_symbol(block.stats[0])
+        .unwrap();
+    let TreeKind::Apply(call) = &typer.typed_ast().get(block.expr).kind else {
+        panic!("copy")
+    };
+    assert_eq!(call.args.len(), 2);
+    for tree in [call.function, call.args[0], call.args[1]] {
+        let TreeKind::TypeApply(tapp) = &typer.typed_ast().get(tree).kind else {
+            panic!()
+        };
+        let TreeKind::Select(sel) = &typer.typed_ast().get(tapp.function).kind else {
+            panic!()
+        };
+        assert_eq!(reference(&typer, sel.qualifier), saved);
+    }
+}
