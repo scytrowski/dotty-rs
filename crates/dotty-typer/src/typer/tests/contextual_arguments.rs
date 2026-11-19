@@ -2101,3 +2101,48 @@ fn context_bound_legacy_default_applies_the_getter_only_to_type_arguments() {
         }
     }
 }
+
+#[test]
+fn anonymous_marker_defaults_check_the_parent_and_roll_back_failed_definitions() {
+    let text = "trait Marker; trait Other
+        trait Needs { def value: Int }; trait Inherited extends Needs
+        class C {
+            def wrong(using b: Other = new Marker {}): Other = b
+            def abstractMember(using b: Needs = new Needs {}): Needs = b
+            def inherited(using b: Inherited = new Inherited {}): Inherited = b
+            def withBody(using b: Marker = new Marker { def unrelated: Int = 1 }): Marker = b
+            def good(using b: Marker = new Marker {}): Marker = b
+        }";
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for name in ["wrong", "abstractMember", "inherited", "withBody", "good"] {
+        let method = method_symbol(&parsed, typer.store(), &index, source, name);
+        let tree = definition_tree(&index, method);
+        let before = typer.store().checkpoint();
+        let typed_before = typer.typed_ast().checkpoint();
+        let result = typer.type_method_definition(tree);
+        if name == "good" {
+            let typed = result.unwrap();
+            assert_eq!(typer.type_method_definition(tree).unwrap(), typed);
+            continue;
+        }
+        let error = result.unwrap_err();
+        if name == "wrong" {
+            assert!(
+                matches!(error, TyperError::ExpectedExpressionTypeMismatch { .. }),
+                "{error:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    error,
+                    TyperError::AnonymousClassInstantiationDeferred { .. }
+                ),
+                "{error:?}"
+            );
+        }
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(typer.typed_ast().checkpoint(), typed_before);
+        assert!(typer.source_typed_index().is_empty());
+    }
+}

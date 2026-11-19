@@ -93,7 +93,7 @@ def rust_observations(tc, rows):
     if (result.returncode or passed != rows.keys()
             or sources != {(name, row[0]) for name, row in rows.items()}
             or len(outcomes) != len(rows) or statuses.keys() != rows.keys()
-            or not set(statuses.values()) <= {"match", "typer-gap", "blocked", "outside-v1"}):
+            or not set(statuses.values()) <= {"match", "typer-gap", "blocked"}):
         raise RuntimeError(f"Rust observations missing, duplicated or changed\n{result.stdout}")
     return statuses
 

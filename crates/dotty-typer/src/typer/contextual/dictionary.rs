@@ -3,8 +3,9 @@
 //! The completed expression selects the same field on the allocated instance.
 
 use super::*;
-use dotty_core::ast::{DefDef, Template, TypeDef, ValDef};
-use dotty_core::{Namespace, Scope, Symbol, SymbolLinks, TermName, TypeName};
+use crate::typer::synthetic_class::synthetic_symbol;
+use dotty_core::ast::ValDef;
+use dotty_core::{Namespace, Scope, TermName};
 
 #[derive(Clone, Default)]
 pub(super) struct Dictionary {
@@ -233,7 +234,6 @@ fn define_holder(
     entries: Vec<Entry>,
     tree_index: u32,
 ) -> Result<(TreeId<Typed>, TreeId<Typed>), TyperError> {
-    let class_name = typer.store.symbols.get(holder).name;
     let scope = typer.store.scopes.alloc(Scope::new(Some(holder)));
     let mut body = Vec::with_capacity(entries.len());
     for entry in entries {
@@ -248,114 +248,8 @@ fn define_holder(
         typer.store.scopes.get_mut(scope).enter(name, entry.field);
         body.push(value_definition(typer, entry.field, entry.goal, rhs));
     }
-    let object = typer.definitions.object_type;
-    let class_info = typer.store.types.alloc(Type::ClassInfo(ClassInfo {
-        prefix: typer.definitions.no_prefix,
-        class: holder,
-        parents: vec![object],
-        declarations: scope,
-        self_type: None,
-    }));
-    typer
-        .store
-        .symbols
-        .set_info(holder, SymbolInfo::Complete(class_info));
-    let constructor_name = Name::new(typer.store.names.intern("<init>"), Namespace::Term);
-    let constructor_type = typer.store.types.alloc(Type::Method(MethodType {
-        params: vec![],
-        result: class_ref,
-        kind: MethodKind::Plain,
-    }));
-    let constructor = synthetic_symbol(
-        typer,
-        constructor_name,
-        holder,
-        SymbolKind::Constructor,
-        SymbolFlags::EMPTY,
-        SymbolInfo::Complete(constructor_type),
-    );
-    typer
-        .store
-        .scopes
-        .get_mut(scope)
-        .enter(constructor_name, constructor);
-    let tpt =
-        TypedAstBuilder::new(&mut typer.typed_arena, &typer.store.types).type_tree(class_ref, None);
-    let ctor = typer.typed_index.alloc_synthetic_definition(
-        &mut typer.typed_arena,
-        constructor,
-        Tree {
-            kind: TreeKind::DefDef(DefDef {
-                name: TermName::new(constructor_name.text()),
-                type_params: vec![],
-                value_param_clauses: vec![vec![]],
-                source_param_clause_order: None,
-                tpt,
-                rhs: None,
-                metadata: (),
-            }),
-            position: None,
-            ty: constructor_type,
-        },
-    );
-    let parent =
-        TypedAstBuilder::new(&mut typer.typed_arena, &typer.store.types).type_tree(object, None);
-    let template = typer.typed_arena.alloc(Tree {
-        kind: TreeKind::Template(Template {
-            constructor: ctor,
-            parents: vec![parent],
-            self_val: None,
-            body,
-            metadata: (),
-        }),
-        position: None,
-        ty: class_ref,
-    });
-    let cls = typer.typed_index.alloc_synthetic_definition(
-        &mut typer.typed_arena,
-        holder,
-        Tree {
-            kind: TreeKind::TypeDef(TypeDef {
-                name: TypeName::new(class_name.text()),
-                rhs: template,
-                metadata: (),
-                variance: None,
-            }),
-            position: None,
-            ty: class_ref,
-        },
-    );
-    let ctor_ref = typer.store.types.alloc(Type::TermRef {
-        prefix: class_ref,
-        target: TermRefTarget::Symbol(constructor),
-    });
-    let mut builder = TypedAstBuilder::new(&mut typer.typed_arena, &typer.store.types);
-    let new = builder.new_expr(tpt, class_ref, None);
-    let selected = builder.select(new, constructor_name, false, ctor_ref, None);
-    let init = builder.apply(selected, vec![], class_ref, None);
-    Ok((cls, init))
-}
-
-fn synthetic_symbol(
-    typer: &mut SourceTyper<'_>,
-    name: Name,
-    owner: SymbolId,
-    kind: SymbolKind,
-    flags: SymbolFlags,
-    info: SymbolInfo,
-) -> SymbolId {
-    typer.store.symbols.alloc(Symbol {
-        name,
-        owner: Some(owner),
-        kind,
-        flags: flags | SymbolFlags::SYNTHETIC,
-        visibility: Visibility::Public,
-        info,
-        origin: SymbolOrigin::Synthetic,
-        annotations: vec![],
-        position: None,
-        links: SymbolLinks::default(),
-    })
+    let trees = typer.finish_local_class(holder, class_ref, scope, body, None, None);
+    Ok((trees.definition, trees.instance))
 }
 
 fn value_definition(

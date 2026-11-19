@@ -32,6 +32,7 @@ mod resolution;
 use resolution::imports::ImportSelection;
 mod source_annotations;
 mod source_function;
+mod synthetic_class;
 mod transaction;
 mod type_projection;
 
