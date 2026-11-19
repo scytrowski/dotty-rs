@@ -10,7 +10,7 @@ use crate::core::{
 };
 use crate::jvm::{
     JvmClassInitializationPlan, JvmClassPlan, JvmFieldPlan, JvmFieldSourceVisibility,
-    JvmMethodPlan, JvmPrimaryConstructorPlan,
+    JvmMethodPlan, JvmPrimaryConstructorPlan, JvmPublicBodyFieldSourceProof,
 };
 
 /// Result of typing one field RHS and the index from that typing operation.
@@ -78,7 +78,7 @@ pub enum ClassPlanError {
     },
     /// A field input has no matching class-body declaration.
     UnexpectedField { class: SymbolId, field: SymbolId },
-    /// An initialized private field has no input.
+    /// An initialized class-body field has no input.
     MissingField { class: SymbolId, field: SymbolId },
     /// Two inputs refer to the same field.
     DuplicateField { class: SymbolId, field: SymbolId },
@@ -107,7 +107,7 @@ impl fmt::Display for ClassPlanError {
 }
 impl std::error::Error for ClassPlanError {}
 
-/// Read-only planner for top-level classes with concrete methods and ordinary private fields.
+/// Read-only planner for top-level classes with concrete methods and ordinary public and private fields.
 /// Provide canonical AST, symbols and method plans from the same session.
 /// The backend validates the assembled unit before emission.
 pub struct JvmClassPlanner<'a> {
@@ -140,7 +140,7 @@ impl<'a> JvmClassPlanner<'a> {
         })
     }
 
-    /// Assembles ordinary private instance `val` and `var` fields and concrete methods. Supply
+    /// Assembles ordinary public and private instance `val` and `var` fields and concrete methods. Supply
     /// the fields in any order and keep all typed roots in the same session
     /// arena used for emission. The plan initializes fields in template order.
     pub fn plan_with_fields<'t>(
@@ -164,49 +164,70 @@ impl<'a> JvmClassPlanner<'a> {
             } else {
                 SymbolFlags::EMPTY
             };
-            if symbol.visibility != Visibility::Private
-                || symbol.flags.difference(SymbolFlags::FINAL) != mutability_flag
-                || definition.metadata.visibility
-                    != Some(VisibilitySyntax::Private { qualifier: None })
-                || !modifiers
-                    .iter()
-                    .all(|m| matches!(m, Modifier::Final | Modifier::Var))
-                || !definition.metadata.annotations.is_empty()
-            {
+            let ordinary = match (symbol.visibility, &definition.metadata.visibility) {
+                (Visibility::Public, None) => {
+                    modifiers.iter().all(|m| *m == Modifier::Var) && symbol.flags == mutability_flag
+                }
+                (Visibility::Private, Some(VisibilitySyntax::Private { qualifier: None })) => {
+                    modifiers
+                        .iter()
+                        .all(|m| matches!(m, Modifier::Final | Modifier::Var))
+                        && symbol.flags.difference(SymbolFlags::FINAL) == mutability_flag
+                }
+                _ => false,
+            };
+            if !ordinary || !definition.metadata.annotations.is_empty() {
                 return Err(error);
             }
             let rhs = definition.rhs.ok_or(error)?;
             if declarations
-                .insert(field, (source, rhs, fields.len()))
+                .insert(field, (source, tree, rhs, fields.len()))
                 .is_some()
             {
                 return Err(error);
             }
-            fields.push(JvmFieldPlan {
-                field,
-                source_visibility: JvmFieldSourceVisibility::PlainPrivate,
-                initializer: None,
-            });
+            fields.push((field, None));
             Ok(())
         })?;
         for input in initializers {
             let field = input.field;
-            let &(source, rhs, position) = declarations
+            let &(source, tree, rhs, position) = declarations
                 .get(&field)
                 .ok_or(ClassPlanError::UnexpectedField { class, field })?;
-            let slot = &mut fields[position];
-            if slot.initializer.is_some() {
+            let slot = &mut fields[position].1;
+            if slot.is_some() {
                 return Err(ClassPlanError::DuplicateField { class, field });
             }
-            slot.initializer = Some(input.checked_root(source, rhs, self.ast, typed_ast)?);
-        }
-        if let Some(missing) = fields.iter().find(|plan| plan.initializer.is_none()) {
-            return Err(ClassPlanError::MissingField {
-                class,
-                field: missing.field,
+            let root = input.checked_root(source, rhs, self.ast, typed_ast)?;
+            let source_visibility =
+                if self.store.symbols.get(field).visibility == Visibility::Public {
+                    let proof = JvmPublicBodyFieldSourceProof::from_source(
+                        class,
+                        field,
+                        source,
+                        tree,
+                        root,
+                        self.ast,
+                        self.index,
+                        input.index,
+                        typed_ast,
+                        self.store,
+                    )
+                    .map_err(|_| ClassPlanError::InvalidFieldInitializer { field })?;
+                    JvmFieldSourceVisibility::PlainPublic(proof)
+                } else {
+                    JvmFieldSourceVisibility::PlainPrivate
+                };
+            *slot = Some(JvmFieldPlan {
+                field,
+                source_visibility,
+                initializer: Some(root),
             });
         }
-        plan.fields = fields;
+        plan.fields = fields
+            .into_iter()
+            .map(|(field, slot)| slot.ok_or(ClassPlanError::MissingField { class, field }))
+            .collect::<Result<_, _>>()?;
         Ok(plan)
     }
 

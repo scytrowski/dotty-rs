@@ -120,8 +120,6 @@ class Pair(z: Int, a: Int):
 
 #[test]
 fn constructor_accessors_have_the_scala_jvm_abi_and_work_across_sources() {
-    use dotty::classfile::{ACC_FINAL, ACC_PRIVATE, ACC_PUBLIC, ClassFile, Reader};
-
     let counter = (
         SourceId::from_index(0),
         "Counter.scala",
@@ -140,6 +138,22 @@ class UseCounter:
     let artifacts = super::compile([counter, use_counter]);
     let reversed = super::compile([use_counter, counter]);
     assert!(artifacts.iter().eq(reversed.iter().rev()));
+    assert_counter_abi(&artifacts, "id", "(II)V");
+    assert_eq!(
+        super::run_java_client("constructor-accessors", "AccessorClient", &artifacts)
+            .lines()
+            .collect::<Vec<_>>(),
+        ["9", "4", "7", "2"]
+    );
+}
+
+fn assert_counter_abi(
+    artifacts: &[dotty::jvm::GeneratedClass],
+    val_name: &str,
+    constructor_descriptor: &str,
+) {
+    use dotty::classfile::{ACC_FINAL, ACC_PRIVATE, ACC_PUBLIC, ClassFile, Reader};
+
     let artifact = artifacts
         .iter()
         .find(|class| class.internal_name() == "demo/Counter")
@@ -160,7 +174,7 @@ class UseCounter:
     assert_eq!(
         fields,
         [
-            ("id", "I", ACC_PRIVATE | ACC_FINAL),
+            (val_name, "I", ACC_PRIVATE | ACC_FINAL),
             ("count", "I", ACC_PRIVATE)
         ]
     );
@@ -175,22 +189,67 @@ class UseCounter:
             )
         })
         .collect();
+    let mut expected_methods = [
+        ("<init>", constructor_descriptor, ACC_PUBLIC),
+        ("count", "()I", ACC_PUBLIC),
+        ("count_$eq", "(I)V", ACC_PUBLIC),
+        (val_name, "()I", ACC_PUBLIC),
+    ];
     methods.sort_unstable();
-    assert_eq!(
-        methods,
-        [
-            ("<init>", "(II)V", ACC_PUBLIC),
-            ("count", "()I", ACC_PUBLIC),
-            ("count_$eq", "(I)V", ACC_PUBLIC),
-            ("id", "()I", ACC_PUBLIC)
-        ]
+    expected_methods.sort_unstable();
+    assert_eq!(methods, expected_methods);
+}
+
+const BODY_COUNTER: &str = "package demo
+class Counter(start: Int):
+  val initial: Int = start
+  var count: Int = start
+";
+
+#[test]
+fn public_body_fields_emit_accessors_and_work_in_both_file_orders_on_jdk21() {
+    let counter = (SourceId::from_index(0), "Counter.scala", BODY_COUNTER);
+    let use_counter = (
+        SourceId::from_index(1),
+        "UseCounter.scala",
+        "package demo
+class UseCounter:
+  def create(start: Int): Counter = new Counter(start)
+  def initial(c: Counter): Int = c.initial
+  def read(c: Counter): Int = c.count
+  def update(c: Counter, next: Int): Unit = c.count = next
+",
     );
-    assert_eq!(
-        super::run_java_client("constructor-accessors", "AccessorClient", &artifacts)
-            .lines()
-            .collect::<Vec<_>>(),
-        ["9", "4", "7", "2"]
-    );
+    let first = super::compile([counter, use_counter]);
+    let second = super::compile([use_counter, counter]);
+    assert!(first.iter().eq(second.iter().rev()));
+    for artifacts in [first, second] {
+        assert_counter_abi(&artifacts, "initial", "(I)V");
+        assert_eq!(
+            super::run_java_client("public-body-fields", "BodyFieldClient", &artifacts)
+                .lines()
+                .collect::<Vec<_>>(),
+            ["4", "4", "7", "2"]
+        );
+    }
+}
+
+#[test]
+fn public_body_fields_reject_swapped_initializers_with_identical_source_text() {
+    let (mut store, defs, packages, unit) = named(BODY_COUNTER);
+    let units = [unit];
+    complete_signatures(&units, &mut store, defs, &packages).unwrap();
+    let (arena, mut bindings) = type_bodies(&units, &mut store, defs, &packages);
+    let [initial, count] = bindings[0].fields.as_mut_slice() else {
+        panic!("expected two fields")
+    };
+    let error = ClassPlanError::FieldInitializerMismatch {
+        field: initial.field,
+        expected: initial.root,
+        actual: count.root,
+    };
+    std::mem::swap(&mut initial.root, &mut count.root);
+    assert_eq!(class_plans(&units, bindings, &arena, &store), Err(error));
 }
 
 #[test]
@@ -493,10 +552,11 @@ fn field_planning_rejects_a_mutability_mismatch_between_source_and_symbol() {
 }
 
 #[test]
-fn field_planning_rejects_public_qualified_and_lazy_fields() {
+fn field_planning_rejects_qualified_and_modified_fields() {
     for declaration in [
-        "var n: Int = 1",
-        "val n: Int = 1",
+        "protected var n: Int = 1",
+        "lazy val n: Int = 1",
+        "final val n: Int = 1",
         "private[this] val n: Int = 1",
         "private lazy val n: Int = 1",
     ] {

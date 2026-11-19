@@ -232,6 +232,11 @@ fn complete_methods_in_order(
             for &field in &class.constructor_fields {
                 typer.complete_symbol(field)?;
             }
+            for &(field, _) in &class.fields {
+                if typer.store().symbols.get(field).visibility == dotty::core::Visibility::Public {
+                    typer.complete_symbol(field)?;
+                }
+            }
         }
     }
 

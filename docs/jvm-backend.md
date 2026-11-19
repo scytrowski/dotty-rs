@@ -84,23 +84,27 @@ source order. For each constructor `val` or `var`, its source tree also
 identifies the class-owned field. The backend uses that binding to initialize
 private storage and emit a public getter, plus a setter for `var`. Callers
 supply method plans only for source methods and typed initializers only for
-class-body fields. A private field initializer may read an ordinary parameter
+class-body fields. A field initializer may read an ordinary parameter
 without introducing storage for the parameter itself.
 
-When compiling multiple source files, complete each constructor signature and
-its class-owned field signatures with the declaring file's typer before typing
-uses in other files. Contextual, by-name, repeated and defaulted parameters
-are outside this facade's scope. A default yields
+When compiling multiple source files, complete constructor signatures and
+public field signatures (in the constructor or class body) with the declaring
+file's typer before typing uses in other files. Contextual, by-name, repeated
+and defaulted parameters are outside this facade's scope. A default yields
 `ClassPlanError::DefaultConstructorParameter` with the parameter's source tree.
-For a class with ordinary unqualified `private val` or `private var` fields, use
+For initialized public or unqualified private `val` and `var` fields, use
 `plan_with_fields(class_symbol, method_plans, &typed_ast, initializers)`.
 Each `TypedFieldInitializer` supplies a field symbol, its typed RHS root and
 the source-to-typed index from that typing operation. The planner checks the
 field owner, declaration, exact RHS mapping and source position. The source
 `var` marker must agree with the canonical symbol's `MUTABLE` flag. It accepts
 inputs in any order and returns fields in template order for initialization.
-The class must have an implicit parent. A public field declared in the class
-body or a standalone initializer expression requires a different plan.
+For an ordinary public body field the planner builds a
+`JvmPublicBodyFieldSourceProof` from its declaration and typed initializer.
+The backend emits private storage, a public getter and, for a `var`, a public
+setter. The class must have an implicit parent. Explicitly modified public
+fields (such as `lazy val` or `final val`) and standalone initializer
+expressions are outside this planner's scope.
 The planner matches the supplied methods by canonical
 symbol and returns them in source order. Unexpected, repeated and missing
 method plans produce distinct errors before emission. All plans and IDs must
