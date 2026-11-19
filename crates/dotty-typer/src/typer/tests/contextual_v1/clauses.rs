@@ -105,8 +105,6 @@ fn c2_bound_and_implicit_default() {
     );
     assert_eq!(typer.store().types.get(b.ty).reference_symbol(), Some(bar));
 
-    // The first failure is completing the getter signature, before typing
-    // the anonymous class in B's initializer. Scala assigns it ordinal 2.
     assert_eq!(typer.store().default_getter(method, 1), Some(getter));
     assert_eq!(
         typer
@@ -115,15 +113,23 @@ fn c2_bound_and_implicit_default() {
             .resolve(typer.store().symbols.get(getter).name.text()),
         "qux2$default$2"
     );
-    for result in [
-        typer.complete_symbol(getter).map(|_| ()),
-        typer.type_method_definition(tree).map(|_| ()),
-    ] {
-        assert!(
-            matches!(result,Err(TyperError::UsingApplicationDeferred { source: s, tree_index }) if s == source && tree_index == parameter.index()),
-            "{result:?}"
-        );
-    }
+    let getter_type = typer.complete_symbol(getter).unwrap();
+    let Type::Poly(poly) = typer.store().types.get(getter_type) else {
+        panic!("polymorphic getter")
+    };
+    assert_eq!(poly.params.len(), 1);
+    assert_eq!(
+        typer.store().types.get(poly.result).reference_symbol(),
+        Some(bar)
+    );
+    let result = typer.type_method_definition(tree);
+    assert!(
+        matches!(
+            result,
+            Err(TyperError::AnonymousClassInstantiationDeferred { .. })
+        ),
+        "{result:?}"
+    );
     outcome("outside-v1");
 }
 

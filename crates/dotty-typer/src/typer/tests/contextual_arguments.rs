@@ -2042,3 +2042,62 @@ fn nested_context_abstraction_registers_both_methods_and_rolls_back_a_bad_body()
         }
     }
 }
+
+#[test]
+fn context_bound_legacy_default_applies_the_getter_only_to_type_arguments() {
+    let text = "trait Foo[A]; class Bar; class C {
+        def read[A: Foo](implicit b: Bar = new Bar): Bar = b
+        def missing: Bar = read[Int]
+        def fallback(using f: Foo[Int]): Bar = read[Int]
+        def supplied(using f: Foo[Int], b: Bar): Bar = read[Int]
+    }";
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let read = method_symbol(&parsed, &store, &index, source, "read");
+    let getter = store.default_getter(read, 1).unwrap();
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    typer
+        .type_method_definition(definition_tree(&index, read))
+        .unwrap();
+    for name in ["missing", "fallback", "supplied"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let result = typer.type_method_definition(definition_tree(&index, method));
+        if name == "missing" {
+            assert!(
+                matches!(result, Err(TyperError::MissingContextualArgument { .. })),
+                "{result:?}"
+            );
+            assert!(typer.source_typed_index().get(source, rhs).is_none());
+            continue;
+        }
+        result.unwrap();
+        let ast = typer.typed_ast();
+        let TreeKind::Apply(call) = &ast
+            .get(typer.source_typed_index().get(source, rhs).unwrap())
+            .kind
+        else {
+            panic!("implicit application")
+        };
+        let [f, b] = call.args[..] else {
+            panic!("witness followed by b")
+        };
+        assert_eq!(
+            reference(&typer, f),
+            method_parameter_symbol(&parsed, &index, source, method, 0)
+        );
+        if name == "supplied" {
+            assert_eq!(
+                reference(&typer, b),
+                method_parameter_symbol(&parsed, &index, source, method, 1)
+            );
+        } else {
+            let TreeKind::TypeApply(default) = &ast.get(b).kind else {
+                panic!("getter[Int]")
+            };
+            let TreeKind::TypeApply(target) = &ast.get(call.function).kind else {
+                panic!("read[Int]")
+            };
+            assert_eq!(reference(&typer, default.function), getter);
+            assert_eq!(default.args, target.args);
+        }
+    }
+}

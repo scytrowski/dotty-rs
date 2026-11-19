@@ -88,8 +88,9 @@ clause still encounters the typer’s selection-prefix restriction for a
 method result whose class comes from TASTy.
 A legacy `implicit` clause also falls back only for missing evidence. Ambiguity
 retains both candidates and rolls back the failed application.
-Combining a default with a synthesized context-bound clause
-still reports a typing error. Conversion insertion covers value adaptation to
+The default getter of a method with a context bound takes the method type
+parameters and the preceding term clauses. Witnesses merged into the defaulted
+parameter’s own clause contribute to its ordinal only. Conversion insertion covers value adaptation to
 a known expected type. This includes ordinary method arguments. Searching for
 a conversion solely because a member is missing, and instantiating generic
 old-style conversion methods, remain outside that implementation.

@@ -43,8 +43,8 @@ impl SourceTyper<'_> {
             return None;
         };
         param.rhs?;
-        let clause = def
-            .value_param_clauses
+        let clause = self
+            .context_bound_clauses(def)
             .iter()
             .position(|clause| clause.contains(&tree))?;
         Some((method_tree, tree, clause))
@@ -68,9 +68,6 @@ impl SourceTyper<'_> {
         let TreeKind::ValDef(param) = &self.arena.get(parameter).kind else {
             return Err(deferred);
         };
-        if self.context_bound_clauses(def).as_ref() != def.value_param_clauses.as_slice() {
-            return Err(deferred);
-        }
         let mut clauses = Vec::new();
         if !def.type_params.is_empty() {
             clauses.push(MethodClauseSpec::Types(self.type_parameter_specs(
@@ -82,7 +79,7 @@ impl SourceTyper<'_> {
                 0,
             )?));
         }
-        for previous in &def.value_param_clauses[..preceding] {
+        for previous in &self.context_bound_clauses(def)[..preceding] {
             let (params, kind) = self.method_parameter_specs(
                 getter,
                 previous,
