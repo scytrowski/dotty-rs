@@ -94,8 +94,9 @@ and defaulted parameters are outside this facade's scope. A default yields
 `ClassPlanError::DefaultConstructorParameter` with the parameter's source tree.
 For initialized public or unqualified private `val` and `var` fields, use
 `plan_with_fields(class_symbol, method_plans, &typed_ast, initializers)`.
-Each `TypedFieldInitializer` supplies a field symbol, its typed RHS root and
-the source-to-typed index from that typing operation. The planner checks the
+For each `TypedFieldInitializer`, pass the field symbol, the root returned by
+`SourceTyper::type_field_initializer(field)`, and that typer's source-to-typed
+index. Keep the typed arena from the same session for emission. The planner checks the
 field owner, declaration, exact RHS mapping and source position. The source
 `var` marker must agree with the canonical symbol's `MUTABLE` flag. It accepts
 inputs in any order and returns fields in template order for initialization.

@@ -531,7 +531,7 @@ fn header_chain_follows_dependencies_and_executes_in_both_file_orders() {
     let base = (
         SourceId::from_index(0),
         "Base.scala",
-        "package demo\nclass Base(seed: Int):\n  private val initial: Int = seed\n  def read(): Int = initial",
+        "package demo\nclass Base(seed: Int):\n  private val initial = seed\n  def read(): Int = initial",
     );
     let mid = (
         SourceId::from_index(1),
@@ -819,10 +819,8 @@ fn private_field_initializers_follow_declarations_and_reject_same_type_substitut
     let class = unit.classes[0].symbol;
     let mut typer = unit.typer(&mut store, defs, &packages);
     let mut roots = Vec::new();
-    for &(field, rhs) in unit.classes.iter().flat_map(|class| &class.fields) {
-        let ty = typer.complete_symbol(field).unwrap();
-        let ctx = typer.field_initializer_context_for(field).unwrap();
-        let root = typer.type_expression_expected(rhs, ctx, ty).unwrap();
+    for &field in unit.classes.iter().flat_map(|class| &class.fields) {
+        let root = typer.type_field_initializer(field).unwrap();
         roots.push((field, root));
     }
     let (arena, index) = typer.into_typed_ast_and_index();
@@ -955,7 +953,7 @@ fn field_planning_rejects_a_mutability_mismatch_between_source_and_symbol() {
     for (keyword, flags) in [("val", SymbolFlags::MUTABLE), ("var", SymbolFlags::EMPTY)] {
         let (mut store, _, _, unit) = named(&format!("class C {{ private {keyword} n: Int = 1 }}"));
         let class = &unit.classes[0];
-        let field = class.fields[0].0;
+        let field = class.fields[0];
         store.symbols.get_mut(field).flags = flags;
         let Some(dotty::core::SourceDefinition::Canonical { tree, .. }) =
             unit.index.definition_of(field)
@@ -989,7 +987,7 @@ fn field_planning_rejects_qualified_and_modified_fields() {
     ] {
         let (store, _, _, unit) = named(&format!("class C {{ {declaration} }}"));
         let class = &unit.classes[0];
-        let field = class.fields[0].0;
+        let field = class.fields[0];
         let Some(dotty::core::SourceDefinition::Canonical { tree, .. }) =
             unit.index.definition_of(field)
         else {

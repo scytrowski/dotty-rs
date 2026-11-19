@@ -1474,6 +1474,14 @@ initializer, and malformed owner/context relationships are rejected with a
 focused context error. This entry point builds context only; field completion
 uses it to type an initializer when inferring that field's type.
 
+`SourceTyper::type_field_initializer(field)` looks up the field's source
+initializer and checks it against the field type in one transaction. It
+returns the typed RHS recorded in the driver's source-to-typed index. When
+field inference has already typed that RHS in the same driver, the caller
+gets the existing root. A fresh driver that shares the completed field
+signature types the RHS into its own output. If the initializer fails, the
+field signature, typed arena and mappings retain their pre-call state.
+
 `complete_symbol` infers ordinary source fields owned by a class when their
 canonical `ValDef` has an initializer and a synthetic inferred `TypeTree`.
 For inferred fields, source `var` syntax must agree with the semantic

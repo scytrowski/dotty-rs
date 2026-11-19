@@ -42,7 +42,7 @@ struct NamedClass {
     constructor: SymbolId,
     constructor_fields: Vec<SymbolId>,
     method_range: Range<usize>,
-    fields: Vec<(SymbolId, TreeId<Untyped>)>,
+    fields: Vec<SymbolId>,
 }
 
 impl NamedUnit {
@@ -125,10 +125,10 @@ fn enter(
                 {
                     methods.push(member)
                 }
-                (TreeKind::ValDef(field), dotty::core::SymbolKind::Field) => {
-                    if let Some(rhs) = field.rhs {
-                        fields.push((symbol, rhs));
-                    }
+                (TreeKind::ValDef(field), dotty::core::SymbolKind::Field)
+                    if field.rhs.is_some() =>
+                {
+                    fields.push(symbol);
                 }
                 _ => {}
             }
@@ -278,7 +278,7 @@ fn complete_headers(
             for &field in &class.constructor_fields {
                 typer.complete_symbol(field)?;
             }
-            for &(field, _) in &class.fields {
+            for &field in &class.fields {
                 if typer.store().symbols.get(field).visibility == dotty::core::Visibility::Public {
                     typer.complete_symbol(field)?;
                 }
@@ -423,7 +423,7 @@ fn type_bodies(
     let mut typed_classes = Vec::new();
     for (unit, class) in named_classes(units) {
         let mut fields = Vec::with_capacity(class.fields.len());
-        for &(field, rhs) in &class.fields {
+        for &field in &class.fields {
             let mut typer = SourceTyper::new_with_typed_ast(
                 &unit.ast,
                 unit.source,
@@ -433,9 +433,7 @@ fn type_bodies(
                 packages,
                 output,
             );
-            let ty = typer.complete_symbol(field).unwrap();
-            let context = typer.field_initializer_context_for(field).unwrap();
-            let root = typer.type_expression_expected(rhs, context, ty).unwrap();
+            let root = typer.type_field_initializer(field).unwrap();
             let (arena, index) = typer.into_typed_ast_and_index();
             output = arena;
             fields.push(FieldBindings { field, root, index });

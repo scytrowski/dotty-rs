@@ -190,6 +190,14 @@ impl SourceTyper<'_> {
         &self,
         field: SymbolId,
     ) -> Result<ExpressionContext, TyperError> {
+        self.field_initializer_and_context(field)
+            .map(|(_, context)| context)
+    }
+
+    pub(super) fn field_initializer_and_context(
+        &self,
+        field: SymbolId,
+    ) -> Result<(TreeId<Untyped>, ExpressionContext), TyperError> {
         if !self.store.symbols.contains(field) {
             return Err(TyperError::FieldInitializerContextInvalid {
                 field,
@@ -461,11 +469,14 @@ impl SourceTyper<'_> {
             });
         }
 
-        Ok(ExpressionContext {
-            lexical,
-            owner,
-            local_scopes: None,
-        })
+        Ok((
+            initializer,
+            ExpressionContext {
+                lexical,
+                owner,
+                local_scopes: None,
+            },
+        ))
     }
 
     pub(super) fn expression_type_context(

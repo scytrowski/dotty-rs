@@ -415,6 +415,21 @@ impl<'a> SourceTyper<'a> {
         result
     }
 
+    /// Types the initializer of a canonical class-body field in its declaration context.
+    ///
+    /// Completes the field's type if needed and checks its source initializer against it.
+    /// Returns the typed root recorded for the source RHS in this driver's index.
+    /// A root already produced by field inference in this driver is reused. When only
+    /// the field type survives from an earlier driver, this driver types the RHS anew.
+    /// Failure rolls back both completion and expression typing.
+    pub fn type_field_initializer(&mut self, field: SymbolId) -> Result<TreeId<Typed>, TyperError> {
+        let (rhs, context) = self.field_initializer_and_context(field)?;
+        self.run_expression_transaction(|typer, journal, mappings| {
+            let expected = typer.completed_expression_symbol_info(field, journal)?;
+            typer.type_expression_expected_inner(rhs, context, expected, journal, mappings)
+        })
+    }
+
     /// Types one canonical source method definition, including its signature,
     /// parameter declarations, result type, and body, into this driver's typed
     /// arena. The definition must be a named class, trait, or module-class
@@ -29027,6 +29042,86 @@ mod tests {
             .expression_term_candidates(name, context, parameter_tree.index(), None)
             .unwrap();
         assert_eq!(candidates, vec![parameter]);
+    }
+
+    #[test]
+    fn type_field_initializer_reuses_inference_and_rebuilds_in_a_fresh_typer() {
+        let (parsed, mut store, packages, defs, index, source) =
+            parse_and_name("class Base(seed: Int) { private val initial = seed }");
+        let (field, _, rhs) = val_definition_and_rhs(&parsed, &store, &index, source, "initial");
+        let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+        assert_eq!(typer.complete_symbol(field).unwrap(), defs.int);
+        let cached = typer.source_typed_index().get(source, rhs).unwrap();
+        let arena = typer.typed_ast().checkpoint();
+        assert_eq!(typer.type_field_initializer(field).unwrap(), cached);
+        assert_eq!(typer.typed_ast().checkpoint(), arena);
+        let previous = typer.into_typed_ast();
+
+        let mut typer = SourceTyper::new_with_typed_ast(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            defs,
+            &packages,
+            previous,
+        );
+        assert_eq!(typer.source_typed_index().get(source, rhs), None);
+        let fresh = typer.type_field_initializer(field).unwrap();
+        assert_ne!(fresh, cached);
+        assert_eq!(typer.source_typed_index().get(source, rhs), Some(fresh));
+        assert_eq!(
+            typer.store().types.get(typer.typed_ast().get(fresh).ty),
+            typer.store().types.get(typer.typed_ast().get(cached).ty)
+        );
+        assert_eq!(typer.type_field_initializer(field).unwrap(), fresh);
+    }
+
+    #[test]
+    fn type_field_initializer_checks_declared_type_and_rolls_back_failed_completion() {
+        let (parsed, mut store, packages, defs, index, source) =
+            parse_and_name("class C { var good: Int = 7; val bad: Int = false }");
+        let (good, _, rhs) = val_definition_and_rhs(&parsed, &store, &index, source, "good");
+        let (bad, _, bad_rhs) = val_definition_and_rhs(&parsed, &store, &index, source, "bad");
+        let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+        let root = typer.type_field_initializer(good).unwrap();
+        assert_eq!(
+            *typer.store().symbols.info(good),
+            SymbolInfo::Complete(defs.int)
+        );
+        let checkpoint = typer.store().checkpoint();
+        let arena = typer.typed_ast().checkpoint();
+        let mappings = typer.source_typed_index().len();
+        assert!(matches!(typer.type_field_initializer(bad),
+            Err(TyperError::ExpectedExpressionTypeMismatch {source: site, tree_index, expected, ..})
+            if site == source && tree_index == bad_rhs.index() && expected == defs.int));
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert_eq!(typer.typed_ast().checkpoint(), arena);
+        assert_eq!(*typer.store().symbols.info(bad), SymbolInfo::Missing);
+        assert_eq!(typer.source_typed_index().len(), mappings);
+        assert_eq!(typer.source_typed_index().get(source, bad_rhs), None);
+        assert_eq!(typer.source_typed_index().get(source, rhs), Some(root));
+    }
+
+    #[test]
+    fn type_field_initializer_checks_a_cached_rhs_against_an_existing_signature() {
+        let (parsed, mut store, packages, defs, index, source) =
+            parse_and_name("class C { val n: Int = false }");
+        let (field, _, rhs) = val_definition_and_rhs(&parsed, &store, &index, source, "n");
+        let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+        let expected = typer.complete_symbol(field).unwrap();
+        let context = typer.field_initializer_context_for(field).unwrap();
+        let cached = typer.type_expression(rhs, context).unwrap();
+        let arena = typer.typed_ast().checkpoint();
+        assert!(matches!(typer.type_field_initializer(field),
+            Err(TyperError::ExpectedExpressionTypeMismatch { source: site, tree_index, expected: ty, .. })
+            if site == source && tree_index == rhs.index() && ty == expected));
+        assert_eq!(
+            *typer.store().symbols.info(field),
+            SymbolInfo::Complete(expected)
+        );
+        assert_eq!(typer.typed_ast().checkpoint(), arena);
+        assert_eq!(typer.source_typed_index().get(source, rhs), Some(cached));
     }
 
     #[test]
