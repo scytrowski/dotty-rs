@@ -53,3 +53,6 @@ pub mod jvm_tasty_constructor_alias;
 
 /// Opt-in emission of a linked `.class` and complete `.tasty` pair.
 pub mod jvm_tasty_artifacts;
+
+/// Source declarations available after naming.
+pub mod source_declarations;

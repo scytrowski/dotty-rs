@@ -25,8 +25,8 @@ fn class_plans_require_exact_methods_and_restore_source_order() {
     );
     let class = unit.classes[0].symbol;
     let mut typer = unit.typer(&mut store, defs, &packages);
-    for &tree in &unit.methods {
-        typer.type_method_definition(tree).unwrap();
+    for method in unit.methods() {
+        typer.type_method_definition(method.tree).unwrap();
     }
     let output = typer.into_typed_output();
     let method_planner = JvmMethodPlanner::new(&store, &unit.ast, &unit.index, &output);
@@ -343,18 +343,36 @@ fn class_planner_identifies_the_parameter_with_a_default() {
 
 #[test]
 fn class_planner_rejects_template_initializer() {
-    let (mut store, defs, packages, unit) = named("class C { def run(): Int = 1; run() }");
-    let class = unit.classes[0].symbol;
-    let tree = unit
+    let source = SourceId::from_index(2);
+    let files = [(
+        source,
+        "Classes.scala",
+        "class C { def run(): Int = 1; run() }",
+    )];
+    let mut store = SemanticStore::new();
+    Definitions::bootstrap(&mut store);
+    let parsed = parsing::parse_files(&files, 1)
+        .pop()
+        .unwrap()
+        .into_session(&mut store.names);
+    let index = super::name_source(
+        source,
+        files[0].1,
+        &parsed,
+        &mut store,
+        &mut Packages::new(),
+    );
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("expected package")
+    };
+    let class = index.symbol_at(source, package.stats[0]).unwrap();
+    let tree = parsed
         .ast
         .iter()
         .find_map(|(id, node)| matches!(node.kind, TreeKind::Apply(_)).then_some(id))
         .unwrap();
-    let units = [unit];
-    let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
-    let (arena, bindings) = type_bodies(&units, &mut store, defs, &packages, headers);
     assert_eq!(
-        class_plans(&units, bindings, &arena, &store),
+        JvmClassPlanner::new(&store, &parsed.ast, &index).plan(class, []),
         Err(ClassPlanError::UnsupportedStatement { class, tree })
     );
 }
@@ -721,9 +739,9 @@ class Second(start: Int) extends Base(start)",
     let [_, first, second] = unit.classes.as_slice() else {
         panic!("expected three classes")
     };
-    let typed_call = |class: &super::NamedClass| {
+    let typed_call = |class: &super::SourceClass| {
         headers.by_class[&class.symbol]
-            .get(unit.source, class.parent_application.unwrap())
+            .get(unit.source, class.parents[0])
             .unwrap()
     };
     let first_call = typed_call(first);
@@ -767,7 +785,7 @@ class Second(start: Int) extends Base(start)",
             .plan(first.symbol, []),
         Err(ClassPlanError::InvalidParentApplication {
             class: first.symbol,
-            tree: first.parent_application.unwrap()
+            tree: first.parents[0]
         })
     );
 }
@@ -804,7 +822,7 @@ fn parent_constructor_must_belong_to_its_declaring_source() {
             .plan(child.symbol, []),
         Err(ClassPlanError::InvalidParentApplication {
             class: child.symbol,
-            tree: child.parent_application.unwrap()
+            tree: child.parents[0]
         })
     );
 }
@@ -819,7 +837,12 @@ fn private_field_initializers_follow_declarations_and_reject_same_type_substitut
     let class = unit.classes[0].symbol;
     let mut typer = unit.typer(&mut store, defs, &packages);
     let mut roots = Vec::new();
-    for &field in unit.classes.iter().flat_map(|class| &class.fields) {
+    for field in unit
+        .classes
+        .iter()
+        .flat_map(|class| class.fields())
+        .map(|d| d.symbol)
+    {
         let root = typer.type_field_initializer(field).unwrap();
         roots.push((field, root));
     }
@@ -953,7 +976,7 @@ fn field_planning_rejects_a_mutability_mismatch_between_source_and_symbol() {
     for (keyword, flags) in [("val", SymbolFlags::MUTABLE), ("var", SymbolFlags::EMPTY)] {
         let (mut store, _, _, unit) = named(&format!("class C {{ private {keyword} n: Int = 1 }}"));
         let class = &unit.classes[0];
-        let field = class.fields[0];
+        let field = class.fields().next().unwrap().symbol;
         store.symbols.get_mut(field).flags = flags;
         let Some(dotty::core::SourceDefinition::Canonical { tree, .. }) =
             unit.index.definition_of(field)
@@ -987,7 +1010,7 @@ fn field_planning_rejects_qualified_and_modified_fields() {
     ] {
         let (store, _, _, unit) = named(&format!("class C {{ {declaration} }}"));
         let class = &unit.classes[0];
-        let field = class.fields[0];
+        let field = class.fields().next().unwrap().symbol;
         let Some(dotty::core::SourceDefinition::Canonical { tree, .. }) =
             unit.index.definition_of(field)
         else {

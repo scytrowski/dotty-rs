@@ -51,12 +51,12 @@ impl MethodHistory {
                     current
                         .get(path.as_str())
                         .filter(|(text, _)| *text == old)
-                        .map(|&(_, unit)| unit)
+                        .map(|&(_, unit)| unit.method_symbols().collect::<Vec<_>>())
                 })
                 .collect();
             for &(file, ordinal) in &self.order {
-                if let Some(unit) = unchanged[file] {
-                    preferred.push(unit.symbol(unit.methods[ordinal]));
+                if let Some(methods) = &unchanged[file] {
+                    preferred.push(methods[ordinal]);
                 }
             }
         }

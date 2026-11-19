@@ -528,16 +528,9 @@ impl<'a> JvmClassPlanner<'a> {
         tree: TreeId<Untyped>,
         kind: SymbolKind,
     ) -> Option<SymbolId> {
-        let id = self.index.symbol_at(source, tree)?;
-        if !self.store.symbols.contains(id)
-            || self.index.definition_of(id) != Some(SourceDefinition::Canonical { source, tree })
-        {
-            return None;
-        }
-        let symbol = self.store.symbols.get(id);
-        (symbol.owner == Some(class)
-            && symbol.kind == kind
-            && symbol.origin == SymbolOrigin::Source(source))
-        .then_some(id)
+        let id = crate::source_declarations::canonical_symbol(
+            self.store, self.index, source, tree, class,
+        )?;
+        (self.store.symbols.get(id).kind == kind).then_some(id)
     }
 }

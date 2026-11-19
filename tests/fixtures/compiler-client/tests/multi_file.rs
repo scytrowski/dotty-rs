@@ -8,7 +8,6 @@ mod pipeline_timing;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::ops::Range;
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -24,6 +23,7 @@ use dotty::jvm_class_plan::{ClassPlanError, JvmClassPlanner, TypedFieldInitializ
 use dotty::jvm_method_plan::JvmMethodPlanner;
 use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty::parser::{DetachedParse, ParseResult};
+use dotty::source_declarations::{Declaration, SourceClass, source_classes};
 use dotty::typer::{
     SignatureCompletion, SourceTypedIndex, SourceTyper, TypedLocalBinding, TyperError,
 };
@@ -32,33 +32,23 @@ struct NamedUnit {
     source: SourceId,
     ast: AstArena<Untyped>,
     index: SourceSemanticIndex,
-    classes: Vec<NamedClass>,
-    methods: Vec<TreeId<Untyped>>,
-}
-
-struct NamedClass {
-    parent_application: Option<TreeId<Untyped>>,
-    symbol: SymbolId,
-    constructor: SymbolId,
-    constructor_fields: Vec<SymbolId>,
-    method_range: Range<usize>,
-    fields: Vec<SymbolId>,
+    classes: Vec<SourceClass>,
 }
 
 impl NamedUnit {
-    fn method_symbol(&self) -> SymbolId {
-        let [method] = self.methods.as_slice() else {
-            panic!("expected one method")
-        };
-        self.symbol(*method)
+    fn methods(&self) -> impl Iterator<Item = Declaration> + '_ {
+        self.classes.iter().flat_map(SourceClass::methods)
     }
 
-    fn symbol(&self, method: TreeId<Untyped>) -> SymbolId {
-        self.index.symbol_at(self.source, method).unwrap()
+    fn method_symbol(&self) -> SymbolId {
+        let mut methods = self.methods();
+        let method = methods.next().expect("expected one method");
+        assert!(methods.next().is_none());
+        method.symbol
     }
 
     fn method_symbols(&self) -> impl Iterator<Item = SymbolId> + '_ {
-        self.methods.iter().map(|&method| self.symbol(method))
+        self.methods().map(|method| method.symbol)
     }
 
     fn typer<'a>(
@@ -78,13 +68,13 @@ impl NamedUnit {
     }
 }
 
-fn enter(
+fn name_source(
     id: SourceId,
     name: &str,
-    parsed: ParseResult,
+    parsed: &ParseResult,
     store: &mut SemanticStore,
     packages: &mut Packages,
-) -> NamedUnit {
+) -> SourceSemanticIndex {
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let NamingOutcome::Named { index, diagnostics } = name_compilation_unit_with_diagnostics(
         &parsed.ast,
@@ -100,68 +90,23 @@ fn enter(
     };
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
 
-    let ast = parsed.ast;
-    let TreeKind::PackageDef(package) = &ast.get(parsed.root).kind else {
-        panic!("expected package")
-    };
-    let mut methods = Vec::new();
-    let mut classes = Vec::with_capacity(package.stats.len());
-    for &tree in &package.stats {
-        let TreeKind::TypeDef(class) = &ast.get(tree).kind else {
-            panic!("expected class")
-        };
-        let TreeKind::Template(template) = &ast.get(class.rhs).kind else {
-            panic!("expected template")
-        };
-        let start = methods.len();
-        let mut fields = Vec::new();
-        for &member in &template.body {
-            let Some(symbol) = index.symbol_at(id, member) else {
-                continue;
-            };
-            match (&ast.get(member).kind, store.symbols.get(symbol).kind) {
-                (TreeKind::DefDef(method), dotty::core::SymbolKind::Method)
-                    if method.rhs.is_some() =>
-                {
-                    methods.push(member)
-                }
-                (TreeKind::ValDef(field), dotty::core::SymbolKind::Field)
-                    if field.rhs.is_some() =>
-                {
-                    fields.push(symbol);
-                }
-                _ => {}
-            }
-        }
-        let TreeKind::DefDef(constructor) = &ast.get(template.constructor).kind else {
-            panic!("expected constructor")
-        };
-        let constructor_fields = constructor
-            .value_param_clauses
-            .iter()
-            .flatten()
-            .map(|&tree| index.symbol_at(id, tree).unwrap())
-            .filter(|&symbol| store.symbols.get(symbol).kind == dotty::core::SymbolKind::Field)
-            .collect();
-        let parent_application = match template.parents.as_slice() {
-            [tree] if matches!(ast.get(*tree).kind, TreeKind::Apply(_)) => Some(*tree),
-            _ => None,
-        };
-        classes.push(NamedClass {
-            parent_application,
-            constructor_fields,
-            symbol: index.symbol_at(id, tree).unwrap(),
-            constructor: index.symbol_at(id, template.constructor).unwrap(),
-            method_range: start..methods.len(),
-            fields,
-        });
-    }
+    *index
+}
+
+fn enter(
+    id: SourceId,
+    name: &str,
+    parsed: ParseResult,
+    store: &mut SemanticStore,
+    packages: &mut Packages,
+) -> NamedUnit {
+    let index = name_source(id, name, &parsed, store, packages);
+    let classes = source_classes(&parsed.ast, parsed.root, id, &index, store).unwrap();
     NamedUnit {
         source: id,
-        ast,
-        index: *index,
+        ast: parsed.ast,
+        index,
         classes,
-        methods,
     }
 }
 
@@ -252,8 +197,9 @@ fn complete_headers(
                         let index = std::sync::Arc::new(index);
                         for class in &unit.classes {
                             if class
-                                .parent_application
-                                .is_some_and(|tree| index.get(unit.source, tree).is_some())
+                                .parents
+                                .iter()
+                                .any(|&tree| index.get(unit.source, tree).is_some())
                             {
                                 headers.by_class.insert(class.symbol, index.clone());
                             }
@@ -278,7 +224,7 @@ fn complete_headers(
             for &field in &class.constructor_fields {
                 typer.complete_symbol(field)?;
             }
-            for &field in &class.fields {
+            for field in class.fields().map(|decl| decl.symbol) {
                 if typer.store().symbols.get(field).visibility == dotty::core::Visibility::Public {
                     typer.complete_symbol(field)?;
                 }
@@ -399,11 +345,12 @@ struct FieldBindings {
 }
 
 struct MethodBindings {
+    method: SymbolId,
     index: SourceTypedIndex,
     locals: Vec<TypedLocalBinding>,
 }
 
-fn named_classes(units: &[NamedUnit]) -> impl Iterator<Item = (&NamedUnit, &NamedClass)> {
+fn named_classes(units: &[NamedUnit]) -> impl Iterator<Item = (&NamedUnit, &SourceClass)> {
     units
         .iter()
         .flat_map(|unit| unit.classes.iter().map(move |class| (unit, class)))
@@ -422,8 +369,8 @@ fn type_bodies(
     } = headers;
     let mut typed_classes = Vec::new();
     for (unit, class) in named_classes(units) {
-        let mut fields = Vec::with_capacity(class.fields.len());
-        for &field in &class.fields {
+        let mut fields = Vec::new();
+        for field in class.fields().map(|decl| decl.symbol) {
             let mut typer = SourceTyper::new_with_typed_ast(
                 &unit.ast,
                 unit.source,
@@ -438,8 +385,8 @@ fn type_bodies(
             output = arena;
             fields.push(FieldBindings { field, root, index });
         }
-        let mut methods = Vec::with_capacity(class.method_range.len());
-        for &method in &unit.methods[class.method_range.clone()] {
+        let mut methods = Vec::new();
+        for method in class.methods() {
             let mut typer = SourceTyper::new_with_typed_ast(
                 &unit.ast,
                 unit.source,
@@ -449,10 +396,11 @@ fn type_bodies(
                 packages,
                 output,
             );
-            typer.type_method_definition(method).unwrap();
+            typer.type_method_definition(method.tree).unwrap();
             let result = typer.into_typed_output();
             output = result.typed_ast;
             methods.push(MethodBindings {
+                method: method.symbol,
                 index: result.source_typed_index,
                 locals: result.local_bindings,
             });
@@ -476,22 +424,18 @@ fn class_plans(
 ) -> Result<Vec<JvmClassPlan>, ClassPlanError> {
     let mut classes = Vec::new();
     for ((unit, class), typed) in named_classes(units).zip(typed_classes) {
-        assert_eq!(class.method_range.len(), typed.methods.len());
-        let methods = unit.methods[class.method_range.clone()]
-            .iter()
-            .zip(typed.methods)
-            .map(|(&tree, typed)| {
-                JvmMethodPlanner {
-                    store,
-                    source_ast: &unit.ast,
-                    source_index: &unit.index,
-                    typed_ast: output,
-                    typed_index: &typed.index,
-                    local_bindings: &typed.locals,
-                }
-                .plan(unit.symbol(tree))
-                .unwrap()
-            });
+        let methods = typed.methods.into_iter().map(|typed| {
+            JvmMethodPlanner {
+                store,
+                source_ast: &unit.ast,
+                source_index: &unit.index,
+                typed_ast: output,
+                typed_index: &typed.index,
+                local_bindings: &typed.locals,
+            }
+            .plan(typed.method)
+            .unwrap()
+        });
         let fields = typed.fields.iter().map(|binding| TypedFieldInitializer {
             field: binding.field,
             root: binding.root,
@@ -624,27 +568,24 @@ fn method_plan_rejects_another_methods_body_in_the_same_source() {
         &mut packages,
     );
     let unit = &units[0];
-    let [first, second] = unit.methods[..] else {
+    let [first, second] = unit.methods().collect::<Vec<_>>()[..] else {
         panic!("expected two methods")
     };
     let mut typer = unit.typer(&mut store, definitions, &packages);
-    let first_root = typer.type_method_definition(first).unwrap();
-    typer.type_method_definition(second).unwrap();
+    let first_root = typer.type_method_definition(first.tree).unwrap();
+    typer.type_method_definition(second.tree).unwrap();
     let mut output = typer.into_typed_output();
     let planner = JvmMethodPlanner::new(&store, &unit.ast, &unit.index, &output);
-    let first_plan = planner.plan(unit.symbol(first)).unwrap();
-    let second_plan = planner.plan(unit.symbol(second)).unwrap();
+    let first_plan = planner.plan(first.symbol).unwrap();
+    let second_plan = planner.plan(second.symbol).unwrap();
     assert_eq!(first_plan.locals.len(), 1);
     assert_eq!(second_plan.locals.len(), 1);
     let first_local = first_plan.locals[0];
     let second_local = second_plan.locals[0];
-    assert_eq!(
-        store.symbols.owner(first_local.symbol),
-        Some(unit.symbol(first))
-    );
+    assert_eq!(store.symbols.owner(first_local.symbol), Some(first.symbol));
     assert_eq!(
         store.symbols.owner(second_local.symbol),
-        Some(unit.symbol(second))
+        Some(second.symbol)
     );
     assert!(first_local.mutable);
     assert!(!second_local.mutable);
@@ -655,9 +596,9 @@ fn method_plan_rejects_another_methods_body_in_the_same_source() {
     };
     definition.rhs = second_plan.body;
     assert_eq!(
-        JvmMethodPlanner::new(&store, &unit.ast, &unit.index, &output).plan(unit.symbol(first)),
+        JvmMethodPlanner::new(&store, &unit.ast, &unit.index, &output).plan(first.symbol),
         Err(MethodPlanError::BodyMismatch {
-            method: unit.symbol(first),
+            method: first.symbol,
             expected: first_plan.body.unwrap(),
             actual: second_plan.body.unwrap()
         })
@@ -815,7 +756,8 @@ fn cross_file_bad_call_reports_arity_at_the_call_after_dependency_completion() {
     let caller = &units[0];
     let f = caller.method_symbol();
     let g = units[1].method_symbol();
-    let TreeKind::DefDef(definition) = &caller.ast.get(caller.methods[0]).kind else {
+    let TreeKind::DefDef(definition) = &caller.ast.get(caller.methods().next().unwrap().tree).kind
+    else {
         panic!("expected method")
     };
     let call = definition.rhs.unwrap();
