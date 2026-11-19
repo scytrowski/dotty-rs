@@ -66,7 +66,7 @@ impl SourceTyper<'_> {
                 .symbols
                 .owner(symbol)
                 .is_some_and(|owner| self.contextual_getter_source(owner).is_some());
-        if self.is_structural_given_parameter_copy(symbol) || getter_projection {
+        if self.is_context_bound_or_given_parameter_copy(symbol) || getter_projection {
             // Constructor and factory binders share syntax with the canonical
             // class declaration. Project each copy in its own lexical scope
             // without publishing those types under the shared source tree.
@@ -564,6 +564,57 @@ impl SourceTyper<'_> {
         let result = self.complete_signature_parameter(symbol, info_journal);
         self.signature_parameter_in_progress = previous;
         result
+    }
+
+    fn is_context_bound_or_given_parameter_copy(&self, symbol: SymbolId) -> bool {
+        let entry = self.store.symbols.get(symbol);
+        if !matches!(
+            entry.kind,
+            SymbolKind::TypeParameter | SymbolKind::Parameter
+        ) {
+            return false;
+        }
+        let Some(method) = entry.owner else {
+            return false;
+        };
+        let Some(SourceDefinition::Derived { source, .. }) = self.index.definition_of(symbol)
+        else {
+            return false;
+        };
+        if source != self.source {
+            return false;
+        }
+        if self.store.symbols.get(method).kind == SymbolKind::Constructor {
+            if self.store.symbols.owner(method).is_some_and(|class| {
+                self.store
+                    .symbols
+                    .get(class)
+                    .flags
+                    .contains(SymbolFlags::GIVEN)
+            }) {
+                return true;
+            }
+            let Some(SourceDefinition::Canonical { tree, .. }) = self.index.definition_of(method)
+            else {
+                return false;
+            };
+            let Some(TreeKind::DefDef(ctor)) = self.arena.try_get(tree).map(|n| &n.kind) else {
+                return false;
+            };
+            return ctor
+                .context_bound_trees(self.arena)
+                .next()
+                .is_some_and(|bound| {
+                    self.index
+                        .derived_symbol_at(method, self.source, bound)
+                        .is_some()
+                });
+        }
+        let Some(SourceDefinition::Derived { source, tree }) = self.index.definition_of(method)
+        else {
+            return false;
+        };
+        source == self.source && self.structural_given_class(method, tree).is_some()
     }
 
     pub(super) fn source_tree_for_symbol(

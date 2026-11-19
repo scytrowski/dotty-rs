@@ -723,6 +723,183 @@ fn inherited_given_priority_uses_declaring_classes_in_a_diamond() {
 }
 
 #[test]
+fn ordinary_class_bound_uses_private_evidence_in_the_body_and_caller_evidence_at_new() {
+    let text = include_str!("../../../tests/fixtures/contextual-v1/controls/ClassBound.scala");
+    for constructor_first in [false, true] {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+        let bound = parsed
+            .ast
+            .iter()
+            .find_map(|(id, node)| {
+                matches!(
+                    node.kind,
+                    TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(_))
+                )
+                .then_some(id)
+            })
+            .unwrap();
+        let field = index.symbol_at(source, bound).unwrap();
+        let resolver = super::contextual_binary::library_resolver(definitions, &packages);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+        let order = if constructor_first {
+            ["make", "evidence"]
+        } else {
+            ["evidence", "make"]
+        };
+        for name in order {
+            let (method, rhs) =
+                method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+            typer
+                .type_method_definition(definition_tree(&index, method))
+                .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            let typed = typer.typed_index.get(source, rhs).unwrap();
+            if name == "evidence" {
+                assert_eq!(reference(&typer, typed), field);
+            } else {
+                let TreeKind::Apply(empty) = &typer.typed_ast().get(typed).kind else {
+                    panic!("expected final empty argument list")
+                };
+                assert!(empty.args.is_empty());
+                let TreeKind::Apply(call) = &typer.typed_ast().get(empty.function).kind else {
+                    panic!("expected contextual constructor call")
+                };
+                let [arg] = call.args[..] else {
+                    panic!("expected one constructor witness")
+                };
+                assert_eq!(
+                    reference(&typer, arg),
+                    method_parameter_symbol(&parsed, &index, source, method, 0)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn ordinary_class_bound_follows_written_arguments_and_merges_with_using_or_implicit() {
+    let text = "trait TC[A]
+        class Data[A: TC](val value: A)
+        class Merged[A: TC as tc](using n: Int)
+        class Legacy[A: TC](implicit n: Int)
+        class Client {
+          def trailing(using leaf: TC[Int]): Data[Int] = new Data[Int](1)
+          def merged(using leaf: TC[Int], n: Int): Merged[Int] = new Merged[Int](using leaf, n)
+          def legacy(using leaf: TC[Int], n: Int): Legacy[Int] = new Legacy[Int]
+        }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for name in ["trailing", "merged", "legacy"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        typer
+            .type_method_definition(definition_tree(&index, method))
+            .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let typed = typer.typed_index.get(source, rhs).unwrap();
+        let TreeKind::Apply(outer) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected constructor call")
+        };
+        let TreeKind::Apply(inner) = &typer.typed_ast().get(outer.function).kind else {
+            panic!("expected constructor call")
+        };
+        let args = match name {
+            "merged" => {
+                assert!(outer.args.is_empty());
+                &inner.args
+            }
+            "legacy" => {
+                assert!(inner.args.is_empty());
+                &outer.args
+            }
+            _ => {
+                assert_eq!(inner.args.len(), 1);
+                &outer.args
+            }
+        };
+        let expected_count = if name == "trailing" { 1 } else { 2 };
+        assert_eq!(args.len(), expected_count);
+        for (i, arg) in args.iter().enumerate() {
+            assert_eq!(
+                reference(&typer, *arg),
+                method_parameter_symbol(&parsed, &index, source, method, i)
+            );
+        }
+    }
+}
+
+#[test]
+fn ordinary_class_bound_reports_missing_and_ambiguous_evidence_at_new() {
+    for (name, text) in [
+        (
+            "missing",
+            include_str!("../../../tests/fixtures/contextual-v1/controls/ClassBoundMissing.scala"),
+        ),
+        (
+            "ambiguous",
+            include_str!(
+                "../../../tests/fixtures/contextual-v1/controls/ClassBoundAmbiguous.scala"
+            ),
+        ),
+    ] {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, name);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let TreeKind::Apply(allocation) = &parsed.ast.get(rhs).kind else {
+            panic!("expected constructor application")
+        };
+        assert!(typer.is_constructor_selection(allocation.function));
+        let site = allocation.function.index();
+        let before = typer.store.checkpoint();
+        match typer.type_method_definition(definition_tree(&index, method)) {
+            Err(TyperError::MissingContextualArgument {
+                source: at,
+                tree_index,
+                ..
+            }) if name == "missing" => {
+                assert_eq!((at, tree_index), (source, site));
+            }
+            Err(TyperError::AmbiguousContextualArgument {
+                source: at,
+                tree_index,
+                candidates,
+                ..
+            }) if name == "ambiguous" => {
+                assert_eq!((at, tree_index), (source, site));
+                assert_eq!(
+                    candidates,
+                    (0..2)
+                        .map(|i| method_parameter_symbol(&parsed, &index, source, method, i))
+                        .collect::<Vec<_>>()
+                );
+            }
+            other => panic!("{name}: {other:?}"),
+        }
+        assert_eq!(typer.store.checkpoint(), before);
+        assert!(typer.typed_index.is_empty());
+    }
+}
+
+#[test]
 fn constructor_contexts_follow_normalized_scala_clause_order() {
     let text = "class Context(using n:Int); class Old(implicit n:Int); class Pair(x:Int)(using n:Int); class C { def implicitCtor(using n:Int):Context=new Context; def explicitCtor(using n:Int):Context=new Context(using n); def legacy(using n:Int):Old=new Old; def trailing(using n:Int):Pair=new Pair(1) }";
     let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
