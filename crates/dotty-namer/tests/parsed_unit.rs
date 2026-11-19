@@ -895,6 +895,51 @@ fn primary_constructor_parts(named: &NamedSource) -> PrimaryConstructorParts {
     }
 }
 
+#[test]
+fn ordinary_class_bounds_enter_private_fields_and_distinct_constructor_parameters() {
+    for (tail, flag) in [
+        ("", SymbolFlags::GIVEN),
+        ("(implicit n: Int)", SymbolFlags::IMPLICIT),
+    ] {
+        let named = named_source(&format!("class Box[A: {{ TC as tc, Show }}]{tail}"), 402);
+        let parts = primary_constructor_parts(&named);
+        let class = named
+            .index
+            .symbol_at(named.source, parts.class_tree)
+            .unwrap();
+        let ctor = named
+            .index
+            .symbol_at(named.source, parts.constructor_tree)
+            .unwrap();
+        let TreeKind::DefDef(def) = &named.parsed.ast.get(parts.constructor_tree).kind else {
+            panic!("expected primary constructor")
+        };
+        let clauses = def.context_bound_clauses(&named.parsed.ast, &named.store.names);
+        for (bound, name) in clauses[0][..2].iter().zip(["tc", "evidence$1"]) {
+            let field = named.index.symbol_at(named.source, *bound).unwrap();
+            let parameter = named
+                .index
+                .derived_symbol_at(ctor, named.source, *bound)
+                .unwrap();
+            assert_ne!(field, parameter);
+            for (id, owner, kind, visibility) in [
+                (field, class, SymbolKind::Field, Visibility::Private),
+                (parameter, ctor, SymbolKind::Parameter, Visibility::Public),
+            ] {
+                let entry = named.store.symbols.get(id);
+                assert_eq!(
+                    (entry.owner, entry.kind, entry.visibility),
+                    (Some(owner), kind, visibility)
+                );
+                assert!(entry.flags.contains(flag));
+                assert_eq!(named.store.names.resolve(entry.name.text()), name);
+                let scope = named.store.scopes.get(named.index.scope_of(owner).unwrap());
+                assert_eq!(scope.lookup_all(&entry.name), &[id]);
+            }
+        }
+    }
+}
+
 struct VecTokenSource {
     tokens: Vec<Token>,
     index: usize,

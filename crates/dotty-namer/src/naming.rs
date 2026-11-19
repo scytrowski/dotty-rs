@@ -2884,33 +2884,36 @@ impl Namer<'_> {
             }
         }
 
-        if self.store.symbols.get(symbol).kind == SymbolKind::Class
-            && self
-                .store
-                .symbols
-                .get(symbol)
-                .flags
-                .contains(SymbolFlags::GIVEN)
-            && let Some(SourceDefinition::Canonical { tree, .. }) = self.index.definition_of(symbol)
-            && let Some(factory) = self
-                .store
-                .symbols
-                .owner(symbol)
-                .and_then(|owner| self.index.derived_symbol_at(owner, self.source, tree))
+        let class = self.store.symbols.get(symbol);
+        if class.kind == SymbolKind::Class
+            && !class.flags.contains(SymbolFlags::CASE)
+            && !class.flags.contains(SymbolFlags::ENUM)
         {
-            let factory_scope =
-                self.index
-                    .scope_of(factory)
-                    .ok_or(NamerError::MalformedAstShape {
+            let factory = if class.flags.contains(SymbolFlags::GIVEN)
+                && let Some(SourceDefinition::Canonical { tree, .. }) =
+                    self.index.definition_of(symbol)
+                && let Some(factory) = class
+                    .owner
+                    .and_then(|owner| self.index.derived_symbol_at(owner, self.source, tree))
+            {
+                let factory_scope =
+                    self.index
+                        .scope_of(factory)
+                        .ok_or(NamerError::MalformedAstShape {
+                            tree_index: tree.index(),
+                            expected: "structural given factory scope",
+                        })?;
+                let factory_context = self.index.declaration_context_of(factory).ok_or(
+                    NamerError::MalformedAstShape {
                         tree_index: tree.index(),
-                        expected: "structural given factory scope",
-                    })?;
-            let factory_context = self.index.declaration_context_of(factory).ok_or(
-                NamerError::MalformedAstShape {
-                    tree_index: tree.index(),
-                    expected: "structural given factory context",
-                },
-            )?;
+                        expected: "structural given factory context",
+                    },
+                )?;
+                Some((factory, factory_scope, factory_context))
+            } else {
+                None
+            };
+            let witness_flag = self.context_bound_flag(&constructor);
             let mut anonymous = 0;
             for parameter in &constructor.type_params {
                 let TreeKind::TypeDef(parameter) = &self.arena.get(*parameter).kind else {
@@ -2919,16 +2922,14 @@ impl Namer<'_> {
                 for (bound, name) in self.context_bound_witnesses(parameter, &mut anonymous)? {
                     let spec = SymbolSpec {
                         kind: SymbolKind::Field,
-                        flags: SymbolFlags::GIVEN,
+                        flags: witness_flag,
                         visibility: Visibility::Private,
                     };
                     let field = self.enter_symbol(bound, *name.as_name(), symbol, scope, spec)?;
                     self.index
                         .record_declaration_context(field, class_source_context)?;
-                    for (owner, scope, context) in [
-                        (constructor_symbol, constructor_scope, constructor_context),
-                        (factory, factory_scope, factory_context),
-                    ] {
+                    let ctor = (constructor_symbol, constructor_scope, constructor_context);
+                    for (owner, scope, context) in std::iter::once(ctor).chain(factory) {
                         let copy = self.enter_derived_symbol(
                             bound,
                             *name.as_name(),
@@ -2936,7 +2937,7 @@ impl Namer<'_> {
                             scope,
                             SymbolSpec {
                                 kind: SymbolKind::Parameter,
-                                flags: SymbolFlags::GIVEN,
+                                flags: witness_flag,
                                 visibility: Visibility::Public,
                             },
                         )?;

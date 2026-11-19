@@ -79,6 +79,10 @@ and context-bound witnesses have distinct symbols for the class, constructor
 and factory. The typer can therefore complete each signature in its own scope.
 A factory with only a type clause has no synthetic empty term clause.
 
+For ordinary classes, a context bound enters a private contextual field in the
+class scope and a distinct parameter in the primary constructor scope. Both
+bindings point to the same source bound. A named bound keeps its source name.
+
 An anonymous given with a constructor parent takes its name from the
 instantiated parent type. For example, `given Context("alpha")` introduces
 `given_Context`, and `given Container[String]("alpha")(2)` introduces
