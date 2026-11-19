@@ -19,7 +19,9 @@ use dotty::core::{
 use dotty::jvm::{
     GeneratedClass, JvmClassPlan, JvmCompilationUnit, PreparedJvmEmission, emit_class,
 };
-use dotty::jvm_class_plan::{ClassHeaderBindings, ClassPlanError, JvmClassPlanner, TypedClassBody};
+use dotty::jvm_class_plan::{
+    ClassHeaderBindings, ClassPlanError, JvmClassPlanner, TypedClassBodies, TypedClassBody,
+};
 use dotty::jvm_method_plan::JvmMethodPlanner;
 use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty::parser::{DetachedParse, ParseResult};
@@ -316,7 +318,7 @@ fn with_plan<R>(
     let headers = complete_signatures(&units, &mut store, definitions, &packages).unwrap();
 
     let (output, typed_classes) = type_bodies(&units, &mut store, definitions, &packages, headers);
-    let classes = class_plans(&units, typed_classes, &output, &store).unwrap();
+    let classes = class_plans(&units, &typed_classes, &output, &store).unwrap();
     let plan = JvmCompilationUnit {
         store: &store,
         typed_ast: &output.arena,
@@ -325,7 +327,9 @@ fn with_plan<R>(
     run(&plan, &definitions)
 }
 
-fn named_classes(units: &[NamedUnit]) -> impl Iterator<Item = (&NamedUnit, &SourceClass)> {
+fn named_classes(
+    units: &[NamedUnit],
+) -> impl DoubleEndedIterator<Item = (&NamedUnit, &SourceClass)> {
     units
         .iter()
         .flat_map(|unit| unit.classes.iter().map(move |class| (unit, class)))
@@ -337,8 +341,8 @@ fn type_bodies(
     definitions: Definitions,
     packages: &Packages,
     mut headers: TypedHeaders,
-) -> (TypedHeaders, Vec<TypedClassBody>) {
-    let mut typed_classes = Vec::new();
+) -> (TypedHeaders, TypedClassBodies) {
+    let mut typed_classes = TypedClassBodies::default();
     for (unit, class) in named_classes(units) {
         let mut typer = SourceTyper::new_with_typed_ast(
             &unit.ast,
@@ -357,7 +361,7 @@ fn type_bodies(
         }
         let (arena, body) = TypedClassBody::from_output(class, typer.into_typed_output());
         headers.arena = arena;
-        typed_classes.push(body);
+        typed_classes.record(body).unwrap();
     }
 
     (headers, typed_classes)
@@ -365,15 +369,16 @@ fn type_bodies(
 
 fn class_plans(
     units: &[NamedUnit],
-    typed_classes: Vec<TypedClassBody>,
+    typed_classes: &TypedClassBodies,
     output: &TypedHeaders,
     store: &SemanticStore,
 ) -> Result<Vec<JvmClassPlan>, ClassPlanError> {
     let mut classes = Vec::new();
-    for ((unit, class), typed) in named_classes(units).zip(typed_classes) {
+    for (unit, class) in named_classes(units) {
+        let body = typed_classes.get(class.symbol)?;
         let planner = JvmClassPlanner::new(store, &unit.ast, &unit.index)
             .with_header_bindings(&output.arena, &output.bindings);
-        classes.push(planner.plan_typed_class(class, &output.arena, &typed)?);
+        classes.push(planner.plan_typed_class(class, &output.arena, body)?);
     }
     Ok(classes)
 }

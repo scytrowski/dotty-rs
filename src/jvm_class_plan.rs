@@ -1,6 +1,6 @@
 //! Assemble field and method plans for a simple source class with a public primary constructor.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 use std::fmt;
 
 use crate::core::{
@@ -41,6 +41,7 @@ impl ClassHeaderBindings {
 
 /// One class's source-to-typed mappings and locals, retained while later
 /// typers append to the session's typed arena.
+#[derive(Debug)]
 pub struct TypedClassBody {
     class: SymbolId,
     index: SourceTypedIndex,
@@ -60,6 +61,32 @@ impl TypedClassBody {
                 locals: output.local_bindings,
             },
         )
+    }
+}
+
+/// Class bodies retained for deferred planning in a single naming and typing session.
+#[derive(Debug, Default)]
+pub struct TypedClassBodies {
+    bodies: HashMap<SymbolId, TypedClassBody>,
+}
+
+impl TypedClassBodies {
+    /// Records a body by its own class symbol. A duplicate leaves the first body in place.
+    pub fn record(&mut self, body: TypedClassBody) -> Result<(), ClassPlanError> {
+        match self.bodies.entry(body.class) {
+            Entry::Vacant(entry) => {
+                entry.insert(body);
+                Ok(())
+            }
+            Entry::Occupied(entry) => Err(ClassPlanError::DuplicateClassBody(*entry.key())),
+        }
+    }
+
+    /// Borrows a recorded body for [`JvmClassPlanner::plan_typed_class`] in any planning order.
+    pub fn get(&self, class: SymbolId) -> Result<&TypedClassBody, ClassPlanError> {
+        self.bodies
+            .get(&class)
+            .ok_or(ClassPlanError::MissingClassBody(class))
     }
 }
 
@@ -108,6 +135,10 @@ impl TypedFieldInitializer<'_> {
 /// The source shape or supplied methods cannot form a simple class plan.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClassPlanError {
+    /// The requested class has no recorded body.
+    MissingClassBody(SymbolId),
+    /// A body was already recorded for this class.
+    DuplicateClassBody(SymbolId),
     /// The retained typer output belongs to a different class in this session.
     ForeignClassBody {
         expected: SymbolId,

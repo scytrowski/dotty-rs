@@ -18,6 +18,94 @@ fn named(text: &str) -> (SemanticStore, Definitions, Packages, NamedUnit) {
     (store, defs, packages, units.pop().unwrap())
 }
 
+fn body_units() -> (SemanticStore, Definitions, Packages, Vec<NamedUnit>) {
+    let files = [
+        (
+            SourceId::from_index(0),
+            "A.scala",
+            "package demo\nclass A { def value(): Int = 40 }",
+        ),
+        (
+            SourceId::from_index(1),
+            "B.scala",
+            "package demo\nclass B { def value(): Int = 7 }",
+        ),
+    ];
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let units = name_units(
+        &files,
+        parsing::parse_files(&files, 2),
+        &mut store,
+        &mut packages,
+    );
+    (store, defs, packages, units)
+}
+
+#[test]
+fn bodies_recorded_b_then_a_plan_and_execute_a_then_b() {
+    let (mut store, defs, packages, mut units) = body_units();
+    let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
+    units.reverse();
+    let (output, bodies) = type_bodies(&units, &mut store, defs, &packages, headers);
+    units.reverse();
+    let classes = class_plans(&units, &bodies, &output, &store).unwrap();
+    let plan = dotty::jvm::JvmCompilationUnit {
+        store: &store,
+        typed_ast: &output.arena,
+        classes,
+    };
+    let prepared = plan.prepare_emission(&defs).unwrap();
+    let (artifacts, _) = super::emit_batch(&prepared, &plan.classes, 2);
+    assert!(
+        artifacts
+            .iter()
+            .map(|c| c.internal_name())
+            .eq(["demo/A", "demo/B"])
+    );
+    assert_eq!(
+        super::run_java_client("typed-bodies", "TypedBodiesClient", &artifacts)
+            .lines()
+            .collect::<Vec<_>>(),
+        ["40", "7"]
+    );
+}
+
+#[test]
+fn planning_requires_b_and_recording_a_twice_preserves_the_first_body() {
+    let (mut store, defs, packages, units) = body_units();
+    let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
+    let (mut output, mut bodies) = type_bodies(&units[..1], &mut store, defs, &packages, headers);
+    let unit = &units[0];
+    let a = &unit.classes[0];
+    let b = &units[1].classes[0];
+    assert_eq!(
+        class_plans(&units, &bodies, &output, &store),
+        Err(ClassPlanError::MissingClassBody(b.symbol))
+    );
+
+    // A second output for A has no method mapping. Replacing the first would break planning.
+    let typer = dotty::typer::SourceTyper::new_with_typed_ast(
+        &unit.ast,
+        unit.source,
+        &unit.index,
+        &mut store,
+        defs,
+        &packages,
+        output.arena,
+    );
+    let (arena, duplicate) =
+        dotty::jvm_class_plan::TypedClassBody::from_output(a, typer.into_typed_output());
+    output.arena = arena;
+    assert_eq!(
+        bodies.record(duplicate),
+        Err(ClassPlanError::DuplicateClassBody(a.symbol))
+    );
+    let plans = class_plans(&units[..1], &bodies, &output, &store).unwrap();
+    assert_eq!(plans[0].methods[0].method, unit.method_symbol());
+}
+
 #[test]
 fn deferred_plans_keep_each_class_body_and_locals_after_extending_the_arena() {
     use dotty::core::AstArena;
@@ -809,14 +897,13 @@ class Base(seed: Int) { private val initial = seed; def read(): Int = initial }"
         }
 
         let (output, bodies) = type_bodies(&units, &mut store, defs, &packages, headers);
-        let mut declarations: Vec<_> = super::named_classes(&units).zip(bodies).collect();
-        declarations.reverse(); // Plan Mid before Leaf from the same retained bindings.
-        let classes = declarations
-            .into_iter()
-            .map(|((unit, class), body)| {
+        // Plan Mid before Leaf using the same retained header and body bindings.
+        let classes = super::named_classes(&units)
+            .rev()
+            .map(|(unit, class)| {
                 JvmClassPlanner::new(&store, &unit.ast, &unit.index)
                     .with_header_bindings(&output.arena, &output.bindings)
-                    .plan_typed_class(class, &output.arena, &body)
+                    .plan_typed_class(class, &output.arena, bodies.get(class.symbol).unwrap())
                     .unwrap()
             })
             .collect();
@@ -1115,7 +1202,7 @@ fn private_fields_encode_mutability_and_keep_per_instance_state_on_jdk21() {
     let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
     let (output, bindings) = type_bodies(&units, &mut store, defs, &packages, headers);
     units[0].classes[0].members.reverse();
-    let classes = class_plans(&units, bindings, &output, &store).unwrap();
+    let classes = class_plans(&units, &bindings, &output, &store).unwrap();
     let class = classes[0].class;
     let unit = dotty::jvm::JvmCompilationUnit {
         store: &store,

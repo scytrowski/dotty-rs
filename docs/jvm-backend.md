@@ -79,9 +79,13 @@ To plan after typing several classes, use one source typer per class. Type
 its field initializers and method definitions, then call
 `TypedClassBody::from_output(class, typer.into_typed_output())`. This moves
 out the session arena and keeps the class symbol, source-to-typed index and
-local bindings together. Pass the arena to the next typer. Once typing is
-complete, call `plan_typed_class(class, &arena, &body)` for each class, using
-its original `SourceClass` and the final arena. For a parent application,
+local bindings together. Pass the arena to the next typer. Keep one
+`TypedClassBodies` collection per session and call `bodies.record(body)` as
+each body becomes available. A second body for the same symbol returns
+`DuplicateClassBody` and preserves the first. Visit declarations in the desired
+planning order and call `plan_typed_class(class, &arena, bodies.get(class.symbol)?)`
+using the final arena. A lookup for an unrecorded class returns `MissingClassBody`
+with its symbol. For a parent application,
 supply the session’s header mappings via `with_header_bindings`.
 Field roots are looked up by source RHS and local declarations by method
 owner. A body retained for another class returns `ForeignClassBody`.
