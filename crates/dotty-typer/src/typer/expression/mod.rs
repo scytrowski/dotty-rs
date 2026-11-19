@@ -12,6 +12,7 @@ mod annotated;
 mod assignment;
 pub(super) mod blocks;
 mod control_flow;
+mod conversion;
 pub(super) mod function;
 mod match_expr;
 mod new;
@@ -433,6 +434,18 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
+        if self.requires_context_abstraction(tree, expected)
+            && self.typed_index.get(self.source, tree).is_none()
+        {
+            return self.synthesize_context_lambda(
+                tree,
+                expected,
+                context,
+                poly_binder,
+                info_journal,
+                new_mappings,
+            );
+        }
         let mut typed = match self.arena.try_get(tree).map(|node| &node.kind) {
             Some(TreeKind::Block(block))
                 if !block.stats.is_empty() && self.is_function_literal_value(block.expr) =>
@@ -574,12 +587,14 @@ impl SourceTyper<'_> {
                 }
                 Ok(typed)
             }
-            Ok(false) => Err(TyperError::ExpectedExpressionTypeMismatch {
-                source: self.source,
-                tree_index: tree.index(),
-                actual,
-                expected,
-            }),
+            Ok(false) => self
+                .try_implicit_conversion(tree, typed, actual, expected, context, info_journal)?
+                .ok_or(TyperError::ExpectedExpressionTypeMismatch {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    actual,
+                    expected,
+                }),
             Err(error) => Err(TyperError::ExpectedExpressionConformanceUnsupported {
                 source: self.source,
                 tree_index: tree.index(),
@@ -622,6 +637,16 @@ impl SourceTyper<'_> {
             self.validate_cached_parent_argument_receiver_access(tree, typed)?;
             return Ok(typed);
         }
+        if self.requires_context_abstraction(tree, expected) {
+            return self.synthesize_context_lambda(
+                tree,
+                expected,
+                context,
+                poly_binder,
+                info_journal,
+                new_mappings,
+            );
+        }
         let node = self
             .arena
             .try_get(tree)
@@ -635,7 +660,8 @@ impl SourceTyper<'_> {
                 // Keep both Function1 components available even when the
                 // lambda's input is explicitly annotated: the output may
                 // still be needed to type a nested function literal.
-                let expected_function1 = self.ordinary_function1_parts(expected, tree.index())?;
+                let kind = self.literal_function_kind(&function);
+                let expected_function1 = self.function1_parts(expected, tree.index(), kind)?;
                 let expected_function1 = if let Some((input, output)) = expected_function1 {
                     let output_contains_poly_parameter = match poly_binder {
                         Some(binder) => self.type_contains_param_ref(output, binder)?,
@@ -660,7 +686,6 @@ impl SourceTyper<'_> {
                 self.type_function_literal(
                     tree,
                     function,
-                    node.position,
                     FunctionLiteralTypingContext {
                         context,
                         expected_function1,
@@ -700,6 +725,13 @@ impl SourceTyper<'_> {
                     info_journal,
                     new_mappings,
                 )?,
+            TreeKind::Ident(_) | TreeKind::Select(_) | TreeKind::Apply(_) => {
+                let saved = self.value_expectation.replace((tree, expected));
+                let result =
+                    self.type_value_expression_inner(tree, context, info_journal, new_mappings);
+                self.value_expectation = saved;
+                return result;
+            }
             _ => {
                 return self.type_value_expression_inner(tree, context, info_journal, new_mappings);
             }
@@ -715,6 +747,10 @@ impl SourceTyper<'_> {
             })?;
         new_mappings.push((self.source, tree));
         Ok(typed)
+    }
+
+    fn requires_context_abstraction(&self, tree: TreeId<Untyped>, expected: TypeId) -> bool {
+        self.is_applied_context_function(expected) && !self.is_function_literal_value(tree)
     }
 
     pub(in crate::typer) fn is_function_literal_value(&self, tree: TreeId<Untyped>) -> bool {
@@ -927,6 +963,31 @@ impl SourceTyper<'_> {
                             })?,
                     };
                     let member_type = self.member_type_on_journaled(&candidate, info_journal)?;
+                    let member_type =
+                        if matches!(self.store.types.try_get(prefix), Some(Type::TermRef { .. }))
+                            && matches!(
+                                self.store.symbols.get(candidate.declaring_class).kind,
+                                SymbolKind::Class | SymbolKind::Trait
+                            )
+                            && self.source_tree_for_symbol(symbol).is_some()
+                            && self.is_stable_selection_prefix(prefix)?
+                        {
+                            dotty_core::types::substitute_this_type(
+                                self.store,
+                                member_type,
+                                candidate.declaring_class,
+                                prefix,
+                            )
+                            .map_err(|error| {
+                                TyperError::MemberPrefixRebinding {
+                                    symbol,
+                                    prefix,
+                                    error,
+                                }
+                            })?
+                        } else {
+                            member_type
+                        };
                     if self.definitions.any_hash_code_symbol(self.store) == Some(symbol)
                         && let Some(Type::ByName { result }) = self.store.types.try_get(member_type)
                     {

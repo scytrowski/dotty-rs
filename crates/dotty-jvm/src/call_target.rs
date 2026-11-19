@@ -21,9 +21,19 @@ pub(super) fn resolve_same_class_call(
     call: TreeId<Typed>,
     definitions: &Definitions,
 ) -> Result<JvmCallTarget, JvmCodegenError> {
-    if let Some(call_tree) = unit.typed_ast.try_get(call)
-        && let TreeKind::Apply(application) = &call_tree.kind
-        && let Some(function) = unit.typed_ast.try_get(application.function)
+    if let Some(function_id) = unit
+        .typed_ast
+        .try_get(call)
+        .and_then(|node| match &node.kind {
+            TreeKind::Apply(application) => Some(application.function),
+            _ if crate::defaults::is_parameterless_getter(unit.store, node) => Some(call),
+            _ => None,
+        })
+        && let Some(function) = unit.typed_ast.try_get(function_id)
+        && let Some(function) = match &function.kind {
+            TreeKind::Apply(previous) => unit.typed_ast.try_get(previous.function),
+            _ => Some(function),
+        }
         && let TreeKind::Select(select) = &function.kind
     {
         let receiver = tree(unit.store, unit.typed_ast, select.qualifier)?;
@@ -40,14 +50,14 @@ pub(super) fn resolve_same_class_call(
                     Some(Type::ThisType { class }) if *class == caller_class
                 ) {
                     return Err(unsupported_call(
-                        application.function,
+                        function_id,
                         UnsupportedJvmCallShapeKind::NonCurrentThis,
                     ));
                 }
             }
             _ => {
                 return Err(unsupported_call(
-                    application.function,
+                    function_id,
                     UnsupportedJvmCallShapeKind::NonThisReceiver,
                 ));
             }
@@ -183,7 +193,12 @@ fn resolve_instance_call_body(
 
     let call_tree = tree(unit.store, unit.typed_ast, call)?;
     let (function_id, apply_kind) = match &call_tree.kind {
-        TreeKind::Apply(apply) => (apply.function, apply.kind),
+        TreeKind::Apply(apply) => (apply.function, Some(apply.kind)),
+        _ if invocation == JvmInvocationKind::Virtual
+            && crate::defaults::is_parameterless_getter(unit.store, call_tree) =>
+        {
+            (call, None)
+        }
         TreeKind::TypeApply(_) => {
             return Err(unsupported_call(
                 call,
@@ -197,14 +212,20 @@ fn resolve_instance_call_body(
             ));
         }
     };
-    if apply_kind != ApplyKind::Regular {
+    let supplied_function = tree(unit.store, unit.typed_ast, function_id)?;
+    let (function_id, prior_application) = match &supplied_function.kind {
+        TreeKind::Apply(prior) if invocation == JvmInvocationKind::Virtual => {
+            (prior.function, Some((function_id, prior)))
+        }
+        _ => (function_id, None),
+    };
+    let function_tree = tree(unit.store, unit.typed_ast, function_id)?;
+    if apply_kind.is_some() && crate::defaults::is_parameterless_getter(unit.store, function_tree) {
         return Err(unsupported_call(
             call,
-            UnsupportedJvmCallShapeKind::UsingClause,
+            UnsupportedJvmCallShapeKind::UnexpectedGetterApplication,
         ));
     }
-
-    let function_tree = tree(unit.store, unit.typed_ast, function_id)?;
     let (receiver_tree, receiver_class, direct_super_parent) = match &function_tree.kind {
         TreeKind::Ident(_) if invocation == JvmInvocationKind::Virtual => {
             (None, caller_class, None)
@@ -269,6 +290,48 @@ fn resolve_instance_call_body(
             expected: SymbolRole::Method,
             found: method_symbol.kind,
         });
+    }
+    let signature = match method_symbol.info {
+        dotty_core::SymbolInfo::Complete(ty) => match unit.store.types.try_get(ty) {
+            Some(Type::Method(signature)) => Some(signature),
+            _ => None,
+        },
+        _ => None,
+    };
+    let tail =
+        signature.and_then(|signature| crate::descriptor::contextual_tail(unit.store, signature));
+    match (signature, tail, prior_application) {
+        (Some(outer), Some(tail), Some((prior_id, prior))) => {
+            let TreeKind::Apply(last) = &call_tree.kind else {
+                unreachable!()
+            };
+            if prior.kind != ApplyKind::Regular
+                || prior.args.len() != outer.params.len()
+                || last.args.len() != tail.params.len()
+                || unit.store.types.try_get(supplied_function.ty)
+                    != unit.store.types.try_get(outer.result)
+            {
+                return Err(unsupported_call(
+                    prior_id,
+                    UnsupportedJvmCallShapeKind::NestedApplication,
+                ));
+            }
+        }
+        (_, Some(_), None) | (_, None, Some(_)) => {
+            return Err(unsupported_call(
+                call,
+                UnsupportedJvmCallShapeKind::NestedApplication,
+            ));
+        }
+        _ if apply_kind == Some(ApplyKind::Using)
+            && !signature.is_some_and(|s| s.kind != dotty_core::MethodKind::Plain) =>
+        {
+            return Err(unsupported_call(
+                call,
+                UnsupportedJvmCallShapeKind::UsingClause,
+            ));
+        }
+        _ => {}
     }
     let method_owner = method_symbol.owner.ok_or(JvmCodegenError::WrongOwner {
         symbol: method,
@@ -426,7 +489,11 @@ fn resolve_instance_call_body(
             });
         }
     }
-    let found = project_result_type(unit, call_tree.ty, definitions);
+    let result_type = match (apply_kind, method_symbol.info) {
+        (None, SymbolInfo::Complete(result)) => result,
+        _ => call_tree.ty,
+    };
+    let found = project_result_type(unit, result_type, definitions);
     let expected = method_metadata.descriptor().result();
     if found != Some(expected) {
         return Err(JvmCodegenError::JvmCallResultTypeMismatch {
@@ -446,6 +513,7 @@ fn resolve_instance_call_body(
         })
         .unwrap_or(class_metadata);
     Ok(JvmCallTarget {
+        prior_application: prior_application.map(|(id, _)| id),
         owner_internal_name: invocation_owner.identity().internal_name().to_owned(),
         method_name: method_metadata.name().to_owned(),
         descriptor: method_metadata.descriptor().clone(),

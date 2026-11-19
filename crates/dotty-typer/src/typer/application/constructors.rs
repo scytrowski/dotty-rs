@@ -1276,6 +1276,7 @@ impl SourceTyper<'_> {
                     binder,
                     &mut inferred,
                     InferenceLocation {
+                        result_pattern: false,
                         tree_index,
                         argument_index,
                         depth: 0,

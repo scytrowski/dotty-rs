@@ -2109,6 +2109,9 @@ fn namer_error_kind(error: &dotty_namer::NamerError) -> String {
             "DuplicateExtensionPrefixClauses"
         }
         dotty_namer::NamerError::DuplicateSourceExportSite { .. } => "DuplicateSourceExportSite",
+        dotty_namer::NamerError::ConflictingSourcePackageWrapper { .. } => {
+            "ConflictingSourcePackageWrapper"
+        }
         dotty_namer::NamerError::DuplicateDeclarationScope { .. } => "DuplicateDeclarationScope",
         dotty_namer::NamerError::DuplicateDeclarationContext { .. } => {
             "DuplicateDeclarationContext"

@@ -6,6 +6,7 @@ use super::super::*;
 pub(in crate::typer) struct InferenceLocation {
     pub(in crate::typer) tree_index: u32,
     pub(in crate::typer) argument_index: usize,
+    pub(in crate::typer) result_pattern: bool,
     pub(in crate::typer) depth: usize,
 }
 
@@ -299,6 +300,7 @@ impl SourceTyper<'_> {
                 binder,
                 &mut inferred,
                 InferenceLocation {
+                    result_pattern: false,
                     tree_index,
                     argument_index,
                     depth: 0,
@@ -338,6 +340,7 @@ impl SourceTyper<'_> {
             tree_index,
             argument_index,
             depth,
+            result_pattern,
         } = location;
         let actual = self.this_type_receiver_view(actual)?;
         if depth >= crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
@@ -473,6 +476,11 @@ impl SourceTyper<'_> {
                 formal,
                 actual,
             });
+        }
+        if result_pattern {
+            // Concrete fragments of a result contribute no binder constraints.
+            // Check their variance in the fully instantiated result against the goal.
+            return Ok(());
         }
         let mut seen = std::collections::HashSet::new();
         self.complete_relation_type(formal, info_journal, &mut seen, 0)?;

@@ -358,7 +358,9 @@ impl SourceTyper<'_> {
             return None;
         }
         let resolver = &self.resolver;
-        let parameters = resolver.class_type_parameters(self.store, class)?;
+        let parameters = resolver
+            .class_type_parameters(self.store, class)
+            .or_else(|| self.context_function_parameters(class, scope))?;
         let mut seen = Vec::with_capacity(parameters.len());
         for parameter in &parameters {
             let symbol = parameter.symbol;

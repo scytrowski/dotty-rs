@@ -499,11 +499,9 @@ pub(super) fn class_metadata(
     let mut previous_body_position = None;
     let mut field_names = HashMap::<String, dotty_core::SymbolId>::new();
     let mut field_symbols = HashSet::new();
-    let typed_ast = if plan.fields.is_empty() {
-        None
-    } else {
-        Some(typed_ast.ok_or(JvmCodegenError::FieldTypedAstRequired { class: plan.class })?)
-    };
+    if !plan.fields.is_empty() && typed_ast.is_none() {
+        return Err(JvmCodegenError::FieldTypedAstRequired { class: plan.class });
+    }
     for field_plan in &plan.fields {
         if !field_symbols.insert(field_plan.field) {
             return Err(JvmCodegenError::DuplicateFieldPlan {
@@ -633,8 +631,15 @@ pub(super) fn class_metadata(
 
     let mut methods = Vec::with_capacity(plan.methods.len());
     for method_plan in &plan.methods {
-        let planned_descriptor = match descriptor_context {
-            Some((descriptor_store, class_identities)) => {
+        let context_result = match typed_ast {
+            Some(ast) => {
+                crate::context_result::project(store, ast, method_plan, plan.class, definitions)?
+            }
+            None => None,
+        };
+        let planned_descriptor = match (context_result, descriptor_context) {
+            (Some(result), _) => result.descriptor(method_plan.method)?,
+            (None, Some((descriptor_store, class_identities))) => {
                 crate::descriptor::method_descriptor_with_class_identities(
                     method_plan,
                     descriptor_store,
@@ -644,7 +649,7 @@ pub(super) fn class_metadata(
                     unit,
                 )?
             }
-            None => method_plan.descriptor(store, plan.class, definitions)?,
+            (None, None) => method_plan.descriptor(store, plan.class, definitions)?,
         };
         let source_method = store.symbols.get(method_plan.method);
         if let Some(source_name) = store.names.try_resolve(source_method.name.text()) {
@@ -665,14 +670,7 @@ pub(super) fn class_metadata(
                 }
             }
         }
-        let method = method_metadata(
-            method_plan,
-            store,
-            plan.class,
-            definitions,
-            descriptor_context,
-            unit,
-        )?;
+        let method = method_metadata(method_plan, store, planned_descriptor, context_result)?;
         let key = (
             method.name().to_owned(),
             method.descriptor().as_str().to_owned(),
@@ -2289,26 +2287,9 @@ fn validate_final_parent_method_collisions(
 fn method_metadata(
     plan: &crate::JvmMethodPlan,
     store: &SemanticStore,
-    owner: dotty_core::SymbolId,
-    definitions: &Definitions,
-    descriptor_context: Option<(&SemanticStore, &[JvmClassIdentity])>,
-    unit: Option<&crate::JvmCompilationUnit<'_>>,
+    descriptor: JvmMethodDescriptor,
+    context_result: Option<crate::context_result::ContextResult>,
 ) -> Result<JvmMethodMetadata, JvmCodegenError> {
-    // Descriptor projection verifies canonical method/parameter ownership and
-    // type correspondence before any output layout is constructed.
-    let descriptor = match descriptor_context {
-        Some((descriptor_store, class_identities)) => {
-            crate::descriptor::method_descriptor_with_class_identities(
-                plan,
-                descriptor_store,
-                owner,
-                definitions,
-                class_identities,
-                unit,
-            )?
-        }
-        None => plan.descriptor(store, owner, definitions)?,
-    };
     let method = store.symbols.get(plan.method);
     if !matches!(method.visibility, Visibility::Public | Visibility::Private) {
         return Err(JvmCodegenError::UnsupportedJvmVisibility {
@@ -2316,7 +2297,14 @@ fn method_metadata(
             visibility: method.visibility,
         });
     }
-    let access_flags = method_access_flags(plan.method, method.visibility, method.flags)?;
+    let getter_name = crate::defaults::getter_name(store, plan)?;
+    // Scala emits source default getters as ordinary instance methods.
+    let flags = if getter_name.is_some() {
+        method.flags.difference(SymbolFlags::SYNTHETIC)
+    } else {
+        method.flags
+    };
+    let access_flags = method_access_flags(plan.method, method.visibility, flags)?;
     let name = store
         .names
         .try_resolve(method.name.text())
@@ -2328,7 +2316,7 @@ fn method_metadata(
             name.to_owned(),
         ));
     }
-    let Some(jvm_name) = jvm_method_name(name) else {
+    let Some(jvm_name) = getter_name.or_else(|| jvm_method_name(name)) else {
         return Err(invalid_name(
             plan.method,
             JvmNameKind::Method,
@@ -2337,8 +2325,14 @@ fn method_metadata(
     };
 
     let mut slot = 1u16; // Slot zero is `this`; only instance methods are accepted.
-    let mut parameters = Vec::with_capacity(plan.parameters.len());
-    for (parameter, ty) in plan.parameters.iter().copied().zip(descriptor.parameters()) {
+    let mut parameters = Vec::with_capacity(descriptor.parameters().len());
+    for (parameter, ty) in plan
+        .parameters
+        .iter()
+        .copied()
+        .chain(context_result.map(|result| result.closure.parameter))
+        .zip(descriptor.parameters())
+    {
         let width = ty.slot_width();
         parameters.push(JvmParameterLocal {
             symbol: parameter,
@@ -2350,6 +2344,7 @@ fn method_metadata(
     }
 
     Ok(JvmMethodMetadata {
+        context_result,
         symbol: plan.method,
         name: jvm_name,
         descriptor,
@@ -2588,7 +2583,7 @@ fn is_simple_identifier(text: &str) -> bool {
         && chars.all(|character| character.is_alphanumeric() || character == '_')
 }
 
-fn jvm_method_name(source_name: &str) -> Option<String> {
+pub(super) fn jvm_method_name(source_name: &str) -> Option<String> {
     if let Some(setter_name) = source_name.strip_suffix("_=") {
         is_simple_identifier(setter_name).then(|| format!("{setter_name}_$eq"))
     } else {

@@ -435,6 +435,38 @@ fn constructor_parameter_capture_rejects_unsupported_lexical_forms() {
 }
 
 #[test]
+fn implicit_context_abstraction_rejects_plain_constructor_parameter_capture() {
+    let (parsed, mut store, mut packages, definitions, index, source) =
+        parse_and_name("class C(xs: Int) { def capture: Int ?=> Int = xs }");
+    enter_capture_checked_function_classes(&mut store, &mut packages, [1]);
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "capture");
+    let tree = method_tree(&parsed, &index, source, method);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    let error = typer.type_method_definition(tree).unwrap_err();
+    let TyperError::FunctionLiteralCaptureUnsupported {
+        source: at,
+        tree_index,
+        symbol: Some(symbol),
+    } = error
+    else {
+        panic!("expected unsupported constructor parameter capture, got {error:?}");
+    };
+    assert_eq!((at, tree_index), (source, rhs.index()));
+    let store = typer.store();
+    let parameter = store.symbols.get(symbol);
+    assert_eq!(parameter.kind, SymbolKind::Parameter);
+    assert_eq!(parameter.owner, store.symbols.owner(method));
+    assert_eq!(store.names.resolve(parameter.name.text()), "xs");
+}
+
+#[test]
 fn constructor_parameter_capture_remains_unsupported_in_initializers() {
     let source = "class C(xs: Int) { val capture: Int => Int = x => xs }";
     let (parsed, mut store, mut packages, definitions, index, source_id) = parse_and_name(source);

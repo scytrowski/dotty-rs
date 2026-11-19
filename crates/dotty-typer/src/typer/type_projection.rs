@@ -78,22 +78,6 @@ impl SourceNameResolver<'_, '_> {
             position: location.position,
         })
     }
-
-    fn resolve_type_member(
-        &mut self,
-        qualifier_tree: TreeId<Untyped>,
-        name: dotty_core::Name,
-        context: SourceContextId,
-        location: SourceTreeLocation,
-    ) -> Result<TypeId, TyperError> {
-        self.typer.type_of_selected_tpt(
-            qualifier_tree,
-            name,
-            context,
-            location.tree_index,
-            location.position,
-        )
-    }
 }
 
 impl SourceTyper<'_> {
@@ -364,6 +348,31 @@ impl SourceTyper<'_> {
             }
             return Ok(ty);
         }
+        if let TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(bound)) = source_tree.kind
+        {
+            let tycon = self.type_of_tpt_inner_journaled(bound.bound, context, info_journal)?;
+            let parameter = SourceNameResolver { typer: self }.resolve_type_name(
+                *bound.parameter.as_name(),
+                context,
+                SourceTreeLocation {
+                    tree_index: tree.index(),
+                    position: source_tree.position,
+                },
+            )?;
+            let ty = self.store.types.alloc(Type::Applied {
+                tycon,
+                args: vec![parameter],
+            });
+            self.type_index
+                .insert(self.source, tree, ty)
+                .map_err(|existing| TyperError::DuplicateSourceTypeCacheEntry {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    existing,
+                    attempted: ty,
+                })?;
+            return Ok(ty);
+        }
         if let TreeKind::ByNameTypeTree(by_name) = &source_tree.kind {
             let result = self.type_of_tpt_inner_journaled(by_name.result, context, info_journal)?;
             let ty = self.store.types.alloc(Type::ByName { result });
@@ -452,14 +461,13 @@ impl SourceTyper<'_> {
             return Ok(ty);
         }
         if let TreeKind::Select(select) = &source_tree.kind {
-            let ty = SourceNameResolver { typer: self }.resolve_type_member(
+            let ty = self.type_of_selected_tpt(
                 select.qualifier,
                 select.name,
                 context,
-                SourceTreeLocation {
-                    tree_index: tree.index(),
-                    position: source_tree.position,
-                },
+                tree.index(),
+                source_tree.position,
+                info_journal,
             )?;
             if let Err(existing) = self.type_index.insert(self.source, tree, ty) {
                 return Err(TyperError::DuplicateSourceTypeCacheEntry {
@@ -771,6 +779,100 @@ impl SourceTyper<'_> {
         })
     }
 
+    fn accessible_path_members(
+        &mut self,
+        receiver: TypeId,
+        name: Name,
+        context: SourceContextId,
+        tree_index: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Vec<SymbolId>, TyperError> {
+        let candidates = self
+            .lookup_members_journaled(receiver, name, journal)
+            .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+        let lexical = ExpressionContext {
+            lexical: context,
+            owner: self.index.source_context(context).owner,
+            local_scopes: None,
+        };
+        let mut accessible = Vec::new();
+        for candidate in candidates {
+            if self.is_selected_member_accessible(
+                candidate.symbol,
+                candidate.declaring_class,
+                lexical,
+                tree_index,
+            )? {
+                accessible.push(candidate.symbol);
+            }
+        }
+        Ok(accessible)
+    }
+
+    /// A dotted type tree spells its identifiers in the type namespace. Recover
+    /// the term path from the root outward so two instances of the same class
+    /// never collapse to the canonical field symbol of an intermediate select.
+    fn selected_term_type_path(
+        &mut self,
+        mut tree: TreeId<Untyped>,
+        context: SourceContextId,
+        tree_index: u32,
+        position: Option<SourceSpan>,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Option<TypeId>, TyperError> {
+        let mut segments = Vec::new();
+        while let Some(TreeKind::Select(select)) = self.arena.try_get(tree).map(|t| &t.kind) {
+            if segments.len() >= MAX_SOURCE_TYPE_PROJECTION_DEPTH {
+                return Err(TyperError::SourceTypeProjectionDepthExceeded {
+                    source: self.source,
+                    tree_index,
+                    max_depth: MAX_SOURCE_TYPE_PROJECTION_DEPTH,
+                });
+            }
+            segments.push((
+                dotty_core::Name::new(select.name.text(), dotty_core::Namespace::Term),
+                tree.index(),
+            ));
+            tree = select.qualifier;
+        }
+        let Some(root) = self.resolve_qualifier_symbol(tree, context, tree_index, position)? else {
+            return Ok(None);
+        };
+        if !matches!(
+            self.store.symbols.get(root).kind,
+            SymbolKind::Field
+                | SymbolKind::Value
+                | SymbolKind::Local
+                | SymbolKind::Variable
+                | SymbolKind::Parameter
+        ) {
+            return Ok(None);
+        }
+        let owner = self.index.source_context(context).owner;
+        let mut path = self.expression_type_of_symbol(root, owner, tree.index(), journal)?;
+        for (name, index) in segments.into_iter().rev() {
+            self.require_stable_selection_prefix(path, index)?;
+            let receiver = self.widen_expression_type_journaled(path, journal, 0)?;
+            let accessible =
+                self.accessible_path_members(receiver, name, context, index, journal)?;
+            let symbol = self
+                .unique_symbol_candidate(&accessible, name, index, position)?
+                .ok_or(TyperError::MemberNotFound {
+                    source: self.source,
+                    tree_index: index,
+                    receiver,
+                    name,
+                })?;
+            self.completed_expression_symbol_info(symbol, journal)?;
+            path = self.store.types.alloc(Type::TermRef {
+                prefix: path,
+                target: TermRefTarget::Symbol(symbol),
+            });
+        }
+        self.require_stable_selection_prefix(path, tree_index)?;
+        Ok(Some(path))
+    }
+
     fn type_of_selected_tpt(
         &mut self,
         qualifier_tree: TreeId<Untyped>,
@@ -778,6 +880,7 @@ impl SourceTyper<'_> {
         context: SourceContextId,
         tree_index: u32,
         position: Option<SourceSpan>,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
         if !name.is_type() {
             return Err(TyperError::UnsupportedTypeTree {
@@ -785,6 +888,22 @@ impl SourceTyper<'_> {
                 tree_index,
                 tree_kind: "term selection",
             });
+        }
+        if let Some(prefix) =
+            self.selected_term_type_path(qualifier_tree, context, tree_index, position, journal)?
+        {
+            let receiver = self.widen_expression_type_journaled(prefix, journal, 0)?;
+            let accessible =
+                self.accessible_path_members(receiver, name, context, tree_index, journal)?;
+            let symbol = self
+                .unique_type_candidate(&accessible, name, tree_index, position)?
+                .ok_or(TyperError::TypeNameNotFound {
+                    source: self.source,
+                    tree_index,
+                    name,
+                    position,
+                })?;
+            return Ok(self.store.types.alloc(Type::type_ref(prefix, symbol)));
         }
         let Some(qualifier) =
             self.resolve_qualifier_symbol(qualifier_tree, context, tree_index, position)?

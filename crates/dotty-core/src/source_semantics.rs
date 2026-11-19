@@ -8,7 +8,7 @@ use crate::ast::Untyped;
 use crate::ids::{ScopeId, SourceId, SymbolId, TreeId};
 use crate::packages::Packages;
 use crate::store::SemanticStore;
-use crate::symbols::SymbolKind;
+use crate::symbols::{SymbolKind, SymbolOrigin};
 
 /// A source semantic index invariant was violated during registration.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,6 +43,8 @@ pub enum SourceSemanticIndexError {
     },
     /// A semantic owner was assigned more than one declaration scope.
     DuplicateDeclarationScope { symbol: SymbolId },
+    /// The file and package disagree with an existing wrapper registration.
+    ConflictingSourcePackageWrapper { source: SourceId, package: SymbolId },
     /// A declaration symbol was assigned two different source contexts.
     DuplicateDeclarationContext {
         symbol: SymbolId,
@@ -174,6 +176,7 @@ pub struct SourceSemanticIndex {
     generated_case_class_method_roles_by_symbol: HashMap<SymbolId, GeneratedCaseClassMethod>,
     definitions_by_symbol: HashMap<SymbolId, SourceDefinition>,
     scopes_by_owner: HashMap<SymbolId, ScopeId>,
+    source_package_wrappers: HashMap<(SourceId, SymbolId), SymbolId>,
     extension_prefix_clauses_by_method: HashMap<SymbolId, Vec<Vec<TreeId<Untyped>>>>,
     source_contexts: Vec<SourceContext>,
     declaration_contexts_by_symbol: HashMap<SymbolId, SourceContextId>,
@@ -325,6 +328,14 @@ impl SourceSemanticIndex {
     /// Returns the declaration scope owned by `symbol`, if one was indexed.
     pub fn scope_of(&self, symbol: SymbolId) -> Option<ScopeId> {
         self.scopes_by_owner.get(&symbol).copied()
+    }
+
+    /// Returns the synthetic module class owning top-level definitions in this
+    /// compilation unit and package. It has a declaration scope but no source tree.
+    pub fn source_package_wrapper(&self, source: SourceId, package: SymbolId) -> Option<SymbolId> {
+        self.source_package_wrappers
+            .get(&(source, package))
+            .copied()
     }
 
     /// Returns the original source prefix clauses for an extension method.
@@ -568,6 +579,32 @@ impl SourceSemanticIndex {
                     method.index(),
                     identity.role,
                     identity.class.index()
+                ));
+            }
+        }
+
+        for ((source, package), wrapper) in &self.source_package_wrappers {
+            let valid = store.symbols.contains(*wrapper) && {
+                let module = store.symbols.get(*wrapper);
+                module.kind == SymbolKind::ModuleClass
+                    && module.origin == SymbolOrigin::Synthetic
+                    && module.owner == Some(*package)
+                    && self.scope_of(*wrapper).is_some()
+                    && packages.scope_of(*package).is_some_and(|scope| {
+                        store.scopes.contains(scope)
+                            && store
+                                .scopes
+                                .get(scope)
+                                .lookup_all(&module.name)
+                                .contains(wrapper)
+                    })
+            };
+            if !valid {
+                violations.push(format!(
+                    "source {} package {} does not contain indexed synthetic module class {}",
+                    source.index(),
+                    package.index(),
+                    wrapper.index()
                 ));
             }
         }
@@ -845,6 +882,38 @@ impl SourceSemanticIndex {
         Ok(())
     }
 
+    /// Registers a compilation unit's synthetic package wrapper and its declaration scope.
+    /// Repeated package clauses can reuse the same wrapper. A conflicting module class
+    /// or scope leaves both associations intact.
+    pub fn record_source_package_wrapper(
+        &mut self,
+        source: SourceId,
+        package: SymbolId,
+        module_class: SymbolId,
+        scope: ScopeId,
+    ) -> Result<(), SourceSemanticIndexError> {
+        let conflict = match self.source_package_wrapper(source, package) {
+            Some(existing) => existing != module_class,
+            None => {
+                self.scope_of(module_class).is_some()
+                    && self
+                        .source_package_wrappers
+                        .values()
+                        .any(|&registered| registered == module_class)
+            }
+        };
+        if conflict {
+            return Err(SourceSemanticIndexError::ConflictingSourcePackageWrapper {
+                source,
+                package,
+            });
+        }
+        self.record_scope(module_class, scope)?;
+        self.source_package_wrappers
+            .insert((source, package), module_class);
+        Ok(())
+    }
+
     /// Associates a declaration scope with its semantic owner.
     ///
     /// Duplicate scope registration is an internal naming error and leaves
@@ -927,6 +996,69 @@ mod tests {
 
         assert_eq!(index.symbol_at(SourceId::from_index(1), tree), Some(first));
         assert_eq!(index.symbol_at(SourceId::from_index(2), tree), Some(second));
+    }
+
+    #[test]
+    fn source_package_wrapper_registration_preserves_identity_and_scope_on_conflict() {
+        let mut store = SemanticStore::new();
+        let source = SourceId::from_index(1);
+        let mut packages = Packages::new();
+        let package_entry = packages.enter(&mut store, SymbolOrigin::Synthetic, &["p"])[0];
+        let package = package_entry.symbol;
+        let wrapper = symbol(&mut store);
+        let module = store.symbols.get_mut(wrapper);
+        module.kind = SymbolKind::ModuleClass;
+        module.owner = Some(package);
+        module.name = *crate::TypeName::new(store.names.intern("Source$package$")).as_name();
+        store
+            .scopes
+            .get_mut(package_entry.scope)
+            .enter(module.name, wrapper);
+        let scope = store.scopes.alloc(Scope::new(Some(wrapper)));
+        let other = symbol(&mut store);
+        let other_scope = store.scopes.alloc(Scope::new(Some(other)));
+        let mut index = SourceSemanticIndex::new();
+        for _ in 0..2 {
+            index
+                .record_source_package_wrapper(source, package, wrapper, scope)
+                .unwrap();
+        }
+
+        assert_eq!(
+            index.record_source_package_wrapper(source, package, other, other_scope),
+            Err(SourceSemanticIndexError::ConflictingSourcePackageWrapper { source, package })
+        );
+        assert_eq!(index.scope_of(other), None);
+        assert_eq!(
+            index.record_source_package_wrapper(source, package, wrapper, other_scope),
+            Err(SourceSemanticIndexError::DuplicateDeclarationScope { symbol: wrapper })
+        );
+        assert_eq!(index.source_package_wrapper(source, package), Some(wrapper));
+        assert_eq!(index.scope_of(wrapper), Some(scope));
+        assert_eq!(index.definition_of(wrapper), None);
+        assert!(index.validate(&store, &packages).is_empty());
+
+        let other_source = SourceId::from_index(2);
+        assert_eq!(
+            index.record_source_package_wrapper(other_source, package, wrapper, scope),
+            Err(SourceSemanticIndexError::ConflictingSourcePackageWrapper {
+                source: other_source,
+                package
+            })
+        );
+        assert_eq!(index.source_package_wrapper(other_source, package), None);
+        assert_eq!(index.source_package_wrapper(source, package), Some(wrapper));
+
+        store.scopes.get_mut(package_entry.scope).remove(wrapper);
+        assert_eq!(
+            index.validate(&store, &packages),
+            vec![format!(
+                "source {} package {} does not contain indexed synthetic module class {}",
+                source.index(),
+                package.index(),
+                wrapper.index()
+            )]
+        );
     }
 
     #[test]

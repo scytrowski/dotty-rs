@@ -63,7 +63,9 @@ impl SourceTyper<'_> {
         symbol: SymbolId,
         ty: TypeId,
     ) -> Result<(), TyperError> {
-        let expected_scope = if self.index.definition_of(symbol).is_some() {
+        let expected_scope = if self.index.definition_of(symbol).is_some()
+            || self.is_source_package_wrapper(symbol)
+        {
             Some(
                 self.index
                     .scope_of(symbol)
@@ -86,6 +88,39 @@ impl SourceTyper<'_> {
         }
     }
 
+    pub(in crate::typer) fn synthetic_module_scope(
+        &self,
+        symbol: SymbolId,
+    ) -> Result<ScopeId, TyperError> {
+        self.index
+            .scope_of(symbol)
+            .filter(|scope| {
+                self.store.scopes.contains(*scope)
+                    && self.store.scopes.get(*scope).owner == Some(symbol)
+            })
+            .ok_or(TyperError::MissingClassScope { symbol })
+    }
+
+    pub(super) fn complete_synthetic_module_class(
+        &mut self,
+        symbol: SymbolId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        let declarations = self.synthetic_module_scope(symbol)?;
+        let info = self.store.types.alloc(Type::ClassInfo(ClassInfo {
+            prefix: self.definitions.no_prefix,
+            class: symbol,
+            parents: vec![self.definitions.object_type],
+            declarations,
+            self_type: None,
+        }));
+        info_journal.push((symbol, *self.store.symbols.info(symbol)));
+        self.store
+            .symbols
+            .set_info(symbol, SymbolInfo::Complete(info));
+        Ok(info)
+    }
+
     pub(super) fn complete_class_info(
         &mut self,
         symbol: SymbolId,
@@ -105,23 +140,7 @@ impl SourceTyper<'_> {
                 .generated_case_class_for_companion_module_class(symbol, self.source, source_tree)
                 .is_some()
         {
-            let declarations = self
-                .index
-                .scope_of(symbol)
-                .ok_or(TyperError::MissingClassScope { symbol })?;
-            let info = self.store.types.alloc(Type::ClassInfo(ClassInfo {
-                prefix: self.definitions.no_prefix,
-                class: symbol,
-                parents: vec![self.definitions.object_type],
-                declarations,
-                self_type: None,
-            }));
-            let previous = *self.store.symbols.info(symbol);
-            info_journal.push((symbol, previous));
-            self.store
-                .symbols
-                .set_info(symbol, SymbolInfo::Complete(info));
-            return Ok(info);
+            return self.complete_synthetic_module_class(symbol, info_journal);
         }
         let template = match (kind, &source_node.kind) {
             (SymbolKind::Class | SymbolKind::Trait, TreeKind::TypeDef(definition)) => {

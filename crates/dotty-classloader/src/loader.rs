@@ -5727,7 +5727,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         for field in &decoded.fields {
             let resolved_type = self
                 .lower_tasty_member_type(&identity.module_class_name, field.declared_type.as_ref());
-            self.enter_field(
+            let symbol = self.enter_field(
                 identity.module_class,
                 declarations,
                 &field.name,
@@ -5735,18 +5735,17 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 resolved_type,
                 origin,
             );
+            let flags = self.store.symbols.get(symbol).flags | field.contextual_flags;
+            self.store.symbols.get_mut(symbol).flags = flags;
         }
-        for method in &decoded.methods {
-            let resolved_type = self.lower_tasty_method(&identity.module_class_name, method);
-            self.enter_method(
-                identity.module_class,
-                declarations,
-                &method.name,
-                method.flags,
-                resolved_type,
-                origin,
-            );
-        }
+        self.enter_tasty_methods(
+            &identity.module_class_name,
+            identity.module_class,
+            declarations,
+            &decoded.methods,
+            &[],
+            origin,
+        )?;
         if let Some(alias) = predef_string_alias {
             debug_assert_eq!(alias.address, 378);
             let text = self.store.names.intern(&alias.name);
@@ -7315,8 +7314,17 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     ) -> Result<TypeId, ClassLoadError> {
         let dependency = class_type_signature_binary_name(signature);
         let class_symbol = self.ensure_dependency_identity(owner, &dependency)?;
-        let tycon = self.type_ref(class_symbol);
+        self.apply_class_signature_arguments(owner, env, class_symbol, signature)
+    }
 
+    fn apply_class_signature_arguments(
+        &mut self,
+        owner: &BinaryName,
+        env: &TypeVarEnv,
+        class_symbol: SymbolId,
+        signature: &ClassTypeSignature,
+    ) -> Result<TypeId, ClassLoadError> {
+        let tycon = self.type_ref(class_symbol);
         let type_arguments = signature
             .suffix
             .last()
@@ -7577,7 +7585,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 field.declared_type.as_ref(),
                 &class_type_parameters,
             );
-            self.enter_field(
+            let symbol = self.enter_field(
                 class_symbol,
                 declarations,
                 &field.name,
@@ -7585,22 +7593,119 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 resolved_type,
                 origin,
             );
+            let flags = self.store.symbols.get(symbol).flags | field.contextual_flags;
+            self.store.symbols.get_mut(symbol).flags = flags;
         }
-        for method in &decoded.methods {
-            let resolved_type =
-                self.lower_tasty_method_with_class_parameters(name, method, &class_type_parameters);
-            self.enter_method(
-                class_symbol,
-                declarations,
-                &method.name,
-                method.flags,
-                resolved_type,
-                origin,
-            );
-        }
+        self.enter_tasty_methods(
+            name,
+            class_symbol,
+            declarations,
+            &decoded.methods,
+            &class_type_parameters,
+            origin,
+        )?;
 
         self.complete_class_with_parent_types(class_symbol, declarations, parents);
         Ok(class_symbol)
+    }
+
+    fn enter_tasty_methods(
+        &mut self,
+        class_name: &BinaryName,
+        owner: SymbolId,
+        declarations: ScopeId,
+        methods: &[tasty_symbol::DecodedTastyMethod],
+        class_parameters: &[TypeId],
+        origin: SymbolOrigin,
+    ) -> Result<(), ClassLoadError> {
+        // Only methods participating in a getter relation need this offset index.
+        let endpoints: HashSet<_> = methods
+            .iter()
+            .filter_map(|getter| {
+                getter
+                    .default_for
+                    .map(|(target, _)| [target, getter.offset])
+            })
+            .flatten()
+            .collect();
+        let mut entries = HashMap::new();
+        for method in methods {
+            let info =
+                self.lower_tasty_method_with_class_parameters(class_name, method, class_parameters);
+            let symbol = self.enter_method(
+                owner,
+                declarations,
+                &method.name,
+                method.flags,
+                info,
+                origin,
+            );
+            let flags = self.store.symbols.get(symbol).flags | method.contextual_flags;
+            self.store.symbols.get_mut(symbol).flags = flags;
+            if endpoints.contains(&method.offset) {
+                entries.insert(method.offset, (symbol, info, method));
+            }
+        }
+        for getter in methods {
+            let Some((target_offset, ordinal)) = getter.default_for else {
+                continue;
+            };
+            let Some(&(method, mut signature, target)) = entries.get(&target_offset) else {
+                continue;
+            };
+            let getter_symbol = entries[&getter.offset].0;
+            if self
+                .store
+                .scopes
+                .get(declarations)
+                .lookup_all(&self.store.symbols.get(getter_symbol).name)
+                != [getter_symbol]
+            {
+                continue;
+            }
+            let Some(decoded_param) = target.parameters.get(ordinal) else {
+                continue;
+            };
+            let mut remaining = ordinal;
+            let parameter = loop {
+                match self.store.types.get(signature) {
+                    Type::Poly(poly) => signature = poly.result,
+                    Type::Method(clause) if remaining >= clause.params.len() => {
+                        remaining -= clause.params.len();
+                        signature = clause.result;
+                    }
+                    Type::Method(clause) => break Some(clause.params[remaining]),
+                    _ => break None,
+                }
+            };
+            let Some(parameter) = parameter else {
+                continue;
+            };
+            let param = self.store.symbols.alloc(Symbol {
+                name: *parameter.name.as_name(),
+                kind: SymbolKind::Parameter,
+                owner: Some(method),
+                flags: decoded_param.contextual_flags
+                    | if parameter.erased {
+                        SymbolFlags::ERASED
+                    } else {
+                        SymbolFlags::EMPTY
+                    },
+                visibility: Visibility::Public,
+                info: SymbolInfo::Complete(parameter.ty),
+                origin,
+                annotations: vec![],
+                position: None,
+                links: SymbolLinks::default(),
+            });
+            self.store
+                .record_default_getter(method, ordinal, param, getter_symbol)
+                .map_err(|error| ClassLoadError::IdentityConflict {
+                    name: class_name.clone(),
+                    reason: error.to_string(),
+                })?;
+        }
+        Ok(())
     }
 
     fn enter_tasty_class_type_parameters(
@@ -7751,6 +7856,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// does not yet recognize (see `tasty_symbol`'s doc comments), rather
     /// than a flag alongside an ordinary array type the way JVMS
     /// `ACC_VARARGS` is.
+    #[cfg(test)]
     fn lower_tasty_method(
         &mut self,
         owner: &BinaryName,
@@ -7837,7 +7943,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             params.push(MethodParam {
                 name: TermName::new(text),
                 ty,
-                erased: false,
+                erased: parameter.erased,
                 varargs: false,
             });
         }
@@ -7853,7 +7959,38 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             )
         };
 
-        let method_type = if method.has_term_clause || method.name == "<init>" {
+        let method_type = if let Some(clauses) = &method.contextual_clauses {
+            if clauses.iter().map(|(_, n)| n).sum::<usize>() != params.len() {
+                self.unresolved_tasty_type("incomplete contextual parameter clause")
+            } else {
+                let mut inner = result;
+                for (depth, &(kind, count)) in clauses.iter().rev().enumerate() {
+                    let start = params.len() - count;
+                    let clause = params.split_off(start);
+                    let binder = self.store.types.reserve();
+                    if depth == 0
+                        && let Some(index) = method
+                            .singleton_result_parameter
+                            .and_then(|index| index.checked_sub(start))
+                            .filter(|index| *index < count)
+                    {
+                        inner = self.store.types.alloc(Type::ParamRef {
+                            binder: binder.id(),
+                            index: index as u32,
+                        });
+                    }
+                    inner = self.store.types.fill(
+                        binder,
+                        Type::Method(MethodType {
+                            params: clause,
+                            result: inner,
+                            kind,
+                        }),
+                    );
+                }
+                inner
+            }
+        } else if method.has_term_clause || method.name == "<init>" {
             self.store.types.alloc(Type::Method(MethodType {
                 params,
                 result,
@@ -8061,6 +8198,41 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             )?);
         }
 
+        let parents = if let Some(signature) = &signature {
+            let env = self.class_type_var_env(declarations, None);
+            let parent_indices = class_file.super_class.iter().chain(&class_file.interfaces);
+            let parent_signatures =
+                std::iter::once(&signature.superclass).chain(&signature.superinterfaces);
+            if parent_indices.clone().count() != parent_signatures.clone().count() {
+                return Err(ClassLoadError::IdentityConflict {
+                    name: name.clone(),
+                    reason: "generic and erased parent counts disagree".into(),
+                });
+            }
+            let mut parents = Vec::with_capacity(parent_indices.clone().count());
+            for ((index, parent), symbol) in parent_indices
+                .zip(parent_signatures)
+                .zip(super_class.into_iter().chain(interfaces))
+            {
+                if self.resolve_name(name, &class_file, *index)?
+                    != class_type_signature_binary_name(parent)
+                {
+                    return Err(ClassLoadError::IdentityConflict {
+                        name: name.clone(),
+                        reason: "generic and erased parent identities disagree".into(),
+                    });
+                }
+                parents.push(self.apply_class_signature_arguments(name, &env, symbol, parent)?);
+            }
+            parents
+        } else {
+            super_class
+                .into_iter()
+                .chain(interfaces)
+                .map(|symbol| self.type_ref(symbol))
+                .collect()
+        };
+
         let mut fields = Vec::with_capacity(class_file.fields.len());
         for field in &class_file.fields {
             let field_name =
@@ -8182,7 +8354,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             },
         );
 
-        self.complete_class(class_symbol, declarations, super_class, interfaces);
+        self.complete_class_with_parent_types(class_symbol, declarations, parents);
         self.in_progress_classes.remove(&class_symbol);
         Ok(class_symbol)
     }
@@ -17344,6 +17516,63 @@ mod tests {
                 superinterfaces: vec![],
             })
         );
+    }
+
+    #[test]
+    fn generic_parent_signature_preserves_the_class_parameter_and_checks_erasure() {
+        for (signature, valid) in [
+            ("<A:Ljava/lang/Object;>Ljava/lang/Object;LBase<TA;>;", true),
+            (
+                "<A:Ljava/lang/Object;>Ljava/lang/Object;LOther<TA;>;",
+                false,
+            ),
+            ("<A:Ljava/lang/Object;>Ljava/lang/Object;", false),
+        ] {
+            let name = BinaryName::from_internal("Child");
+            let classes = HashMap::from([
+                (
+                    name.clone(),
+                    signature_class(
+                        "Child",
+                        Some("java/lang/Object"),
+                        &["Base"],
+                        Some(signature),
+                        &[],
+                        &[],
+                    ),
+                ),
+                (
+                    BinaryName::from_internal("java/lang/Object"),
+                    synthetic_class("java/lang/Object", None),
+                ),
+                (
+                    BinaryName::from_internal("Base"),
+                    synthetic_class("Base", None),
+                ),
+            ]);
+            let mut store = SemanticStore::new();
+            let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
+            let result = loader.load_class(&name);
+            if !valid {
+                assert!(
+                    matches!(result, Err(ClassLoadError::IdentityConflict { name: rejected, .. }) if rejected == name)
+                );
+                continue;
+            }
+            let class = result.unwrap();
+            let parameter = type_parameter_symbol(loader.store, class, "A");
+            let parents = &class_info(loader.store, class).parents;
+            assert_eq!(parents.len(), 2);
+            let Type::Applied { tycon, args } = loader.store.types.get(parents[1]) else {
+                panic!("expected Base[A]")
+            };
+            assert_eq!(
+                symbol_name(loader.store, parent_symbol(loader.store, *tycon)),
+                "Base"
+            );
+            assert_eq!(args.len(), 1);
+            assert_eq!(parent_symbol(loader.store, args[0]), parameter);
+        }
     }
 
     /// The `SymbolId` of the `SymbolKind::TypeParameter` symbol entered

@@ -859,7 +859,90 @@ a same-class method. Preserve method and parameter declaration order.
 | Same-class reference or call | Require resolved `TermRefTarget::Symbol`, same-class owner, supported completed signature and canonical `this` prefix; positional arguments match clause arity/order. The observed forward `SELECT second` stays a named `this`-qualified edge. | Overload ambiguity, external/name-designed/unresolved target, unsupported signature or argument mismatch: scoped `UnsupportedConstruct`, `UnsupportedTypeReference` or `InvalidBinding`. |
 | Ordinary declarations | Public named package/class/method, no type params; result and accepted parameter types are canonical Int. | Other types, modifiers, annotations, visibility, polymorphism, fields, extra classes/objects/traits or nested packages: `UnsupportedConstruct` with offending symbol/tree. |
 
-Named arguments and external calls remain deferred, as do multiple clauses,
-contextual clauses and non-Int types even where Scala accepts them. This audit
-freezes the inputs for implementation issues; it does not authorize a serializer
-implementation or production API changes.
+This audit covered plain clauses. The contextual method increment below extends
+that subset. Named arguments, external calls, multiple clauses and non-Int
+types remain outside this producer contract.
+
+### Contextual method parameters
+
+A supported monomorphic method may declare a single contextual or legacy
+implicit parameter clause. Validation checks the modifier on each source
+parameter against its symbol and the kind of the completed method type.
+The writer emits the corresponding `GIVEN` or `IMPLICIT` modifier on each
+`PARAM`. A Scala 3.9 client compiles against this TASTy and executes both
+an inferred call and an explicit `using` call in the contextual-arguments oracle.
+
+For same-class methods returning `Int`, explicit `using` calls preserve the
+validated target and argument symbols in TASTy. A method with one contextual
+`Int` parameter can also forward it to a same-class method by naming the
+callee as its entire body. Validation checks the inserted argument against
+the caller’s parameter identity and the callee’s contextual signature.
+
+The one-class producer also accepts successive primitive value clauses when
+at least one is contextual or legacy implicit. Each nonempty term clause
+followed by another nonempty term clause emits a `SPLITCLAUSE`. An empty
+clause emits `EMPTYCLAUSE`. A separately compiled Scala 3.9 client exercises
+both inferred and explicit evidence for these method declarations.
+
+A method of the form `def evidence[A](using a: A): A = a` can also be
+exported. The type parameter has the default `Nothing` and `Any` bounds.
+Both type references point to the emitted type parameter, and the body
+refers directly to the evidence parameter owned by the same method.
+The Scala client checks independent `Int` and reference instantiations.
+
+### Returned unary context functions
+
+The method-only producer accepts an explicit `Int ?=> Int` result and an
+explicit contextual lambda. Its body can return an integer literal, its own
+parameter, an enclosing method's integer parameter, or one supported primitive
+integer operation on those leaves. Validation checks the source lambda and its
+parameter against the session's source-to-typed index. The generated method
+and parameter each require a synthetic definition receipt. Captured parameters
+must coincide with the closure environment in first-use order.
+
+The producer writes a `BLOCK` containing a `LAMBDA` whose direct method
+reference targets the block's synthetic `$anonfun` definition. References in
+that definition target its own `GIVEN` parameter or the enclosing method's
+formal declaration. The enclosing method carries Scala's
+`scala.annotation.internal.ContextResultCount(1)`, which tells erasure to append
+the context parameter to the method's JVM parameters. The focused
+`source_pipeline` oracle test reconstructs the library with Scala 3.9.0
+`-from-tasty`, compiles a separate client and executes both the capturing and
+non-capturing calls.
+
+### Integer defaults for contextual parameters
+
+The method-only producer accepts a default that refers to either parameter of
+a preceding plain clause with two `Int` parameters, or to the sole parameter
+of a plain `Int` clause. For example:
+
+```scala
+def offset(x: Int)(using n: Int = x): Int = n
+def pick(x: Int, y: Int)(using n: Int = y): Int = n
+```
+
+The defaulted parameter carries `GIVEN` and `HASDEFAULT`. The structured name
+`DEFAULTGETTER(pick, 2)` renders as `pick$default$3`. This getter owns copies of
+`x` and `y`, in source order. Each copy's `SHAREDterm` points to its original
+parameter's type syntax. The body's `TERMREFdirect` points to the getter's
+copy of `y`. Validation checks the registered method and ordinal, each copy's
+source identity and signature position, and the symbol referenced by the body.
+The result carries `scala.annotation.unchecked.uncheckedVariance`, as in
+Scala 3.9.0. The declaration skeleton records both omitted bodies, and the
+complete artifact retains both typed roots. A separate Scala client checks
+that ordinary arguments run once in source order when the default is used,
+and that a local given or an explicit contextual argument supplies its own value.
+
+A sole contextual clause can default its one `Int` parameter to an integer
+literal, as in `def read(using n: Int = 7): Int = n`. Its getter uses
+`DEFAULTGETTER(read, 0)` and has no parameter or clause marker. Scala 3.9.0
+encodes the getter result as `Int @uncheckedVariance` and the body as
+`INTconst 7`. The pickler compares the typed constant and its singleton type
+to the source literal before emission. A separate Scala client exercises the
+fallback, a local given and an explicitly supplied argument on the same
+receiver.
+
+A legacy `implicit` clause supports the same two default forms. The parameter
+carries `IMPLICIT` followed by `HASDEFAULT`. A Scala 3.9 client tests
+`def legacy(implicit n: Int = 7): Int = n` with missing, locally supplied,
+explicit, and ambiguous evidence.

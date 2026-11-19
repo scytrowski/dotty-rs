@@ -24,6 +24,7 @@ mod application;
 pub use application::ConstructorCandidate;
 mod completion;
 mod context;
+mod contextual;
 mod error;
 mod expression;
 use expression::LocalMethodIndex;
@@ -92,7 +93,7 @@ pub enum OverloadRejection {
 
 fn application_kind_accepts(application_kind: ApplyKind, method_kind: MethodKind) -> bool {
     match application_kind {
-        ApplyKind::Regular => method_kind == MethodKind::Plain,
+        ApplyKind::Regular => matches!(method_kind, MethodKind::Plain | MethodKind::Implicit),
         ApplyKind::Using => matches!(method_kind, MethodKind::Contextual | MethodKind::Implicit),
     }
 }
@@ -131,9 +132,12 @@ pub struct SourceTyper<'a> {
     inferred_field_types_in_progress: HashSet<SymbolId>,
     inferred_method_results_in_progress: HashSet<SymbolId>,
     uninitialized_parent_receiver: Option<SymbolId>,
+    value_expectation: Option<(TreeId<Untyped>, TypeId)>,
+    searching_conversion: bool,
     import_qualifier_cache: HashMap<ImportQualifierCacheKey, SymbolId>,
     import_member_cache: HashMap<ImportMemberCacheKey, SymbolId>,
     semantic_transaction_depth: usize,
+    diagnostics: Vec<dotty_core::Diagnostic>,
     typed_arena: AstArena<Typed>,
     typed_index: SourceTypedIndex,
     function_literals: expression::FunctionLiteralIndex,
@@ -298,9 +302,12 @@ impl<'a> SourceTyper<'a> {
             inferred_field_types_in_progress: HashSet::new(),
             inferred_method_results_in_progress: HashSet::new(),
             uninitialized_parent_receiver: None,
+            value_expectation: None,
+            searching_conversion: false,
             import_qualifier_cache: HashMap::new(),
             import_member_cache: HashMap::new(),
             semantic_transaction_depth: 0,
+            diagnostics: Vec::new(),
             typed_arena: AstArena::new(),
             typed_index: SourceTypedIndex::new(),
             function_literals: expression::FunctionLiteralIndex::default(),
@@ -440,7 +447,15 @@ impl<'a> SourceTyper<'a> {
                     && matches!(&nested_node.kind, TreeKind::DefDef(nested) if has_parameter_default(nested))
             })
         });
-        if has_parameter_default(definition) || has_default_in_body {
+        let owner = self
+            .index
+            .symbol_at(self.source, tree)
+            .and_then(|m| self.store.symbols.owner(m));
+        let unsupported_default = definition.value_param_clauses.iter().flatten().any(|&tree| {
+            matches!(self.arena.try_get(tree).map(|node| &node.kind), Some(TreeKind::ValDef(parameter)) if parameter.rhs.is_some()) &&
+            owner.and_then(|owner| self.index.derived_symbol_at(owner,self.source,tree)).and_then(|getter| self.contextual_getter_source(getter)).is_none()
+        });
+        if unsupported_default || has_default_in_body {
             return Err(TyperError::LocalBlockDeclarationDeferred {
                 source: self.source,
                 tree_index: tree.index(),
@@ -493,6 +508,12 @@ impl<'a> SourceTyper<'a> {
         }
 
         self.run_expression_transaction(|typer, info_journal, new_mappings| {
+            typer.check_contextual_default_bodies(
+                method,
+                &definition,
+                info_journal,
+                new_mappings,
+            )?;
             typer.type_source_method_definition(
                 tree,
                 &definition,
@@ -641,7 +662,6 @@ impl<'a> SourceTyper<'a> {
             TreeKind::PhaseSpecific(UntypedNode::Function(function)) => self.type_function_literal(
                 tree,
                 function,
-                source_tree.position,
                 expression::FunctionLiteralTypingContext {
                     context,
                     expected_function1: None,
@@ -796,6 +816,11 @@ impl<'a> SourceTyper<'a> {
     /// Exposes the shared semantic store after the driver is no longer needed.
     pub fn store(&self) -> &SemanticStore {
         self.store
+    }
+
+    /// Diagnostics emitted by successful typing operations in this source session.
+    pub fn diagnostics(&self) -> &[dotty_core::Diagnostic] {
+        &self.diagnostics
     }
 
     /// Typed expression trees produced by this typer instance.
@@ -1356,21 +1381,26 @@ mod tests {
         })
     }
 
-    fn parse_and_name(
-        text: &str,
-    ) -> (
+    type NamedTestUnit = (
         dotty_parser::ParseResult,
         SemanticStore,
         Packages,
         Definitions,
         SourceSemanticIndex,
         SourceId,
-    ) {
+    );
+
+    fn parse_and_name(text: &str) -> NamedTestUnit {
+        parse_and_name_file(text, "Typer.scala")
+    }
+
+    fn parse_and_name_file(text: &str, file: &str) -> NamedTestUnit {
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);
         let source = SourceId::from_index(11);
         let mut packages = Packages::new();
-        let (parsed, index) = parse_and_name_unit(text, source, &mut store, &mut packages);
+        let (parsed, index) =
+            parse_and_name_unit_file(text, source, &mut store, &mut packages, file);
         (parsed, store, packages, definitions, index, source)
     }
 
@@ -1439,6 +1469,16 @@ mod tests {
         store: &mut SemanticStore,
         packages: &mut Packages,
     ) -> (dotty_parser::ParseResult, SourceSemanticIndex) {
+        parse_and_name_unit_file(text, source, store, packages, "Typer.scala")
+    }
+
+    fn parse_and_name_unit_file(
+        text: &str,
+        source: SourceId,
+        store: &mut SemanticStore,
+        packages: &mut Packages,
+        file: &str,
+    ) -> (dotty_parser::ParseResult, SourceSemanticIndex) {
         let scanner = ContextualScanner::new(text).unwrap();
         let parsed = dotty_parser::parse_compilation_unit(
             SourceText::new(text).unwrap(),
@@ -1447,15 +1487,8 @@ mod tests {
             &mut store.names,
         );
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-        let index = name_compilation_unit(
-            &parsed.ast,
-            parsed.root,
-            source,
-            "Typer.scala",
-            store,
-            packages,
-        )
-        .unwrap();
+        let index =
+            name_compilation_unit(&parsed.ast, parsed.root, source, file, store, packages).unwrap();
         (parsed, index)
     }
 
@@ -9540,6 +9573,21 @@ mod tests {
             else {
                 panic!("synthetic method definition should be available separately");
             };
+            let implementation = closure
+                .implementation
+                .as_ref()
+                .expect("source lambda implementation");
+            assert_eq!(implementation.definition, method_definition_tree);
+            assert_eq!(
+                typer
+                    .source_typed_index()
+                    .synthetic_definition_symbol(method_definition_tree),
+                typer
+                    .store()
+                    .types
+                    .get(typer.typed_ast().get(closure.method).ty)
+                    .reference_symbol()
+            );
             assert_ne!(closure.method, method_definition_tree);
             let TreeKind::DefDef(method_definition) =
                 &typer.typed_ast().get(method_definition_tree).kind
@@ -9548,6 +9596,18 @@ mod tests {
             };
             assert_eq!(method_definition.value_param_clauses.len(), 1);
             let parameters = &method_definition.value_param_clauses[0];
+            assert_eq!(
+                implementation.parameters,
+                parameters
+                    .iter()
+                    .map(|parameter| {
+                        typer
+                            .source_typed_index()
+                            .synthetic_definition_symbol(*parameter)
+                            .expect("canonical lambda parameter")
+                    })
+                    .collect::<Vec<_>>()
+            );
             let expected_arity = match method_name {
                 "zero" => 0,
                 "one" | "block" => 1,
@@ -9758,12 +9818,18 @@ mod tests {
 
     mod compose_conformance;
     mod constructor_parameter_capture;
+    mod contextual_arguments;
+    mod contextual_binary;
+    mod contextual_consumers;
+    mod contextual_v1;
     mod enclosing_this_capture;
     mod issue_2282_generated_apply_inference;
     mod lexical_closure_contract;
     mod lexical_closure_rollback;
     mod local_value_capture;
     mod method_parameter_capture;
+    mod nested_context_client;
+    mod nested_context_evidence;
 
     #[test]
     fn function1_expectation_infers_lambda_parameter_and_checks_body() {
@@ -19614,7 +19680,7 @@ mod tests {
     }
 
     #[test]
-    fn regular_constructor_application_rejects_a_contextual_clause() {
+    fn positional_constructor_argument_does_not_supply_an_omitted_context() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C(using value: Int); class Use { def make: C = new C(1) }");
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
@@ -19630,11 +19696,7 @@ mod tests {
 
         assert!(matches!(
             typer.type_expression(rhs, context),
-            Err(TyperError::ApplicationMethodKindMismatch {
-                application_kind: ApplyKind::Regular,
-                method_kind: MethodKind::Contextual,
-                ..
-            })
+            Err(TyperError::MissingContextualArgument {expected,..}) if expected == definitions.int
         ));
     }
 
@@ -26518,9 +26580,9 @@ mod tests {
     }
 
     #[test]
-    fn anonymous_local_given_without_a_term_identity_remains_deferred() {
+    fn anonymous_local_given_has_the_canonical_invented_term_name() {
         let (parsed, mut store, packages, definitions, index, source) =
-            parse_and_name("class C { def use: Int = { given Int = 1; 0 } }");
+            parse_and_name("class C { def use: Int = { given Int = 1; given_Int } }");
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
         let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
             unreachable!();
@@ -26536,16 +26598,20 @@ mod tests {
         );
 
         let context = typer.expression_context_for(method).unwrap();
-        assert!(matches!(
-            typer.type_expression(rhs, context),
-            Err(TyperError::LocalValueModifierDeferred {
-                tree_index,
-                classification: "anonymous given has no local term identity",
-                ..
-            }) if tree_index == given.index()
-        ));
-        assert!(typer.local_symbol_at(source, given).is_none());
-        assert!(typer.typed_ast().iter().next().is_none());
+        typer.type_expression(rhs, context).unwrap();
+        let symbol = typer.local_symbol_at(source, given).unwrap();
+        assert_eq!(
+            typer
+                .store
+                .names
+                .resolve(typer.store.symbols.get(symbol).name.text()),
+            "given_Int"
+        );
+        let typed = typer.typed_index.get(source, block.expr).unwrap();
+        assert!(
+            matches!(typer.store.types.get(typer.typed_arena.get(typed).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(found), .. } if *found == symbol)
+        );
     }
 
     #[test]
@@ -26796,7 +26862,7 @@ mod tests {
     }
 
     #[test]
-    fn local_contextual_search_remains_outside_declaration_typing() {
+    fn parentheses_apply_to_the_result_after_supplying_the_local_given() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class C { def need(using value: Int): Int = value; def use: Int = { given local: Int = 1; need() } }",
         );
@@ -26813,11 +26879,7 @@ mod tests {
 
         assert!(matches!(
             typer.type_expression(rhs, context),
-            Err(TyperError::ApplicationMethodKindMismatch {
-                application_kind: ApplyKind::Regular,
-                method_kind: MethodKind::Contextual,
-                ..
-            })
+            Err(TyperError::ApplicationCalleeNotMethod { .. })
         ));
     }
 
@@ -38456,7 +38518,7 @@ mod tests {
     }
 
     #[test]
-    fn regular_application_rejects_a_contextual_clause() {
+    fn positional_arguments_do_not_substitute_for_missing_contextual_values() {
         let source_text = "class C { def f(using x: Int): Int = x; def use: Int = f(1) }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
@@ -38476,16 +38538,12 @@ mod tests {
 
         assert!(matches!(
             typer.type_expression(rhs, context),
-            Err(TyperError::ApplicationMethodKindMismatch {
-                application_kind: ApplyKind::Regular,
-                method_kind: MethodKind::Contextual,
-                ..
-            })
+            Err(TyperError::MissingContextualArgument { expected, .. }) if expected == definitions.int
         ));
     }
 
     #[test]
-    fn contextual_function_projection_does_not_insert_a_contextual_application() {
+    fn positional_context_function_call_searches_for_evidence_before_applying_the_result() {
         let source_text = "class C { def use(function: Int ?=> Int): Int = function(1) }";
         let (parsed, mut store, mut packages, definitions, index, source) =
             parse_and_name(source_text);
@@ -38503,13 +38561,13 @@ mod tests {
         let context = typer.expression_context_for(method).unwrap();
         let result = typer.type_expression(rhs, context);
         assert!(
-            matches!(&result, Err(TyperError::ApplicationCalleeNotMethod { .. })),
+            matches!(&result, Err(TyperError::MissingContextualArgument {expected,..}) if *expected==definitions.int),
             "{result:?}"
         );
     }
 
     #[test]
-    fn regular_application_rejects_an_implicit_clause() {
+    fn regular_application_consumes_legacy_implicit_clause_with_warning() {
         let source_text = "class C { def f(implicit x: Int): Int = x; def use: Int = f(1) }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
@@ -38527,14 +38585,20 @@ mod tests {
             &packages,
         );
 
-        assert!(matches!(
-            typer.type_expression(rhs, context),
-            Err(TyperError::ApplicationMethodKindMismatch {
-                application_kind: ApplyKind::Regular,
-                method_kind: MethodKind::Implicit,
-                ..
-            })
-        ));
+        typer.inject_failure_after_outermost_success = true;
+        assert!(typer.type_expression(rhs, context).is_err());
+        assert!(typer.diagnostics().is_empty());
+        let typed = typer.type_expression(rhs, context).unwrap();
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+        assert_eq!(typer.type_expression(rhs, context).unwrap(), typed);
+        let [warning] = typer.diagnostics() else {
+            panic!("expected one migration warning")
+        };
+        assert_eq!(warning.severity(), dotty_core::DiagnosticSeverity::Warning);
+        assert_eq!(
+            warning.span().start() as usize,
+            source_text.rfind('1').unwrap()
+        );
     }
 
     #[test]
@@ -38583,6 +38647,12 @@ mod tests {
 
         let typed = typer.type_expression(rhs, context).unwrap();
 
+        let TreeKind::Apply(trailing) = &typer.typed_ast().get(typed).kind else {
+            panic!("normalized empty constructor clause")
+        };
+        assert_eq!(trailing.kind, ApplyKind::Regular);
+        assert!(trailing.args.is_empty());
+        let typed = trailing.function;
         let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
             panic!("expected a typed contextual constructor application")
         };

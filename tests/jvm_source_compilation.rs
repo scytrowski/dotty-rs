@@ -479,6 +479,8 @@ fn compile_source_batch_with_typer_failure_observer(
         }));
     }
 
+    // The typer installs compiler-synthesized ContextFunctionN classes in scala.
+    packages.enter(&mut store, dotty_core::SymbolOrigin::Synthetic, &["scala"]);
     let mut typer = SourceTyper::new(
         &parsed.ast,
         source_id,
@@ -726,7 +728,30 @@ fn compile_source_batch_with_typer_failure_observer(
     for (class, fields) in classes.into_iter().zip(fields_by_class) {
         let mut methods = Vec::with_capacity(class.methods.len());
         for source_method in class.methods {
+            let has_defaults = (0..source_method.parameters.len()).any(|ordinal| {
+                typer
+                    .store()
+                    .default_getter(source_method.symbol, ordinal)
+                    .is_some()
+            });
             let body = match source_method.rhs {
+                Some(rhs) if has_defaults => {
+                    let Some(SourceDefinition::Canonical { tree, .. }) =
+                        index.definition_of(source_method.symbol)
+                    else {
+                        return Err(PipelineFailure::MissingSourceIdentity(
+                            "method with contextual defaults",
+                        ));
+                    };
+                    typer
+                        .type_method_definition(tree)
+                        .map_err(PipelineFailure::Typer)?;
+                    Some(typer.source_typed_index().get(source_id, rhs).ok_or(
+                        PipelineFailure::MissingSourceIdentity(
+                            "typed method with contextual defaults",
+                        ),
+                    )?)
+                }
                 Some(rhs) => {
                     let context = match typer.expression_context_for(source_method.symbol) {
                         Ok(context) => context,
@@ -737,7 +762,23 @@ fn compile_source_batch_with_typer_failure_observer(
                             return Err(PipelineFailure::Typer(error));
                         }
                     };
-                    match typer.type_expression(rhs, context) {
+                    // Direct lambda results need their declared function type as the expected type.
+                    let declared_result = match typer.store().symbols.info(source_method.symbol) {
+                        SymbolInfo::Complete(ty) => match typer.store().types.try_get(*ty) {
+                            Some(Type::Method(method)) => Some(method.result),
+                            Some(Type::Applied { .. }) => Some(*ty),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    let typed_body = match (&parsed.ast.get(rhs).kind, declared_result) {
+                        (
+                            TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::Function(_)),
+                            Some(expected),
+                        ) => typer.type_expression_expected(rhs, context, expected),
+                        _ => typer.type_expression(rhs, context),
+                    };
+                    match typed_body {
                         Ok(body) => Some(body),
                         Err(error) => {
                             if let Some(observer) = observe_typer_failure.as_mut() {
@@ -749,35 +790,68 @@ fn compile_source_batch_with_typer_failure_observer(
                 }
                 None => None,
             };
-            let mut locals = parsed
-                .ast
-                .iter()
-                .filter_map(|(source_tree, node)| {
-                    if !matches!(node.kind, TreeKind::ValDef(_)) {
-                        return None;
-                    }
-                    let binding = typer.typed_local_binding_at(source_id, source_tree)?;
-                    (typer.store().symbols.get(binding.symbol()).owner
-                        == Some(source_method.symbol))
-                    .then_some(JvmLocalBinding {
-                        declaration: binding.declaration(),
-                        symbol: binding.symbol(),
-                        mutable: typer
-                            .store()
-                            .symbols
-                            .get(binding.symbol())
-                            .flags
-                            .contains(SymbolFlags::MUTABLE),
-                    })
-                })
-                .collect::<Vec<_>>();
+            let mut locals = Vec::new();
+            for (source_tree, node) in parsed.ast.iter() {
+                if !matches!(node.kind, TreeKind::ValDef(_)) {
+                    continue;
+                }
+                let Some(symbol) = typer.local_symbol_at(source_id, source_tree) else {
+                    continue;
+                };
+                let local = typer.store().symbols.get(symbol);
+                if local.owner != Some(source_method.symbol) {
+                    continue;
+                }
+                if local.flags.contains(SymbolFlags::GIVEN) {
+                    locals.push(
+                        JvmLocalBinding::literal_given(
+                            source_method.symbol,
+                            symbol,
+                            source_id,
+                            source_tree,
+                            &parsed.ast,
+                            typer.typed_ast(),
+                            typer.source_typed_index(),
+                            typer.store(),
+                            &definitions,
+                        )
+                        .map_err(PipelineFailure::Codegen)?,
+                    );
+                } else if let Some(binding) = typer.typed_local_binding_at(source_id, source_tree) {
+                    locals.push(JvmLocalBinding::ordinary(
+                        binding.declaration(),
+                        symbol,
+                        local.flags.contains(SymbolFlags::MUTABLE),
+                    ));
+                }
+            }
             locals.sort_by_key(|binding| binding.declaration.index());
-            methods.push(JvmMethodPlan {
+            let plan = JvmMethodPlan {
                 method: source_method.symbol,
                 parameters: source_method.parameters,
                 locals,
                 body,
-            });
+            };
+            let getters = if has_defaults {
+                plan.source_default_getters(
+                    source_id,
+                    &parsed.ast,
+                    &index,
+                    typer.source_typed_index(),
+                    typer.store(),
+                )
+                .map_err(PipelineFailure::Codegen)?
+            } else {
+                Vec::new()
+            };
+            for mut method in std::iter::once(plan).chain(getters) {
+                method.bind_generated_locals(
+                    typer.typed_ast(),
+                    typer.source_typed_index(),
+                    typer.store(),
+                );
+                methods.push(method);
+            }
         }
         plans.push(JvmClassPlan {
             class: class.class,
@@ -8335,16 +8409,16 @@ fn resolve_source_constructor_calls(source_text: &str) -> Result<Vec<String>, Pi
                 }
                 let binding = typer.typed_local_binding_at(source_id, source_tree)?;
                 (typer.store().symbols.get(binding.symbol()).owner == Some(source_method.symbol))
-                    .then_some(JvmLocalBinding {
-                        declaration: binding.declaration(),
-                        symbol: binding.symbol(),
-                        mutable: typer
+                    .then_some(JvmLocalBinding::ordinary(
+                        binding.declaration(),
+                        binding.symbol(),
+                        typer
                             .store()
                             .symbols
                             .get(binding.symbol())
                             .flags
                             .contains(SymbolFlags::MUTABLE),
-                    })
+                    ))
             })
             .collect::<Vec<_>>();
         locals.sort_by_key(|binding| binding.declaration.index());
@@ -21044,16 +21118,16 @@ fn mutable_counter_reference_rebinding_preserves_source_identity_and_verifies_on
                 );
                 (
                     *declaration,
-                    JvmLocalBinding {
-                        declaration: binding.declaration(),
-                        symbol: binding.symbol(),
-                        mutable: typer
+                    JvmLocalBinding::ordinary(
+                        binding.declaration(),
+                        binding.symbol(),
+                        typer
                             .store()
                             .symbols
                             .get(binding.symbol())
                             .flags
                             .contains(SymbolFlags::MUTABLE),
-                    },
+                    ),
                 )
             })
             .collect::<Vec<_>>();
@@ -21954,11 +22028,11 @@ fn conditional_mutable_counter_assignment_reuses_one_local_and_verifies_on_jdk21
                 let symbol = typer.store().symbols.get(binding.symbol());
                 assert_eq!(symbol.owner, Some(owner));
                 assert_eq!(typer.store().scopes.get(binding.scope()).owner, Some(owner));
-                JvmLocalBinding {
-                    declaration: binding.declaration(),
-                    symbol: binding.symbol(),
-                    mutable: symbol.flags.contains(SymbolFlags::MUTABLE),
-                }
+                JvmLocalBinding::ordinary(
+                    binding.declaration(),
+                    binding.symbol(),
+                    symbol.flags.contains(SymbolFlags::MUTABLE),
+                )
             })
             .collect::<Vec<_>>();
         assert_eq!(locals.len(), 3);
@@ -27638,16 +27712,16 @@ fn source_local_declarations_export_method_scoped_canonical_bindings() {
                 }
                 let binding = typer.typed_local_binding_at(source_id, source_tree)?;
                 (typer.store().symbols.get(binding.symbol()).owner == Some(source_method.symbol))
-                    .then_some(JvmLocalBinding {
-                        declaration: binding.declaration(),
-                        symbol: binding.symbol(),
-                        mutable: typer
+                    .then_some(JvmLocalBinding::ordinary(
+                        binding.declaration(),
+                        binding.symbol(),
+                        typer
                             .store()
                             .symbols
                             .get(binding.symbol())
                             .flags
                             .contains(SymbolFlags::MUTABLE),
-                    })
+                    ))
             })
             .collect::<Vec<_>>();
         locals.sort_by_key(|binding| binding.declaration.index());
@@ -31642,4 +31716,729 @@ fn mixed_origin_pair_proof_preserves_renamed_and_reordered_identities() {
     )
     .expect("renamed and reordered classes remain valid in one source session");
     assert!(observed);
+}
+
+#[test]
+fn contextual_parameters_are_passed_in_verified_instance_calls() {
+    let output = TestOutputDirectory::new("context-parameter-forwarding");
+    compile_source(
+        "class ContextCalls { def read(using n: Int): Int = n; def forward(using n: Int): Int = read; def legacy(implicit n: Int): Int = n; def explicit(value: Int): Int = legacy(using value) }",
+        "ContextCalls.scala", output.path(),
+    ).unwrap();
+    if require_jdk_or_skip() {
+        let harness = output.path().join("Run.java");
+        fs::write(&harness, "class Run { public static void main(String[] args) { var c = new ContextCalls(); if (c.forward(41) != 41 || c.explicit(17) != 17) throw new AssertionError(); } }").unwrap();
+        let result = Command::new("java")
+            .arg("-Xverify:all")
+            .arg("-classpath")
+            .arg(output.path())
+            .arg(harness)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+#[test]
+fn polymorphic_contextual_identity_erases_to_object_and_preserves_reference() {
+    let output = TestOutputDirectory::new("polymorphic-contextual");
+    let artifacts = compile_source(
+        "class Generic { def evidence[A](using a: A): A = a }",
+        "Generic.scala",
+        output.path(),
+    )
+    .unwrap();
+    let mut reader = Reader::new(artifacts.class.bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+    assert_opcode_sequence(emitted_method_code(&class, "evidence"), &[0x2b, 0xb0]);
+    if require_jdk_or_skip() {
+        let harness = output.path().join("Run.java");
+        fs::write(&harness, "class Run { public static void main(String[] args) throws Exception { var method = Generic.class.getDeclaredMethod(\"evidence\", Object.class); var token = new Object(); if (method.getReturnType() != Object.class || new Generic().evidence(token) != token) throw new AssertionError(); } }").unwrap();
+        let result = Command::new("java")
+            .arg("-Xverify:all")
+            .arg("-classpath")
+            .arg(output.path())
+            .arg(harness)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+#[test]
+fn polymorphic_contextual_identity_rejects_another_methods_type_parameter() {
+    let output = TestOutputDirectory::new("polymorphic-contextual-binder");
+    let mut expected = None;
+    let mut change_binder = |ast: &AstArena<Untyped>,
+                             source: SourceId,
+                             index: &SourceSemanticIndex,
+                             store: &mut SemanticStore| {
+        let evidence = |name: &str| {
+            ast.iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::DefDef(def)
+                        if store.names.resolve(def.name.as_name().text()) == name =>
+                    {
+                        Some((
+                            index.symbol_at(source, tree).unwrap(),
+                            index
+                                .symbol_at(source, def.value_param_clauses[0][0])
+                                .unwrap(),
+                        ))
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let (first, a) = evidence("first");
+        let (_, b) = evidence("second");
+        let foreign = *store.symbols.info(b);
+        store.symbols.set_info(a, foreign);
+        expected = Some(first);
+    };
+    let failure = compile_source_batch_with_typer_failure_observer(
+        "class Generic { def first[A](using a: A): A = a; def second[A](using a: A): A = a }",
+        "Generic.scala",
+        output.path(),
+        SourceId::from_index(1),
+        SourceUnitCardinality::ExactlyOne,
+        SourceBatchObservers {
+            source_store_mutator: Some(&mut change_binder),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(failure, PipelineFailure::Codegen(JvmCodegenError::UnsupportedMethodShape {
+        method, kind: dotty_jvm::UnsupportedMethodShapeKind::Polymorphic, ..
+    }) if Some(method) == expected)
+    );
+    assert!(!output.path().join("Generic.class").exists());
+}
+
+#[test]
+fn curried_contextual_calls_flatten_into_one_jvm_invocation() {
+    let output = TestOutputDirectory::new("curried-contextual");
+    compile_source(
+        "class Curried { def pick(x: Int)(using n: Int): Int = x - n; def use(x: Int)(using n: Int): Int = pick(x); def supplied(x: Int, y: Int): Int = pick(x)(using y) }",
+        "Curried.scala", output.path(),
+    ).unwrap();
+    if require_jdk_or_skip() {
+        let harness = output.path().join("Run.java");
+        fs::write(&harness, "class Run { public static void main(String[] args) { var c = new Curried(); if (c.use(41, 7) != 34 || c.supplied(19, 3) != 16) throw new AssertionError(); } }").unwrap();
+        let result = Command::new("java")
+            .arg("-Xverify:all")
+            .arg("-classpath")
+            .arg(output.path())
+            .arg(harness)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+#[test]
+fn context_function_results_use_the_lambda_evidence_and_captured_parameter() {
+    let output = TestOutputDirectory::new("context-function-results");
+    let emitted = compile_source(
+        "package example; class ContextResults { def closure: Int ?=> Int = (n: Int) ?=> n; def capture(x: Int): Int ?=> Int = (n: Int) ?=> n + x; def shadow(x: Int): Int ?=> Int = (x: Int) ?=> x; def empty(): Int ?=> Int = (n: Int) ?=> n }",
+        "ContextResults.scala", output.path(),
+    ).unwrap();
+    let mut reader = Reader::new(emitted.class.bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+    assert_opcode_sequence(emitted_method_code(&class, "closure"), &[0x1b, 0xac]);
+    assert_opcode_sequence(
+        emitted_method_code(&class, "capture"),
+        &[0x1c, 0x1b, 0x60, 0xac],
+    );
+    assert_opcode_sequence(emitted_method_code(&class, "shadow"), &[0x1c, 0xac]);
+    assert_opcode_sequence(emitted_method_code(&class, "empty"), &[0x1b, 0xac]);
+    if require_jdk_or_skip() {
+        let harness = output.path().join("Run.java");
+        fs::write(&harness, "class Run { public static void main(String[] args) { var c = new example.ContextResults(); if (c.closure(37) != 37 || c.capture(19, 23) != 42 || c.shadow(1, 5) != 5 || c.empty(17) != 17) throw new AssertionError(); } }").unwrap();
+        let result = Command::new("java")
+            .arg("-Xverify:all")
+            .arg("-classpath")
+            .arg(output.path())
+            .arg(harness)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+#[test]
+fn context_function_results_reject_another_methods_closure_root() {
+    let output = TestOutputDirectory::new("context-function-foreign-root");
+    let mut expected = None;
+    let mut change = |unit: &mut JvmCompilationUnit<'_>, _: &Definitions| {
+        let methods = &mut unit.classes[0].methods;
+        let root = methods[1].body.unwrap();
+        expected = Some((methods[0].method, root));
+        methods[0].body = Some(root);
+    };
+    let failure = compile_source_batch_observed(
+        "package example; class Foreign { def first: Int ?=> Int = (n: Int) ?=> n; def second: Int ?=> Int = (n: Int) ?=> n }",
+        "Foreign.scala", output.path(), SourceId::from_index(1), SourceUnitCardinality::ExactlyOne, Some(&mut change)
+    ).unwrap_err();
+    assert!(
+        matches!(failure, PipelineFailure::Codegen(JvmCodegenError::InvalidContextFunctionResult { method, tree }) if Some((method, tree)) == expected),
+        "{failure:?}"
+    );
+    assert!(!output.path().join("example/Foreign.class").exists());
+}
+
+const CONTEXTUAL_DEFAULT_EXECUTION: &str = r#"
+package example
+class Reader:
+  def offset(x: Int)(using n: Int = x): Int = n
+class Caller:
+  private var calls: Int = 0
+  private var receivers: Int = 0
+  def next(): Int = { calls = calls + 1; calls }
+  def count(): Int = calls
+  def run(reader: Reader): Int = reader.offset(next())
+  def receiverCount(): Int = receivers
+  def choose(reader: Reader): Reader = { receivers = receivers + 1; reader }
+  def runBoth(reader: Reader): Int = choose(reader).offset(next())
+"#;
+
+#[test]
+fn contextual_default_getter_reuses_the_evaluated_argument() {
+    let output = TestOutputDirectory::new("contextual-default-getter");
+    let artifacts = compile_source_classes(
+        CONTEXTUAL_DEFAULT_EXECUTION,
+        "ContextualDefault.scala",
+        output.path(),
+    )
+    .unwrap();
+    let reader = artifacts
+        .iter()
+        .find(|a| a.class.internal_name() == "example/Reader")
+        .unwrap();
+    let reader = ClassFile::decode(&mut Reader::new(reader.class.bytes())).unwrap();
+    assert_opcode_sequence(
+        emitted_method_code(&reader, "offset$default$2"),
+        &[0x1b, 0xac],
+    );
+    let getter = reader
+        .methods
+        .iter()
+        .find(|method| reader.constant_pool.utf8(method.name_index) == Ok("offset$default$2"))
+        .unwrap();
+    assert_eq!(
+        reader.constant_pool.utf8(getter.descriptor_index),
+        Ok("(I)I")
+    );
+    assert_eq!(getter.access_flags.0, ACC_PUBLIC);
+    let caller = artifacts
+        .iter()
+        .find(|a| a.class.internal_name() == "example/Caller")
+        .unwrap();
+    let caller = ClassFile::decode(&mut Reader::new(caller.class.bytes())).unwrap();
+    assert_invoked_method_names(
+        &caller,
+        emitted_method_code(&caller, "run"),
+        &["next", "offset$default$2", "offset"],
+    );
+    assert_invoked_method_names(
+        &caller,
+        emitted_method_code(&caller, "runBoth"),
+        &["choose", "next", "offset$default$2", "offset"],
+    );
+    if require_jdk_or_skip() {
+        let harness = output.path().join("Run.java");
+        fs::write(
+            &harness,
+            r#"class Run {
+            public static void main(String[] args) {
+                var reader = new example.Reader();
+                var caller = new example.Caller();
+                if (caller.run(reader) != 1 || caller.count() != 1) throw new AssertionError();
+                if (caller.run(reader) != 2 || caller.count() != 2) throw new AssertionError();
+                if (caller.runBoth(reader) != 3 || caller.count() != 3 || caller.receiverCount() != 1) throw new AssertionError();
+                var customized = new example.Reader() {
+                    @Override public int offset$default$2(int x) { return x + 40; }
+                };
+                if (caller.run(customized) != 44 || caller.count() != 4) throw new AssertionError();
+            }
+        }"#,
+        )
+        .unwrap();
+        let result = Command::new("java")
+            .arg("-Xverify:all")
+            .arg("-classpath")
+            .arg(output.path())
+            .arg(harness)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+#[test]
+fn two_argument_contextual_default_reuses_the_receiver_and_both_arguments_in_order() {
+    let source = r#"
+package example
+class Reader:
+  def pick(x: Int, y: Int)(using n: Int = y): Int = n
+class Caller:
+  def choose(reader: Reader): Reader = reader
+  def nextX(): Int = 0
+  def nextY(): Int = 0
+  def missing(reader: Reader): Int = choose(reader).pick(nextX(), nextY())
+  def local(reader: Reader): Int = { given evidence: Int = 41; reader.pick(13, 29) }
+  def explicit(reader: Reader): Int = reader.pick(13, 29)(using 59)
+"#;
+    let output = TestOutputDirectory::new("two-argument-contextual-default");
+    let artifacts = compile_source_classes(source, "Reader.scala", output.path()).unwrap();
+    let reader = decode_emitted_class_named(&artifacts, "example/Reader");
+    assert_opcode_sequence(
+        emitted_method_code(&reader, "pick$default$3"),
+        &[0x1c, 0xac],
+    );
+    let caller = decode_emitted_class_named(&artifacts, "example/Caller");
+    assert_invocation_sequence(
+        &caller,
+        emitted_method_code(&caller, "missing"),
+        &[
+            (
+                0xb6,
+                "example/Caller",
+                "choose",
+                "(Lexample/Reader;)Lexample/Reader;",
+            ),
+            (0xb6, "example/Caller", "nextX", "()I"),
+            (0xb6, "example/Caller", "nextY", "()I"),
+            (0xb6, "example/Reader", "pick$default$3", "(II)I"),
+            (0xb6, "example/Reader", "pick", "(III)I"),
+        ],
+    );
+    for name in ["local", "explicit"] {
+        assert_invocation_sequence(
+            &caller,
+            emitted_method_code(&caller, name),
+            &[(0xb6, "example/Reader", "pick", "(III)I")],
+        );
+    }
+    if require_jdk_or_skip() {
+        let harness = output.path().join("Run.java");
+        fs::write(
+            &harness,
+            r#"class Run {
+            static class Counted extends example.Reader {
+                int getterCalls;
+                @Override public int pick$default$3(int x, int y) {
+                    getterCalls++;
+                    if (x != 13 || y != 29) throw new AssertionError("getter arguments");
+                    return super.pick$default$3(x, y);
+                }
+                @Override public int pick(int x, int y, int n) {
+                    if (x != 13 || y != 29) throw new AssertionError("pick arguments");
+                    return super.pick(x, y, n);
+                }
+            }
+            public static void main(String[] args) {
+                var selected = new Counted();
+                var trace = new StringBuilder();
+                var caller = new example.Caller() {
+                    @Override public example.Reader choose(example.Reader ignored) {
+                        trace.append("r"); return selected;
+                    }
+                    @Override public int nextX() { trace.append("x"); return 13; }
+                    @Override public int nextY() { trace.append("y"); return 29; }
+                };
+                if (caller.missing(null) != 29 || selected.getterCalls != 1 ||
+                    !trace.toString().equals("rxy")) throw new AssertionError(trace);
+                if (caller.local(selected) != 41 || caller.explicit(selected) != 59 ||
+                    selected.getterCalls != 1) throw new AssertionError("evidence");
+            }
+        }"#,
+        )
+        .unwrap();
+        let result = Command::new("java")
+            .arg("-Xverify:all")
+            .arg("-classpath")
+            .arg(output.path())
+            .arg(harness)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+#[test]
+fn contextual_default_getter_rejects_the_original_methods_formal_in_its_plan() {
+    let output = TestOutputDirectory::new("contextual-default-foreign-formal");
+    let mut wrong_formal = None;
+    let mut change = |unit: &mut JvmCompilationUnit<'_>, _: &Definitions| {
+        let methods = &mut unit.classes[0].methods;
+        let parent = methods
+            .iter()
+            .find(|method| unit.store.default_getter(method.method, 1).is_some())
+            .unwrap();
+        let getter = unit.store.default_getter(parent.method, 1).unwrap();
+        let original = parent.parameters[0];
+        wrong_formal = Some((original, getter, parent.method));
+        methods
+            .iter_mut()
+            .find(|candidate| candidate.method == getter)
+            .unwrap()
+            .parameters[0] = original;
+    };
+    let failure = compile_source_batch_observed(
+        CONTEXTUAL_DEFAULT_EXECUTION,
+        "ContextualDefault.scala",
+        output.path(),
+        SourceId::from_index(1),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut change),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(failure, PipelineFailure::Codegen(JvmCodegenError::WrongOwner { symbol, expected, actual: Some(actual) }) if Some((symbol,expected,actual)) == wrong_formal),
+        "{failure:?}"
+    );
+    assert!(fs::read_dir(output.path()).unwrap().next().is_none());
+}
+
+#[test]
+fn unregistered_synthetic_method_cannot_claim_a_default_getter_abi_name() {
+    let output = TestOutputDirectory::new("contextual-default-impostor");
+    let mut decoy = None;
+    let mut change = |ast: &AstArena<Untyped>,
+                      source: SourceId,
+                      index: &SourceSemanticIndex,
+                      store: &mut SemanticStore| {
+        let (tree, _) = ast.iter().find(|(_,node)| matches!(&node.kind,TreeKind::DefDef(d) if store.names.resolve(d.name.as_name().text())=="offset$default$2")).unwrap();
+        let symbol = index.symbol_at(source, tree).unwrap();
+        assert_eq!(store.default_getter_origin(symbol), None);
+        store.symbols.get_mut(symbol).flags = SymbolFlags::SYNTHETIC;
+        decoy = Some(symbol);
+    };
+    let failure = compile_source_batch_with_typer_failure_observer(
+        "package example; class Decoy { def `offset$default$2`(x: Int): Int = x }",
+        "Decoy.scala",
+        output.path(),
+        SourceId::from_index(1),
+        SourceUnitCardinality::ExactlyOne,
+        SourceBatchObservers {
+            source_store_mutator: Some(&mut change),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(failure, PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmSymbolFlag { symbol, flag:dotty_jvm::UnsupportedJvmSymbolFlag::Synthetic }) if Some(symbol)==decoy),
+        "{failure:?}"
+    );
+    assert!(fs::read_dir(output.path()).unwrap().next().is_none());
+}
+
+const CONTEXTUAL_LITERAL_DEFAULT: &str = r#"
+package example
+class Reader:
+  def read(using n: Int = 7): Int = n
+  def own(): Int = read
+class Consumer:
+  def missing(reader: Reader): Int = reader.read
+  def local(reader: Reader): Int = { given evidence: Int = 11; reader.read }
+  def explicit(reader: Reader): Int = reader.read(using 9)
+"#;
+
+#[test]
+fn contextual_literal_default_invokes_the_parameterless_getter_only_when_missing() {
+    let output = TestOutputDirectory::new("contextual-literal-default");
+    let artifacts =
+        compile_source_classes(CONTEXTUAL_LITERAL_DEFAULT, "Reader.scala", output.path()).unwrap();
+    let class = |name: &str| {
+        let artifact = artifacts
+            .iter()
+            .find(|a| a.class.internal_name() == name)
+            .unwrap();
+        ClassFile::decode(&mut Reader::new(artifact.class.bytes())).unwrap()
+    };
+    let reader = class("example/Reader");
+    let getter = reader
+        .methods
+        .iter()
+        .find(|m| reader.constant_pool.utf8(m.name_index) == Ok("read$default$1"))
+        .unwrap();
+    assert_eq!(
+        reader.constant_pool.utf8(getter.descriptor_index),
+        Ok("()I")
+    );
+    assert_eq!(getter.access_flags.0, ACC_PUBLIC);
+    assert_eq!(
+        emitted_method_code(&reader, "read$default$1"),
+        &[0x10, 0x07, 0xac]
+    );
+    assert_invoked_method_names(
+        &reader,
+        emitted_method_code(&reader, "own"),
+        &["read$default$1", "read"],
+    );
+    let consumer = class("example/Consumer");
+    assert_invoked_method_names(
+        &consumer,
+        emitted_method_code(&consumer, "missing"),
+        &["read$default$1", "read"],
+    );
+    for method in ["local", "explicit"] {
+        assert_invoked_method_names(&consumer, emitted_method_code(&consumer, method), &["read"]);
+    }
+    if require_jdk_or_skip() {
+        let harness = output.path().join("Run.java");
+        fs::write(
+            &harness,
+            r#"class Run {
+            static class Counted extends example.Reader {
+                int calls;
+                @Override public int read$default$1() { calls++; return super.read$default$1(); }
+            }
+            public static void main(String[] args) {
+                var reader = new Counted();
+                var consumer = new example.Consumer();
+                if (reader.own() != 7 || reader.calls != 1) throw new AssertionError();
+                if (consumer.missing(reader) != 7 || reader.calls != 2) throw new AssertionError();
+                if (consumer.local(reader) != 11 || reader.calls != 2) throw new AssertionError();
+                if (consumer.explicit(reader) != 9 || reader.calls != 2) throw new AssertionError();
+            }
+        }"#,
+        )
+        .unwrap();
+        let result = Command::new("java")
+            .arg("-Xverify:all")
+            .arg("-classpath")
+            .arg(output.path())
+            .arg(harness)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+#[test]
+fn contextual_literal_default_rejects_an_empty_clause_in_the_getters_signature() {
+    let output = TestOutputDirectory::new("contextual-literal-default-empty-clause");
+    let mut corrupted = None;
+    let mut change = |ast: &AstArena<Untyped>,
+                      source: SourceId,
+                      index: &SourceSemanticIndex,
+                      store: &mut SemanticStore| {
+        let getter = ast
+            .iter()
+            .find_map(|(tree, _)| store.default_getter(index.symbol_at(source, tree)?, 0))
+            .unwrap();
+        let SymbolInfo::Complete(result) = *store.symbols.info(getter) else {
+            panic!("the source getter was completed")
+        };
+        let signature = store
+            .types
+            .alloc(Type::Method(dotty_core::types::MethodType {
+                params: Vec::new(),
+                result,
+                kind: dotty_core::types::MethodKind::Plain,
+            }));
+        store
+            .symbols
+            .set_info(getter, SymbolInfo::Complete(signature));
+        corrupted = Some(getter);
+    };
+    let failure = compile_source_batch_with_typer_failure_observer(
+        CONTEXTUAL_LITERAL_DEFAULT,
+        "Reader.scala",
+        output.path(),
+        SourceId::from_index(1),
+        SourceUnitCardinality::AtLeastTwo,
+        SourceBatchObservers {
+            source_store_mutator: Some(&mut change),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(failure, PipelineFailure::Codegen(JvmCodegenError::InvalidContextualDefaultGetter {method}) if Some(method) == corrupted),
+        "{failure:?}"
+    );
+    assert!(fs::read_dir(output.path()).unwrap().next().is_none());
+}
+
+#[test]
+fn contextual_literal_default_rejects_an_effectful_local_given_initializer() {
+    let output = TestOutputDirectory::new("contextual-literal-default-lazy-initializer");
+    let source = CONTEXTUAL_LITERAL_DEFAULT.replace(
+        "given evidence: Int = 11",
+        "given evidence: Int = reader.own()",
+    );
+    let failure = compile_source_classes(&source, "Reader.scala", output.path()).unwrap_err();
+    assert!(
+        matches!(
+            failure,
+            PipelineFailure::Codegen(JvmCodegenError::InvalidLiteralGiven { .. })
+        ),
+        "{failure:?}"
+    );
+    assert!(fs::read_dir(output.path()).unwrap().next().is_none());
+}
+
+#[test]
+fn contextual_literal_default_requires_source_proof_for_the_given_local() {
+    let output = TestOutputDirectory::new("contextual-literal-default-given-proof");
+    let mut missing = None;
+    let mut change = |unit: &mut JvmCompilationUnit<'_>, _: &Definitions| {
+        let binding = unit
+            .classes
+            .iter_mut()
+            .flat_map(|c| &mut c.methods)
+            .flat_map(|m| &mut m.locals)
+            .find(|l| {
+                unit.store
+                    .symbols
+                    .get(l.symbol)
+                    .flags
+                    .contains(SymbolFlags::GIVEN)
+            })
+            .unwrap();
+        missing = Some(binding.symbol);
+        *binding = JvmLocalBinding::ordinary(binding.declaration, binding.symbol, false);
+    };
+    let failure = compile_source_batch_observed(
+        CONTEXTUAL_LITERAL_DEFAULT,
+        "Reader.scala",
+        output.path(),
+        SourceId::from_index(1),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut change),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(failure, PipelineFailure::Codegen(JvmCodegenError::UnsupportedLocalFlag {symbol, flag: dotty_jvm::UnsupportedJvmLocalFlag::Lazy}) if Some(symbol) == missing),
+        "{failure:?}"
+    );
+    assert!(fs::read_dir(output.path()).unwrap().next().is_none());
+}
+
+#[test]
+fn contextual_literal_default_rejects_an_explicit_application_of_its_parameterless_getter() {
+    let output = TestOutputDirectory::new("contextual-literal-default-getter-application");
+    let mut checked = false;
+    let mut check = |unit: &mut JvmCompilationUnit<'_>, definitions: &Definitions| {
+        let reader = &unit.classes[0];
+        let caller = reader
+            .methods
+            .iter()
+            .find(|m| {
+                unit.store
+                    .names
+                    .resolve(unit.store.symbols.get(m.method).name.text())
+                    == "own"
+            })
+            .unwrap();
+        let body = caller.body.unwrap();
+        let TreeKind::Apply(call) = &unit.typed_ast.get(body).kind else {
+            panic!("the source call to read includes inserted evidence")
+        };
+        let [getter] = call.args.as_slice() else {
+            panic!("one default getter reference")
+        };
+        let mut ast = copy_ast(unit.typed_ast);
+        let applied = dotty_core::ast::TypedAstBuilder::new(&mut ast, &unit.store.types).apply(
+            *getter,
+            Vec::new(),
+            definitions.int,
+            None,
+        );
+        let forged = JvmCompilationUnit {
+            store: unit.store,
+            typed_ast: &ast,
+            classes: unit.classes.clone(),
+        };
+        assert_eq!(
+            forged.resolve_planned_instance_call(reader.class, caller.method, applied, definitions),
+            Err(JvmCodegenError::UnsupportedJvmCallShape {
+                tree: applied,
+                kind: dotty_jvm::UnsupportedJvmCallShapeKind::UnexpectedGetterApplication
+            })
+        );
+        checked = true;
+    };
+    compile_source_batch_observed(
+        CONTEXTUAL_LITERAL_DEFAULT,
+        "Reader.scala",
+        output.path(),
+        SourceId::from_index(1),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut check),
+    )
+    .unwrap();
+    assert!(checked);
+}
+
+#[test]
+fn legacy_default_getter_runs_only_for_missing_implicit_evidence() {
+    let output = TestOutputDirectory::new("legacy-implicit-default");
+    let source = include_str!(
+        "../crates/dotty-typer/tests/fixtures/contextual-arguments/LegacyDefaults.scala"
+    );
+    let artifact = compile_source(source, "LegacyDefaults.scala", output.path()).unwrap();
+    let class = ClassFile::decode(&mut Reader::new(artifact.class.bytes())).unwrap();
+    assert_invoked_method_names(
+        &class,
+        emitted_method_code(&class, "fallback"),
+        &["legacy$default$1", "legacy"],
+    );
+    for name in ["supplied", "explicit"] {
+        assert_invoked_method_names(&class, emitted_method_code(&class, name), &["legacy"]);
+    }
+    if require_jdk_or_skip() {
+        let harness = output.path().join("Run.java");
+        fs::write(&harness, r#"class Run {
+            public static void main(String[] args) {
+                var reader = new example.LegacyDefaults();
+                if (reader.fallback() != 7 || reader.supplied(11) != 11 || reader.explicit(1, 2) != 9)
+                    throw new AssertionError();
+            }
+        }"#).unwrap();
+        let result = Command::new("java")
+            .arg("-Xverify:all")
+            .arg("-classpath")
+            .arg(output.path())
+            .arg(harness)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
 }

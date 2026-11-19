@@ -69,6 +69,32 @@ counted as completed-run structural failures. Synthetic enum APIs such as
 `values`, lookup methods, and `ordinal` are later synthesis work, not enum
 identity failures.
 
+## Structural given factories and contextual default getters
+
+A parameterized structural given has a class in the type namespace and a
+factory method in the term namespace. The class is the canonical binding for
+the declaration tree. Looking up the same tree as a derived definition of the
+enclosing owner returns the factory. Type parameters, contextual parameters,
+and context-bound witnesses have distinct symbols for the class, constructor
+and factory. The typer can therefore complete each signature in its own scope.
+A factory with only a type clause has no synthetic empty term clause.
+
+An anonymous given with a constructor parent takes its name from the
+instantiated parent type. For example, `given Context("alpha")` introduces
+`given_Context`, and `given Container[String]("alpha")(2)` introduces
+`given_Container_String`.
+
+For a supported contextual parameter with a default, or an ordinary defaulted
+parameter following a contextual clause, the derived getter belongs to the
+method's owner. Its source tree is the defaulted parameter.
+Earlier parameter clauses have their own getter-owned bindings, which let the
+typer resolve a reference in the default expression to the correct parameter.
+For methods with explicit value clauses and no context bounds, the namer
+also records the method, flattened zero-based parameter position, parameter
+symbol, and getter symbol in the semantic store. Context-bound witnesses can
+change the positions, so these methods retain their source-index bindings
+until default completion supports witness placement.
+
 ## Bounded nested case-class companions
 
 The namer now creates a companion `Object`/`ModuleClass` and a derived
@@ -135,6 +161,11 @@ duplicate identities, transaction rollback, and package/source-wrapper
 identity reuse. All reported semantic invariant failures and transaction
 residue counts are zero. Parser-recovered detached enum nodes are listed as
 parser-blocked rather than charged as Namer invariant failures.
+
+For top-level definitions, the index records the synthetic module class by
+source unit and package. Repeated clauses of that package in the unit share
+its declaration scope. Each wrapped declaration keeps its original lexical
+context, including the imports visible at that point.
 
 The current source semantic index is suitable for the first source typer
 milestone, with the deferred local-scope, annotation, synthetic-member, and

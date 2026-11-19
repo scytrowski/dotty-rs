@@ -4,6 +4,8 @@ use super::*;
 
 mod constructors;
 mod declarations;
+mod default_getters;
+mod given_factory;
 mod local_methods;
 mod methods;
 
@@ -54,6 +56,25 @@ impl SourceTyper<'_> {
         symbol: SymbolId,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
+        // File owners have a declaration scope but no source template.
+        if self.is_source_package_wrapper(symbol) {
+            return self.complete_synthetic_module_class(symbol, info_journal);
+        }
+        let getter_projection = self.contextual_getter_source(symbol).is_some()
+            || self
+                .store
+                .symbols
+                .owner(symbol)
+                .is_some_and(|owner| self.contextual_getter_source(owner).is_some());
+        if self.is_structural_given_parameter_copy(symbol) || getter_projection {
+            // Constructor and factory binders share syntax with the canonical
+            // class declaration. Project each copy in its own lexical scope
+            // without publishing those types under the shared source tree.
+            let canonical = std::mem::take(&mut self.type_index);
+            let result = self.complete_symbol_inner_body(symbol, info_journal);
+            self.type_index = canonical;
+            return result;
+        }
         if let Some(method) = self.generated_case_class_apply_owner_for_parameter(symbol) {
             self.complete_symbol_inner(method, info_journal)?;
             if let SymbolInfo::Complete(info) = *self.store.symbols.info(symbol) {
@@ -298,6 +319,15 @@ impl SourceTyper<'_> {
                 | SymbolKind::Parameter,
                 TreeKind::ValDef(definition),
             ) => Some(definition.tpt),
+            (
+                SymbolKind::Parameter | SymbolKind::Field,
+                TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(_)),
+            ) => Some(tree),
+            (SymbolKind::Method, TreeKind::ValDef(_))
+                if self.contextual_getter_source(symbol).is_some() =>
+            {
+                None
+            }
             (SymbolKind::Method | SymbolKind::Constructor, TreeKind::DefDef(_)) => None,
             (
                 SymbolKind::TypeParameter
@@ -310,6 +340,11 @@ impl SourceTyper<'_> {
                 if self
                     .generated_case_class_for_companion_module_class(symbol, source, tree)
                     .is_some() =>
+            {
+                None
+            }
+            (SymbolKind::Method, TreeKind::TypeDef(_))
+                if self.structural_given_class(symbol, tree).is_some() =>
             {
                 None
             }
@@ -421,7 +456,13 @@ impl SourceTyper<'_> {
                 self.complete_type_alias(symbol, rhs, tree.index(), context, info_journal)
             }
             SymbolKind::Method => {
-                let info = if let Some(class) =
+                let info = if let Some((method, param, preceding)) =
+                    self.contextual_getter_source(symbol)
+                {
+                    self.complete_contextual_getter(symbol, method, param, preceding, info_journal)?
+                } else if let Some(class) = self.structural_given_class(symbol, tree) {
+                    self.complete_structural_given_factory(symbol, class, tree, info_journal)?
+                } else if let Some(class) =
                     self.generated_case_class_for_apply(symbol, source, tree)
                 {
                     self.complete_generated_case_class_apply_signature(

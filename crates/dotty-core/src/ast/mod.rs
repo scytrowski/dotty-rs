@@ -2,6 +2,7 @@
 
 mod arena;
 mod common;
+pub mod given_name;
 mod modifiers;
 mod phase;
 mod tree;
@@ -11,11 +12,11 @@ mod untyped;
 pub use arena::{AstArena, AstArenaCheckpoint};
 pub use common::{
     Alternative, Annotated, AppliedTypeTree, Apply, ApplyKind, Assign, Bind, Block, ByNameTypeTree,
-    CaseDef, Closure, DefDef, DefParamClauseOrder, Export, Ident, If, Import, ImportSelector,
-    Inlined, LambdaTypeTree, Literal, Match, MatchTypeTree, NamedArg, New, PackageDef, Quote,
-    QuotePattern, RefinedTypeTree, Return, Select, SingletonTypeTree, Splice, SplicePattern, Super,
-    Template, This, Try, TypeApply, TypeBoundsTree, TypeDef, TypeTree, TypedExpr, UnApply, ValDef,
-    While,
+    CaseDef, Closure, ClosureImplementation, DefDef, DefParamClauseOrder, Export, Ident, If,
+    Import, ImportSelector, Inlined, LambdaTypeTree, Literal, Match, MatchTypeTree, NamedArg, New,
+    PackageDef, Quote, QuotePattern, RefinedTypeTree, Return, Select, SingletonTypeTree, Splice,
+    SplicePattern, Super, Template, This, Try, TypeApply, TypeBoundsTree, TypeDef, TypeTree,
+    TypedExpr, UnApply, ValDef, While,
 };
 pub use modifiers::{Modifier, Modifiers, VisibilitySyntax};
 pub use phase::{AstPhase, Typed, Untyped};

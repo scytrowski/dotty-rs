@@ -12,6 +12,7 @@
 //! The parser and typer that will consume this crate do not exist yet.
 
 pub mod ast;
+mod context_closure;
 pub mod definitions;
 pub mod diagnostics;
 pub mod ids;
@@ -59,6 +60,7 @@ pub mod core {
 }
 
 pub use ast::{AstArena, AstPhase, Modifiers, Tree, TreeKind, Typed, TypedAstBuilder, Untyped};
+pub use context_closure::{CheckedUnaryContextClosure, checked_unary_context_closure};
 pub use definitions::{
     BooleanPrimitiveOperatorRegistrationError, BooleanPrimitiveOperatorSymbols, Definitions,
     IntPrimitiveOperatorInfoState, IntPrimitiveOperatorRegistrationError,
@@ -84,7 +86,7 @@ pub use source_semantics::{
     SourceDefinition, SourceExportSite, SourceSemanticIndex, SourceSemanticIndexError,
 };
 pub use source_typed_index::{ConflictingTypedTree, SourceTypedIndex};
-pub use store::{SemanticStore, StoreCheckpoint};
+pub use store::{DefaultGetterError, SemanticStore, StoreCheckpoint};
 pub use symbols::{
     OriginTable, Scope, ScopeArena, Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks,
     SymbolOrigin, SymbolTable, Visibility, source_modifier_flag,

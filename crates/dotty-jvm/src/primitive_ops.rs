@@ -118,11 +118,9 @@ pub fn resolve_int_intrinsic(
         });
     }
     let call_tree = get_tree(store, typed_ast, call)?;
-    let (function_id, args) = match &call_tree.kind {
-        TreeKind::Apply(apply) if apply.kind == ApplyKind::Regular => {
-            (apply.function, apply.args.as_slice())
-        }
-        TreeKind::Apply(_) | TreeKind::TypeApply(_) => {
+    let (function_id, args, kind) = match &call_tree.kind {
+        TreeKind::Apply(apply) => (apply.function, apply.args.as_slice(), apply.kind),
+        TreeKind::TypeApply(_) => {
             return Err(JvmIntIntrinsicError::UnsupportedCallShape { tree: call });
         }
         _ => return Ok(None),
@@ -167,6 +165,9 @@ pub fn resolve_int_intrinsic(
 
     if !store.symbols.contains(method) {
         return Err(JvmIntIntrinsicError::UnknownMethod { tree: call, method });
+    }
+    if kind != ApplyKind::Regular {
+        return Err(JvmIntIntrinsicError::UnsupportedCallShape { tree: call });
     }
     let method_symbol = store.symbols.get(method);
     if method_symbol.kind != SymbolKind::Method {

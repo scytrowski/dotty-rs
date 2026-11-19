@@ -768,6 +768,7 @@ impl Validator<'_, '_> {
         source_name: dotty_core::Name,
         prefix: TypeId,
         source_tree: TreeId<Untyped>,
+        application: ApplyKind,
     ) -> Result<usize, PickleError> {
         let p = self.plan;
         let target_method = p
@@ -811,8 +812,14 @@ impl Validator<'_, '_> {
                 role: TypeRole::Parameter,
             });
         };
-        if signature.kind != MethodKind::Plain
-            || signature.params.len() != target_method.parameter_clauses[0].len()
+        if !matches!(
+            (application, signature.kind),
+            (ApplyKind::Regular, MethodKind::Plain | MethodKind::Implicit)
+                | (
+                    ApplyKind::Using,
+                    MethodKind::Contextual | MethodKind::Implicit
+                )
+        ) || signature.params.len() != target_method.parameter_clauses[0].len()
             || signature.result != p.definitions.int
         {
             return Err(PickleError::MalformedType {
@@ -881,8 +888,7 @@ impl Validator<'_, '_> {
                 expected: SourceRole::Body,
             });
         };
-        if source_apply.kind != ApplyKind::Regular
-            || typed_apply.kind != ApplyKind::Regular
+        if source_apply.kind != typed_apply.kind
             || source_apply.args.is_empty()
             || source_apply.args.len() != typed_apply.args.len()
         {
@@ -975,6 +981,7 @@ impl Validator<'_, '_> {
             name,
             *prefix,
             source_apply.function,
+            source_apply.kind,
         )?;
         if count != source_apply.args.len() {
             return Err(PickleError::BodyType {
@@ -1803,7 +1810,13 @@ impl Validator<'_, '_> {
                 } else {
                     let parameter = target;
                     self.kind(*parameter, SymbolKind::Parameter)?;
-                    self.owner(*parameter, Some(method.symbol))?;
+                    let owner = self.symbol(method.symbol)?;
+                    // A validated closure plan lists its formal and its exact enclosing captures.
+                    if owner.origin != SymbolOrigin::Synthetic
+                        || self.symbol(*parameter)?.owner != owner.owner
+                    {
+                        self.owner(*parameter, Some(method.symbol))?;
+                    }
                     if !method
                         .parameter_clauses
                         .iter()
@@ -2008,8 +2021,7 @@ impl Validator<'_, '_> {
                 if !visited.insert(body) {
                     return Err(PickleError::RepeatedExpression { tree: body });
                 }
-                if source_apply.kind != ApplyKind::Regular
-                    || typed_apply.kind != ApplyKind::Regular
+                if source_apply.kind != typed_apply.kind
                     || source_apply.args.len() != typed_apply.args.len()
                 {
                     return Err(
@@ -2103,6 +2115,7 @@ impl Validator<'_, '_> {
                     name,
                     *prefix,
                     source_apply.function,
+                    source_apply.kind,
                 )?;
                 if source_apply.args.len() != parameter_count {
                     return Err(PickleError::BodyType {
@@ -2339,6 +2352,92 @@ impl Validator<'_, '_> {
                     tree: rhs,
                     expected: SourceRole::Body,
                 })?)
+            }
+            (TreeKind::Ident(ident), TreeKind::Apply(call)) if method.body == Some(body) => {
+                // The source identifier binds to the adapted call. Its function
+                // and inserted argument therefore have no separate source roots.
+                let unsupported = || PickleError::Unsupported {
+                    feature: UnsupportedFeature::BodyExpression,
+                    symbol: Some(method.symbol),
+                };
+                let [arg] = call.args.as_slice() else {
+                    return Err(unsupported());
+                };
+                if call.kind != ApplyKind::Regular
+                    || result_type != p.definitions.int
+                    || node.ty != result_type
+                    || self.unqualified_name_is_shadowed(ident.name, method)
+                {
+                    return Err(unsupported());
+                }
+                self.charge(3)?;
+                let function =
+                    p.typed_ast
+                        .try_get(call.function)
+                        .ok_or(PickleError::InvalidTypedTree {
+                            tree: call.function,
+                        })?;
+                let argument = p
+                    .typed_ast
+                    .try_get(*arg)
+                    .ok_or(PickleError::InvalidTypedTree { tree: *arg })?;
+                let (TreeKind::Ident(head), TreeKind::Ident(actual)) =
+                    (&function.kind, &argument.kind)
+                else {
+                    return Err(unsupported());
+                };
+                if head != ident || argument.position.is_some() {
+                    return Err(unsupported());
+                }
+                self.paired_source_typed_span(
+                    source_rhs.position,
+                    function.position,
+                    call.function,
+                )?;
+                let Type::TermRef {
+                    prefix,
+                    target: TermRefTarget::Symbol(target),
+                } = self.ty(function.ty)?
+                else {
+                    return Err(unsupported());
+                };
+                if self.same_class_method_application_target(
+                    *target,
+                    ident.name,
+                    *prefix,
+                    rhs,
+                    ApplyKind::Using,
+                )? != 1
+                {
+                    return Err(unsupported());
+                }
+                let Type::TermRef {
+                    prefix,
+                    target: TermRefTarget::Symbol(evidence),
+                } = self.ty(argument.ty)?
+                else {
+                    return Err(unsupported());
+                };
+                let [params] = method.parameter_clauses.as_slice() else {
+                    return Err(unsupported());
+                };
+                let [formal] = params.as_slice() else {
+                    return Err(unsupported());
+                };
+                let entry = self.symbol(*formal)?;
+                if evidence != formal
+                    || actual.name != entry.name
+                    || actual.backquoted
+                    || *prefix != p.definitions.no_prefix
+                    || entry.kind != SymbolKind::Parameter
+                    || entry.owner != Some(method.symbol)
+                    || !(entry.flags.contains(SymbolFlags::GIVEN)
+                        || entry.flags.contains(SymbolFlags::IMPLICIT))
+                    || self.complete(*formal)? != p.definitions.int
+                {
+                    return Err(unsupported());
+                }
+                None
             }
             (TreeKind::Ident(_), _) => {
                 return Err(PickleError::SourceShape {
