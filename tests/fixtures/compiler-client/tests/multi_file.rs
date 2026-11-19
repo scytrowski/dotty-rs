@@ -20,7 +20,7 @@ use dotty::jvm::{
     GeneratedClass, JvmClassPlan, JvmCompilationUnit, PreparedJvmEmission, emit_class,
 };
 use dotty::jvm_class_plan::{
-    ClassHeaderBindings, ClassPlanError, JvmClassPlanner, TypedClassBodies, TypedClassBody,
+    ClassHeaderBindings, ClassPlanError, JvmClassPlanner, TypedClassBodies,
 };
 use dotty::jvm_method_plan::JvmMethodPlanner;
 use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
@@ -344,23 +344,16 @@ fn type_bodies(
 ) -> (TypedHeaders, TypedClassBodies) {
     let mut typed_classes = TypedClassBodies::default();
     for (unit, class) in named_classes(units) {
-        let mut typer = SourceTyper::new_with_typed_ast(
+        let body = dotty::type_class_body(
+            class,
             &unit.ast,
-            unit.source,
             &unit.index,
             store,
             definitions,
             packages,
-            headers.arena,
-        );
-        for field in class.fields() {
-            typer.type_field_initializer(field.symbol).unwrap();
-        }
-        for method in class.methods() {
-            typer.type_method_definition(method.tree).unwrap();
-        }
-        let (arena, body) = TypedClassBody::from_output(class, typer.into_typed_output());
-        headers.arena = arena;
+            &mut headers.arena,
+        )
+        .unwrap();
         typed_classes.record(body).unwrap();
     }
 

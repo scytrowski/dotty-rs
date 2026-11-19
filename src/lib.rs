@@ -36,6 +36,9 @@ pub use dotty_classloader::classloader;
 /// Semantic unpickling of TASTy into the shared `dotty-core` model.
 pub use dotty_tasty_unpickler::tasty_unpickler;
 
+mod class_body;
+pub use class_body::{ClassBodyError, type_class_body};
+
 /// JVM class plans for simple source classes with methods and private instance fields.
 pub mod jvm_class_plan;
 

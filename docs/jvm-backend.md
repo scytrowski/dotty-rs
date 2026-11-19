@@ -75,11 +75,15 @@ accepts the retained bindings and the session's extended typed arena.
 
 For an ordinary top-level source class, the facade also provides
 `jvm_class_plan::JvmClassPlanner::new(&store, &source_ast, &source_index)`.
-To plan after typing several classes, use one source typer per class. Type
-its field initializers and method definitions, then call
-`TypedClassBody::from_output(class, typer.into_typed_output())`. This moves
-out the session arena and keeps the class symbol, source-to-typed index and
-local bindings together. Pass the arena to the next typer. Keep one
+For each named class, call
+`dotty::type_class_body(class, &ast, &index, &mut store, definitions, &packages, &mut arena)`.
+It checks the class and its members against the named source, types its field
+initializers and methods in declaration order, and returns the completed
+`TypedClassBody`. An inconsistent declaration view yields `InvalidClass` before
+typing starts. For a typing failure, `ClassBodyError::Member` identifies the class
+and declaration and carries the original typer error. Earlier successful members
+can extend the session arena and store. Previously completed classes can still be
+planned and emitted with the same arena. Keep one
 `TypedClassBodies` collection per session and call `bodies.record(body)` as
 each body becomes available. A second body for the same symbol returns
 `DuplicateClassBody` and preserves the first. Visit declarations in the desired

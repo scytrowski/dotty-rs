@@ -2,7 +2,7 @@
 
 use crate::core::{
     AstArena, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex, SymbolFlags,
-    SymbolId, SymbolKind, SymbolOrigin, Tree, TreeId, TreeKind, Untyped,
+    SymbolId, SymbolKind, SymbolOrigin, Template, Tree, TreeId, TreeKind, Untyped,
 };
 use std::fmt;
 
@@ -37,6 +37,40 @@ pub struct SourceClass {
 }
 
 impl SourceClass {
+    /// Checks the caller's body view against the original named template before typing.
+    pub(crate) fn body_source(
+        &self,
+        ast: &AstArena<Untyped>,
+        index: &SourceSemanticIndex,
+        store: &SemanticStore,
+    ) -> Option<SourceId> {
+        let SourceDefinition::Canonical { source, tree } = index.definition_of(self.symbol)? else {
+            return None;
+        };
+        if tree != self.tree || !store.symbols.contains(self.symbol) {
+            return None;
+        }
+        let owner = store.symbols.owner(self.symbol)?;
+        if !store.symbols.contains(owner) || store.symbols.get(owner).kind != SymbolKind::Package {
+            return None;
+        }
+        let reader = Reader {
+            ast,
+            source,
+            index,
+            store,
+        };
+        let (symbol, template) = reader.class_template(tree, owner).ok()?;
+        (symbol == self.symbol
+            && template.body.len() == self.members.len()
+            && template
+                .body
+                .iter()
+                .zip(&self.members)
+                .all(|(&tree, &member)| reader.body_member(tree, symbol) == Ok(member)))
+        .then_some(source)
+    }
+
     /// Initialized body fields in declaration order.
     pub fn fields(&self) -> impl Iterator<Item = Declaration> + '_ {
         self.members.iter().filter_map(|member| match member {
@@ -159,11 +193,11 @@ impl Reader<'_> {
         Ok(Declaration { symbol, tree })
     }
 
-    fn class(
+    fn class_template(
         &self,
         tree: TreeId<Untyped>,
         owner: SymbolId,
-    ) -> Result<SourceClass, DeclarationError> {
+    ) -> Result<(SymbolId, &Template<Untyped>), DeclarationError> {
         let source = self.source;
         let TreeKind::TypeDef(def) = &self.node(tree)?.kind else {
             return Err(DeclarationError::Unsupported { source, tree });
@@ -186,6 +220,16 @@ impl Reader<'_> {
         {
             return Err(DeclarationError::Unsupported { source, tree });
         }
+        Ok((class, template))
+    }
+
+    fn class(
+        &self,
+        tree: TreeId<Untyped>,
+        owner: SymbolId,
+    ) -> Result<SourceClass, DeclarationError> {
+        let source = self.source;
+        let (class, template) = self.class_template(tree, owner)?;
         let ctor_tree = template.constructor;
         let ctor_error = DeclarationError::InvalidBinding {
             source,
@@ -216,27 +260,7 @@ impl Reader<'_> {
         }
         let mut members = Vec::with_capacity(template.body.len());
         for &tree in &template.body {
-            let member = match &self.node(tree)?.kind {
-                TreeKind::ValDef(field) if field.rhs.is_some() => {
-                    let decl = self.declaration(tree, class)?;
-                    if self.store.symbols.get(decl.symbol).kind != SymbolKind::Field {
-                        return Err(DeclarationError::InvalidBinding { source, tree });
-                    }
-                    ClassMember::Field(decl)
-                }
-                TreeKind::DefDef(method) if method.rhs.is_some() => {
-                    let decl = self.declaration(tree, class)?;
-                    match self.store.symbols.get(decl.symbol).kind {
-                        SymbolKind::Method => ClassMember::Method(decl),
-                        SymbolKind::Constructor => {
-                            return Err(DeclarationError::Unsupported { source, tree });
-                        }
-                        _ => return Err(DeclarationError::InvalidBinding { source, tree }),
-                    }
-                }
-                _ => return Err(DeclarationError::Unsupported { source, tree }),
-            };
-            members.push(member);
+            members.push(self.body_member(tree, class)?);
         }
         Ok(SourceClass {
             symbol: class,
@@ -245,6 +269,34 @@ impl Reader<'_> {
             constructor_fields,
             parents: template.parents.clone(),
             members,
+        })
+    }
+
+    fn body_member(
+        &self,
+        tree: TreeId<Untyped>,
+        class: SymbolId,
+    ) -> Result<ClassMember, DeclarationError> {
+        let source = self.source;
+        Ok(match &self.node(tree)?.kind {
+            TreeKind::ValDef(field) if field.rhs.is_some() => {
+                let decl = self.declaration(tree, class)?;
+                if self.store.symbols.get(decl.symbol).kind != SymbolKind::Field {
+                    return Err(DeclarationError::InvalidBinding { source, tree });
+                }
+                ClassMember::Field(decl)
+            }
+            TreeKind::DefDef(method) if method.rhs.is_some() => {
+                let decl = self.declaration(tree, class)?;
+                match self.store.symbols.get(decl.symbol).kind {
+                    SymbolKind::Method => ClassMember::Method(decl),
+                    SymbolKind::Constructor => {
+                        return Err(DeclarationError::Unsupported { source, tree });
+                    }
+                    _ => return Err(DeclarationError::InvalidBinding { source, tree }),
+                }
+            }
+            _ => return Err(DeclarationError::Unsupported { source, tree }),
         })
     }
 }

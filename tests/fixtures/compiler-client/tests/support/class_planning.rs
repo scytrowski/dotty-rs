@@ -18,18 +18,14 @@ fn named(text: &str) -> (SemanticStore, Definitions, Packages, NamedUnit) {
     (store, defs, packages, units.pop().unwrap())
 }
 
-fn body_units() -> (SemanticStore, Definitions, Packages, Vec<NamedUnit>) {
+fn body_units(b_source: &str) -> (SemanticStore, Definitions, Packages, Vec<NamedUnit>) {
     let files = [
         (
             SourceId::from_index(0),
             "A.scala",
-            "package demo\nclass A { def value(): Int = 40 }",
+            "package demo\nclass A { private val seed: Int = 40; def value(): Int = { val n = seed; n } }",
         ),
-        (
-            SourceId::from_index(1),
-            "B.scala",
-            "package demo\nclass B { def value(): Int = 7 }",
-        ),
+        (SourceId::from_index(1), "B.scala", b_source),
     ];
     let mut store = SemanticStore::new();
     let defs = Definitions::bootstrap(&mut store);
@@ -43,9 +39,12 @@ fn body_units() -> (SemanticStore, Definitions, Packages, Vec<NamedUnit>) {
     (store, defs, packages, units)
 }
 
+const VALID_B: &str =
+    "package demo\nclass B { private val seed: Int = 7; def value(): Int = { val n = seed; n } }";
+
 #[test]
 fn bodies_recorded_b_then_a_plan_and_execute_a_then_b() {
-    let (mut store, defs, packages, mut units) = body_units();
+    let (mut store, defs, packages, mut units) = body_units(VALID_B);
     let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
     units.reverse();
     let (output, bodies) = type_bodies(&units, &mut store, defs, &packages, headers);
@@ -73,8 +72,97 @@ fn bodies_recorded_b_then_a_plan_and_execute_a_then_b() {
 }
 
 #[test]
+fn method_error_keeps_a_executable_and_b_unpublished() {
+    let (mut store, defs, packages, units) =
+        body_units("package demo\nclass B { private val seed: Int = 7; def value(): Int = true }");
+    let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
+    let (mut output, mut bodies) = type_bodies(&units[..1], &mut store, defs, &packages, headers);
+    let unit = &units[1];
+    let b = &unit.classes[0];
+    let method = b.methods().next().unwrap();
+    let TreeKind::DefDef(def) = &unit.ast.get(method.tree).kind else {
+        panic!("expected B.value")
+    };
+    let rhs = def.rhs.unwrap();
+    let error = dotty::type_class_body(
+        b,
+        &unit.ast,
+        &unit.index,
+        &mut store,
+        defs,
+        &packages,
+        &mut output.arena,
+    )
+    .map(|body| bodies.record(body).unwrap())
+    .unwrap_err();
+    let dotty::ClassBodyError::Member {
+        class,
+        member,
+        error:
+            dotty::typer::TyperError::ExpectedExpressionTypeMismatch {
+                source,
+                tree_index,
+                actual,
+                expected,
+            },
+    } = error
+    else {
+        panic!("unexpected error for B.value: {error:?}")
+    };
+    assert_eq!(class, b.symbol);
+    assert_eq!(
+        member,
+        dotty::source_declarations::ClassMember::Method(method)
+    );
+    assert_eq!((source, tree_index), (unit.source, rhs.index()));
+    assert_eq!((actual, expected), (defs.boolean, defs.int));
+    assert_eq!(
+        bodies.get(b.symbol).unwrap_err(),
+        ClassPlanError::MissingClassBody(b.symbol)
+    );
+
+    let classes = class_plans(&units[..1], &bodies, &output, &store).unwrap();
+    let plan = dotty::jvm::JvmCompilationUnit {
+        store: &store,
+        typed_ast: &output.arena,
+        classes,
+    };
+    let artifact = plan
+        .prepare_emission(&defs)
+        .unwrap()
+        .emit_class(units[0].classes[0].symbol)
+        .unwrap();
+    assert_eq!(
+        super::run_java_client("surviving-body", "SurvivingClassClient", &[artifact]).trim(),
+        "40"
+    );
+}
+
+#[test]
+fn type_class_body_rejects_substituted_member_before_typing() {
+    let (mut store, defs, packages, mut unit) =
+        named("class A { def value(): Int = 40 }; class B { def value(): Int = 7 }");
+    unit.classes[0].members[0] = unit.classes[1].members[0];
+    let a = &unit.classes[0];
+    let mut arena = dotty::core::AstArena::new();
+    let before = arena.checkpoint();
+    let error = dotty::type_class_body(
+        a,
+        &unit.ast,
+        &unit.index,
+        &mut store,
+        defs,
+        &packages,
+        &mut arena,
+    )
+    .unwrap_err();
+    assert!(matches!(error, dotty::ClassBodyError::InvalidClass(class) if class == a.symbol));
+    assert_eq!(arena.checkpoint(), before);
+}
+
+#[test]
 fn planning_requires_b_and_recording_a_twice_preserves_the_first_body() {
-    let (mut store, defs, packages, units) = body_units();
+    let (mut store, defs, packages, units) = body_units(VALID_B);
     let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
     let (mut output, mut bodies) = type_bodies(&units[..1], &mut store, defs, &packages, headers);
     let unit = &units[0];
