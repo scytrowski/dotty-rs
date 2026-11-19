@@ -174,32 +174,22 @@ fn complete_headers(
         active.insert(root.symbol, 0);
         while let Some(&symbol) = path.last() {
             let unit = owners[&symbol];
-            let mut typer = SourceTyper::new_with_typed_ast(
+            let completion = dotty::try_complete_class_header(
+                symbol,
                 &unit.ast,
-                unit.source,
                 &unit.index,
                 store,
                 definitions,
                 packages,
-                headers.arena,
-            );
-            let completion =
-                typer.try_complete_signature(symbol, |dep| owners.contains_key(&dep))?;
+                &mut headers.arena,
+                &mut headers.bindings,
+                |dep| owners.contains_key(&dep),
+            )?;
             observe(symbol, completion);
-            let (arena, index) = typer.into_typed_ast_and_index();
-            headers.arena = arena;
             match completion {
                 SignatureCompletion::Complete(_) => {
                     path.pop();
                     active.remove(&symbol);
-                    headers.bindings.record(index).map_err(|error| {
-                        TyperError::ConflictingTypedExpression {
-                            source: error.source,
-                            tree_index: error.untyped.index(),
-                            existing: error.existing.index(),
-                            attempted: error.attempted.index(),
-                        }
-                    })?;
                 }
                 SignatureCompletion::BlockedOn(parent) => {
                     if let Some(&start) = active.get(&parent) {

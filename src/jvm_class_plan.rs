@@ -22,7 +22,7 @@ use crate::typer::{TypedLocalBinding, TypedSourceOutput};
 /// Source-to-typed bindings from successful class-header completions in one session.
 #[derive(Debug, Default)]
 pub struct ClassHeaderBindings {
-    index: SourceTypedIndex,
+    pub(crate) index: SourceTypedIndex,
 }
 
 impl ClassHeaderBindings {

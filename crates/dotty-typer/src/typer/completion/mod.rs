@@ -33,7 +33,38 @@ impl SourceTyper<'_> {
         symbol: SymbolId,
         in_batch: impl FnOnce(SymbolId) -> bool,
     ) -> Result<SignatureCompletion, TyperError> {
-        let error = match self.complete_symbol(symbol) {
+        self.try_complete_signature_with(symbol, in_batch, |_| Ok(()))
+    }
+
+    /// Finishes this driver by atomically merging its source-to-typed mappings
+    /// into a same-session index on completion. A conflicting mapping rolls
+    /// back the completion. The arena is returned for every outcome.
+    pub fn try_complete_signature_into(
+        mut self,
+        symbol: SymbolId,
+        in_batch: impl FnOnce(SymbolId) -> bool,
+        bindings: &mut SourceTypedIndex,
+    ) -> (AstArena<Typed>, Result<SignatureCompletion, TyperError>) {
+        let result = self.try_complete_signature_with(symbol, in_batch, |index| {
+            bindings.merge(std::mem::take(index)).map_err(|e| {
+                TyperError::ConflictingTypedExpression {
+                    source: e.source,
+                    tree_index: e.untyped.index(),
+                    existing: e.existing.index(),
+                    attempted: e.attempted.index(),
+                }
+            })
+        });
+        (self.into_typed_ast(), result)
+    }
+
+    fn try_complete_signature_with(
+        &mut self,
+        symbol: SymbolId,
+        in_batch: impl FnOnce(SymbolId) -> bool,
+        publish: impl FnOnce(&mut SourceTypedIndex) -> Result<(), TyperError>,
+    ) -> Result<SignatureCompletion, TyperError> {
+        let error = match self.complete_symbol_with(symbol, publish) {
             Ok(ty) => return Ok(SignatureCompletion::Complete(ty)),
             Err(error) => error,
         };
@@ -67,11 +98,19 @@ impl SourceTyper<'_> {
     /// no real class parent is present. Scala 3.9 TASTy also records `Object`
     /// as the parent of a trait with no explicit parent.
     pub fn complete_symbol(&mut self, symbol: SymbolId) -> Result<TypeId, TyperError> {
+        self.complete_symbol_with(symbol, |_| Ok(()))
+    }
+
+    fn complete_symbol_with(
+        &mut self,
+        symbol: SymbolId,
+        publish: impl FnOnce(&mut SourceTypedIndex) -> Result<(), TyperError>,
+    ) -> Result<TypeId, TyperError> {
         self.run_atomic(|typer, info_journal| {
             if !typer.store.symbols.contains(symbol) {
                 return Err(TyperError::UnknownSymbol { symbol });
             }
-            match *typer.store.symbols.info(symbol) {
+            let ty = match *typer.store.symbols.info(symbol) {
                 SymbolInfo::Complete(ty) => {
                     if matches!(
                         typer.store.symbols.get(symbol).kind,
@@ -86,15 +125,16 @@ impl SourceTyper<'_> {
                             info_journal,
                         )?;
                     }
-                    return Ok(ty);
+                    ty
                 }
-                SymbolInfo::Missing => {}
+                SymbolInfo::Missing => typer.complete_symbol_inner(symbol, info_journal)?,
                 SymbolInfo::Deferred(_) => {
                     return Err(TyperError::DeferredSymbolCompletion { symbol });
                 }
                 SymbolInfo::Error => return Err(TyperError::SymbolAlreadyErrored { symbol }),
-            }
-            typer.complete_symbol_inner(symbol, info_journal)
+            };
+            publish(&mut typer.typed_index)?;
+            Ok(ty)
         })
     }
 

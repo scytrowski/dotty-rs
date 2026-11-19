@@ -47,27 +47,17 @@ impl SourceClass {
         let SourceDefinition::Canonical { source, tree } = index.definition_of(self.symbol)? else {
             return None;
         };
-        if tree != self.tree || !store.symbols.contains(self.symbol) {
+        if tree != self.tree {
             return None;
         }
-        let owner = store.symbols.owner(self.symbol)?;
-        if !store.symbols.contains(owner) || store.symbols.get(owner).kind != SymbolKind::Package {
-            return None;
-        }
-        let reader = Reader {
-            ast,
-            source,
-            index,
-            store,
-        };
-        let (symbol, template) = reader.class_template(tree, owner).ok()?;
-        (symbol == self.symbol
-            && template.body.len() == self.members.len()
+        let (reader, template) =
+            named_class_template(self.symbol, tree, ast, source, index, store)?;
+        (template.body.len() == self.members.len()
             && template
                 .body
                 .iter()
                 .zip(&self.members)
-                .all(|(&tree, &member)| reader.body_member(tree, symbol) == Ok(member)))
+                .all(|(&tree, &member)| reader.body_member(tree, self.symbol) == Ok(member)))
         .then_some(source)
     }
 
@@ -164,15 +154,40 @@ pub(crate) fn canonical_symbol(
     (symbol.owner == Some(owner) && symbol.origin == SymbolOrigin::Source(source)).then_some(id)
 }
 
-struct Reader<'a> {
+pub(crate) fn named_class_template<'a>(
+    class: SymbolId,
+    tree: TreeId<Untyped>,
+    ast: &'a AstArena<Untyped>,
+    source: SourceId,
+    index: &'a SourceSemanticIndex,
+    store: &'a SemanticStore,
+) -> Option<(Reader<'a>, &'a Template<Untyped>)> {
+    if !store.symbols.contains(class) {
+        return None;
+    }
+    let owner = store.symbols.owner(class)?;
+    if !store.symbols.contains(owner) || store.symbols.get(owner).kind != SymbolKind::Package {
+        return None;
+    }
+    let reader = Reader {
+        ast,
+        source,
+        index,
+        store,
+    };
+    let (symbol, template) = reader.class_template(tree, owner).ok()?;
+    (symbol == class).then_some((reader, template))
+}
+
+pub(crate) struct Reader<'a> {
     ast: &'a AstArena<Untyped>,
     source: SourceId,
     index: &'a SourceSemanticIndex,
     store: &'a SemanticStore,
 }
 
-impl Reader<'_> {
-    fn node(&self, tree: TreeId<Untyped>) -> Result<&Tree<Untyped>, DeclarationError> {
+impl<'a> Reader<'a> {
+    fn node(&self, tree: TreeId<Untyped>) -> Result<&'a Tree<Untyped>, DeclarationError> {
         self.ast
             .try_get(tree)
             .filter(|node| node.position.is_none_or(|p| p.source() == self.source))
@@ -197,7 +212,7 @@ impl Reader<'_> {
         &self,
         tree: TreeId<Untyped>,
         owner: SymbolId,
-    ) -> Result<(SymbolId, &Template<Untyped>), DeclarationError> {
+    ) -> Result<(SymbolId, &'a Template<Untyped>), DeclarationError> {
         let source = self.source;
         let TreeKind::TypeDef(def) = &self.node(tree)?.kind else {
             return Err(DeclarationError::Unsupported { source, tree });

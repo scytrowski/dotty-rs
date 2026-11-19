@@ -1108,6 +1108,136 @@ fn wrong_parent_argument_reports_the_same_error_in_both_file_orders() {
 }
 
 #[test]
+fn header_attempt_checks_class_identity_even_for_completed_symbols() {
+    let (mut store, defs, packages, units) = body_units(VALID_B);
+    let mut headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
+    let a = &units[0];
+    let b = &units[1];
+    let class = &a.classes[0];
+    let before = headers.arena.checkpoint();
+    let mut attempt = |symbol, ast| {
+        dotty::try_complete_class_header(
+            symbol,
+            ast,
+            &a.index,
+            &mut store,
+            defs,
+            &packages,
+            &mut headers.arena,
+            &mut headers.bindings,
+            |_| false,
+        )
+    };
+    let error = attempt(class.symbol, &b.ast).unwrap_err();
+    assert!(
+        matches!(error, dotty::typer::TyperError::MalformedSourceAst { source, tree_index, symbol, .. }
+        if source == a.source && tree_index == class.tree.index() && symbol == class.symbol)
+    );
+    let method = class.methods().next().unwrap();
+    let error = attempt(method.symbol, &a.ast).unwrap_err();
+    assert!(
+        matches!(error, dotty::typer::TyperError::SymbolSourceKindMismatch { symbol, kind: dotty::core::SymbolKind::Method, .. } if symbol == method.symbol)
+    );
+    assert_eq!(headers.arena.checkpoint(), before);
+}
+
+#[test]
+fn failed_header_preserves_good_parent_call_for_execution() {
+    let files = [
+        (
+            SourceId::from_index(0),
+            "Base.scala",
+            "package demo\nclass Base(val value: Int)",
+        ),
+        (
+            SourceId::from_index(1),
+            "Good.scala",
+            "package demo\nclass Good(start: Int) extends Base(start)",
+        ),
+        (
+            SourceId::from_index(2),
+            "Bad.scala",
+            "package demo\nclass Bad(start: Boolean) extends Base(start)",
+        ),
+    ];
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let units = name_units(
+        &files,
+        parsing::parse_files(&files, 2),
+        &mut store,
+        &mut packages,
+    );
+    let mut headers = complete_signatures(&units[..2], &mut store, defs, &packages).unwrap();
+    let good = &units[1];
+    let good_parent = good.classes[0].parents[0];
+    let good_root = headers.bindings.get(good.source, good_parent).unwrap();
+    let bad = &units[2];
+    let class = &bad.classes[0];
+    bad.typer(&mut store, defs, &packages)
+        .complete_symbol(class.constructor)
+        .unwrap();
+    let parent = class.parents[0];
+    let TreeKind::Apply(call) = &bad.ast.get(parent).kind else {
+        panic!("expected Base(start)")
+    };
+    let argument = call.args[0];
+    let before = headers.arena.checkpoint();
+    let error = dotty::try_complete_class_header(
+        class.symbol,
+        &bad.ast,
+        &bad.index,
+        &mut store,
+        defs,
+        &packages,
+        &mut headers.arena,
+        &mut headers.bindings,
+        |_| true,
+    )
+    .unwrap_err();
+    let dotty::typer::TyperError::ApplicationArgumentTypeMismatch {
+        source,
+        tree_index,
+        argument_index,
+        actual,
+        expected,
+    } = error
+    else {
+        panic!("unexpected error for Bad: {error:?}")
+    };
+    assert_eq!(source, bad.source);
+    assert_eq!(tree_index, parent.index());
+    assert_eq!(argument_index, 0);
+    assert_eq!((actual, expected), (defs.boolean, defs.int));
+    assert_eq!(
+        store.symbols.info(class.symbol),
+        &dotty::core::SymbolInfo::Missing
+    );
+    assert_eq!(headers.arena.checkpoint(), before);
+    assert_eq!(headers.bindings.get(bad.source, parent), None);
+    assert_eq!(headers.bindings.get(bad.source, argument), None);
+    assert_eq!(
+        headers.bindings.get(good.source, good_parent),
+        Some(good_root)
+    );
+
+    let (output, bodies) = type_bodies(&units[..2], &mut store, defs, &packages, headers);
+    let classes = class_plans(&units[..2], &bodies, &output, &store).unwrap();
+    let plan = dotty::jvm::JvmCompilationUnit {
+        store: &store,
+        typed_ast: &output.arena,
+        classes,
+    };
+    let prepared = plan.prepare_emission(&defs).unwrap();
+    let (artifacts, _) = super::emit_batch(&prepared, &plan.classes, 2);
+    assert_eq!(
+        super::run_java_client("surviving-header", "GoodHeaderClient", &artifacts).trim(),
+        "40"
+    );
+}
+
+#[test]
 fn forwarded_parent_rejects_an_int_argument_from_another_parent_call() {
     let (mut store, defs, packages, unit) = named(
         "class Base(seed: Int)

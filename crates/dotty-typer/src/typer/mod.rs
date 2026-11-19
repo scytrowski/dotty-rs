@@ -1754,6 +1754,66 @@ mod tests {
     }
 
     #[test]
+    fn conflicting_header_binding_rolls_back_and_can_be_retried() {
+        let (parsed, mut store, packages, defs, index, source) =
+            parse_and_name("class Base(x: Int); class Child(x: Int) extends Base(x)");
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let base = class_symbol(&parsed, &store, &index, source, "Base");
+        let call = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::Template(template) => template.parents.first().copied(),
+                _ => None,
+            })
+            .unwrap();
+        let mut arena = AstArena::new();
+        let prior = TypedAstBuilder::new(&mut arena, &store.types).literal(
+            dotty_core::Constant::Int(9),
+            defs.int,
+            None,
+        );
+        let mut bindings = SourceTypedIndex::new();
+        bindings.insert(source, call, prior).unwrap();
+        let before = (arena.checkpoint(), store.checkpoint());
+        let typer = SourceTyper::new_with_typed_ast(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            defs,
+            &packages,
+            arena,
+        );
+        let (arena, result) = typer.try_complete_signature_into(child, |_| false, &mut bindings);
+        assert!(
+            matches!(result, Err(TyperError::ConflictingTypedExpression { source: site, tree_index, existing, .. })
+            if site == source && tree_index == call.index() && existing == prior.index())
+        );
+        assert_eq!((arena.checkpoint(), store.checkpoint()), before);
+        for symbol in [base, child] {
+            assert_eq!(store.symbols.info(symbol), &SymbolInfo::Missing);
+        }
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings.remove(source, call), Some(prior));
+        let typer = SourceTyper::new_with_typed_ast(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            defs,
+            &packages,
+            arena,
+        );
+        let (arena, result) = typer.try_complete_signature_into(child, |_| false, &mut bindings);
+        assert!(matches!(result, Ok(SignatureCompletion::Complete(_))));
+        assert!(matches!(
+            arena.get(bindings.get(source, call).unwrap()).kind,
+            TreeKind::Apply(_)
+        ));
+    }
+
+    #[test]
     fn appending_a_source_to_the_typed_arena_preserves_prior_roots_on_rollback() {
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);

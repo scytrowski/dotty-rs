@@ -1953,9 +1953,9 @@ root and its source attribution.
 ### Class headers and inferred method results across source files
 
 The standalone compiler client names the sources and completes their constructor
-signatures. It then uses `SourceTyper::try_complete_signature(symbol, in_batch)`
-for class headers and subsequently for method signatures. Each phase supplies
-a membership predicate for the declarations it can schedule.
+signatures. It uses `dotty::try_complete_class_header` for class headers and
+`SourceTyper::try_complete_signature(symbol, in_batch)` for method signatures.
+Each phase supplies a membership predicate for the declarations it can schedule.
 
 - `Ok(SignatureCompletion::Complete(ty))` gives the canonical signature.
 - `Ok(SignatureCompletion::BlockedOn(dependency))` identifies a missing method
@@ -1969,8 +1969,10 @@ a membership predicate for the declarations it can schedule.
 For `class Derived(start: Int) extends Base(start)`, the client can receive
 `BlockedOn` with the symbol of `Base` even when its constructor signature is
 already complete. After completing the base header, retrying the derived
-header records the typed parent application and its argument in the derived
-source's typed index. A type mismatch in the argument remains a typing error.
+header records the typed parent application and its argument in the
+session's header bindings under the derived source ID. A type mismatch in the
+argument remains a typing error. Earlier applications and their typed arena
+remain available for planning.
 
 For `A.f(b: B) = b.g()`, the external client observes the symbol of `B.g`,
 completes it and retries `A.f`. A call to the same zero-argument method with

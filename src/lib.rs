@@ -36,6 +36,9 @@ pub use dotty_classloader::classloader;
 /// Semantic unpickling of TASTy into the shared `dotty-core` model.
 pub use dotty_tasty_unpickler::tasty_unpickler;
 
+mod class_header;
+pub use class_header::try_complete_class_header;
+
 mod class_body;
 pub use class_body::{ClassBodyError, type_class_body};
 

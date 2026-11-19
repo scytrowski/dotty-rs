@@ -133,13 +133,15 @@ same JVM unit. Unit validation checks the direct parent and its public
 no-argument constructor before emission.
 
 For `class Derived(start: Int) extends Base(start)`, keep one
-`jvm_class_plan::ClassHeaderBindings` per session. After each successful class
-header completion, call `record(index)` with the index from
-`typer.into_typed_ast_and_index()` and pass the returned arena to the next
-typer. One attempt can also complete a parent in the same file. Recording
-once retains both applications, keyed by source and tree. A conflicting
-mapping returns `ConflictingTypedTree` and leaves the collection unchanged.
-The client schedules retries after `BlockedOn`.
+`jvm_class_plan::ClassHeaderBindings` per session. Use `dotty::try_complete_class_header` for each
+attempt, passing the class symbol, its source AST and naming index, the store,
+definitions and packages, the mutable session arena and bindings, and a predicate
+that identifies dependencies the client can schedule. On `Complete`, the function
+records all mappings produced by the attempt, including applications from
+parents completed recursively in the same source. On `BlockedOn`, the client
+schedules the dependency in its own source and retries. A typing error or a
+conflicting mapping rolls back the attempt. Previously completed headers can
+still be planned with the same arena and bindings.
 Configure each planner with `with_header_bindings(&typed_ast, &bindings)`
 using the final session arena. The planner finds the parent application and
 checks its single argument against the mapped reference to the child's own
