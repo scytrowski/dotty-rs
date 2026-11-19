@@ -1944,15 +1944,24 @@ root and its source attribution.
 
 ### Inferred results across source files
 
-The standalone compiler client names both sources and completes their class
-headers before requesting method signatures. For an ordinary source method,
-`MemberTypeUnavailable { symbol }` can identify a dependency: the client
-checks that the symbol belongs to a named method in this batch and its
-canonical info is still `Missing`. It completes that method in the owning
-source and retries the original request. Other errors propagate. An active
-stack of method symbols detects cross-file cycles. Each failed
-`complete_symbol` attempt rolls back before the client visits a dependency.
+The standalone compiler client names the sources and completes their class
+headers before requesting method signatures. It calls
+`SourceTyper::try_complete_signature(symbol, in_batch)` with a membership
+predicate for methods that it can schedule in the current session.
 
-The fixture infers both `A.get()` and `B.read(a: A) = a.get()`, emits identical
-classes in either input order and runs the call on JDK 21. The cycle fixture
-checks the reentered symbol and the absence of partial method signatures.
+- `Ok(SignatureCompletion::Complete(ty))` gives the canonical signature.
+- `Ok(SignatureCompletion::BlockedOn(dependency))` identifies a missing
+  source method in a different file of the batch. The attempt has rolled
+  back. The client can complete the dependency in its owning source and
+  retry the original request.
+- `Err(TyperError)` preserves the underlying failure, including an unavailable
+  member outside the batch. The existing `complete_symbol` API continues to
+  report unavailable members as errors.
+
+For `A.f(b: B) = b.g()`, the external client observes the symbol of `B.g`,
+completes it and retries `A.f`. A call to the same zero-argument method with
+one argument produces `ApplicationArityMismatch` at the call site after the
+dependency completes. The client detects cross-file cycles on its active
+stack and reports the reentered method. Both methods in the two-file cycle
+remain incomplete. The JVM client fixture also compares class bytes for both
+input orders and executes the inferred call on JDK 21.

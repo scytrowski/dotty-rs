@@ -20,7 +20,9 @@ use dotty::jvm::{
 };
 use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty::parser::{DetachedParse, ParseResult};
-use dotty::typer::{SourceTypedIndex, SourceTyper, TypedLocalBinding, TyperError};
+use dotty::typer::{
+    SignatureCompletion, SourceTypedIndex, SourceTyper, TypedLocalBinding, TyperError,
+};
 
 struct NamedUnit {
     source: SourceId,
@@ -142,7 +144,7 @@ fn complete_signatures_in_order<'a>(
     store: &mut SemanticStore,
     definitions: Definitions,
     packages: &Packages,
-    observe: impl FnMut(SymbolId, Option<&TyperError>),
+    observe: impl FnMut(SymbolId, SignatureCompletion),
 ) -> Result<(), TyperError> {
     complete_methods_in_order(
         units,
@@ -160,15 +162,14 @@ fn complete_methods_in_order(
     store: &mut SemanticStore,
     definitions: Definitions,
     packages: &Packages,
-    mut observe: impl FnMut(SymbolId, Option<&TyperError>),
+    mut observe: impl FnMut(SymbolId, SignatureCompletion),
 ) -> Result<(), TyperError> {
     let mut owners = HashMap::new();
     for unit in units {
         let header = unit
             .typer(store, definitions, packages)
-            .complete_symbol(unit.class);
-        observe(unit.class, header.as_ref().err());
-        header?;
+            .complete_symbol(unit.class)?;
+        observe(unit.class, SignatureCompletion::Complete(header));
         owners.extend(unit.method_symbols().map(|method| (method, unit)));
     }
 
@@ -182,17 +183,14 @@ fn complete_methods_in_order(
             let unit = owners[&symbol];
             let completion = unit
                 .typer(store, definitions, packages)
-                .complete_symbol(symbol);
-            observe(symbol, completion.as_ref().err());
+                .try_complete_signature(symbol, |dependency| owners.contains_key(&dependency))?;
+            observe(symbol, completion);
             match completion {
-                Ok(_) => {
+                SignatureCompletion::Complete(_) => {
                     pending.pop();
                     active.remove(&symbol);
                 }
-                Err(TyperError::MemberTypeUnavailable { symbol: dependency })
-                    if owners.contains_key(&dependency)
-                        && matches!(store.symbols.info(dependency), SymbolInfo::Missing) =>
-                {
+                SignatureCompletion::BlockedOn(dependency) => {
                     if !active.insert(dependency) {
                         return Err(TyperError::RecursiveInferredMethodResult {
                             symbol: dependency,
@@ -200,7 +198,6 @@ fn complete_methods_in_order(
                     }
                     pending.push(dependency);
                 }
-                Err(error) => return Err(error),
             }
         }
     }
@@ -480,6 +477,105 @@ fn measure_jvm_batch() {
             }
         });
     }
+}
+
+fn signature_pair(
+    caller: &str,
+    store: &mut SemanticStore,
+    packages: &mut Packages,
+) -> Vec<NamedUnit> {
+    let files = [
+        (SourceId::from_index(7), "A.scala", caller),
+        (
+            SourceId::from_index(2),
+            "B.scala",
+            "class B { def g() = 7 }",
+        ),
+    ];
+    name_units(&files, parsing::parse_files(&files, 2), store, packages)
+}
+
+#[test]
+fn cross_file_signature_completes_the_dependency_then_retries_the_original_method() {
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let units = signature_pair("class A { def f(b: B) = b.g() }", &mut store, &mut packages);
+    let f = units[0].method_symbol();
+    let g = units[1].method_symbol();
+    let mut attempts = Vec::new();
+    complete_methods_in_order(
+        &units,
+        [f],
+        &mut store,
+        defs,
+        &packages,
+        |method, outcome| {
+            if method == f || method == g {
+                attempts.push((method, outcome));
+            }
+        },
+    )
+    .unwrap();
+    let signature = |method| {
+        let SymbolInfo::Complete(ty) = *store.symbols.info(method) else {
+            panic!("missing signature")
+        };
+        let dotty::core::Type::Method(info) = store.types.get(ty) else {
+            panic!("expected method")
+        };
+        assert_eq!(info.result, defs.int);
+        SignatureCompletion::Complete(ty)
+    };
+    assert_eq!(
+        attempts,
+        [
+            (f, SignatureCompletion::BlockedOn(g)),
+            (g, signature(g)),
+            (f, signature(f))
+        ]
+    );
+}
+
+#[test]
+fn cross_file_bad_call_reports_arity_at_the_call_after_dependency_completion() {
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let units = signature_pair(
+        "class A { def f(b: B) = b.g(1) }",
+        &mut store,
+        &mut packages,
+    );
+    let caller = &units[0];
+    let f = caller.method_symbol();
+    let g = units[1].method_symbol();
+    let TreeKind::DefDef(definition) = &caller.ast.get(caller.methods[0]).kind else {
+        panic!("expected method")
+    };
+    let call = definition.rhs.unwrap();
+    let mut dependencies = Vec::new();
+    let err = complete_methods_in_order(
+        &units,
+        [f],
+        &mut store,
+        defs,
+        &packages,
+        |method, outcome| {
+            if let SignatureCompletion::BlockedOn(dependency) = outcome {
+                dependencies.push((method, dependency));
+            }
+        },
+    )
+    .unwrap_err();
+    assert_eq!(dependencies, [(f, g)]);
+    assert!(
+        matches!(err, TyperError::ApplicationArityMismatch { source, tree_index, expected: 0, actual: 1 }
+        if source == caller.source && tree_index == call.index()),
+        "{err:?}"
+    );
+    assert!(matches!(store.symbols.info(f), SymbolInfo::Missing));
+    assert!(matches!(store.symbols.info(g), SymbolInfo::Complete(_)));
 }
 
 #[test]

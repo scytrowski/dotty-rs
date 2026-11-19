@@ -1,7 +1,7 @@
 //! Scheduling experiments in the external client, using one source method per file.
 use std::collections::{HashMap, HashSet};
 
-use super::super::{NamedUnit, TyperError, complete_signatures_in_order};
+use super::super::{NamedUnit, SignatureCompletion, complete_signatures_in_order};
 use super::{
     Layout, Timings, compile_timed, compile_with_signatures, dependent_sources, inputs, name_units,
     parsing,
@@ -67,9 +67,12 @@ fn ready_widths(
         for unit in units.iter().skip(level).step_by(4) {
             let method = unit.method_symbol();
             visited.insert(method);
-            match unit.typer(store, defs, packages).complete_symbol(method) {
-                Ok(_) => assert_eq!(level, 3),
-                Err(TyperError::MemberTypeUnavailable { symbol }) => {
+            match unit
+                .typer(store, defs, packages)
+                .try_complete_signature(method, |symbol| remaining.contains(&symbol))
+            {
+                Ok(SignatureCompletion::Complete(_)) => assert_eq!(level, 3),
+                Ok(SignatureCompletion::BlockedOn(symbol)) => {
                     assert!(level < 3 && remaining.contains(&symbol) && !visited.contains(&symbol));
                     edges.insert(method, symbol);
                 }
@@ -130,14 +133,14 @@ fn check_counts(groups: usize, layout: Layout) {
             &mut store,
             defs,
             &packages,
-            |symbol, error| {
+            |symbol, outcome| {
                 calls += 1;
                 if !seen.insert(symbol) {
                     retries += 1;
                 }
-                if let Some(TyperError::MemberTypeUnavailable { symbol }) = error {
+                if let SignatureCompletion::BlockedOn(symbol) = outcome {
                     blocked += 1;
-                    targets.insert(*symbol);
+                    targets.insert(symbol);
                 }
             },
         )

@@ -1,5 +1,5 @@
 //! Replay the previous session's completion order as a file scheduling hint.
-use super::super::{NamedUnit, TyperError, complete_signatures_in_order};
+use super::super::{NamedUnit, SignatureCompletion, TyperError, complete_signatures_in_order};
 use super::{
     Layout, Timings, compile_timed, compile_with_signatures, dependent_sources, inputs, name_units,
     parsing,
@@ -37,16 +37,15 @@ impl LearnedOrder {
             .collect();
         let mut next = Vec::with_capacity(units.len());
         let mut seen = HashSet::with_capacity(units.len());
-        let observe = |symbol, error: Option<&TyperError>| match error {
-            Some(TyperError::MemberTypeUnavailable { .. }) => on_blocked(),
-            None => {
+        let observe = |symbol, outcome| match outcome {
+            SignatureCompletion::BlockedOn(_) => on_blocked(),
+            SignatureCompletion::Complete(_) => {
                 if let Some(&path) = by_method.get(&symbol)
                     && seen.insert(path)
                 {
                     next.push(path.to_owned());
                 }
             }
-            _ => {}
         };
 
         if self.0.is_empty() {

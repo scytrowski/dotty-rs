@@ -23,6 +23,7 @@ use crate::{SourceTypeIndex, SourceTypedIndex};
 mod application;
 pub use application::ConstructorCandidate;
 mod completion;
+pub use completion::SignatureCompletion;
 mod context;
 mod error;
 mod expression;
@@ -1519,6 +1520,84 @@ mod tests {
         )
         .unwrap();
         (parsed, index)
+    }
+
+    #[test]
+    fn signature_attempt_exposes_only_a_missing_foreign_method_in_the_callers_batch() {
+        let (caller, mut store, mut packages, defs, caller_index, caller_source) =
+            parse_and_name("class Caller { def read(p: Provider) = p.value() }");
+        let provider_source = SourceId::from_index(12);
+        let (provider, provider_index) = parse_and_name_unit(
+            "class Provider { def value() = 7 }",
+            provider_source,
+            &mut store,
+            &mut packages,
+        );
+        let (read, rhs) =
+            method_definition_and_rhs(&caller, &store, &caller_index, caller_source, "read");
+        let value = method_symbol(&provider, &store, &provider_index, provider_source, "value");
+        for (source, parsed, index, method) in [
+            (caller_source, &caller, &caller_index, read),
+            (provider_source, &provider, &provider_index, value),
+        ] {
+            let owner = store.symbols.owner(method).unwrap();
+            SourceTyper::new(&parsed.ast, source, index, &mut store, defs, &packages)
+                .complete_symbol(owner)
+                .unwrap();
+        }
+        let checkpoint = store.checkpoint();
+        {
+            let mut typer = SourceTyper::new(
+                &caller.ast,
+                caller_source,
+                &caller_index,
+                &mut store,
+                defs,
+                &packages,
+            );
+            let ast = typer.typed_ast().checkpoint();
+            assert!(
+                matches!(typer.try_complete_signature(read, |_| false), Err(TyperError::MemberTypeUnavailable { symbol }) if symbol == value)
+            );
+            assert_eq!(
+                typer
+                    .try_complete_signature(read, |candidate| candidate == value)
+                    .unwrap(),
+                SignatureCompletion::BlockedOn(value)
+            );
+            assert_eq!(typer.store().checkpoint(), checkpoint);
+            assert_eq!(typer.typed_ast().checkpoint(), ast);
+            assert_eq!(typer.source_typed_index().get(caller_source, rhs), None);
+            for method in [read, value] {
+                assert!(matches!(
+                    typer.store().symbols.info(method),
+                    SymbolInfo::Missing
+                ));
+            }
+        }
+        // These unavailable members retain the underlying typing error even in batch.
+        for (origin, info) in [
+            (SymbolOrigin::Source(provider_source), SymbolInfo::Error),
+            (
+                SymbolOrigin::Classfile(store.origins.register_classfile()),
+                SymbolInfo::Missing,
+            ),
+            (SymbolOrigin::Synthetic, SymbolInfo::Missing),
+        ] {
+            store.symbols.get_mut(value).origin = origin;
+            store.symbols.set_info(value, info);
+            let mut typer = SourceTyper::new(
+                &caller.ast,
+                caller_source,
+                &caller_index,
+                &mut store,
+                defs,
+                &packages,
+            );
+            assert!(
+                matches!(typer.try_complete_signature(read, |_| true), Err(TyperError::MemberTypeUnavailable { symbol }) if symbol == value)
+            );
+        }
     }
 
     #[test]

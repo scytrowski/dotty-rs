@@ -1,7 +1,7 @@
 //! Compare three caller-owned schedules over consecutive, fresh semantic sessions.
 use super::super::{
-    Input, LearnedOrder, NamedUnit, Timings, TyperError, compile_timed, compile_with_signatures,
-    inputs, name_units, parsing,
+    Input, LearnedOrder, NamedUnit, SignatureCompletion, Timings, TyperError, compile_timed,
+    compile_with_signatures, inputs, name_units, parsing,
 };
 use super::{Graph, sources};
 use crate::{complete_methods_in_order, complete_signatures_in_order};
@@ -65,22 +65,16 @@ impl MethodHistory {
         let roots = preferred
             .into_iter()
             .chain(units.iter().flat_map(NamedUnit::method_symbols));
-        complete_methods_in_order(
-            units,
-            roots,
-            store,
-            defs,
-            packages,
-            |symbol, error| match error {
-                Some(TyperError::MemberTypeUnavailable { .. }) => blocked(),
-                None => {
+        complete_methods_in_order(units, roots, store, defs, packages, |symbol, outcome| {
+            match outcome {
+                SignatureCompletion::BlockedOn(_) => blocked(),
+                SignatureCompletion::Complete(_) => {
                     if let Some(&key) = by_symbol.get(&symbol) {
                         next_order.push(key);
                     }
                 }
-                _ => {}
-            },
-        )?;
+            }
+        })?;
         self.sources = files
             .iter()
             .map(|&(_, path, text)| (path.to_owned(), text.to_owned()))
@@ -123,8 +117,8 @@ impl Strategy {
     ) -> Result<(), TyperError> {
         match self {
             Self::Ordinary => {
-                complete_signatures_in_order(units, units, store, defs, packages, |_, error| {
-                    if matches!(error, Some(TyperError::MemberTypeUnavailable { .. })) {
+                complete_signatures_in_order(units, units, store, defs, packages, |_, outcome| {
+                    if matches!(outcome, SignatureCompletion::BlockedOn(_)) {
                         blocked();
                     }
                 })
