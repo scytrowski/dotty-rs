@@ -2374,8 +2374,15 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
 #[cfg(test)]
 mod conditional_mutable_assignment_tests {
     use super::with_paired_jvm_tasty_batch_plan;
+    use dotty_classfile::attribute::Attribute;
+    use dotty_classfile::classfile::{ClassFile, Reader, TastyLinkId};
     use dotty_core::SourceId;
-    use dotty_jvm_tasty_contract::validate_jvm_tasty_batch;
+    use dotty_jvm::emit_class_with_tasty_link;
+    use dotty_jvm_tasty_contract::{
+        JvmTastyBatchArtifacts, JvmTastyClassFileArtifact, JvmTastySidecarArtifact,
+        validate_jvm_tasty_batch, validate_jvm_tasty_batch_artifacts,
+    };
+    use dotty_tasty::tasty::TastyFile;
 
     const SOURCE: &str = include_str!(
         "../tests/fixtures/jvm_tasty_conditional_mutable_reference_assignment/ConditionalMutableReferenceAssignment.scala"
@@ -2446,6 +2453,104 @@ mod conditional_mutable_assignment_tests {
                 let validated = validate_jvm_tasty_batch(plan.jvm_unit, &tasty_plans)
                     .expect("the original source/JVM/TASTy plans satisfy the paired contract");
                 assert_eq!(validated.classes().len(), 3);
+                let canonical_artifacts = || {
+                    let entries = plan
+                        .classes
+                        .iter()
+                        .map(|class| {
+                            let pickled = class
+                                .tasty_plan
+                                .pickle()
+                                .expect("the original complete TASTy plan pickles");
+                            let tasty = TastyFile::parse_and_validate_scala_3_9(pickled.bytes())
+                                .expect("the original TASTy output decodes");
+                            let classfile = emit_class_with_tasty_link(
+                                plan.jvm_unit,
+                                class.class,
+                                class.tasty_plan.plan().definitions,
+                                TastyLinkId::from_bytes(tasty.header().uuid),
+                            )
+                            .expect("the exact source class emits from the canonical JVM plan");
+                            (
+                                JvmTastyClassFileArtifact {
+                                    classfile_path: class.classfile_path.clone(),
+                                    classfile_bytes: classfile.into_bytes(),
+                                },
+                                JvmTastySidecarArtifact {
+                                    tasty_path: class.tasty_path.clone(),
+                                    tasty_bytes: pickled.bytes().to_vec(),
+                                },
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let (classfiles, sidecars) = entries.into_iter().unzip();
+                    JvmTastyBatchArtifacts {
+                        classfiles,
+                        sidecars,
+                    }
+                };
+                let valid_artifacts = canonical_artifacts();
+                validate_jvm_tasty_batch_artifacts(&validated, valid_artifacts.clone())
+                    .expect("complete canonical output satisfies the structural artifact contract");
+
+                let factory = valid_artifacts
+                    .classfiles
+                    .iter()
+                    .find(|artifact| artifact.classfile_path == "example/PairFactory.class")
+                    .expect("complete output has PairFactory.class");
+                let mut reader = Reader::new(&factory.classfile_bytes);
+                let decoded = ClassFile::decode(&mut reader).expect("canonical class decodes");
+                let create = decoded
+                    .methods
+                    .iter()
+                    .find(|method| {
+                        decoded.constant_pool.utf8(method.name_index).ok() == Some("create")
+                    })
+                    .expect("PairFactory.create is emitted");
+                let [Attribute::Code(code)] = create.attributes.as_slice() else {
+                    panic!("PairFactory.create has one Code attribute");
+                };
+                let code_start =
+                    code.code.as_ptr() as usize - factory.classfile_bytes.as_ptr() as usize;
+                let initializer = [0x19, 0x05, 0x3a, 0x07];
+                let initializer_offsets = code
+                    .code
+                    .windows(initializer.len())
+                    .enumerate()
+                    .filter_map(|(offset, bytes)| (bytes == initializer).then_some(offset))
+                    .collect::<Vec<_>>();
+                let [initializer_offset, _else_store_offset] = initializer_offsets.as_slice()
+                else {
+                    panic!(
+                        "selected initializer and ELSE assignment use canonical slots: {initializer_offsets:?}"
+                    );
+                };
+                for (name, offset, replacement) in [
+                    ("missing selected initializer", 0, 0x00),
+                    ("wrong selected initializer source", 1, 0x06),
+                    ("wrong selected initializer target", 3, 0x06),
+                ] {
+                    let mut corrupted = valid_artifacts.clone();
+                    let factory = corrupted
+                        .classfiles
+                        .iter_mut()
+                        .find(|artifact| artifact.classfile_path == "example/PairFactory.class")
+                        .unwrap();
+                    factory.classfile_bytes[code_start + initializer_offset + offset] = replacement;
+                    let error = validate_jvm_tasty_batch_artifacts(&validated, corrupted)
+                        .expect_err("selected-local initializer corruption rejects the batch");
+                    assert!(
+                        matches!(
+                            error,
+                            dotty_jvm_tasty_contract::JvmTastyContractError::BatchArtifact {
+                                class_index: 2,
+                                phase: "cross-class invocation",
+                                ..
+                            }
+                        ),
+                        "{name} rejects at the structural output contract: {error:?}"
+                    );
+                }
             },
         );
         result.expect("the exact source passes structural paired validation");

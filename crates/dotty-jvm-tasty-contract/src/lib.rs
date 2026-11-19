@@ -1802,6 +1802,7 @@ struct ConditionalSelectionRef {
 
 #[derive(Clone, Copy)]
 struct ConditionalMutableAssignmentRef {
+    initializer_source_slot: u16,
     condition_local_slot: u16,
     then_rhs_local_slot: u16,
     else_rhs_local_slot: u16,
@@ -2882,9 +2883,14 @@ fn validate_two_local_constructor_pair(
             .local(binding.rhs_locals[1])
             .map_err(|error| format!("conditional ELSE value has no JVM slot: {error:?}"))?
             .slot();
+        let initializer_source_slot = layout
+            .local(first.local)
+            .map_err(|error| format!("conditional initializer source has no JVM slot: {error:?}"))?
+            .slot();
         local_slots.push(selected_slot.slot());
         local_symbols.push(binding.local);
         conditional_mutable_assignment_ref = Some(ConditionalMutableAssignmentRef {
+            initializer_source_slot,
             condition_local_slot: condition_slot,
             then_rhs_local_slot: then_rhs_slot,
             else_rhs_local_slot: else_rhs_slot,
@@ -6597,6 +6603,8 @@ fn validate_conditional_mutable_assignment_code(
     pc: &mut usize,
     assignment: ConditionalMutableAssignmentRef,
 ) -> Result<(), String> {
+    take_factory_local(code, pc, false, assignment.initializer_source_slot)?;
+    take_factory_local(code, pc, true, assignment.selected_local_slot)?;
     take_int_local(code, pc, assignment.condition_local_slot)?;
     let ifeq_pc = *pc;
     take_factory_call_opcode(code, pc, 0x99, "ifeq")?;
@@ -7527,13 +7535,15 @@ mod paired_block_shape_tests {
     }
 
     #[test]
-    fn conditional_assignment_bytecode_binds_both_rhs_and_stores_to_one_slot() {
-        // iload_3; ifeq else; aload 6; astore 7; goto join; aload 5; astore 7
+    fn conditional_assignment_output_contract_requires_the_initializer_and_both_arms() {
+        // aload 5; astore 7; iload_3; ifeq else; aload 6; astore 7; goto join;
+        // aload 5; astore 7
         let original = [
-            0x1d, 0x99, 0x00, 0x0a, 0x19, 0x06, 0x3a, 0x07, 0xa7, 0x00, 0x07, 0x19, 0x05, 0x3a,
-            0x07,
+            0x19, 0x05, 0x3a, 0x07, 0x1d, 0x99, 0x00, 0x0a, 0x19, 0x06, 0x3a, 0x07, 0xa7, 0x00,
+            0x07, 0x19, 0x05, 0x3a, 0x07,
         ];
         let receipt = ConditionalMutableAssignmentRef {
+            initializer_source_slot: 5,
             condition_local_slot: 3,
             then_rhs_local_slot: 6,
             else_rhs_local_slot: 5,
@@ -7545,12 +7555,14 @@ mod paired_block_shape_tests {
         assert_eq!(pc, original.len());
 
         for (name, index, replacement) in [
-            ("wrong THEN RHS", 5, 5),
-            ("wrong THEN selected slot", 7, 5),
-            ("wrong ELSE RHS", 12, 6),
-            ("wrong ELSE selected slot", 14, 5),
-            ("wrong else target", 3, 9),
-            ("missing ELSE store", 14, 0),
+            ("wrong initializer source", 1, 6),
+            ("wrong initializer target", 3, 6),
+            ("wrong THEN RHS", 9, 5),
+            ("wrong THEN selected slot", 11, 5),
+            ("wrong ELSE RHS", 16, 6),
+            ("wrong ELSE selected slot", 18, 5),
+            ("wrong else target", 7, 9),
+            ("missing ELSE store", 18, 0),
         ] {
             let mut changed = original;
             changed[index] = replacement;
@@ -7560,6 +7572,16 @@ mod paired_block_shape_tests {
                 "{name} is rejected"
             );
         }
+
+        let mut missing_initializer = 0;
+        assert!(
+            validate_conditional_mutable_assignment_code(
+                &original[4..],
+                &mut missing_initializer,
+                receipt,
+            )
+            .is_err()
+        );
 
         let mut missing_else = 0;
         assert!(
