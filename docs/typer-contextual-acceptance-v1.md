@@ -64,6 +64,11 @@ The signature combining a synthesized context-bound witness with a default in
 
 ## Reproduction
 
+The [CI workflow](../.github/workflows/typer-contextual-v1.yml) runs the audit
+with `--require-parity` on pull requests targeting `main` and pushes to
+`main` that change the frontend or its audit dependencies. It can also be
+started manually in GitHub Actions.
+
 Use JDK 21, a checkout of the revision above and the cached artifacts specified
 by the [oracle setup](../tools/tasty-pickler-oracle/README.md). Export
 `JAVA_HOME`, `SCALA39_ROOT`, and `COURSIER_MAVEN_ROOT`. Run the following commands from the workspace root.
