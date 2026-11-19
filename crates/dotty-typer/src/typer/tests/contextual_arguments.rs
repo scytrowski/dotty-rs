@@ -2146,3 +2146,106 @@ fn anonymous_marker_defaults_check_the_parent_and_roll_back_failed_definitions()
         assert!(typer.source_typed_index().is_empty());
     }
 }
+
+#[test]
+fn projected_context_bound_orders_and_binds_the_method_and_getter_parameters() {
+    let text = include_str!(
+        "../../../tests/fixtures/contextual-v1/controls/DependentWitnessDefault.scala"
+    );
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let evidence = class_symbol(&parsed, &store, &index, source, "Ev");
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for name in ["read", "shadow"] {
+        let method = method_symbol(&parsed, typer.store(), &index, source, name);
+        let getter = typer.store().default_getter(method, 2).unwrap();
+        for target in [getter, method] {
+            let signature = typer.complete_symbol(target).unwrap();
+            let types = &typer.store().types;
+            let Type::Poly(poly) = types.get(signature) else {
+                panic!("polymorphic signature")
+            };
+            let Type::Method(witness) = types.get(poly.result) else {
+                panic!("witness clause")
+            };
+            assert_eq!(witness.kind, MethodKind::Contextual);
+            assert_eq!(witness.params.len(), 1);
+            let Type::Method(value) = types.get(witness.result) else {
+                panic!("dependent clause")
+            };
+            assert_eq!(value.kind, MethodKind::Plain);
+            assert_eq!(value.params.len(), 1);
+            let Type::TypeRef {
+                prefix,
+                target: TypeRefTarget::Symbol(out),
+            } = types.get(value.params[0].ty)
+            else {
+                panic!("tc.Out")
+            };
+            assert_eq!(typer.store().symbols.owner(*out), Some(evidence));
+            assert_eq!(
+                types.get(*prefix),
+                &Type::ParamRef {
+                    binder: poly.result,
+                    index: 0
+                }
+            );
+            if target == getter {
+                assert_eq!(value.result, defs.int);
+            } else {
+                let Type::Method(last) = types.get(value.result) else {
+                    panic!("defaulted using clause")
+                };
+                assert_eq!(last.kind, MethodKind::Contextual);
+                assert_eq!(last.params.len(), 1);
+                assert_eq!(last.params[0].ty, defs.int);
+                assert_eq!(last.result, defs.int);
+            }
+        }
+        typer
+            .type_method_definition(definition_tree(&index, method))
+            .unwrap();
+    }
+}
+
+#[test]
+fn type_projection_with_the_witness_spelling_keeps_the_witness_in_the_final_clause() {
+    let text = include_str!(
+        "../../../tests/fixtures/contextual-v1/controls/DependentWitnessDefault.scala"
+    );
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let projected_class = class_symbol(&parsed, &store, &index, source, "tc");
+    let method = method_symbol(&parsed, &store, &index, source, "project");
+    let getter = store.default_getter(method, 2).unwrap();
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for target in [method, getter] {
+        let signature = typer.complete_symbol(target).unwrap();
+        let types = &typer.store().types;
+        let Type::Poly(poly) = types.get(signature) else {
+            panic!("type parameter A")
+        };
+        let Type::Method(value) = types.get(poly.result) else {
+            panic!("ordinary parameter")
+        };
+        assert_eq!(value.kind, MethodKind::Plain);
+        assert_eq!(value.params.len(), 1);
+        let Type::TypeRef {
+            target: TypeRefTarget::Symbol(out),
+            prefix,
+        } = types.get(value.params[0].ty)
+        else {
+            panic!("tc#Out")
+        };
+        assert_eq!(typer.store().symbols.owner(*out), Some(projected_class));
+        assert_eq!(types.get(*prefix).reference_symbol(), Some(projected_class));
+        if target == method {
+            let Type::Method(last) = types.get(value.result) else {
+                panic!("using tc, n")
+            };
+            assert_eq!(last.kind, MethodKind::Contextual);
+            assert_eq!(last.params.len(), 2);
+            assert_eq!(last.params[1].ty, defs.int);
+        } else {
+            assert_eq!(value.result, defs.int);
+        }
+    }
+}

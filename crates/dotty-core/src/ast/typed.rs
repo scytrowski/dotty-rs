@@ -169,6 +169,7 @@ impl<'a> TypedAstBuilder<'a> {
             kind: TreeKind::Select(Select {
                 qualifier,
                 name,
+                is_type_projection: false,
                 backquoted,
             }),
             position,
@@ -967,6 +968,7 @@ mod tests {
             TreeKind::Select(Select {
                 qualifier,
                 name: selected_name,
+                is_type_projection: false,
                 backquoted: true,
             })
         );

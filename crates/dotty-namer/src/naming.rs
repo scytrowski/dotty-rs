@@ -4208,6 +4208,7 @@ mod tests {
             kind: TreeKind::Select(Select {
                 qualifier,
                 name: *dotty_core::TermName::new(name).as_name(),
+                is_type_projection: false,
                 backquoted: false,
             }),
             position: None,
@@ -4594,6 +4595,7 @@ mod tests {
             kind: TreeKind::Select(Select {
                 qualifier,
                 name: *selected.as_name(),
+                is_type_projection: false,
                 backquoted: false,
             }),
             position: None,
@@ -4616,6 +4618,7 @@ mod tests {
             kind: TreeKind::Select(Select {
                 qualifier,
                 name: *constructor.as_name(),
+                is_type_projection: false,
                 backquoted: false,
             }),
             position: None,

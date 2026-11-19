@@ -90,7 +90,14 @@ A legacy `implicit` clause also falls back only for missing evidence. Ambiguity
 retains both candidates and rolls back the failed application.
 The default getter of a method with a context bound takes the method type
 parameters and the preceding term clauses. Witnesses merged into the defaulted
-parameter’s own clause contribute to its ordinal only. For the default
+parameter’s own clause contribute to its ordinal only. In
+`read[A: Ev as tc](v: tc.Out)(using n: Int = 1)`, the witness is
+inserted before `v`. Both `read` and `read$default$3` bind `tc.Out` to their
+own witness parameter. A projection `tc#Out` from a class named `tc` leaves
+the witness in the final contextual clause. At a call site with
+`e: Ev[Int]` and `v: e.Out`, typing `read[Int](using e)(v)` still stops at
+argument conformance for the abstract member `Out`, before default insertion.
+For the default
 `new Bar {}` in Scala’s `i8491.scala`, the typed tree binds an anonymous
 class to the getter, calls its constructor and widens the result to the
 source marker trait. Anonymous templates with members or inherited

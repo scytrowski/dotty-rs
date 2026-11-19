@@ -131,6 +131,7 @@ where
                 TreeKind::Select(Select {
                     qualifier: tree,
                     name,
+                    is_type_projection: false,
                     backquoted,
                 }),
             );
@@ -221,6 +222,7 @@ mod tests {
         let TreeKind::Select(selection) = parser.ast().get(reference).kind else {
             panic!("expected a selection");
         };
+        assert!(!selection.is_type_projection);
         assert!(selection.name.is_type());
         assert!(matches!(
             parser.ast().get(selection.qualifier).kind,

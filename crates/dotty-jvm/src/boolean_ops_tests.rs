@@ -85,6 +85,7 @@ impl BooleanIntrinsicFixture {
             kind: TreeKind::Select(Select {
                 qualifier: receiver,
                 name,
+                is_type_projection: false,
                 backquoted: false,
             }),
             position: None,
@@ -245,6 +246,7 @@ fn user_defined_operator_with_same_signature_is_not_an_intrinsic() {
         kind: TreeKind::Select(Select {
             qualifier: receiver,
             name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -526,6 +528,7 @@ fn accepts_boolean_singleton_receiver_and_argument_types() {
         kind: TreeKind::Select(Select {
             qualifier: receiver,
             name: fixture.store.symbols.get(method).name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,

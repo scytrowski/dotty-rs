@@ -1580,6 +1580,7 @@ where
                 TreeKind::Select(Select {
                     qualifier: reference,
                     name,
+                    is_type_projection: false,
                     backquoted,
                 }),
             );
@@ -1822,6 +1823,7 @@ where
                 TreeKind::Select(Select {
                     qualifier: tree,
                     name: *name.as_name(),
+                    is_type_projection: false,
                     backquoted: false,
                 }),
             );
@@ -2391,6 +2393,7 @@ where
                 TreeKind::Select(Select {
                     qualifier: tree,
                     name,
+                    is_type_projection: true,
                     backquoted,
                 }),
             );
@@ -2590,6 +2593,7 @@ where
                 TreeKind::Select(dotty_core::ast::Select {
                     qualifier: tree,
                     name,
+                    is_type_projection: false,
                     backquoted,
                 }),
             );
@@ -10357,6 +10361,7 @@ mod tests {
         let TreeKind::Select(selection) = &parser.ast().get(id).kind else {
             panic!("expected a type projection");
         };
+        assert!(selection.is_type_projection);
         assert!(selection.name.is_type());
         assert!(matches!(
             parser.ast().get(selection.qualifier).kind,

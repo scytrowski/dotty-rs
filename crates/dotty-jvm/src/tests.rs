@@ -5613,6 +5613,7 @@ fn typed_call_to(
             kind: TreeKind::Select(Select {
                 qualifier: receiver,
                 name: fixture.store.symbols.get(method).name,
+                is_type_projection: false,
                 backquoted: false,
             }),
             position: None,
@@ -5640,6 +5641,7 @@ fn typed_boolean_intrinsic_call(
         kind: TreeKind::Select(Select {
             qualifier: receiver,
             name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -5672,6 +5674,7 @@ fn typed_boolean_not(
         kind: TreeKind::Select(Select {
             qualifier: receiver,
             name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -5696,6 +5699,7 @@ fn typed_int_intrinsic_call(
         kind: TreeKind::Select(Select {
             qualifier: receiver,
             name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -6764,6 +6768,7 @@ fn resolves_ident_this_calls_and_supported_zero_argument_results_by_symbol() {
         kind: TreeKind::Select(Select {
             qualifier: this_tree,
             name: fixture.store.symbols.get(identity).name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -6894,6 +6899,7 @@ fn lowers_explicit_and_implicit_same_class_call_receivers_once() {
         kind: TreeKind::Select(Select {
             qualifier: this_tree,
             name: fixture.store.symbols.get(target).name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -7108,6 +7114,7 @@ fn reference_call_values_are_forwarded_and_used_as_receivers_once() {
         kind: TreeKind::Select(Select {
             qualifier: receiver,
             name: fixture.store.symbols.get(get).name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -7178,6 +7185,7 @@ fn reference_call_values_are_forwarded_and_used_as_receivers_once() {
         kind: TreeKind::Select(Select {
             qualifier: receiver_call,
             name: fixture.store.symbols.get(get).name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -7265,6 +7273,7 @@ fn reference_call_receiver_resolution_rejects_cycles_and_excessive_depth() {
         kind: TreeKind::Select(Select {
             qualifier: this,
             name: cyclic.store.symbols.get(identity).name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -7325,6 +7334,7 @@ fn reference_call_receiver_resolution_rejects_cycles_and_excessive_depth() {
             kind: TreeKind::Select(Select {
                 qualifier: receiver,
                 name: deep.store.symbols.get(identity).name,
+                is_type_projection: false,
                 backquoted: false,
             }),
             position: None,
@@ -8114,6 +8124,7 @@ fn emits_parameter_arithmetic_once_before_the_approved_constructor_call() {
         kind: TreeKind::Select(dotty_core::ast::Select {
             qualifier: seed,
             name: fixture.store.symbols.get(operator).name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -9120,6 +9131,7 @@ fn rejects_unsupported_call_receivers_and_static_caller_contexts() {
         kind: TreeKind::Select(Select {
             qualifier: receiver,
             name: fixture.store.symbols.get(target).name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -9166,6 +9178,7 @@ fn rejects_unsupported_call_receivers_and_static_caller_contexts() {
         kind: TreeKind::Select(Select {
             qualifier: qualified_this,
             name: fixture.store.symbols.get(target).name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -9212,6 +9225,7 @@ fn rejects_unsupported_call_receivers_and_static_caller_contexts() {
         kind: TreeKind::Select(Select {
             qualifier: other_this,
             name: fixture.store.symbols.get(target).name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -9728,6 +9742,7 @@ fn rejects_non_this_receivers_non_current_this_and_nullary_methods() {
         kind: TreeKind::Select(Select {
             qualifier: receiver,
             name: fixture.store.symbols.get(identity).name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -9793,6 +9808,7 @@ fn rejects_non_this_receivers_non_current_this_and_nullary_methods() {
         kind: TreeKind::Select(Select {
             qualifier: other_this,
             name: fixture.store.symbols.get(identity).name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -10397,6 +10413,7 @@ fn planned_field_reads_reject_stale_targets_and_forged_this_prefixes() {
         kind: TreeKind::Select(Select {
             qualifier: receiver,
             name: Name::new(field_name, Namespace::Term),
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -10427,6 +10444,7 @@ fn planned_field_reads_reject_stale_targets_and_forged_this_prefixes() {
         kind: TreeKind::Select(Select {
             qualifier: receiver,
             name: Name::new(field_name, Namespace::Term),
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -10586,6 +10604,7 @@ impl PrimitiveIntrinsicFixture {
             kind: TreeKind::Select(Select {
                 qualifier: receiver,
                 name,
+                is_type_projection: false,
                 backquoted: false,
             }),
             position: None,

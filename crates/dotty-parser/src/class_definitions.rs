@@ -1034,6 +1034,7 @@ where
                 TreeKind::Select(dotty_core::ast::Select {
                     qualifier,
                     name: *name.as_name(),
+                    is_type_projection: false,
                     backquoted,
                 }),
             );

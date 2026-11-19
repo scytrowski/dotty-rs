@@ -352,6 +352,7 @@ where
                     TreeKind::Select(Select {
                         qualifier: tree,
                         name,
+                        is_type_projection: false,
                         backquoted,
                     }),
                 );

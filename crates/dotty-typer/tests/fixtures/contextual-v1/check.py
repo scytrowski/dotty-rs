@@ -51,6 +51,14 @@ def check_controls(tc, checkout):
     controls = [
         ("CurriedDefault.scala", 0, ["this.narrow(c)(this.narrow$default$2(c))",
           "def narrow$default$2(using c: Int): Int @uncheckedVariance = this.root(c)"]),
+        ("DependentWitnessDefault.scala", 0, [
+            "def read[A >: Nothing <: Any](using tc: Ev[A])(v: tc.Out)(using n: Int): Int",
+            "def read$default$3[A >: Nothing <: Any](using tc: Ev[A])(v: tc.Out): Int @uncheckedVariance = 1",
+            "def shadow[tc >: Nothing <: Any](using tc: Ev[tc])(v: tc.Out)(using n: Int)",
+            "def shadow$default$3[tc >: Nothing <: Any](using tc: Ev[tc])(v: tc.Out)",
+            "def project[A >: Nothing <: Any](v: tc#Out)(using tc: Ev[A], n: Int): Int",
+            "def project$default$3[A >: Nothing <: Any](v: tc#Out): Int @uncheckedVariance = 1",
+        ]),
         ("ExplicitContextFunction.scala", 0, ["this.ExplicitContextFunction$$inline$bar.apply(using 4):Int",
           "private[this] def bar: (Int) ?=> Int = (using contextual$1: Int) => 3"]),
         ("OwnerAmbiguity.scala", 1, ["[E172]", "both given instance a1 in object Cases and given "

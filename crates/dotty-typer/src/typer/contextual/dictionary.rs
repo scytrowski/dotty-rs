@@ -218,6 +218,7 @@ fn qualify_references(
         node.kind = TreeKind::Select(dotty_core::ast::Select {
             qualifier,
             name: typer.store.symbols.get(use_.field).name,
+            is_type_projection: false,
             backquoted: false,
         });
         node.ty = typer.store.types.alloc(Type::TermRef {

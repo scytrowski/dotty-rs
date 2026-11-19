@@ -78,7 +78,16 @@ fn type_references_witness(
         };
         match &node.kind {
             TreeKind::Ident(id) if names.contains(&id.name) => return true,
-            TreeKind::Select(s) => pending.push(s.qualifier),
+            TreeKind::Select(s) => {
+                // Dotted type paths carry type names even for a stable term prefix.
+                if !s.is_type_projection
+                    && let Some(TreeKind::Ident(id)) = arena.try_get(s.qualifier).map(|n| &n.kind)
+                    && names.contains(TermName::new(id.name.text()).as_name())
+                {
+                    return true;
+                }
+                pending.push(s.qualifier);
+            }
             TreeKind::AppliedTypeTree(t) => {
                 pending.push(t.tpt);
                 pending.extend(&t.args);

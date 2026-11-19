@@ -1646,6 +1646,7 @@ fn constructor_field_initializer_rejects_qualified_parameter_references() {
                     kind: TreeKind::Select(Select {
                         qualifier,
                         name: typer.store().symbols.get(parameters[0]).name,
+                        is_type_projection: false,
                         backquoted: false,
                     }),
                     position: None,
