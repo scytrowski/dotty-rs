@@ -15,6 +15,34 @@ use crate::jvm::{
     JvmPublicBodyFieldSourceProof,
 };
 
+use crate::jvm_method_plan::{JvmMethodPlanner, MethodPlanError};
+use crate::source_declarations::{ClassMember, SourceClass};
+use crate::typer::{TypedLocalBinding, TypedSourceOutput};
+
+/// One class's source-to-typed mappings and locals, retained while later
+/// typers append to the session's typed arena.
+pub struct TypedClassBody {
+    class: SymbolId,
+    index: SourceTypedIndex,
+    locals: Vec<TypedLocalBinding>,
+}
+
+impl TypedClassBody {
+    /// Split the output of the typer used for this class's body. Pass the arena
+    /// to the next typer and keep the body for [`JvmClassPlanner::plan_typed_class`].
+    /// All declarations, outputs and the final arena must come from one session.
+    pub fn from_output(class: &SourceClass, output: TypedSourceOutput) -> (AstArena<Typed>, Self) {
+        (
+            output.typed_ast,
+            Self {
+                class: class.symbol,
+                index: output.source_typed_index,
+                locals: output.local_bindings,
+            },
+        )
+    }
+}
+
 /// Result of typing one field RHS and the index from that typing operation.
 #[derive(Clone, Copy)]
 pub struct TypedFieldInitializer<'a> {
@@ -60,6 +88,13 @@ impl TypedFieldInitializer<'_> {
 /// The source shape or supplied methods cannot form a simple class plan.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClassPlanError {
+    /// The retained typer output belongs to a different class in this session.
+    ForeignClassBody {
+        expected: SymbolId,
+        actual: SymbolId,
+    },
+    /// A method could not be projected from the class's typer output.
+    MethodPlan(MethodPlanError),
     /// The symbol does not identify an ordinary concrete top-level source class.
     SourceClass(SymbolId),
     /// The parent is unsupported or unresolved, or the template has a self type, derives or uses clause.
@@ -149,6 +184,98 @@ impl<'a> JvmClassPlanner<'a> {
     ) -> Self {
         self.header = Some((typed_ast, index));
         self
+    }
+
+    /// Plans every body member from one class's typer output and the current
+    /// session arena. Parent applications still use [`Self::with_typed_header`].
+    pub fn plan_typed_class(
+        &self,
+        class: &SourceClass,
+        typed_ast: &AstArena<Typed>,
+        body: &TypedClassBody,
+    ) -> Result<JvmClassPlan, ClassPlanError> {
+        if class.symbol != body.class {
+            return Err(ClassPlanError::ForeignClassBody {
+                expected: class.symbol,
+                actual: body.class,
+            });
+        }
+        let Some(SourceDefinition::Canonical { source, tree }) =
+            self.index.definition_of(class.symbol)
+        else {
+            return Err(ClassPlanError::SourceClass(class.symbol));
+        };
+        if tree != class.tree {
+            return Err(ClassPlanError::SourceClass(class.symbol));
+        }
+
+        // Group once so each method visits only its own locals, in typer order.
+        let mut locals = HashMap::<_, Vec<_>>::new();
+        for &binding in &body.locals {
+            let symbol = binding.symbol();
+            if !self.store.symbols.contains(symbol) {
+                return Err(ClassPlanError::MethodPlan(MethodPlanError::Local(symbol)));
+            }
+            if let Some(owner) = self.store.symbols.owner(symbol) {
+                locals.entry(owner).or_default().push(binding);
+            }
+        }
+        let mut methods = Vec::new();
+        let mut fields = Vec::new();
+        for member in &class.members {
+            match member {
+                ClassMember::Method(method) => {
+                    if self.member(class.symbol, source, method.tree, SymbolKind::Method)
+                        != Some(method.symbol)
+                    {
+                        return Err(ClassPlanError::UnexpectedMethod {
+                            class: class.symbol,
+                            method: method.symbol,
+                        });
+                    }
+                    let planner = JvmMethodPlanner {
+                        store: self.store,
+                        source_ast: self.ast,
+                        source_index: self.index,
+                        typed_ast,
+                        typed_index: &body.index,
+                        local_bindings: locals.get(&method.symbol).map_or(&[], Vec::as_slice),
+                    };
+                    methods.push(
+                        planner
+                            .plan(method.symbol)
+                            .map_err(ClassPlanError::MethodPlan)?,
+                    );
+                }
+                ClassMember::Field(field) => {
+                    if self.member(class.symbol, source, field.tree, SymbolKind::Field)
+                        != Some(field.symbol)
+                    {
+                        return Err(ClassPlanError::UnexpectedField {
+                            class: class.symbol,
+                            field: field.symbol,
+                        });
+                    }
+                    let root = self
+                        .ast
+                        .try_get(field.tree)
+                        .and_then(|node| match &node.kind {
+                            TreeKind::ValDef(def) => def.rhs,
+                            _ => None,
+                        })
+                        .and_then(|rhs| body.index.get(source, rhs))
+                        .ok_or(ClassPlanError::InvalidFieldInitializer {
+                            field: field.symbol,
+                        })?;
+                    fields.push(TypedFieldInitializer {
+                        field: field.symbol,
+                        root,
+                        index: &body.index,
+                    });
+                }
+            }
+        }
+        self.plan_with_fields(class.symbol, methods, typed_ast, fields)
     }
 
     /// Plans a public primary constructor with at most one value parameter list.

@@ -14,19 +14,17 @@ use std::time::{Duration, Instant};
 
 use dotty::core::{
     AstArena, Definitions, Packages, SemanticStore, SourceId, SourceSemanticIndex, SymbolId,
-    SymbolInfo, TreeId, TreeKind, Typed, Untyped,
+    SymbolInfo, TreeKind, Typed, Untyped,
 };
 use dotty::jvm::{
     GeneratedClass, JvmClassPlan, JvmCompilationUnit, PreparedJvmEmission, emit_class,
 };
-use dotty::jvm_class_plan::{ClassPlanError, JvmClassPlanner, TypedFieldInitializer};
+use dotty::jvm_class_plan::{ClassPlanError, JvmClassPlanner, TypedClassBody};
 use dotty::jvm_method_plan::JvmMethodPlanner;
 use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty::parser::{DetachedParse, ParseResult};
 use dotty::source_declarations::{Declaration, SourceClass, source_classes};
-use dotty::typer::{
-    SignatureCompletion, SourceTypedIndex, SourceTyper, TypedLocalBinding, TyperError,
-};
+use dotty::typer::{SignatureCompletion, SourceTypedIndex, SourceTyper, TyperError};
 
 struct NamedUnit {
     source: SourceId,
@@ -334,20 +332,7 @@ fn with_plan<R>(
 
 struct ClassBindings {
     header: Option<std::sync::Arc<SourceTypedIndex>>,
-    methods: Vec<MethodBindings>,
-    fields: Vec<FieldBindings>,
-}
-
-struct FieldBindings {
-    field: SymbolId,
-    root: TreeId<Typed>,
-    index: SourceTypedIndex,
-}
-
-struct MethodBindings {
-    method: SymbolId,
-    index: SourceTypedIndex,
-    locals: Vec<TypedLocalBinding>,
+    body: TypedClassBody,
 }
 
 fn named_classes(units: &[NamedUnit]) -> impl Iterator<Item = (&NamedUnit, &SourceClass)> {
@@ -369,46 +354,25 @@ fn type_bodies(
     } = headers;
     let mut typed_classes = Vec::new();
     for (unit, class) in named_classes(units) {
-        let mut fields = Vec::new();
-        for field in class.fields().map(|decl| decl.symbol) {
-            let mut typer = SourceTyper::new_with_typed_ast(
-                &unit.ast,
-                unit.source,
-                &unit.index,
-                store,
-                definitions,
-                packages,
-                output,
-            );
-            let root = typer.type_field_initializer(field).unwrap();
-            let (arena, index) = typer.into_typed_ast_and_index();
-            output = arena;
-            fields.push(FieldBindings { field, root, index });
+        let mut typer = SourceTyper::new_with_typed_ast(
+            &unit.ast,
+            unit.source,
+            &unit.index,
+            store,
+            definitions,
+            packages,
+            output,
+        );
+        for field in class.fields() {
+            typer.type_field_initializer(field.symbol).unwrap();
         }
-        let mut methods = Vec::new();
         for method in class.methods() {
-            let mut typer = SourceTyper::new_with_typed_ast(
-                &unit.ast,
-                unit.source,
-                &unit.index,
-                store,
-                definitions,
-                packages,
-                output,
-            );
             typer.type_method_definition(method.tree).unwrap();
-            let result = typer.into_typed_output();
-            output = result.typed_ast;
-            methods.push(MethodBindings {
-                method: method.symbol,
-                index: result.source_typed_index,
-                locals: result.local_bindings,
-            });
         }
-
+        let (arena, body) = TypedClassBody::from_output(class, typer.into_typed_output());
+        output = arena;
         typed_classes.push(ClassBindings {
-            methods,
-            fields,
+            body,
             header: by_class.remove(&class.symbol),
         });
     }
@@ -424,28 +388,11 @@ fn class_plans(
 ) -> Result<Vec<JvmClassPlan>, ClassPlanError> {
     let mut classes = Vec::new();
     for ((unit, class), typed) in named_classes(units).zip(typed_classes) {
-        let methods = typed.methods.into_iter().map(|typed| {
-            JvmMethodPlanner {
-                store,
-                source_ast: &unit.ast,
-                source_index: &unit.index,
-                typed_ast: output,
-                typed_index: &typed.index,
-                local_bindings: &typed.locals,
-            }
-            .plan(typed.method)
-            .unwrap()
-        });
-        let fields = typed.fields.iter().map(|binding| TypedFieldInitializer {
-            field: binding.field,
-            root: binding.root,
-            index: &binding.index,
-        });
         let mut planner = JvmClassPlanner::new(store, &unit.ast, &unit.index);
         if let Some(index) = &typed.header {
             planner = planner.with_typed_header(output, index);
         }
-        classes.push(planner.plan_with_fields(class.symbol, methods, output, fields)?);
+        classes.push(planner.plan_typed_class(class, output, &typed.body)?);
     }
     Ok(classes)
 }

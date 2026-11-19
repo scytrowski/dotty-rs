@@ -19,6 +19,104 @@ fn named(text: &str) -> (SemanticStore, Definitions, Packages, NamedUnit) {
 }
 
 #[test]
+fn deferred_plans_keep_each_class_body_and_locals_after_extending_the_arena() {
+    use dotty::core::AstArena;
+    use dotty::jvm_class_plan::TypedClassBody;
+    use dotty::typer::SourceTyper;
+
+    let (mut store, defs, packages, unit) = named(
+        "class A { private val seed: Int = 40; def value(): Int = { val n = seed; n }; def other(): Int = { val n = 9; n } }
+         class B { private val seed: Int = 7; def value(): Int = { var n = seed; n } }",
+    );
+    let mut arena = AstArena::new();
+    let mut bodies = Vec::new();
+    for class in &unit.classes {
+        let mut typer = SourceTyper::new_with_typed_ast(
+            &unit.ast,
+            unit.source,
+            &unit.index,
+            &mut store,
+            defs,
+            &packages,
+            arena,
+        );
+        let field = class.fields().next().unwrap().symbol;
+        let initializer = typer.type_field_initializer(field).unwrap();
+        let mut methods = Vec::new();
+        for method in class.methods() {
+            let root = typer.type_method_definition(method.tree).unwrap();
+            let TreeKind::DefDef(def) = &typer.typed_ast().get(root).kind else {
+                panic!("expected a method")
+            };
+            methods.push((method.symbol, def.rhs.unwrap()));
+        }
+        let (extended, body) = TypedClassBody::from_output(class, typer.into_typed_output());
+        arena = extended;
+        bodies.push((body, field, initializer, methods));
+    }
+
+    let planner = JvmClassPlanner::new(&store, &unit.ast, &unit.index);
+    for (i, (body, field, initializer, methods)) in bodies.iter().enumerate().rev() {
+        let plan = planner
+            .plan_typed_class(&unit.classes[i], &arena, body)
+            .unwrap();
+        assert_eq!(
+            (plan.fields[0].field, plan.fields[0].initializer),
+            (*field, Some(*initializer))
+        );
+        assert_eq!(plan.methods.len(), methods.len());
+        for (planned, &(method, rhs)) in plan.methods.iter().zip(methods) {
+            assert_eq!((planned.method, planned.body), (method, Some(rhs)));
+            let [local] = &planned.locals[..] else {
+                panic!("expected one local")
+            };
+            assert_eq!(store.symbols.owner(local.symbol), Some(method));
+            let TreeKind::Block(block) = &arena.get(rhs).kind else {
+                panic!("expected a block")
+            };
+            assert_eq!(block.stats, [local.declaration]);
+            assert_eq!(local.mutable, i == 1);
+        }
+    }
+    let [a, b] = &unit.classes[..] else {
+        panic!("expected two classes")
+    };
+    assert_eq!(
+        planner.plan_typed_class(a, &arena, &bodies[1].0),
+        Err(ClassPlanError::ForeignClassBody {
+            expected: a.symbol,
+            actual: b.symbol
+        })
+    );
+}
+
+#[test]
+fn typed_class_requires_canonical_method_mappings_even_with_matching_class_label() {
+    use dotty::jvm_class_plan::TypedClassBody;
+    use dotty::jvm_method_plan::MethodPlanError;
+    let (mut store, defs, packages, unit) =
+        named("class A { def value(): Int = 40 }; class B { def value(): Int = 7 }");
+    let [a, b] = &unit.classes[..] else {
+        panic!("expected two classes")
+    };
+    let mut typer = unit.typer(&mut store, defs, &packages);
+    typer
+        .type_method_definition(b.methods().next().unwrap().tree)
+        .unwrap();
+    let (arena, mislabeled) = TypedClassBody::from_output(a, typer.into_typed_output());
+    assert_eq!(
+        JvmClassPlanner::new(&store, &unit.ast, &unit.index).plan_typed_class(
+            a,
+            &arena,
+            &mislabeled
+        ),
+        Err(ClassPlanError::MethodPlan(MethodPlanError::TypedMethod(
+            a.methods().next().unwrap().symbol
+        )))
+    );
+}
+
+#[test]
 fn class_plans_require_exact_methods_and_restore_source_order() {
     let (mut store, defs, packages, unit) = named(
         "class A { def value(): Int = 17; def other(): Int = 5 }\nclass B { def value(): Int = 42 }",
@@ -236,20 +334,59 @@ class UseCounter:
 
 #[test]
 fn public_body_fields_reject_swapped_initializers_with_identical_source_text() {
-    let (mut store, defs, packages, unit) = named(BODY_COUNTER);
-    let units = [unit];
-    let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
-    let (arena, mut bindings) = type_bodies(&units, &mut store, defs, &packages, headers);
-    let [initial, count] = bindings[0].fields.as_mut_slice() else {
-        panic!("expected two fields")
-    };
-    let error = ClassPlanError::FieldInitializerMismatch {
-        field: initial.field,
-        expected: initial.root,
-        actual: count.root,
-    };
-    std::mem::swap(&mut initial.root, &mut count.root);
-    assert_eq!(class_plans(&units, bindings, &arena, &store), Err(error));
+    assert_substituted_field_root_is_rejected(BODY_COUNTER, 0);
+}
+
+fn assert_substituted_field_root_is_rejected(source: &str, target: usize) {
+    use dotty::jvm_class_plan::TypedFieldInitializer;
+
+    let (mut store, defs, packages, unit) = named(source);
+    complete_signatures(std::slice::from_ref(&unit), &mut store, defs, &packages).unwrap();
+    let class = &unit.classes[0];
+    let mut typer = unit.typer(&mut store, defs, &packages);
+    let fields: Vec<_> = class
+        .fields()
+        .map(|field| {
+            (
+                field.symbol,
+                typer.type_field_initializer(field.symbol).unwrap(),
+            )
+        })
+        .collect();
+    for method in class.methods() {
+        typer.type_method_definition(method.tree).unwrap();
+    }
+    let output = typer.into_typed_output();
+    let planner = JvmMethodPlanner::new(&store, &unit.ast, &unit.index, &output);
+    let methods = class
+        .methods()
+        .map(|method| planner.plan(method.symbol).unwrap());
+    let mut inputs: Vec<_> = fields
+        .into_iter()
+        .map(|(field, root)| TypedFieldInitializer {
+            field,
+            root,
+            index: &output.source_typed_index,
+        })
+        .collect();
+    assert_eq!(inputs.len(), 2);
+    let expected = inputs[target].root;
+    let actual = inputs[1 - target].root;
+    inputs[target].root = actual;
+    let field = inputs[target].field;
+    assert_eq!(
+        JvmClassPlanner::new(&store, &unit.ast, &unit.index).plan_with_fields(
+            class.symbol,
+            methods,
+            &output.typed_ast,
+            inputs
+        ),
+        Err(ClassPlanError::FieldInitializerMismatch {
+            field,
+            expected,
+            actual
+        })
+    );
 }
 
 #[test]
@@ -909,10 +1046,10 @@ fn private_fields_encode_mutability_and_keep_per_instance_state_on_jdk21() {
     use dotty::classfile::{ACC_FINAL, ACC_PRIVATE, ClassFile, FieldAccessFlags, Reader};
 
     let (mut store, defs, packages, unit) = named(include_str!("../../Counter.scala"));
-    let units = [unit];
+    let mut units = [unit];
     let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
-    let (arena, mut bindings) = type_bodies(&units, &mut store, defs, &packages, headers);
-    bindings[0].fields.reverse();
+    let (arena, bindings) = type_bodies(&units, &mut store, defs, &packages, headers);
+    units[0].classes[0].members.reverse();
     let classes = class_plans(&units, bindings, &arena, &store).unwrap();
     let class = classes[0].class;
     let unit = dotty::jvm::JvmCompilationUnit {
@@ -953,20 +1090,7 @@ fn private_fields_encode_mutability_and_keep_per_instance_state_on_jdk21() {
 
 #[test]
 fn private_var_rejects_the_initializer_of_another_int_field() {
-    let (mut store, defs, packages, unit) = named(include_str!("../../Counter.scala"));
-    let units = [unit];
-    let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
-    let (arena, mut bindings) = type_bodies(&units, &mut store, defs, &packages, headers);
-    let [base, current] = bindings[0].fields.as_mut_slice() else {
-        panic!("expected two fields")
-    };
-    let error = ClassPlanError::FieldInitializerMismatch {
-        field: current.field,
-        expected: current.root,
-        actual: base.root,
-    };
-    current.root = base.root;
-    assert_eq!(class_plans(&units, bindings, &arena, &store), Err(error));
+    assert_substituted_field_root_is_rejected(include_str!("../../Counter.scala"), 1);
 }
 
 #[test]

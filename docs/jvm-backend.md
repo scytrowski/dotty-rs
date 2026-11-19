@@ -75,8 +75,19 @@ accepts the retained bindings and the session's extended typed arena.
 
 For an ordinary top-level source class, the facade also provides
 `jvm_class_plan::JvmClassPlanner::new(&store, &source_ast, &source_index)`.
+To plan after typing several classes, use one source typer per class. Type
+its field initializers and method definitions, then call
+`TypedClassBody::from_output(class, typer.into_typed_output())`. This moves
+out the session arena and keeps the class symbol, source-to-typed index and
+local bindings together. Pass the arena to the next typer. Once typing is
+complete, call `plan_typed_class(class, &arena, &body)` for each class, using
+its original `SourceClass` and the final arena. For a parent application,
+supply the header mappings from signature completion via `with_typed_header`.
+Field roots are looked up by source RHS and local declarations by method
+owner. A body retained for another class returns `ForeignClassBody`.
+
 Use `plan(class_symbol, method_plans)` for a method-only template.
-Both planning entry points accept a public primary constructor with zero or
+The planner accepts a public primary constructor with zero or
 one value parameter list. An empty signature selects `ImplicitNoArg`. A list
 may mix ordinary parameters with public `val` and `var` parameters. The
 planner passes constructor-owned formals to `JvmPrimaryConstructorPlan` in
@@ -107,7 +118,7 @@ setter. Explicitly modified public
 fields (such as `lazy val` or `final val`) and standalone initializer
 expressions are outside this planner's scope.
 
-Both entry points also accept a single bare type identifier in `extends Base`.
+The planner also accepts a single bare type identifier in `extends Base`.
 Complete the child class header first so its `ClassInfo` identifies the source
 class that the typer resolved as the parent. Include both class plans in the
 same JVM unit. Unit validation checks the direct parent and its public
