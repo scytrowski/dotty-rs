@@ -33,7 +33,6 @@ impl SourceTyper<'_> {
         let class = self.store.symbols.get(owner);
         let term_clauses = if is_primary
             && class.kind == SymbolKind::Class
-            && !class.flags.contains(SymbolFlags::CASE)
             && !class.flags.contains(SymbolFlags::ENUM)
         {
             self.context_bound_clauses(definition)

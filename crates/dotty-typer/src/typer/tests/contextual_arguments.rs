@@ -2524,3 +2524,185 @@ fn dependent_read_rejects_a_value_from_an_independent_witness() {
         assert!(typer.source_typed_index().is_empty());
     }
 }
+
+#[test]
+fn case_class_bound_infers_int_and_passes_the_callers_witness_to_apply() {
+    let text = include_str!("../../../tests/fixtures/contextual-v1/controls/CaseClassBound.scala");
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let class = class_symbol(&parsed, &store, &index, source, "Box");
+    let apply = index
+        .generated_case_class_method(class, dotty_core::GeneratedCaseClassMethodRole::Apply)
+        .unwrap();
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+    let resolver = super::contextual_binary::library_resolver(definitions, &packages);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(resolver));
+    typer
+        .type_method_definition(definition_tree(&index, method))
+        .unwrap();
+    let typed = typer.typed_index.get(source, rhs).unwrap();
+    let TreeKind::Apply(evidence) = &typer.typed_ast().get(typed).kind else {
+        panic!("missing evidence clause")
+    };
+    assert_eq!(
+        reference(&typer, evidence.args[0]),
+        method_parameter_symbol(&parsed, &index, source, method, 0)
+    );
+    let TreeKind::Apply(values) = &typer.typed_ast().get(evidence.function).kind else {
+        panic!("missing value clause")
+    };
+    assert_eq!(reference(&typer, values.function), apply);
+    assert!(
+        matches!(typer.store.types.get(typer.typed_ast().get(typed).ty), Type::Applied {tycon,args}
+        if args == &[definitions.int] && typer.store.types.get(*tycon).reference_symbol() == Some(class))
+    );
+
+    let body = typer.type_generated_case_class_apply_body(apply).unwrap();
+    assert_eq!(
+        typer.type_generated_case_class_apply_body(apply).unwrap(),
+        body
+    );
+    let TreeKind::Apply(forward) = &typer.typed_ast().get(body).kind else {
+        panic!("missing forwarded witness")
+    };
+    let TreeKind::Apply(init) = &typer.typed_ast().get(forward.function).kind else {
+        panic!("missing forwarded value")
+    };
+    assert_eq!(forward.kind, ApplyKind::Using);
+    let witness = reference(&typer, forward.args[0]);
+    let value = reference(&typer, init.args[0]);
+    let constructor = reference(&typer, init.function);
+    assert_eq!(
+        typer.store.symbols.get(constructor).kind,
+        SymbolKind::Constructor
+    );
+    assert_eq!(typer.store.symbols.owner(constructor), Some(class));
+    for target in [value, witness] {
+        let Some(SourceDefinition::Derived { tree, .. }) = index.definition_of(target) else {
+            panic!("expected a copied parameter")
+        };
+        assert_eq!(index.derived_symbol_at(apply, source, tree), Some(target));
+        assert_eq!(typer.store.symbols.owner(target), Some(apply));
+        assert!(
+            index
+                .derived_symbol_at(constructor, source, tree)
+                .is_some_and(|formal| formal != target)
+        );
+    }
+    assert!(
+        typer
+            .store
+            .symbols
+            .get(witness)
+            .flags
+            .contains(SymbolFlags::GIVEN)
+    );
+    let (inside, rhs) =
+        method_definition_and_rhs(&parsed, typer.store(), &index, source, "evidence");
+    typer
+        .type_method_definition(definition_tree(&index, inside))
+        .unwrap();
+    let field = reference(&typer, typer.typed_index.get(source, rhs).unwrap());
+    assert_eq!(typer.store.symbols.owner(field), Some(class));
+    assert_eq!(
+        typer.store.symbols.get(field).visibility,
+        Visibility::Private
+    );
+}
+
+#[test]
+fn case_class_bound_reports_missing_and_ambiguous_evidence_at_apply() {
+    for (name, text) in [
+        (
+            "missing",
+            include_str!(
+                "../../../tests/fixtures/contextual-v1/controls/CaseClassBoundMissing.scala"
+            ),
+        ),
+        (
+            "ambiguous",
+            include_str!(
+                "../../../tests/fixtures/contextual-v1/controls/CaseClassBoundAmbiguous.scala"
+            ),
+        ),
+    ] {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, name);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let before = typer.store.checkpoint();
+        match typer.type_method_definition(definition_tree(&index, method)) {
+            Err(TyperError::MissingContextualArgument {
+                source: at,
+                tree_index,
+                ..
+            }) if name == "missing" => assert_eq!((at, tree_index), (source, rhs.index())),
+            Err(TyperError::AmbiguousContextualArgument {
+                source: at,
+                tree_index,
+                candidates,
+                ..
+            }) if name == "ambiguous" => {
+                assert_eq!((at, tree_index), (source, rhs.index()));
+                assert_eq!(
+                    candidates,
+                    (0..2)
+                        .map(|i| method_parameter_symbol(&parsed, &index, source, method, i))
+                        .collect::<Vec<_>>()
+                );
+            }
+            other => panic!("{name}: {other:?}"),
+        }
+        assert_eq!(typer.store.checkpoint(), before);
+        assert!(typer.typed_index.is_empty());
+    }
+}
+
+#[test]
+fn case_class_apply_forwards_each_named_witness_in_declaration_order() {
+    let text =
+        "trait TC[A]; object Owner { case class Pair[A: {TC as left, TC as right}](value: A) }";
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+    let class = class_symbol(&parsed, &store, &index, source, "Pair");
+    let apply = index
+        .generated_case_class_method(class, dotty_core::GeneratedCaseClassMethodRole::Apply)
+        .unwrap();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    let body = typer.type_generated_case_class_apply_body(apply).unwrap();
+    let TreeKind::Apply(call) = &typer.typed_ast().get(body).kind else {
+        panic!("expected forwarded witnesses")
+    };
+    assert_eq!(call.kind, ApplyKind::Using);
+    assert_eq!(call.args.len(), 2);
+    for (&arg, name) in call.args.iter().zip(["left", "right"]) {
+        let id = reference(&typer, arg);
+        assert_eq!(typer.store.symbols.owner(id), Some(apply));
+        assert_eq!(
+            typer
+                .store
+                .names
+                .resolve(typer.store.symbols.get(id).name.text()),
+            name
+        );
+    }
+}

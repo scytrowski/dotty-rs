@@ -1593,7 +1593,13 @@ impl Namer<'_> {
             {
                 synthesize_apply = false;
             }
-            let TreeKind::TypeBoundsTree(bounds) = &self.arena.get(parameter.rhs).kind else {
+            let bounds_tree = match &self.arena.get(parameter.rhs).kind {
+                TreeKind::PhaseSpecific(UntypedNode::ContextBounds(bounds)) => bounds.bounds,
+                _ => parameter.rhs,
+            };
+            let Some(TreeKind::TypeBoundsTree(bounds)) =
+                self.arena.try_get(bounds_tree).map(|tree| &tree.kind)
+            else {
                 synthesize_apply = false;
                 continue;
             };
@@ -1816,12 +1822,18 @@ impl Namer<'_> {
                 ));
             }
         };
-        let case_class_shape_supported = synthesize_apply;
-        let explicit_apply_comparison = if top_level && synthesize_apply {
+        let class_clauses = constructor.context_bound_clauses(self.arena, &self.store.names);
+        let has_witnesses = constructor.context_bound_trees(self.arena).next().is_some();
+        if has_witnesses && class_clauses.first().map(Vec::as_slice) != Some(leading_clause) {
+            // A public case accessor cannot expose a path through the private witness.
+            synthesize_apply = false;
+        }
+        let product_shape_supported = synthesize_apply && !has_witnesses;
+        let explicit_apply_comparison = if (top_level || has_witnesses) && synthesize_apply {
             self.explicit_companion_apply_collides(
                 companion_module_class,
                 &constructor.type_params,
-                value_parameters,
+                &class_clauses,
             )
         } else {
             Some(false)
@@ -1840,12 +1852,12 @@ impl Namer<'_> {
                 class_symbol,
                 companion_module_class,
                 declaration_context,
-                &constructor.type_params,
-                value_parameters,
+                constructor,
+                &class_clauses,
             )?;
         }
         let synthesize_product_selectors = top_level
-            && case_class_shape_supported
+            && product_shape_supported
             && constructor.type_params.is_empty()
             && constructor.value_param_clauses.len() == 1
             && (value_parameters.len() == 1
@@ -1856,7 +1868,7 @@ impl Namer<'_> {
                     value_parameters,
                 ));
         let generic_product1_source_shape = top_level
-            && case_class_shape_supported
+            && product_shape_supported
             && constructor.value_param_clauses.len() == 1
             && self.is_generic_product1_source_shape(
                 tree,
@@ -2193,7 +2205,7 @@ impl Namer<'_> {
         &self,
         companion_module_class: SymbolId,
         class_type_parameters: &[TreeId<Untyped>],
-        class_value_parameters: &[TreeId<Untyped>],
+        class_clauses: &[Vec<TreeId<Untyped>>],
     ) -> Option<bool> {
         let Some(SourceDefinition::Derived { source, tree }) =
             self.index.definition_of(companion_module_class)
@@ -2217,14 +2229,25 @@ impl Namer<'_> {
             };
             if self.store.names.resolve(method.name.as_name().text()) != "apply"
                 || method.type_params.len() != class_type_parameters.len()
-                || method.value_param_clauses.len() != 1
-                || method.value_param_clauses[0].len() != class_value_parameters.len()
             {
+                continue;
+            }
+            let method_clauses = method.context_bound_clauses(self.arena, &self.store.names);
+            if !method_clauses
+                .iter()
+                .map(Vec::len)
+                .eq(class_clauses.iter().map(Vec::len))
+            {
+                continue;
+            }
+            if class_clauses.len() != 1 || method.value_param_clauses.len() != 1 {
+                // Comparing evidence types across declaration scopes needs type completion.
+                unsupported_comparison = true;
                 continue;
             }
             let comparison = method.value_param_clauses[0]
                 .iter()
-                .zip(class_value_parameters)
+                .zip(&class_clauses[0])
                 .map(|(method_parameter, class_parameter)| {
                     let (TreeKind::ValDef(method_parameter), TreeKind::ValDef(class_parameter)) = (
                         &self.arena.get(*method_parameter).kind,
@@ -2368,8 +2391,8 @@ impl Namer<'_> {
         class_symbol: SymbolId,
         companion_module_class: SymbolId,
         declaration_context: SourceContextId,
-        type_parameters: &[TreeId<Untyped>],
-        value_parameters: &[TreeId<Untyped>],
+        constructor: &dotty_core::ast::DefDef<Untyped>,
+        clauses: &[Vec<TreeId<Untyped>>],
     ) -> Result<(), NamerError> {
         let companion_scope =
             self.index
@@ -2400,9 +2423,9 @@ impl Namer<'_> {
         self.enter_derived_method_parameters(
             apply,
             declaration_context,
-            type_parameters,
-            value_parameters.iter().copied(),
-            None,
+            &constructor.type_params,
+            clauses.iter().flatten().copied(),
+            Some(self.context_bound_flag(constructor)),
         )
     }
 
@@ -2885,10 +2908,7 @@ impl Namer<'_> {
         }
 
         let class = self.store.symbols.get(symbol);
-        if class.kind == SymbolKind::Class
-            && !class.flags.contains(SymbolFlags::CASE)
-            && !class.flags.contains(SymbolFlags::ENUM)
-        {
+        if class.kind == SymbolKind::Class && !class.flags.contains(SymbolFlags::ENUM) {
             let factory = if class.flags.contains(SymbolFlags::GIVEN)
                 && let Some(SourceDefinition::Canonical { tree, .. }) =
                     self.index.definition_of(symbol)

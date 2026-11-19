@@ -2,6 +2,7 @@
 
 use super::*;
 
+mod case_class_apply;
 mod constructors;
 mod declarations;
 mod default_getters;
@@ -182,7 +183,9 @@ impl SourceTyper<'_> {
             .value_param_clauses
             .iter()
             .flatten()
-            .any(|tree| *tree == parameter_tree)
+            .copied()
+            .chain(constructor.context_bound_trees(self.arena))
+            .any(|tree| tree == parameter_tree)
             .then_some(method)
     }
 

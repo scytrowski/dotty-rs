@@ -940,6 +940,61 @@ fn ordinary_class_bounds_enter_private_fields_and_distinct_constructor_parameter
     }
 }
 
+#[test]
+fn case_class_bound_enters_separate_witnesses_and_compares_effective_companion_clauses() {
+    for (companion, generated) in [
+        ("", true),
+        ("object Box { def apply[A](x: A): A = x }", true),
+        (
+            "object Box { def apply[A](x: A)(using e: TC[A]): A = x }",
+            false,
+        ),
+    ] {
+        let named = named_source(
+            &format!("case class Box[A: TC as tc](value: A); {companion}"),
+            403,
+        );
+        let parts = primary_constructor_parts(&named);
+        let class = named
+            .index
+            .symbol_at(named.source, parts.class_tree)
+            .unwrap();
+        let ctor = named
+            .index
+            .symbol_at(named.source, parts.constructor_tree)
+            .unwrap();
+        let TreeKind::DefDef(def) = &named.parsed.ast.get(parts.constructor_tree).kind else {
+            panic!("expected constructor")
+        };
+        let bound = def.context_bound_trees(&named.parsed.ast).next().unwrap();
+        let field = named.index.symbol_at(named.source, bound).unwrap();
+        let formal = named
+            .index
+            .derived_symbol_at(ctor, named.source, bound)
+            .unwrap();
+        assert_eq!(named.store.symbols.owner(field), Some(class));
+        assert_eq!(
+            named.store.symbols.get(field).visibility,
+            Visibility::Private
+        );
+        assert_eq!(named.store.symbols.owner(formal), Some(ctor));
+        let factory = named
+            .index
+            .generated_case_class_method(class, GeneratedCaseClassMethodRole::Apply);
+        assert_eq!(factory.is_some(), generated);
+        if let Some(factory) = factory {
+            let copy = named
+                .index
+                .derived_symbol_at(factory, named.source, bound)
+                .unwrap();
+            let entry = named.store.symbols.get(copy);
+            assert_eq!(entry.owner, Some(factory));
+            assert!(entry.flags.contains(SymbolFlags::GIVEN));
+            assert_eq!(named.store.names.resolve(entry.name.text()), "tc");
+        }
+    }
+}
+
 struct VecTokenSource {
     tokens: Vec<Token>,
     index: usize,
@@ -9392,7 +9447,7 @@ fn valid_nested_case_class_shapes_defer_apply_without_losing_the_companion_or_si
         "object Owners { case class Node private (value: Int); def unrelated: Int = 1 }",
         "object Owners { case class Node(value: Int) { def this() = this(0) }; def unrelated: Int = 1 }",
         "object Owners { case class Node[A <: AnyRef](value: A); def unrelated: Int = 1 }",
-        "object Owners { case class Node[A: Ordering](value: A); def unrelated: Int = 1 }",
+        "object Owners { case class Node[A <: AnyRef: Ordering](value: A); def unrelated: Int = 1 }",
         "object Owners { case class Node(private val value: Int); def unrelated: Int = 1 }",
         "object Owners { abstract case class Node(value: Int); def unrelated: Int = 1 }",
     ];
