@@ -1,0 +1,259 @@
+use super::*;
+
+#[test]
+#[ignore = "requires pinned Scala 3.9 sources"]
+fn c1_curried_threading_default() {
+    let text = upstream("tests/run/curried-using-threading.scala");
+    let source = SourceId::from_index(11);
+    let mut store = SemanticStore::new();
+    Definitions::bootstrap(&mut store);
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(&text).unwrap(),
+        source,
+        ContextualScanner::new(&text).unwrap(),
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty());
+    let err = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "curried-using-threading.scala",
+        &mut store,
+        &mut Packages::new(),
+    )
+    .unwrap_err();
+    let dotty_namer::NamerError::UnsupportedGivenNameShape {
+        tree_index,
+        position: Some(position),
+        unsupported_tree_index,
+        unsupported_kind: "New",
+    } = err
+    else {
+        panic!("unexpected naming error {err:?}")
+    };
+    assert_eq!(position.source(), source);
+    let range = position.span().range();
+    assert_eq!(
+        &text[range.start() as usize..range.end() as usize],
+        "given Context(\"alpha\")"
+    );
+    assert_eq!(
+        parsed
+            .ast
+            .iter()
+            .find(|(t, _)| t.index() == tree_index)
+            .unwrap()
+            .1
+            .position,
+        Some(position)
+    );
+    assert!(matches!(
+        &parsed
+            .ast
+            .iter()
+            .find(|(t, _)| t.index() == unsupported_tree_index)
+            .unwrap()
+            .1
+            .kind,
+        TreeKind::New(_)
+    ));
+    reduced_ordinary_default_after_using();
+    outcome("blocked");
+}
+
+#[test]
+#[ignore = "requires pinned Scala 3.9 sources"]
+fn c2_bound_and_implicit_default() {
+    let text = upstream("tests/pos/i8491.scala");
+    let (parsed, mut store, packages, defs, index, source) =
+        parse_and_name_file(&text, "i8491.scala");
+    let method = method_symbol(&parsed, &store, &index, source, "qux2");
+    let tree = declaration(&index, method);
+    let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+        panic!("qux2 method")
+    };
+    let parameter = def.value_param_clauses[0][0];
+    let defaulted = index.symbol_at(source, parameter).unwrap();
+    let TreeKind::TypeDef(type_parameter) = &parsed.ast.get(def.type_params[0]).kind else {
+        panic!("type parameter A")
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::ContextBounds(bounds)) =
+        &parsed.ast.get(type_parameter.rhs).kind
+    else {
+        panic!("A: Foo")
+    };
+    let witness = index.symbol_at(source, bounds.context_bounds[0]).unwrap();
+    let owner = store.symbols.owner(method).unwrap();
+    let getter = index.derived_symbol_at(owner, source, parameter).unwrap();
+    let foo = class_symbol(&parsed, &store, &index, source, "Foo");
+    let bar = class_symbol(&parsed, &store, &index, source, "Bar");
+    let resolver = audit_resolver(defs, &packages);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages)
+        .with_resolver(Box::new(resolver));
+
+    // Signature completion already places the bound witness before B.
+    let signature = typer.complete_symbol(method).unwrap();
+    let Type::Poly(poly) = typer.store().types.get(signature) else {
+        panic!("polymorphic qux2")
+    };
+    let Type::Method(clause) = typer.store().types.get(poly.result) else {
+        panic!("implicit clause")
+    };
+    assert_eq!(clause.kind, MethodKind::Implicit);
+    let [evidence, b] = clause.params.as_slice() else {
+        panic!("expected evidence and B")
+    };
+    for (formal, symbol) in [(evidence, witness), (b, defaulted)] {
+        assert_eq!(typer.store().symbols.owner(symbol), Some(method));
+        assert_eq!(
+            *formal.name.as_name(),
+            typer.store().symbols.get(symbol).name
+        );
+    }
+    let Type::Applied { tycon, .. } = typer.store().types.get(evidence.ty) else {
+        panic!("Foo[A]")
+    };
+    assert_eq!(
+        typer.store().types.get(*tycon).reference_symbol(),
+        Some(foo)
+    );
+    assert_eq!(typer.store().types.get(b.ty).reference_symbol(), Some(bar));
+
+    // The first failure is completing the getter signature, before typing
+    // the anonymous class in B's initializer. Scala assigns it ordinal 2.
+    assert_eq!(typer.store().default_getter(method, 1), None);
+    for result in [
+        typer.complete_symbol(getter).map(|_| ()),
+        typer.type_method_definition(tree).map(|_| ()),
+    ] {
+        assert!(
+            matches!(result,Err(TyperError::UsingApplicationDeferred { source: s, tree_index }) if s == source && tree_index == parameter.index()),
+            "{result:?}"
+        );
+    }
+    outcome("outside-v1");
+}
+
+#[test]
+#[ignore = "requires pinned Scala 3.9 sources"]
+fn c3_explicit_context_function() {
+    let text = upstream("tests/pos/i5295.scala");
+    let (parsed, mut store, mut packages, defs, index, source) =
+        parse_and_name_file(&text, "i5295.scala");
+    packages.enter(&mut store, SymbolOrigin::Synthetic, &["scala"]);
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "foo");
+    let bar = method_symbol(&parsed, &store, &index, source, "bar");
+    let wrapper = store.symbols.owner(method).unwrap();
+    assert_eq!(store.symbols.owner(bar), Some(wrapper));
+    assert_eq!(store.symbols.get(wrapper).kind, SymbolKind::ModuleClass);
+    assert_eq!(store.symbols.get(wrapper).origin, SymbolOrigin::Synthetic);
+    let resolver = audit_resolver(defs, &packages);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages)
+        .with_resolver(Box::new(resolver));
+    // The real Scala/JDK classpath resolves the source types. Both public
+    // body entry points stop while looking up members of the top-level owner.
+    typer.complete_symbol(method).unwrap();
+    typer.complete_symbol(bar).unwrap();
+    let context = typer.expression_context_for(method).unwrap();
+    for result in [
+        typer.type_method_definition(declaration(&index, method)),
+        typer.type_expression(rhs, context),
+    ] {
+        let Err(TyperError::MemberLookup(lookup)) = result else {
+            panic!("{result:?}")
+        };
+        assert!(
+            matches!(*lookup, MemberLookupError::ClassInfoUnavailable { symbol, state:crate::types::SymbolInfoState::Missing } if symbol == wrapper),
+            "{lookup:?}"
+        );
+    }
+    assert!(
+        matches!(typer.complete_symbol(wrapper),Err(TyperError::SourceProvenanceMissing {symbol}) if symbol == wrapper)
+    );
+    reduced_explicit_context_function_in_member();
+    outcome("blocked");
+}
+
+fn reduced_ordinary_default_after_using() {
+    let text =
+        include_str!("../../../../tests/fixtures/contextual-v1/controls/CurriedDefault.scala");
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "test");
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let ctx = typer.expression_context_for(method).unwrap();
+    let result = typer.type_expression_expected(rhs, ctx, defs.int);
+    assert!(
+        matches!(result,Err(TyperError::ApplicationArityMismatch {source: s, tree_index, expected: 1, actual: 0}) if s == source && tree_index == rhs.index()),
+        "{result:?}"
+    );
+}
+
+fn reduced_explicit_context_function_in_member() {
+    let text = include_str!(
+        "../../../../tests/fixtures/contextual-v1/controls/ExplicitContextFunction.scala"
+    );
+    let (parsed, mut store, mut packages, defs, index, source) = parse_and_name(text);
+    packages.enter(&mut store, SymbolOrigin::Synthetic, &["scala"]);
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "foo");
+    let bar = method_symbol(&parsed, &store, &index, source, "bar");
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    typer
+        .type_method_definition(declaration(&index, method))
+        .unwrap();
+    let ast = typer.typed_ast();
+    let store = typer.store();
+    let node = ast.get(typer.source_typed_index().get(source, rhs).unwrap());
+    let TreeKind::Apply(call) = &node.kind else {
+        panic!("contextual application of bar")
+    };
+    assert_eq!((node.ty, call.kind), (defs.int, ApplyKind::Using));
+    let [literal] = call.args.as_slice() else {
+        panic!("one explicit argument")
+    };
+    assert!(
+        matches!(&ast.get(*literal).kind, TreeKind::Literal(l) if l.value == dotty_core::Constant::Int(4))
+    );
+    let selection = ast.get(call.function);
+    let TreeKind::Select(member) = &selection.kind else {
+        panic!("selection of ContextFunction1.apply")
+    };
+    assert_eq!(
+        store
+            .types
+            .get(ast.get(member.qualifier).ty)
+            .reference_symbol(),
+        Some(bar)
+    );
+    let Type::TermRef {
+        prefix,
+        target: TermRefTarget::Symbol(apply),
+    } = store.types.get(selection.ty)
+    else {
+        panic!("resolved apply")
+    };
+    let Type::Applied { tycon, args } = store.types.get(*prefix) else {
+        panic!("instantiated context function")
+    };
+    assert_eq!(args, &[defs.int, defs.int]);
+    let family = store.types.get(*tycon).reference_symbol().unwrap();
+    assert_eq!(typer.synthesized_context_function_arity(family), Some(1));
+    assert_eq!(store.symbols.owner(*apply), Some(family));
+    let SymbolInfo::Complete(info) = *store.symbols.info(family) else {
+        panic!("complete ContextFunction1")
+    };
+    let Type::ClassInfo(class) = store.types.get(info) else {
+        panic!("context function class info")
+    };
+    assert_eq!(
+        store
+            .scopes
+            .get(class.declarations)
+            .lookup_all(&member.name),
+        &[*apply]
+    );
+    assert_eq!(
+        store.names.resolve(store.symbols.get(*apply).name.text()),
+        "apply"
+    );
+}

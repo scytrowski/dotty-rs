@@ -8,6 +8,9 @@ allocation order.
 
 ## Contextual arguments in Scala 3.9
 
+The [v1 acceptance audit](typer-contextual-acceptance-v1.md) compares selected
+upstream sites with the pinned compiler and records the remaining blockers.
+
 At the start of this work, the frontend preserved contextual clause kinds and
 typed a number of explicit `using` applications. It could complete the
 signature of `def read(using n: Int): Int` but a bare `read` could not

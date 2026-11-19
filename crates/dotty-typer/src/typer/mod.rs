@@ -1381,21 +1381,26 @@ mod tests {
         })
     }
 
-    fn parse_and_name(
-        text: &str,
-    ) -> (
+    type NamedTestUnit = (
         dotty_parser::ParseResult,
         SemanticStore,
         Packages,
         Definitions,
         SourceSemanticIndex,
         SourceId,
-    ) {
+    );
+
+    fn parse_and_name(text: &str) -> NamedTestUnit {
+        parse_and_name_file(text, "Typer.scala")
+    }
+
+    fn parse_and_name_file(text: &str, file: &str) -> NamedTestUnit {
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);
         let source = SourceId::from_index(11);
         let mut packages = Packages::new();
-        let (parsed, index) = parse_and_name_unit(text, source, &mut store, &mut packages);
+        let (parsed, index) =
+            parse_and_name_unit_file(text, source, &mut store, &mut packages, file);
         (parsed, store, packages, definitions, index, source)
     }
 
@@ -1464,6 +1469,16 @@ mod tests {
         store: &mut SemanticStore,
         packages: &mut Packages,
     ) -> (dotty_parser::ParseResult, SourceSemanticIndex) {
+        parse_and_name_unit_file(text, source, store, packages, "Typer.scala")
+    }
+
+    fn parse_and_name_unit_file(
+        text: &str,
+        source: SourceId,
+        store: &mut SemanticStore,
+        packages: &mut Packages,
+        file: &str,
+    ) -> (dotty_parser::ParseResult, SourceSemanticIndex) {
         let scanner = ContextualScanner::new(text).unwrap();
         let parsed = dotty_parser::parse_compilation_unit(
             SourceText::new(text).unwrap(),
@@ -1472,15 +1487,8 @@ mod tests {
             &mut store.names,
         );
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-        let index = name_compilation_unit(
-            &parsed.ast,
-            parsed.root,
-            source,
-            "Typer.scala",
-            store,
-            packages,
-        )
-        .unwrap();
+        let index =
+            name_compilation_unit(&parsed.ast, parsed.root, source, file, store, packages).unwrap();
         (parsed, index)
     }
 
@@ -9812,6 +9820,7 @@ mod tests {
     mod contextual_arguments;
     mod contextual_binary;
     mod contextual_consumers;
+    mod contextual_v1;
     mod enclosing_this_capture;
     mod issue_2282_generated_apply_inference;
     mod lexical_closure_contract;

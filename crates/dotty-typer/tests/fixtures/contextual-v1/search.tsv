@@ -1,0 +1,4 @@
+search_recursive_companion	tests/pos/byname-implicits-1.scala	0	implicitly[Foo]( ~~ val $_lazy_implicit_$1: Foo = Foo.foo(this.$_lazy_implicit_$1) ~~ $_lazy_implicit_$3.$_lazy_implicit_$1
+search_stable_companion	tests/pos/byname-implicits-2.scala	0	implicitly[Foo[Int]](Foo.fooInt)
+search_growing_byname	tests/neg/byname-implicits-11.scala	1	[E172] ~~ No given instance of type Foo[Int] was found for parameter e of method implicitly in object Predef ~~ Foo.foo[Int](/* missing */summon[=> Foo[Foo[Int]]]) ~~ 1 error found
+search_direct_ambiguity	tests/neg/given-ambiguous-2.scala	1	[E172] ~~ both given instance a1 and given instance a2 match type A of parameter a of method g ~~ 1 error found

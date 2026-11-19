@@ -1,0 +1,3 @@
+c1_curried_threading_default	tests/run/curried-using-threading.scala	0	def narrow$default$2(using x$1: Context): String @uncheckedVariance = root(x$1) ~~ narrow($1$)(curried-using-threading$package.narrow$default$2($1$))
+c2_bound_and_implicit_default	tests/pos/i8491.scala	0	def qux2[A >: Nothing <: Any](implicit evidence$1: Foo[A], implicit B: Bar) ~~ def qux2$default$2[A >: Nothing <: Any]: Bar @uncheckedVariance
+c3_explicit_context_function	tests/pos/i5295.scala	0	inline def foo: String = inline$bar.apply(using 4):String ~~ def inline$bar: (Int) ?=> String = (using x$0: Int) => bar.apply(x$0)
