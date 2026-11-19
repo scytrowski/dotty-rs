@@ -73,6 +73,17 @@ from another method yields `MethodPlanError::BodyMismatch` even when it has the
 same type and comes from the same file. For deferred planning, the planner also
 accepts the retained bindings and the session's extended typed arena.
 
+For an ordinary top-level source class, the facade also provides
+`jvm_class_plan::JvmClassPlanner::new(&store, &source_ast, &source_index)`.
+Its `plan(class_symbol, method_plans)` checks the public parameterless primary
+constructor and the template before selecting `ImplicitNoArg`. This planner
+covers classes with an implicit parent and only concrete method declarations.
+An explicit parent, a field or a template initialization expression requires
+a different class plan. The planner matches the supplied methods by canonical
+symbol and returns them in source order. Unexpected, repeated and missing
+method plans produce distinct errors before emission. All plans and IDs must
+belong to the same session.
+
 Each method plan may also carry `JvmLocalBinding` entries for ordinary local
 `val` and `var` declarations. A binding pairs the exact typed `ValDef`
 `TreeId<Typed>` with the existing canonical `SymbolId::Local` whose owner is

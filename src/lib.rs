@@ -36,6 +36,9 @@ pub use dotty_classloader::classloader;
 /// Semantic unpickling of TASTy into the shared `dotty-core` model.
 pub use dotty_tasty_unpickler::tasty_unpickler;
 
+/// JVM class plans for simple, method-only source classes.
+pub mod jvm_class_plan;
+
 /// JVM method plans from canonical source and typed declarations.
 pub mod jvm_method_plan;
 

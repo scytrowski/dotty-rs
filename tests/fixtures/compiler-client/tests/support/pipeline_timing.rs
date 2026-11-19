@@ -103,7 +103,7 @@ fn compile_with_signatures(
     let (arena, typed) = type_bodies(&units, &mut store, definitions, &packages);
     let typed_at = Instant::now();
     let plan = JvmCompilationUnit {
-        classes: class_plans(&units, typed, &arena, &store),
+        classes: class_plans(&units, typed, &arena, &store).unwrap(),
         store: &store,
         typed_ast: &arena,
     };

@@ -1,4 +1,6 @@
 //! The consumer owns phase ordering, plans and output for classes with a no-arg constructor.
+#[path = "support/class_planning.rs"]
+mod class_planning;
 #[path = "support/parsing.rs"]
 mod parsing;
 #[path = "support/pipeline_timing.rs"]
@@ -16,9 +18,9 @@ use dotty::core::{
     SymbolInfo, TreeId, TreeKind, Typed, Untyped,
 };
 use dotty::jvm::{
-    GeneratedClass, JvmClassInitializationPlan, JvmClassPlan, JvmCompilationUnit,
-    PreparedJvmEmission, emit_class,
+    GeneratedClass, JvmClassPlan, JvmCompilationUnit, PreparedJvmEmission, emit_class,
 };
+use dotty::jvm_class_plan::{ClassPlanError, JvmClassPlanner};
 use dotty::jvm_method_plan::JvmMethodPlanner;
 use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty::parser::{DetachedParse, ParseResult};
@@ -108,7 +110,12 @@ fn enter(
             panic!("expected template")
         };
         let start = methods.len();
-        methods.extend_from_slice(&template.body);
+        methods.extend(template.body.iter().copied().filter(|&tree| {
+            matches!(&ast.get(tree).kind, TreeKind::DefDef(method) if method.rhs.is_some())
+                && index.symbol_at(id, tree).is_some_and(|symbol| {
+                    store.symbols.get(symbol).kind == dotty::core::SymbolKind::Method
+                })
+        }));
         classes.push(NamedClass {
             symbol: index.symbol_at(id, tree).unwrap(),
             method_range: start..methods.len(),
@@ -234,7 +241,7 @@ fn with_plan<R>(
     complete_signatures(&units, &mut store, definitions, &packages).unwrap();
 
     let (output, typed_classes) = type_bodies(&units, &mut store, definitions, &packages);
-    let classes = class_plans(&units, typed_classes, &output, &store);
+    let classes = class_plans(&units, typed_classes, &output, &store).unwrap();
     let plan = JvmCompilationUnit {
         store: &store,
         typed_ast: &output,
@@ -294,7 +301,7 @@ fn class_plans(
     typed_classes: Vec<Vec<MethodBindings>>,
     output: &AstArena<Typed>,
     store: &SemanticStore,
-) -> Vec<JvmClassPlan> {
+) -> Result<Vec<JvmClassPlan>, ClassPlanError> {
     let mut classes = Vec::new();
     for ((unit, class), typed) in named_classes(units).zip(typed_classes) {
         assert_eq!(class.method_range.len(), typed.len());
@@ -312,16 +319,11 @@ fn class_plans(
                 }
                 .plan(unit.symbol(tree))
                 .unwrap()
-            })
-            .collect();
-        classes.push(JvmClassPlan {
-            class: class.symbol,
-            fields: vec![],
-            initialization: JvmClassInitializationPlan::ImplicitNoArg,
-            methods,
-        });
+            });
+        classes
+            .push(JvmClassPlanner::new(store, &unit.ast, &unit.index).plan(class.symbol, methods)?);
     }
-    classes
+    Ok(classes)
 }
 
 fn emit_batch(
