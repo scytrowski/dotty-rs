@@ -9,7 +9,7 @@ allocation order.
 ## Contextual arguments in Scala 3.9
 
 The [v1 acceptance audit](typer-contextual-acceptance-v1.md) compares selected
-upstream sites with the pinned compiler. All ten in-scope observations agree.
+upstream sites with the pinned compiler. All eleven in-scope observations agree.
 
 At the start of this work, the frontend preserved contextual clause kinds and
 typed a number of explicit `using` applications. It could complete the
@@ -88,8 +88,24 @@ clause still encounters the typer’s selection-prefix restriction for a
 method result whose class comes from TASTy.
 A legacy `implicit` clause also falls back only for missing evidence. Ambiguity
 retains both candidates and rolls back the failed application.
-Combining a default with a synthesized context-bound clause
-still reports a typing error. Conversion insertion covers value adaptation to
+The default getter of a method with a context bound takes the method type
+parameters and the preceding term clauses. Witnesses merged into the defaulted
+parameter’s own clause contribute to its ordinal only. In
+`read[A: Ev as tc](v: tc.Out)(using n: Int = 1)`, the witness is
+inserted before `v`. Both `read` and `read$default$3` bind `tc.Out` to their
+own witness parameter. A projection `tc#Out` from a class named `tc` leaves
+the witness in the final contextual clause. At a call site with
+`e: Ev[Int]` and `v: e.Out`, omitting `n` inserts `read$default$3[Int](e)(v)`.
+Both calls share the original typed arguments. An explicit `(using 1)`
+passes the literal directly. For the unbounded abstract member `type Out`, a
+value from an independent witness has a distinct type and is rejected.
+For the default
+`new Bar {}` in Scala’s `i8491.scala`, the typed tree binds an anonymous
+class to the getter, calls its constructor and widens the result to the
+source marker trait. Anonymous templates with members or inherited
+implementation obligations remain deferred.
+
+Conversion insertion covers value adaptation to
 a known expected type. This includes ordinary method arguments. Searching for
 a conversion solely because a member is missing, and instantiating generic
 old-style conversion methods, remain outside that implementation.

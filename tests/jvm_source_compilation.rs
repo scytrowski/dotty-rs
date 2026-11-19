@@ -16626,6 +16626,7 @@ fn planned_call_proof_rejects_a_select_for_an_unqualified_source_function() {
         function.kind = TreeKind::Select(dotty_core::ast::Select {
             qualifier: call.typed_argument(),
             name: identifier.name,
+            is_type_projection: false,
             backquoted: false,
         });
         let corrupted_unit = JvmCompilationUnit {

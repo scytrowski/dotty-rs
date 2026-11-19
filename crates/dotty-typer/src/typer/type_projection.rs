@@ -462,8 +462,7 @@ impl SourceTyper<'_> {
         }
         if let TreeKind::Select(select) = &source_tree.kind {
             let ty = self.type_of_selected_tpt(
-                select.qualifier,
-                select.name,
+                select,
                 context,
                 tree.index(),
                 source_tree.position,
@@ -835,7 +834,16 @@ impl SourceTyper<'_> {
             ));
             tree = select.qualifier;
         }
-        let Some(root) = self.resolve_qualifier_symbol(tree, context, tree_index, position)? else {
+        let Some(TreeKind::Ident(ident)) = self.arena.try_get(tree).map(|node| &node.kind) else {
+            return Ok(None);
+        };
+        if self.store.names.resolve(ident.name.text()) == "_root_" {
+            return Ok(None);
+        }
+        let term_name = *dotty_core::TermName::new(ident.name.text()).as_name();
+        let Some(root) =
+            self.resolve_unrooted_qualifier_name(term_name, context, tree_index, position)?
+        else {
             return Ok(None);
         };
         if !matches!(
@@ -875,13 +883,14 @@ impl SourceTyper<'_> {
 
     fn type_of_selected_tpt(
         &mut self,
-        qualifier_tree: TreeId<Untyped>,
-        name: dotty_core::Name,
+        select: &dotty_core::ast::Select<Untyped>,
         context: SourceContextId,
         tree_index: u32,
         position: Option<SourceSpan>,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
+        let qualifier_tree = select.qualifier;
+        let name = select.name;
         if !name.is_type() {
             return Err(TyperError::UnsupportedTypeTree {
                 source: self.source,
@@ -889,10 +898,20 @@ impl SourceTyper<'_> {
                 tree_kind: "term selection",
             });
         }
-        if let Some(prefix) =
+        let path = if select.is_type_projection {
+            let prefix = self.type_of_tpt_inner_journaled(qualifier_tree, context, journal)?;
+            Some((prefix, prefix))
+        } else if let Some(prefix) =
             self.selected_term_type_path(qualifier_tree, context, tree_index, position, journal)?
         {
-            let receiver = self.widen_expression_type_journaled(prefix, journal, 0)?;
+            Some((
+                prefix,
+                self.widen_expression_type_journaled(prefix, journal, 0)?,
+            ))
+        } else {
+            None
+        };
+        if let Some((prefix, receiver)) = path {
             let accessible =
                 self.accessible_path_members(receiver, name, context, tree_index, journal)?;
             let symbol = self

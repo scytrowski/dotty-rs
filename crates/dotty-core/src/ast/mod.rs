@@ -2,6 +2,7 @@
 
 mod arena;
 mod common;
+mod context_bounds;
 pub mod given_name;
 mod modifiers;
 mod phase;

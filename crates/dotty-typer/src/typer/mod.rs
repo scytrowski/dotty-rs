@@ -32,6 +32,7 @@ mod resolution;
 use resolution::imports::ImportSelection;
 mod source_annotations;
 mod source_function;
+mod synthetic_class;
 mod transaction;
 mod type_projection;
 
@@ -8260,6 +8261,7 @@ mod tests {
             kind: TreeKind::Select(dotty_core::ast::Select {
                 qualifier: new_tree,
                 name: constructor_name,
+                is_type_projection: false,
                 backquoted: false,
             }),
             position: None,
@@ -15175,6 +15177,7 @@ mod tests {
             kind: TreeKind::Select(dotty_core::ast::Select {
                 qualifier: imports[0].1,
                 name: member_name,
+                is_type_projection: false,
                 backquoted: false,
             }),
             position: None,

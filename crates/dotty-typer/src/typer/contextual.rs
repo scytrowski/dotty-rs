@@ -310,24 +310,11 @@ impl SourceTyper<'_> {
                 .map_err(|_| deferred)?;
             arg_ty
         } else if self.type_contains_param_ref(result, binder)? {
-            let paths = args
-                .iter()
-                .map(|arg| {
-                    let path = self.typed_arena.get(*arg).ty;
-                    Ok(self.is_stable_selection_prefix(path)?.then_some(path))
-                })
-                .collect::<Result<Vec<_>, TyperError>>()?;
-            dotty_core::types::instantiate_method_result(self.store, binder, &paths).map_err(
-                |error| match error {
-                    dotty_core::types::TypeRebindError::MissingMethodArgumentPath { .. } => {
-                        deferred
-                    }
-                    error => TyperError::TypeRebinding {
-                        source: self.source,
-                        tree_index,
-                        error,
-                    },
-                },
+            self.instantiate_contextual_result(
+                binder,
+                result,
+                args.iter().copied().map(Some),
+                tree_index,
             )?
         } else {
             result
@@ -336,6 +323,45 @@ impl SourceTyper<'_> {
             TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
                 .apply_with_kind(function, args, kind, result, position),
         )
+    }
+
+    /// An unavailable path matters only when the result actually refers to
+    /// that argument. The core rebinder checks this while substituting.
+    fn instantiate_contextual_result(
+        &mut self,
+        binder: TypeId,
+        result: TypeId,
+        arguments: impl Iterator<Item = Option<TreeId<Typed>>>,
+        tree_index: u32,
+    ) -> Result<TypeId, TyperError> {
+        let mut paths = Vec::with_capacity(arguments.size_hint().0);
+        for argument in arguments {
+            let path = match argument {
+                Some(arg) => {
+                    let ty = self.typed_arena.get(arg).ty;
+                    self.is_stable_selection_prefix(ty)?.then_some(ty)
+                }
+                None => None,
+            };
+            paths.push(path);
+        }
+        dotty_core::types::instantiate_method_result(self.store, binder, &paths).map_err(|error| {
+            match error {
+                dotty_core::types::TypeRebindError::MissingMethodArgumentPath { .. } => {
+                    TyperError::DependentMethodApplicationDeferred {
+                        source: self.source,
+                        tree_index,
+                        binder,
+                        result,
+                    }
+                }
+                error => TyperError::TypeRebinding {
+                    source: self.source,
+                    tree_index,
+                    error,
+                },
+            }
+        })
     }
 
     fn contextual_reference_tree(

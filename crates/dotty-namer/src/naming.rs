@@ -1176,7 +1176,7 @@ impl Namer<'_> {
                 owner_context.source_context,
                 &constructor.type_params,
                 constructor.value_param_clauses.iter().flatten().copied(),
-                true,
+                Some(SymbolFlags::GIVEN),
             )?;
         }
         Ok(Some(EnteredHeader::ClassLike {
@@ -2402,7 +2402,7 @@ impl Namer<'_> {
             declaration_context,
             type_parameters,
             value_parameters.iter().copied(),
-            false,
+            None,
         )
     }
 
@@ -2412,7 +2412,7 @@ impl Namer<'_> {
         declaration_context: SourceContextId,
         type_parameters: &[TreeId<Untyped>],
         value_parameters: impl Iterator<Item = TreeId<Untyped>>,
-        preserve_parameter_flags: bool,
+        witness_flag: Option<SymbolFlags>,
     ) -> Result<(), NamerError> {
         let scope = self.store.scopes.alloc(Scope::new(Some(factory)));
         self.index.record_scope(factory, scope)?;
@@ -2439,26 +2439,42 @@ impl Namer<'_> {
             )?;
             self.index.record_declaration_context(symbol, context)?;
         }
+        let mut anonymous = 0;
         for parameter_tree in value_parameters {
-            let TreeKind::ValDef(parameter) = &self.arena.get(parameter_tree).kind else {
-                return Err(NamerError::MalformedAstShape {
-                    tree_index: parameter_tree.index(),
-                    expected: "factory value parameter ValDef",
-                });
-            };
-            let symbol = self.enter_derived_symbol(
-                parameter_tree,
-                *parameter.name.as_name(),
-                factory,
-                scope,
-                SymbolSpec {
-                    kind: SymbolKind::Parameter,
-                    flags: if preserve_parameter_flags {
+            let (name, flags) = match (&self.arena.get(parameter_tree).kind, witness_flag) {
+                (TreeKind::ValDef(parameter), flags) => (
+                    parameter.name,
+                    if flags.is_some() {
                         Self::source_flags(&parameter.metadata.modifiers)
                             & (SymbolFlags::GIVEN | SymbolFlags::IMPLICIT | SymbolFlags::ERASED)
                     } else {
                         SymbolFlags::EMPTY
                     },
+                ),
+                (TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(bound)), Some(flag)) => {
+                    let name = bound.name.unwrap_or_else(|| {
+                        anonymous += 1;
+                        dotty_core::TermName::new(
+                            self.store.names.intern(&format!("evidence${anonymous}")),
+                        )
+                    });
+                    (name, flag)
+                }
+                _ => {
+                    return Err(NamerError::MalformedAstShape {
+                        tree_index: parameter_tree.index(),
+                        expected: "derived method value parameter or context bound",
+                    });
+                }
+            };
+            let symbol = self.enter_derived_symbol(
+                parameter_tree,
+                *name.as_name(),
+                factory,
+                scope,
+                SymbolSpec {
+                    kind: SymbolKind::Parameter,
+                    flags,
                     visibility: Visibility::Public,
                 },
             )?;
@@ -3331,10 +3347,18 @@ impl Namer<'_> {
         if extension_prefix_clauses.is_none() {
             let mut ordinal = 0;
             let mut follows_contextual_clause = false;
-            for (clause_index, clause) in definition.value_param_clauses.iter().enumerate() {
+            let clauses = definition.context_bound_clauses(self.arena, &self.store.names);
+            for (clause_index, clause) in clauses.iter().enumerate() {
                 let mut contextual_clause = false;
                 for &parameter_tree in clause {
                     ordinal += 1;
+                    if matches!(
+                        self.arena.get(parameter_tree).kind,
+                        TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(_))
+                    ) {
+                        contextual_clause = true;
+                        continue;
+                    }
                     let TreeKind::ValDef(parameter) = &self.arena.get(parameter_tree).kind else {
                         continue;
                     };
@@ -3370,11 +3394,8 @@ impl Namer<'_> {
                         getter,
                         declaration_context,
                         &definition.type_params,
-                        definition.value_param_clauses[..clause_index]
-                            .iter()
-                            .flatten()
-                            .copied(),
-                        true,
+                        clauses[..clause_index].iter().flatten().copied(),
+                        Some(self.context_bound_flag(definition)),
                     )?;
                 }
                 follows_contextual_clause |= contextual_clause;
@@ -3565,6 +3586,13 @@ impl Namer<'_> {
         Ok(witnesses)
     }
 
+    fn context_bound_flag(&self, definition: &dotty_core::ast::DefDef<Untyped>) -> SymbolFlags {
+        definition.value_param_clauses.last().and_then(|clause| clause.first())
+            .and_then(|tree| self.arena.try_get(*tree))
+            .filter(|node| matches!(&node.kind, TreeKind::ValDef(parameter) if parameter.metadata.modifiers.contains(&Modifier::Implicit)))
+            .map_or(SymbolFlags::GIVEN, |_| SymbolFlags::IMPLICIT)
+    }
+
     fn scan_method_parameters(
         &mut self,
         tree: TreeId<Untyped>,
@@ -3575,12 +3603,8 @@ impl Namer<'_> {
         let TreeKind::DefDef(definition) = &self.arena.get(tree).kind else {
             return Ok(());
         };
-        let witness_flag = definition.value_param_clauses.last().and_then(|clause| clause.first())
-            .and_then(|tree| self.arena.try_get(*tree))
-            .filter(|node| matches!(&node.kind, TreeKind::ValDef(parameter) if parameter.metadata.modifiers.contains(&Modifier::Implicit)))
-            .map_or(SymbolFlags::GIVEN, |_| SymbolFlags::IMPLICIT);
+        let witness_flag = self.context_bound_flag(definition);
         let mut anonymous_witnesses = 0;
-        let mut has_context_bounds = false;
         for parameter_tree in &definition.type_params {
             let TreeKind::TypeDef(parameter) = &self.arena.get(*parameter_tree).kind else {
                 return Err(NamerError::MalformedAstShape {
@@ -3604,7 +3628,6 @@ impl Namer<'_> {
             self.index
                 .record_declaration_context(parameter_symbol, method_context)?;
             for (tree, name) in self.context_bound_witnesses(parameter, &mut anonymous_witnesses)? {
-                has_context_bounds = true;
                 let witness = self.enter_symbol(
                     tree,
                     *name.as_name(),
@@ -3620,55 +3643,55 @@ impl Namer<'_> {
                     .record_declaration_context(witness, method_context)?;
             }
         }
-        let mut ordinal = 0;
-        for clause in &definition.value_param_clauses {
-            for parameter_tree in clause {
-                let TreeKind::ValDef(parameter) = &self.arena.get(*parameter_tree).kind else {
-                    return Err(NamerError::MalformedAstShape {
+        let clauses = definition.context_bound_clauses(self.arena, &self.store.names);
+        for (ordinal, parameter_tree) in clauses.iter().flatten().enumerate() {
+            if matches!(
+                self.arena.get(*parameter_tree).kind,
+                TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(_))
+            ) {
+                continue; // The witness symbol was entered with its type parameter.
+            }
+            let TreeKind::ValDef(parameter) = &self.arena.get(*parameter_tree).kind else {
+                return Err(NamerError::MalformedAstShape {
+                    tree_index: parameter_tree.index(),
+                    expected: "ValDef method value parameter",
+                });
+            };
+            if parameter.metadata.modifiers.iter().any(|modifier| {
+                matches!(modifier, Modifier::ParamAccessor | Modifier::PrivateLocal)
+            }) {
+                return Err(NamerError::MalformedAstShape {
+                    tree_index: parameter_tree.index(),
+                    expected: "ordinary method ValDef without constructor-role metadata",
+                });
+            }
+            let spec = self.source_symbol_spec(
+                *parameter_tree,
+                &parameter.metadata,
+                method,
+                SymbolKind::Parameter,
+            )?;
+            let parameter_symbol = self.enter_symbol(
+                *parameter_tree,
+                *parameter.name.as_name(),
+                method,
+                method_scope,
+                spec,
+            )?;
+            self.index
+                .record_declaration_context(parameter_symbol, method_context)?;
+            if parameter.rhs.is_some()
+                && let Some(getter) = self.store.symbols.owner(method).and_then(|owner| {
+                    self.index
+                        .derived_symbol_at(owner, self.source, *parameter_tree)
+                })
+            {
+                self.store
+                    .record_default_getter(method, ordinal, parameter_symbol, getter)
+                    .map_err(|_| NamerError::MalformedAstShape {
                         tree_index: parameter_tree.index(),
-                        expected: "ValDef method value parameter",
-                    });
-                };
-                if parameter.metadata.modifiers.iter().any(|modifier| {
-                    matches!(modifier, Modifier::ParamAccessor | Modifier::PrivateLocal)
-                }) {
-                    return Err(NamerError::MalformedAstShape {
-                        tree_index: parameter_tree.index(),
-                        expected: "ordinary method ValDef without constructor-role metadata",
-                    });
-                }
-                let spec = self.source_symbol_spec(
-                    *parameter_tree,
-                    &parameter.metadata,
-                    method,
-                    SymbolKind::Parameter,
-                )?;
-                let parameter_symbol = self.enter_symbol(
-                    *parameter_tree,
-                    *parameter.name.as_name(),
-                    method,
-                    method_scope,
-                    spec,
-                )?;
-                self.index
-                    .record_declaration_context(parameter_symbol, method_context)?;
-                // Context-bound witnesses can move before explicit clauses. Until default
-                // completion supports that signature, its flattened positions are unknown.
-                if !has_context_bounds
-                    && parameter.rhs.is_some()
-                    && let Some(getter) = self.store.symbols.owner(method).and_then(|owner| {
-                        self.index
-                            .derived_symbol_at(owner, self.source, *parameter_tree)
-                    })
-                {
-                    self.store
-                        .record_default_getter(method, ordinal, parameter_symbol, getter)
-                        .map_err(|_| NamerError::MalformedAstShape {
-                            tree_index: parameter_tree.index(),
-                            expected: "a unique default getter for this parameter",
-                        })?;
-                }
-                ordinal += 1;
+                        expected: "a unique default getter for this parameter",
+                    })?;
             }
         }
         Ok(())
@@ -4185,6 +4208,7 @@ mod tests {
             kind: TreeKind::Select(Select {
                 qualifier,
                 name: *dotty_core::TermName::new(name).as_name(),
+                is_type_projection: false,
                 backquoted: false,
             }),
             position: None,
@@ -4571,6 +4595,7 @@ mod tests {
             kind: TreeKind::Select(Select {
                 qualifier,
                 name: *selected.as_name(),
+                is_type_projection: false,
                 backquoted: false,
             }),
             position: None,
@@ -4593,6 +4618,7 @@ mod tests {
             kind: TreeKind::Select(Select {
                 qualifier,
                 name: *constructor.as_name(),
+                is_type_projection: false,
                 backquoted: false,
             }),
             position: None,

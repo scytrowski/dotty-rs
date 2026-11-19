@@ -105,19 +105,85 @@ fn c2_bound_and_implicit_default() {
     );
     assert_eq!(typer.store().types.get(b.ty).reference_symbol(), Some(bar));
 
-    // The first failure is completing the getter signature, before typing
-    // the anonymous class in B's initializer. Scala assigns it ordinal 2.
-    assert_eq!(typer.store().default_getter(method, 1), None);
-    for result in [
-        typer.complete_symbol(getter).map(|_| ()),
-        typer.type_method_definition(tree).map(|_| ()),
-    ] {
-        assert!(
-            matches!(result,Err(TyperError::UsingApplicationDeferred { source: s, tree_index }) if s == source && tree_index == parameter.index()),
-            "{result:?}"
-        );
-    }
-    outcome("outside-v1");
+    assert_eq!(typer.store().default_getter(method, 1), Some(getter));
+    assert_eq!(
+        typer
+            .store()
+            .names
+            .resolve(typer.store().symbols.get(getter).name.text()),
+        "qux2$default$2"
+    );
+    let getter_type = typer.complete_symbol(getter).unwrap();
+    let Type::Poly(poly) = typer.store().types.get(getter_type) else {
+        panic!("polymorphic getter")
+    };
+    assert_eq!(poly.params.len(), 1);
+    assert_eq!(
+        typer.store().types.get(poly.result).reference_symbol(),
+        Some(bar)
+    );
+    typer.type_method_definition(tree).unwrap();
+    let def_body = typer
+        .source_typed_index()
+        .get(source, def.rhs.unwrap())
+        .unwrap();
+    assert_eq!(referent(&typer, def_body), defaulted);
+
+    let TreeKind::ValDef(param) = &parsed.ast.get(parameter).kind else {
+        panic!("defaulted B")
+    };
+    let rhs = typer
+        .source_typed_index()
+        .get(source, param.rhs.unwrap())
+        .unwrap();
+    let ast = typer.typed_ast();
+    let TreeKind::Block(block) = &ast.get(rhs).kind else {
+        panic!("anonymous class block")
+    };
+    let [class_tree] = block.stats[..] else {
+        panic!("one local class")
+    };
+    let class = typer
+        .source_typed_index()
+        .synthetic_definition_symbol(class_tree)
+        .unwrap();
+    assert_eq!(typer.store().symbols.owner(class), Some(getter));
+    assert!(
+        typer
+            .store()
+            .symbols
+            .get(class)
+            .flags
+            .contains(SymbolFlags::FINAL)
+    );
+    let SymbolInfo::Complete(info) = *typer.store().symbols.info(class) else {
+        panic!("anonymous class info")
+    };
+    let Type::ClassInfo(info) = typer.store().types.get(info) else {
+        panic!("class info")
+    };
+    assert_eq!(info.parents.len(), 2);
+    assert_eq!(info.parents[0], defs.object_type);
+    assert_eq!(
+        typer.store().types.get(info.parents[1]).reference_symbol(),
+        Some(bar)
+    );
+    let TreeKind::Typed(result) = &ast.get(block.expr).kind else {
+        panic!("widened to Bar")
+    };
+    assert_eq!(
+        typer
+            .store()
+            .types
+            .get(ast.get(result.expr).ty)
+            .reference_symbol(),
+        Some(class)
+    );
+    assert_eq!(
+        typer.store().types.get(ast.get(rhs).ty).reference_symbol(),
+        Some(bar)
+    );
+    outcome("match");
 }
 
 #[test]

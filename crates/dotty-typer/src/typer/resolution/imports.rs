@@ -402,12 +402,7 @@ impl SourceTyper<'_> {
                         Err(error) => return Err(error),
                     }
                 }
-                if let Some(symbol) =
-                    self.lookup_context_symbol(ident.name, context, tree_index, position)?
-                {
-                    return Ok(Some(symbol));
-                }
-                self.resolve_relative_import_segment(ident.name, context, tree_index, position)
+                self.resolve_unrooted_qualifier_name(ident.name, context, tree_index, position)
             }
             TreeKind::Select(select) => {
                 let Some(qualifier) = self.resolve_qualifier_symbol_with_expression_context(
@@ -495,6 +490,19 @@ impl SourceTyper<'_> {
                 tree_kind: tree_kind_name(&node.kind),
             }),
         }
+    }
+
+    pub(in crate::typer) fn resolve_unrooted_qualifier_name(
+        &mut self,
+        name: Name,
+        context: SourceContextId,
+        tree_index: u32,
+        position: Option<SourceSpan>,
+    ) -> Result<Option<SymbolId>, TyperError> {
+        if let Some(symbol) = self.lookup_context_symbol(name, context, tree_index, position)? {
+            return Ok(Some(symbol));
+        }
+        self.resolve_relative_import_segment(name, context, tree_index, position)
     }
 
     /// Resolves the first segment of an unrooted import qualifier. The actual

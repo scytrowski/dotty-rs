@@ -1,8 +1,8 @@
 # Acceptance audit of contextual argument typing, v1
 
-**The source typer meets the v1 acceptance criteria.** All ten in-scope
-sites agree with Scala 3.9. The eleventh site exercises a previously
-documented unsupported combination of a context bound and a default argument.
+**The source typer meets the v1 acceptance criteria.** All eleven selected
+sites agree with Scala 3.9.0, including the context bound and implicit default
+in the upstream regression `i8491.scala`.
 
 ## What the audit measures
 
@@ -44,7 +44,7 @@ the last column help locate a failure and carry no additional acceptance votes.
 | `tests/neg/given-ambiguous-2.scala` · RHS of top-level `f` | E172 names the conflicting `a1` and `a2` at the call of `g`. | **Match.** Typing the original method reports ambiguity at its call to `g` and identifies the source declarations `a1` and `a2`. |
 | `tests/pos/i5295.scala` · top-level `foo` | The inline accessor for `bar` applies the context function with explicit argument `4`. | **Match.** In the original inline method body, Rust resolves the source `bar` and `ContextFunction1.apply`, keeps the explicit argument `4` and produces the declared `String` result. The comparison covers the source application before inline-accessor lowering. |
 | `tests/run/curried-using-threading.scala` · `narrow()` | The call and its ordinary default getter receive the same contextual argument. | **Match.** Rust resolves the constructor-form given to `given_Context`. The call of `narrow` and the call of `narrow$default$2` reuse the same evidence. The getter body calls `root` with its own copy of the contextual parameter. |
-| `tests/pos/i8491.scala` · `Test.qux2` | The synthesized witness precedes `B` in the implicit clause and the getter is `qux2$default$2`. | **Outside the documented v1 subset.** Rust completes the two-parameter signature but rejects the definition with `UsingApplicationDeferred` at `B`. The combination of a synthesized context bound and a default was already listed as unsupported. |
+| `tests/pos/i8491.scala` · `Test.qux2` | The synthesized witness precedes `B` in the implicit clause and the getter is `qux2$default$2`. | **Match.** The complete definition returns its `B` parameter. The polymorphic getter takes only the type parameter. Its default constructs a fresh anonymous class owned by the getter, with parents `Object` and `Bar`, and widens the result to `Bar`. |
 
 The existing contextual argument and consumer fixtures provide additional
 controls for structural givens, dependent argument paths, contextual defaults,
@@ -55,12 +55,12 @@ describes their coverage and the separate output contracts for JVM and TASTy.
 
 ## Scope of closure
 
-The ten in-scope observations and the focused regressions cover source typing.
+The eleven in-scope observations and the focused regressions cover source typing.
 The curried test exercises the original `narrow()` inside `Test`, as well as
 the definition of `narrow` and its default expression. The run-suite program's
 `@main` launcher, JVM output and TASTy emission have separate acceptance criteria.
-The signature combining a synthesized context-bound witness with a default in
-`i8491.scala` remains tracked outside v1.
+The `i8491.scala` observation covers source typing of the default body. Emission
+of its anonymous class has a separate output contract.
 
 ## Reproduction
 

@@ -89,11 +89,11 @@ parameter following a contextual clause, the derived getter belongs to the
 method's owner. Its source tree is the defaulted parameter.
 Earlier parameter clauses have their own getter-owned bindings, which let the
 typer resolve a reference in the default expression to the correct parameter.
-For methods with explicit value clauses and no context bounds, the namer
-also records the method, flattened zero-based parameter position, parameter
-symbol, and getter symbol in the semantic store. Context-bound witnesses can
-change the positions, so these methods retain their source-index bindings
-until default completion supports witness placement.
+The namer records the method, flattened zero-based parameter position,
+parameter symbol and getter symbol after placing context-bound witnesses.
+For `def read[A: Show](x: A)(using n: Int = 1)`, the witness precedes `n`
+in the last clause, so `read$default$3` copies `A` and `x`. A witness placed
+in an earlier clause has its own getter-owned parameter.
 
 ## Bounded nested case-class companions
 

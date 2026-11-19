@@ -1108,6 +1108,16 @@ impl SourceTyper<'_> {
             };
             let expected_type =
                 self.rebind_active_type_parameter_symbols(expected_type, actual, tree_index)?;
+            // A selected abstract type and a transparent member alias have the
+            // same symbol kind. The completed bounds distinguish them.
+            for ty in [actual, expected_type] {
+                if let Some(member) = self.projected_type_member(ty)
+                    && self.is_current_source_symbol(member)
+                    && matches!(self.store.symbols.info(member), SymbolInfo::Missing)
+                {
+                    self.complete_symbol_inner(member, info_journal)?;
+                }
+            }
             match self.conforms(actual, expected_type) {
                 Ok(true) => {}
                 Ok(false)

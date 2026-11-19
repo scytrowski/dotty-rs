@@ -268,7 +268,7 @@ pub enum TyperError {
         class: SymbolId,
         tree_index: u32,
     },
-    /// A `new` type tree is a template; anonymous-class lowering is deferred.
+    /// The anonymous template exceeds the supported empty source marker-trait shape.
     AnonymousClassInstantiationDeferred {
         source: SourceId,
         tree_index: u32,

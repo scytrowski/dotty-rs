@@ -31,6 +31,8 @@ pub struct Ident {
 /// backquotes in the source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Select<P: AstPhase> {
+    /// True for a source type projection (`T#Member`).
+    pub is_type_projection: bool,
     pub qualifier: TreeId<P>,
     pub name: Name,
     pub backquoted: bool,
@@ -431,6 +433,7 @@ mod tests {
         let select = Select {
             qualifier: tree_id(2),
             name: name(1),
+            is_type_projection: false,
             backquoted: false,
         };
 

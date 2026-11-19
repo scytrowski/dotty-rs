@@ -90,6 +90,40 @@ impl fmt::Display for TypeRelationError {
 impl std::error::Error for TypeRelationError {}
 
 impl SourceTyper<'_> {
+    /// The type member selected from a term path. Opaque aliases have separate
+    /// visibility and completion rules.
+    pub(crate) fn projected_type_member(&self, ty: TypeId) -> Option<SymbolId> {
+        let Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(member),
+        } = self.store.types.try_get(ty)?
+        else {
+            return None;
+        };
+        if !matches!(
+            self.store.types.try_get(*prefix),
+            Some(Type::TermRef { .. })
+        ) || !self.store.symbols.contains(*member)
+        {
+            return None;
+        }
+        let declaration = self.store.symbols.get(*member);
+        (declaration.kind == SymbolKind::TypeAlias
+            && !declaration.flags.contains(SymbolFlags::OPAQUE))
+        .then_some(*member)
+    }
+
+    pub(crate) fn is_unbounded_member_projection(&self, ty: TypeId) -> bool {
+        let Some(member) = self.projected_type_member(ty) else {
+            return false;
+        };
+        let SymbolInfo::Complete(info) = self.store.symbols.info(member) else {
+            return false;
+        };
+        matches!(self.store.types.try_get(*info), Some(Type::Bounds {low, high})
+            if *low == self.definitions.nothing_type && *high == self.definitions.any_type)
+    }
+
     /// Tests the supported nominal subtype relation without completing source symbols.
     ///
     /// Nominal parent checks read already completed class information. Call
@@ -310,7 +344,10 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
                 }
             }
         }
-        if opaque {
+        if opaque
+            || self.typer.is_unbounded_member_projection(found)
+            || self.typer.is_unbounded_member_projection(expected)
+        {
             return Ok(false);
         }
         if self.is_class(expected, self.typer.definitions.null_class) {
@@ -587,6 +624,9 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
     }
 
     fn normalize(&mut self, ty: TypeId) -> Result<TypeId, TypeRelationError> {
+        if self.typer.is_unbounded_member_projection(ty) {
+            return Ok(ty);
+        }
         TypeNormalizer::new(self.typer.store)
             .normalize_for_relation(ty)
             .map_err(TypeRelationError::Normalization)
@@ -1089,6 +1129,7 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
                 }
                 let declaration = self.typer.store.symbols.get(symbol);
                 if value_position
+                    && !self.typer.is_unbounded_member_projection(found)
                     && !(declaration.kind == SymbolKind::TypeAlias
                         && declaration.flags.contains(SymbolFlags::OPAQUE))
                     && !matches!(

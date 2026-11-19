@@ -643,7 +643,7 @@ function type forms. Literal singleton types for strings, characters, numbers,
 booleans, and `null` are represented by `SingletonTypeTree` around the existing
 `Literal` tree. Type projections such as `T#Member`, `F[A]#Result`, and
 repeated `#` suffixes use the existing `Select` node with type-namespace
-names, including projections from parenthesized structural types such as
+names and `is_type_projection` set on each `#` selection, including projections from parenthesized structural types such as
 `({ type L = A })#L`. The parser preserves `This` and `Super` references
 syntactically; it does not resolve enclosing classes or superclass targets.
 An empty

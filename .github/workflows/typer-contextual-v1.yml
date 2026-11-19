@@ -64,7 +64,7 @@ jobs:
           while IFS=$'\t' read -r sha256 artifact; do
             jar="$COURSIER_MAVEN_ROOT/$artifact"
             curl --fail --location --silent --show-error --retry 3 --create-dirs \
-              --output "$jar" "https://repo.maven.apache.org/maven2/$artifact"
+              --output "$jar" "https://repo1.maven.org/maven2/$artifact"
             printf '%s  %s\n' "$sha256" "$jar" | sha256sum --check
           done < crates/dotty-typer/tests/fixtures/lexical-closure-contract/scala-artifacts.sha256.tsv
 

@@ -244,12 +244,14 @@ impl SourceTyper<'_> {
                     .contains(SymbolFlags::OPAQUE)
             {
                 self.complete_relation_type(ty, journal, &mut HashSet::new(), 0)?;
-                pending.push(
-                    crate::types::TypeNormalizer::new(self.store)
-                        .normalize_for_relation(ty)
-                        .map_err(TyperError::TypeNormalization)?,
-                );
-                continue;
+                if !self.is_unbounded_member_projection(ty) {
+                    pending.push(
+                        crate::types::TypeNormalizer::new(self.store)
+                            .normalize_for_relation(ty)
+                            .map_err(TyperError::TypeNormalization)?,
+                    );
+                    continue;
+                }
             }
             match self.store.types.try_get(ty).cloned() {
                 Some(Type::Applied { tycon, args }) => {

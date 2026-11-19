@@ -2042,3 +2042,308 @@ fn nested_context_abstraction_registers_both_methods_and_rolls_back_a_bad_body()
         }
     }
 }
+
+#[test]
+fn context_bound_legacy_default_applies_the_getter_only_to_type_arguments() {
+    let text = "trait Foo[A]; class Bar; class C {
+        def read[A: Foo](implicit b: Bar = new Bar): Bar = b
+        def missing: Bar = read[Int]
+        def fallback(using f: Foo[Int]): Bar = read[Int]
+        def supplied(using f: Foo[Int], b: Bar): Bar = read[Int]
+    }";
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let read = method_symbol(&parsed, &store, &index, source, "read");
+    let getter = store.default_getter(read, 1).unwrap();
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    typer
+        .type_method_definition(definition_tree(&index, read))
+        .unwrap();
+    for name in ["missing", "fallback", "supplied"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let result = typer.type_method_definition(definition_tree(&index, method));
+        if name == "missing" {
+            assert!(
+                matches!(result, Err(TyperError::MissingContextualArgument { .. })),
+                "{result:?}"
+            );
+            assert!(typer.source_typed_index().get(source, rhs).is_none());
+            continue;
+        }
+        result.unwrap();
+        let ast = typer.typed_ast();
+        let TreeKind::Apply(call) = &ast
+            .get(typer.source_typed_index().get(source, rhs).unwrap())
+            .kind
+        else {
+            panic!("implicit application")
+        };
+        let [f, b] = call.args[..] else {
+            panic!("witness followed by b")
+        };
+        assert_eq!(
+            reference(&typer, f),
+            method_parameter_symbol(&parsed, &index, source, method, 0)
+        );
+        if name == "supplied" {
+            assert_eq!(
+                reference(&typer, b),
+                method_parameter_symbol(&parsed, &index, source, method, 1)
+            );
+        } else {
+            let TreeKind::TypeApply(default) = &ast.get(b).kind else {
+                panic!("getter[Int]")
+            };
+            let TreeKind::TypeApply(target) = &ast.get(call.function).kind else {
+                panic!("read[Int]")
+            };
+            assert_eq!(reference(&typer, default.function), getter);
+            assert_eq!(default.args, target.args);
+        }
+    }
+}
+
+#[test]
+fn anonymous_marker_defaults_check_the_parent_and_roll_back_failed_definitions() {
+    let text = "trait Marker; trait Other
+        trait Needs { def value: Int }; trait Inherited extends Needs
+        class C {
+            def wrong(using b: Other = new Marker {}): Other = b
+            def abstractMember(using b: Needs = new Needs {}): Needs = b
+            def inherited(using b: Inherited = new Inherited {}): Inherited = b
+            def withBody(using b: Marker = new Marker { def unrelated: Int = 1 }): Marker = b
+            def good(using b: Marker = new Marker {}): Marker = b
+        }";
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for name in ["wrong", "abstractMember", "inherited", "withBody", "good"] {
+        let method = method_symbol(&parsed, typer.store(), &index, source, name);
+        let tree = definition_tree(&index, method);
+        let before = typer.store().checkpoint();
+        let typed_before = typer.typed_ast().checkpoint();
+        let result = typer.type_method_definition(tree);
+        if name == "good" {
+            let typed = result.unwrap();
+            assert_eq!(typer.type_method_definition(tree).unwrap(), typed);
+            continue;
+        }
+        let error = result.unwrap_err();
+        if name == "wrong" {
+            assert!(
+                matches!(error, TyperError::ExpectedExpressionTypeMismatch { .. }),
+                "{error:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    error,
+                    TyperError::AnonymousClassInstantiationDeferred { .. }
+                ),
+                "{error:?}"
+            );
+        }
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(typer.typed_ast().checkpoint(), typed_before);
+        assert!(typer.source_typed_index().is_empty());
+    }
+}
+
+#[test]
+fn projected_context_bound_orders_and_binds_the_method_and_getter_parameters() {
+    let text = include_str!(
+        "../../../tests/fixtures/contextual-v1/controls/DependentWitnessDefault.scala"
+    );
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let evidence = class_symbol(&parsed, &store, &index, source, "Ev");
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for name in ["read", "shadow"] {
+        let method = method_symbol(&parsed, typer.store(), &index, source, name);
+        let getter = typer.store().default_getter(method, 2).unwrap();
+        for target in [getter, method] {
+            let signature = typer.complete_symbol(target).unwrap();
+            let types = &typer.store().types;
+            let Type::Poly(poly) = types.get(signature) else {
+                panic!("polymorphic signature")
+            };
+            let Type::Method(witness) = types.get(poly.result) else {
+                panic!("witness clause")
+            };
+            assert_eq!(witness.kind, MethodKind::Contextual);
+            assert_eq!(witness.params.len(), 1);
+            let Type::Method(value) = types.get(witness.result) else {
+                panic!("dependent clause")
+            };
+            assert_eq!(value.kind, MethodKind::Plain);
+            assert_eq!(value.params.len(), 1);
+            let Type::TypeRef {
+                prefix,
+                target: TypeRefTarget::Symbol(out),
+            } = types.get(value.params[0].ty)
+            else {
+                panic!("tc.Out")
+            };
+            assert_eq!(typer.store().symbols.owner(*out), Some(evidence));
+            assert_eq!(
+                types.get(*prefix),
+                &Type::ParamRef {
+                    binder: poly.result,
+                    index: 0
+                }
+            );
+            if target == getter {
+                assert_eq!(value.result, defs.int);
+            } else {
+                let Type::Method(last) = types.get(value.result) else {
+                    panic!("defaulted using clause")
+                };
+                assert_eq!(last.kind, MethodKind::Contextual);
+                assert_eq!(last.params.len(), 1);
+                assert_eq!(last.params[0].ty, defs.int);
+                assert_eq!(last.result, defs.int);
+            }
+        }
+        typer
+            .type_method_definition(definition_tree(&index, method))
+            .unwrap();
+    }
+}
+
+#[test]
+fn type_projection_with_the_witness_spelling_keeps_the_witness_in_the_final_clause() {
+    let text = include_str!(
+        "../../../tests/fixtures/contextual-v1/controls/DependentWitnessDefault.scala"
+    );
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let projected_class = class_symbol(&parsed, &store, &index, source, "tc");
+    let method = method_symbol(&parsed, &store, &index, source, "project");
+    let getter = store.default_getter(method, 2).unwrap();
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for target in [method, getter] {
+        let signature = typer.complete_symbol(target).unwrap();
+        let types = &typer.store().types;
+        let Type::Poly(poly) = types.get(signature) else {
+            panic!("type parameter A")
+        };
+        let Type::Method(value) = types.get(poly.result) else {
+            panic!("ordinary parameter")
+        };
+        assert_eq!(value.kind, MethodKind::Plain);
+        assert_eq!(value.params.len(), 1);
+        let Type::TypeRef {
+            target: TypeRefTarget::Symbol(out),
+            prefix,
+        } = types.get(value.params[0].ty)
+        else {
+            panic!("tc#Out")
+        };
+        assert_eq!(typer.store().symbols.owner(*out), Some(projected_class));
+        assert_eq!(types.get(*prefix).reference_symbol(), Some(projected_class));
+        if target == method {
+            let Type::Method(last) = types.get(value.result) else {
+                panic!("using tc, n")
+            };
+            assert_eq!(last.kind, MethodKind::Contextual);
+            assert_eq!(last.params.len(), 2);
+            assert_eq!(last.params[1].ty, defs.int);
+        } else {
+            assert_eq!(value.result, defs.int);
+        }
+    }
+}
+
+#[test]
+fn dependent_read_calls_use_the_supplied_path_and_share_the_getter_arguments() {
+    let text = include_str!(
+        "../../../tests/fixtures/contextual-v1/controls/DependentWitnessDefault.scala"
+    );
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let read = method_symbol(&parsed, &store, &index, source, "read");
+    let getter = store.default_getter(read, 2).unwrap();
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for name in ["explicit", "fallback"] {
+        let (caller, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let caller_tree = definition_tree(&index, caller);
+        typer.type_method_definition(caller_tree).unwrap();
+        let TreeKind::DefDef(def) = &parsed.ast.get(caller_tree).kind else {
+            panic!("caller")
+        };
+        let ast = typer.typed_ast();
+        let root = typer.source_typed_index().get(source, rhs).unwrap();
+        assert_eq!(ast.get(root).ty, defs.int);
+        let TreeKind::Apply(last) = &ast.get(root).kind else {
+            panic!("final using argument")
+        };
+        let operands = |tree| {
+            let TreeKind::Apply(v) = &ast.get(tree).kind else {
+                panic!("(v)")
+            };
+            let TreeKind::Apply(e) = &ast.get(v.function).kind else {
+                panic!("(e)")
+            };
+            let TreeKind::TypeApply(types) = &ast.get(e.function).kind else {
+                panic!("[Int]")
+            };
+            let Type::Method(next) = typer.store().types.get(ast.get(v.function).ty) else {
+                panic!("instantiated (v: e.Out) clause")
+            };
+            let [param] = next.params.as_slice() else {
+                panic!("one dependent parameter")
+            };
+            let Type::TypeRef { prefix, .. } = typer.store().types.get(param.ty) else {
+                panic!("e.Out")
+            };
+            assert_eq!(
+                typer.store().types.get(*prefix).reference_symbol(),
+                Some(reference(&typer, e.args[0]))
+            );
+            assert_eq!(v.args.len(), 1);
+            assert_eq!(e.args.len(), 1);
+            (
+                reference(&typer, types.function),
+                &types.args,
+                e.args[0],
+                v.args[0],
+            )
+        };
+        let (method, ts, e, v) = operands(last.function);
+        assert_eq!(method, read);
+        assert_eq!(ts.len(), 1);
+        assert_eq!(ast.get(ts[0]).ty, defs.int);
+        for (i, argument) in [e, v].into_iter().enumerate() {
+            assert_eq!(
+                Some(reference(&typer, argument)),
+                index.symbol_at(source, def.value_param_clauses[i][0])
+            );
+        }
+        let [n] = last.args[..] else {
+            panic!("one contextual Int")
+        };
+        if name == "explicit" {
+            assert!(
+                matches!(&ast.get(n).kind, TreeKind::Literal(l) if l.value == dotty_core::Constant::Int(1))
+            );
+        } else {
+            assert_eq!(operands(n), (getter, ts, e, v));
+        }
+    }
+}
+
+#[test]
+fn dependent_read_rejects_a_value_from_an_independent_witness() {
+    let text =
+        include_str!("../../../tests/fixtures/contextual-v1/controls/DifferentWitness.scala");
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let (caller, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "wrong");
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let before = typer.store().checkpoint();
+    for _ in 0..2 {
+        let err = typer
+            .type_method_definition(definition_tree(&index, caller))
+            .unwrap_err();
+        assert!(
+            matches!(err,TyperError::ApplicationArgumentTypeMismatch {tree_index, argument_index:0,..} if tree_index == rhs.index()),
+            "{err:?}"
+        );
+        assert_eq!(typer.store().checkpoint(), before);
+        assert!(typer.source_typed_index().is_empty());
+    }
+}
