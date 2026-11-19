@@ -95,8 +95,10 @@ parameter’s own clause contribute to its ordinal only. In
 inserted before `v`. Both `read` and `read$default$3` bind `tc.Out` to their
 own witness parameter. A projection `tc#Out` from a class named `tc` leaves
 the witness in the final contextual clause. At a call site with
-`e: Ev[Int]` and `v: e.Out`, typing `read[Int](using e)(v)` still stops at
-argument conformance for the abstract member `Out`, before default insertion.
+`e: Ev[Int]` and `v: e.Out`, omitting `n` inserts `read$default$3[Int](e)(v)`.
+Both calls share the original typed arguments. An explicit `(using 1)`
+passes the literal directly. For the unbounded abstract member `type Out`, a
+value from an independent witness has a distinct type and is rejected.
 For the default
 `new Bar {}` in Scala’s `i8491.scala`, the typed tree binds an anonymous
 class to the getter, calls its constructor and widens the result to the

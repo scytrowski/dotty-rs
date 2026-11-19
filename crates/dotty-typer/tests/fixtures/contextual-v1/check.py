@@ -58,7 +58,10 @@ def check_controls(tc, checkout):
             "def shadow$default$3[tc >: Nothing <: Any](using tc: Ev[tc])(v: tc.Out)",
             "def project[A >: Nothing <: Any](v: tc#Out)(using tc: Ev[A], n: Int): Int",
             "def project$default$3[A >: Nothing <: Any](v: tc#Out): Int @uncheckedVariance = 1",
+            "this.read[Int](using e)(v)(using 1)",
+            "this.read[Int](using e)(v)(using this.read$default$3[Int](e)(v))",
         ]),
+        ("DifferentWitness.scala", 1, ["[E007]", "Found: (v : e2.Out)", "Required: e1.Out", "1 error found"]),
         ("ExplicitContextFunction.scala", 0, ["this.ExplicitContextFunction$$inline$bar.apply(using 4):Int",
           "private[this] def bar: (Int) ?=> Int = (using contextual$1: Int) => 3"]),
         ("OwnerAmbiguity.scala", 1, ["[E172]", "both given instance a1 in object Cases and given "

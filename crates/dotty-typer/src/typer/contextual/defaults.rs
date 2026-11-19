@@ -310,8 +310,9 @@ impl SourceTyper<'_> {
                             tree_index,
                         });
                     };
+                    let dependent = self.type_contains_param_ref(previous.result, signature)?;
                     if previous.params.len() != app.args.len()
-                        || self.type_contains_param_ref(previous.result, signature)?
+                        || (dependent && (binary || previous.kind == MethodKind::Plain))
                     {
                         return Err(TyperError::UsingApplicationDeferred {
                             source: self.source,
@@ -338,7 +339,21 @@ impl SourceTyper<'_> {
                             },
                         );
                     }
-                    signature = previous.result;
+                    signature = if dependent {
+                        // A widened temporary cannot stand for the original singleton path.
+                        let paths = shared
+                            .iter()
+                            .zip(&app.args)
+                            .map(|(&copy, &arg)| (copy == arg).then_some(arg));
+                        self.instantiate_contextual_result(
+                            signature,
+                            previous.result,
+                            paths,
+                            tree_index,
+                        )?
+                    } else {
+                        previous.result
+                    };
                     let mut b = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types);
                     if target != app.function || shared != app.args {
                         target = b.apply_with_kind(

@@ -2249,3 +2249,101 @@ fn type_projection_with_the_witness_spelling_keeps_the_witness_in_the_final_clau
         }
     }
 }
+
+#[test]
+fn dependent_read_calls_use_the_supplied_path_and_share_the_getter_arguments() {
+    let text = include_str!(
+        "../../../tests/fixtures/contextual-v1/controls/DependentWitnessDefault.scala"
+    );
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let read = method_symbol(&parsed, &store, &index, source, "read");
+    let getter = store.default_getter(read, 2).unwrap();
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for name in ["explicit", "fallback"] {
+        let (caller, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let caller_tree = definition_tree(&index, caller);
+        typer.type_method_definition(caller_tree).unwrap();
+        let TreeKind::DefDef(def) = &parsed.ast.get(caller_tree).kind else {
+            panic!("caller")
+        };
+        let ast = typer.typed_ast();
+        let root = typer.source_typed_index().get(source, rhs).unwrap();
+        assert_eq!(ast.get(root).ty, defs.int);
+        let TreeKind::Apply(last) = &ast.get(root).kind else {
+            panic!("final using argument")
+        };
+        let operands = |tree| {
+            let TreeKind::Apply(v) = &ast.get(tree).kind else {
+                panic!("(v)")
+            };
+            let TreeKind::Apply(e) = &ast.get(v.function).kind else {
+                panic!("(e)")
+            };
+            let TreeKind::TypeApply(types) = &ast.get(e.function).kind else {
+                panic!("[Int]")
+            };
+            let Type::Method(next) = typer.store().types.get(ast.get(v.function).ty) else {
+                panic!("instantiated (v: e.Out) clause")
+            };
+            let [param] = next.params.as_slice() else {
+                panic!("one dependent parameter")
+            };
+            let Type::TypeRef { prefix, .. } = typer.store().types.get(param.ty) else {
+                panic!("e.Out")
+            };
+            assert_eq!(
+                typer.store().types.get(*prefix).reference_symbol(),
+                Some(reference(&typer, e.args[0]))
+            );
+            assert_eq!(v.args.len(), 1);
+            assert_eq!(e.args.len(), 1);
+            (
+                reference(&typer, types.function),
+                &types.args,
+                e.args[0],
+                v.args[0],
+            )
+        };
+        let (method, ts, e, v) = operands(last.function);
+        assert_eq!(method, read);
+        assert_eq!(ts.len(), 1);
+        assert_eq!(ast.get(ts[0]).ty, defs.int);
+        for (i, argument) in [e, v].into_iter().enumerate() {
+            assert_eq!(
+                Some(reference(&typer, argument)),
+                index.symbol_at(source, def.value_param_clauses[i][0])
+            );
+        }
+        let [n] = last.args[..] else {
+            panic!("one contextual Int")
+        };
+        if name == "explicit" {
+            assert!(
+                matches!(&ast.get(n).kind, TreeKind::Literal(l) if l.value == dotty_core::Constant::Int(1))
+            );
+        } else {
+            assert_eq!(operands(n), (getter, ts, e, v));
+        }
+    }
+}
+
+#[test]
+fn dependent_read_rejects_a_value_from_an_independent_witness() {
+    let text =
+        include_str!("../../../tests/fixtures/contextual-v1/controls/DifferentWitness.scala");
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let (caller, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "wrong");
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let before = typer.store().checkpoint();
+    for _ in 0..2 {
+        let err = typer
+            .type_method_definition(definition_tree(&index, caller))
+            .unwrap_err();
+        assert!(
+            matches!(err,TyperError::ApplicationArgumentTypeMismatch {tree_index, argument_index:0,..} if tree_index == rhs.index()),
+            "{err:?}"
+        );
+        assert_eq!(typer.store().checkpoint(), before);
+        assert!(typer.source_typed_index().is_empty());
+    }
+}
