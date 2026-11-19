@@ -59,6 +59,52 @@ impl SourceTyper<'_> {
         Ok((args, kind))
     }
 
+    /// Fill trailing ordinary arguments whose source getter replays earlier
+    /// clauses. Binary getter replay is currently supported for contextual
+    /// parameters only.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::typer) fn trailing_source_defaults(
+        &mut self,
+        function: &mut TreeId<Typed>,
+        method: &MethodType,
+        supplied: usize,
+        context: ExpressionContext,
+        tree_index: u32,
+        shared: &mut Vec<TreeId<Typed>>,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Vec<TreeId<Typed>>, TyperError> {
+        let mut arguments = Vec::new();
+        for (ordinal, parameter) in method.params.iter().enumerate().skip(supplied) {
+            let call = self
+                .default_call(*function, ordinal, parameter.ty)
+                .filter(|call| self.index.definition_of(call.getter).is_some())
+                .ok_or(TyperError::ApplicationArityMismatch {
+                    source: self.source,
+                    tree_index,
+                    expected: method.params.len(),
+                    actual: supplied,
+                })?;
+            arguments.push(
+                self.apply_default_getter(call, function, shared, context, tree_index, journal)?,
+            );
+        }
+        Ok(arguments)
+    }
+
+    pub(in crate::typer) fn bind_default_operands(
+        &mut self,
+        shared: Vec<TreeId<Typed>>,
+        expr: TreeId<Typed>,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Typed> {
+        if shared.is_empty() {
+            return expr;
+        }
+        let result = self.typed_arena.get(expr).ty;
+        TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+            .block(shared, expr, result, position)
+    }
+
     fn default_call(
         &self,
         mut tree: TreeId<Typed>,

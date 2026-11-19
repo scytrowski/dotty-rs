@@ -251,6 +251,9 @@ impl SourceTyper<'_> {
                     self.resolve_apply_function(function, callable, request, info_journal)?;
                 (function, callable, None, None)
             };
+        // Keep bindings from inferred clauses around the entire written call.
+        // A later default getter may replay the arguments bound here.
+        let mut shared = Vec::new();
         let (function, callable) = if application.kind == ApplyKind::Regular
             && let Some(Type::Method(clause)) = self.store.types.try_get(callable)
             && clause.kind == MethodKind::Contextual
@@ -264,6 +267,7 @@ impl SourceTyper<'_> {
                 function,
                 callable,
                 context,
+                &mut shared,
                 info_journal,
             )?;
             let result_type = self.typed_arena.get(adapted).ty;
@@ -272,7 +276,7 @@ impl SourceTyper<'_> {
         } else {
             (function, callable)
         };
-        self.type_resolved_application(
+        let applied = self.type_resolved_application(
             ResolvedApplication {
                 tree_index: tree.index(),
                 application_kind: application.kind,
@@ -287,7 +291,8 @@ impl SourceTyper<'_> {
             },
             info_journal,
             new_mappings,
-        )
+        )?;
+        Ok(self.bind_default_operands(shared, applied, position))
     }
 
     pub(in crate::typer) fn prepare_source_owner_for_qualified_this_argument(
@@ -820,7 +825,7 @@ impl SourceTyper<'_> {
             argument_trees,
             position,
             context,
-            function,
+            mut function,
             mut callable,
             mut typed_arguments,
             is_constructor_application,
@@ -984,14 +989,31 @@ impl SourceTyper<'_> {
                 method_kind: method.kind,
             });
         }
-        if argument_trees.len() != method.params.len() {
+        let mut shared = Vec::new();
+        let defaults = if argument_trees.len() == method.params.len() {
+            Vec::new()
+        } else if argument_trees.len() < method.params.len()
+            && method.kind == MethodKind::Plain
+            && application_kind == ApplyKind::Regular
+            && !is_constructor_application
+        {
+            self.trailing_source_defaults(
+                &mut function,
+                &method,
+                argument_trees.len(),
+                context,
+                tree_index,
+                &mut shared,
+                info_journal,
+            )?
+        } else {
             return Err(TyperError::ApplicationArityMismatch {
                 source: self.source,
                 tree_index,
                 expected: method.params.len(),
                 actual: argument_trees.len(),
             });
-        }
+        };
         for (parameter_index, parameter) in method.params.iter().enumerate() {
             if parameter.erased {
                 return Err(TyperError::ErasedApplicationParameterDeferred {
@@ -1127,6 +1149,7 @@ impl SourceTyper<'_> {
             }
             arguments.push(argument);
         }
+        arguments.extend(defaults);
         if application_kind == ApplyKind::Regular
             && method.kind == MethodKind::Implicit
             && let Some(span) = argument_trees
@@ -1151,15 +1174,14 @@ impl SourceTyper<'_> {
                 tree_index,
             );
         }
-        Ok(
-            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply_with_kind(
-                function,
-                arguments,
-                application_kind,
-                method.result,
-                position,
-            ),
-        )
+        let call = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply_with_kind(
+            function,
+            arguments,
+            application_kind,
+            method.result,
+            position,
+        );
+        Ok(self.bind_default_operands(shared, call, position))
     }
 
     pub(in crate::typer) fn type_type_application(

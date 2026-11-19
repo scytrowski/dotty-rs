@@ -9,7 +9,7 @@ allocation order.
 ## Contextual arguments in Scala 3.9
 
 The [v1 acceptance audit](typer-contextual-acceptance-v1.md) compares selected
-upstream sites with the pinned compiler and records the remaining blockers.
+upstream sites with the pinned compiler. All ten in-scope observations agree.
 
 At the start of this work, the frontend preserved contextual clause kinds and
 typed a number of explicit `using` applications. It could complete the
@@ -67,6 +67,13 @@ Dependent clause application substitutes stable argument paths. Within a
 simple source opaque alias's defining owner, contextual search can use its
 representation. Outside that owner it uses the nominal type and its companion.
 Higher-kinded inference and general proofs from opaque bounds remain open.
+
+A source method can omit trailing ordinary arguments with defaults after a
+contextual clause. In `narrow(using c: Context)(owner: String = root)`, the
+call `narrow()` passes the selected context to both `narrow` and
+`narrow$default$2`. The getter body resolves `root` using its own copy of
+`c`. Explicit ordinary arguments keep their positions, and effectful earlier
+operands shared with a getter are evaluated once.
 
 For a classpath method, replay uses the link between a defaulted parameter
 and its getter in the same TASTy template. The typer checks the copied clauses

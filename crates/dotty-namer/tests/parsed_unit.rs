@@ -709,7 +709,7 @@ fn structural_given_factory_and_its_binders_have_distinct_source_identities() {
 #[test]
 fn contextual_default_getters_copy_only_earlier_clauses() {
     let named = named_source(
-        "class Reader { def read[A](x: A)(using n: A = x, extra: A = x): A = n }",
+        "class Reader { def read[A](x: A)(using n: A = x, extra: A = x)(end: A = n): A = end }",
         110,
     );
     let (method_tree, definition) = named
@@ -760,6 +760,35 @@ fn contextual_default_getters_copy_only_earlier_clauses() {
                 .is_none()
         );
     }
+    let final_param = definition.value_param_clauses[2][0];
+    let getter = named
+        .index
+        .derived_symbol_at(owner, named.source, final_param)
+        .unwrap();
+    assert_eq!(named.store.default_getter(method, 3), Some(getter));
+    assert_eq!(named.store.default_getter_origin(getter), Some((method, 3)));
+    assert_eq!(
+        named
+            .store
+            .names
+            .resolve(named.store.symbols.get(getter).name.text()),
+        "read$default$4"
+    );
+    for param in &definition.value_param_clauses[1] {
+        let copy = named
+            .index
+            .derived_symbol_at(getter, named.source, *param)
+            .unwrap();
+        let entry = named.store.symbols.get(copy);
+        assert_eq!(entry.owner, Some(getter));
+        assert!(entry.flags.contains(SymbolFlags::GIVEN));
+    }
+    assert!(
+        named
+            .index
+            .derived_symbol_at(getter, named.source, final_param)
+            .is_none()
+    );
 }
 
 #[test]

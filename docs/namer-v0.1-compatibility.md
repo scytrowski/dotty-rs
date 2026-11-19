@@ -79,8 +79,14 @@ and context-bound witnesses have distinct symbols for the class, constructor
 and factory. The typer can therefore complete each signature in its own scope.
 A factory with only a type clause has no synthetic empty term clause.
 
-For a supported contextual parameter with a default, the derived getter
-belongs to the method's owner. Its source tree is the defaulted parameter.
+An anonymous given with a constructor parent takes its name from the
+instantiated parent type. For example, `given Context("alpha")` introduces
+`given_Context`, and `given Container[String]("alpha")(2)` introduces
+`given_Container_String`.
+
+For a supported contextual parameter with a default, or an ordinary defaulted
+parameter following a contextual clause, the derived getter belongs to the
+method's owner. Its source tree is the defaulted parameter.
 Earlier parameter clauses have their own getter-owned bindings, which let the
 typer resolve a reference in the default expression to the correct parameter.
 For methods with explicit value clauses and no context bounds, the namer

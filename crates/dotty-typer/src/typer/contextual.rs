@@ -88,13 +88,17 @@ impl SourceTyper<'_> {
         for _ in 0..crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
             let (selected, signature) =
                 self.resolve_apply_function(adapted, callable, request, info_journal)?;
-            adapted = self.supply_contextual_clauses(
+            let mut shared = Vec::new();
+            let call = self.supply_contextual_clauses(
                 source_tree,
                 selected,
                 signature,
                 context,
+                &mut shared,
                 info_journal,
             )?;
+            adapted =
+                self.bind_default_operands(shared, call, self.arena.get(source_tree).position);
             let result = self.typed_arena.get(adapted).ty;
             if !self.is_applied_context_function(result) {
                 return Ok(adapted);
@@ -136,8 +140,17 @@ impl SourceTyper<'_> {
             Some(Type::Method(_)) => ty,
             _ => return Ok(function),
         };
+        let mut shared = Vec::new();
+        let call = self.supply_contextual_clauses(
+            source_tree,
+            function,
+            callable,
+            context,
+            &mut shared,
+            journal,
+        )?;
         let applied =
-            self.supply_contextual_clauses(source_tree, function, callable, context, journal)?;
+            self.bind_default_operands(shared, call, self.arena.get(source_tree).position);
         let ty = self.typed_arena.get(applied).ty;
         if let Some(Type::Method(method)) = self.store.types.try_get(ty)
             && method.kind == MethodKind::Plain
@@ -193,12 +206,12 @@ impl SourceTyper<'_> {
         mut function: TreeId<Typed>,
         mut callable: TypeId,
         context: ExpressionContext,
+        shared: &mut Vec<TreeId<Typed>>,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TreeId<Typed>, TyperError> {
         let position = self.arena.get(source_tree).position;
         let tree_index = source_tree.index();
         let mut visited = HashSet::new();
-        let mut shared = Vec::new();
         while let Some(Type::Method(method)) = self.store.types.try_get(callable) {
             if method.kind == MethodKind::Plain {
                 break;
@@ -217,7 +230,7 @@ impl SourceTyper<'_> {
                 context,
                 tree_index,
                 None,
-                &mut shared,
+                shared,
                 journal,
             )?;
             function = self.finish_contextual_call(
@@ -230,10 +243,6 @@ impl SourceTyper<'_> {
                 tree_index,
             )?;
             callable = self.typed_arena.get(function).ty;
-        }
-        if !shared.is_empty() {
-            function = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
-                .block(shared, function, callable, position);
         }
         Ok(function)
     }

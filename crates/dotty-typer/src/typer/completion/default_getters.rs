@@ -1,4 +1,4 @@
-//! Source default getters for contextual parameters of member methods.
+//! Source default getters for contextual parameters and ordinary parameters after a contextual clause.
 use super::*;
 
 impl SourceTyper<'_> {

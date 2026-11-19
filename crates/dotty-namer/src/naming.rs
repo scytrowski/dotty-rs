@@ -3330,18 +3330,22 @@ impl Namer<'_> {
 
         if extension_prefix_clauses.is_none() {
             let mut ordinal = 0;
+            let mut follows_contextual_clause = false;
             for (clause_index, clause) in definition.value_param_clauses.iter().enumerate() {
+                let mut contextual_clause = false;
                 for &parameter_tree in clause {
                     ordinal += 1;
                     let TreeKind::ValDef(parameter) = &self.arena.get(parameter_tree).kind else {
                         continue;
                     };
+                    let contextual_parameter = parameter
+                        .metadata
+                        .modifiers
+                        .iter()
+                        .any(|m| matches!(m, Modifier::Given | Modifier::Implicit));
+                    contextual_clause |= contextual_parameter;
                     if parameter.rhs.is_none()
-                        || !parameter
-                            .metadata
-                            .modifiers
-                            .iter()
-                            .any(|m| matches!(m, Modifier::Given | Modifier::Implicit))
+                        || !(contextual_parameter || follows_contextual_clause)
                     {
                         continue;
                     }
@@ -3373,6 +3377,7 @@ impl Namer<'_> {
                         true,
                     )?;
                 }
+                follows_contextual_clause |= contextual_clause;
             }
         }
 
@@ -3660,7 +3665,7 @@ impl Namer<'_> {
                         .record_default_getter(method, ordinal, parameter_symbol, getter)
                         .map_err(|_| NamerError::MalformedAstShape {
                             tree_index: parameter_tree.index(),
-                            expected: "a unique contextual default getter for this parameter",
+                            expected: "a unique default getter for this parameter",
                         })?;
                 }
                 ordinal += 1;

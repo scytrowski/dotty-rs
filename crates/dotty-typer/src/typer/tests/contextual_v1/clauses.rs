@@ -41,14 +41,10 @@ fn c1_curried_threading_default() {
     let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages)
         .with_resolver(Box::new(resolver));
     let ctx = typer.expression_context_for(test).unwrap();
-    let result = typer.type_expression(site, ctx);
-    assert!(
-        matches!(result, Err(TyperError::ApplicationArityMismatch { source: at, tree_index, expected: 1, actual: 0 })
-            if at == source && tree_index == site.index()),
-        "{result:?}"
-    );
+    let call = typer.type_expression(site, ctx).unwrap();
+    assert_curried_default_call(&parsed, &mut typer, narrow, given, call);
     reduced_ordinary_default_after_using();
-    outcome("blocked");
+    outcome("match");
 }
 
 #[test]
@@ -175,10 +171,115 @@ fn reduced_ordinary_default_after_using() {
     let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "test");
     let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
     let ctx = typer.expression_context_for(method).unwrap();
-    let result = typer.type_expression_expected(rhs, ctx, defs.int);
-    assert!(
-        matches!(result,Err(TyperError::ApplicationArityMismatch {source: s, tree_index, expected: 1, actual: 0}) if s == source && tree_index == rhs.index()),
-        "{result:?}"
+    let call = typer.type_expression_expected(rhs, ctx, defs.int).unwrap();
+    let narrow = method_symbol(&parsed, typer.store(), &index, source, "narrow");
+    let evidence = method_parameter_symbol(&parsed, &index, source, method, 0);
+    assert_curried_default_call(&parsed, &mut typer, narrow, evidence, call);
+}
+
+/// Check both applications and the getter body using the original source identities.
+fn assert_curried_default_call(
+    parsed: &dotty_parser::ParseResult,
+    typer: &mut SourceTyper<'_>,
+    narrow: SymbolId,
+    evidence: SymbolId,
+    typed: TreeId<Typed>,
+) {
+    let source = typer.source;
+    let narrow_tree = declaration(typer.index, narrow);
+    let TreeKind::DefDef(def) = &parsed.ast.get(narrow_tree).kind else {
+        panic!("source narrow")
+    };
+    let owner_param = def.value_param_clauses[1][0];
+    let getter = typer
+        .index
+        .derived_symbol_at(
+            typer.store.symbols.owner(narrow).unwrap(),
+            source,
+            owner_param,
+        )
+        .unwrap();
+    assert_eq!(
+        typer
+            .store
+            .names
+            .resolve(typer.store.symbols.get(getter).name.text()),
+        "narrow$default$2"
+    );
+    assert_eq!(typer.store.default_getter(narrow, 1), Some(getter));
+    let arena = typer.typed_ast();
+    let (result, shared_evidence) = match &arena.get(typed).kind {
+        TreeKind::Block(block) => {
+            let [stat] = block.stats[..] else {
+                panic!("one shared contextual operand")
+            };
+            let TreeKind::ValDef(temp) = &arena.get(stat).kind else {
+                panic!("shared argument binding")
+            };
+            assert_eq!(referent(typer, temp.rhs.unwrap()), evidence);
+            (
+                block.expr,
+                typer
+                    .source_typed_index()
+                    .synthetic_definition_symbol(stat)
+                    .unwrap(),
+            )
+        }
+        _ => (typed, evidence),
+    };
+    let TreeKind::Apply(call) = &arena.get(result).kind else {
+        panic!("ordinary clause of narrow")
+    };
+    assert_eq!(call.kind, ApplyKind::Regular);
+    let [default] = call.args[..] else {
+        panic!("one omitted argument")
+    };
+    let [target_argument, getter_argument] =
+        [(call.function, narrow), (default, getter)].map(|(applied, symbol)| {
+            let TreeKind::Apply(previous) = &arena.get(applied).kind else {
+                panic!("earlier using clause")
+            };
+            assert_eq!(referent(typer, previous.function), symbol);
+            let [arg] = previous.args[..] else {
+                panic!("expected one contextual argument")
+            };
+            assert_eq!(referent(typer, arg), shared_evidence);
+            arg
+        });
+    assert_eq!(target_argument, getter_argument);
+    let call_type = arena.get(result).ty;
+    let getter_type = arena.get(default).ty;
+    let owner = typer.index.symbol_at(source, owner_param).unwrap();
+    let SymbolInfo::Complete(declared) = *typer.store.symbols.info(owner) else {
+        panic!("declared type of the defaulted ordinary parameter")
+    };
+    for actual in [call_type, getter_type] {
+        assert!(typer.is_subtype(actual, declared).unwrap());
+        assert!(typer.is_subtype(declared, actual).unwrap());
+    }
+
+    // The body of narrow$default$2 uses the getter's copy of the using parameter.
+    typer.type_method_definition(narrow_tree).unwrap();
+    let TreeKind::ValDef(param) = &parsed.ast.get(owner_param).kind else {
+        panic!("ordinary owner parameter")
+    };
+    let default_rhs = typer
+        .source_typed_index()
+        .get(source, param.rhs.unwrap())
+        .unwrap();
+    let TreeKind::Apply(root_call) = &typer.typed_ast().get(default_rhs).kind else {
+        panic!("root with contextual argument")
+    };
+    let root = method_symbol(parsed, typer.store(), typer.index, source, "root");
+    assert_eq!(referent(typer, root_call.function), root);
+    let [arg] = root_call.args[..] else {
+        panic!("getter evidence")
+    };
+    assert_eq!(
+        Some(referent(typer, arg)),
+        typer
+            .index
+            .derived_symbol_at(getter, source, def.value_param_clauses[0][0])
     );
 }
 

@@ -1671,6 +1671,185 @@ fn contextual_defaults_evaluate_the_receiver_and_earlier_arguments_once_in_order
 }
 
 #[test]
+fn ordinary_defaults_replay_contextual_clauses_and_keep_explicit_arguments() {
+    let text = "class Example {
+        def root(using c: Int): Int = c
+        def narrow(using c: Int)(x: Int = root, y: Int = root): Int = x
+        def implicitCall(using c: Int): Int = narrow()
+        def next(): Int = 3
+        def explicitCall: Int = narrow(using next())(4)
+        def fullCall(using c: Int): Int = narrow(4, 5)
+    }";
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let narrow = method_symbol(&parsed, &store, &index, source, "narrow");
+    let next = method_symbol(&parsed, &store, &index, source, "next");
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for (name, supplied) in [("implicitCall", 0), ("explicitCall", 1), ("fullCall", 2)] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        typer
+            .type_method_definition(definition_tree(&index, method))
+            .unwrap();
+        let typed = typer.source_typed_index().get(source, rhs).unwrap();
+        let (call, evidence) = if name == "explicitCall" {
+            let TreeKind::Block(block) = &typer.typed_ast().get(typed).kind else {
+                panic!("single evaluation of next()")
+            };
+            let [temp] = block.stats[..] else {
+                panic!("one shared operand")
+            };
+            let TreeKind::ValDef(value) = &typer.typed_ast().get(temp).kind else {
+                panic!("temporary")
+            };
+            let TreeKind::Apply(init) = &typer.typed_ast().get(value.rhs.unwrap()).kind else {
+                panic!("next()")
+            };
+            assert_eq!(reference(&typer, init.function), next);
+            (
+                block.expr,
+                typer
+                    .source_typed_index()
+                    .synthetic_definition_symbol(temp)
+                    .unwrap(),
+            )
+        } else {
+            (
+                typed,
+                method_parameter_symbol(&parsed, &index, source, method, 0),
+            )
+        };
+        let TreeKind::Apply(ordinary) = &typer.typed_ast().get(call).kind else {
+            panic!("ordinary clause")
+        };
+        let TreeKind::Apply(contextual) = &typer.typed_ast().get(ordinary.function).kind else {
+            panic!("contextual clause")
+        };
+        assert_eq!(reference(&typer, contextual.function), narrow);
+        assert_eq!(ordinary.kind, ApplyKind::Regular);
+        assert_eq!(reference(&typer, contextual.args[0]), evidence);
+        assert_eq!(ordinary.args.len(), 2);
+        for (i, arg) in ordinary.args.iter().enumerate() {
+            if i < supplied {
+                assert!(
+                    matches!(&typer.typed_ast().get(*arg).kind, TreeKind::Literal(lit) if lit.value == dotty_core::Constant::Int(4 + i as i32))
+                );
+            } else {
+                let TreeKind::Apply(getter) = &typer.typed_ast().get(*arg).kind else {
+                    panic!("getter call")
+                };
+                assert_eq!(getter.args, contextual.args);
+                assert_eq!(getter.kind, contextual.kind);
+                assert_eq!(
+                    typer.store().default_getter(narrow, i + 1),
+                    Some(reference(&typer, getter.function))
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn ordinary_default_keeps_evaluation_order_when_the_contextual_clause_also_defaults() {
+    let text = "class C {
+        def next(): Int = 1
+        def target(x: Int)(using c: Int = x)(y: Int = c): Int = y
+        def run: Int = target(next())()
+    }";
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let (run, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "run");
+    let target = method_symbol(&parsed, &store, &index, source, "target");
+    let next = method_symbol(&parsed, &store, &index, source, "next");
+    let contextual_getter = store.default_getter(target, 1).unwrap();
+    let ordinary_getter = store.default_getter(target, 2).unwrap();
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    typer
+        .type_method_definition(definition_tree(&index, run))
+        .unwrap();
+    let ast = typer.typed_ast();
+    let typed = typer.source_typed_index().get(source, rhs).unwrap();
+    let TreeKind::Block(block) = &ast.get(typed).kind else {
+        panic!("lifted operands")
+    };
+    let [x] = block.stats[..] else {
+        panic!("shared x")
+    };
+    let TreeKind::Block(ordinary_block) = &ast.get(block.expr).kind else {
+        panic!("temporary for contextual default")
+    };
+    let [c] = ordinary_block.stats[..] else {
+        panic!("shared c")
+    };
+    let temp = |tree| {
+        typer
+            .source_typed_index()
+            .synthetic_definition_symbol(tree)
+            .unwrap()
+    };
+    let initializer = |tree| {
+        let TreeKind::ValDef(def) = &ast.get(tree).kind else {
+            panic!("temporary")
+        };
+        let TreeKind::Apply(call) = &ast.get(def.rhs.unwrap()).kind else {
+            panic!("initializer call")
+        };
+        call
+    };
+    assert_eq!(reference(&typer, initializer(x).function), next);
+    assert_eq!(
+        reference(&typer, initializer(c).function),
+        contextual_getter
+    );
+    assert_eq!(reference(&typer, initializer(c).args[0]), temp(x));
+    let TreeKind::Apply(call) = &ast.get(ordinary_block.expr).kind else {
+        panic!("ordinary call")
+    };
+    for (prefix, expected) in [(call.function, target), (call.args[0], ordinary_getter)] {
+        let TreeKind::Apply(second) = &ast.get(prefix).kind else {
+            panic!("(using c)")
+        };
+        assert_eq!(reference(&typer, second.args[0]), temp(c));
+        let TreeKind::Apply(first) = &ast.get(second.function).kind else {
+            panic!("(x)")
+        };
+        assert_eq!(reference(&typer, first.args[0]), temp(x));
+        assert_eq!(reference(&typer, first.function), expected);
+    }
+}
+
+#[test]
+fn ordinary_defaults_after_using_preserve_missing_evidence_and_required_parameters() {
+    let text = "class Example {
+        def target(using c: Int)(x: Int = c, y: Int): Int = x
+        def missing: Int = target()
+        def required(using c: Int): Int = target()
+    }";
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for name in ["missing", "required"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let checkpoint = typer.store().checkpoint();
+        for _ in 0..2 {
+            let error = typer
+                .type_method_definition(definition_tree(&index, method))
+                .unwrap_err();
+            match error {
+                TyperError::MissingContextualArgument { expected, .. } if name == "missing" => {
+                    assert_eq!(expected, defs.int)
+                }
+                TyperError::ApplicationArityMismatch {
+                    tree_index,
+                    expected: 2,
+                    actual: 0,
+                    ..
+                } if name == "required" => assert_eq!(tree_index, rhs.index()),
+                other => panic!("{name}: {other:?}"),
+            }
+            assert_eq!(typer.store().checkpoint(), checkpoint);
+            assert!(typer.source_typed_index().is_empty());
+        }
+    }
+}
+
+#[test]
 fn conditional_provider_uses_its_own_default_after_dependency_search() {
     let (parsed, mut store, packages, defs, index, source) = parse_and_name(include_str!(
         "../../../tests/fixtures/contextual-arguments/Defaults.scala"
