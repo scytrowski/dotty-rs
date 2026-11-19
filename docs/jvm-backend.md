@@ -63,6 +63,16 @@ kind and owner and check that a body root exists, but it relies on the
 frontend to supply the correct formal parameters, order, and method/body
 association.
 
+For a concrete source method, the `dotty` facade provides
+`jvm_method_plan::JvmMethodPlanner::new(&store, &source_ast, &source_index, &typed_output)`.
+Call `plan(method_symbol)` to obtain a `JvmMethodPlan` before assembling the
+class. The planner checks the typed definition's symbol and the exact mapping
+of the source body, verifies each value parameter in declaration order, and
+selects the method's ordinary locals from the typer output. A substituted body
+from another method yields `MethodPlanError::BodyMismatch` even when it has the
+same type and comes from the same file. For deferred planning, the planner also
+accepts the retained bindings and the session's extended typed arena.
+
 Each method plan may also carry `JvmLocalBinding` entries for ordinary local
 `val` and `var` declarations. A binding pairs the exact typed `ValDef`
 `TreeId<Typed>` with the existing canonical `SymbolId::Local` whose owner is

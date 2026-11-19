@@ -12,13 +12,14 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use dotty::core::{
-    AstArena, Definitions, Packages, SemanticStore, SourceId, SourceSemanticIndex, SymbolFlags,
-    SymbolId, SymbolInfo, TreeId, TreeKind, Typed, Untyped,
+    AstArena, Definitions, Packages, SemanticStore, SourceId, SourceSemanticIndex, SymbolId,
+    SymbolInfo, TreeId, TreeKind, Typed, Untyped,
 };
 use dotty::jvm::{
-    GeneratedClass, JvmClassInitializationPlan, JvmClassPlan, JvmCompilationUnit, JvmLocalBinding,
-    JvmMethodPlan, PreparedJvmEmission, emit_class,
+    GeneratedClass, JvmClassInitializationPlan, JvmClassPlan, JvmCompilationUnit,
+    PreparedJvmEmission, emit_class,
 };
+use dotty::jvm_method_plan::JvmMethodPlanner;
 use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty::parser::{DetachedParse, ParseResult};
 use dotty::typer::{
@@ -242,8 +243,7 @@ fn with_plan<R>(
     run(&plan, &definitions)
 }
 
-struct TypedMethod {
-    root: TreeId<Typed>,
+struct MethodBindings {
     index: SourceTypedIndex,
     locals: Vec<TypedLocalBinding>,
 }
@@ -259,7 +259,7 @@ fn type_bodies(
     store: &mut SemanticStore,
     definitions: Definitions,
     packages: &Packages,
-) -> (AstArena<Typed>, Vec<Vec<TypedMethod>>) {
+) -> (AstArena<Typed>, Vec<Vec<MethodBindings>>) {
     let mut output = AstArena::new();
     let mut typed_classes = Vec::new();
     for (unit, class) in named_classes(units) {
@@ -274,11 +274,10 @@ fn type_bodies(
                 packages,
                 output,
             );
-            let root = typer.type_method_definition(method).unwrap();
+            typer.type_method_definition(method).unwrap();
             let result = typer.into_typed_output();
             output = result.typed_ast;
-            methods.push(TypedMethod {
-                root,
+            methods.push(MethodBindings {
                 index: result.source_typed_index,
                 locals: result.local_bindings,
             });
@@ -292,7 +291,7 @@ fn type_bodies(
 
 fn class_plans(
     units: &[NamedUnit],
-    typed_classes: Vec<Vec<TypedMethod>>,
+    typed_classes: Vec<Vec<MethodBindings>>,
     output: &AstArena<Typed>,
     store: &SemanticStore,
 ) -> Vec<JvmClassPlan> {
@@ -303,42 +302,16 @@ fn class_plans(
             .iter()
             .zip(typed)
             .map(|(&tree, typed)| {
-                let TreeKind::DefDef(method) = &unit.ast.get(tree).kind else {
-                    panic!("expected method")
-                };
-                let parameters = method
-                    .value_param_clauses
-                    .iter()
-                    .flatten()
-                    .map(|&tree| unit.index.symbol_at(unit.source, tree).unwrap())
-                    .collect();
-                let TreeKind::DefDef(definition) = &output.get(typed.root).kind else {
-                    panic!("expected typed method")
-                };
-                let body = definition.rhs.unwrap();
-                assert_eq!(
-                    typed.index.get(unit.source, method.rhs.unwrap()),
-                    Some(body)
-                );
-                assert_eq!(output.get(body).position.unwrap().source(), unit.source);
-                JvmMethodPlan {
-                    method: unit.symbol(tree),
-                    parameters,
-                    body: Some(body),
-                    locals: typed
-                        .locals
-                        .into_iter()
-                        .map(|binding| {
-                            let symbol = store.symbols.get(binding.symbol());
-                            assert_eq!(symbol.owner, Some(unit.symbol(tree)));
-                            JvmLocalBinding {
-                                declaration: binding.declaration(),
-                                symbol: binding.symbol(),
-                                mutable: symbol.flags.contains(SymbolFlags::MUTABLE),
-                            }
-                        })
-                        .collect(),
+                JvmMethodPlanner {
+                    store,
+                    source_ast: &unit.ast,
+                    source_index: &unit.index,
+                    typed_ast: output,
+                    typed_index: &typed.index,
+                    local_bindings: &typed.locals,
                 }
+                .plan(unit.symbol(tree))
+                .unwrap()
             })
             .collect();
         classes.push(JvmClassPlan {
@@ -442,8 +415,71 @@ fn same_named_methods_in_one_source_execute_on_jdk21_in_either_file_order() {
         names.sort_unstable();
         assert_eq!(names, ["demo/A", "demo/B", "demo/Use"], "{order}");
         let stdout = run_java_client(order, "ProviderClient", &classes);
-        assert_eq!(stdout.lines().collect::<Vec<_>>(), ["17", "42"], "{order}");
+        assert_eq!(
+            stdout.lines().collect::<Vec<_>>(),
+            ["17", "42", "5"],
+            "{order}"
+        );
     }
+}
+
+#[test]
+fn method_plan_rejects_another_methods_body_in_the_same_source() {
+    use dotty::jvm_method_plan::MethodPlanError;
+
+    let files = [(
+        SourceId::from_index(0),
+        "Pair.scala",
+        "class Pair { def first(): Int = { var n = 1; n }; def second(): Int = { val n = 2; n } }",
+    )];
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let units = name_units(
+        &files,
+        parsing::parse_files(&files, 1),
+        &mut store,
+        &mut packages,
+    );
+    let unit = &units[0];
+    let [first, second] = unit.methods[..] else {
+        panic!("expected two methods")
+    };
+    let mut typer = unit.typer(&mut store, definitions, &packages);
+    let first_root = typer.type_method_definition(first).unwrap();
+    typer.type_method_definition(second).unwrap();
+    let mut output = typer.into_typed_output();
+    let planner = JvmMethodPlanner::new(&store, &unit.ast, &unit.index, &output);
+    let first_plan = planner.plan(unit.symbol(first)).unwrap();
+    let second_plan = planner.plan(unit.symbol(second)).unwrap();
+    assert_eq!(first_plan.locals.len(), 1);
+    assert_eq!(second_plan.locals.len(), 1);
+    let first_local = first_plan.locals[0];
+    let second_local = second_plan.locals[0];
+    assert_eq!(
+        store.symbols.owner(first_local.symbol),
+        Some(unit.symbol(first))
+    );
+    assert_eq!(
+        store.symbols.owner(second_local.symbol),
+        Some(unit.symbol(second))
+    );
+    assert!(first_local.mutable);
+    assert!(!second_local.mutable);
+    assert_ne!(first_plan.body, second_plan.body);
+
+    let TreeKind::DefDef(definition) = &mut output.typed_ast.get_mut(first_root).kind else {
+        panic!("expected typed method")
+    };
+    definition.rhs = second_plan.body;
+    assert_eq!(
+        JvmMethodPlanner::new(&store, &unit.ast, &unit.index, &output).plan(unit.symbol(first)),
+        Err(MethodPlanError::BodyMismatch {
+            method: unit.symbol(first),
+            expected: first_plan.body.unwrap(),
+            actual: second_plan.body.unwrap()
+        })
+    );
 }
 
 fn run_java_client(label: &str, main_class: &str, classes: &[GeneratedClass]) -> String {

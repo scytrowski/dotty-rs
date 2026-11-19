@@ -7,5 +7,6 @@ class ProviderClient {
         Use use = new Use();
         System.out.println(use.fromA(new A()));
         System.out.println(use.fromB(new B()));
+        System.out.println(use.diff(9, 4));
     }
 }
