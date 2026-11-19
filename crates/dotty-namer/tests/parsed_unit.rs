@@ -792,7 +792,7 @@ fn contextual_default_getters_copy_only_earlier_clauses() {
 }
 
 #[test]
-fn contextual_getter_with_context_bound_witnesses_has_no_unverified_ordinal() {
+fn contextual_getter_counts_the_context_bound_before_the_defaulted_parameter() {
     let named = named_source(
         "trait Show[A]; class C { def read[A: Show](x: A)(using n: Int = 1): Int = n }",
         110,
@@ -819,7 +819,50 @@ fn contextual_getter_with_context_bound_witnesses_has_no_unverified_ordinal() {
             def.value_param_clauses[1][0],
         )
         .unwrap();
-    assert_eq!(named.store.default_getter_origin(getter), None);
+    assert_eq!(named.store.default_getter_origin(getter), Some((method, 2)));
+    assert_eq!(named.store.default_getter(method, 2), Some(getter));
+    assert_eq!(named.store.default_getter(method, 1), None);
+    assert_eq!(
+        named
+            .store
+            .names
+            .resolve(named.store.symbols.get(getter).name.text()),
+        "read$default$3"
+    );
+}
+
+#[test]
+fn a_default_getter_copies_the_bound_needed_by_an_earlier_dependent_clause() {
+    let named = named_source(
+        "trait TC[A]; class C { def read[A: TC as tc](v: tc.type)(using n: Int = 1): Int = n }",
+        111,
+    );
+    let (tree, def) = named
+        .parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::DefDef(def)
+                if named.store.names.resolve(def.name.as_name().text()) == "read" =>
+            {
+                Some((tree, def))
+            }
+            _ => None,
+        })
+        .unwrap();
+    let method = named.index.symbol_at(named.source, tree).unwrap();
+    let getter = named.store.default_getter(method, 2).unwrap();
+    let clauses = def.context_bound_clauses(&named.parsed.ast, &named.store.names);
+    let witness = clauses[0][0];
+    let copy = named
+        .index
+        .derived_symbol_at(getter, named.source, witness)
+        .unwrap();
+    assert_ne!(Some(copy), named.index.symbol_at(named.source, witness));
+    let param = named.store.symbols.get(copy);
+    assert_eq!(param.owner, Some(getter));
+    assert!(param.flags.contains(SymbolFlags::GIVEN));
+    assert_eq!(named.store.names.resolve(param.name.text()), "tc");
 }
 
 struct PrimaryConstructorParts {

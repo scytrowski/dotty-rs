@@ -107,7 +107,14 @@ fn c2_bound_and_implicit_default() {
 
     // The first failure is completing the getter signature, before typing
     // the anonymous class in B's initializer. Scala assigns it ordinal 2.
-    assert_eq!(typer.store().default_getter(method, 1), None);
+    assert_eq!(typer.store().default_getter(method, 1), Some(getter));
+    assert_eq!(
+        typer
+            .store()
+            .names
+            .resolve(typer.store().symbols.get(getter).name.text()),
+        "qux2$default$2"
+    );
     for result in [
         typer.complete_symbol(getter).map(|_| ()),
         typer.type_method_definition(tree).map(|_| ()),
