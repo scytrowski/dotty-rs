@@ -238,8 +238,8 @@ class UseCounter:
 fn public_body_fields_reject_swapped_initializers_with_identical_source_text() {
     let (mut store, defs, packages, unit) = named(BODY_COUNTER);
     let units = [unit];
-    complete_signatures(&units, &mut store, defs, &packages).unwrap();
-    let (arena, mut bindings) = type_bodies(&units, &mut store, defs, &packages);
+    let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
+    let (arena, mut bindings) = type_bodies(&units, &mut store, defs, &packages, headers);
     let [initial, count] = bindings[0].fields.as_mut_slice() else {
         panic!("expected two fields")
     };
@@ -351,8 +351,8 @@ fn class_planner_rejects_template_initializer() {
         .find_map(|(id, node)| matches!(node.kind, TreeKind::Apply(_)).then_some(id))
         .unwrap();
     let units = [unit];
-    complete_signatures(&units, &mut store, defs, &packages).unwrap();
-    let (arena, bindings) = type_bodies(&units, &mut store, defs, &packages);
+    let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
+    let (arena, bindings) = type_bodies(&units, &mut store, defs, &packages, headers);
     assert_eq!(
         class_plans(&units, bindings, &arena, &store),
         Err(ClassPlanError::UnsupportedStatement { class, tree })
@@ -381,12 +381,19 @@ fn class_planner_requires_a_public_constructor() {
 #[test]
 fn class_planner_rejects_parent_arguments_even_after_type_resolution() {
     let (mut store, defs, packages, unit) =
-        named("class Base(x: Int)\nclass Derived extends Base(1)");
-    complete_signatures(std::slice::from_ref(&unit), &mut store, defs, &packages).unwrap();
+        named("class Base(x: Int)\nclass Derived(start: Int) extends Base(1)");
+    let headers =
+        complete_signatures(std::slice::from_ref(&unit), &mut store, defs, &packages).unwrap();
     let child = unit.classes[1].symbol;
     let planner = JvmClassPlanner::new(&store, &unit.ast, &unit.index);
     assert_eq!(
         planner.plan(child, []),
+        Err(ClassPlanError::UnsupportedTemplate(child))
+    );
+    assert_eq!(
+        planner
+            .with_typed_header(&headers.arena, &headers.by_class[&child])
+            .plan(child, []),
         Err(ClassPlanError::UnsupportedTemplate(child))
     );
 }
@@ -416,7 +423,6 @@ fn bare_parent_requires_an_available_no_arg_constructor_before_emission() {
 
 #[test]
 fn bare_parent_constructor_and_virtual_dispatch_work_in_both_file_orders_on_jdk21() {
-    use dotty::classfile::{Attribute, ClassFile, ConstantPoolEntry, ConstantPoolIndex, Reader};
     let base = (
         SourceId::from_index(0),
         "Base.scala",
@@ -440,38 +446,7 @@ class Derived extends Base:
     let second = super::compile([derived, base]);
     assert!(first.iter().eq(second.iter().rev()));
     for artifacts in [first, second] {
-        let artifact = artifacts
-            .iter()
-            .find(|a| a.internal_name() == "demo/Derived")
-            .unwrap();
-        let class = ClassFile::decode(&mut Reader::new(artifact.bytes())).unwrap();
-        let pool = &class.constant_pool;
-        assert_eq!(pool.class_name(class.super_class.unwrap()), Ok("demo/Base"));
-        let constructor = class
-            .methods
-            .iter()
-            .find(|m| pool.utf8(m.name_index) == Ok("<init>"))
-            .unwrap();
-        assert_eq!(pool.utf8(constructor.descriptor_index), Ok("()V"));
-        let [Attribute::Code(code)] = constructor.attributes.as_slice() else {
-            panic!("expected constructor code")
-        };
-        let [0x2a, 0xb7, hi, lo, 0xb1] = code.code else {
-            panic!("expected aload_0, invokespecial, return")
-        };
-        let reference = ConstantPoolIndex(u16::from_be_bytes([*hi, *lo]));
-        let Some(ConstantPoolEntry::Methodref {
-            class_index,
-            name_and_type_index,
-        }) = pool.get(reference)
-        else {
-            panic!("invokespecial must reference a class method")
-        };
-        assert_eq!(pool.class_name(*class_index), Ok("demo/Base"));
-        assert_eq!(
-            pool.name_and_type(*name_and_type_index),
-            Ok(("<init>", "()V"))
-        );
+        assert_super_call(&artifacts, "()V", &[0x2a]);
         assert_eq!(
             super::run_java_client("inheritance", "InheritanceClient", &artifacts)
                 .lines()
@@ -479,6 +454,174 @@ class Derived extends Base:
             ["1", "1", "7"]
         );
     }
+}
+
+fn assert_super_call(artifacts: &[dotty::jvm::GeneratedClass], descriptor: &str, loads: &[u8]) {
+    use dotty::classfile::{Attribute, ClassFile, ConstantPoolEntry, ConstantPoolIndex, Reader};
+    let artifact = artifacts
+        .iter()
+        .find(|a| a.internal_name() == "demo/Derived")
+        .unwrap();
+    let class = ClassFile::decode(&mut Reader::new(artifact.bytes())).unwrap();
+    let pool = &class.constant_pool;
+    assert_eq!(pool.class_name(class.super_class.unwrap()), Ok("demo/Base"));
+    let constructor = class
+        .methods
+        .iter()
+        .find(|m| pool.utf8(m.name_index) == Ok("<init>"))
+        .unwrap();
+    assert_eq!(pool.utf8(constructor.descriptor_index), Ok(descriptor));
+    let [Attribute::Code(code)] = constructor.attributes.as_slice() else {
+        panic!("expected constructor code")
+    };
+    let Some([0xb7, hi, lo, 0xb1]) = code.code.strip_prefix(loads) else {
+        panic!("expected receiver and argument loads, invokespecial, return")
+    };
+    let reference = ConstantPoolIndex(u16::from_be_bytes([*hi, *lo]));
+    let Some(ConstantPoolEntry::Methodref {
+        class_index,
+        name_and_type_index,
+    }) = pool.get(reference)
+    else {
+        panic!("invokespecial must reference a class method")
+    };
+    assert_eq!(pool.class_name(*class_index), Ok("demo/Base"));
+    assert_eq!(
+        pool.name_and_type(*name_and_type_index),
+        Ok(("<init>", descriptor))
+    );
+}
+
+#[test]
+fn forwarded_parent_argument_reaches_base_state_in_both_file_orders() {
+    let base = (
+        SourceId::from_index(0),
+        "Base.scala",
+        "package demo
+class Base(seed: Int):
+  private val initial: Int = seed
+  def read(): Int = initial
+",
+    );
+    let derived = (
+        SourceId::from_index(1),
+        "Derived.scala",
+        "package demo
+class Derived(start: Int) extends Base(start)
+",
+    );
+    let first = super::compile([base, derived]);
+    let second = super::compile([derived, base]);
+    assert!(first.iter().eq(second.iter().rev()));
+    for artifacts in [first, second] {
+        assert_super_call(&artifacts, "(I)V", &[0x2a, 0x1b]); // aload_0, iload_1
+        assert_eq!(
+            super::run_java_client("forwarded-parent", "ForwardingClient", &artifacts)
+                .lines()
+                .collect::<Vec<_>>(),
+            ["40", "7"]
+        );
+    }
+}
+
+#[test]
+fn forwarded_parent_rejects_an_int_argument_from_another_parent_call() {
+    let (mut store, defs, packages, unit) = named(
+        "class Base(seed: Int)
+class First(start: Int) extends Base(start)
+class Second(start: Int) extends Base(start)",
+    );
+    let mut headers =
+        complete_signatures(std::slice::from_ref(&unit), &mut store, defs, &packages).unwrap();
+    let [_, first, second] = unit.classes.as_slice() else {
+        panic!("expected three classes")
+    };
+    let typed_call = |class: &super::NamedClass| {
+        headers.by_class[&class.symbol]
+            .get(unit.source, class.parent_application.unwrap())
+            .unwrap()
+    };
+    let first_call = typed_call(first);
+    let second_call = typed_call(second);
+    let argument = |call| {
+        let TreeKind::Apply(app) = &headers.arena.get(call).kind else {
+            panic!("expected a typed parent application")
+        };
+        let [arg] = app.args[..] else {
+            panic!("expected a single argument")
+        };
+        let Some(dotty::core::Type::TermRef {
+            target: dotty::core::TermRefTarget::Symbol(formal),
+            ..
+        }) = store.types.try_get(headers.arena.get(arg).ty)
+        else {
+            panic!("expected a constructor parameter reference")
+        };
+        assert_eq!(
+            *store.symbols.info(*formal),
+            dotty::core::SymbolInfo::Complete(defs.int)
+        );
+        arg
+    };
+    let original = argument(first_call);
+    let foreign = argument(second_call);
+    assert_ne!(original, foreign);
+    let planner = JvmClassPlanner::new(&store, &unit.ast, &unit.index);
+    let bindings = &headers.by_class[&first.symbol];
+    planner
+        .with_typed_header(&headers.arena, bindings)
+        .plan(first.symbol, [])
+        .unwrap();
+    let TreeKind::Apply(app) = &mut headers.arena.get_mut(first_call).kind else {
+        unreachable!()
+    };
+    app.args[0] = foreign;
+    assert_eq!(
+        JvmClassPlanner::new(&store, &unit.ast, &unit.index)
+            .with_typed_header(&headers.arena, bindings)
+            .plan(first.symbol, []),
+        Err(ClassPlanError::InvalidParentApplication {
+            class: first.symbol,
+            tree: first.parent_application.unwrap()
+        })
+    );
+}
+
+#[test]
+fn parent_constructor_must_belong_to_its_declaring_source() {
+    let base = SourceId::from_index(1);
+    let derived = SourceId::from_index(2);
+    let files = [
+        (base, "Base.scala", "class Base(seed: Int)"),
+        (
+            derived,
+            "Derived.scala",
+            "class Derived(start: Int) extends Base(start)",
+        ),
+    ];
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let units = name_units(
+        &files,
+        parsing::parse_files(&files, 1),
+        &mut store,
+        &mut packages,
+    );
+    let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
+    let unit = &units[1];
+    let child = &unit.classes[0];
+    let constructor = units[0].classes[0].constructor;
+    store.symbols.get_mut(constructor).origin = dotty::core::SymbolOrigin::Source(derived);
+    assert_eq!(
+        JvmClassPlanner::new(&store, &unit.ast, &unit.index)
+            .with_typed_header(&headers.arena, &headers.by_class[&child.symbol])
+            .plan(child.symbol, []),
+        Err(ClassPlanError::InvalidParentApplication {
+            class: child.symbol,
+            tree: child.parent_application.unwrap()
+        })
+    );
 }
 
 #[test]
@@ -561,8 +704,8 @@ fn private_fields_encode_mutability_and_keep_per_instance_state_on_jdk21() {
 
     let (mut store, defs, packages, unit) = named(include_str!("../../Counter.scala"));
     let units = [unit];
-    complete_signatures(&units, &mut store, defs, &packages).unwrap();
-    let (arena, mut bindings) = type_bodies(&units, &mut store, defs, &packages);
+    let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
+    let (arena, mut bindings) = type_bodies(&units, &mut store, defs, &packages, headers);
     bindings[0].fields.reverse();
     let classes = class_plans(&units, bindings, &arena, &store).unwrap();
     let class = classes[0].class;
@@ -606,8 +749,8 @@ fn private_fields_encode_mutability_and_keep_per_instance_state_on_jdk21() {
 fn private_var_rejects_the_initializer_of_another_int_field() {
     let (mut store, defs, packages, unit) = named(include_str!("../../Counter.scala"));
     let units = [unit];
-    complete_signatures(&units, &mut store, defs, &packages).unwrap();
-    let (arena, mut bindings) = type_bodies(&units, &mut store, defs, &packages);
+    let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
+    let (arena, mut bindings) = type_bodies(&units, &mut store, defs, &packages, headers);
     let [base, current] = bindings[0].fields.as_mut_slice() else {
         panic!("expected two fields")
     };

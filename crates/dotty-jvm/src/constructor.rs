@@ -86,6 +86,7 @@ pub struct JvmDirectSuperConstructorPlan {
     child_class: SymbolId,
     child_constructor: SymbolId,
     parent_class: SymbolId,
+    parent_source: SourceId,
     parent_constructor: SymbolId,
     source_application: TreeId<Untyped>,
     typed_application: TreeId<Typed>,
@@ -146,7 +147,10 @@ impl JvmDirectSuperConstructorPlan {
         if symbol.kind != SymbolKind::Constructor || symbol.owner != Some(self.parent_class) {
             return Err(fail());
         }
-        if symbol.origin != dotty_core::SymbolOrigin::Source(self.source)
+        let parent_origin = dotty_core::SymbolOrigin::Source(self.parent_source);
+        if symbol.origin != parent_origin
+            || !store.symbols.contains(self.parent_class)
+            || store.symbols.get(self.parent_class).origin != parent_origin
             || !store.symbols.contains(self.child_class)
             || store.symbols.get(self.child_class).origin
                 != dotty_core::SymbolOrigin::Source(self.source)
@@ -721,6 +725,9 @@ impl JvmPrimaryConstructorPlan {
             return Err(fail(JvmConstructorIssue::ParentConstructorIdentity));
         }
         let parent_class = parent.owner.expect("checked above");
+        let dotty_core::SymbolOrigin::Source(parent_source) = parent.origin else {
+            return Err(fail(JvmConstructorIssue::ParentConstructorIdentity));
+        };
         if typed_apply.kind != dotty_core::ast::ApplyKind::Regular
             || typed_apply.args.len() != arguments.len()
             || typed_apply
@@ -735,6 +742,7 @@ impl JvmPrimaryConstructorPlan {
             child_class: self.class,
             child_constructor: self.constructor,
             parent_class,
+            parent_source,
             parent_constructor,
             source_application: parent_application,
             typed_application: typed_parent_application,

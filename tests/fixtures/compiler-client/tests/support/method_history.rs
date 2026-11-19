@@ -26,7 +26,7 @@ impl MethodHistory {
         defs: Definitions,
         packages: &Packages,
         mut blocked: impl FnMut(),
-    ) -> Result<(), TyperError> {
+    ) -> Result<crate::TypedHeaders, TyperError> {
         let by_symbol: HashMap<_, _> = units
             .iter()
             .enumerate()
@@ -65,22 +65,23 @@ impl MethodHistory {
         let roots = preferred
             .into_iter()
             .chain(units.iter().flat_map(NamedUnit::method_symbols));
-        complete_methods_in_order(units, roots, store, defs, packages, |symbol, outcome| {
-            match outcome {
-                SignatureCompletion::BlockedOn(_) => blocked(),
-                SignatureCompletion::Complete(_) => {
-                    if let Some(&key) = by_symbol.get(&symbol) {
-                        next_order.push(key);
+        let headers =
+            complete_methods_in_order(units, roots, store, defs, packages, |symbol, outcome| {
+                match outcome {
+                    SignatureCompletion::BlockedOn(_) => blocked(),
+                    SignatureCompletion::Complete(_) => {
+                        if let Some(&key) = by_symbol.get(&symbol) {
+                            next_order.push(key);
+                        }
                     }
                 }
-            }
-        })?;
+            })?;
         self.sources = files
             .iter()
             .map(|&(_, path, text)| (path.to_owned(), text.to_owned()))
             .collect();
         self.order = next_order;
-        Ok(())
+        Ok(headers)
     }
 }
 
@@ -114,7 +115,7 @@ impl Strategy {
         defs: Definitions,
         packages: &Packages,
         mut blocked: impl FnMut(),
-    ) -> Result<(), TyperError> {
+    ) -> Result<crate::TypedHeaders, TyperError> {
         match self {
             Self::Ordinary => {
                 complete_signatures_in_order(units, units, store, defs, packages, |_, outcome| {

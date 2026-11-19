@@ -6,12 +6,13 @@ use std::fmt;
 use crate::core::{
     AstArena, Modifier, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex,
     SourceTypedIndex, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, Template,
-    TreeId, TreeKind, Type, TypeRefTarget, Typed, Untyped, UntypedNode, ValDef, Visibility,
-    VisibilitySyntax,
+    TermRefTarget, TreeId, TreeKind, Type, TypeRefTarget, Typed, Untyped, UntypedNode, ValDef,
+    Visibility, VisibilitySyntax,
 };
 use crate::jvm::{
-    JvmClassInitializationPlan, JvmClassPlan, JvmFieldPlan, JvmFieldSourceVisibility,
-    JvmMethodPlan, JvmPrimaryConstructorPlan, JvmPublicBodyFieldSourceProof,
+    JvmClassInitializationPlan, JvmClassPlan, JvmConstructorArgumentBinding, JvmFieldPlan,
+    JvmFieldSourceVisibility, JvmMethodPlan, JvmPrimaryConstructorPlan,
+    JvmPublicBodyFieldSourceProof,
 };
 
 /// Result of typing one field RHS and the index from that typing operation.
@@ -63,6 +64,11 @@ pub enum ClassPlanError {
     SourceClass(SymbolId),
     /// The parent is unsupported or unresolved, or the template has a self type, derives or uses clause.
     UnsupportedTemplate(SymbolId),
+    /// The class header has incomplete or inconsistent bindings for its parent application.
+    InvalidParentApplication {
+        class: SymbolId,
+        tree: TreeId<Untyped>,
+    },
     /// The primary constructor has unsupported parameter clauses or formals.
     ConstructorParameters(SymbolId),
     /// A constructor parameter supplies an unsupported default value.
@@ -115,6 +121,7 @@ pub struct JvmClassPlanner<'a> {
     store: &'a SemanticStore,
     ast: &'a AstArena<Untyped>,
     index: &'a SourceSemanticIndex,
+    header: Option<(&'a AstArena<Typed>, &'a SourceTypedIndex)>,
 }
 
 impl<'a> JvmClassPlanner<'a> {
@@ -124,7 +131,24 @@ impl<'a> JvmClassPlanner<'a> {
         ast: &'a AstArena<Untyped>,
         index: &'a SourceSemanticIndex,
     ) -> Self {
-        Self { store, ast, index }
+        Self {
+            store,
+            ast,
+            index,
+            header: None,
+        }
+    }
+
+    /// Uses the mappings produced when completing this class header to plan a
+    /// direct parent call forwarding constructor parameters. Keep the typed
+    /// arena from that operation (or its session extension) through emission.
+    pub fn with_typed_header(
+        mut self,
+        typed_ast: &'a AstArena<Typed>,
+        index: &'a SourceTypedIndex,
+    ) -> Self {
+        self.header = Some((typed_ast, index));
+        self
     }
 
     /// Plans a public primary constructor with at most one value parameter list.
@@ -244,6 +268,28 @@ impl<'a> JvmClassPlanner<'a> {
     ) -> Result<JvmClassPlan, ClassPlanError> {
         let (source, template) = self.template(class)?;
         let initialization = self.constructor_plan(class, source, template)?;
+        let initialization = match template.parents.as_slice() {
+            [] => initialization,
+            [parent] if self.has_source_parent(class) => {
+                match &self
+                    .ast
+                    .try_get(*parent)
+                    .ok_or(ClassPlanError::UnsupportedTemplate(class))?
+                    .kind
+                {
+                    TreeKind::Ident(ident) if ident.name.is_type() => initialization,
+                    TreeKind::Apply(application) => self.plan_parent_call(
+                        class,
+                        source,
+                        *parent,
+                        &application.args,
+                        initialization,
+                    )?,
+                    _ => return Err(ClassPlanError::UnsupportedTemplate(class)),
+                }
+            }
+            _ => return Err(ClassPlanError::UnsupportedTemplate(class)),
+        };
 
         let mut positions = HashMap::with_capacity(template.body.len());
         let mut slots = Vec::with_capacity(template.body.len());
@@ -336,22 +382,10 @@ impl<'a> JvmClassPlanner<'a> {
         {
             return Err(ClassPlanError::UnsupportedTemplate(class));
         }
-        match template.parents.as_slice() {
-            [] => {}
-            [parent] if self.is_bare_source_parent(class, *parent) => {}
-            _ => return Err(ClassPlanError::UnsupportedTemplate(class)),
-        }
         Ok((source, template))
     }
 
-    // ClassInfo retains the resolved parent type even for `extends Base(1)`.
-    // Check the original syntax before letting the JVM unit select Base.<init>()V.
-    fn is_bare_source_parent(&self, class: SymbolId, tree: TreeId<Untyped>) -> bool {
-        if !matches!(self.ast.try_get(tree).map(|node| &node.kind),
-            Some(TreeKind::Ident(ident)) if ident.name.is_type())
-        {
-            return false;
-        }
+    fn has_source_parent(&self, class: SymbolId) -> bool {
         let SymbolInfo::Complete(info) = *self.store.symbols.info(class) else {
             return false;
         };
@@ -373,6 +407,57 @@ impl<'a> JvmClassPlanner<'a> {
         }
         let symbol = self.store.symbols.get(*parent);
         symbol.kind == SymbolKind::Class && matches!(symbol.origin, SymbolOrigin::Source(_))
+    }
+
+    fn plan_parent_call(
+        &self,
+        class: SymbolId,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+        args: &[TreeId<Untyped>],
+        initialization: JvmClassInitializationPlan,
+    ) -> Result<JvmClassInitializationPlan, ClassPlanError> {
+        let unsupported = ClassPlanError::UnsupportedTemplate(class);
+        let JvmClassInitializationPlan::PrimaryConstructor(constructor) = initialization else {
+            return Err(unsupported);
+        };
+        let (typed_ast, index) = self.header.ok_or(unsupported)?;
+        let invalid = ClassPlanError::InvalidParentApplication { class, tree };
+        let typed_call = index.get(source, tree).ok_or(invalid)?;
+        let [arg] = args else { return Err(unsupported) };
+        let source_arg = self.ast.try_get(*arg).ok_or(invalid)?;
+        if !matches!(&source_arg.kind, TreeKind::Ident(ident) if ident.name.is_term()) {
+            return Err(unsupported);
+        }
+        let typed = index.get(source, *arg).ok_or(invalid)?;
+        // Only a reference to a formal of this exact child constructor may be forwarded.
+        let node = typed_ast.try_get(typed).ok_or(invalid)?;
+        if !source_arg
+            .position
+            .is_some_and(|pos| pos.source() == source)
+            || node.position != source_arg.position
+            || !matches!(&node.kind, TreeKind::Ident(_))
+            || !matches!(self.store.types.try_get(node.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. })
+                if constructor.parameters().contains(symbol))
+        {
+            return Err(invalid);
+        }
+        constructor
+            .with_direct_super_constructor(
+                tree,
+                typed_call,
+                vec![JvmConstructorArgumentBinding {
+                    source: *arg,
+                    typed,
+                }],
+                self.ast,
+                self.index,
+                index,
+                self.store,
+                typed_ast,
+            )
+            .map(JvmClassInitializationPlan::PrimaryConstructor)
+            .map_err(|_| invalid)
     }
 
     fn constructor_plan(

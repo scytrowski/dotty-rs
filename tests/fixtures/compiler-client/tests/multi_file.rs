@@ -37,6 +37,7 @@ struct NamedUnit {
 }
 
 struct NamedClass {
+    parent_application: Option<TreeId<Untyped>>,
     symbol: SymbolId,
     constructor: SymbolId,
     constructor_fields: Vec<SymbolId>,
@@ -142,7 +143,12 @@ fn enter(
             .map(|&tree| index.symbol_at(id, tree).unwrap())
             .filter(|&symbol| store.symbols.get(symbol).kind == dotty::core::SymbolKind::Field)
             .collect();
+        let parent_application = match template.parents.as_slice() {
+            [tree] if matches!(ast.get(*tree).kind, TreeKind::Apply(_)) => Some(*tree),
+            _ => None,
+        };
         classes.push(NamedClass {
+            parent_application,
             constructor_fields,
             symbol: index.symbol_at(id, tree).unwrap(),
             constructor: index.symbol_at(id, template.constructor).unwrap(),
@@ -177,12 +183,110 @@ fn name_units(
 
 // Scheduling belongs to the consumer. The index identifies the owning source
 // even when different files reuse the same input tree slots.
+#[derive(Debug, Default)]
+struct TypedHeaders {
+    arena: AstArena<Typed>,
+    by_class: HashMap<SymbolId, std::sync::Arc<SourceTypedIndex>>,
+}
+
+fn complete_headers(
+    units: &[NamedUnit],
+    store: &mut SemanticStore,
+    definitions: Definitions,
+    packages: &Packages,
+    observe: &mut impl FnMut(SymbolId, SignatureCompletion),
+) -> Result<TypedHeaders, TyperError> {
+    // Parent applications need the declaring file's constructor signature.
+    for unit in units {
+        let mut typer = unit.typer(store, definitions, packages);
+        for class in &unit.classes {
+            typer.complete_symbol(class.constructor)?;
+        }
+    }
+    let mut headers = TypedHeaders::default();
+    let mut pending: Vec<_> = units
+        .iter()
+        .map(|unit| (unit, unit.classes.iter().collect::<Vec<_>>()))
+        .collect();
+    while !pending.is_empty() {
+        let mut next = Vec::new();
+        let mut progress = false;
+        let mut blocked = None;
+        for (unit, classes) in pending {
+            let mut typer = SourceTyper::new_with_typed_ast(
+                &unit.ast,
+                unit.source,
+                &unit.index,
+                store,
+                definitions,
+                packages,
+                headers.arena,
+            );
+            let mut retry = Vec::new();
+            for class in classes {
+                match typer.complete_symbol(class.symbol) {
+                    Ok(header) => {
+                        observe(class.symbol, SignatureCompletion::Complete(header));
+                        progress = true;
+                    }
+                    Err(error @ TyperError::NewClassInfoUnavailable { symbol })
+                        if typer.store().symbols.contains(symbol)
+                            && matches!(
+                                typer.store().symbols.info(symbol),
+                                SymbolInfo::Missing
+                            )
+                            && matches!(typer.store().symbols.get(symbol).origin, dotty::core::SymbolOrigin::Source(source) if source != unit.source) =>
+                    {
+                        blocked = Some(error);
+                        retry.push(class);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            let (arena, index) = typer.into_typed_ast_and_index();
+            headers.arena = arena;
+            if !index.is_empty() {
+                let index = std::sync::Arc::new(index);
+                for class in &unit.classes {
+                    if class
+                        .parent_application
+                        .is_some_and(|tree| index.get(unit.source, tree).is_some())
+                    {
+                        headers.by_class.insert(class.symbol, index.clone());
+                    }
+                }
+            }
+            if !retry.is_empty() {
+                next.push((unit, retry));
+            }
+        }
+        if !progress && let Some(error) = blocked {
+            return Err(error);
+        }
+        pending = next;
+    }
+    for unit in units {
+        let mut typer = unit.typer(store, definitions, packages);
+        for class in &unit.classes {
+            for &field in &class.constructor_fields {
+                typer.complete_symbol(field)?;
+            }
+            for &(field, _) in &class.fields {
+                if typer.store().symbols.get(field).visibility == dotty::core::Visibility::Public {
+                    typer.complete_symbol(field)?;
+                }
+            }
+        }
+    }
+    Ok(headers)
+}
+
 fn complete_signatures(
     units: &[NamedUnit],
     store: &mut SemanticStore,
     definitions: Definitions,
     packages: &Packages,
-) -> Result<(), TyperError> {
+) -> Result<TypedHeaders, TyperError> {
     complete_signatures_in_order(units, units, store, definitions, packages, |_, _| {})
 }
 
@@ -193,7 +297,7 @@ fn complete_signatures_in_order<'a>(
     definitions: Definitions,
     packages: &Packages,
     observe: impl FnMut(SymbolId, SignatureCompletion),
-) -> Result<(), TyperError> {
+) -> Result<TypedHeaders, TyperError> {
     complete_methods_in_order(
         units,
         roots.into_iter().flat_map(NamedUnit::method_symbols),
@@ -211,34 +315,12 @@ fn complete_methods_in_order(
     definitions: Definitions,
     packages: &Packages,
     mut observe: impl FnMut(SymbolId, SignatureCompletion),
-) -> Result<(), TyperError> {
-    let mut owners = HashMap::new();
-    for unit in units {
-        for class in &unit.classes {
-            let header = unit
-                .typer(store, definitions, packages)
-                .complete_symbol(class.symbol)?;
-            observe(class.symbol, SignatureCompletion::Complete(header));
-        }
-        owners.extend(unit.method_symbols().map(|method| (method, unit)));
-    }
-
-    // Resolve constructor and field signatures against their declaring source
-    // before another unit types a construction or member selection.
-    for unit in units {
-        let mut typer = unit.typer(store, definitions, packages);
-        for class in &unit.classes {
-            typer.complete_symbol(class.constructor)?;
-            for &field in &class.constructor_fields {
-                typer.complete_symbol(field)?;
-            }
-            for &(field, _) in &class.fields {
-                if typer.store().symbols.get(field).visibility == dotty::core::Visibility::Public {
-                    typer.complete_symbol(field)?;
-                }
-            }
-        }
-    }
+) -> Result<TypedHeaders, TyperError> {
+    let headers = complete_headers(units, store, definitions, packages, &mut observe)?;
+    let owners: HashMap<_, _> = units
+        .iter()
+        .flat_map(|unit| unit.method_symbols().map(move |symbol| (symbol, unit)))
+        .collect();
 
     for symbol in roots {
         if matches!(store.symbols.info(symbol), SymbolInfo::Complete(_)) {
@@ -268,7 +350,7 @@ fn complete_methods_in_order(
             }
         }
     }
-    Ok(())
+    Ok(headers)
 }
 
 fn with_plan<R>(
@@ -284,9 +366,9 @@ fn with_plan<R>(
         &mut store,
         &mut packages,
     );
-    complete_signatures(&units, &mut store, definitions, &packages).unwrap();
+    let headers = complete_signatures(&units, &mut store, definitions, &packages).unwrap();
 
-    let (output, typed_classes) = type_bodies(&units, &mut store, definitions, &packages);
+    let (output, typed_classes) = type_bodies(&units, &mut store, definitions, &packages, headers);
     let classes = class_plans(&units, typed_classes, &output, &store).unwrap();
     let plan = JvmCompilationUnit {
         store: &store,
@@ -297,6 +379,7 @@ fn with_plan<R>(
 }
 
 struct ClassBindings {
+    header: Option<std::sync::Arc<SourceTypedIndex>>,
     methods: Vec<MethodBindings>,
     fields: Vec<FieldBindings>,
 }
@@ -323,8 +406,12 @@ fn type_bodies(
     store: &mut SemanticStore,
     definitions: Definitions,
     packages: &Packages,
+    headers: TypedHeaders,
 ) -> (AstArena<Typed>, Vec<ClassBindings>) {
-    let mut output = AstArena::new();
+    let TypedHeaders {
+        arena: mut output,
+        mut by_class,
+    } = headers;
     let mut typed_classes = Vec::new();
     for (unit, class) in named_classes(units) {
         let mut fields = Vec::with_capacity(class.fields.len());
@@ -365,7 +452,11 @@ fn type_bodies(
             });
         }
 
-        typed_classes.push(ClassBindings { methods, fields });
+        typed_classes.push(ClassBindings {
+            methods,
+            fields,
+            header: by_class.remove(&class.symbol),
+        });
     }
 
     (output, typed_classes)
@@ -400,14 +491,11 @@ fn class_plans(
             root: binding.root,
             index: &binding.index,
         });
-        classes.push(
-            JvmClassPlanner::new(store, &unit.ast, &unit.index).plan_with_fields(
-                class.symbol,
-                methods,
-                output,
-                fields,
-            )?,
-        );
+        let mut planner = JvmClassPlanner::new(store, &unit.ast, &unit.index);
+        if let Some(index) = &typed.header {
+            planner = planner.with_typed_header(output, index);
+        }
+        classes.push(planner.plan_with_fields(class.symbol, methods, output, fields)?);
     }
     Ok(classes)
 }

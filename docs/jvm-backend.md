@@ -110,9 +110,22 @@ Both entry points also accept a single bare type identifier in `extends Base`.
 Complete the child class header first so its `ClassInfo` identifies the source
 class that the typer resolved as the parent. Include both class plans in the
 same JVM unit. Unit validation checks the direct parent and its public
-no-argument constructor before emission. An explicit parent application such
-as `extends Base(1)` yields `ClassPlanError::UnsupportedTemplate`, even when
-its resolved parent type is also `Base`.
+no-argument constructor before emission.
+
+For `class Derived(start: Int) extends Base(start)`, retain the
+`SourceTypedIndex` from completing the child class header and keep its typed
+arena as the session arena for subsequent bodies and emission. Configure the
+planner with `with_typed_header(&typed_ast, &header_index)` before calling
+`plan` or `plan_with_fields`. The planner finds the parent application and
+checks its single argument against the mapped reference to the child's own
+constructor parameter. Mismatched bindings yield
+`ClassPlanError::InvalidParentApplication`. Literal arguments such as
+`extends Base(1)` remain outside the facade's scope.
+
+Across files, complete the parent class and its constructor in the parent's
+source context before completing the child header. The parent constructor
+belongs to its declaring source. The call and argument trees belong to the
+child's source.
 
 The planner matches the supplied methods by canonical
 symbol and returns them in source order. Unexpected, repeated and missing

@@ -27,7 +27,7 @@ impl LearnedOrder {
         defs: Definitions,
         packages: &Packages,
         mut on_blocked: impl FnMut(),
-    ) -> Result<(), TyperError> {
+    ) -> Result<crate::TypedHeaders, TyperError> {
         let by_method: HashMap<_, _> = units
             .iter()
             .zip(files)
@@ -48,8 +48,8 @@ impl LearnedOrder {
             }
         };
 
-        if self.0.is_empty() {
-            complete_signatures_in_order(units, units, store, defs, packages, observe)?;
+        let headers = if self.0.is_empty() {
+            complete_signatures_in_order(units, units, store, defs, packages, observe)?
         } else {
             let mut by_path: HashMap<_, _> = files
                 .iter()
@@ -68,10 +68,10 @@ impl LearnedOrder {
                     roots.push(unit);
                 }
             }
-            complete_signatures_in_order(units, roots, store, defs, packages, observe)?;
-        }
+            complete_signatures_in_order(units, roots, store, defs, packages, observe)?
+        };
         self.0 = next;
-        Ok(())
+        Ok(headers)
     }
 
     fn compile(&mut self, files: &[Input<'_>], workers: usize) -> (Vec<GeneratedClass>, Timings) {

@@ -87,7 +87,7 @@ fn compile_with_signatures(
         &mut SemanticStore,
         Definitions,
         &Packages,
-    ) -> Result<(), super::TyperError>,
+    ) -> Result<crate::TypedHeaders, super::TyperError>,
 ) -> (Vec<GeneratedClass>, Timings) {
     let start = Instant::now();
     let mut store = SemanticStore::new();
@@ -98,9 +98,9 @@ fn compile_with_signatures(
     let parsed_at = Instant::now();
     let units = name_units(files, parsed, &mut store, &mut packages);
     let named = Instant::now();
-    complete(&units, &mut store, definitions, &packages).unwrap();
+    let headers = complete(&units, &mut store, definitions, &packages).unwrap();
     let completed = Instant::now();
-    let (arena, typed) = type_bodies(&units, &mut store, definitions, &packages);
+    let (arena, typed) = type_bodies(&units, &mut store, definitions, &packages, headers);
     let typed_at = Instant::now();
     let plan = JvmCompilationUnit {
         classes: class_plans(&units, typed, &arena, &store).unwrap(),
