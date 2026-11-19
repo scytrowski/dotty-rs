@@ -9817,6 +9817,7 @@ mod tests {
     }
 
     mod compose_conformance;
+    mod constructor_parameter_capture;
     mod contextual_arguments;
     mod contextual_binary;
     mod contextual_consumers;

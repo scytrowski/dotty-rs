@@ -98,7 +98,8 @@ fn counter_source_body_failure(tasty: &TastyFile<'_>) -> Option<&'static str> {
 
     let (set_address, set) = method_body(tasty, "set");
     let index = tasty.ast_address_index().ok()?;
-    let [formal] = set.parameters.as_slice() else {
+    let mut parameters = set.parameters();
+    let (Some(formal), None) = (parameters.next(), parameters.next()) else {
         return Some("set does not have exactly one formal parameter");
     };
     if tasty.names().render(formal.name()).ok().as_deref() != Some("value") {
@@ -134,7 +135,8 @@ fn assert_factory_constructor_argument_provenance(tasty: &TastyFile<'_>) {
     let index = tasty
         .ast_address_index()
         .expect("valid Factory address index");
-    let [formal] = wrap.parameters.as_slice() else {
+    let mut parameters = wrap.parameters();
+    let (Some(formal), None) = (parameters.next(), parameters.next()) else {
         panic!("Factory.wrap has exactly one formal");
     };
     assert_eq!(tasty.names().render(formal.name()).unwrap(), "counter");

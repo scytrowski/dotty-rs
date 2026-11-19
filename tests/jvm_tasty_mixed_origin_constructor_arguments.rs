@@ -258,16 +258,14 @@ fn assert_mixed_wire(source: &str, source_id: u32, method: &str, expected: [&str
     let tasty = tasty(bytes);
     let (method_address, body) = method_body(&tasty, method);
     assert_eq!(
-        body.parameters
-            .iter()
+        body.parameters()
             .map(|parameter| tasty.names().render(parameter.name()).unwrap())
             .collect::<Vec<_>>(),
         ["existing", "seed"]
     );
-    assert_eq!(body.parameters.len(), 2);
+    assert_eq!(body.parameters().count(), 2);
     assert_eq!(
-        body.parameters
-            .iter()
+        body.parameters()
             .map(|parameter| {
                 parameter
                     .decode_body()
@@ -279,7 +277,10 @@ fn assert_mixed_wire(source: &str, source_id: u32, method: &str, expected: [&str
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>(),
-        [vec!["Counter", "example"], vec!["Int", "scala"]]
+        [
+            vec!["Counter", "Counter", "example"],
+            vec!["Int", "Int", "scala"]
+        ]
     );
     assert_eq!(
         body.return_type
@@ -287,7 +288,7 @@ fn assert_mixed_wire(source: &str, source_id: u32, method: &str, expected: [&str
             .into_iter()
             .map(|name| tasty.names().render(name).unwrap())
             .collect::<Vec<_>>(),
-        ["Pair", "example"]
+        ["Pair", "Pair", "example"]
     );
     let index = tasty.ast_address_index().unwrap();
     let parameter_addresses = parameter_addresses(&index, method_address);

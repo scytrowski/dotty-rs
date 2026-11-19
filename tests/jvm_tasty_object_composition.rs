@@ -351,7 +351,7 @@ fn scala_39_oracle_pins_private_reference_val_tasty_and_jvm_abi() {
             .into_iter()
             .map(|name| owner_tasty.names().render(name).unwrap())
             .collect::<Vec<_>>(),
-        ["Counter", "example"]
+        ["Counter", "Counter", "example"]
     );
     let initializer = initializer.expect("private val inner has an initializer");
     let RawTree::LengthNode(apply_node) = initializer else {
@@ -461,12 +461,15 @@ fn scala_39_oracle_pins_private_reference_val_tasty_and_jvm_abi() {
         .unwrap()
         .decode_defdef_body()
         .unwrap();
-    assert_eq!(constructor_body.parameters.len(), 1);
-    assert_eq!(constructor_body.parameters[0].tag(), PARAM_TAG);
+    assert_eq!(constructor_body.parameters().count(), 1);
+    assert_eq!(
+        constructor_body.parameters().next().unwrap().tag(),
+        PARAM_TAG
+    );
     assert_eq!(
         owner_tasty
             .names()
-            .render(constructor_body.parameters[0].name())
+            .render(constructor_body.parameters().next().unwrap().name())
             .unwrap(),
         "seed"
     );
@@ -661,7 +664,7 @@ fn scala_39_oracle_pins_constructor_reference_alias_tasty_and_jvm_abi() {
             .into_iter()
             .map(|name| owner_tasty.names().render(name).unwrap())
             .collect::<Vec<_>>(),
-        ["example"]
+        ["Counter", "example"]
     );
     assert!(
         template_parameter

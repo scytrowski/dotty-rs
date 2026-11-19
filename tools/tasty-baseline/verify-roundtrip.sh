@@ -112,7 +112,7 @@ cargo run --manifest-path "$repo_root/Cargo.toml" --locked --quiet --bin tasty-r
   "$input_root" \
   "$roundtrip_root"
 
-run_inspector() {
+run_sbt() {
   local arguments=$1
   local runtime_name=$2
   local temporary_runtime="$sbt_runtime_dir/$runtime_name"
@@ -126,6 +126,18 @@ run_inspector() {
   )
 }
 
+# Exercise a real edit as well as the unmodified corpus. The Rust test checks
+# the new b/a declaration order before handing its encoded file to scalac.
+candidate="$work_dir/Locals.tasty"
+rebuilt="$work_dir/rebuilt"
+mkdir -p "$rebuilt"
+DOTTY_RELOCATED_LOCALS_TASTY="$candidate" cargo test \
+  --manifest-path "$repo_root/Cargo.toml" --locked -p dotty-tasty --test ast_relocation \
+  reordered_scala_locals_keep_the_pick_result -- --exact
+run_sbt "runMain dotty.tools.dotc.Main -usejavacp -from-tasty -d \"$rebuilt\" \"$candidate\"" locals
+java -Xverify:all -cp "$rebuilt" \
+  "$repo_root/crates/dotty-tasty/tests/fixtures/reordered_locals/CheckPick.java"
+
 original_full_output="$work_dir/original-full-semantic.json"
 full_output="$work_dir/full-semantic.json"
 original_full_arguments="run $original_full_output $input_root"
@@ -134,8 +146,8 @@ if [[ -n "$classpath_path" ]]; then
   original_full_arguments+=" --classpath=$classpath_path"
   full_arguments+=" --classpath=$classpath_path"
 fi
-run_inspector "$original_full_arguments" original-full
-run_inspector "$full_arguments" full
+run_sbt "$original_full_arguments" original-full
+run_sbt "$full_arguments" full
 
 if ! cmp -s "$original_full_output" "$full_output"; then
   echo "full semantic projection mismatch after structured re-encoding: $corpus_dir" >&2
@@ -147,7 +159,7 @@ selected_arguments="run $semantic_output --select=$selection_path $roundtrip_roo
 if [[ -n "$classpath_path" ]]; then
   selected_arguments+=" --classpath=$classpath_path"
 fi
-run_inspector "$selected_arguments" selected
+run_sbt "$selected_arguments" selected
 
 if ! cmp -s "$semantic_output" "$expectation_path"; then
   echo "semantic baseline mismatch after structured re-encoding: $corpus_dir" >&2

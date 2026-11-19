@@ -29821,11 +29821,19 @@ fn dual_reference_factory_wrap_records_the_genuine_source_session_and_first_proo
                         [
                             (
                                 "first".to_owned(),
-                                vec!["Counter".to_owned(), "example".to_owned()]
+                                vec![
+                                    "Counter".to_owned(),
+                                    "Counter".to_owned(),
+                                    "example".to_owned()
+                                ]
                             ),
                             (
                                 "second".to_owned(),
-                                vec!["Counter".to_owned(), "example".to_owned()]
+                                vec![
+                                    "Counter".to_owned(),
+                                    "Counter".to_owned(),
+                                    "example".to_owned()
+                                ]
                             ),
                         ]
                     );
@@ -29846,7 +29854,7 @@ fn dual_reference_factory_wrap_records_the_genuine_source_session_and_first_proo
                             .into_iter()
                             .map(|name| projected.fragment.names.render(name).unwrap())
                             .collect::<Vec<_>>(),
-                        ["Pair", "example"]
+                        ["Pair", "Pair", "example"]
                     );
                     "Ok(two ordered method PARAM roots and Pair result)".to_owned()
                 }

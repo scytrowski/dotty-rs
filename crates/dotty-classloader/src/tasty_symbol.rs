@@ -8,8 +8,8 @@ use dotty_core::{SymbolFlags, SymbolKind};
 use dotty_tasty::tasty::{
     ABSTRACT_TAG, APPLIEDTPT_TAG, APPLIEDTYPE_TAG, ARTIFACT_TAG, AppliedTypeNode, ApplyNode,
     AstError, BYNAMETPT_TAG, CASEACCESSOR_TAG, CONTRAVARIANT_TAG, COVARIANT_TAG, DEFDEF_TAG,
-    DefDefBody, DefinitionBody, DefinitionTail, EMPTYCLAUSE_TAG, FIELDACCESSOR_TAG, FINAL_TAG,
-    IDENTTPT_TAG, IdentNode, LOCAL_TAG, MUTABLE_TAG, NEW_TAG, OBJECT_TAG, PACKAGE_TAG, PRIVATE_TAG,
+    DefinitionBody, DefinitionTail, EMPTYCLAUSE_TAG, FIELDACCESSOR_TAG, FINAL_TAG, IDENTTPT_TAG,
+    IdentNode, LOCAL_TAG, MUTABLE_TAG, NEW_TAG, OBJECT_TAG, PACKAGE_TAG, PRIVATE_TAG,
     PRIVATEQUALIFIED_TAG, PROTECTED_TAG, PROTECTEDQUALIFIED_TAG, ParameterNode, RawName, RawTree,
     Reader, ReferenceNode, RenderedSignedName, SELECTIN_TAG, SHAREDTERM_TAG, SHAREDTYPE_TAG,
     STABLE_TAG, STATIC_TAG, SYNTHETIC_TAG, SelectNode, StandardSection, StructuredNode,
@@ -620,6 +620,7 @@ fn ast_error_code(error: &AstError) -> &'static str {
     use dotty_tasty::term::TermError;
     match error {
         AstError::UnsupportedCategory { .. } => "tasty.ast.unsupported_category",
+        AstError::AmbiguousRelocation { .. } => "tasty.ast.ambiguous_relocation",
         AstError::UnsupportedRelocation { .. } => "tasty.ast.unsupported_relocation",
         AstError::RecursionLimit { .. } => "tasty.ast.recursion_limit",
         AstError::Term(TermError::UnsupportedCategory { .. }) => "tasty.term.unsupported_category",
@@ -637,6 +638,7 @@ fn ast_error_category(error: &AstError) -> ClassLoadCategory {
     use dotty_tasty::term::TermError;
     match error {
         AstError::UnsupportedCategory { .. }
+        | AstError::AmbiguousRelocation { .. }
         | AstError::UnsupportedRelocation { .. }
         | AstError::RecursionLimit { .. }
         | AstError::Term(
@@ -3118,30 +3120,21 @@ fn decode_members(
                 });
             }
             DEFDEF_TAG => {
-                let StructuredNode::DefDef(DefDefBody {
-                    name,
-                    parameters,
-                    clauses,
-                    header_items,
-                    return_type,
-                    tail,
-                    ..
-                }) = node.decode_structured()?
-                else {
+                let StructuredNode::DefDef(body) = node.decode_structured()? else {
                     continue;
                 };
                 let default_for = default_sites.get(&node.offset).copied();
                 let method_name = if default_for.is_some() {
-                    file.names().render(name).ok()
+                    file.names().render(body.name).ok()
                 } else {
-                    wire_name(file, name)
+                    wire_name(file, body.name)
                 };
                 let Some(method_name) = method_name else {
                     continue;
                 };
 
-                let type_parameter_addresses = parameters
-                    .iter()
+                let type_parameter_addresses = body
+                    .parameters()
                     .filter(|parameter| matches!(parameter, ParameterNode::TypeParam { .. }))
                     .map(|parameter| {
                         let payload = parameter.payload();
@@ -3163,8 +3156,8 @@ fn decode_members(
                         Some((address, u32::try_from(index).ok()?))
                     })
                     .collect::<HashMap<_, _>>();
-                let type_parameters = parameters
-                    .iter()
+                let type_parameters = body
+                    .parameters()
                     .filter(|parameter| matches!(parameter, ParameterNode::TypeParam { .. }))
                     .map(|parameter| {
                         decode_tasty_type_parameter(
@@ -3181,8 +3174,8 @@ fn decode_members(
                     continue;
                 };
 
-                let mut decoded_parameters = Vec::with_capacity(parameters.len());
-                for parameter in &parameters {
+                let mut decoded_parameters = Vec::new();
+                for parameter in body.parameters() {
                     let ParameterNode::TermParam {
                         name: parameter_name,
                         ..
@@ -3224,7 +3217,7 @@ fn decode_members(
                 // descriptor is always `V`, never resolved either) --
                 // see `ClassLoader::lower_tasty_method`'s doc comment for
                 // where the loader supplies `Unit` instead.
-                let singleton_result_parameter = match &return_type {
+                let singleton_result_parameter = match &body.return_type {
                     RawTree::Ast {
                         tag: dotty_tasty::tasty::SINGLETONTPT_TAG,
                         child,
@@ -3236,8 +3229,7 @@ fn decode_members(
                             term.ast_ref()
                                 .and_then(|reference| address_index.get(reference.address))
                                 .and_then(|node| {
-                                    parameters
-                                        .iter()
+                                    body.parameters()
                                         .filter(|param| {
                                             matches!(param, ParameterNode::TermParam { .. })
                                         })
@@ -3250,14 +3242,14 @@ fn decode_members(
                     },
                     _ => None,
                 };
-                let underlying =
-                    default_for.and_then(|_| default_getter_underlying_result(file, &return_type));
+                let underlying = default_for
+                    .and_then(|_| default_getter_underlying_result(file, &body.return_type));
                 let return_type = if method_name == "<init>" {
                     None
                 } else {
                     decode_tasty_member_type(
                         file,
-                        underlying.as_ref().unwrap_or(&return_type),
+                        underlying.as_ref().unwrap_or(&body.return_type),
                         package,
                         &type_parameters_by_address,
                         class_type_parameters,
@@ -3265,23 +3257,23 @@ fn decode_members(
                         0,
                     )
                 };
-                let has_term_clause = parameters
-                    .iter()
+                let has_term_clause = body
+                    .parameters()
                     .any(|parameter| matches!(parameter, ParameterNode::TermParam { .. }))
-                    || clauses.contains(&EMPTYCLAUSE_TAG);
+                    || body.clauses().any(|tag| tag == EMPTYCLAUSE_TAG);
 
                 methods.push(DecodedTastyMethod {
                     offset: node.offset,
                     default_for,
                     name: method_name,
-                    flags: decode_method_flags(&tail),
-                    contextual_flags: symbol_flags(&tail).intersection(
+                    flags: decode_method_flags(&body.tail),
+                    contextual_flags: symbol_flags(&body.tail).intersection(
                         SymbolFlags::GIVEN
                             | SymbolFlags::IMPLICIT
                             | SymbolFlags::INLINE
                             | SymbolFlags::TRANSPARENT,
                     ),
-                    contextual_clauses: contextual_clauses(&header_items)?,
+                    contextual_clauses: contextual_clauses(&body.header_items)?,
                     singleton_result_parameter,
                     type_parameters,
                     parameters: decoded_parameters,
@@ -5297,7 +5289,7 @@ mod tests {
         let mut pattern = Writer::new();
         pattern.write_u8(NEW_TAG);
         pattern.write_u8(TYPEREF_TAG);
-        pattern.write_nat(marker_name.try_into().unwrap());
+        pattern.write_nat(marker_name.try_into().unwrap()).unwrap();
         let new_type = pattern.into_inner();
         let at = wrong_owner
             .windows(new_type.len())

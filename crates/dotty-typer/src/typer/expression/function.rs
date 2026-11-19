@@ -39,11 +39,15 @@ struct FunctionLiteralDefinition {
     scope: ScopeId,
     typed_definition: Option<TreeId<Typed>>,
     captures: Vec<(SymbolId, TreeId<Typed>)>,
-    capture_enclosing_values: bool,
+    unary_kind: Option<SourceFunctionKind>,
     nested_context_parent: Option<SymbolId>,
 }
 
 impl FunctionLiteralIndex {
+    fn unary_kind(&self, method: SymbolId) -> Option<SourceFunctionKind> {
+        self.definitions.get(&method)?.unary_kind
+    }
+
     pub(in crate::typer) fn is_method(&self, method: SymbolId) -> bool {
         self.definitions.contains_key(&method)
     }
@@ -125,7 +129,7 @@ impl FunctionLiteralIndex {
         method: SymbolId,
     ) -> Option<(SymbolId, Option<SymbolId>)> {
         let definition = self.definitions.get(&method)?;
-        if !definition.capture_enclosing_values
+        if definition.unary_kind.is_none()
             || !store.symbols.contains(method)
             || store.symbols.get(method).kind != SymbolKind::Method
         {
@@ -288,12 +292,7 @@ impl FunctionLiteralIndex {
         method: SymbolId,
         symbol: SymbolId,
     ) -> bool {
-        if !self
-            .definitions
-            .get(&method)
-            .is_some_and(|definition| definition.capture_enclosing_values)
-            || !store.symbols.contains(symbol)
-        {
+        if self.unary_kind(method).is_none() || !store.symbols.contains(symbol) {
             return false;
         }
         let local = store.symbols.get(symbol);
@@ -324,6 +323,62 @@ impl SourceTyper<'_> {
             SourceFunctionKind::Contextual
         } else {
             SourceFunctionKind::Ordinary
+        }
+    }
+
+    pub(in crate::typer) fn can_capture_constructor_parameter(
+        &self,
+        method: SymbolId,
+        symbol: SymbolId,
+    ) -> bool {
+        let Some((source_method, None)) = self.function_literals.capture_owners(self.store, method)
+        else {
+            return false;
+        };
+        if self.function_literals.unary_kind(method) != Some(SourceFunctionKind::Ordinary)
+            || !self.is_current_source_symbol(source_method)
+            || !self.is_source_private_constructor_parameter(symbol)
+        {
+            return false;
+        }
+        let Some(class) = self.store.symbols.get(source_method).owner else {
+            return false;
+        };
+        if !self.store.symbols.contains(class)
+            || self.store.symbols.get(class).kind != SymbolKind::Class
+        {
+            return false;
+        }
+        let parameter = self.store.symbols.get(symbol);
+        if parameter.owner != Some(class) || parameter.flags.contains(SymbolFlags::MUTABLE) {
+            return false;
+        }
+        let Some(SourceDefinition::Canonical { source, tree }) = self.index.definition_of(symbol)
+        else {
+            return false;
+        };
+        if source != self.source || self.index.symbol_at(source, tree) != Some(symbol) {
+            return false;
+        }
+        let Some(TreeKind::ValDef(parameter_tree)) =
+            self.arena.try_get(tree).map(|node| &node.kind)
+        else {
+            return false;
+        };
+        if parameter_tree.metadata.modifiers.contains(&Modifier::Var) {
+            return false;
+        }
+        let Some(type_tree) = self.arena.try_get(parameter_tree.tpt) else {
+            return false;
+        };
+        match &type_tree.kind {
+            TreeKind::ByNameTypeTree(_) => false,
+            TreeKind::PhaseSpecific(UntypedNode::PostfixOp(PostfixOp { op, .. }))
+                if self.store.names.resolve(op.text()) == "*" =>
+            {
+                false
+            }
+            _ => true,
         }
     }
 
@@ -572,7 +627,7 @@ impl SourceTyper<'_> {
                 scope: method_scope,
                 typed_definition: None,
                 captures: Vec::new(),
-                capture_enclosing_values: parameters.len() == 1,
+                unary_kind: (parameters.len() == 1).then_some(kind),
                 nested_context_parent: nested.then_some(context.owner),
             },
         );

@@ -66,8 +66,7 @@ pub fn template_default_getters<'a, 'b: 'a>(
         }
         let header = node.decode_defdef_body()?;
         for (ordinal, param) in header
-            .parameters
-            .iter()
+            .parameters()
             .filter(|p| matches!(p, ParameterNode::TermParam { .. }))
             .enumerate()
         {
@@ -137,14 +136,14 @@ mod tests {
 
     fn method(name: u32, parameters: &[(u8, bool)]) -> Vec<u8> {
         let mut writer = Writer::new();
-        writer.write_nat(name);
+        writer.write_nat(name).unwrap();
         for &(tag, has_default) in parameters {
             writer.write_u8(tag);
             if tag == SPLITCLAUSE_TAG {
                 continue;
             }
             let mut body = Writer::new();
-            body.write_nat(4);
+            body.write_nat(4).unwrap();
             body.write_u8(UNITCONST_TAG);
             if has_default {
                 body.write_u8(HASDEFAULT_TAG);
@@ -193,10 +192,10 @@ mod tests {
     fn default_getter_distinguishes_contextual_and_implicit_parameter_modifiers() {
         for marker in [GIVEN_TAG, IMPLICIT_TAG] {
             let mut payload = Writer::new();
-            payload.write_nat(0);
+            payload.write_nat(0).unwrap();
             payload.write_u8(PARAM_TAG);
             let mut parameter = Writer::new();
-            parameter.write_nat(4);
+            parameter.write_nat(4).unwrap();
             parameter.write_u8(UNITCONST_TAG);
             parameter.write_u8(marker);
             parameter.write_u8(HASDEFAULT_TAG);

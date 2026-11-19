@@ -131,9 +131,10 @@ fn plain_int_primary_constructor_preserves_both_parameter_identities_and_wire_sh
     );
     let constructor_node = addresses.get(constructor.address).unwrap();
     let constructor = constructor_node.decode_defdef_body().unwrap();
-    assert_eq!(constructor.parameters.len(), 1);
+    assert_eq!(constructor.parameters().count(), 1);
     assert_eq!(
-        file.render_name(constructor.parameters[0].name()).unwrap(),
+        file.render_name(constructor.parameters().next().unwrap().name())
+            .unwrap(),
         "start"
     );
     assert!(constructor.rhs.is_none());
@@ -3108,6 +3109,7 @@ fn multiple_literal_methods_and_empty_clause_match_the_scala_390_oracle() {
                 .decode_defdef_body()
                 .unwrap();
             let name = file.render_name(method.name).unwrap();
+            let clauses = method.clauses().collect::<Vec<_>>();
             let rhs = match method.rhs.unwrap() {
                 RawTree::Leaf(leaf) if leaf.tag == INTCONST_TAG => match leaf.value {
                     TermValue::Int(value) => value,
@@ -3115,7 +3117,7 @@ fn multiple_literal_methods_and_empty_clause_match_the_scala_390_oracle() {
                 },
                 other => panic!("unexpected literal body: {other:?}"),
             };
-            (name.to_owned(), method.clauses, rhs)
+            (name.to_owned(), clauses, rhs)
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -3179,11 +3181,10 @@ fn source_int_parameters_emit_ordered_canonical_param_declarations() {
         .unwrap()
         .decode_defdef_body()
         .unwrap();
-    assert!(method.clauses.is_empty());
+    assert!(method.clauses().next().is_none());
     assert_eq!(
         method
-            .parameters
-            .iter()
+            .parameters()
             .map(|parameter| file.render_name(parameter.name()).unwrap())
             .collect::<Vec<_>>(),
         ["first", "second"]
@@ -3390,10 +3391,11 @@ fn contextual_parameters_retain_their_wire_flags_and_reference_identity() {
         };
         assert_eq!(reference.tag, TERMREFDIRECT_TAG);
         let target = index.get(reference.ast_ref().unwrap().address).unwrap();
-        assert!(std::ptr::eq(target.payload, method.parameters[0].payload()));
+        let parameter = method.parameters().next().unwrap();
+        assert!(std::ptr::eq(target.payload, parameter.payload()));
         counts[slot] += 1;
         assert_eq!(
-            method.parameters[0].decode_body().unwrap().tail,
+            parameter.decode_body().unwrap().tail,
             [DefinitionTail::Modifier(tag)]
         );
     }
@@ -3429,7 +3431,13 @@ fn legacy_default_preserves_implicit_marker_and_separate_client_resolution() {
         .find(|method| file.names().get_utf8(method.name) == Some("legacy"))
         .unwrap();
     assert_eq!(
-        declaration.parameters[0].decode_body().unwrap().tail,
+        declaration
+            .parameters()
+            .next()
+            .unwrap()
+            .decode_body()
+            .unwrap()
+            .tail,
         [
             DefinitionTail::Modifier(IMPLICIT_TAG),
             DefinitionTail::Modifier(HASDEFAULT_TAG),
@@ -3472,13 +3480,13 @@ fn curried_contextual_parameters_preserve_clause_boundaries_in_scala() {
             _ => continue,
         };
         checked += 1;
-        assert_eq!(method.clauses, [marker]);
-        let evidence = method.parameters.last().unwrap();
+        assert_eq!(method.clauses().collect::<Vec<_>>(), [marker]);
+        let evidence = method.parameters().next_back().unwrap();
         assert_eq!(
             evidence.decode_body().unwrap().tail,
             [DefinitionTail::Modifier(GIVEN_TAG)]
         );
-        let Some(RawTree::Leaf(reference)) = method.rhs else {
+        let Some(RawTree::Leaf(reference)) = &method.rhs else {
             panic!("expected evidence reference")
         };
         let target = index.get(reference.ast_ref().unwrap().address).unwrap();
@@ -3505,7 +3513,8 @@ fn polymorphic_evidence_result_preserves_its_own_type_binder() {
         .filter_map(|node| node.decode_defdef_body().ok())
         .find(|d| file.render_name(d.name).unwrap() == "evidence")
         .unwrap();
-    let [tparam, evidence] = method.parameters.as_slice() else {
+    let parameters = method.parameters().collect::<Vec<_>>();
+    let [tparam, evidence] = parameters.as_slice() else {
         panic!("expected type and term parameter")
     };
     assert_eq!(file.render_name(tparam.name()).unwrap(), "A");
@@ -4479,7 +4488,13 @@ fn context_result_closures_preserve_identity_capture_and_scala_interoperability(
             ]
         );
         assert_eq!(
-            generated.parameters[0].decode_body().unwrap().tail,
+            generated
+                .parameters()
+                .next()
+                .unwrap()
+                .decode_body()
+                .unwrap()
+                .tail,
             [DefinitionTail::Modifier(GIVEN_TAG)]
         );
     }
@@ -4632,7 +4647,13 @@ fn contextual_default_getter_preserves_its_own_parameter_and_scala_client_semant
     let original = member("offset");
     let getter = member("offset$default$2");
     assert_eq!(
-        original.parameters[1].decode_body().unwrap().tail,
+        original
+            .parameters()
+            .nth(1)
+            .unwrap()
+            .decode_body()
+            .unwrap()
+            .tail,
         [
             DefinitionTail::Modifier(GIVEN_TAG),
             DefinitionTail::Modifier(HASDEFAULT_TAG)
@@ -4660,18 +4681,18 @@ fn contextual_default_getter_preserves_its_own_parameter_and_scala_client_semant
         matches!(signed,RenderedSignedName::Signed{original,signature} if original=="<init>" && signature.parameters.is_empty() && signature.result=="scala.annotation.unchecked.uncheckedVariance")
     );
 
-    let Some(RawTree::Leaf(reference)) = getter.rhs else {
+    let Some(RawTree::Leaf(reference)) = &getter.rhs else {
         panic!("missing default expression")
     };
     assert_eq!(reference.tag, TERMREFDIRECT_TAG);
     let rebound = addresses.get(reference.ast_ref().unwrap().address).unwrap();
     assert!(std::ptr::eq(
         rebound.payload,
-        getter.parameters[0].payload()
+        getter.parameters().next().unwrap().payload()
     ));
     assert!(!std::ptr::eq(
         rebound.payload,
-        original.parameters[0].payload()
+        original.parameters().next().unwrap().payload()
     ));
     verify_contextual_client(
         "Reader",
@@ -4740,7 +4761,12 @@ fn first_contextual_default_getter_has_no_clause_and_a_literal_body() {
     };
     let read = member("read");
     assert_eq!(
-        read.parameters[0].decode_body().unwrap().tail,
+        read.parameters()
+            .next()
+            .unwrap()
+            .decode_body()
+            .unwrap()
+            .tail,
         [
             DefinitionTail::Modifier(GIVEN_TAG),
             DefinitionTail::Modifier(HASDEFAULT_TAG)
@@ -4840,10 +4866,11 @@ fn two_formal_default_getters_preserve_copy_order_source_syntax_and_scala_calls(
     };
     for (name, modifier, selected) in [("pick", GIVEN_TAG, 1), ("first", IMPLICIT_TAG, 0)] {
         let original = member(name);
-        assert_eq!(original.clauses, [SPLITCLAUSE_TAG]);
-        assert_eq!(original.parameters.len(), 3);
+        assert_eq!(original.clauses().collect::<Vec<_>>(), [SPLITCLAUSE_TAG]);
+        let original_parameters = original.parameters().collect::<Vec<_>>();
+        assert_eq!(original_parameters.len(), 3);
         assert_eq!(
-            original.parameters[2].decode_body().unwrap().tail,
+            original_parameters[2].decode_body().unwrap().tail,
             [
                 DefinitionTail::Modifier(modifier),
                 DefinitionTail::Modifier(HASDEFAULT_TAG)
@@ -4853,11 +4880,12 @@ fn two_formal_default_getters_preserve_copy_order_source_syntax_and_scala_calls(
         assert!(
             matches!(file.names().get(getter.name),Some(RawName::DefaultGetter{underlying,index:2}) if *underlying==original.name)
         );
-        assert!(getter.clauses.is_empty());
-        assert_eq!(getter.parameters.len(), 2);
+        assert!(getter.clauses().next().is_none());
+        let getter_parameters = getter.parameters().collect::<Vec<_>>();
+        assert_eq!(getter_parameters.len(), 2);
         for (i, expected_name) in ["x", "y"].into_iter().enumerate() {
-            let original_formal = &original.parameters[i];
-            let copy = &getter.parameters[i];
+            let original_formal = original_parameters[i];
+            let copy = getter_parameters[i];
             assert_eq!(file.render_name(copy.name()).unwrap(), expected_name);
             assert_eq!(copy.name(), original_formal.name());
             assert!(!std::ptr::eq(copy.payload(), original_formal.payload()));
@@ -4874,14 +4902,14 @@ fn two_formal_default_getters_preserve_copy_order_source_syntax_and_scala_calls(
                 original_formal.payload()
             ));
         }
-        let Some(RawTree::Leaf(reference)) = getter.rhs else {
+        let Some(RawTree::Leaf(reference)) = &getter.rhs else {
             panic!("expected reference to a copied formal")
         };
         assert_eq!(reference.tag, TERMREFDIRECT_TAG);
         let target = index.resolve(reference.ast_ref().unwrap()).unwrap();
         assert!(std::ptr::eq(
             target.payload,
-            getter.parameters[selected].payload()
+            getter_parameters[selected].payload()
         ));
     }
     verify_contextual_client(

@@ -19,8 +19,8 @@ fn literal(output: &PickledTasty) -> i32 {
         .unwrap()
         .decode_defdef_body()
         .unwrap();
-    assert!(method.clauses.is_empty());
-    assert!(method.parameters.is_empty());
+    assert!(method.clauses().next().is_none());
+    assert!(method.parameters().next().is_none());
     assert!(method.tail.is_empty());
     let RawTree::NatAst {
         tag: IDENTTPT_TAG,

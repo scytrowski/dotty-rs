@@ -464,3 +464,24 @@ fn name_references_are_zero_based_in_every_scala3_library_unit() {
         "the corpus has no composite names"
     );
 }
+
+#[test]
+fn predef_implicit_match_keeps_its_case() {
+    let file =
+        TastyFile::parse(include_bytes!("fixtures/scala3-library/scala/Predef.tasty")).unwrap();
+    let index = file.ast_address_index().unwrap();
+    let matched = index
+        .iter()
+        .find(|node| {
+            node.tag == dotty_tasty::MATCH_TAG
+                && node.payload.first() == Some(&dotty_tasty::IMPLICIT_TAG)
+        })
+        .unwrap()
+        .decode_match()
+        .unwrap();
+    assert!(matches!(
+        matched.selector,
+        dotty_tasty::tasty::MatchSelector::Implicit
+    ));
+    assert_eq!(matched.cases.len(), 1);
+}

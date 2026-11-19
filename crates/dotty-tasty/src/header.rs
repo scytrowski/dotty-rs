@@ -139,9 +139,9 @@ impl Header {
     /// Encodes this header at the writer's current position.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), WriteError> {
         writer.write_bytes(&TASTY_MAGIC);
-        writer.write_nat(self.major_version);
-        writer.write_nat(self.minor_version);
-        writer.write_nat(self.experimental_version);
+        writer.write_nat(self.major_version)?;
+        writer.write_nat(self.minor_version)?;
+        writer.write_nat(self.experimental_version)?;
         writer.write_utf8(&self.tooling_version)?;
         writer.write_bytes(&self.uuid);
         Ok(())

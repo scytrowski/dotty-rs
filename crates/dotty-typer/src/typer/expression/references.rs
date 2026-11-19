@@ -1126,6 +1126,8 @@ impl SourceTyper<'_> {
                 context.owner,
                 symbol,
             );
+        let capture_constructor_parameter = self.function_literals.is_method(context.owner)
+            && self.can_capture_constructor_parameter(context.owner, symbol);
         let capture_local =
             self.function_literals
                 .can_capture_local_value(self.store, context.owner, symbol)
@@ -1146,6 +1148,7 @@ impl SourceTyper<'_> {
             && (matches!(declaration.kind, SymbolKind::Parameter | SymbolKind::Local)
                 || (instance_member && !shared_owner && capture_member_owner.is_none()))
             && !capture_parameter
+            && !capture_constructor_parameter
             && !capture_local
         {
             return Err(TyperError::FunctionLiteralCaptureUnsupported {
@@ -1155,12 +1158,24 @@ impl SourceTyper<'_> {
             });
         }
         let ty = self.expression_type_of_symbol(symbol, context.owner, tree_index, info_journal)?;
+        if capture_constructor_parameter
+            && matches!(
+                self.store.types.try_get(ty),
+                Some(Type::ByName { .. } | Type::Repeated { .. })
+            )
+        {
+            return Err(TyperError::FunctionLiteralCaptureUnsupported {
+                source: self.source,
+                tree_index,
+                symbol: Some(symbol),
+            });
+        }
         let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
             .ident_with_backquoted(ident.name, ident.backquoted, ty, position);
         if let Some(class) = capture_member_owner {
             self.capture_implicit_enclosing_this(context.owner, class, tree_index, position)?;
         }
-        if capture_parameter || capture_local {
+        if capture_parameter || capture_constructor_parameter || capture_local {
             self.function_literals
                 .capture(self.store, context.owner, symbol, typed);
         }

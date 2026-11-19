@@ -133,13 +133,15 @@ pub(crate) fn prepare_header(
     // is written by the existing Writer; only payload lengths are added here.
     header.encode(&mut writer).map_err(encoding)?;
     for section in [asts, attributes] {
-        writer.write_nat(section.name());
-        writer.write_nat(u32::try_from(section.payload().len()).map_err(|_| {
-            PickleError::LimitExceeded {
-                kind: LimitKind::FileBytes,
-                limit: max_file_bytes,
-            }
-        })?);
+        writer.write_nat(section.name()).map_err(encoding)?;
+        writer
+            .write_nat(u32::try_from(section.payload().len()).map_err(|_| {
+                PickleError::LimitExceeded {
+                    kind: LimitKind::FileBytes,
+                    limit: max_file_bytes,
+                }
+            })?)
+            .map_err(encoding)?;
     }
     let total = writer
         .as_slice()

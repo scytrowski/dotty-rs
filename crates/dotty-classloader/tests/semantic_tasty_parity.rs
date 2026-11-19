@@ -1751,7 +1751,11 @@ fn complete_visibility_constructor_once(unit_id: &str) -> Result<String, String>
                 }
                 _ => "<non-reference-result-tree>".to_owned(),
             };
-            (body.clauses.len(), result_name, format!("{:?}", body.tail))
+            (
+                body.clauses().count(),
+                result_name,
+                format!("{:?}", body.tail),
+            )
         }
         other => return Err(format!("constructor address decoded as {other:?}")),
     };
@@ -2114,7 +2118,7 @@ fn neighboring_non_empty_constructor_is_explicitly_completed_as_a_bounded_probe(
         panic!("Body constructor is not a DEFDEF")
     };
     assert_eq!(
-        body.parameters.len(),
+        body.parameters().count(),
         1,
         "Body constructor has one parameter"
     );
@@ -2141,7 +2145,7 @@ fn neighboring_non_empty_constructor_is_explicitly_completed_as_a_bounded_probe(
     if std::env::var_os("DOTTY_DUMP_VISIBILITY_AUDIT").is_some() {
         eprintln!(
             "probe=fields-body\tconstructor_address={constructor_address}\tparameter_count={}\tresult=SUPPORTED(one Int parameter, owning class result)",
-            body.parameters.len()
+            body.parameters().count()
         );
     }
 }

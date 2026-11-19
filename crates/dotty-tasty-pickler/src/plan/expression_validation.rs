@@ -1420,20 +1420,95 @@ impl Validator<'_, '_> {
         let source_if = *source_if;
         let typed_if = *typed_if;
         self.validate_if_condition(source_if.cond, typed_if.cond, method, depth, visited)?;
-        let then_type = self.validate_if_branch(
-            source_if.then_branch,
-            typed_if.then_branch,
-            method,
-            depth,
-            visited,
-        )?;
-        let else_type = self.validate_if_branch(
-            source_if.else_branch,
-            typed_if.else_branch,
-            method,
-            depth,
-            visited,
-        )?;
+        let conditional_assignment = self.conditional_mutable_assignment.filter(|binding| {
+            binding.method == method.symbol
+                && binding.source_if == source_id
+                && binding.typed_if == typed_id
+                && binding.source_assignments == [source_if.then_branch, source_if.else_branch]
+                && binding.typed_assignments == [typed_if.then_branch, typed_if.else_branch]
+        });
+        let (then_type, else_type) = if let Some(binding) = conditional_assignment {
+            for (source_branch, typed_branch) in [
+                (source_if.then_branch, typed_if.then_branch),
+                (source_if.else_branch, typed_if.else_branch),
+            ] {
+                if !binding
+                    .source_assignments
+                    .iter()
+                    .zip(binding.typed_assignments)
+                    .any(|(&source, typed)| source == source_branch && typed == typed_branch)
+                {
+                    return Err(
+                        self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                    );
+                }
+                self.validate_assignment_statement(
+                    source_branch,
+                    typed_branch,
+                    method,
+                    depth,
+                    visited,
+                )?;
+            }
+            (
+                self.plan.typed_ast.get(typed_if.then_branch).ty,
+                self.plan.typed_ast.get(typed_if.else_branch).ty,
+            )
+        } else {
+            (
+                self.validate_if_branch(
+                    source_if.then_branch,
+                    typed_if.then_branch,
+                    method,
+                    depth,
+                    visited,
+                )?,
+                self.validate_if_branch(
+                    source_if.else_branch,
+                    typed_if.else_branch,
+                    method,
+                    depth,
+                    visited,
+                )?,
+            )
+        };
+
+        if let Some(binding) = conditional_assignment {
+            let condition = self.plan.typed_ast.try_get(typed_if.cond).ok_or(
+                PickleError::InvalidTypedTree {
+                    tree: typed_if.cond,
+                },
+            )?;
+            let source_condition = self.source_tree(source_if.cond)?;
+            let condition_symbol = self.symbol(binding.condition_formal)?;
+            if binding.source_id != self.plan.source.id
+                || binding.owner != self.plan.class
+                || binding.source_condition != source_if.cond
+                || binding.typed_condition != typed_if.cond
+                || binding.source_assignments != [source_if.then_branch, source_if.else_branch]
+                || binding.typed_assignments != [typed_if.then_branch, typed_if.else_branch]
+                || condition_symbol.kind != SymbolKind::Parameter
+                || condition_symbol.owner != Some(method.symbol)
+                || condition_symbol.flags != SymbolFlags::EMPTY
+                || !matches!(source_condition.kind, TreeKind::Ident(ident) if ident.name == condition_symbol.name)
+                || !matches!(condition.kind, TreeKind::Ident(ident) if ident.name == condition_symbol.name)
+                || !matches!(self.ty(condition.ty)?, Type::TermRef {
+                    prefix,
+                    target: TermRefTarget::Symbol(symbol),
+                } if *prefix == self.plan.definitions.no_prefix && *symbol == binding.condition_formal)
+                || binding.local_type != self.complete(binding.local)?
+                || self.symbol(binding.local)?.owner != Some(method.symbol)
+                || self.symbol(binding.local)?.flags != SymbolFlags::MUTABLE
+                || typed.ty != self.plan.definitions.unit
+                || then_type != self.plan.definitions.unit
+                || else_type != self.plan.definitions.unit
+            {
+                return Err(
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                );
+            }
+            return Ok(self.plan.definitions.unit);
+        }
 
         let branch_join = match self.ty(typed.ty)? {
             Type::Constant(Constant::Int(value)) => {
@@ -2631,6 +2706,9 @@ impl Validator<'_, '_> {
         let conditional_selection = p
             .typed_bindings
             .conditional_local_reference_selection(p.source.id, method.symbol);
+        let conditional_mutable_assignment = p
+            .typed_bindings
+            .conditional_mutable_reference_assignment(p.source.id, method.symbol);
         let conditional_pair_shape = argument_count == 2
             && method.parameter_clauses.len() == 1
             && method.parameter_clauses[0].len() == 4
@@ -2638,6 +2716,14 @@ impl Validator<'_, '_> {
                 selection.method == method.symbol
                     && selection.owner == p.class
                     && method.parameter_clauses[0][2] == selection.condition_formal
+            });
+        let conditional_mutable_pair_shape = argument_count == 2
+            && method.parameter_clauses.len() == 1
+            && method.parameter_clauses[0].len() == 4
+            && conditional_mutable_assignment.is_some_and(|assignment| {
+                assignment.method == method.symbol
+                    && assignment.owner == p.class
+                    && assignment.condition_formal == method.parameter_clauses[0][2]
             });
         let mutable_rebinding_pair_shape = argument_count == 2
             && method.parameter_clauses.len() == 1
@@ -2660,6 +2746,7 @@ impl Validator<'_, '_> {
         if method.parameter_clauses.len() != 1
             || (method.parameter_clauses[0].len() != argument_count
                 && !conditional_pair_shape
+                && !conditional_mutable_pair_shape
                 && !mutable_rebinding_pair_shape)
         {
             return Err(self.unsupported(UnsupportedFeature::ParameterClauses, Some(method.symbol)));
@@ -3145,12 +3232,25 @@ impl Validator<'_, '_> {
                         .local_receiver_unit_call(p.source.id, method.symbol)
                         .is_some()
             });
+        let conditional_mutable_rebinding = p
+            .typed_bindings
+            .conditional_mutable_reference_assignment(p.source.id, method.symbol)
+            .is_some_and(|assignment| {
+                assignment.method == method.symbol
+                    && assignment.owner == p.class
+                    && assignment.rhs_locals[0] != assignment.rhs_locals[1]
+                    && p.store.scopes.contains(assignment.scope)
+                    && p.store.scopes.get(assignment.scope).owner == Some(method.symbol)
+            });
         let formal_clause_matches =
             match (method.parameter_clauses.as_slice(), conditional_selection) {
                 ([formals], None) => {
                     formals.as_slice() == binding.method_formals
                         || (mutable_rebinding
                             && formals.len() == 3
+                            && formals[..2] == binding.method_formals)
+                        || (conditional_mutable_rebinding
+                            && formals.len() == 4
                             && formals[..2] == binding.method_formals)
                 }
                 ([formals], Some(selection)) => {
@@ -3184,6 +3284,15 @@ impl Validator<'_, '_> {
                     || (mutable_rebinding
                         && formals.len() == 3
                         && formals[..2] == binding.source_method_formals)
+                    || (conditional_mutable_rebinding
+                        && formals.len() == 4
+                        && formals[..2] == binding.source_method_formals
+                        && p.typed_bindings
+                            .conditional_mutable_reference_assignment(p.source.id, method.symbol)
+                            .is_some_and(|assignment| {
+                                p.source_index.symbol_at(p.source.id, formals[2])
+                                    == Some(assignment.condition_formal)
+                            }))
             }
             ([formals], Some(selection)) => {
                 formals.len() == 4
@@ -3204,7 +3313,7 @@ impl Validator<'_, '_> {
             });
         };
         if method_signature.params.len()
-            != if conditional_selection.is_some() {
+            != if conditional_selection.is_some() || conditional_mutable_rebinding {
                 4
             } else if mutable_rebinding {
                 3
@@ -3222,6 +3331,11 @@ impl Validator<'_, '_> {
                     || method_signature.params[2].ty != p.definitions.boolean
                     || method_signature.params[3].ty != p.definitions.int
             })
+            || (conditional_mutable_rebinding
+                && (method_signature.params[0].ty != p.definitions.int
+                    || method_signature.params[1].ty != p.definitions.int
+                    || method_signature.params[2].ty != p.definitions.boolean
+                    || method_signature.params[3].ty != p.definitions.int))
         {
             return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
         }
