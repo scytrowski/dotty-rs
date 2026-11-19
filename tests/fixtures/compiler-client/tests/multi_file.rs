@@ -142,6 +142,24 @@ fn complete_signatures_in_order<'a>(
     store: &mut SemanticStore,
     definitions: Definitions,
     packages: &Packages,
+    observe: impl FnMut(SymbolId, Option<&TyperError>),
+) -> Result<(), TyperError> {
+    complete_methods_in_order(
+        units,
+        roots.into_iter().flat_map(NamedUnit::method_symbols),
+        store,
+        definitions,
+        packages,
+        observe,
+    )
+}
+
+fn complete_methods_in_order(
+    units: &[NamedUnit],
+    roots: impl IntoIterator<Item = SymbolId>,
+    store: &mut SemanticStore,
+    definitions: Definitions,
+    packages: &Packages,
     mut observe: impl FnMut(SymbolId, Option<&TyperError>),
 ) -> Result<(), TyperError> {
     let mut owners = HashMap::new();
@@ -154,7 +172,7 @@ fn complete_signatures_in_order<'a>(
         owners.extend(unit.method_symbols().map(|method| (method, unit)));
     }
 
-    for symbol in roots.into_iter().flat_map(NamedUnit::method_symbols) {
+    for symbol in roots {
         if matches!(store.symbols.info(symbol), SymbolInfo::Complete(_)) {
             continue;
         }

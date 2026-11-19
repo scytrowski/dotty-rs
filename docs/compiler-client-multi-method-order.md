@@ -115,7 +115,7 @@ These generated sources support keeping file history optional in a compiler
 client. Observing both recording cost and retries *after* replay matters. A
 large initial retry count alone would have selected the unprofitable Crossed
 case. The results cover four methods per class and this first-completion
-heuristic. More granular scheduling would require its own measurement.
+heuristic. The [method-history experiment](compiler-client-method-history.md) compares both granularities across repeated builds and source edits.
 
 ## Reproduction
 

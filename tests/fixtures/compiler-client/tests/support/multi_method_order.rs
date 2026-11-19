@@ -3,6 +3,9 @@ use super::{LearnedOrder, compile_timed, inputs, measure_cases, probe};
 use dotty::classfile::{ClassFile, Reader};
 use std::fmt::Write;
 
+#[path = "method_history.rs"]
+mod method_history;
+
 #[derive(Clone, Copy, Debug)]
 enum Graph {
     Chains,
