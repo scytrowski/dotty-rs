@@ -64,7 +64,7 @@ pub enum ClassPlanError {
     UnsupportedTemplate(SymbolId),
     /// The primary constructor has unsupported parameter clauses or formals.
     ConstructorParameters(SymbolId),
-    /// An ordinary constructor parameter supplies an unsupported default value.
+    /// A constructor parameter supplies an unsupported default value.
     DefaultConstructorParameter {
         class: SymbolId,
         tree: TreeId<Untyped>,
@@ -126,9 +126,10 @@ impl<'a> JvmClassPlanner<'a> {
         Self { store, ast, index }
     }
 
-    /// Plans a public primary constructor with zero or one ordinary parameter list and assembles the
-    /// supplied method plans in source declaration order. Each source method
-    /// requires exactly one plan from the caller.
+    /// Plans a public primary constructor with at most one value parameter list.
+    /// Plain parameters and public constructor `val` and `var` declarations may
+    /// share the list. Supply one plan per source method. Generated accessors
+    /// come from the constructor bindings.
     pub fn plan(
         &self,
         class: SymbolId,
@@ -355,13 +356,10 @@ impl<'a> JvmClassPlanner<'a> {
             if param.rhs.is_some() {
                 return Err(ClassPlanError::DefaultConstructorParameter { class, tree });
             }
-            if param.metadata.modifiers != [Modifier::ParamAccessor, Modifier::PrivateLocal]
-                || matches!(
-                    &self.ast.try_get(param.tpt).ok_or(unsupported)?.kind,
-                    TreeKind::ByNameTypeTree(_)
-                        | TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_))
-                )
-            {
+            if matches!(
+                &self.ast.try_get(param.tpt).ok_or(unsupported)?.kind,
+                TreeKind::ByNameTypeTree(_) | TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_))
+            ) {
                 return Err(unsupported);
             }
             let parameter = self

@@ -77,13 +77,20 @@ For an ordinary top-level source class, the facade also provides
 `jvm_class_plan::JvmClassPlanner::new(&store, &source_ast, &source_index)`.
 Use `plan(class_symbol, method_plans)` for a method-only template.
 Both planning entry points accept a public primary constructor with zero or
-one value parameter list. An empty signature selects `ImplicitNoArg`. For
-ordinary parameters, the planner looks up each constructor-owned formal in
-source declaration order and builds a `JvmPrimaryConstructorPlan`. Complete
-the constructor signature in the typer before backend validation. A private
-field initializer can read a constructor parameter without emitting a field for
-the parameter itself. Constructor accessors, contextual, by-name, repeated and
-defaulted parameters are outside this facade's scope. A default yields
+one value parameter list. An empty signature selects `ImplicitNoArg`. A list
+may mix ordinary parameters with public `val` and `var` parameters. The
+planner passes constructor-owned formals to `JvmPrimaryConstructorPlan` in
+source order. For each constructor `val` or `var`, its source tree also
+identifies the class-owned field. The backend uses that binding to initialize
+private storage and emit a public getter, plus a setter for `var`. Callers
+supply method plans only for source methods and typed initializers only for
+class-body fields. A private field initializer may read an ordinary parameter
+without introducing storage for the parameter itself.
+
+When compiling multiple source files, complete each constructor signature and
+its class-owned field signatures with the declaring file's typer before typing
+uses in other files. Contextual, by-name, repeated and defaulted parameters
+are outside this facade's scope. A default yields
 `ClassPlanError::DefaultConstructorParameter` with the parameter's source tree.
 For a class with ordinary unqualified `private val` or `private var` fields, use
 `plan_with_fields(class_symbol, method_plans, &typed_ast, initializers)`.
@@ -92,8 +99,8 @@ the source-to-typed index from that typing operation. The planner checks the
 field owner, declaration, exact RHS mapping and source position. The source
 `var` marker must agree with the canonical symbol's `MUTABLE` flag. It accepts
 inputs in any order and returns fields in template order for initialization.
-The class must have an implicit parent. A public accessor or
-standalone initializer expression requires a different plan.
+The class must have an implicit parent. A public field declared in the class
+body or a standalone initializer expression requires a different plan.
 The planner matches the supplied methods by canonical
 symbol and returns them in source order. Unexpected, repeated and missing
 method plans produce distinct errors before emission. All plans and IDs must

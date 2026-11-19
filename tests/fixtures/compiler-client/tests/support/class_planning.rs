@@ -119,10 +119,85 @@ class Pair(z: Int, a: Int):
 }
 
 #[test]
+fn constructor_accessors_have_the_scala_jvm_abi_and_work_across_sources() {
+    use dotty::classfile::{ACC_FINAL, ACC_PRIVATE, ACC_PUBLIC, ClassFile, Reader};
+
+    let counter = (
+        SourceId::from_index(0),
+        "Counter.scala",
+        "package demo\nclass Counter(val id: Int, var count: Int)",
+    );
+    let use_counter = (
+        SourceId::from_index(1),
+        "UseCounter.scala",
+        r#"package demo
+class UseCounter:
+  def create(id: Int, count: Int): Counter = new Counter(id, count)
+  def read(c: Counter): Int = c.count
+  def update(c: Counter, next: Int): Unit = c.count = next
+"#,
+    );
+    let artifacts = super::compile([counter, use_counter]);
+    let reversed = super::compile([use_counter, counter]);
+    assert!(artifacts.iter().eq(reversed.iter().rev()));
+    let artifact = artifacts
+        .iter()
+        .find(|class| class.internal_name() == "demo/Counter")
+        .unwrap();
+    let decoded = ClassFile::decode(&mut Reader::new(artifact.bytes())).unwrap();
+    let pool = &decoded.constant_pool;
+    let fields: Vec<_> = decoded
+        .fields
+        .iter()
+        .map(|field| {
+            (
+                pool.utf8(field.name_index).unwrap(),
+                pool.utf8(field.descriptor_index).unwrap(),
+                field.access_flags.0,
+            )
+        })
+        .collect();
+    assert_eq!(
+        fields,
+        [
+            ("id", "I", ACC_PRIVATE | ACC_FINAL),
+            ("count", "I", ACC_PRIVATE)
+        ]
+    );
+    let mut methods: Vec<_> = decoded
+        .methods
+        .iter()
+        .map(|method| {
+            (
+                pool.utf8(method.name_index).unwrap(),
+                pool.utf8(method.descriptor_index).unwrap(),
+                method.access_flags.0,
+            )
+        })
+        .collect();
+    methods.sort_unstable();
+    assert_eq!(
+        methods,
+        [
+            ("<init>", "(II)V", ACC_PUBLIC),
+            ("count", "()I", ACC_PUBLIC),
+            ("count_$eq", "(I)V", ACC_PUBLIC),
+            ("id", "()I", ACC_PUBLIC)
+        ]
+    );
+    assert_eq!(
+        super::run_java_client("constructor-accessors", "AccessorClient", &artifacts)
+            .lines()
+            .collect::<Vec<_>>(),
+        ["9", "4", "7", "2"]
+    );
+}
+
+#[test]
 fn class_planner_rejects_nonordinary_parameters_and_multiple_lists() {
     for source in [
-        "class C(val x: Int)",
-        "class C(var x: Int)",
+        "class C(private val x: Int)",
+        "class C(protected var x: Int)",
         "class C(x: Int)(y: Int)",
         "class C(x: => Int)",
         "class C(xs: Int*)",
@@ -140,7 +215,7 @@ fn class_planner_rejects_nonordinary_parameters_and_multiple_lists() {
 
 #[test]
 fn method_only_class_plan_preserves_constructor_formal_identity_and_order() {
-    let (store, _, _, unit) = named("class Pair(z: Int, a: Int)");
+    let (store, _, _, unit) = named("class Pair(z: Int, val a: Int, var b: Int)");
     let class = &unit.classes[0];
     let plan = JvmClassPlanner::new(&store, &unit.ast, &unit.index)
         .plan(class.symbol, [])
@@ -161,29 +236,50 @@ fn method_only_class_plan_preserves_constructor_formal_identity_and_order() {
             store.names.resolve(parameter.name.text())
         })
         .collect();
-    assert_eq!(names, ["z", "a"]);
+    assert_eq!(names, ["z", "a", "b"]);
+    let bindings: Vec<_> = constructor
+        .accessor_bindings()
+        .iter()
+        .map(|binding| {
+            let field = store.symbols.get(binding.field());
+            assert_eq!(field.owner, Some(class.symbol));
+            assert_eq!(field.kind, dotty::core::SymbolKind::Field);
+            assert_eq!(
+                binding.parameter(),
+                constructor.parameters()[binding.source_ordinal()]
+            );
+            (
+                binding.source_ordinal(),
+                store.names.resolve(field.name.text()),
+                binding.is_mutable(),
+            )
+        })
+        .collect();
+    assert_eq!(bindings, [(1, "a", false), (2, "b", true)]);
 }
 
 #[test]
 fn class_planner_identifies_the_parameter_with_a_default() {
-    let (store, _, _, unit) = named("class C(x: Int, y: Int = 3)");
-    let class = &unit.classes[0];
-    let Some(dotty::core::SourceDefinition::Canonical { tree, .. }) =
-        unit.index.definition_of(class.constructor)
-    else {
-        panic!("expected a canonical constructor");
-    };
-    let TreeKind::DefDef(constructor) = &unit.ast.get(tree).kind else {
-        panic!("expected a constructor")
-    };
-    let parameter = constructor.value_param_clauses[0][1];
-    assert_eq!(
-        JvmClassPlanner::new(&store, &unit.ast, &unit.index).plan(class.symbol, []),
-        Err(ClassPlanError::DefaultConstructorParameter {
-            class: class.symbol,
-            tree: parameter
-        })
-    );
+    for prefix in ["", "val ", "var "] {
+        let (store, _, _, unit) = named(&format!("class C(x: Int, {prefix}y: Int = 3)"));
+        let class = &unit.classes[0];
+        let Some(dotty::core::SourceDefinition::Canonical { tree, .. }) =
+            unit.index.definition_of(class.constructor)
+        else {
+            panic!("expected a canonical constructor");
+        };
+        let TreeKind::DefDef(constructor) = &unit.ast.get(tree).kind else {
+            panic!("expected a constructor")
+        };
+        let parameter = constructor.value_param_clauses[0][1];
+        assert_eq!(
+            JvmClassPlanner::new(&store, &unit.ast, &unit.index).plan(class.symbol, []),
+            Err(ClassPlanError::DefaultConstructorParameter {
+                class: class.symbol,
+                tree: parameter
+            })
+        );
+    }
 }
 
 #[test]

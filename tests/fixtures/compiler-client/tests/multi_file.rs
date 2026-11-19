@@ -39,6 +39,7 @@ struct NamedUnit {
 struct NamedClass {
     symbol: SymbolId,
     constructor: SymbolId,
+    constructor_fields: Vec<SymbolId>,
     method_range: Range<usize>,
     fields: Vec<(SymbolId, TreeId<Untyped>)>,
 }
@@ -131,7 +132,18 @@ fn enter(
                 _ => {}
             }
         }
+        let TreeKind::DefDef(constructor) = &ast.get(template.constructor).kind else {
+            panic!("expected constructor")
+        };
+        let constructor_fields = constructor
+            .value_param_clauses
+            .iter()
+            .flatten()
+            .map(|&tree| index.symbol_at(id, tree).unwrap())
+            .filter(|&symbol| store.symbols.get(symbol).kind == dotty::core::SymbolKind::Field)
+            .collect();
         classes.push(NamedClass {
+            constructor_fields,
             symbol: index.symbol_at(id, tree).unwrap(),
             constructor: index.symbol_at(id, template.constructor).unwrap(),
             method_range: start..methods.len(),
@@ -209,6 +221,18 @@ fn complete_methods_in_order(
             observe(class.symbol, SignatureCompletion::Complete(header));
         }
         owners.extend(unit.method_symbols().map(|method| (method, unit)));
+    }
+
+    // Resolve constructor and field signatures against their declaring source
+    // before another unit types a construction or member selection.
+    for unit in units {
+        let mut typer = unit.typer(store, definitions, packages);
+        for class in &unit.classes {
+            typer.complete_symbol(class.constructor)?;
+            for &field in &class.constructor_fields {
+                typer.complete_symbol(field)?;
+            }
+        }
     }
 
     for symbol in roots {
@@ -298,9 +322,6 @@ fn type_bodies(
     let mut output = AstArena::new();
     let mut typed_classes = Vec::new();
     for (unit, class) in named_classes(units) {
-        unit.typer(store, definitions, packages)
-            .complete_symbol(class.constructor)
-            .unwrap();
         let mut fields = Vec::with_capacity(class.fields.len());
         for &(field, rhs) in &class.fields {
             let mut typer = SourceTyper::new_with_typed_ast(
