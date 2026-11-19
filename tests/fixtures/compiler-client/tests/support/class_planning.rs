@@ -525,6 +525,59 @@ class Derived(start: Int) extends Base(start)
 }
 
 #[test]
+fn wrong_parent_argument_reports_the_same_error_in_both_file_orders() {
+    use dotty::typer::{SignatureCompletion, TyperError};
+
+    let base = (
+        SourceId::from_index(0),
+        "Base.scala",
+        "class Base(seed: Int)",
+    );
+    let derived = (
+        SourceId::from_index(1),
+        "Derived.scala",
+        "class Derived(start: Boolean) extends Base(start)",
+    );
+    for (files, child_index, parent_index) in [([base, derived], 1, 0), ([derived, base], 0, 1)] {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let units = name_units(
+            &files,
+            parsing::parse_files(&files, 2),
+            &mut store,
+            &mut packages,
+        );
+        let child = &units[child_index].classes[0];
+        let parent = units[parent_index].classes[0].symbol;
+        let mut blocked = Vec::new();
+        let error =
+            super::complete_headers(&units, &mut store, defs, &packages, &mut |class, result| {
+                if let SignatureCompletion::BlockedOn(dependency) = result {
+                    blocked.push((class, dependency));
+                }
+            })
+            .unwrap_err();
+
+        if child_index == 0 {
+            assert_eq!(blocked, [(child.symbol, parent)]);
+        } else {
+            assert!(blocked.is_empty());
+        }
+        assert!(
+            matches!(error, TyperError::ApplicationArgumentTypeMismatch {
+            source, argument_index: 0, expected, ..
+        } if source == derived.0 && expected == defs.int),
+            "{error:?}"
+        );
+        assert_eq!(
+            store.symbols.info(child.symbol),
+            &dotty::core::SymbolInfo::Missing
+        );
+    }
+}
+
+#[test]
 fn forwarded_parent_rejects_an_int_argument_from_another_parent_call() {
     let (mut store, defs, packages, unit) = named(
         "class Base(seed: Int)

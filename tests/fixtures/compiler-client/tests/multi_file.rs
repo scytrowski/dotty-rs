@@ -203,6 +203,9 @@ fn complete_headers(
             typer.complete_symbol(class.constructor)?;
         }
     }
+    let in_batch: HashSet<_> = named_classes(units)
+        .map(|(_, class)| class.symbol)
+        .collect();
     let mut headers = TypedHeaders::default();
     let mut pending: Vec<_> = units
         .iter()
@@ -224,23 +227,15 @@ fn complete_headers(
             );
             let mut retry = Vec::new();
             for class in classes {
-                match typer.complete_symbol(class.symbol) {
-                    Ok(header) => {
-                        observe(class.symbol, SignatureCompletion::Complete(header));
-                        progress = true;
-                    }
-                    Err(error @ TyperError::NewClassInfoUnavailable { symbol })
-                        if typer.store().symbols.contains(symbol)
-                            && matches!(
-                                typer.store().symbols.info(symbol),
-                                SymbolInfo::Missing
-                            )
-                            && matches!(typer.store().symbols.get(symbol).origin, dotty::core::SymbolOrigin::Source(source) if source != unit.source) =>
-                    {
-                        blocked = Some(error);
+                let completion =
+                    typer.try_complete_signature(class.symbol, |dep| in_batch.contains(&dep))?;
+                observe(class.symbol, completion);
+                match completion {
+                    SignatureCompletion::Complete(_) => progress = true,
+                    SignatureCompletion::BlockedOn(dependency) => {
+                        blocked = Some(dependency);
                         retry.push(class);
                     }
-                    Err(error) => return Err(error),
                 }
             }
             let (arena, index) = typer.into_typed_ast_and_index();
@@ -260,8 +255,8 @@ fn complete_headers(
                 next.push((unit, retry));
             }
         }
-        if !progress && let Some(error) = blocked {
-            return Err(error);
+        if !progress && let Some(symbol) = blocked {
+            return Err(TyperError::NewClassInfoUnavailable { symbol });
         }
         pending = next;
     }

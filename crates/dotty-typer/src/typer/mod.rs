@@ -1601,6 +1601,144 @@ mod tests {
     }
 
     #[test]
+    fn signature_attempt_retries_a_class_header_after_its_foreign_parent_is_complete() {
+        let (derived_unit, mut store, mut packages, defs, child_index, child_source) =
+            parse_and_name("class Derived(start: Int) extends Base(start)");
+        let base_source = SourceId::from_index(12);
+        let (base_unit, base_index) = parse_and_name_unit(
+            "class Base(seed: Int)",
+            base_source,
+            &mut store,
+            &mut packages,
+        );
+        let base = class_symbol(&base_unit, &store, &base_index, base_source, "Base");
+        let child = class_symbol(&derived_unit, &store, &child_index, child_source, "Derived");
+        let template = |parsed: &dotty_parser::ParseResult| {
+            parsed
+                .ast
+                .iter()
+                .find_map(|(_, node)| {
+                    if let TreeKind::Template(template) = &node.kind {
+                        Some((template.constructor, template.parents.first().copied()))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap()
+        };
+        let base_ctor = base_index
+            .symbol_at(base_source, template(&base_unit).0)
+            .unwrap();
+        SourceTyper::new(
+            &base_unit.ast,
+            base_source,
+            &base_index,
+            &mut store,
+            defs,
+            &packages,
+        )
+        .complete_symbol(base_ctor)
+        .unwrap();
+        let (constructor_tree, Some(call)) = template(&derived_unit) else {
+            panic!("expected a parent application")
+        };
+        let constructor = child_index
+            .symbol_at(child_source, constructor_tree)
+            .unwrap();
+        let TreeKind::DefDef(definition) = &derived_unit.ast.get(constructor_tree).kind else {
+            panic!("expected constructor")
+        };
+        let formal = child_index
+            .derived_symbol_at(
+                constructor,
+                child_source,
+                definition.value_param_clauses[0][0],
+            )
+            .unwrap();
+        let TreeKind::Apply(application) = &derived_unit.ast.get(call).kind else {
+            panic!("expected parent arguments")
+        };
+        let arg = application.args[0];
+
+        let checkpoint = store.checkpoint();
+        {
+            let mut typer = SourceTyper::new(
+                &derived_unit.ast,
+                child_source,
+                &child_index,
+                &mut store,
+                defs,
+                &packages,
+            );
+            let arena = typer.typed_ast().checkpoint();
+            assert!(matches!(typer.try_complete_signature(child, |_| false),
+                Err(TyperError::NewClassInfoUnavailable { symbol }) if symbol == base));
+            assert_eq!(
+                typer
+                    .try_complete_signature(child, |symbol| symbol == base)
+                    .unwrap(),
+                SignatureCompletion::BlockedOn(base)
+            );
+            assert_eq!(typer.store().checkpoint(), checkpoint);
+            assert_eq!(typer.typed_ast().checkpoint(), arena);
+            assert!(typer.source_typed_index().is_empty());
+            for symbol in [base, child, constructor, formal] {
+                assert_eq!(*typer.store().symbols.info(symbol), SymbolInfo::Missing);
+            }
+        }
+        SourceTyper::new(
+            &base_unit.ast,
+            base_source,
+            &base_index,
+            &mut store,
+            defs,
+            &packages,
+        )
+        .complete_symbol(base)
+        .unwrap();
+        let mut typer = SourceTyper::new(
+            &derived_unit.ast,
+            child_source,
+            &child_index,
+            &mut store,
+            defs,
+            &packages,
+        );
+        let SignatureCompletion::Complete(header) =
+            typer.try_complete_signature(child, |_| false).unwrap()
+        else {
+            panic!("parent is complete")
+        };
+        let Type::ClassInfo(info) = typer.store().types.get(header) else {
+            panic!("expected class header")
+        };
+        assert_eq!(type_symbol(typer.store(), info.parents[0]), base);
+        let mapped = |tree| typer.source_typed_index().get(child_source, tree).unwrap();
+        let TreeKind::Apply(typed_call) = &typer.typed_ast().get(mapped(call)).kind else {
+            panic!("expected typed call")
+        };
+        assert_eq!(typed_call.args, [mapped(arg)]);
+        assert!(
+            matches!(typer.store().types.get(typer.typed_ast().get(mapped(arg)).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == formal)
+        );
+    }
+
+    #[test]
+    fn signature_attempt_preserves_parent_argument_type_errors() {
+        let (parsed, mut store, packages, defs, index, source) = parse_and_name(
+            "class Base(seed: Int); class Derived(start: Boolean) extends Base(start)",
+        );
+        let derived = class_symbol(&parsed, &store, &index, source, "Derived");
+        let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+        assert!(
+            matches!(typer.try_complete_signature(derived, |_| panic!("no dependency to schedule")),
+            Err(TyperError::ApplicationArgumentTypeMismatch { source: site, argument_index: 0, expected, .. })
+            if site == source && expected == defs.int)
+        );
+    }
+
+    #[test]
     fn appending_a_source_to_the_typed_arena_preserves_prior_roots_on_rollback() {
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);

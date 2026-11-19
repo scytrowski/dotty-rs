@@ -1942,21 +1942,27 @@ limits are p95 depth <= 6 and completed-class fanout <= 16. The
 incomplete until the manually initiated hosted audit reconciles every frozen
 root and its source attribution.
 
-### Inferred results across source files
+### Class headers and inferred method results across source files
 
-The standalone compiler client names the sources and completes their class
-headers before requesting method signatures. It calls
-`SourceTyper::try_complete_signature(symbol, in_batch)` with a membership
-predicate for methods that it can schedule in the current session.
+The standalone compiler client names the sources and completes their constructor
+signatures. It then uses `SourceTyper::try_complete_signature(symbol, in_batch)`
+for class headers and subsequently for method signatures. Each phase supplies
+a membership predicate for the declarations it can schedule.
 
 - `Ok(SignatureCompletion::Complete(ty))` gives the canonical signature.
-- `Ok(SignatureCompletion::BlockedOn(dependency))` identifies a missing
-  source method in a different file of the batch. The attempt has rolled
-  back. The client can complete the dependency in its owning source and
-  retry the original request.
-- `Err(TyperError)` preserves the underlying failure, including an unavailable
-  member outside the batch. The existing `complete_symbol` API continues to
-  report unavailable members as errors.
+- `Ok(SignatureCompletion::BlockedOn(dependency))` identifies a missing method
+  signature or, during class header completion, a missing class header in a
+  different source of the batch. The attempt has rolled back. The client can
+  complete the dependency in its owning source and retry the original request.
+- `Err(TyperError)` preserves the underlying failure. An unavailable class
+  outside the batch retains `NewClassInfoUnavailable`, and an unavailable
+  method outside the batch retains `MemberTypeUnavailable`.
+
+For `class Derived(start: Int) extends Base(start)`, the client can receive
+`BlockedOn` with the symbol of `Base` even when its constructor signature is
+already complete. After completing the base header, retrying the derived
+header records the typed parent application and its argument in the derived
+source's typed index. A type mismatch in the argument remains a typing error.
 
 For `A.f(b: B) = b.g()`, the external client observes the symbol of `B.g`,
 completes it and retries `A.f`. A call to the same zero-argument method with

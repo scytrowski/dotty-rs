@@ -15,42 +15,48 @@ pub(super) const MAX_INFERRED_FIELD_TYPE_COMPLETION_DEPTH: usize = 64;
 pub enum SignatureCompletion {
     /// The declaration's complete semantic type in this session.
     Complete(TypeId),
-    /// Complete this method in its owning source, then retry the original request.
+    /// Complete this declaration in its owning source, then retry the original request.
     BlockedOn(SymbolId),
 }
 
 impl SourceTyper<'_> {
     /// Attempts the same declaration completion as [`Self::complete_symbol`].
     ///
-    /// After rollback, a missing method from a different source can be returned
-    /// as [`SignatureCompletion::BlockedOn`]. `in_batch` identifies the method
-    /// symbols the caller can schedule in this semantic session. A dependency
-    /// outside that set retains its [`TyperError::MemberTypeUnavailable`] error.
-    /// Other typing errors propagate. The caller chooses retry order and detects
-    /// cycles between sources.
+    /// After rollback, a missing method signature or, during class header
+    /// completion, a missing class header from another source can be returned
+    /// as [`SignatureCompletion::BlockedOn`]. `in_batch` identifies declarations
+    /// the caller can schedule in this session. Dependencies outside that set
+    /// and other typing failures retain their original errors. The caller
+    /// chooses retry order and detects cycles between sources.
     pub fn try_complete_signature(
         &mut self,
         symbol: SymbolId,
         in_batch: impl FnOnce(SymbolId) -> bool,
     ) -> Result<SignatureCompletion, TyperError> {
-        match self.complete_symbol(symbol) {
-            Ok(ty) => Ok(SignatureCompletion::Complete(ty)),
-            Err(error @ TyperError::MemberTypeUnavailable { symbol: dependency })
-                if self.store.symbols.contains(dependency) =>
+        let error = match self.complete_symbol(symbol) {
+            Ok(ty) => return Ok(SignatureCompletion::Complete(ty)),
+            Err(error) => error,
+        };
+        let (dependency, kind) = match error {
+            TyperError::MemberTypeUnavailable { symbol } => (symbol, SymbolKind::Method),
+            TyperError::NewClassInfoUnavailable { symbol: dependency }
+                if self.store.symbols.get(symbol).kind == SymbolKind::Class =>
             {
-                let member = self.store.symbols.get(dependency);
-                if member.kind == SymbolKind::Method
-                    && matches!(member.origin, SymbolOrigin::Source(source) if source != self.source)
-                    && matches!(member.info, SymbolInfo::Missing)
-                    && in_batch(dependency)
-                {
-                    Ok(SignatureCompletion::BlockedOn(dependency))
-                } else {
-                    Err(error)
-                }
+                (dependency, SymbolKind::Class)
             }
-            Err(error) => Err(error),
+            _ => return Err(error),
+        };
+        if self.store.symbols.contains(dependency) {
+            let declaration = self.store.symbols.get(dependency);
+            if declaration.kind == kind
+                && matches!(declaration.origin, SymbolOrigin::Source(source) if source != self.source)
+                && matches!(declaration.info, SymbolInfo::Missing)
+                && in_batch(dependency)
+            {
+                return Ok(SignatureCompletion::BlockedOn(dependency));
+            }
         }
+        Err(error)
     }
 
     /// Completes a source declaration, rolling back this call's mutations on failure.
