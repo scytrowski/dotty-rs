@@ -109,6 +109,10 @@ def main():
                 "[E172]", "Ambiguous given instances",
                 "both parameter b and parameter a match type Int of parameter n of method legacy",
             )),
+            ("ByNameGrowth.scala", 0, (
+                "this.ask(this.grow[Int](this.grow[growth.Box[Int]](this.growingLeaf)))",
+                "this.shrink[growth.Box[Int]](this.shrink[Int](this.shrinkingLeaf))",
+            )),
             ("Inherited.scala", 0, ("this.need(TC.instance[Int])",)),
             ("Invalid.scala", 1, (
                 "[E050]", "[E172]", "does not take more parameters",

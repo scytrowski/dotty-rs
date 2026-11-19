@@ -172,18 +172,30 @@ fn search_stable_companion() {
 #[test]
 #[ignore = "requires pinned Scala 3.9 sources"]
 fn search_growing_byname() {
-    check_module_statement(GROWING, "implicitly[Foo[Int]]", |_, typer, stmt, ctx| {
-        let error = typer.type_expression(stmt, ctx).unwrap_err();
-        assert!(
-            matches!(
-                error,
-                TyperError::ContextualSearchLimit { source, tree_index }
-                    if source == typer.source && tree_index == stmt.index()
-            ),
-            "{error:?}"
-        );
-    });
-    outcome("typer-gap");
+    check_module_statement(
+        GROWING,
+        "implicitly[Foo[Int]]",
+        |parsed, typer, stmt, ctx| {
+            let before = typer.store.checkpoint();
+            assert!(matches!(typer.type_expression(stmt, ctx),
+            Err(TyperError::MissingContextualArgument { source, tree_index, .. })
+            if source == typer.source && tree_index == stmt.index()));
+            assert_eq!(typer.store.checkpoint(), before);
+            // Pin the original type argument in the session before retrying, so
+            // the expected type can be compared by identity after error rollback.
+            let TreeKind::TypeApply(call) = &parsed.ast.get(stmt).kind else {
+                panic!("implicitly[Foo[Int]]")
+            };
+            let expected = typer.type_of_tpt(call.args[0], ctx.lexical).unwrap();
+            let error = typer.type_expression(stmt, ctx).unwrap_err();
+            assert!(
+                matches!(error, TyperError::MissingContextualArgument { source, tree_index, expected: missing }
+                    if source == typer.source && tree_index == stmt.index() && missing == expected),
+                "{error:?}"
+            );
+        },
+    );
+    outcome("match");
 }
 
 #[test]

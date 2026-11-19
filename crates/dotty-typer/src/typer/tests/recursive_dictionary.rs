@@ -176,3 +176,69 @@ fn dictionary_allocations_roll_back_with_a_failed_recursive_candidate() {
         }
     }
 }
+
+#[test]
+fn by_name_search_reaches_a_leaf_through_new_or_shrinking_goals() {
+    let text = include_str!("../../../tests/fixtures/contextual-arguments/ByNameGrowth.scala");
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for (entry, step, leaf) in [
+        ("growing", "grow", "growingLeaf"),
+        ("shrinking", "shrink", "shrinkingLeaf"),
+    ] {
+        let (method, rhs) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, entry);
+        let step = method_symbol(&parsed, typer.store(), &index, source, step);
+        let leaf = val_symbol(&parsed, typer.store(), &index, source, leaf).0;
+        typer
+            .type_method_definition(definition_tree(&index, method))
+            .unwrap();
+        let arena = typer.typed_ast();
+        let TreeKind::Apply(ask) = &arena.get(typer.typed_index.get(source, rhs).unwrap()).kind
+        else {
+            panic!("ask")
+        };
+        let mut evidence = ask.args[0];
+        for _ in 0..2 {
+            let TreeKind::Apply(call) = &arena.get(evidence).kind else {
+                panic!("provider call")
+            };
+            let TreeKind::TypeApply(poly) = &arena.get(call.function).kind else {
+                panic!("instantiated provider")
+            };
+            assert_eq!(reference(&typer, poly.function), step);
+            evidence = call.args[0];
+        }
+        assert_eq!(reference(&typer, evidence), leaf);
+    }
+}
+
+#[test]
+fn nominal_goal_size_expands_canonical_tuples_and_transparent_aliases() {
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(
+        "package scala { class Tuple3[A, B, C] }; package app {
+            class Tuple3[A, B, C]; class C {
+              type Triple = (Int, Int, Int);
+              val tuple: (Int, Int, Int) = ???; val alias: Triple = ???;
+              val other: Tuple3[Int, Int, Int] = ???
+            }
+        }",
+    );
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let mut shape = |name| {
+        let (field, tpt) = val_symbol(&parsed, typer.store(), &index, source, name);
+        let ty = typer
+            .type_of_tpt(tpt, index.declaration_context_of(field).unwrap())
+            .unwrap();
+        typer
+            .complete_relation_type(ty, &mut Vec::new(), &mut HashSet::new(), 0)
+            .unwrap();
+        typer.nominal_goal_shape(ty).unwrap()
+    };
+    let tuple = shape("tuple");
+    assert_eq!(tuple.0, 3);
+    assert_eq!(shape("alias"), tuple);
+    let other = shape("other");
+    assert_eq!(other.0, 1);
+    assert_ne!(other.1, tuple.1);
+}

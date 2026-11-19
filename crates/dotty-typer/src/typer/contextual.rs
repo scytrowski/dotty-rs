@@ -906,6 +906,98 @@ impl SourceTyper<'_> {
         result.map(|tree| (!probe).then_some(tree))
     }
 
+    /// Count applications by occurrence and collect distinct declarations for
+    /// closed nominal goals. Leave other shapes to the existing recursion guard.
+    pub(super) fn nominal_goal_shape(
+        &mut self,
+        goal: TypeId,
+    ) -> Option<(usize, HashSet<SymbolId>)> {
+        let mut pending = vec![goal];
+        let mut covering = HashSet::new();
+        let mut size = 0;
+        let mut visited = 0;
+        while let Some(ty) = pending.pop() {
+            visited += 1;
+            if visited > MAX_TYPE_RELATION_VIEWS {
+                return None;
+            }
+            let ty = crate::types::TypeNormalizer::new(self.store)
+                .normalize_for_relation(ty)
+                .ok()?;
+            match self.store.types.get(ty) {
+                Type::Applied { tycon, args } => {
+                    if args.len() + pending.len() >= MAX_TYPE_RELATION_VIEWS {
+                        return None;
+                    }
+                    size += self.contextual_application_size(*tycon, args.len());
+                    pending.push(*tycon);
+                    pending.extend(args);
+                }
+                Type::TypeRef {
+                    target: TypeRefTarget::Symbol(symbol),
+                    prefix,
+                } if matches!(
+                    self.store.symbols.get(*symbol).kind,
+                    SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+                ) =>
+                {
+                    if *symbol != self.definitions.any_class
+                        && *symbol != self.definitions.nothing_class
+                    {
+                        covering.insert(*symbol);
+                        pending.push(*prefix);
+                    }
+                }
+                Type::NoPrefix | Type::ThisType { .. } => (),
+                Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    prefix,
+                }
+                | Type::TypeRef {
+                    target: TypeRefTarget::Symbol(symbol),
+                    prefix,
+                } if self.store.symbols.contains(*symbol)
+                    && self.store.symbols.get(*symbol).kind == SymbolKind::Package =>
+                {
+                    pending.push(*prefix);
+                }
+                _ => return None,
+            }
+        }
+        Some((size, covering))
+    }
+
+    // Scala measures TupleN after expanding it into N nested pairs, while
+    // its covering set keeps the original tuple class.
+    fn contextual_application_size(&self, tycon: TypeId, arity: usize) -> usize {
+        if !(2..=22).contains(&arity) {
+            return 1;
+        }
+        let Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        }) = self.store.types.try_get(tycon)
+        else {
+            return 1;
+        };
+        if !self.store.symbols.contains(*symbol) {
+            return 1;
+        }
+        let entry = self.store.symbols.get(*symbol);
+        let name = self.store.names.resolve(entry.name.text());
+        if entry.kind == SymbolKind::Class
+            && name.starts_with("Tuple")
+            && name == format!("Tuple{arity}")
+            && entry
+                .owner
+                .is_some_and(|owner| self.package_path(owner) == ["scala"])
+        {
+            arity
+        } else {
+            1
+        }
+    }
+
     fn materialize_provider(
         &mut self,
         provider: &Provider,
@@ -922,13 +1014,30 @@ impl SourceTyper<'_> {
                 tree_index,
             });
         }
-        for &(reference, ancestor, _) in &history.active {
-            if self.same_contextual_ref(reference, provider.reference)
-                && self.contextual_conforms(expected, ancestor, tree_index, journal)?
+        for &(reference, ancestor, depth) in history.active.iter().rev() {
+            if !self.same_contextual_ref(reference, provider.reference) {
+                continue;
+            }
+            if self.contextual_conforms(expected, ancestor, tree_index, journal)?
                 && self.contextual_conforms(ancestor, expected, tree_index, journal)?
             {
                 history.divergences += 1;
                 return Err(TyperError::DivergentContextualArgument {
+                    source: self.source,
+                    tree_index,
+                    expected,
+                });
+            }
+            // contextual_value has already tried the by-name back-reference.
+            // A growing obligation rules out this provider at this goal. Other
+            // evidence, including a concrete leaf, may still satisfy the goal.
+            if history.by_name_depth > depth
+                && let Some((current_size, current_cover)) = self.nominal_goal_shape(expected)
+                && let Some((prior_size, prior_cover)) = self.nominal_goal_shape(ancestor)
+                && current_size > prior_size
+                && current_cover == prior_cover
+            {
+                return Err(TyperError::MissingContextualArgument {
                     source: self.source,
                     tree_index,
                     expected,

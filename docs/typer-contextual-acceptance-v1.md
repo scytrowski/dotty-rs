@@ -1,9 +1,9 @@
 # Acceptance audit of contextual argument typing, v1
 
-**Keep the typer milestone open.** Of 11 selected upstream sites,
-five agree on the chosen evidence, one exposes an in-scope search discrepancy,
-four stop before the intended observation, and one exercises a previously
-documented unsupported combination. Growing by-name search still prevents closure. The original sites also expose three frontend prerequisites.
+**Keep the typer milestone open.** Six of the eleven selected upstream sites
+agree with Scala 3.9, including the inherited given and growing by-name search
+that differed in the first audit. Four sites still stop before the intended
+observation. One exercises a previously documented unsupported combination.
 
 ## What the audit measures
 
@@ -26,8 +26,7 @@ Rust parses the entire source and runs the namer with the real filename.
 After naming succeeds, each probe types the designated method body, initializer,
 or statement using its original context. Positive observations compare selected
 declarations, arguments or recursive references. Negative observations compare
-the reason for rejection at the designated site. Matching compiler exit status
-alone would conceal the remaining search discrepancy.
+the reason for rejection at the designated site. A rejection counts as a match when the typer reports the expected failure at the original call.
 
 ## Results on original sources
 
@@ -41,7 +40,7 @@ the last column help locate a failure and carry no additional acceptance votes.
 | `tests/pos/byname-implicits-2.scala` · `implicitly[Foo[Int]]` | `Foo.fooInt` | **Match.** The evidence points to the companion's source value and the application returns `Foo[Int]`. |
 | `tests/pos/byname-implicits-1.scala` · `implicitly[Foo]` | A lazy dictionary entry calls `Foo.foo` with itself. | **Match.** The provider call references the source method. Its recursive argument and the final result refer to the same synthetic field. |
 | `tests/pos/given-priority.scala` · first `summon[A]` | Selects `NormalImplicits.g2` after `import NormalImplicits.given`. | **Match.** The original import and initializer resolve to the source symbol for `g2` in both language modes. Typing the entire method subsequently encounters a separate `DuplicateLocalValue` on the second wildcard value declaration. |
-| `tests/neg/byname-implicits-11.scala` · `implicitly[Foo[Int]]` | E172, missing evidence for `Foo[Int]`. The failed provider would require `=> Foo[Foo[Int]]`. | **Typer gap.** Rust rejects the same call with `ContextualSearchLimit`. The diagnostic exposes the implementation limit. Scala identifies the missing nested dependency. |
+| `tests/neg/byname-implicits-11.scala` · `implicitly[Foo[Int]]` | E172, missing evidence for `Foo[Int]`. The failed provider would require `=> Foo[Foo[Int]]`. | **Match.** Rust reports `MissingContextualArgument` at the original call for the exact `Foo[Int]` goal. Scala also prints the failed nested dependency. |
 | `tests/run/implicit-disambiguation.scala` · `M.f` | The inner `a` supplies `summon[A].show`. Its initializer uses the parameter of type `B`. | **Blocked at member selection.** Rust reports `UnstableSelectionPrefix` on `.show`. Returning just `summon[A]` confirms both symbol choices in the original lexical scope. |
 | `tests/neg/given-ambiguous-2.scala` · RHS of top-level `f` | E172 names the conflicting `a1` and `a2` at the call of `g`. | **Blocked at owner lookup.** Rust lacks class information for the synthetic file owner. Moving the declarations into an object reproduces the expected ambiguity in both compilers. |
 | `tests/pos/i5295.scala` · top-level `foo` | The inline accessor for `bar` applies the context function with explicit argument `4`. | **Blocked at owner lookup.** The synthetic file owner lacks class information. In the class-member control, Rust resolves the source `bar`, the unary context function’s `apply` and the literal argument `4`. |
@@ -57,16 +56,12 @@ describes their coverage and the separate output contracts for JVM and TASTy.
 
 ## Work required for closure
 
-1. **Recognize unproductive growth in by-name search.** Reject the increasing
-   `Foo[T]` obligation as missing evidence at the call. Preserve the successful
-   shared dictionary in the companion example and keep the resource limit as a
-   safeguard. The [reference divergence check](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/dotc/typer/Implicits.scala#L1889-L1905) compares type size and covering sets after checking the by-name back-reference.
-2. **Resolve the synthetic file owner.** Retest both top-level examples through
+1. **Resolve the synthetic file owner.** Retest both top-level examples through
    normal method typing. One must identify the two ambiguous declarations and
    the other must apply the context function to `4`.
-3. **Type member selection on the result of `summon`.** Retest the full `.show`
+2. **Type member selection on the result of `summon`.** Retest the full `.show`
    expression while retaining the nested-scope evidence check.
-4. **Name the anonymous constructor-form given, then retest the curried call.**
+3. **Name the anonymous constructor-form given, then retest the curried call.**
    Once the namer admits the file, verify that both the call and its ordinary
    default getter reuse the contextual argument. The reduced case makes the
    ordinary-default dependency independently observable.

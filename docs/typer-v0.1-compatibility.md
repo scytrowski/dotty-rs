@@ -44,6 +44,15 @@ of the binary evidence. Run them with `JAVA_HOME`, `SCALA39_ROOT` and
 | Other searches | A contextual receiver can provide an extension. A supported extractor can request trailing contextual clauses. Expected result and argument types can trigger a `scala.Conversion` instance or a unary monomorphic `implicit def`. | The contextual consumer fixtures check selected symbols, nested scopes, ambiguity, and the order of arguments passed to `unapply`. |
 | Output | The pickler and JVM backend accept selected curried contextual methods, polymorphic evidence identity methods, and methods returning a unary `Int ?=> Int` literal. | Scala 3.9 clients read the emitted TASTy. Separate JDK 21 harnesses verify and execute the emitted classes. |
 
+Between eligible modern givens in the same search scope, a declaration in a
+derived class or trait takes priority over a declaration in its nominal base.
+Unrelated declaring classes can still produce an ambiguity. Recursive search
+first tries a compatible by-name dictionary reference. For closed nominal
+application types, repeating the same provider across a by-name edge with more
+applications and the same set of nominal declarations rules out that branch.
+A concrete alternative can still supply the missing argument. Other type
+shapes continue to use the existing recursion and resource limits.
+
 Dependent clause application substitutes stable argument paths. Within a
 simple source opaque alias's defining owner, contextual search can use its
 representation. Outside that owner it uses the nominal type and its companion.
