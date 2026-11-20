@@ -3,12 +3,12 @@
 use std::fmt;
 
 use crate::core::{
-    AstArena, Definitions, Packages, SemanticStore, SourceDefinition, SourceSemanticIndex,
-    SymbolId, SymbolKind, TreeKind, Untyped,
+    AstArena, Definitions, Packages, SemanticStore, SourceDefinition, SourceId,
+    SourceSemanticIndex, SymbolId, SymbolKind, TreeKind, Untyped,
 };
 use crate::source_declarations::canonical_symbol;
 use crate::typer::{SignatureCompletion, SourceTyper, TyperError};
-use crate::{SourceDeclaration, SourceDeclarationIndex};
+use crate::{SourceDeclaration, SourceDeclarationIndex, TypingDiagnostic};
 
 /// Failure to locate or type the requested member.
 #[derive(Debug)]
@@ -21,6 +21,21 @@ pub enum MemberSignatureError {
         declaration: SourceDeclaration,
         error: TyperError,
     },
+}
+
+impl MemberSignatureError {
+    /// Reports this failure after a signature attempt, using the original untyped arena
+    /// for the requested source. Missing locations follow [`crate::typer_error_span_with`].
+    /// An invalid member has no source site.
+    pub fn diagnostic<'a>(
+        &self,
+        ast_for: impl FnOnce(SourceId) -> Option<&'a AstArena<Untyped>>,
+    ) -> TypingDiagnostic {
+        match self {
+            Self::InvalidMember(_) => TypingDiagnostic::error(self.to_string(), None),
+            Self::Typing { error, .. } => TypingDiagnostic::from_typer(error, ast_for),
+        }
+    }
 }
 
 impl fmt::Display for MemberSignatureError {
