@@ -2216,6 +2216,13 @@ the declaration tree and hence its source range. The query returns `None` when
 the body has no binding for the call or the source callee has no direct typed
 counterpart, as in an inserted `apply` selection.
 
+For an editor query, retain `ParseResult::call_names` alongside the source
+arena. `TypedClassBody::selected_method_at` takes a UTF-8 byte offset in
+that file and resolves a cursor on the written name of a parenthesized call.
+In `a.take(42)` each byte of `take` selects the method. The receiver, dot,
+parentheses and argument yield `None`. After an edit, query the new parse
+and its corresponding typed body.
+
 For a call with the wrong number of arguments, pass the original
 `TyperError::ApplicationArityMismatch` and its untyped AST to
 `dotty::typer_error_span`. The returned `SourceSpan` covers the call

@@ -27,13 +27,14 @@ use dotty::jvm_class_plan::{
 };
 use dotty::jvm_method_plan::JvmMethodPlanner;
 use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
-use dotty::parser::{DetachedParse, ParseResult};
+use dotty::parser::{DetachedParse, ParseResult, SourceCallNames};
 use dotty::source_declarations::{Declaration, SourceClass, source_classes};
 use dotty::typer::{SignatureCompletion, SourceTyper, TyperError};
 
 struct NamedUnit {
     source: SourceId,
     ast: AstArena<Untyped>,
+    call_names: SourceCallNames,
     index: SourceSemanticIndex,
     classes: Vec<SourceClass>,
 }
@@ -108,6 +109,7 @@ fn enter(
     NamedUnit {
         source: id,
         ast: parsed.ast,
+        call_names: parsed.call_names,
         index,
         classes,
     }
@@ -525,15 +527,27 @@ fn selected_method_tracks_an_edited_overload_in_both_file_orders() {
             let (output, bodies) = type_bodies(&units, &mut store, defs, &packages, headers);
             let caller = sources.by_source[&b];
             let provider = sources.by_source[&a];
-            let read = caller.methods().next().unwrap();
-            let TreeKind::DefDef(def) = &caller.ast.get(read.tree).kind else {
-                panic!("expected B.read")
-            };
-            let call = def.rhs.unwrap();
             let body = bodies.get(caller.classes[0].symbol).unwrap();
-            let method = body
-                .selected_method(call, &caller.ast, &output.arena, &store)
-                .unwrap();
+            let method_at = |offset| {
+                body.selected_method_at(
+                    offset,
+                    &caller.call_names,
+                    &caller.ast,
+                    &output.arena,
+                    &store,
+                )
+            };
+            let name_start = text.find("take(").unwrap() as u32;
+            let method = method_at(name_start).unwrap();
+            for offset in name_start..name_start + 4 {
+                assert_eq!(method_at(offset), Some(method));
+            }
+            // Receiver, dot, opening parenthesis, argument and closing parenthesis.
+            let close = text.rfind(')').unwrap() as u32;
+            for offset in (name_start - 2..name_start).chain(name_start + 4..=close) {
+                assert_eq!(method_at(offset), None, "offset {offset} in {text}");
+            }
+            assert_eq!(method_at(text.len() as u32), None);
             let expected = provider.methods().nth(overload).unwrap();
             assert_eq!(method, expected.symbol);
 
@@ -557,11 +571,26 @@ fn selected_method_tracks_an_edited_overload_in_both_file_orders() {
                 TextRange::new(start, start + declaration.len() as u32).unwrap()
             );
 
+            let read = caller.methods().next().unwrap();
+            let TreeKind::DefDef(def) = &caller.ast.get(read.tree).kind else {
+                panic!("expected B.read")
+            };
+            let call = def.rhs.unwrap();
             assert_eq!(
                 body.selected_method(read.tree, &caller.ast, &output.arena, &store),
                 None
             );
             let other_body = bodies.get(provider.classes[0].symbol).unwrap();
+            assert_eq!(
+                other_body.selected_method_at(
+                    name_start,
+                    &caller.call_names,
+                    &caller.ast,
+                    &output.arena,
+                    &store
+                ),
+                None
+            );
             assert_eq!(
                 other_body.selected_method(call, &caller.ast, &output.arena, &store),
                 None
@@ -572,20 +601,19 @@ fn selected_method_tracks_an_edited_overload_in_both_file_orders() {
 
 #[test]
 fn selected_method_distinguishes_a_direct_call_from_an_inserted_apply() {
-    let (mut store, defs, packages, unit) = class_planning::named(
-        "class Callable {
+    let text = "class Callable {
            def apply(n: Int): Int = n
            def direct(): Int = apply(42)
            def indirect(c: Callable): Int = c(42)
-         }",
-    );
+         }";
+    let (mut store, defs, packages, unit) = class_planning::named(text);
     let units = std::slice::from_ref(&unit);
     let headers = complete_signatures(units, &mut store, defs, &packages).unwrap();
     let (output, bodies) = type_bodies(units, &mut store, defs, &packages, headers);
     let body = bodies.get(unit.classes[0].symbol).unwrap();
     let mut methods = unit.methods();
     let apply = methods.next().unwrap().symbol;
-    for expected in [Some(apply), None] {
+    for (spelling, expected) in [("apply(42)", Some(apply)), ("c(42)", None)] {
         let TreeKind::DefDef(def) = &unit.ast.get(methods.next().unwrap().tree).kind else {
             panic!("expected method")
         };
@@ -593,6 +621,12 @@ fn selected_method_distinguishes_a_direct_call_from_an_inserted_apply() {
         assert!(matches!(unit.ast.get(call).kind, TreeKind::Apply(_)));
         assert_eq!(
             body.selected_method(call, &unit.ast, &output.arena, &store),
+            expected
+        );
+        let offset = text.find(spelling).unwrap() as u32;
+        assert_eq!(unit.call_names.call_at(offset), Some(call));
+        assert_eq!(
+            body.selected_method_at(offset, &unit.call_names, &unit.ast, &output.arena, &store),
             expected
         );
     }

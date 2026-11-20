@@ -24,6 +24,15 @@ impl SourceCallNames {
     pub fn iter(&self) -> impl Iterator<Item = (TextRange, TreeId<Untyped>)> + '_ {
         self.entries.iter().copied()
     }
+
+    /// Finds the application whose written name contains this byte offset.
+    pub fn call_at(&self, offset: u32) -> Option<TreeId<Untyped>> {
+        let next = self
+            .entries
+            .partition_point(|(range, _)| range.start() <= offset);
+        let &(range, call) = self.entries.get(next.checked_sub(1)?)?;
+        range.contains(offset).then_some(call)
+    }
 }
 
 /// Result of parsing one source compilation unit.

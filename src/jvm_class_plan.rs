@@ -49,6 +49,25 @@ pub struct TypedClassBody {
 }
 
 impl TypedClassBody {
+    /// Resolves a byte offset on the name of a direct parenthesized call in this body.
+    /// Use the call names and source arena from the same parse, and the typed arena
+    /// and store from its typing session. Positions outside the token, including
+    /// its exclusive end, yield `None`. See [`Self::selected_method`] for supported callees.
+    pub fn selected_method_at(
+        &self,
+        offset: u32,
+        names: &crate::parser::SourceCallNames,
+        source_ast: &AstArena<Untyped>,
+        typed_ast: &AstArena<Typed>,
+        store: &SemanticStore,
+    ) -> Option<SymbolId> {
+        let call = names.call_at(offset)?;
+        if source_ast.try_get(call)?.position?.source() != names.source() {
+            return None;
+        }
+        self.selected_method(call, source_ast, typed_ast, store)
+    }
+
     /// Returns the method chosen by the typer for a direct source call such as `a.take(42)`.
     /// Pass a call node in its original parse and the typed arena and store from the same session.
     /// The call and its function must map to the corresponding typed application and callee.

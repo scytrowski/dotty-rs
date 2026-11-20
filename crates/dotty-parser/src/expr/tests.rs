@@ -47,6 +47,10 @@ fn direct_call_names_keep_exact_source_tokens_in_nested_calls() {
     for spelling in ["take", "`żółć`", "ż"] {
         let (range, call) = entries.next().unwrap();
         assert_eq!(call, expected_call);
+        for offset in range.start()..range.end() {
+            assert_eq!(parsed.call_names.call_at(offset), Some(call));
+        }
+        assert_eq!(parsed.call_names.call_at(range.end()), None);
         assert_eq!(
             &text[range.start() as usize..range.end() as usize],
             spelling
@@ -59,6 +63,7 @@ fn direct_call_names_keep_exact_source_tokens_in_nested_calls() {
         }
     }
     assert_eq!(entries.next(), None);
+    assert_eq!(parsed.call_names.call_at(u32::MAX), None);
 }
 
 #[test]
