@@ -26,6 +26,7 @@ mod completion;
 pub use completion::SignatureCompletion;
 mod context;
 mod contextual;
+mod diagnostic_types;
 mod error;
 mod expression;
 use expression::LocalMethodIndex;

@@ -2046,6 +2046,7 @@ fn failed_header_preserves_good_parent_call_for_execution() {
         argument_index,
         actual,
         expected,
+        ..
     } = error
     else {
         panic!("unexpected error for Bad: {error:?}")

@@ -504,13 +504,14 @@ impl SourceTyper<'_> {
         self.complete_relation_type(actual, info_journal, &mut seen, 0)?;
         match self.conforms(actual, formal) {
             Ok(true) => Ok(()),
-            Ok(false) => Err(TyperError::ApplicationArgumentTypeMismatch {
-                source: self.source,
+            Ok(false) => Err(TyperError::argument_type_mismatch(
+                self.store,
+                self.source,
                 tree_index,
                 argument_index,
                 actual,
-                expected: formal,
-            }),
+                formal,
+            )),
             Err(_) => Err(TyperError::UnsupportedInferenceShape {
                 source: self.source,
                 tree_index,

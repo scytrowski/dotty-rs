@@ -401,6 +401,8 @@ mod tests {
             argument_index,
             actual: defs.boolean,
             expected: defs.int,
+            actual_description: "Boolean".into(),
+            expected_description: "Int".into(),
         };
         let error = mismatch(call.index(), 0);
         assert_eq!(typer_error_span(&error, &ast), Some(argument_span));

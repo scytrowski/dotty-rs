@@ -2201,6 +2201,10 @@ expected and actual argument counts. For `ApplicationArgumentTypeMismatch`
 on a source `Apply`, the same function returns the position of the argument
 at the index carried by the error. For example, it locates `true` in
 `provider.diff(9, true)` and the use of `start` in `extends Base(start)`.
+The error owns `expected_description` and `actual_description` for reporting
+after rollback. These short labels use simple declaration names and summarize
+complex types. The raw type IDs describe the state at the point of failure:
+their slots may disappear or be reused after rollback.
 A missing tree or position, a foreign source, an out-of-range argument, or
 an unsupported expression shape or error variant yields `None`. Use the
 AST from the same parse because tree slots and source IDs can be reused.

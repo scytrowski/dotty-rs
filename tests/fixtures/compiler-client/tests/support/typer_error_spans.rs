@@ -4,6 +4,115 @@ use dotty::core::{Definitions, TextRange};
 use dotty::source_declarations::SourceClass;
 use dotty::typer::TyperError;
 
+#[test]
+fn cross_file_diagnostic_tracks_an_unsaved_edit_in_utf16() {
+    use super::{name_units, parsing};
+    use dotty::classloader::{ClasspathSymbolResolver, JmodClassPath, LoadingSession};
+    use dotty::core::{Packages, SemanticStore, SourceId, SourceText};
+    use std::path::PathBuf;
+
+    let a = SourceId::from_index(7);
+    let b = SourceId::from_index(2);
+    let mut buffer = String::from("class B {\n  def read(a: A): Int = /* 😀 */ a.take(\"bad\")\n}");
+    let analyze = |buffer: &str| {
+        let files = [
+            (b, "B.scala", buffer),
+            (a, "A.scala", "class A { def take(n: Int): Int = n }"),
+        ];
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let units = name_units(
+            &files,
+            parsing::parse_files(&files, 2),
+            &mut store,
+            &mut packages,
+        );
+        let mut headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
+        let sources = SignatureSources::new(&units, &store);
+        let [caller, provider] = units.as_slice() else {
+            panic!("expected two sources")
+        };
+        dotty::type_class_body(
+            &provider.classes[0],
+            &provider.ast,
+            &provider.index,
+            &mut store,
+            defs,
+            &packages,
+            &mut headers.arena,
+        )
+        .unwrap();
+
+        // Keep the loader's generic class metadata available during conformance checking.
+        let jdk =
+            PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME for the client tests"));
+        let resolver = ClasspathSymbolResolver::new(
+            JmodClassPath::new(jdk.join("jmods/java.base.jmod")).unwrap(),
+            defs,
+            LoadingSession::with_packages(packages),
+        );
+        let local_packages = Packages::new();
+        let mut typer = caller
+            .typer(&mut store, defs, &local_packages)
+            .with_resolver(Box::new(resolver));
+        let mut diagnostics = Vec::new();
+        for method in caller.methods() {
+            let before = typer.store().checkpoint();
+            let Err(error) = typer.type_method_definition(method.tree) else {
+                continue;
+            };
+            assert_eq!(typer.store().checkpoint(), before);
+            let TyperError::ApplicationArgumentTypeMismatch {
+                source,
+                argument_index,
+                expected,
+                ref actual_description,
+                ref expected_description,
+                ..
+            } = error
+            else {
+                panic!("expected a mismatched argument, got {error:?}");
+            };
+            assert_eq!((source, argument_index, expected), (b, 0, defs.int));
+            let span = sources.error_span(&error).expect("argument position");
+            let &(_, name, text) = files.iter().find(|file| file.0 == span.source()).unwrap();
+            let source = SourceText::new(text).unwrap();
+            let range = span.span().range();
+            assert_eq!(source.slice(range).unwrap(), "\"bad\"");
+            let lines = source.line_index().unwrap();
+            let position = |offset| {
+                (
+                    lines.line_of_offset(offset).unwrap(),
+                    lines.utf16_column(text, offset).unwrap(),
+                )
+            };
+            let message = format!("expected {expected_description}, found {actual_description}");
+            diagnostics.push((
+                name,
+                position(range.start()),
+                position(range.end()),
+                message,
+            ));
+        }
+        assert!(typer.diagnostics().is_empty(), "{:?}", typer.diagnostics());
+        diagnostics
+    };
+
+    assert_eq!(
+        analyze(&buffer),
+        [(
+            "B.scala",
+            (1, 40),
+            (1, 45),
+            String::from("expected Int, found String")
+        )]
+    );
+    let start = buffer.find("\"bad\"").unwrap();
+    buffer.replace_range(start..start + "\"bad\"".len(), "42");
+    assert!(analyze(&buffer).is_empty());
+}
+
 /// The delimiters mark the expected byte range, even when its spelling is repeated.
 fn check_body_error(marked: &str, check: impl FnOnce(TyperError, Definitions, &SourceClass)) {
     let (before, rest) = marked.split_once('«').unwrap();
