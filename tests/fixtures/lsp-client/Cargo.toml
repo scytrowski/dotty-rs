@@ -1,0 +1,13 @@
+[package]
+name = "dotty-lsp"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+dotty = { path = "../../.." }
+serde_json = "1"
+lsp-server = "0.7"
+crossbeam-channel = "0.5"
+
+[workspace]
