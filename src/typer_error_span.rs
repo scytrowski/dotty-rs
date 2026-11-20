@@ -4,6 +4,7 @@ use crate::typer::TyperError;
 enum ErrorSite {
     Tree,
     Argument(usize),
+    TypeApplication { argument: Option<usize> },
     IfCondition,
     WhileCondition,
     ReturnValue,
@@ -16,6 +17,9 @@ enum ErrorSite {
 ///
 /// - Call arity errors identify the whole call. Argument type mismatches on
 ///   explicit applications identify the offending argument.
+/// - A type argument count mismatch identifies the explicit type application. A
+///   bound violation identifies the type argument. Failed or ambiguous overload
+///   selection identifies the whole call.
 /// - Expected expression type mismatches identify the checked expression.
 ///   Local value type mismatches identify the initializer.
 /// - An immutable or non-assignable assignment target identifies the left-hand side.
@@ -43,12 +47,37 @@ pub fn typer_error_span_with<'a>(
         TyperError::ApplicationArityMismatch {
             source, tree_index, ..
         }
+        | TyperError::OverloadApplicationNoApplicable {
+            source, tree_index, ..
+        }
+        | TyperError::AmbiguousOverloadApplication {
+            source, tree_index, ..
+        }
         | TyperError::ExpectedExpressionTypeMismatch {
             source, tree_index, ..
         }
         | TyperError::MemberNotFound {
             source, tree_index, ..
         } => (source, tree_index, ErrorSite::Tree),
+        TyperError::ExplicitTypeApplicationArityMismatch {
+            source, tree_index, ..
+        } => (
+            source,
+            tree_index,
+            ErrorSite::TypeApplication { argument: None },
+        ),
+        TyperError::ExplicitTypeArgumentBoundViolation {
+            source,
+            tree_index,
+            parameter_index,
+            ..
+        } => (
+            source,
+            tree_index,
+            ErrorSite::TypeApplication {
+                argument: Some(parameter_index),
+            },
+        ),
         TyperError::TermNameNotFound {
             source,
             tree_index,
@@ -135,6 +164,10 @@ pub fn typer_error_span_with<'a>(
                 && name_range.end() <= tree_range.end())
             .then_some(name);
         }
+        (ErrorSite::TypeApplication { argument }, TreeKind::TypeApply(call)) => match argument {
+            Some(index) => *call.args.get(index)?,
+            None => return Some(position),
+        },
         (ErrorSite::Argument(index), TreeKind::Apply(call)) => *call.args.get(index)?,
         (ErrorSite::AssignmentTarget { reported_lhs }, TreeKind::Assign(assign))
             if reported_lhs.is_none_or(|index| index == assign.lhs.index()) =>
@@ -173,6 +206,35 @@ mod tests {
         .into_session(&mut store.names);
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         parsed.ast
+    }
+
+    #[test]
+    fn explicit_bound_violation_requires_an_argument_of_the_reported_type_application() {
+        let source = SourceId::from_index(1);
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let ast = parse_ast("class C { def f(): Int = g[Int](0) }", source, &mut store);
+        let (id, argument) = ast
+            .iter()
+            .find_map(|(id, tree)| match &tree.kind {
+                TreeKind::TypeApply(call) => Some((id, call.args[0])),
+                _ => None,
+            })
+            .unwrap();
+        let error = |tree_index, parameter_index| TyperError::ExplicitTypeArgumentBoundViolation {
+            source,
+            tree_index,
+            parameter_index,
+            argument: defs.int,
+            bound: defs.boolean,
+            side: crate::typer::TypeArgumentBoundSide::Upper,
+        };
+        assert_eq!(
+            typer_error_span(&error(id.index(), 0), &ast),
+            ast.get(argument).position
+        );
+        assert_eq!(typer_error_span(&error(id.index(), 1), &ast), None);
+        assert_eq!(typer_error_span(&error(argument.index(), 0), &ast), None);
     }
 
     #[test]
@@ -420,8 +482,12 @@ mod tests {
             actual: 0,
         };
         assert_eq!(typer_error_span(&type_arguments, &ast), None);
+        let unsupported = TyperError::TreeOutsideArena {
+            source,
+            tree_index: u32::MAX,
+        };
         assert_eq!(
-            typer_error_span_with(&type_arguments, |_| panic!("unexpected AST lookup")),
+            typer_error_span_with(&unsupported, |_| panic!("unexpected AST lookup")),
             None
         );
     }

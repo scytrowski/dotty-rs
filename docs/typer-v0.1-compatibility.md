@@ -2019,6 +2019,11 @@ type mismatch, the range covers the condition. A return type mismatch
 locates the returned expression or, for a bare `return`, the instruction itself.
 An immutable or non-assignable assignment target points to the left-hand side.
 An expected-type mismatch in the assigned value points to the right-hand expression.
+An explicit type argument count mismatch locates the whole type application
+(`f[Int, Boolean]`), and a bound violation locates the offending type argument.
+A call with no applicable overload or several equally applicable overloads
+locates the whole call. The original error retains the rejected candidates and
+their reasons, or the ambiguous candidates.
 
 For `A.f(b: B) = b.g()`, the external client observes the symbol of `B.g`,
 completes it and retries `A.f`. A call to the same zero-argument method with

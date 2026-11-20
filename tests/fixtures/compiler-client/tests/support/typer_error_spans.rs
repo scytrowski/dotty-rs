@@ -101,3 +101,65 @@ fn assignment_errors_distinguish_the_target_from_the_value() {
         },
     );
 }
+
+#[test]
+fn explicit_type_application_errors_locate_the_application_or_the_bound_argument() {
+    use dotty::typer::TypeArgumentBoundSide;
+    check_body_error(
+        "class C { def f[A](x: A): A = x; def bad(): Int = «f[Int, Boolean]»(1) }",
+        |error, _, _| {
+            assert!(
+                matches!(
+                    error,
+                    TyperError::ExplicitTypeApplicationArityMismatch {
+                        expected: 1,
+                        actual: 2,
+                        ..
+                    }
+                ),
+                "{error:?}"
+            );
+        },
+    );
+    check_body_error(
+        "class C { def f[A, B <: Int](x: Int): Int = x; def bad(): Int = f[Boolean, «Boolean»](1) }",
+        |error, defs, _| {
+            assert!(
+                matches!(error, TyperError::ExplicitTypeArgumentBoundViolation { parameter_index: 1, argument, bound, side: TypeArgumentBoundSide::Upper, .. } if argument == defs.boolean && bound == defs.int),
+                "{error:?}"
+            );
+        },
+    );
+}
+
+#[test]
+fn overload_errors_locate_the_whole_call_and_keep_its_candidates() {
+    check_body_error(
+        "class C { def f(x: Int): Int = 1; def f(x: Boolean): Int = 2; def bad(x: Byte): Int = «f(x)» }",
+        |error, _, class| {
+            let TyperError::OverloadApplicationNoApplicable { candidates, .. } = error else {
+                panic!("{error:?}")
+            };
+            let declared: Vec<_> = class.methods().take(2).map(|m| m.symbol).collect();
+            assert_eq!(candidates.len(), declared.len());
+            for symbol in declared {
+                assert!(candidates.iter().any(|(id, _)| *id == symbol));
+            }
+            // The formal parameter types differ, so the rejection payloads must differ too.
+            assert_ne!(candidates[0].1, candidates[1].1);
+        },
+    );
+    check_body_error(
+        "class C { def f(x: Int, y: Any): Int = 1; def f(x: Any, y: Int): Int = 2; def bad(): Int = «f(1, 1)» }",
+        |error, _, class| {
+            let TyperError::AmbiguousOverloadApplication { candidates, .. } = error else {
+                panic!("{error:?}")
+            };
+            let declared: Vec<_> = class.methods().take(2).map(|m| m.symbol).collect();
+            assert_eq!(candidates.len(), declared.len());
+            for symbol in declared {
+                assert!(candidates.contains(&symbol));
+            }
+        },
+    );
+}
