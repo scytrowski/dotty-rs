@@ -37,7 +37,7 @@ impl SourceTyper<'_> {
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Option<(TreeId<Typed>, TypeId)>, TyperError> {
         let mut candidates = Vec::new();
-        let mut selections = Vec::new();
+
         for evidence in refs {
             if self.initializing_local_symbols.contains(&evidence.symbol) {
                 continue;
@@ -94,7 +94,10 @@ impl SourceTyper<'_> {
                 if !self.contextual_conforms(receiver, expected_receiver, tree_index, journal)? {
                     continue;
                 }
-                if selections.iter().any(|(r, _, _)| *r == evidence) {
+                if candidates
+                    .iter()
+                    .any(|(p, _): &(Provider, _)| p.reference == evidence)
+                {
                     return Err(TyperError::OverloadedSelectionDeferred {
                         source: self.source,
                         tree_index,
@@ -108,19 +111,12 @@ impl SourceTyper<'_> {
                         callable: view,
                         result: view,
                     },
-                    None,
+                    Ok((member.symbol, signature)),
                 ));
-                selections.push((evidence, member.symbol, signature));
             }
         }
-        let Some(provider) =
+        let Some((provider, (symbol, signature))) =
             self.choose_contextual_candidate(candidates, receiver, tree_index, journal)?
-        else {
-            return Ok(None);
-        };
-        let Some((_, symbol, signature)) = selections
-            .into_iter()
-            .find(|(r, _, _)| *r == provider.reference)
         else {
             return Ok(None);
         };

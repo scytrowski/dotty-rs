@@ -7,7 +7,9 @@ mod dictionary;
 use dictionary::Dictionary;
 
 mod conversions;
-pub(super) use conversions::{ConversionGoal, ConversionTarget, MemberConversionGoal};
+pub(super) use conversions::{
+    ConversionGoal, ConversionOperand, ConversionTarget, ConversionUse, MemberConversionGoal,
+};
 mod defaults;
 mod extension;
 mod opaque;
@@ -747,7 +749,7 @@ impl SourceTyper<'_> {
         }
         let mut eligible = Vec::new();
         for provider in candidates {
-            let ambiguity = if matches!(
+            let viability = if matches!(
                 self.store.types.try_get(provider.callable),
                 Some(Type::Method(_))
             ) {
@@ -759,16 +761,16 @@ impl SourceTyper<'_> {
                         TyperError::MissingContextualArgument { .. }
                         | TyperError::DivergentContextualArgument { .. },
                     ) => continue,
-                    Err(error @ TyperError::AmbiguousContextualArgument { .. }) => Some(error),
-                    Ok(_) => None,
+                    Err(error @ TyperError::AmbiguousContextualArgument { .. }) => Err(error),
+                    Ok(_) => Ok(()),
                     Err(error) => return Err(error),
                 }
             } else {
-                None
+                Ok(())
             };
-            eligible.push((provider, ambiguity));
+            eligible.push((provider, viability));
         }
-        let Some(provider) =
+        let Some((provider, ())) =
             self.choose_contextual_candidate(eligible, expected, tree_index, journal)?
         else {
             return Ok(None);
@@ -790,21 +792,11 @@ impl SourceTyper<'_> {
             Some(Type::Poly(poly)) => Some(poly.clone()),
             _ => None,
         };
-        let mut result = poly.as_ref().map_or(signature, |poly| poly.result);
-        let mut depth = 0;
-        while let Some(Type::Method(method)) = self.store.types.try_get(result) {
-            if method.kind == MethodKind::Plain {
-                return Ok(None);
-            }
-            if depth >= crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
-                return Err(TyperError::UsingApplicationDeferred {
-                    source: self.source,
-                    tree_index,
-                });
-            }
-            depth += 1;
-            result = method.result;
-        }
+        let Some(mut result) = self
+            .contextual_factory_result(poly.as_ref().map_or(signature, |p| p.result), tree_index)?
+        else {
+            return Ok(None);
+        };
         // A binary factory can publish a reference to its implementation
         // before that class's parents and ordered parameters have been loaded.
         if matches!(
@@ -862,16 +854,10 @@ impl SourceTyper<'_> {
                 return Ok(None);
             };
             callable = instance;
-            result = callable;
-            for _ in 0..depth {
-                let Some(Type::Method(method)) = self.store.types.try_get(result) else {
-                    return Err(TyperError::UsingApplicationDeferred {
-                        source: self.source,
-                        tree_index,
-                    });
-                };
-                result = method.result;
-            }
+            let Some(instantiated) = self.contextual_factory_result(callable, tree_index)? else {
+                return Ok(None);
+            };
+            result = instantiated;
         }
         let result = self.contextual_type_at_owner(result, owner, journal)?;
         if !self.contextual_conforms(result, expected, tree_index, journal)? {
@@ -883,6 +869,28 @@ impl SourceTyper<'_> {
             callable,
             result,
         }))
+    }
+
+    fn contextual_factory_result(
+        &self,
+        mut result: TypeId,
+        tree_index: u32,
+    ) -> Result<Option<TypeId>, TyperError> {
+        let mut depth = 0;
+        while let Some(Type::Method(method)) = self.store.types.try_get(result) {
+            if method.kind == MethodKind::Plain {
+                return Ok(None);
+            }
+            if depth >= crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
+                return Err(TyperError::UsingApplicationDeferred {
+                    source: self.source,
+                    tree_index,
+                });
+            }
+            depth += 1;
+            result = method.result;
+        }
+        Ok(Some(result))
     }
 
     fn infer_provider_result(
@@ -1500,14 +1508,13 @@ impl SourceTyper<'_> {
         Ok(ancestors)
     }
 
-    fn given_class_owner(&self, provider: &Provider) -> Option<SymbolId> {
+    fn contextual_class_owner(&self, provider: &Provider) -> Option<SymbolId> {
         let symbol = self.store.symbols.get(provider.reference.symbol);
         let owner = symbol.owner?;
-        (symbol.flags.contains(SymbolFlags::GIVEN)
-            && matches!(
-                self.store.symbols.get(owner).kind,
-                SymbolKind::Class | SymbolKind::ModuleClass | SymbolKind::Trait
-            ))
+        matches!(
+            self.store.symbols.get(owner).kind,
+            SymbolKind::Class | SymbolKind::ModuleClass | SymbolKind::Trait
+        )
         .then_some(owner)
     }
 
@@ -1596,13 +1603,13 @@ impl SourceTyper<'_> {
         })
     }
 
-    fn choose_contextual_candidate(
+    fn choose_contextual_candidate<T>(
         &mut self,
-        mut candidates: Vec<(Provider, Option<TyperError>)>,
+        mut candidates: Vec<(Provider, Result<T, TyperError>)>,
         expected: TypeId,
         tree_index: u32,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
-    ) -> Result<Option<Provider>, TyperError> {
+    ) -> Result<Option<(Provider, T)>, TyperError> {
         let mut ancestors = HashMap::new();
         let mut maxima = Vec::new();
         for (index, (candidate, _)) in candidates.iter().enumerate() {
@@ -1611,12 +1618,24 @@ impl SourceTyper<'_> {
                 if self.same_contextual_ref(rival.reference, candidate.reference) {
                     continue;
                 }
-                // Scala 3.9 gives the declaring owner's inheritance priority
-                // over result specificity when comparing two modern givens.
-                if let (Some(own), Some(other)) = (
-                    self.given_class_owner(candidate),
-                    self.given_class_owner(rival),
-                ) && own != other
+                let given = |p: &Provider| {
+                    self.store
+                        .symbols
+                        .get(p.reference.symbol)
+                        .flags
+                        .contains(SymbolFlags::GIVEN)
+                };
+                let unary = |p: &Provider| matches!(self.store.types.get(p.callable), Type::Method(m) if m.kind == MethodKind::Plain);
+                let prefer_candidate = given(candidate) && unary(rival);
+                let prefer_rival = given(rival) && unary(candidate);
+                // Compare declaring owners first for modern givens, including a
+                // given Conversion competing with an old-style unary conversion.
+                if (prefer_candidate || prefer_rival || (given(candidate) && given(rival)))
+                    && let (Some(own), Some(other)) = (
+                        self.contextual_class_owner(candidate),
+                        self.contextual_class_owner(rival),
+                    )
+                    && own != other
                 {
                     for class in [own, other] {
                         if let std::collections::hash_map::Entry::Vacant(slot) =
@@ -1632,6 +1651,13 @@ impl SourceTyper<'_> {
                     if ancestors[&own].iter().any(|(base, _)| *base == other) {
                         continue;
                     }
+                }
+                if prefer_rival {
+                    dominated = true;
+                    break;
+                }
+                if prefer_candidate {
+                    continue;
                 }
                 let is_method = |p: &Provider| {
                     !p.type_arguments.is_empty()
@@ -1686,14 +1712,13 @@ impl SourceTyper<'_> {
         }
         // An ambiguous dependency rules out the whole search unless a strictly
         // better viable provider supersedes it, regardless of declaration order.
-        for &index in &maxima {
-            if let Some(error) = candidates[index].1.take() {
-                return Err(error);
+        let failed = maxima.iter().find(|&&i| candidates[i].1.is_err());
+        match (failed, maxima.as_slice()) {
+            (_, []) => Ok(None),
+            (Some(winner), _) | (None, [winner]) => {
+                let (provider, outcome) = candidates.swap_remove(*winner);
+                outcome.map(|value| Some((provider, value)))
             }
-        }
-        match maxima.as_slice() {
-            [] => Ok(None),
-            [winner] => Ok(Some(candidates.swap_remove(*winner).0)),
             _ => Err(TyperError::AmbiguousContextualArgument {
                 source: self.source,
                 tree_index,

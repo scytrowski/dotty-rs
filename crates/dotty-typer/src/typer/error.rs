@@ -1155,6 +1155,14 @@ pub enum TyperError {
         expected: TypeId,
         candidates: Vec<SymbolId>,
     },
+    /// A conversion exposing the selected member could not obtain its contextual argument.
+    MemberConversionDependency {
+        source: SourceId,
+        tree_index: u32,
+        name: Name,
+        provider: SymbolId,
+        cause: Box<TyperError>,
+    },
     /// Multiple eligible conversions expose the requested term on their result.
     AmbiguousMemberConversion {
         source: SourceId,

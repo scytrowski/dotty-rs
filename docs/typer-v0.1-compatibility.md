@@ -115,19 +115,36 @@ a known expected type, including ordinary method arguments. For a unary
 `Wrapped[Int]` produces `wrap[Int](x)`. The typer infers type arguments from
 the receiver and can fill remaining arguments from the expected result. It
 checks the instantiated bounds, input, and result before selecting a method.
+A unary conversion can also take a final legacy implicit clause. For
+`implicit def wrap[A](x: Box[A])(implicit tc: TC[A]): Wrapped[A]`, both an
+argument expecting `Wrapped[Int]` and a selection of `x.show` use
+`wrap[Int](x)(tc)`. A missing witness permits a fallback conversion in the
+receiver companion. Equally eligible witnesses report a dependency ambiguity
+at the operand and prevent that companion fallback. The result and evidence
+types in this form must be independent of the value of the receiver, and the
+result must be independent of the witness value.
 With `import scala.language.implicitConversions`, this search still reaches a
 receiver companion when the classpath adapter cannot project the feature
 marker’s nested type. An imported user conversion with the same name remains
 eligible.
 For a missing source selection
 such as `x.show`, the typer considers monomorphic `scala.Conversion[From, To]`
-values and unary `implicit def` methods. For a generic method the receiver
+values, conditional givens returning a conversion, and unary `implicit def`
+methods. For a generic method the receiver
 must determine all type arguments. For example, selecting `show` on a
 `Box[Int]` can produce `wrap[Int](x).show`. The receiver must conform to `From` and
 `To` must expose an accessible `show`. A direct member wins. Two equally
 eligible conversions produce an ambiguity at the selection, including when
 their output types differ. Search checks lexical scopes before the receiver’s
-companion. A monomorphic structural given can contribute its instantiated
+companion. For `given wrap[A](using TC[A]): Conversion[Box[A], Wrapped[A]]`,
+selecting `x.show` on a `Box[Int]` with witness `tc` produces
+`wrap[Int](tc).apply(x).show`. A missing or ambiguous dependency allows the
+search to try another conversion, including one in the receiver companion.
+If none succeeds, the selection reports the failed dependency. When a viable
+conditional given and a unary `implicit def` compete in the same class, the
+given wins. A unary conversion declared in a subclass takes precedence over
+an inherited given.
+A monomorphic structural given can contribute its instantiated
 `Conversion` parent. An unrelated unary `apply` or a private member on a
 conversion’s result does not make that candidate eligible.
 

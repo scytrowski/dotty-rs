@@ -20716,6 +20716,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::DivergentContextualArgument { .. } => "DivergentContextualArgument",
         TyperError::ContextualSearchLimit { .. } => "ContextualSearchLimit",
         TyperError::MissingContextualArgument { .. } => "MissingContextualArgument",
+        TyperError::MemberConversionDependency { .. } => "MemberConversionDependency",
         TyperError::AmbiguousMemberConversion { .. } => "AmbiguousMemberConversion",
         TyperError::AmbiguousContextualArgument { .. } => "AmbiguousContextualArgument",
         TyperError::UsingApplicationDeferred { .. } => "UsingApplicationDeferred",
