@@ -2008,6 +2008,8 @@ an unsupported expression shape or error variant yields `None`. Use the
 AST from the same parse because tree slots and source IDs can be reused.
 A multi-file client can call `dotty::typer_error_span_with(error, ast_for)`
 to look up that AST by source ID. A missing file yields `None`.
+Both functions locate the checked expression for `ExpectedExpressionTypeMismatch`
+and the initializer of a local declaration for `LocalValueTypeMismatch`.
 
 For `A.f(b: B) = b.g()`, the external client observes the symbol of `B.g`,
 completes it and retries `A.f`. A call to the same zero-argument method with

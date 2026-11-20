@@ -1,12 +1,20 @@
 use crate::core::{AstArena, SourceId, SourceSpan, TreeKind, Untyped};
 use crate::typer::TyperError;
 
+enum ErrorSite {
+    Tree,
+    Argument(usize),
+    LocalInitializer,
+}
+
 /// Locates a call rejected with [`TyperError::ApplicationArityMismatch`] or
 /// the offending argument of an explicit application rejected with
-/// [`TyperError::ApplicationArgumentTypeMismatch`].
+/// [`TyperError::ApplicationArgumentTypeMismatch`]. For
+/// [`TyperError::ExpectedExpressionTypeMismatch`] it locates the expression,
+/// and for [`TyperError::LocalValueTypeMismatch`] the initializer of the local value.
 ///
 /// Supply the untyped AST from the parse that produced the error. The
-/// call and any reported argument must carry positions in the error's source.
+/// reported tree and any selected child must carry positions in the error's source.
 /// An unavailable position, unsupported tree shape for the argument lookup,
 /// or unsupported error variant yields `None`.
 pub fn typer_error_span(error: &TyperError, ast: &AstArena<Untyped>) -> Option<SourceSpan> {
@@ -21,29 +29,36 @@ pub fn typer_error_span_with<'a>(
     error: &TyperError,
     ast_for: impl FnOnce(SourceId) -> Option<&'a AstArena<Untyped>>,
 ) -> Option<SourceSpan> {
-    let (source, tree_index, argument_index) = match *error {
+    let (source, tree_index, site) = match *error {
         TyperError::ApplicationArityMismatch {
             source, tree_index, ..
-        } => (source, tree_index, None),
+        }
+        | TyperError::ExpectedExpressionTypeMismatch {
+            source, tree_index, ..
+        } => (source, tree_index, ErrorSite::Tree),
+        TyperError::LocalValueTypeMismatch {
+            source, tree_index, ..
+        } => (source, tree_index, ErrorSite::LocalInitializer),
         TyperError::ApplicationArgumentTypeMismatch {
             source,
             tree_index,
             argument_index,
             ..
-        } => (source, tree_index, Some(argument_index)),
+        } => (source, tree_index, ErrorSite::Argument(argument_index)),
         _ => return None,
     };
     let ast = ast_for(source)?;
-    let (_, call) = ast.iter().nth(tree_index as usize)?;
-    let call_span = call.position.filter(|span| span.source() == source)?;
-    let Some(index) = argument_index else {
-        return Some(call_span);
+    let (_, tree) = ast.iter().nth(tree_index as usize)?;
+    let position = tree.position.filter(|span| span.source() == source)?;
+    let child = match (site, &tree.kind) {
+        (ErrorSite::Tree, _) => return Some(position),
+        (ErrorSite::Argument(index), TreeKind::Apply(call)) => *call.args.get(index)?,
+        (ErrorSite::LocalInitializer, TreeKind::ValDef(def)) => def.rhs?,
+        _ => return None,
     };
-    let TreeKind::Apply(application) = &call.kind else {
-        return None;
-    };
-    let argument = ast.try_get(*application.args.get(index)?)?;
-    argument.position.filter(|span| span.source() == source)
+    ast.try_get(child)?
+        .position
+        .filter(|span| span.source() == source)
 }
 
 #[cfg(test)]
@@ -53,6 +68,52 @@ mod tests {
         Apply, ApplyKind, Constant, Definitions, Literal, SemanticStore, SourceId, Span, TextRange,
         Tree, TreeKind,
     };
+
+    fn parse_ast(text: &str, source: SourceId, store: &mut SemanticStore) -> AstArena<Untyped> {
+        let parsed = crate::parser::DetachedParse::parse(
+            crate::core::SourceText::new(text).unwrap(),
+            source,
+            crate::lexer::ContextualScanner::new(text).unwrap(),
+            Default::default(),
+        )
+        .into_session(&mut store.names);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        parsed.ast
+    }
+
+    #[test]
+    fn local_value_mismatch_requires_an_initializer_from_the_same_source() {
+        let source = SourceId::from_index(3);
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut ast = parse_ast(
+            "class A { def f(): Int = { val n: Int = false; n } }",
+            source,
+            &mut store,
+        );
+        let (local, rhs) = ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::ValDef(def) => Some((tree, def.rhs?)),
+                _ => None,
+            })
+            .unwrap();
+        let error = TyperError::LocalValueTypeMismatch {
+            source,
+            tree_index: local.index(),
+            actual: defs.boolean,
+            expected: defs.int,
+        };
+        let position = ast.get(rhs).position.unwrap();
+        assert_eq!(typer_error_span(&error, &ast), Some(position));
+        ast.get_mut(rhs).position = Some(SourceSpan::new(SourceId::from_index(4), position.span()));
+        assert_eq!(typer_error_span(&error, &ast), None);
+        let TreeKind::ValDef(def) = &mut ast.get_mut(local).kind else {
+            unreachable!()
+        };
+        def.rhs = None;
+        assert_eq!(typer_error_span(&error, &ast), None);
+    }
 
     #[test]
     fn argument_mismatch_requires_a_positioned_argument_in_the_same_source_as_the_call() {

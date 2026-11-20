@@ -153,19 +153,81 @@ fn bodies_recorded_b_then_a_plan_and_execute_a_then_b() {
     );
 }
 
+fn assert_error_text(
+    sources: &SignatureSources<'_>,
+    error: &dotty::typer::TyperError,
+    unit: &NamedUnit,
+    text: &str,
+    expected: &str,
+) {
+    let span = sources
+        .error_span(error)
+        .expect("source position for typer error");
+    assert_eq!(span.source(), unit.source);
+    assert_eq!(
+        dotty::core::SourceText::new(text)
+            .unwrap()
+            .slice(span.span().range())
+            .unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn field_and_local_value_errors_locate_the_initializer() {
+    use dotty::typer::TyperError;
+    for (text, local) in [
+        ("class B { val count: Int = false }", false),
+        (
+            "class B { def value(): Int = { val count: Int = false; count } }",
+            true,
+        ),
+    ] {
+        let (mut store, defs, packages, unit) = named(text);
+        let units = std::slice::from_ref(&unit);
+        complete_signatures(units, &mut store, defs, &packages).unwrap();
+        let error = dotty::type_class_body(
+            &unit.classes[0],
+            &unit.ast,
+            &unit.index,
+            &mut store,
+            defs,
+            &packages,
+            &mut Default::default(),
+        )
+        .unwrap_err();
+        let dotty::ClassBodyError::Member { error, .. } = error else {
+            panic!("{error:?}")
+        };
+        let (actual, expected) = match error {
+            TyperError::ExpectedExpressionTypeMismatch {
+                actual, expected, ..
+            } if !local => (actual, expected),
+            TyperError::LocalValueTypeMismatch {
+                actual, expected, ..
+            } if local => (actual, expected),
+            _ => panic!("{error:?}"),
+        };
+        assert_eq!((actual, expected), (defs.boolean, defs.int));
+        assert_error_text(
+            &SignatureSources::new(units, &store),
+            &error,
+            &unit,
+            text,
+            "false",
+        );
+    }
+}
+
 #[test]
 fn method_error_keeps_a_executable_and_b_unpublished() {
-    let (mut store, defs, packages, units) =
-        body_units("package demo\nclass B { private val seed: Int = 7; def value(): Int = true }");
+    let text = "package demo\nclass B { private val seed: Int = 7; def value(): Int = true }";
+    let (mut store, defs, packages, units) = body_units(text);
     let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
     let (mut output, mut bodies) = type_bodies(&units[..1], &mut store, defs, &packages, headers);
     let unit = &units[1];
     let b = &unit.classes[0];
     let method = b.methods().next().unwrap();
-    let TreeKind::DefDef(def) = &unit.ast.get(method.tree).kind else {
-        panic!("expected B.value")
-    };
-    let rhs = def.rhs.unwrap();
     let error = dotty::type_class_body(
         b,
         &unit.ast,
@@ -180,13 +242,7 @@ fn method_error_keeps_a_executable_and_b_unpublished() {
     let dotty::ClassBodyError::Member {
         class,
         member,
-        error:
-            dotty::typer::TyperError::ExpectedExpressionTypeMismatch {
-                source,
-                tree_index,
-                actual,
-                expected,
-            },
+        error,
     } = error
     else {
         panic!("unexpected error for B.value: {error:?}")
@@ -196,8 +252,18 @@ fn method_error_keeps_a_executable_and_b_unpublished() {
         member,
         dotty::source_declarations::ClassMember::Method(method)
     );
-    assert_eq!((source, tree_index), (unit.source, rhs.index()));
-    assert_eq!((actual, expected), (defs.boolean, defs.int));
+    assert!(
+        matches!(error, dotty::typer::TyperError::ExpectedExpressionTypeMismatch { actual, expected, .. } if actual == defs.boolean && expected == defs.int),
+        "{error:?}"
+    );
+    assert_error_text(
+        &SignatureSources::new(&units, &store),
+        &error,
+        unit,
+        text,
+        "true",
+    );
+    assert_eq!(dotty::typer_error_span(&error, &units[0].ast), None);
     assert_eq!(
         bodies.get(b.symbol).unwrap_err(),
         ClassPlanError::MissingClassBody(b.symbol)
