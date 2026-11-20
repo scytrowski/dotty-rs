@@ -1994,6 +1994,15 @@ retain their types across retries. A field error includes the class and field
 symbols and the original `TyperError`. The later `type_class_body` call
 produces the typed initializers used by the backend.
 
+For a call with the wrong number of arguments, pass the original
+`TyperError::ApplicationArityMismatch` and its untyped AST to
+`dotty::typer_error_span`. The returned `SourceSpan` covers the call
+expression, including the receiver in `provider.value(1)`. The caller can
+use the source ID and byte range to display the expression alongside the
+expected and actual argument counts. A missing tree or position, a position
+in a different source, or another error variant yields `None`. Use the AST
+from the same parse because tree slots and source IDs can be reused.
+
 For `A.f(b: B) = b.g()`, the external client observes the symbol of `B.g`,
 completes it and retries `A.f`. A call to the same zero-argument method with
 one argument produces `ApplicationArityMismatch` at the call site after the

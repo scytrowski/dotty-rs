@@ -1012,83 +1012,123 @@ fn public_field_cycle_reports_the_closed_symbol_path_in_either_order() {
 }
 
 #[test]
-fn field_scheduler_preserves_arity_error_after_completing_dependency() {
-    use dotty::ClassFieldSignatureError;
+fn field_scheduler_reports_the_bad_call_in_consumer_in_both_orders() {
+    use dotty::core::{SourceText, SymbolInfo};
     use dotty::typer::{SignatureCompletion, TyperError};
-    let mut store = SemanticStore::new();
-    let defs = Definitions::bootstrap(&mut store);
-    let mut packages = Packages::new();
-    let units = field_signature_units(
-        "class Consumer(provider: Provider) { val answer = provider.value(1) }",
-        "class Provider { def value() = 40 }",
-        false,
-        &mut store,
-        &mut packages,
+
+    let consumer_file = (
+        SourceId::from_index(3),
+        "Consumer.scala",
+        "// źródło\nclass Consumer(provider: Provider) { val answer = provider.value(1) }",
     );
-    let consumer = &units[0];
-    let class = &consumer.classes[0];
-    let answer = class.fields().next().unwrap();
-    let value = units[1].method_symbol();
-    let TreeKind::ValDef(def) = &consumer.ast.get(answer.tree).kind else {
-        panic!("expected answer field")
-    };
-    let rhs = def.rhs.unwrap();
-    let mut edges = Vec::new();
-    let error = super::complete_methods_in_order(
-        &units,
-        [],
-        &mut store,
-        defs,
-        &packages,
-        |symbol, result| {
-            if let SignatureCompletion::BlockedOn(dep) = result {
-                edges.push((symbol, dep));
+    let provider_file = (
+        SourceId::from_index(8),
+        "Provider.scala",
+        "class Provider { def value() = { val seed = 40; val n = seed; n } }",
+    );
+    for files in [
+        [consumer_file, provider_file],
+        [provider_file, consumer_file],
+    ] {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let units = name_units(
+            &files,
+            parsing::parse_files(&files, 2),
+            &mut store,
+            &mut packages,
+        );
+        let sources = SignatureSources::new(&units, &store);
+        let consumer = sources.by_source[&consumer_file.0];
+        let provider = sources.by_source[&provider_file.0];
+        let class = &consumer.classes[0];
+        let answer = class.fields().next().unwrap();
+        let value = provider.method_symbol();
+        let TreeKind::ValDef(def) = &consumer.ast.get(answer.tree).kind else {
+            panic!("expected answer field")
+        };
+        let rhs = def.rhs.unwrap();
+        // Both files have a positioned node in the slot reported for the failed call.
+        assert_eq!(
+            provider.ast.get(rhs).position.unwrap().source(),
+            provider.source
+        );
+
+        let mut edges = Vec::new();
+        let error = super::complete_methods_in_order(
+            &units,
+            [],
+            &mut store,
+            defs,
+            &packages,
+            |symbol, result| {
+                if let SignatureCompletion::BlockedOn(dep) = result {
+                    edges.push((symbol, dep));
+                }
+            },
+        )
+        .unwrap_err();
+        assert_eq!(edges, [(answer.symbol, value)]);
+        let super::SignatureError::Member(dotty::MemberSignatureError::Typing {
+            declaration,
+            member,
+            error: member_error,
+        }) = error
+        else {
+            panic!("unexpected error for answer: {error:?}")
+        };
+        assert_eq!(
+            declaration,
+            dotty::SourceDeclaration {
+                class: class.symbol,
+                source: consumer.source,
+                kind: dotty::core::SymbolKind::Field,
             }
-        },
-    )
-    .unwrap_err();
-    assert_eq!(edges, [(answer.symbol, value)]);
-    let super::SignatureError::Member(dotty::MemberSignatureError::Typing {
-        declaration,
-        member,
-        error:
-            TyperError::ApplicationArityMismatch {
+        );
+        assert_eq!(member, answer.symbol);
+        assert!(matches!(store.symbols.info(value), SymbolInfo::Complete(_)));
+        assert_eq!(store.symbols.info(answer.symbol), &SymbolInfo::Missing);
+
+        // With the dependency complete, the class field pass encounters the same call.
+        let retry = complete_signatures(&units, &mut store, defs, &packages).unwrap_err();
+        let super::SignatureError::Field(dotty::ClassFieldSignatureError::Field {
+            class: owner,
+            field,
+            error: field_error,
+        }) = retry
+        else {
+            panic!("unexpected error on retry: {retry:?}")
+        };
+        assert_eq!((owner, field), (class.symbol, answer.symbol));
+        for error in [member_error, field_error] {
+            let TyperError::ApplicationArityMismatch {
                 source,
                 tree_index,
                 expected,
                 actual,
-            },
-    }) = error
-    else {
-        panic!("unexpected error for answer: {error:?}")
-    };
-    assert_eq!(
-        declaration,
-        dotty::SourceDeclaration {
-            class: class.symbol,
-            source: consumer.source,
-            kind: dotty::core::SymbolKind::Field
+            } = &error
+            else {
+                panic!("expected a call arity error: {error:?}")
+            };
+            assert_eq!((*source, *tree_index), (consumer.source, rhs.index()));
+            assert_eq!(dotty::typer_error_span(&error, &provider.ast), None);
+            let span = dotty::typer_error_span(&error, &sources.by_source[source].ast).unwrap();
+            let (_, filename, text) = files
+                .iter()
+                .find(|(id, _, _)| *id == span.source())
+                .unwrap();
+            let call = SourceText::new(text)
+                .unwrap()
+                .slice(span.span().range())
+                .unwrap();
+            let report = format!("{filename}: {call}: expected {expected} arguments, got {actual}");
+            assert_eq!(
+                report,
+                "Consumer.scala: provider.value(1): expected 0 arguments, got 1"
+            );
         }
-    );
-    assert_eq!(member, answer.symbol);
-    assert_eq!((source, tree_index), (consumer.source, rhs.index()));
-    assert_eq!((expected, actual), (0, 1));
-    assert!(matches!(
-        store.symbols.info(value),
-        dotty::core::SymbolInfo::Complete(_)
-    ));
-    assert_eq!(
-        store.symbols.info(answer.symbol),
-        &dotty::core::SymbolInfo::Missing
-    );
-    // With the dependency already complete, the class's initial field pass sees the same error.
-    let retry = complete_signatures(&units, &mut store, defs, &packages).unwrap_err();
-    assert!(
-        matches!(retry, super::SignatureError::Field(ClassFieldSignatureError::Field {
-        class: owner, field, error: TyperError::ApplicationArityMismatch {
-            source, tree_index, expected: 0, actual: 1
-        }}) if owner == class.symbol && field == answer.symbol && source == consumer.source && tree_index == rhs.index())
-    );
+    }
 }
 
 #[test]

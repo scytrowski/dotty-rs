@@ -75,3 +75,6 @@ mod source_declaration_index;
 pub use source_declaration_index::{
     SourceDeclaration, SourceDeclarationIndex, SourceDeclarationIndexError,
 };
+
+mod typer_error_span;
+pub use typer_error_span::typer_error_span;
