@@ -48,7 +48,9 @@ mod member_signature;
 pub use member_signature::{MemberSignatureError, try_complete_member_signature};
 
 mod class_body;
-pub use class_body::{ClassBodyError, type_class_body, type_class_body_with_resolver};
+pub use class_body::{
+    ClassBodyError, check_class_body, type_class_body, type_class_body_with_resolver,
+};
 
 /// JVM class plans for simple source classes with methods and private instance fields.
 pub mod jvm_class_plan;

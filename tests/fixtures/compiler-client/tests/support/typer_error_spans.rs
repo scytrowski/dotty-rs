@@ -5,15 +5,18 @@ use dotty::source_declarations::SourceClass;
 use dotty::typer::TyperError;
 
 #[test]
-fn cross_file_diagnostic_tracks_an_unsaved_edit_in_utf16() {
+fn cross_file_diagnostics_track_two_unsaved_edits_in_utf16() {
     use super::{name_units, named_classes, parsing};
     use dotty::classloader::{ClasspathSymbolResolver, JmodClassPath, LoadingSession};
     use dotty::core::{Packages, SemanticStore, SourceId, SourceText, SymbolResolver};
+    use dotty::jvm_class_plan::{ClassPlanError, JvmClassPlanner, TypedClassBodies};
     use std::path::PathBuf;
 
     let a = SourceId::from_index(7);
     let b = SourceId::from_index(2);
-    let mut buffer = String::from("class B {\n  def read(a: A): Int = /* 😀 */ a.take(\"bad\")\n}");
+    let mut buffer = String::from(
+        "class B {\n  def read(a: A): Int = /* 😀 */ a.take(\"bad\")\n  def next(a: A): Int = a.take(false)\n}",
+    );
     let analyze = |buffer: &str| {
         let files = [
             (b, "B.scala", buffer),
@@ -44,10 +47,11 @@ fn cross_file_diagnostic_tracks_an_unsaved_edit_in_utf16() {
         );
         let local_packages = Packages::new();
         let mut diagnostics = Vec::new();
+        let mut bodies = TypedClassBodies::default();
         for (unit, class) in named_classes(&units) {
             let before = store.checkpoint();
             let resolver_before = resolver.checkpoint();
-            let error = match dotty::type_class_body_with_resolver(
+            let errors = match dotty::check_class_body(
                 class,
                 &unit.ast,
                 &unit.index,
@@ -57,58 +61,114 @@ fn cross_file_diagnostic_tracks_an_unsaved_edit_in_utf16() {
                 &mut headers.arena,
                 &mut resolver,
             ) {
-                Ok(_) => continue,
-                Err(dotty::ClassBodyError::Member { error, .. }) => error,
-                Err(other) => panic!("unexpected class error: {other:?}"),
+                Ok(body) => {
+                    bodies.record(body).unwrap();
+                    continue;
+                }
+                Err(errors) => errors,
             };
-            assert_eq!(store.checkpoint(), before);
-            assert_eq!(resolver.checkpoint(), resolver_before);
-            let TyperError::ApplicationArgumentTypeMismatch {
-                source,
-                argument_index,
-                expected,
-                ref actual_description,
-                ref expected_description,
-                ..
-            } = error
-            else {
-                panic!("expected a mismatched argument, got {error:?}");
-            };
-            assert_eq!((source, argument_index, expected), (b, 0, defs.int));
-            let span = sources.error_span(&error).expect("argument position");
-            let &(_, name, text) = files.iter().find(|file| file.0 == span.source()).unwrap();
-            let source = SourceText::new(text).unwrap();
-            let range = span.span().range();
-            assert_eq!(source.slice(range).unwrap(), "\"bad\"");
-            let lines = source.line_index().unwrap();
-            let position = |offset| {
-                (
-                    lines.line_of_offset(offset).unwrap(),
-                    lines.utf16_column(text, offset).unwrap(),
-                )
-            };
-            let message = format!("expected {expected_description}, found {actual_description}");
-            diagnostics.push((
-                name,
-                position(range.start()),
-                position(range.end()),
-                message,
-            ));
+            assert!(!errors.is_empty());
+            if errors.len() == class.members.len() {
+                assert_eq!(store.checkpoint(), before);
+                assert_eq!(resolver.checkpoint(), resolver_before);
+            }
+            for failure in errors {
+                let dotty::ClassBodyError::Member {
+                    class: owner,
+                    member,
+                    error,
+                } = failure
+                else {
+                    panic!("unexpected class error: {failure:?}");
+                };
+                assert_eq!(owner, class.symbol);
+                let TyperError::ApplicationArgumentTypeMismatch {
+                    source,
+                    argument_index,
+                    expected,
+                    ref actual_description,
+                    ref expected_description,
+                    ..
+                } = error
+                else {
+                    panic!("expected a mismatched argument, got {error:?}");
+                };
+                assert_eq!((source, argument_index, expected), (b, 0, defs.int));
+                let span = sources.error_span(&error).expect("argument position");
+                let &(_, name, text) = files.iter().find(|file| file.0 == span.source()).unwrap();
+                let source = SourceText::new(text).unwrap();
+                let range = span.span().range();
+                let spelling = source.slice(range).unwrap().to_owned();
+                let member_name = match member {
+                    dotty::source_declarations::ClassMember::Method(m) => store
+                        .names
+                        .resolve(store.symbols.get(m.symbol).name.text())
+                        .to_owned(),
+                    _ => panic!("expected method error"),
+                };
+                let lines = source.line_index().unwrap();
+                let position = |offset| {
+                    (
+                        lines.line_of_offset(offset).unwrap(),
+                        lines.utf16_column(text, offset).unwrap(),
+                    )
+                };
+                let message =
+                    format!("expected {expected_description}, found {actual_description}");
+                diagnostics.push((
+                    name,
+                    position(range.start()),
+                    position(range.end()),
+                    message,
+                    spelling,
+                    member_name,
+                ));
+            }
+        }
+        let b_class = units[0].classes[0].symbol;
+        assert!(bodies.get(units[1].classes[0].symbol).is_ok());
+        if diagnostics.is_empty() {
+            let b = &units[0];
+            let class = &b.classes[0];
+            let plan = JvmClassPlanner::new(&store, &b.ast, &b.index)
+                .with_header_bindings(&headers.arena, &headers.bindings)
+                .plan_typed_class(class, &headers.arena, bodies.get(b_class).unwrap())
+                .unwrap();
+            assert!(
+                plan.methods
+                    .iter()
+                    .map(|m| m.method)
+                    .eq(class.methods().map(|m| m.symbol))
+            );
+        } else {
+            assert_eq!(
+                bodies.get(b_class).unwrap_err(),
+                ClassPlanError::MissingClassBody(b_class)
+            );
         }
         diagnostics
     };
 
-    assert_eq!(
-        analyze(&buffer),
-        [(
-            "B.scala",
-            (1, 40),
-            (1, 45),
-            String::from("expected Int, found String")
-        )]
+    let string_error = (
+        "B.scala",
+        (1, 40),
+        (1, 45),
+        "expected Int, found String".into(),
+        "\"bad\"".into(),
+        "read".into(),
     );
-    let start = buffer.find("\"bad\"").unwrap();
-    buffer.replace_range(start..start + "\"bad\"".len(), "42");
+    let boolean_error = (
+        "B.scala",
+        (2, 31),
+        (2, 36),
+        "expected Int, found Boolean".into(),
+        "false".into(),
+        "next".into(),
+    );
+    assert_eq!(analyze(&buffer), [string_error, boolean_error.clone()]);
+    buffer = buffer.replace("\"bad\"", "42");
+    assert_eq!(analyze(&buffer), [boolean_error]);
+    buffer = buffer.replace("false", "7");
     assert!(analyze(&buffer).is_empty());
 }
 

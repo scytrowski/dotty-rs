@@ -348,6 +348,75 @@ fn method_error_keeps_a_executable_and_b_unpublished() {
 }
 
 #[test]
+fn class_body_checks_interleaved_members_and_keeps_successes_after_a_failure() {
+    use dotty::{ClassBodyError, core::NoResolver, typer::TyperError};
+
+    let (mut store, defs, packages, unit) = named(
+        "class C { val bad: Int = false; def good(): Int = 7; def wrong(): Int = true; val last: Boolean = 3 }",
+    );
+    let mut headers =
+        complete_signatures(std::slice::from_ref(&unit), &mut store, defs, &packages).unwrap();
+    let class = &unit.classes[0];
+    let before = headers.arena.checkpoint();
+    let first = dotty::type_class_body(
+        class,
+        &unit.ast,
+        &unit.index,
+        &mut store,
+        defs,
+        &packages,
+        &mut headers.arena,
+    )
+    .unwrap_err();
+    assert!(matches!(first, ClassBodyError::Member { member, .. } if member == class.members[0]));
+    assert_eq!(headers.arena.checkpoint(), before);
+
+    let errors = dotty::check_class_body(
+        class,
+        &unit.ast,
+        &unit.index,
+        &mut store,
+        defs,
+        &packages,
+        &mut headers.arena,
+        NoResolver,
+    )
+    .unwrap_err();
+    let expected = [
+        (0, defs.boolean, defs.int),
+        (2, defs.boolean, defs.int),
+        (3, defs.int, defs.boolean),
+    ];
+    assert_eq!(errors.len(), expected.len());
+    for (error, (index, found, required)) in errors.into_iter().zip(expected) {
+        let ClassBodyError::Member {
+            class: owner,
+            member,
+            error:
+                TyperError::ExpectedExpressionTypeMismatch {
+                    actual, expected, ..
+                },
+        } = error
+        else {
+            panic!("unexpected member error: {error:?}");
+        };
+        assert_eq!(
+            (owner, member, actual, expected),
+            (class.symbol, class.members[index], found, required)
+        );
+    }
+    let typed_methods: Vec<_> = headers
+        .arena
+        .iter()
+        .filter_map(|(_, tree)| match &tree.kind {
+            TreeKind::DefDef(method) => Some(store.names.resolve(method.name.as_name().text())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(typed_methods, ["good"]);
+}
+
+#[test]
 fn type_class_body_rejects_substituted_member_before_typing() {
     let (mut store, defs, packages, mut unit) =
         named("class A { def value(): Int = 40 }; class B { def value(): Int = 7 }");
@@ -366,6 +435,21 @@ fn type_class_body_rejects_substituted_member_before_typing() {
     )
     .unwrap_err();
     assert!(matches!(error, dotty::ClassBodyError::InvalidClass(class) if class == a.symbol));
+    assert_eq!(arena.checkpoint(), before);
+    let errors = dotty::check_class_body(
+        a,
+        &unit.ast,
+        &unit.index,
+        &mut store,
+        defs,
+        &packages,
+        &mut arena,
+        dotty::core::NoResolver,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(errors.as_slice(), [dotty::ClassBodyError::InvalidClass(id)] if *id == a.symbol)
+    );
     assert_eq!(arena.checkpoint(), before);
 }
 

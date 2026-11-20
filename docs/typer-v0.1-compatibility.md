@@ -2196,6 +2196,14 @@ binary dependencies can pass the same mutable `SymbolResolver` to
 For example, the external client uses the JDK classpath resolver to check a
 string literal against a source method parameter.
 
+After signature completion, `dotty::check_class_body` uses the same resolver
+to check every member in declaration order. Each failed method or field
+initializer contributes its first error and rolls back its own typing attempt.
+On success, the client receives the complete `TypedClassBody`. On failure,
+it receives the ordered errors and retains the arena with the successful
+members' trees. The original `type_class_body` entry points stop at the
+first failure.
+
 For a call with the wrong number of arguments, pass the original
 `TyperError::ApplicationArityMismatch` and its untyped AST to
 `dotty::typer_error_span`. The returned `SourceSpan` covers the call

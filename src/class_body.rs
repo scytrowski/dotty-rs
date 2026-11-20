@@ -84,9 +84,67 @@ pub fn type_class_body_with_resolver(
     arena: &mut AstArena<Typed>,
     resolver: impl SymbolResolver,
 ) -> Result<TypedClassBody, ClassBodyError> {
-    let source = class
-        .body_source(ast, index, store)
-        .ok_or(ClassBodyError::InvalidClass(class.symbol))?;
+    visit_class_body(
+        class,
+        ast,
+        index,
+        store,
+        definitions,
+        packages,
+        arena,
+        resolver,
+        |first, _| first,
+    )
+}
+
+/// Checks each method and field initializer of a named class after signature completion.
+/// Reports at most one error per member, in declaration order. An invalid class view
+/// yields a single [`ClassBodyError::InvalidClass`] before typing begins.
+/// Each failed member rolls back its typing attempt. Successful members can extend
+/// the session arena and store. Only a completely checked class yields a body.
+/// Pass [`NoResolver`] for source-only checking, or borrow a session resolver.
+#[allow(clippy::too_many_arguments)]
+pub fn check_class_body(
+    class: &SourceClass,
+    ast: &AstArena<Untyped>,
+    index: &SourceSemanticIndex,
+    store: &mut SemanticStore,
+    definitions: Definitions,
+    packages: &Packages,
+    arena: &mut AstArena<Typed>,
+    resolver: impl SymbolResolver,
+) -> Result<TypedClassBody, Vec<ClassBodyError>> {
+    visit_class_body(
+        class,
+        ast,
+        index,
+        store,
+        definitions,
+        packages,
+        arena,
+        resolver,
+        |first, rest| std::iter::once(first).chain(rest).collect(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn visit_class_body<E>(
+    class: &SourceClass,
+    ast: &AstArena<Untyped>,
+    index: &SourceSemanticIndex,
+    store: &mut SemanticStore,
+    definitions: Definitions,
+    packages: &Packages,
+    arena: &mut AstArena<Typed>,
+    resolver: impl SymbolResolver,
+    collect_errors: impl FnOnce(ClassBodyError, &mut dyn Iterator<Item = ClassBodyError>) -> E,
+) -> Result<TypedClassBody, E> {
+    let Some(source) = class.body_source(ast, index, store) else {
+        return Err(collect_errors(
+            ClassBodyError::InvalidClass(class.symbol),
+            &mut std::iter::empty(),
+        ));
+    };
     let mut typer = SourceTyper::new_with_typed_ast(
         ast,
         source,
@@ -97,19 +155,23 @@ pub fn type_class_body_with_resolver(
         std::mem::take(arena),
     )
     .with_resolver(Box::new(resolver));
-    for &member in &class.members {
+    // Advancing this iterator types the next members. The fail-fast caller stops
+    // at the first failure. The diagnostic caller consumes the rest in source order.
+    let mut failures = class.members.iter().filter_map(|&member| {
         let result = match member {
             ClassMember::Field(field) => typer.type_field_initializer(field.symbol),
             ClassMember::Method(method) => typer.type_method_definition(method.tree),
         };
-        if let Err(error) = result {
-            *arena = typer.into_typed_ast();
-            return Err(ClassBodyError::Member {
-                class: class.symbol,
-                member,
-                error,
-            });
-        }
+        result.err().map(|error| ClassBodyError::Member {
+            class: class.symbol,
+            member,
+            error,
+        })
+    });
+    if let Some(first) = failures.next() {
+        let errors = collect_errors(first, &mut failures);
+        *arena = typer.into_typed_ast();
+        return Err(errors);
     }
     let (extended, body) = TypedClassBody::from_output(class, typer.into_typed_output());
     *arena = extended;
