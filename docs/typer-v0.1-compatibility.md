@@ -45,7 +45,7 @@ of the binary evidence. Run them with `JAVA_HOME`, `SCALA39_ROOT` and
 | Contextual defaults | A missing argument can invoke the indexed default getter of a source method, a source conditional provider, or a method loaded from Scala TASTy. The getter receives the original receiver and earlier clauses. | Tests check the getter's parameter identity, supplied evidence, rejection of ambiguity, rejection of an ill-typed default, and single evaluation of effectful operands. |
 | Recursive by-name evidence | A successful recursive search across a by-name parameter creates a shared dictionary. Its synthetic definitions and references have canonical identities. | Two recursive dependencies refer to the same field. The strict variant diverges. Discarding a failed candidate rolls back its dictionary and symbols. |
 | Implicit scope and dependent types | Search can follow transparent aliases, use an opaque type's companion, and preserve the stable term prefix of a nested type. | `p.Item` and `q.Item` select evidence from their respective receivers. A later contextual clause and result can depend on a stable argument to an earlier clause. |
-| Other searches | A contextual receiver can provide an extension. A supported extractor can request trailing contextual clauses. Expected result and argument types can trigger a `scala.Conversion` instance or a unary monomorphic `implicit def`. | The contextual consumer fixtures check selected symbols, nested scopes, ambiguity, and the order of arguments passed to `unapply`. |
+| Other searches | A contextual receiver can provide an extension. A supported extractor can request trailing contextual clauses. Expected result and argument types can trigger a `scala.Conversion` instance or a unary `implicit def` with concrete or inferred type arguments. | The contextual consumer fixtures check selected symbols, nested scopes, ambiguity, and the order of arguments passed to `unapply`. |
 | Output | The pickler and JVM backend accept selected curried contextual methods, polymorphic evidence identity methods, and methods returning a unary `Int ?=> Int` literal. | Scala 3.9 clients read the emitted TASTy. Separate JDK 21 harnesses verify and execute the emitted classes. |
 
 When a receiver's instantiated method type has a contextual clause, term
@@ -109,18 +109,64 @@ class to the getter, calls its constructor and widens the result to the
 source marker trait. Anonymous templates with members or inherited
 implementation obligations remain deferred.
 
+An extension can be contributed by a conditional given. For
+`given ops[A](using TC[A]): Ops[A]` and an extension on `Box[A]` in `Ops[A]`,
+selecting `x.render(3)` on a `Box[Int]` uses `ops[Int](tc).render(x)(3)`.
+The receiver must determine the factory's type arguments within their bounds.
+A missing or ambiguous factory dependency permits a viable alternative in the
+receiver companion, including a conversion. If lookup fails, the selection
+reports the provider and its unsatisfied dependency. A trailing `using`
+on the selected method is filled at the call site after the ordinary arguments.
+For `render(i: Int)(using fmt: Format)`, the full application is
+`ops[Int](tc).render(x)(3)(fmt)`. An explicit `(using chosen)` supplies
+the method argument even when implicit search for `Format` would be ambiguous.
+If that provider also offers `render(b: Boolean): Boolean`, the ordinary
+argument selects the overload before contextual arguments are synthesized.
+Thus `x.render(true)` needs only the factory witness. A call with no applicable
+overload reports the attempted provider at the selection.
+When the ordinary clauses tie, an immediately following explicit `using`
+clause can select the overload by its written argument types. For overloads
+taking `Compact` and `Detailed`, omitting that clause leaves the selection
+ambiguous even when only a `Compact` witness is in scope.
+
 Conversion insertion covers value adaptation to
-a known expected type. This includes ordinary method arguments. For a missing source selection
-such as `x.show`, the typer also considers contextual values of type
-`scala.Conversion[From, To]`. The receiver must conform to `From` and
+a known expected type, including ordinary method arguments. For a unary
+`implicit def wrap[A](x: Box[A]): Wrapped[A]`, adapting a `Box[Int]` to
+`Wrapped[Int]` produces `wrap[Int](x)`. The typer infers type arguments from
+the receiver and can fill remaining arguments from the expected result. It
+checks the instantiated bounds, input, and result before selecting a method.
+A unary conversion can also take a final legacy implicit clause. For
+`implicit def wrap[A](x: Box[A])(implicit tc: TC[A]): Wrapped[A]`, both an
+argument expecting `Wrapped[Int]` and a selection of `x.show` use
+`wrap[Int](x)(tc)`. A missing witness permits a fallback conversion in the
+receiver companion. Equally eligible witnesses report a dependency ambiguity
+at the operand and prevent that companion fallback. The result and evidence
+types in this form must be independent of the value of the receiver, and the
+result must be independent of the witness value.
+With `import scala.language.implicitConversions`, this search still reaches a
+receiver companion when the classpath adapter cannot project the feature
+marker’s nested type. An imported user conversion with the same name remains
+eligible.
+For a missing source selection
+such as `x.show`, the typer considers monomorphic `scala.Conversion[From, To]`
+values, conditional givens returning a conversion, and unary `implicit def`
+methods. For a generic method the receiver
+must determine all type arguments. For example, selecting `show` on a
+`Box[Int]` can produce `wrap[Int](x).show`. The receiver must conform to `From` and
 `To` must expose an accessible `show`. A direct member wins. Two equally
 eligible conversions produce an ambiguity at the selection, including when
 their output types differ. Search checks lexical scopes before the receiver’s
-companion. A monomorphic structural given can contribute its instantiated
+companion. For `given wrap[A](using TC[A]): Conversion[Box[A], Wrapped[A]]`,
+selecting `x.show` on a `Box[Int]` with witness `tc` produces
+`wrap[Int](tc).apply(x).show`. A missing or ambiguous dependency allows the
+search to try another conversion, including one in the receiver companion.
+If none succeeds, the selection reports the failed dependency. When a viable
+conditional given and a unary `implicit def` compete in the same class, the
+given wins. A unary conversion declared in a subclass takes precedence over
+an inherited given.
+A monomorphic structural given can contribute its instantiated
 `Conversion` parent. An unrelated unary `apply` or a private member on a
-conversion’s result does not make that candidate eligible. Missing-member
-adaptation currently covers monomorphic conversion values. Generic old-style
-conversion methods remain deferred.
+conversion’s result does not make that candidate eligible.
 
 The frontend accepts a wider range of typed trees than either producer can emit.
 In particular, the recursive dictionary tests inspect typed declarations and

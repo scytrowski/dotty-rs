@@ -7,9 +7,12 @@ mod dictionary;
 use dictionary::Dictionary;
 
 mod conversions;
-pub(super) use conversions::{ConversionGoal, ConversionTarget, MemberConversionGoal};
+pub(super) use conversions::{
+    ConversionGoal, ConversionOperand, ConversionTarget, ConversionUse, MemberConversionGoal,
+};
 mod defaults;
 mod extension;
+pub(super) use extension::{ExtensionCall, ExtensionLookup};
 mod opaque;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,6 +44,64 @@ struct SearchHistory {
     current_goal_by_name: bool,
     attempts: usize,
     divergences: usize,
+}
+
+#[derive(Default)]
+struct AdaptationSearch {
+    history: SearchHistory,
+    dependency_failure: Option<TyperError>,
+}
+
+impl AdaptationSearch {
+    /// Keep searching other providers on an unsatisfied dependency, but propagate
+    /// lookup and resource-limit errors. Candidate probes roll back their trees.
+    fn dependency_error(
+        &mut self,
+        typer: &mut SourceTyper<'_>,
+        provider: &Provider,
+        context: ExpressionContext,
+        site: u32,
+    ) -> Result<Option<TyperError>, TyperError> {
+        if !matches!(typer.store.types.get(provider.callable), Type::Method(m) if m.kind != MethodKind::Plain)
+        {
+            return Ok(None);
+        }
+        match typer.try_contextual_provider(
+            provider,
+            provider.result,
+            context,
+            site,
+            &mut self.history,
+            None,
+        ) {
+            Ok(_) => Ok(None),
+            Err(
+                cause @ (TyperError::MissingContextualArgument { .. }
+                | TyperError::DivergentContextualArgument { .. }
+                | TyperError::AmbiguousContextualArgument { .. }),
+            ) => Ok(Some(cause)),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn materialize(
+        &mut self,
+        typer: &mut SourceTyper<'_>,
+        provider: &Provider,
+        context: ExpressionContext,
+        site: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let tree = typer.materialize_provider(
+            provider,
+            provider.result,
+            context,
+            site,
+            &mut self.history,
+            journal,
+        )?;
+        std::mem::take(&mut self.history.dictionary).emit(typer, tree, site)
+    }
 }
 
 struct ContextualScope {
@@ -77,6 +138,7 @@ impl SourceTyper<'_> {
             return Ok(adapted);
         }
         let request = ApplicationRequest {
+            following_using: None,
             function_tree: source_tree,
             argument_trees: &[],
             application_kind: ApplyKind::Using,
@@ -747,7 +809,7 @@ impl SourceTyper<'_> {
         }
         let mut eligible = Vec::new();
         for provider in candidates {
-            let ambiguity = if matches!(
+            let viability = if matches!(
                 self.store.types.try_get(provider.callable),
                 Some(Type::Method(_))
             ) {
@@ -759,16 +821,16 @@ impl SourceTyper<'_> {
                         TyperError::MissingContextualArgument { .. }
                         | TyperError::DivergentContextualArgument { .. },
                     ) => continue,
-                    Err(error @ TyperError::AmbiguousContextualArgument { .. }) => Some(error),
-                    Ok(_) => None,
+                    Err(error @ TyperError::AmbiguousContextualArgument { .. }) => Err(error),
+                    Ok(_) => Ok(()),
                     Err(error) => return Err(error),
                 }
             } else {
-                None
+                Ok(())
             };
-            eligible.push((provider, ambiguity));
+            eligible.push((provider, viability));
         }
-        let Some(provider) =
+        let Some((provider, ())) =
             self.choose_contextual_candidate(eligible, expected, tree_index, journal)?
         else {
             return Ok(None);
@@ -790,21 +852,11 @@ impl SourceTyper<'_> {
             Some(Type::Poly(poly)) => Some(poly.clone()),
             _ => None,
         };
-        let mut result = poly.as_ref().map_or(signature, |poly| poly.result);
-        let mut depth = 0;
-        while let Some(Type::Method(method)) = self.store.types.try_get(result) {
-            if method.kind == MethodKind::Plain {
-                return Ok(None);
-            }
-            if depth >= crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
-                return Err(TyperError::UsingApplicationDeferred {
-                    source: self.source,
-                    tree_index,
-                });
-            }
-            depth += 1;
-            result = method.result;
-        }
+        let Some(mut result) = self
+            .contextual_factory_result(poly.as_ref().map_or(signature, |p| p.result), tree_index)?
+        else {
+            return Ok(None);
+        };
         // A binary factory can publish a reference to its implementation
         // before that class's parents and ordered parameters have been loaded.
         if matches!(
@@ -835,42 +887,15 @@ impl SourceTyper<'_> {
         let mut type_arguments = Vec::new();
         if let Some(poly) = poly {
             let mut inferred = vec![None; poly.params.len()];
-            self.complete_relation_type(result, journal, &mut HashSet::new(), 0)?;
-            let views = self
-                .contextual_inference_views(result, expected)
-                .map_err(
-                    |error| TyperError::ExpectedExpressionConformanceUnsupported {
-                        source: self.source,
-                        tree_index,
-                        actual: result,
-                        expected,
-                        error: Box::new(error),
-                    },
-                )?;
-            if views.is_empty() {
+            if !self.infer_provider_result(
+                signature,
+                result,
+                expected,
+                &mut inferred,
+                tree_index,
+                journal,
+            )? {
                 return Ok(None);
-            }
-            for view in views {
-                match self.infer_type_constraints(
-                    view,
-                    expected,
-                    signature,
-                    &mut inferred,
-                    InferenceLocation {
-                        result_pattern: true,
-                        tree_index,
-                        argument_index: 0,
-                        depth: 0,
-                    },
-                    journal,
-                ) {
-                    Ok(()) => {}
-                    Err(
-                        TyperError::UnsupportedInferenceShape { .. }
-                        | TyperError::ConflictingInferenceConstraints { .. },
-                    ) => return Ok(None),
-                    Err(error) => return Err(error),
-                }
             }
             let Some(arguments) = inferred.into_iter().collect::<Option<Vec<_>>>() else {
                 return Err(TyperError::UsingApplicationDeferred {
@@ -879,31 +904,20 @@ impl SourceTyper<'_> {
                 });
             };
             type_arguments = arguments;
-            let instance =
-                dotty_core::types::instantiate_poly(self.store, signature, &type_arguments)
-                    .map_err(TyperError::PolyInstantiation)?;
-            for (index, (&argument, bounds)) in
-                type_arguments.iter().zip(instance.bounds).enumerate()
-            {
-                match self.check_explicit_type_argument_bounds(
-                    argument, bounds, index, tree_index, journal,
-                ) {
-                    Ok(()) => {}
-                    Err(TyperError::ExplicitTypeArgumentBoundViolation { .. }) => return Ok(None),
-                    Err(error) => return Err(error),
-                }
-            }
-            callable = instance.result;
-            result = callable;
-            for _ in 0..depth {
-                let Some(Type::Method(method)) = self.store.types.try_get(result) else {
-                    return Err(TyperError::UsingApplicationDeferred {
-                        source: self.source,
-                        tree_index,
-                    });
-                };
-                result = method.result;
-            }
+            let Some(instance) = self.instantiate_provider_signature(
+                signature,
+                &type_arguments,
+                tree_index,
+                journal,
+            )?
+            else {
+                return Ok(None);
+            };
+            callable = instance;
+            let Some(instantiated) = self.contextual_factory_result(callable, tree_index)? else {
+                return Ok(None);
+            };
+            result = instantiated;
         }
         let result = self.contextual_type_at_owner(result, owner, journal)?;
         if !self.contextual_conforms(result, expected, tree_index, journal)? {
@@ -915,6 +929,211 @@ impl SourceTyper<'_> {
             callable,
             result,
         }))
+    }
+
+    fn contextual_factory_result(
+        &self,
+        mut result: TypeId,
+        tree_index: u32,
+    ) -> Result<Option<TypeId>, TyperError> {
+        let mut depth = 0;
+        while let Some(Type::Method(method)) = self.store.types.try_get(result) {
+            if method.kind == MethodKind::Plain {
+                return Ok(None);
+            }
+            if depth >= crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
+                return Err(TyperError::UsingApplicationDeferred {
+                    source: self.source,
+                    tree_index,
+                });
+            }
+            depth += 1;
+            result = method.result;
+        }
+        Ok(Some(result))
+    }
+
+    fn infer_provider_result(
+        &mut self,
+        signature: TypeId,
+        result: TypeId,
+        expected: TypeId,
+        inferred: &mut [Option<TypeId>],
+        tree_index: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<bool, TyperError> {
+        self.complete_relation_type(result, journal, &mut HashSet::new(), 0)?;
+        let views = self
+            .contextual_inference_views(result, expected)
+            .map_err(
+                |error| TyperError::ExpectedExpressionConformanceUnsupported {
+                    source: self.source,
+                    tree_index,
+                    actual: result,
+                    expected,
+                    error: Box::new(error),
+                },
+            )?;
+        if views.is_empty() {
+            return Ok(false);
+        }
+        for view in views {
+            match self.infer_type_constraints(
+                view,
+                expected,
+                signature,
+                inferred,
+                InferenceLocation {
+                    result_pattern: true,
+                    tree_index,
+                    argument_index: 0,
+                    depth: 0,
+                },
+                journal,
+            ) {
+                Ok(()) => {}
+                Err(
+                    TyperError::UnsupportedInferenceShape { .. }
+                    | TyperError::ConflictingInferenceConstraints { .. },
+                ) => return Ok(false),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(true)
+    }
+
+    fn infer_contextual_receiver(
+        &mut self,
+        signature: TypeId,
+        input: TypeId,
+        actual: TypeId,
+        inferred: &mut [Option<TypeId>],
+        tree_index: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<bool, TyperError> {
+        // Match the receiver at the declared input class, e.g. Child extends Box[Int].
+        let views = if let Type::Applied { tycon, .. } = self.store.types.get(input)
+            && let Some(class) = self.store.types.get(*tycon).reference_symbol()
+            && self.type_contains_param_ref(input, signature)?
+            && matches!(
+                self.store.types.get(actual),
+                Type::TypeRef { .. } | Type::Applied { .. } | Type::ThisType { .. }
+            ) {
+            self.complete_relation_type(actual, journal, &mut HashSet::new(), 0)?;
+            self.nominal_views_as(actual, class).map_err(|error| {
+                TyperError::ExpectedExpressionConformanceUnsupported {
+                    source: self.source,
+                    tree_index,
+                    actual,
+                    expected: input,
+                    error: Box::new(error),
+                }
+            })?
+        } else {
+            vec![actual]
+        };
+        if views.is_empty() {
+            return Ok(false);
+        }
+        let location = InferenceLocation {
+            result_pattern: false,
+            tree_index,
+            argument_index: 0,
+            depth: 0,
+        };
+        for view in views {
+            match self.infer_type_constraints(input, view, signature, inferred, location, journal) {
+                Ok(()) => {}
+                Err(
+                    TyperError::UnsupportedInferenceShape { .. }
+                    | TyperError::ConflictingInferenceConstraints { .. }
+                    | TyperError::ApplicationArgumentTypeMismatch { .. },
+                ) => return Ok(false),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(true)
+    }
+
+    fn contextual_provider_head(
+        &self,
+        reference: ContextualRef,
+        signature: TypeId,
+        site: u32,
+    ) -> Result<Option<Provider>, TyperError> {
+        let body = match self.store.types.get(signature) {
+            Type::Poly(poly) => poly.result,
+            _ => signature,
+        };
+        Ok(self
+            .contextual_factory_result(body, site)?
+            .map(|result| Provider {
+                reference,
+                callable: signature,
+                result,
+                type_arguments: Vec::new(),
+            }))
+    }
+
+    /// Infer a conversion or extension factory's type arguments from its receiver pattern.
+    fn instantiate_receiver_provider(
+        &mut self,
+        mut provider: Provider,
+        input: TypeId,
+        receiver: TypeId,
+        site: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Option<Provider>, TyperError> {
+        let signature = provider.callable;
+        if let Type::Poly(poly) = self.store.types.get(signature) {
+            let mut inferred = vec![None; poly.params.len()];
+            if !self.infer_contextual_receiver(
+                signature,
+                input,
+                receiver,
+                &mut inferred,
+                site,
+                journal,
+            )? {
+                return Ok(None);
+            }
+            let Some(arguments) = inferred.into_iter().collect::<Option<Vec<_>>>() else {
+                return Ok(None);
+            };
+            let Some(callable) =
+                self.instantiate_provider_signature(signature, &arguments, site, journal)?
+            else {
+                return Ok(None);
+            };
+            let Some(result) = self.contextual_factory_result(callable, site)? else {
+                return Ok(None);
+            };
+            provider.callable = callable;
+            provider.result = result;
+            provider.type_arguments = arguments;
+        }
+        Ok(Some(provider))
+    }
+
+    fn instantiate_provider_signature(
+        &mut self,
+        signature: TypeId,
+        arguments: &[TypeId],
+        tree_index: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Option<TypeId>, TyperError> {
+        let instance = dotty_core::types::instantiate_poly(self.store, signature, arguments)
+            .map_err(TyperError::PolyInstantiation)?;
+        for (index, (&argument, bounds)) in arguments.iter().zip(instance.bounds).enumerate() {
+            match self
+                .check_explicit_type_argument_bounds(argument, bounds, index, tree_index, journal)
+            {
+                Ok(()) => {}
+                Err(TyperError::ExplicitTypeArgumentBoundViolation { .. }) => return Ok(None),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(Some(instance.result))
     }
 
     // A failed or speculative search must discard dictionary entries as well as
@@ -1092,6 +1311,27 @@ impl SourceTyper<'_> {
             .define(self, expected, result?, first_use, tree_index, journal)
     }
 
+    fn provider_reference_tree(
+        &mut self,
+        provider: &Provider,
+        context: ExpressionContext,
+        tree_index: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let mut tree =
+            self.contextual_reference_tree(provider.reference, context, tree_index, None, journal)?;
+        if !provider.type_arguments.is_empty() {
+            let mut builder = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types);
+            let args = provider
+                .type_arguments
+                .iter()
+                .map(|ty| builder.type_tree(*ty, None))
+                .collect();
+            tree = builder.type_apply(tree, args, provider.callable, None);
+        }
+        Ok(tree)
+    }
+
     fn build_provider(
         &mut self,
         provider: &Provider,
@@ -1100,18 +1340,8 @@ impl SourceTyper<'_> {
         history: &mut SearchHistory,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TreeId<Typed>, TyperError> {
-        let mut tree =
-            self.contextual_reference_tree(provider.reference, context, tree_index, None, journal)?;
+        let mut tree = self.provider_reference_tree(provider, context, tree_index, journal)?;
         let mut signature = provider.callable;
-        if !provider.type_arguments.is_empty() {
-            let mut builder = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types);
-            let args = provider
-                .type_arguments
-                .iter()
-                .map(|ty| builder.type_tree(*ty, None))
-                .collect();
-            tree = builder.type_apply(tree, args, signature, None);
-        }
         let mut shared = Vec::new();
         while let Some(Type::Method(method)) = self.store.types.try_get(signature).cloned() {
             let (args, kind) = self.contextual_call_arguments(
@@ -1451,14 +1681,13 @@ impl SourceTyper<'_> {
         Ok(ancestors)
     }
 
-    fn given_class_owner(&self, provider: &Provider) -> Option<SymbolId> {
+    fn contextual_class_owner(&self, provider: &Provider) -> Option<SymbolId> {
         let symbol = self.store.symbols.get(provider.reference.symbol);
         let owner = symbol.owner?;
-        (symbol.flags.contains(SymbolFlags::GIVEN)
-            && matches!(
-                self.store.symbols.get(owner).kind,
-                SymbolKind::Class | SymbolKind::ModuleClass | SymbolKind::Trait
-            ))
+        matches!(
+            self.store.symbols.get(owner).kind,
+            SymbolKind::Class | SymbolKind::ModuleClass | SymbolKind::Trait
+        )
         .then_some(owner)
     }
 
@@ -1547,13 +1776,13 @@ impl SourceTyper<'_> {
         })
     }
 
-    fn choose_contextual_candidate(
+    fn choose_contextual_candidate<T>(
         &mut self,
-        mut candidates: Vec<(Provider, Option<TyperError>)>,
+        mut candidates: Vec<(Provider, Result<T, TyperError>)>,
         expected: TypeId,
         tree_index: u32,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
-    ) -> Result<Option<Provider>, TyperError> {
+    ) -> Result<Option<(Provider, T)>, TyperError> {
         let mut ancestors = HashMap::new();
         let mut maxima = Vec::new();
         for (index, (candidate, _)) in candidates.iter().enumerate() {
@@ -1562,12 +1791,24 @@ impl SourceTyper<'_> {
                 if self.same_contextual_ref(rival.reference, candidate.reference) {
                     continue;
                 }
-                // Scala 3.9 gives the declaring owner's inheritance priority
-                // over result specificity when comparing two modern givens.
-                if let (Some(own), Some(other)) = (
-                    self.given_class_owner(candidate),
-                    self.given_class_owner(rival),
-                ) && own != other
+                let given = |p: &Provider| {
+                    self.store
+                        .symbols
+                        .get(p.reference.symbol)
+                        .flags
+                        .contains(SymbolFlags::GIVEN)
+                };
+                let unary = |p: &Provider| matches!(self.store.types.get(p.callable), Type::Method(m) if m.kind == MethodKind::Plain);
+                let prefer_candidate = given(candidate) && unary(rival);
+                let prefer_rival = given(rival) && unary(candidate);
+                // Compare declaring owners first for modern givens, including a
+                // given Conversion competing with an old-style unary conversion.
+                if (prefer_candidate || prefer_rival || (given(candidate) && given(rival)))
+                    && let (Some(own), Some(other)) = (
+                        self.contextual_class_owner(candidate),
+                        self.contextual_class_owner(rival),
+                    )
+                    && own != other
                 {
                     for class in [own, other] {
                         if let std::collections::hash_map::Entry::Vacant(slot) =
@@ -1583,6 +1824,13 @@ impl SourceTyper<'_> {
                     if ancestors[&own].iter().any(|(base, _)| *base == other) {
                         continue;
                     }
+                }
+                if prefer_rival {
+                    dominated = true;
+                    break;
+                }
+                if prefer_candidate {
+                    continue;
                 }
                 let is_method = |p: &Provider| {
                     !p.type_arguments.is_empty()
@@ -1618,7 +1866,14 @@ impl SourceTyper<'_> {
                     // old-style implicit in the specific direction.
                     let candidate_as_good = if candidate_legacy { narrower } else { broader };
                     let rival_as_good = if rival_legacy { broader } else { narrower };
-                    dominated = rival_as_good && !candidate_as_good;
+                    // For equivalent instantiated conversion inputs, a concrete
+                    // unary method wins over one requiring type inference.
+                    let specialized_conversion = narrower
+                        && broader
+                        && !candidate.type_arguments.is_empty()
+                        && rival.type_arguments.is_empty()
+                        && matches!(self.store.types.get(candidate.callable), Type::Method(m) if m.kind == MethodKind::Plain);
+                    dominated = rival_as_good && (!candidate_as_good || specialized_conversion);
                 }
                 if dominated {
                     break;
@@ -1630,14 +1885,13 @@ impl SourceTyper<'_> {
         }
         // An ambiguous dependency rules out the whole search unless a strictly
         // better viable provider supersedes it, regardless of declaration order.
-        for &index in &maxima {
-            if let Some(error) = candidates[index].1.take() {
-                return Err(error);
+        let failed = maxima.iter().find(|&&i| candidates[i].1.is_err());
+        match (failed, maxima.as_slice()) {
+            (_, []) => Ok(None),
+            (Some(winner), _) | (None, [winner]) => {
+                let (provider, outcome) = candidates.swap_remove(*winner);
+                outcome.map(|value| Some((provider, value)))
             }
-        }
-        match maxima.as_slice() {
-            [] => Ok(None),
-            [winner] => Ok(Some(candidates.swap_remove(*winner).0)),
             _ => Err(TyperError::AmbiguousContextualArgument {
                 source: self.source,
                 tree_index,

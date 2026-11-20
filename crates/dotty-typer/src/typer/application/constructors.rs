@@ -214,6 +214,7 @@ impl SourceTyper<'_> {
             application_kind,
             context,
             tree_index: application_tree_index,
+            ..
         } = request;
         if !self.is_constructor_selection(function_tree) {
             return Ok(None);

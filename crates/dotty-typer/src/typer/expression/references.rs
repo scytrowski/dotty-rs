@@ -2,6 +2,7 @@
 
 use super::super::{ExpressionContext, SourceTyper, TyperError};
 use crate::typer::MemberLookupError;
+use crate::typer::contextual::ExtensionLookup;
 use dotty_core::ast::*;
 use dotty_core::types::*;
 use dotty_core::*;
@@ -1431,6 +1432,40 @@ impl SourceTyper<'_> {
         )
     }
 
+    pub(in crate::typer) fn select_member_after_conversion(
+        &mut self,
+        request: SelectedMemberRequest,
+        receiver: TypeId,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Option<TreeId<Typed>>, TyperError> {
+        let Some(source) = request.source_qualifier else {
+            return Ok(None);
+        };
+        let Some(converted) = self.try_conversion(
+            source,
+            request.qualifier,
+            receiver,
+            crate::typer::contextual::ConversionUse::Member {
+                name: request.name,
+                site: request.tree_index,
+            },
+            request.context,
+            journal,
+        )?
+        else {
+            return Ok(None);
+        };
+        self.type_selected_member_on_qualifier(
+            SelectedMemberRequest {
+                source_qualifier: None,
+                qualifier: converted,
+                ..request
+            },
+            journal,
+        )
+        .map(Some)
+    }
+
     /// Selects a member from a qualifier already typed by the caller.
     pub(in crate::typer) fn type_selected_member_on_qualifier(
         &mut self,
@@ -1438,7 +1473,7 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TreeId<Typed>, TyperError> {
         let SelectedMemberRequest {
-            source_qualifier,
+            source_qualifier: _,
             tree_index,
             qualifier,
             name,
@@ -1547,54 +1582,46 @@ impl SourceTyper<'_> {
         }
         let candidate = match candidates.as_slice() {
             [] => {
-                if !java_class_qualifier
-                    && let Some((extension, signature)) = self.contextual_extension(
+                let mut failure = None;
+                if !java_class_qualifier {
+                    match self.contextual_extension(
                         name,
                         receiver,
                         context,
                         tree_index,
+                        None,
                         info_journal,
-                    )?
-                    && let Some(Type::Method(clause)) = self.store.types.try_get(signature)
-                {
-                    return Ok(
-                        TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply(
-                            extension,
-                            vec![qualifier],
-                            clause.result,
-                            position,
-                        ),
-                    );
+                    )? {
+                        ExtensionLookup::Selected(extension, signature) => {
+                            if let Some(Type::Method(clause)) = self.store.types.try_get(signature)
+                            {
+                                return Ok(TypedAstBuilder::new(
+                                    &mut self.typed_arena,
+                                    &self.store.types,
+                                )
+                                .apply(
+                                    extension,
+                                    vec![qualifier],
+                                    clause.result,
+                                    position,
+                                ));
+                            }
+                        }
+                        ExtensionLookup::Missing(cause) => failure = cause,
+                    }
                 }
                 if !java_class_qualifier
-                    && let Some(source) = source_qualifier
-                    && let Some(converted) = self.try_conversion(
-                        source,
-                        qualifier,
-                        receiver,
-                        super::conversion::ConversionUse::Member {
-                            name,
-                            site: tree_index,
-                        },
-                        context,
-                        info_journal,
-                    )?
+                    && let Some(selected) =
+                        self.select_member_after_conversion(request, receiver, info_journal)?
                 {
-                    return self.type_selected_member_on_qualifier(
-                        SelectedMemberRequest {
-                            source_qualifier: None,
-                            qualifier: converted,
-                            ..request
-                        },
-                        info_journal,
-                    );
+                    return Ok(selected);
                 }
-                return Err(TyperError::MemberNotFound {
+                return Err(failure.unwrap_or(TyperError::MemberNotFound {
                     source: self.source,
                     tree_index,
                     receiver,
                     name,
-                });
+                }));
             }
             [candidate] => candidate,
             _ => {
