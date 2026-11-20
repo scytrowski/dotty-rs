@@ -788,7 +788,7 @@ impl SourceTyper<'_> {
                 clause_index: 0,
             });
         };
-        if constructor.value_param_clauses.len() != 1 {
+        if !(1..=2).contains(&constructor.value_param_clauses.len()) {
             return Err(TyperError::MalformedMethodClause {
                 method,
                 method_tree_index: class_tree.index(),

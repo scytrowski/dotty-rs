@@ -114,7 +114,9 @@ generic source relationships recoverable without fabricating completed
 For a case class with one ordinary clause and context bounds, the companion’s
 generated `apply` owns a separate parameter for each constructor witness. The
 class field, constructor parameter and factory parameter share the source
-bound tree. A case class in this subset without an explicit `copy` member
+bound tree. A trailing written `(using trace: Trace)` also contributes a
+parameter to the generated `apply` and `copy`, after the synthesized witness.
+A case class in this subset without an explicit `copy` member
 also gets an instance method with separately owned parameters. The default
 getter for each ordinary copy parameter is indexed by method and position.
 The witness clause has no defaults. An explicit companion method with different effective clause
@@ -122,7 +124,7 @@ arities can coexist with the generated factory. When contextual signatures
 have matching arities and the namer cannot compare their types, it defers
 factory synthesis.
 
-Abstract case classes, constructor defaults, contextual/repeated or otherwise
+Abstract case classes, constructor defaults, other contextual clauses, repeated or otherwise
 modified parameters, explicit lower or upper type bounds, non-public
 constructors and secondary constructors remain outside the generated factory
 subset. Abstract case classes do not receive a

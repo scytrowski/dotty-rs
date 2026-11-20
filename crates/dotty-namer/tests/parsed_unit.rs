@@ -996,6 +996,31 @@ fn case_class_bound_enters_separate_witnesses_and_compares_effective_companion_c
 }
 
 #[test]
+fn case_class_trailing_using_member_named_copy_preserves_the_companion_apply() {
+    let named = named_source(
+        "case class Envelope[A: TC](value: A)(using copy: Trace)",
+        404,
+    );
+    let parts = primary_constructor_parts(&named);
+    let class = named
+        .index
+        .symbol_at(named.source, parts.class_tree)
+        .unwrap();
+    assert!(
+        named
+            .index
+            .generated_case_class_method(class, GeneratedCaseClassMethodRole::Apply)
+            .is_some()
+    );
+    assert!(
+        named
+            .index
+            .generated_case_class_method(class, GeneratedCaseClassMethodRole::Copy)
+            .is_none()
+    );
+}
+
+#[test]
 fn case_class_copy_indexes_only_the_ordinary_defaults_on_the_instance() {
     let named = named_source("case class Pair[A: TC as tc](left: A, right: A)", 404);
     let parts = primary_constructor_parts(&named);
@@ -9015,6 +9040,8 @@ fn unsupported_top_level_case_class_apply_shapes_keep_the_class_and_defer_apply(
 
     let sources = [
         "case class Node(value: Int = 1)",
+        "case class Node[A: TC](value: A)(tag: Int)",
+        "case class Node[A: TC](value: A)(using trace: Trace = log)",
         "case class Node(value: Int)(tag: Int)",
         "case class Node()",
         "case class Node[A <: AnyRef](value: A)",
