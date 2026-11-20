@@ -14,6 +14,15 @@ def main():
     toolchain = runpy.run_path(str(ROOT / "tools/tasty-pickler-oracle/run.py"))["Toolchain"]()
     with tempfile.TemporaryDirectory() as out:
         for sources, status, *expected in [
+            (["LegacyMemberConversions.scala"], 0,
+             "legacymembers.Box.wrap[Int](x).show", "this.local[Int](x).show",
+             "def keep(x: legacymembers.Box[Int]): Int = x.direct", "this.modern.apply(x).show",
+             "this.mono(x).show"),
+            (["LegacyMemberConversions.scala", "LegacyMemberRejected.scala"], 1,
+             "value hidden is not a member of legacymembers.Box[Int]",
+             "value absent is not a member of legacymembers.Box[Int]",
+             "both method first in class Ambiguous and method second in class Ambiguous provide an extension method `show`",
+             "3 errors found"),
             (["MemberConversionScope.scala"], 0, "memberscope.From.render.apply(x).show"),
             (["MemberConversionScope.scala"], 0, "chosen.apply(x).show"),
             (["MemberConversions.scala"], 0, "Int = x.show"),

@@ -116,15 +116,16 @@ a known expected type, including ordinary method arguments. For a unary
 the receiver and can fill remaining arguments from the expected result. It
 checks the instantiated bounds, input, and result before selecting a method.
 For a missing source selection
-such as `x.show`, the typer also considers contextual values of type
-`scala.Conversion[From, To]`. The receiver must conform to `From` and
+such as `x.show`, the typer considers monomorphic `scala.Conversion[From, To]`
+values and unary `implicit def` methods. For a generic method the receiver
+must determine all type arguments. For example, selecting `show` on a
+`Box[Int]` can produce `wrap[Int](x).show`. The receiver must conform to `From` and
 `To` must expose an accessible `show`. A direct member wins. Two equally
 eligible conversions produce an ambiguity at the selection, including when
 their output types differ. Search checks lexical scopes before the receiver’s
 companion. A monomorphic structural given can contribute its instantiated
 `Conversion` parent. An unrelated unary `apply` or a private member on a
-conversion’s result does not make that candidate eligible. Missing-member
-adaptation currently covers monomorphic conversion values.
+conversion’s result does not make that candidate eligible.
 
 The frontend accepts a wider range of typed trees than either producer can emit.
 In particular, the recursive dictionary tests inspect typed declarations and
