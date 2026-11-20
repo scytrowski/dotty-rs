@@ -401,3 +401,67 @@ fn member_conversion_ambiguity_names_both_conversions_and_rolls_back() {
     assert_eq!(typer.store.checkpoint(), before);
     assert!(typer.typed_index.is_empty());
 }
+
+#[test]
+fn member_conversion_uses_the_structural_given_in_the_receiver_companion() {
+    let text =
+        include_str!("../../../tests/fixtures/contextual-consumers/MemberConversionScope.scala");
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let dest = class_symbol(&parsed, &store, &index, source, "To");
+    let from = class_symbol(&parsed, &store, &index, source, "From");
+    let companion = store.symbols.get(from).links.companion.unwrap();
+    let resolver = super::contextual_binary::library_resolver(defs, &packages);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages)
+        .with_resolver(Box::new(resolver));
+    let (method, rhs) =
+        method_definition_and_rhs(&parsed, typer.store(), &index, source, "fromCompanion");
+    let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+        panic!()
+    };
+    typer.type_method_definition(tree).unwrap();
+    let selected = typer.typed_index.get(source, rhs).unwrap();
+    assert_eq!(
+        typer.store.symbols.owner(typed_reference(&typer, selected)),
+        Some(dest)
+    );
+    let TreeKind::Select(show) = &typer.typed_arena.get(selected).kind else {
+        panic!("show")
+    };
+    let TreeKind::Apply(call) = &typer.typed_arena.get(show.qualifier).kind else {
+        panic!("converted receiver")
+    };
+    let TreeKind::Select(apply) = &typer.typed_arena.get(call.function).kind else {
+        panic!("apply")
+    };
+    let TreeKind::Select(render) = &typer.typed_arena.get(apply.qualifier).kind else {
+        panic!("companion given")
+    };
+    assert_eq!(typer.store.names.resolve(render.name.text()), "render");
+    assert_eq!(typed_reference(&typer, render.qualifier), companion);
+
+    let (method, rhs) =
+        method_definition_and_rhs(&parsed, typer.store(), &index, source, "fromScope");
+    let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+        panic!()
+    };
+    let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+        panic!()
+    };
+    typer.type_method_definition(tree).unwrap();
+    let root = typer.typed_index.get(source, rhs).unwrap();
+    let TreeKind::Select(show) = &typer.typed_arena.get(root).kind else {
+        panic!("show")
+    };
+    let TreeKind::Apply(call) = &typer.typed_arena.get(show.qualifier).kind else {
+        panic!("converted receiver")
+    };
+    let TreeKind::Select(apply) = &typer.typed_arena.get(call.function).kind else {
+        panic!("apply")
+    };
+    assert_eq!(
+        typed_reference(&typer, apply.qualifier),
+        index
+            .symbol_at(source, def.value_param_clauses[1][1])
+            .unwrap()
+    );
+}

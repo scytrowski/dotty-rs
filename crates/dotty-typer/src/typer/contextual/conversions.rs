@@ -171,17 +171,30 @@ impl SourceTyper<'_> {
             }
             let view =
                 self.contextual_reference_signature(reference, context.owner, site, journal)?;
-            let Some(Type::Applied { tycon, args }) = self.store.types.try_get(view) else {
+            let Some((base, input, output)) =
+                self.member_conversion_signature(view, goal.class, site, journal)?
+            else {
                 continue;
             };
-            let [input, output] = args[..] else { continue };
-            if self.store.types.get(*tycon).reference_symbol() != Some(goal.class)
-                || !self.contextual_conforms(goal.receiver, input, site, journal)?
-            {
+            if !self.contextual_conforms(goal.receiver, input, site, journal)? {
                 continue;
             }
+            // An abstract result can only offer members visible through its upper bound.
+            let lookup_type = match self.store.types.get(output) {
+                Type::TypeRef {
+                    target: TypeRefTarget::Symbol(param),
+                    ..
+                } if self.store.symbols.get(*param).kind == SymbolKind::TypeParameter => {
+                    let info = self.complete_signature_parameter(*param, journal)?;
+                    match self.store.types.get(info) {
+                        Type::Bounds { high, .. } => *high,
+                        _ => output,
+                    }
+                }
+                _ => output,
+            };
             let members = self
-                .lookup_members_journaled(output, goal.name, journal)
+                .lookup_members_journaled(lookup_type, goal.name, journal)
                 .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
             for member in members {
                 if self.is_selected_member_accessible(
@@ -194,7 +207,7 @@ impl SourceTyper<'_> {
                         Provider {
                             reference,
                             type_arguments: Vec::new(),
-                            callable: view,
+                            callable: base,
                             result: view,
                         },
                         None,
@@ -220,7 +233,7 @@ impl SourceTyper<'_> {
         let Some(winner) = winner else {
             return Ok(None);
         };
-        let Some(Type::Applied { args, .. }) = self.store.types.try_get(winner.result) else {
+        let Some(Type::Applied { args, .. }) = self.store.types.try_get(winner.callable) else {
             return Err(TyperError::MemberTypeUnavailable {
                 symbol: winner.reference.symbol,
             });
@@ -229,5 +242,67 @@ impl SourceTyper<'_> {
         let evidence =
             self.contextual_reference_tree(winner.reference, context, site, None, journal)?;
         Ok(Some((evidence, output)))
+    }
+
+    /// Project a monomorphic evidence value to its canonical `Conversion[In, Out]` base.
+    fn member_conversion_signature(
+        &mut self,
+        view: TypeId,
+        target: SymbolId,
+        site: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Option<(TypeId, TypeId, TypeId)>, TyperError> {
+        let head = match self.store.types.get(view) {
+            Type::Applied { tycon, .. } => *tycon,
+            _ => view,
+        };
+        let Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(class),
+            ..
+        }) = self.store.types.try_get(head)
+        else {
+            return Ok(None);
+        };
+        let entry = self.store.symbols.get(*class);
+        if !matches!(
+            entry.kind,
+            SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+        ) || matches!(entry.origin, SymbolOrigin::Builtin)
+        {
+            return Ok(None);
+        }
+        self.complete_relation_type(view, journal, &mut HashSet::new(), 0)?;
+        let bases = self.nominal_views_as(view, target).map_err(|error| {
+            TyperError::ExpectedExpressionConformanceUnsupported {
+                source: self.source,
+                tree_index: site,
+                actual: view,
+                expected: {
+                    let prefix = self.type_symbol_prefix(target);
+                    self.store.types.alloc(Type::type_ref(prefix, target))
+                },
+                error: Box::new(error),
+            }
+        })?;
+        let Some((&base, rest)) = bases.split_first() else {
+            return Ok(None);
+        };
+        for &other in rest {
+            if !self.contextual_conforms(base, other, site, journal)?
+                || !self.contextual_conforms(other, base, site, journal)?
+            {
+                return Err(TyperError::UsingApplicationDeferred {
+                    source: self.source,
+                    tree_index: site,
+                });
+            }
+        }
+        let Some(Type::Applied { args, .. }) = self.store.types.try_get(base) else {
+            return Ok(None);
+        };
+        let [input, output] = args[..] else {
+            return Ok(None);
+        };
+        Ok(Some((base, input, output)))
     }
 }

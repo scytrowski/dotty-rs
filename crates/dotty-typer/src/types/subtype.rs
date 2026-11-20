@@ -167,14 +167,23 @@ impl SourceTyper<'_> {
         {
             return Ok(vec![result]);
         }
+        let expected = TypeRelation::new(self).class_view(goal)?;
+        self.nominal_views_as(result, expected.class)
+    }
+
+    /// Instantiated views of a nominal type at the given class, including inherited views.
+    pub(crate) fn nominal_views_as(
+        &mut self,
+        result: TypeId,
+        target: SymbolId,
+    ) -> Result<Vec<TypeId>, TypeRelationError> {
         let mut relation = TypeRelation::new(self);
         let declared = relation.class_view(result)?;
-        let expected = relation.class_view(goal)?;
-        if declared.class == expected.class {
+        if declared.class == target {
             return Ok(vec![result]);
         }
         let mut views = Vec::new();
-        relation.visit_inherited_views(declared, expected.class, |_, view| {
+        relation.visit_inherited_views(declared, target, |_, view| {
             views.push(view.ty);
             Ok(())
         })?;

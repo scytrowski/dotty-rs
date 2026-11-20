@@ -14,6 +14,8 @@ def main():
     toolchain = runpy.run_path(str(ROOT / "tools/tasty-pickler-oracle/run.py"))["Toolchain"]()
     with tempfile.TemporaryDirectory() as out:
         for sources, status, expected in [
+            (["MemberConversionScope.scala"], 0, "memberscope.From.render.apply(x).show"),
+            (["MemberConversionScope.scala"], 0, "chosen.apply(x).show"),
             (["MemberConversions.scala"], 0, "Int = x.show"),
             (["MemberConversions.scala"], 0, "Int = via.apply(x).show"),
             (["MemberConversions.scala", "MemberConversionMissing.scala"], 1,
