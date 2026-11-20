@@ -10,6 +10,7 @@ use dotty_core::store::SemanticStore;
 use dotty_core::symbols::SymbolInfo;
 use dotty_core::types::{Constant, TermRefTarget, Type, TypeRefTarget};
 
+use crate::reference::ReferenceUnit;
 use crate::{
     InvalidTypeReason, JVM_EXPRESSION_DEPTH_LIMIT, JVM_EXPRESSION_NODE_BUDGET, JvmBooleanIntrinsic,
     JvmCallTarget, JvmClassMetadata, JvmCodegenError, JvmCompilationUnit, JvmExpressionFlow,
@@ -181,7 +182,7 @@ struct JvmLoweringContext<'a> {
     reference_assignment_restricted_region_depth: usize,
     temporary_local_slots: usize,
     call_context: Option<(
-        &'a JvmCompilationUnit<'a>,
+        ReferenceUnit<'a>,
         &'a JvmClassMetadata,
         &'a [crate::JvmClassMetadata],
     )>,
@@ -341,15 +342,15 @@ pub(super) fn lower_method_body(
 }
 
 pub(super) fn lower_planned_method_body(
-    unit: &JvmCompilationUnit<'_>,
+    scope: ReferenceUnit<'_>,
     class: &JvmClassMetadata,
     definitions: &Definitions,
+    metadata: &[JvmClassMetadata],
     method: &JvmMethodMetadata,
     body: TreeId<Typed>,
 ) -> Result<CodeBuilder, JvmCodegenError> {
+    let unit = scope.unit;
     let mut code = CodeBuilder::new();
-    unit.validate()?;
-    let metadata = unit.metadata(definitions)?;
     let class_symbol = class.identity().symbol();
     let class_plan = unit
         .classes
@@ -371,7 +372,7 @@ pub(super) fn lower_planned_method_body(
         method,
         method_plan.locals(),
         definitions,
-        &metadata,
+        metadata,
     )?;
     if let Some(code) = crate::descriptor::contextual_poly::lower_body(
         unit.store,
@@ -384,7 +385,7 @@ pub(super) fn lower_planned_method_body(
     }
     let mut context = JvmLoweringContext::new(unit.store, unit.typed_ast, definitions, method);
     context.local_layout = Some(&local_layout);
-    context.call_context = Some((unit, class, &metadata));
+    context.call_context = Some((scope, class, metadata));
     let (expression, expected) = match method.context_result {
         Some(result) if result.root == body => (result.closure.body, Some(result.closure.result)),
         Some(_) => {
@@ -396,7 +397,7 @@ pub(super) fn lower_planned_method_body(
         None => (body, source_method_result_type(unit.store, method.symbol())),
     };
     let flow = emit_expression_with_expected(&mut context, expression, expected, &mut code, 0)?;
-    append_method_return(Some(unit), definitions, method, body, flow, &mut code)?;
+    append_method_return(Some(scope), definitions, method, body, flow, &mut code)?;
     // Branched references are checked after all symbolic references have been
     // staged in ClassFileBuilder. Its encode preflight analyzes CFG states and
     // generates frames before `emit_class` returns or publishes the class.
@@ -404,7 +405,7 @@ pub(super) fn lower_planned_method_body(
 }
 
 fn append_method_return(
-    unit: Option<&JvmCompilationUnit<'_>>,
+    unit: Option<ReferenceUnit<'_>>,
     definitions: &Definitions,
     method: &JvmMethodMetadata,
     body: TreeId<Typed>,
@@ -743,7 +744,7 @@ fn parameter_value_type(
     };
     let found = match parameter.ty() {
         JvmType::Reference(class) => {
-            let Some((unit, _, metadata)) = context.call_context else {
+            let Some((scope, _, metadata)) = context.call_context else {
                 return Err(JvmCodegenError::ReferenceParameterRequiresPlan {
                     tree,
                     parameter: symbol,
@@ -759,7 +760,7 @@ fn parameter_value_type(
                 semantic_type,
                 context.definitions,
                 &class_identities,
-                Some(unit),
+                Some(scope),
             )?
         }
         JvmType::Int | JvmType::Boolean | JvmType::Long => {
@@ -799,7 +800,7 @@ fn current_this_value_type(
     tree: TreeId<Typed>,
     ty: TypeId,
 ) -> Result<JvmType, JvmCodegenError> {
-    let Some((unit, class, metadata)) = context.call_context else {
+    let Some((ReferenceUnit { unit, .. }, class, metadata)) = context.call_context else {
         return Err(JvmCodegenError::JvmReferenceValueContextUnavailable {
             tree,
             method: context.method.symbol(),
@@ -874,7 +875,7 @@ fn local_reference_slot(
         SymbolInfo::Error => return Err(JvmCodegenError::ErrorSemanticInfo { symbol }),
     };
     let found = match context.call_context {
-        Some((unit, _, metadata)) => {
+        Some((ReferenceUnit { unit, .. }, _, metadata)) => {
             unit.local_value_type(symbol, semantic_type, context.definitions, Some(metadata))?
         }
         None => crate::descriptor::primitive_semantic_value_type(
@@ -906,7 +907,7 @@ fn local_expected_source_type(
     if !matches!(local.ty(), JvmType::Reference(_)) {
         return Ok(None);
     }
-    let Some((unit, _, metadata)) = context.call_context else {
+    let Some((ReferenceUnit { unit, .. }, _, metadata)) = context.call_context else {
         return Ok(None);
     };
     let semantic_type = match context.store.symbols.info(local.symbol()) {
@@ -1066,7 +1067,7 @@ fn emit_null_literal(
             node: "null literal without an explicit reference context",
         });
     };
-    let Some((unit, _, _)) = context.call_context else {
+    let Some((ReferenceUnit { unit, .. }, _, _)) = context.call_context else {
         return Err(JvmCodegenError::UnsupportedTypedExpression {
             tree,
             node: "null literal outside a validated planned reference context",
@@ -1228,7 +1229,7 @@ fn resolve_accessor(
     tree: TreeId<Typed>,
     field: SymbolId,
 ) -> Result<Option<(String, SymbolId, crate::JvmAccessorMetadata)>, JvmCodegenError> {
-    let Some((unit, _, classes)) = context.call_context else {
+    let Some((ReferenceUnit { unit, .. }, _, classes)) = context.call_context else {
         return Ok(None);
     };
     let mut found = None;
@@ -1317,7 +1318,7 @@ fn resolve_accessor(
                 })
                 .collect::<Vec<_>>(),
         ),
-        Some(unit),
+        Some(unit.into()),
     )?;
     if projected != accessor.value_type()
         || symbol
@@ -1378,7 +1379,7 @@ fn emit_field_read(
         });
     };
     if let Some((_, owner_symbol, accessor)) = resolve_accessor(context, tree_id, field)? {
-        let Some((unit, _, classes)) = context.call_context else {
+        let Some((ReferenceUnit { unit, .. }, _, classes)) = context.call_context else {
             return Err(JvmCodegenError::JvmFieldReadContextUnavailable {
                 tree: tree_id,
                 method: context.method.symbol(),
@@ -1870,7 +1871,7 @@ fn emit_field_assignment(
                 class: class.identity().symbol(),
             });
         }
-        let Some((unit, _, classes)) = context.call_context else {
+        let Some((ReferenceUnit { unit, .. }, _, classes)) = context.call_context else {
             return Err(JvmCodegenError::JvmFieldWriteContextUnavailable {
                 tree: tree_id,
                 method: context.method.symbol(),
@@ -2541,7 +2542,7 @@ fn block_value_type(
         return Ok(Some(value_type));
     }
     if matches!(context.store.types.try_get(ty), Some(Type::TypeRef { .. })) {
-        let Some((unit, _, _)) = context.call_context else {
+        let Some((ReferenceUnit { unit, .. }, _, _)) = context.call_context else {
             return Ok(None);
         };
         let projected = crate::reference::project_type(unit, ty, context.definitions)
@@ -2630,7 +2631,7 @@ fn contextual_block_value_type(
         && let Some(expected_type) = expected_type
     {
         let expected = planned_value_type(
-            context.call_context.map(|(unit, _, _)| unit).ok_or(
+            context.call_context.map(|(scope, _, _)| scope.unit).ok_or(
                 JvmCodegenError::UnsupportedTypedExpression {
                     tree,
                     node: "null-valued composite outside a planned reference context",
@@ -2646,7 +2647,7 @@ fn contextual_block_value_type(
         Some(Type::Or { .. })
     ) && let Some(expected_type) = expected_type
     {
-        let Some((unit, _, _)) = context.call_context else {
+        let Some((ReferenceUnit { unit, .. }, _, _)) = context.call_context else {
             return Err(JvmCodegenError::UnsupportedSiblingUnionProjection {
                 source_type,
                 expected_type,
@@ -2786,7 +2787,7 @@ fn emit_planned_apply(
     code: &mut CodeBuilder,
     depth: usize,
 ) -> Result<Flow, JvmCodegenError> {
-    let Some((unit, class, _)) = context.call_context else {
+    let Some((scope, class, metadata)) = context.call_context else {
         return Err(JvmCodegenError::JvmCallContextUnavailable {
             tree: tree_id,
             method: context.method.symbol(),
@@ -2795,11 +2796,14 @@ fn emit_planned_apply(
 
     let caller_class = class.identity().symbol();
     let caller_method = context.method.symbol();
-    let target = unit.resolve_planned_instance_call(
+    let target = crate::call_target::resolve_instance_call(
+        scope,
         caller_class,
         caller_method,
         tree_id,
         context.definitions,
+        JvmInvocationKind::Virtual,
+        Some(metadata),
     )?;
     if let Some(prior) = target.prior_application {
         context.visit(prior, depth + 1)?;
@@ -2863,7 +2867,7 @@ fn emit_planned_apply(
             source_method_parameter_type(context.store, target.method_symbol(), index);
         let flow =
             emit_expression_with_expected(context, argument, source_expected, code, depth + 1)?;
-        if !call_argument_assignable(unit, flow, expected, context.definitions)? {
+        if !expression_flow_assignable(context, flow, expected)? {
             return Err(JvmCodegenError::JvmCallArgumentMismatch {
                 tree: tree_id,
                 argument,
@@ -2925,17 +2929,20 @@ fn emit_direct_super_call(
     code: &mut CodeBuilder,
     depth: usize,
 ) -> Result<Flow, JvmCodegenError> {
-    let Some((unit, class, _)) = context.call_context else {
+    let Some((scope, class, metadata)) = context.call_context else {
         return Err(JvmCodegenError::JvmCallContextUnavailable {
             tree: tree_id,
             method: context.method.symbol(),
         });
     };
-    let target = unit.resolve_direct_super_call(
+    let target = crate::call_target::resolve_instance_call(
+        scope,
         class.identity().symbol(),
         context.method.symbol(),
         tree_id,
         context.definitions,
+        JvmInvocationKind::SpecialSuper,
+        Some(metadata),
     )?;
     let parameters = target.descriptor().parameters().to_vec();
     if arguments.len() != parameters.len() {
@@ -2979,7 +2986,7 @@ fn emit_direct_super_call(
             source_method_parameter_type(context.store, target.method_symbol(), index);
         let flow =
             emit_expression_with_expected(context, argument, source_expected, code, depth + 1)?;
-        if !call_argument_assignable(unit, flow, expected, context.definitions)? {
+        if !expression_flow_assignable(context, flow, expected)? {
             return Err(JvmCodegenError::JvmCallArgumentMismatch {
                 tree: tree_id,
                 argument,
@@ -3027,7 +3034,7 @@ fn emit_object_creation(
     code: &mut CodeBuilder,
     depth: usize,
 ) -> Result<Flow, JvmCodegenError> {
-    let Some((unit, class, _)) = context.call_context else {
+    let Some((ReferenceUnit { unit, .. }, class, _)) = context.call_context else {
         return Err(JvmCodegenError::JvmConstructorCallContextUnavailable {
             tree: tree_id,
             method: context.method.symbol(),
@@ -3067,7 +3074,7 @@ fn emit_object_creation(
             &mut budget,
         )?;
         if let Some(source_expected) = source_expected {
-            let Some((unit, _, _)) = context.call_context else {
+            let Some((ReferenceUnit { unit, .. }, _, _)) = context.call_context else {
                 return Err(JvmCodegenError::JvmConstructorCallContextUnavailable {
                     tree: tree_id,
                     method: context.method.symbol(),
@@ -3289,7 +3296,8 @@ fn validate_constructor_argument(
                 let Some(expected @ JvmType::Reference(_)) = expected else {
                     return Err(unsupported());
                 };
-                let Some((unit, caller_class, _)) = context.call_context else {
+                let Some((ReferenceUnit { unit, .. }, caller_class, _)) = context.call_context
+                else {
                     return Err(unsupported());
                 };
                 let target = unit.resolve_constructor_call(
@@ -3298,11 +3306,10 @@ fn validate_constructor_argument(
                     tree_id,
                     context.definitions,
                 )?;
-                if !call_argument_assignable(
-                    unit,
+                if !expression_flow_assignable(
+                    context,
                     Flow::Value(target.result_type()),
                     expected,
-                    context.definitions,
                 )? {
                     return Err(JvmCodegenError::JvmConstructorCallArgumentTypeMismatch {
                         tree: constructor_call,
@@ -3439,8 +3446,10 @@ fn is_approved_constructor_reference_field(
         return Ok(false);
     }
     let class_symbol = class.identity().symbol();
-    let field_is_approved = context.call_context.is_some_and(|(unit, _, _)| {
-        unit.classes
+    let field_is_approved = context.call_context.is_some_and(|(scope, _, _)| {
+        scope
+            .unit
+            .classes
             .iter()
             .find(|plan| plan.class == class_symbol)
             .is_some_and(|plan| {
@@ -3507,21 +3516,24 @@ fn validate_constructor_reference_factory_call(
         tree: constructor_call,
         argument: tree_id,
     };
-    let Some((unit, class, _)) = context.call_context else {
+    let Some((scope, class, metadata)) = context.call_context else {
         return Err(unsupported());
     };
-    let target = unit.resolve_planned_instance_call(
+    let target = crate::call_target::resolve_instance_call(
+        scope,
         class.identity().symbol(),
         context.method.symbol(),
         tree_id,
         context.definitions,
+        JvmInvocationKind::Virtual,
+        Some(metadata),
     )?;
     let JvmReturnType::Value(result) = target.result() else {
         return Err(unsupported());
     };
     let assignable = match expected {
         Some(expected) => {
-            crate::reference::is_assignable(Some(unit), result, expected, context.definitions)?
+            crate::reference::is_assignable(Some(scope), result, expected, context.definitions)?
         }
         None => false,
     };
@@ -3550,7 +3562,7 @@ fn validate_constructor_reference_factory_call(
         let source_expected =
             source_method_parameter_type(context.store, target.method_symbol(), index);
         if let Some(source_expected) = source_expected {
-            let source_type = planned_value_type(unit, source_expected, context.definitions)?;
+            let source_type = planned_value_type(scope.unit, source_expected, context.definitions)?;
             if source_type != expected {
                 return Err(unsupported());
             }
@@ -4305,7 +4317,7 @@ fn merge_if_flows(
                         )
                         && let Some(expected_type) = expected_type
                     {
-                        let Some((unit, _, _)) = context.call_context else {
+                        let Some((ReferenceUnit { unit, .. }, _, _)) = context.call_context else {
                             return Err(JvmCodegenError::UnsupportedSiblingUnionProjection {
                                 source_type: result_ty,
                                 expected_type,
@@ -4591,19 +4603,6 @@ fn public_flow(flow: Flow) -> JvmExpressionFlow {
     }
 }
 
-fn call_argument_assignable(
-    unit: &JvmCompilationUnit<'_>,
-    found: Flow,
-    expected: JvmType,
-    definitions: &Definitions,
-) -> Result<bool, JvmCodegenError> {
-    match found {
-        Flow::Value(found) => reference_assignable(Some(unit), found, expected, definitions),
-        Flow::Null => Ok(matches!(expected, JvmType::Reference(_))),
-        Flow::Unit | Flow::Diverges => Ok(false),
-    }
-}
-
 fn expression_flow_assignable(
     context: &JvmLoweringContext<'_>,
     found: Flow,
@@ -4626,7 +4625,7 @@ fn flow_assignable(
 }
 
 fn reference_assignable(
-    unit: Option<&JvmCompilationUnit<'_>>,
+    unit: Option<ReferenceUnit<'_>>,
     found: JvmType,
     expected: JvmType,
     definitions: &Definitions,

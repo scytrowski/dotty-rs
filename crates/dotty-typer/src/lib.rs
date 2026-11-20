@@ -46,8 +46,9 @@ pub use typer::{
     ConstructorCandidate, ExpressionContext, ExpressionScopeId, FieldInitializerContextIssue,
     MAX_MEMBER_LOOKUP_DEPTH, MAX_SOURCE_FUNCTION_ARITY, MAX_TYPE_RELATION_DEPTH,
     MAX_TYPE_RELATION_VIEWS, MAX_UNION_RELATION_COMPARISONS, MemberCandidate, MemberLookupError,
-    PatternKind, SourceFunctionFamily, SourceFunctionKind, SourceFunctionPurity, SourceTyper,
-    TypeArgumentBoundSide, TypeRelationError, TypedLocalBinding, TyperError,
+    OverloadRejection, PatternKind, SignatureCompletion, SourceFunctionFamily, SourceFunctionKind,
+    SourceFunctionPurity, SourceTyper, TypeArgumentBoundSide, TypeRelationError, TypedLocalBinding,
+    TypedSourceOutput, TyperError,
 };
 pub use types::{
     MAX_TYPE_NORMALIZATION_DEPTH, SymbolInfoState, TypeNormalizeError, TypeNormalizer,

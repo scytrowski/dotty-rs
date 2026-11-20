@@ -12,6 +12,7 @@ use dotty_core::store::SemanticStore;
 use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind, SymbolOrigin, Visibility};
 use dotty_core::types::{Type, TypeRefTarget};
 
+use crate::reference::ReferenceUnit;
 use crate::{
     InvalidJvmClassInfoKind, JvmAccessorCollisionKind, JvmAccessorDispatchMetadata,
     JvmAccessorDispatchRole, JvmAccessorMetadata, JvmAccessorMethodMetadata, JvmBinaryMethodOrigin,
@@ -172,6 +173,8 @@ pub(super) fn unit_hierarchy(
     unit: &crate::JvmCompilationUnit<'_>,
     definitions: &Definitions,
 ) -> Result<crate::JvmClassHierarchy, JvmCodegenError> {
+    #[cfg(test)]
+    HIERARCHY_BUILDS.with(|count| count.set(count.get() + 1));
     unit.validate()?;
     let plans = unit
         .classes
@@ -491,7 +494,7 @@ pub(super) fn class_metadata(
     definitions: &Definitions,
     descriptor_context: Option<(&SemanticStore, &[JvmClassIdentity])>,
     superclass: Option<&crate::JvmSuperclassPlan>,
-    unit: Option<&crate::JvmCompilationUnit<'_>>,
+    unit: Option<ReferenceUnit<'_>>,
 ) -> Result<JvmClassMetadata, JvmCodegenError> {
     let identity = class_identity(store, plan.class)?;
     let mut fields = Vec::with_capacity(plan.fields.len());
@@ -722,7 +725,7 @@ fn accessor_metadata(
     store: &SemanticStore,
     definitions: &Definitions,
     class_identities: Option<&[JvmClassIdentity]>,
-    unit: Option<&crate::JvmCompilationUnit<'_>>,
+    unit: Option<ReferenceUnit<'_>>,
 ) -> Result<JvmAccessorMetadata, JvmCodegenError> {
     let field = store
         .symbols
@@ -869,10 +872,10 @@ fn accessor_method_descriptor(
     })
 }
 
-struct FieldMetadataContext<'a, 'unit> {
+struct FieldMetadataContext<'a> {
     class_identities: Option<&'a [JvmClassIdentity]>,
     superclass: Option<&'a crate::JvmSuperclassPlan>,
-    unit: Option<&'a crate::JvmCompilationUnit<'unit>>,
+    unit: Option<ReferenceUnit<'a>>,
 }
 
 fn field_metadata(
@@ -881,7 +884,7 @@ fn field_metadata(
     store: &SemanticStore,
     typed_ast: Option<&dotty_core::ast::TypedAst>,
     definitions: &Definitions,
-    context: FieldMetadataContext<'_, '_>,
+    context: FieldMetadataContext<'_>,
 ) -> Result<JvmFieldMetadata, JvmCodegenError> {
     let FieldMetadataContext {
         class_identities,
@@ -1026,8 +1029,13 @@ fn field_metadata(
                 field: plan.field,
                 initializer: initializer_id,
             })?;
-    let is_planned_new =
-        is_canonical_planned_new_initializer(store, typed_ast, initializer_id, unit, definitions)?;
+    let is_planned_new = is_canonical_planned_new_initializer(
+        store,
+        typed_ast,
+        initializer_id,
+        unit.map(|scope| scope.unit),
+        definitions,
+    )?;
     let initializer_type = if is_planned_new {
         project_field_value_type(
             store,
@@ -1193,7 +1201,7 @@ pub(super) fn project_field_value_type(
     symbol: dotty_core::SymbolId,
     ty: dotty_core::TypeId,
     class_identities: Option<&[JvmClassIdentity]>,
-    unit: Option<&crate::JvmCompilationUnit<'_>>,
+    unit: Option<ReferenceUnit<'_>>,
 ) -> Result<crate::JvmType, JvmCodegenError> {
     match crate::descriptor::primitive_semantic_value_type(store, definitions, symbol, ty) {
         Err(error @ JvmCodegenError::UnsupportedJvmType { .. }) => match class_identities {
@@ -1246,7 +1254,7 @@ pub(super) fn typed_expression_field_value_type(
     initializer: dotty_core::TreeId<dotty_core::ast::Typed>,
     ty: dotty_core::TypeId,
     class_identities: Option<&[JvmClassIdentity]>,
-    unit: Option<&crate::JvmCompilationUnit<'_>>,
+    unit: Option<ReferenceUnit<'_>>,
 ) -> Result<crate::JvmType, JvmCodegenError> {
     let target = match store.types.try_get(ty) {
         Some(Type::TermRef {
@@ -1383,11 +1391,27 @@ pub(super) fn validate_field_flags(
     Ok(())
 }
 
+#[cfg(test)]
+std::thread_local! {
+    pub(super) static HIERARCHY_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static METADATA_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(super) fn unit_metadata(
     unit: &crate::JvmCompilationUnit<'_>,
     definitions: &Definitions,
 ) -> Result<Vec<JvmClassMetadata>, JvmCodegenError> {
     let hierarchy = unit_hierarchy(unit, definitions)?;
+    metadata_with_hierarchy(unit, definitions, &hierarchy)
+}
+
+pub(super) fn metadata_with_hierarchy(
+    unit: &crate::JvmCompilationUnit<'_>,
+    definitions: &Definitions,
+    hierarchy: &crate::JvmClassHierarchy,
+) -> Result<Vec<JvmClassMetadata>, JvmCodegenError> {
+    #[cfg(test)]
+    METADATA_BUILDS.with(|count| count.set(count.get() + 1));
     let class_identities = unit_class_identities(unit)?;
     let mut metadata = Vec::with_capacity(unit.classes.len());
     for class_plan in &unit.classes {
@@ -1403,7 +1427,10 @@ pub(super) fn unit_metadata(
             definitions,
             Some((unit.store, &class_identities)),
             Some(superclass),
-            Some(unit),
+            Some(ReferenceUnit {
+                unit,
+                hierarchy: Some(hierarchy),
+            }),
         )?;
         metadata.push(class);
     }

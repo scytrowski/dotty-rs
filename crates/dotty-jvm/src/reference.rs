@@ -1,5 +1,7 @@
 //! Checked projection of semantic class references within one emission unit.
 
+use std::borrow::Cow;
+
 use dotty_core::definitions::Definitions;
 use dotty_core::ids::{SymbolId, TypeId};
 use dotty_core::store::SemanticStore;
@@ -7,14 +9,42 @@ use dotty_core::symbols::{SymbolKind, SymbolOrigin};
 use dotty_core::types::{Type, TypeRefTarget};
 
 use crate::{
-    InvalidTypeReason, JvmClassIdentity, JvmCodegenError, JvmCompilationUnit, JvmType,
-    UnsupportedJvmReferenceTypeKind,
+    InvalidTypeReason, JvmClassHierarchy, JvmClassIdentity, JvmCodegenError, JvmCompilationUnit,
+    JvmType, UnsupportedJvmReferenceTypeKind,
 };
+
+/// The unit for reference projection, with its checked hierarchy when available.
+#[derive(Clone, Copy)]
+pub(super) struct ReferenceUnit<'a> {
+    pub(super) unit: &'a JvmCompilationUnit<'a>,
+    pub(super) hierarchy: Option<&'a JvmClassHierarchy>,
+}
+
+impl<'a> From<&'a JvmCompilationUnit<'a>> for ReferenceUnit<'a> {
+    fn from(unit: &'a JvmCompilationUnit<'a>) -> Self {
+        Self {
+            unit,
+            hierarchy: None,
+        }
+    }
+}
+
+impl<'a> ReferenceUnit<'a> {
+    pub(super) fn checked_hierarchy(
+        self,
+        definitions: &Definitions,
+    ) -> Result<Cow<'a, JvmClassHierarchy>, JvmCodegenError> {
+        match self.hierarchy {
+            Some(hierarchy) => Ok(Cow::Borrowed(hierarchy)),
+            None => self.unit.class_hierarchy(definitions).map(Cow::Owned),
+        }
+    }
+}
 
 /// Returns whether `found` is assignable to `expected` through the validated
 /// canonical ancestry in this emission unit, bounded to two user-class edges.
 pub(super) fn is_validated_subtype(
-    unit: &JvmCompilationUnit<'_>,
+    unit: ReferenceUnit<'_>,
     found: SymbolId,
     expected: SymbolId,
     definitions: &Definitions,
@@ -22,7 +52,7 @@ pub(super) fn is_validated_subtype(
     if found == expected {
         return Ok(true);
     }
-    let hierarchy = unit.class_hierarchy(definitions)?;
+    let hierarchy = unit.checked_hierarchy(definitions)?;
     for class in [found, expected] {
         if !hierarchy
             .superclasses()
@@ -58,14 +88,14 @@ pub(super) fn is_validated_subtype(
 /// compilation unit. References may use exact identity or at most two verified
 /// user-class ancestry edges; primitive values remain invariant.
 pub(super) fn is_assignable(
-    unit: Option<&JvmCompilationUnit<'_>>,
+    unit: Option<ReferenceUnit<'_>>,
     found: JvmType,
     expected: JvmType,
     definitions: &Definitions,
 ) -> Result<bool, JvmCodegenError> {
     if found == expected {
         if let (JvmType::Reference(class), Some(unit)) = (found, unit) {
-            let hierarchy = unit.class_hierarchy(definitions)?;
+            let hierarchy = unit.checked_hierarchy(definitions)?;
             if !hierarchy
                 .superclasses()
                 .iter()
@@ -131,8 +161,8 @@ pub(super) fn project_sibling_union_to_expected_type(
     // siblings. Ancestor pairs already have an ordinary exact projection and
     // must continue to use that existing path.
     if arm_classes[0] == arm_classes[1]
-        || is_validated_subtype(unit, arm_classes[0], arm_classes[1], definitions)?
-        || is_validated_subtype(unit, arm_classes[1], arm_classes[0], definitions)?
+        || is_validated_subtype(unit.into(), arm_classes[0], arm_classes[1], definitions)?
+        || is_validated_subtype(unit.into(), arm_classes[1], arm_classes[0], definitions)?
     {
         return Err(unsupported());
     }
@@ -140,8 +170,8 @@ pub(super) fn project_sibling_union_to_expected_type(
     let hierarchy = unit.class_hierarchy(definitions)?;
     if hierarchy.nearest_common_non_object_ancestor(arm_classes[0], arm_classes[1])
         != Some(expected_class)
-        || !is_validated_subtype(unit, arm_classes[0], expected_class, definitions)?
-        || !is_validated_subtype(unit, arm_classes[1], expected_class, definitions)?
+        || !is_validated_subtype(unit.into(), arm_classes[0], expected_class, definitions)?
+        || !is_validated_subtype(unit.into(), arm_classes[1], expected_class, definitions)?
     {
         return Err(unsupported());
     }
@@ -213,7 +243,15 @@ pub(super) fn project_constructor_type(
             kind: UnsupportedJvmReferenceTypeKind::UnsupportedPrefix,
         });
     }
-    project_class(Some(unit), unit.store, ty, *class, definitions, None, None)
+    project_class(
+        Some(unit.into()),
+        unit.store,
+        ty,
+        *class,
+        definitions,
+        None,
+        None,
+    )
 }
 
 /// Projects a method signature reference against identities already validated
@@ -224,17 +262,36 @@ pub(super) fn project_method_signature_type(
     ty: TypeId,
     definitions: &Definitions,
     class_identities: &[JvmClassIdentity],
-    unit: Option<&JvmCompilationUnit<'_>>,
+    projection: Option<ReferenceUnit<'_>>,
 ) -> Result<JvmType, JvmCodegenError> {
     let class = method_signature_class_target(store, ty, definitions)?;
     project_class(
-        unit,
+        projection,
         store,
         ty,
         class,
         definitions,
         None,
         Some(class_identities),
+    )
+}
+
+/// Projects a canonical receiver or result reference against validated call metadata.
+pub(super) fn project_call_reference(
+    scope: ReferenceUnit<'_>,
+    ty: TypeId,
+    definitions: &Definitions,
+    metadata: &[crate::JvmClassMetadata],
+) -> Result<JvmType, JvmCodegenError> {
+    let class = method_signature_class_target(scope.unit.store, ty, definitions)?;
+    project_class(
+        Some(scope),
+        scope.unit.store,
+        ty,
+        class,
+        definitions,
+        Some(metadata),
+        None,
     )
 }
 
@@ -342,7 +399,7 @@ fn project_type_with_metadata(
             }
             match target {
                 TypeRefTarget::Symbol(class) => project_class(
-                    Some(unit),
+                    Some(unit.into()),
                     unit.store,
                     ty,
                     *class,
@@ -364,7 +421,7 @@ fn project_type_with_metadata(
 }
 
 fn project_class(
-    unit: Option<&JvmCompilationUnit<'_>>,
+    projection: Option<ReferenceUnit<'_>>,
     store: &SemanticStore,
     ty: TypeId,
     class: dotty_core::SymbolId,
@@ -372,6 +429,7 @@ fn project_class(
     metadata: Option<&[crate::JvmClassMetadata]>,
     class_identities: Option<&[JvmClassIdentity]>,
 ) -> Result<JvmType, JvmCodegenError> {
+    let unit = projection.map(|scope| scope.unit);
     if !store.symbols.contains(class) {
         return Err(JvmCodegenError::ReferenceClassNotInJvmPlan { class });
     }
@@ -467,8 +525,8 @@ fn project_class(
         return Err(JvmCodegenError::ReferenceClassNotInJvmPlan { class });
     }
 
-    let object_rooted = if let Some(unit) = unit {
-        let hierarchy = unit.class_hierarchy(definitions)?;
+    let object_rooted = if let Some(scope) = projection {
+        let hierarchy = scope.checked_hierarchy(definitions)?;
         let mut cursor = class;
         let mut rooted = false;
         while let Some(edge) = hierarchy

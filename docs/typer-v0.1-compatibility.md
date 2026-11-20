@@ -1642,6 +1642,14 @@ initializer, and malformed owner/context relationships are rejected with a
 focused context error. This entry point builds context only; field completion
 uses it to type an initializer when inferring that field's type.
 
+`SourceTyper::type_field_initializer(field)` looks up the field's source
+initializer and checks it against the field type in one transaction. It
+returns the typed RHS recorded in the driver's source-to-typed index. When
+field inference has already typed that RHS in the same driver, the caller
+gets the existing root. A fresh driver that shares the completed field
+signature types the RHS into its own output. If the initializer fails, the
+field signature, typed arena and mappings retain their pre-call state.
+
 `complete_symbol` infers ordinary source fields owned by a class when their
 canonical `ValDef` has an initializer and a synthetic inferred `TypeTree`.
 For inferred fields, source `var` syntax must agree with the semantic
@@ -2131,3 +2139,88 @@ limits are p95 depth <= 6 and completed-class fanout <= 16. The
 [checkpoint](typer-classpath-corpus-audit-post-tasty-parents-3.9.0.md) remains
 incomplete until the manually initiated hosted audit reconciles every frozen
 root and its source attribution.
+
+### Class headers and inferred member signatures across source files
+
+The standalone compiler client names the sources and completes their constructor
+signatures. It uses `dotty::try_complete_class_header` for class headers and
+`dotty::try_complete_member_signature` for individual member
+signatures. The client builds one `dotty::SourceDeclarationIndex` from the
+batch's named classes. Looking up a blocked symbol gives its source ID,
+declaring class and symbol kind. The header phase accepts indexed classes and
+the member phase accepts indexed fields and methods. The client uses the source
+ID to select the AST and semantic index for the next attempt. The member API
+checks the declaration against these inputs even for a cached signature. An
+invalid target or a mismatched unit returns `MemberSignatureError::InvalidMember`.
+
+- `Ok(SignatureCompletion::Complete(ty))` gives the canonical signature.
+- `Ok(SignatureCompletion::BlockedOn(dependency))` identifies a missing method
+  or public field signature or, during header completion, a class header in a
+  different source of the batch. The attempt has rolled back. The client can
+  complete the dependency in its owning source and retry the original request.
+- A member typing failure preserves the original `TyperError` along with the
+  requested symbol and its indexed declaration. An unavailable class
+  outside the batch retains `NewClassInfoUnavailable`, and an unavailable
+  method or public field outside the batch retains `MemberTypeUnavailable`.
+
+For `class Derived(start: Int) extends Base(start)`, the client can receive
+`BlockedOn` with the symbol of `Base` even when its constructor signature is
+already complete. After completing the base header, retrying the derived
+header records the typed parent application and its argument in the
+session's header bindings under the derived source ID. A type mismatch in the
+argument remains a typing error. Earlier applications and their typed arena
+remain available for planning.
+
+After headers, `dotty::try_complete_class_field_signatures` visits class-owned
+constructor fields followed by public fields declared in the class body. For
+`val answer = provider.value()`, `BlockedOn { field, dependency }` identifies
+`answer` and the missing method in the provider's file. The client completes
+that method in its owning source. For `val answer = provider.seed`, the
+dependency is the symbol of the public field `seed`. With `val seed = 40`,
+both signatures complete as `Int` in either file order. The client follows
+individual member symbols, reports a closed path for cycles involving fields,
+and retries blocked fields after their dependencies complete. Completed fields
+retain their types across retries. A field error includes the class and field
+symbols and the original `TyperError`. The later `type_class_body` call
+produces the typed initializers used by the backend.
+
+For a call with the wrong number of arguments, pass the original
+`TyperError::ApplicationArityMismatch` and its untyped AST to
+`dotty::typer_error_span`. The returned `SourceSpan` covers the call
+expression, including the receiver in `provider.value(1)`. The caller can
+use the source ID and byte range to display the expression alongside the
+expected and actual argument counts. For `ApplicationArgumentTypeMismatch`
+on a source `Apply`, the same function returns the position of the argument
+at the index carried by the error. For example, it locates `true` in
+`provider.diff(9, true)` and the use of `start` in `extends Base(start)`.
+A missing tree or position, a foreign source, an out-of-range argument, or
+an unsupported expression shape or error variant yields `None`. Use the
+AST from the same parse because tree slots and source IDs can be reused.
+A multi-file client can call `dotty::typer_error_span_with(error, ast_for)`
+to look up that AST by source ID. A missing file yields `None`.
+Both functions locate the checked expression for `ExpectedExpressionTypeMismatch`
+and the initializer of a local declaration for `LocalValueTypeMismatch`.
+For missing or ambiguous term and type names and for `WrongTypeNameKind`,
+a recorded position must belong to the same source and lie within the
+reported tree. If the error has no recorded position, the tree supplies
+the range. For `MemberNotFound` the reported tree supplies the range,
+including the qualifier in `obj.missing`. For an `if` or `while` condition
+type mismatch, the range covers the condition. A return type mismatch
+locates the returned expression or, for a bare `return`, the instruction itself.
+An immutable or non-assignable assignment target points to the left-hand side.
+An expected-type mismatch in the assigned value points to the right-hand expression.
+An explicit type argument count mismatch locates the whole type application
+(`f[Int, Boolean]`), and a bound violation locates the offending type argument.
+A call with no applicable overload or several equally applicable overloads
+locates the whole call. The original error retains the rejected candidates and
+their reasons, or the ambiguous candidates. Clients can match each rejected
+symbol's `dotty::typer::OverloadRejection` to report its expected and actual
+argument counts or the index and types of a nonconforming argument.
+
+For `A.f(b: B) = b.g()`, the external client observes the symbol of `B.g`,
+completes it and retries `A.f`. A call to the same zero-argument method with
+one argument produces `ApplicationArityMismatch` at the call site after the
+dependency completes. The client detects cross-file cycles on its active
+stack and reports the reentered method. Both methods in the two-file cycle
+remain incomplete. The JVM client fixture also compares class bytes for both
+input orders and executes the inferred call on JDK 21.

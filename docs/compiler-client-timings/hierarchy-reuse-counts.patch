@@ -1,0 +1,54 @@
+--- a/crates/dotty-jvm/src/emission.rs
++++ b/crates/dotty-jvm/src/emission.rs
+@@ -64,6 +64,10 @@
+     verification: Result<ClassHierarchy, ClassHierarchyError>,
+ }
+
++std::thread_local! {
++    pub(super) static PREP_COUNTS: std::cell::Cell<Option<(usize, usize)>> = const { std::cell::Cell::new(None) };
++}
++
+ impl JvmCompilationUnit<'_> {
+     /// Validates the unit and projects metadata once for subsequent class emission.
+     /// The returned value can be borrowed by multiple scoped worker threads.
+@@ -71,6 +75,7 @@
+         &'a self,
+         definitions: &'a Definitions,
+     ) -> Result<PreparedJvmEmission<'a>, JvmCodegenError> {
++        PREP_COUNTS.set(Some((0, 0)));
+         let hierarchy = self.class_hierarchy(definitions)?;
+         let metadata = crate::identity::metadata_with_hierarchy(self, definitions, &hierarchy)?;
+         crate::identity::validate_accessor_inheritance_for_emission(&metadata)?;
+@@ -84,6 +89,8 @@
+                 .into_iter()
+                 .map(|edge| (edge.child_internal_name, edge.parent_internal_name)),
+         );
++        let (hierarchies, validations) = PREP_COUNTS.take().unwrap();
++        eprintln!("prepare_counts,{},{hierarchies},{validations}", self.classes.len());
+         Ok(PreparedJvmEmission {
+             unit: self,
+             definitions,
+--- a/crates/dotty-jvm/src/identity.rs
++++ b/crates/dotty-jvm/src/identity.rs
+@@ -178,6 +178,9 @@
+         .iter()
+         .map(|plan| (plan.class, plan))
+         .collect::<HashMap<_, _>>();
++    if let Some((hierarchies, validations)) = crate::emission::PREP_COUNTS.get() {
++        crate::emission::PREP_COUNTS.set(Some((hierarchies + 1, validations)));
++    }
+     for plan in &unit.classes {
+         let info = class_info(unit.store, plan.class)?;
+         if let [parent_type] = info.parents.as_slice()
+--- a/crates/dotty-jvm/src/lib.rs
++++ b/crates/dotty-jvm/src/lib.rs
+@@ -2979,6 +2979,9 @@
+     /// then typed-arena allocation order. Symbol identity is always the
+     /// canonical [`SymbolId`]; equal names never substitute for identity.
+     pub fn validate(&self) -> Result<(), JvmCodegenError> {
++        if let Some((hierarchies, validations)) = emission::PREP_COUNTS.get() {
++            emission::PREP_COUNTS.set(Some((hierarchies, validations + 1)));
++        }
+         let mut seen_classes = HashSet::new();
+         let mut seen_methods = HashSet::new();
+         let mut seen_fields = HashSet::new();

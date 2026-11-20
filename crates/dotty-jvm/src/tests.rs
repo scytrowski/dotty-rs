@@ -663,12 +663,20 @@ fn rejects_duplicate_method_plans_and_missing_or_unknown_body_roots() {
 
 #[test]
 fn rejects_duplicate_class_and_parameter_plans() {
-    let fixture = Fixture::new();
+    let mut fixture = Fixture::new();
+    let definitions = Definitions::bootstrap(&mut fixture.store);
     let mut unit = fixture.unit();
     unit.classes.push(unit.classes[0].clone());
     assert_eq!(
         unit.validate(),
         Err(JvmCodegenError::DuplicateClassPlan {
+            class: fixture.class
+        })
+    );
+
+    assert_eq!(
+        unit.prepare_emission(&definitions).err(),
+        Some(JvmCodegenError::DuplicateClassPlan {
             class: fixture.class
         })
     );
@@ -1209,16 +1217,22 @@ fn reference_projection_requires_the_complete_unit_proof_for_a_deep_class() {
     );
 
     let identities = crate::identity::unit_class_identities(&unit).unwrap();
-    assert_eq!(
-        crate::reference::project_method_signature_type(
-            &fixture.store,
-            third_type,
-            &fixture.definitions,
-            &identities,
-            Some(&unit),
-        ),
-        Ok(JvmType::Reference(fixture.third))
-    );
+    let hierarchy = unit.class_hierarchy(&fixture.definitions).unwrap();
+    for proof in [None, Some(&hierarchy)] {
+        assert_eq!(
+            crate::reference::project_method_signature_type(
+                &fixture.store,
+                third_type,
+                &fixture.definitions,
+                &identities,
+                Some(crate::reference::ReferenceUnit {
+                    unit: &unit,
+                    hierarchy: proof
+                }),
+            ),
+            Ok(JvmType::Reference(fixture.third))
+        );
+    }
     assert!(matches!(
         crate::reference::project_method_signature_type(
             &fixture.store,
@@ -1257,96 +1271,54 @@ fn reference_assignability_uses_only_the_validated_two_edge_ancestor_path() {
         SymbolFlags::EMPTY,
     );
     let unit = fixture.unit(&[fixture.base, fixture.derived, fixture.third, other]);
-    let reference = |class| JvmType::Reference(class);
-
-    assert!(
+    let hierarchy = unit.class_hierarchy(&fixture.definitions).unwrap();
+    for proof in [None, Some(&hierarchy)] {
+        let scope = crate::reference::ReferenceUnit {
+            unit: &unit,
+            hierarchy: proof,
+        };
+        let assignable = |found, expected| {
+            crate::reference::is_assignable(
+                Some(scope),
+                JvmType::Reference(found),
+                JvmType::Reference(expected),
+                &fixture.definitions,
+            )
+        };
+        assert_eq!(assignable(fixture.third, fixture.base), Ok(true));
+        assert_eq!(assignable(fixture.third, fixture.derived), Ok(true));
+        assert_eq!(assignable(fixture.derived, fixture.base), Ok(true));
+        assert_eq!(assignable(fixture.base, fixture.third), Ok(false));
+        assert_eq!(assignable(other, fixture.base), Ok(false));
+        for found in [fixture.third, foreign_base] {
+            assert_eq!(
+                assignable(found, foreign_base),
+                Err(JvmCodegenError::ReferenceClassNotInJvmPlan {
+                    class: foreign_base
+                })
+            );
+        }
+    }
+    assert_eq!(
         crate::reference::is_assignable(
-            Some(&unit),
-            reference(fixture.third),
-            reference(fixture.base),
-            &fixture.definitions,
-        )
-        .unwrap()
-    );
-    assert!(
-        crate::reference::is_assignable(
-            Some(&unit),
-            reference(fixture.third),
-            reference(fixture.derived),
-            &fixture.definitions,
-        )
-        .unwrap()
-    );
-    assert!(
-        crate::reference::is_assignable(
-            Some(&unit),
-            reference(fixture.derived),
-            reference(fixture.base),
-            &fixture.definitions,
-        )
-        .unwrap()
-    );
-    assert!(
-        !crate::reference::is_assignable(
-            Some(&unit),
-            reference(fixture.base),
-            reference(fixture.third),
-            &fixture.definitions,
-        )
-        .unwrap()
-    );
-    assert!(
-        !crate::reference::is_assignable(
-            Some(&unit),
-            reference(other),
-            reference(fixture.base),
-            &fixture.definitions,
-        )
-        .unwrap()
-    );
-    assert!(
-        !crate::reference::is_assignable(
             None,
-            reference(fixture.third),
-            reference(fixture.base),
+            JvmType::Reference(fixture.third),
+            JvmType::Reference(fixture.base),
             &fixture.definitions,
-        )
-        .unwrap()
+        ),
+        Ok(false)
     );
 
     let unplanned_unit = fixture.unit(&[fixture.base, fixture.derived]);
     assert_eq!(
         crate::reference::is_assignable(
-            Some(&unplanned_unit),
-            reference(fixture.third),
-            reference(fixture.base),
+            Some((&unplanned_unit).into()),
+            JvmType::Reference(fixture.third),
+            JvmType::Reference(fixture.base),
             &fixture.definitions,
         ),
         Err(JvmCodegenError::ReferenceClassNotInJvmPlan {
-            class: fixture.third,
-        })
-    );
-
-    assert_eq!(
-        crate::reference::is_assignable(
-            Some(&unit),
-            reference(fixture.third),
-            reference(foreign_base),
-            &fixture.definitions,
-        ),
-        Err(JvmCodegenError::ReferenceClassNotInJvmPlan {
-            class: foreign_base,
-        })
-    );
-    assert_eq!(
-        crate::reference::is_assignable(
-            Some(&unit),
-            reference(foreign_base),
-            reference(foreign_base),
-            &fixture.definitions,
-        ),
-        Err(JvmCodegenError::ReferenceClassNotInJvmPlan {
-            class: foreign_base,
+            class: fixture.third
         })
     );
 }
@@ -2086,51 +2058,40 @@ fn method_signature_projection_requires_exact_class_and_package_identity() {
     let unit = fixture.unit();
     let identities = crate::identity::unit_class_identities(&unit).unwrap();
 
-    assert_eq!(
-        crate::reference::project_method_signature_type(
-            unit.store,
-            counter_signature,
-            &fixture.definitions,
-            &identities,
-            None,
-        ),
-        Ok(JvmType::Reference(counter))
-    );
-    assert_eq!(
-        crate::reference::project_method_signature_type(
-            unit.store,
-            wrong_prefix,
-            &fixture.definitions,
-            &identities,
-            None,
-        ),
-        Err(JvmCodegenError::UnsupportedJvmReferenceType {
-            ty: wrong_prefix,
-            kind: crate::UnsupportedJvmReferenceTypeKind::UnsupportedPrefix,
-        })
-    );
-    assert_eq!(
-        crate::reference::project_method_signature_type(
-            unit.store,
-            no_prefix_signature,
-            &fixture.definitions,
-            &identities,
-            None,
-        ),
-        Ok(JvmType::Reference(counter))
-    );
-    assert_eq!(
-        crate::reference::project_method_signature_type(
-            unit.store,
-            foreign_signature,
-            &fixture.definitions,
-            &identities,
-            None,
-        ),
-        Err(JvmCodegenError::ReferenceClassNotInJvmPlan {
-            class: foreign_counter,
-        })
-    );
+    let hierarchy = unit.class_hierarchy(&fixture.definitions).unwrap();
+    let prepared = crate::reference::ReferenceUnit {
+        unit: &unit,
+        hierarchy: Some(&hierarchy),
+    };
+    for scope in [None, Some(prepared)] {
+        let project = |ty| {
+            crate::reference::project_method_signature_type(
+                unit.store,
+                ty,
+                &fixture.definitions,
+                &identities,
+                scope,
+            )
+        };
+        assert_eq!(project(counter_signature), Ok(JvmType::Reference(counter)));
+        assert_eq!(
+            project(wrong_prefix),
+            Err(JvmCodegenError::UnsupportedJvmReferenceType {
+                ty: wrong_prefix,
+                kind: crate::UnsupportedJvmReferenceTypeKind::UnsupportedPrefix,
+            })
+        );
+        assert_eq!(
+            project(no_prefix_signature),
+            Ok(JvmType::Reference(counter))
+        );
+        assert_eq!(
+            project(foreign_signature),
+            Err(JvmCodegenError::ReferenceClassNotInJvmPlan {
+                class: foreign_counter
+            })
+        );
+    }
 }
 
 #[test]
@@ -6961,7 +6922,11 @@ fn emits_explicit_and_implicit_virtual_calls_with_exact_owner_and_descriptor() {
             ty: fixture.definitions.nothing_type,
         });
 
-        let generated = fixture.emit().unwrap();
+        let unit = fixture.unit();
+        let prepared = unit.prepare_emission(&fixture.definitions).unwrap();
+        let builds = crate::identity::METADATA_BUILDS.get();
+        let generated = prepared.emit_class(fixture.class).unwrap();
+        assert_eq!(crate::identity::METADATA_BUILDS.get(), builds);
         let mut reader = Reader::new(generated.bytes());
         let class = ClassFile::decode(&mut reader).unwrap();
         class.validate_references().unwrap();
@@ -7202,7 +7167,16 @@ fn reference_call_values_are_forwarded_and_used_as_receivers_once() {
     fixture.parameters.push(nested_receiver_parameters);
     fixture.bodies.push(nested_receiver_body);
 
-    let generated = fixture.emit().expect("exact planned reference calls lower");
+    let unit = fixture.unit();
+    let hierarchies = crate::identity::HIERARCHY_BUILDS.get();
+    let prepared = unit.prepare_emission(&fixture.definitions).unwrap();
+    assert_eq!(crate::identity::HIERARCHY_BUILDS.get() - hierarchies, 1);
+    let builds = crate::identity::METADATA_BUILDS.get();
+    let generated = prepared
+        .emit_class(fixture.class)
+        .expect("exact planned reference calls lower");
+    assert_eq!(crate::identity::HIERARCHY_BUILDS.get() - hierarchies, 1);
+    assert_eq!(crate::identity::METADATA_BUILDS.get(), builds);
     let mut reader = Reader::new(generated.bytes());
     let class = ClassFile::decode(&mut reader).expect("decode reference-call class");
     class

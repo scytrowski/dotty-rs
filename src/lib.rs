@@ -15,17 +15,46 @@ pub use dotty_classfile::classfile;
 /// TASTy unpickler, and namer/typer.
 pub use dotty_core::core;
 
+/// Scala 3 source lexer and contextual scanner.
+pub use dotty_lexer as lexer;
+
 /// Scala 3.9.0 source parser infrastructure and parser-facing AST APIs.
 pub use dotty_parser as parser;
 
-/// Source declaration signature completion.
+/// Source declaration naming and semantic indexing.
+pub use dotty_namer as namer;
+
+/// Source signature completion and expression typing.
 pub use dotty_typer as typer;
+
+/// JVM class planning and emission from typed trees.
+pub use dotty_jvm as jvm;
 
 /// Classpath loading APIs, unifying TASTy and class file entries.
 pub use dotty_classloader::classloader;
 
 /// Semantic unpickling of TASTy into the shared `dotty-core` model.
 pub use dotty_tasty_unpickler::tasty_unpickler;
+
+mod class_header;
+pub use class_header::try_complete_class_header;
+
+mod class_field_signatures;
+pub use class_field_signatures::{
+    ClassFieldSignatureCompletion, ClassFieldSignatureError, try_complete_class_field_signatures,
+};
+
+mod member_signature;
+pub use member_signature::{MemberSignatureError, try_complete_member_signature};
+
+mod class_body;
+pub use class_body::{ClassBodyError, type_class_body};
+
+/// JVM class plans for simple source classes with methods and private instance fields.
+pub mod jvm_class_plan;
+
+/// JVM method plans from canonical source and typed declarations.
+pub mod jvm_method_plan;
 
 /// One-session planning for the audited JVM and Scala 3 TASTy class overlap.
 pub mod jvm_tasty_plan;
@@ -38,3 +67,14 @@ pub mod jvm_tasty_constructor_alias;
 
 /// Opt-in emission of a linked `.class` and complete `.tasty` pair.
 pub mod jvm_tasty_artifacts;
+
+/// Source declarations available after naming.
+pub mod source_declarations;
+
+mod source_declaration_index;
+pub use source_declaration_index::{
+    SourceDeclaration, SourceDeclarationIndex, SourceDeclarationIndexError,
+};
+
+mod typer_error_span;
+pub use typer_error_span::{typer_error_span, typer_error_span_with};

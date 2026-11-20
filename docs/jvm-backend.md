@@ -63,6 +63,102 @@ kind and owner and check that a body root exists, but it relies on the
 frontend to supply the correct formal parameters, order, and method/body
 association.
 
+For a concrete source method, the `dotty` facade provides
+`jvm_method_plan::JvmMethodPlanner::new(&store, &source_ast, &source_index, &typed_output)`.
+Call `plan(method_symbol)` to obtain a `JvmMethodPlan` before assembling the
+class. The planner checks the typed definition's symbol and the exact mapping
+of the source body, verifies each value parameter in declaration order, and
+selects the method's ordinary locals from the typer output. A substituted body
+from another method yields `MethodPlanError::BodyMismatch` even when it has the
+same type and comes from the same file. For deferred planning, the planner also
+accepts the retained bindings and the session's extended typed arena.
+
+For an ordinary top-level source class, the facade also provides
+`jvm_class_plan::JvmClassPlanner::new(&store, &source_ast, &source_index)`.
+For each named class, call
+`dotty::type_class_body(class, &ast, &index, &mut store, definitions, &packages, &mut arena)`.
+It checks the class and its members against the named source, types its field
+initializers and methods in declaration order, and returns the completed
+`TypedClassBody`. An inconsistent declaration view yields `InvalidClass` before
+typing starts. For a typing failure, `ClassBodyError::Member` identifies the class
+and declaration and carries the original typer error. Earlier successful members
+can extend the session arena and store. Previously completed classes can still be
+planned and emitted with the same arena. Keep one
+`TypedClassBodies` collection per session and call `bodies.record(body)` as
+each body becomes available. A second body for the same symbol returns
+`DuplicateClassBody` and preserves the first. Visit declarations in the desired
+planning order and call `plan_typed_class(class, &arena, bodies.get(class.symbol)?)`
+using the final arena. A lookup for an unrecorded class returns `MissingClassBody`
+with its symbol. For a parent application,
+supply the session’s header mappings via `with_header_bindings`.
+Field roots are looked up by source RHS and local declarations by method
+owner. A body retained for another class returns `ForeignClassBody`.
+
+Use `plan(class_symbol, method_plans)` for a method-only template.
+The planner accepts a public primary constructor with zero or
+one value parameter list. An empty signature selects `ImplicitNoArg`. A list
+may mix ordinary parameters with public `val` and `var` parameters. The
+planner passes constructor-owned formals to `JvmPrimaryConstructorPlan` in
+source order. For each constructor `val` or `var`, its source tree also
+identifies the class-owned field. The backend uses that binding to initialize
+private storage and emit a public getter, plus a setter for `var`. Callers
+supply method plans only for source methods and typed initializers only for
+class-body fields. A field initializer may read an ordinary parameter
+without introducing storage for the parameter itself.
+
+When compiling multiple source files, complete constructor signatures and
+public field signatures (in the constructor or class body) with the declaring
+file's typer before typing uses in other files. Contextual, by-name, repeated
+and defaulted parameters are outside this facade's scope. A default yields
+`ClassPlanError::DefaultConstructorParameter` with the parameter's source tree.
+For initialized public or unqualified private `val` and `var` fields, use
+`plan_with_fields(class_symbol, method_plans, &typed_ast, initializers)`.
+For each `TypedFieldInitializer`, pass the field symbol, the root returned by
+`SourceTyper::type_field_initializer(field)`, and that typer's source-to-typed
+index. Keep the typed arena from the same session for emission. The planner checks the
+field owner, declaration, exact RHS mapping and source position. The source
+`var` marker must agree with the canonical symbol's `MUTABLE` flag. It accepts
+inputs in any order and returns fields in template order for initialization.
+For an ordinary public body field the planner builds a
+`JvmPublicBodyFieldSourceProof` from its declaration and typed initializer.
+The backend emits private storage, a public getter and, for a `var`, a public
+setter. Explicitly modified public
+fields (such as `lazy val` or `final val`) and standalone initializer
+expressions are outside this planner's scope.
+
+The planner also accepts a single bare type identifier in `extends Base`.
+Complete the child class header first so its `ClassInfo` identifies the source
+class that the typer resolved as the parent. Include both class plans in the
+same JVM unit. Unit validation checks the direct parent and its public
+no-argument constructor before emission.
+
+For `class Derived(start: Int) extends Base(start)`, keep one
+`jvm_class_plan::ClassHeaderBindings` per session. Use `dotty::try_complete_class_header` for each
+attempt, passing the class symbol, its source AST and naming index, the store,
+definitions and packages, the mutable session arena and bindings, and a predicate
+that identifies dependencies the client can schedule. On `Complete`, the function
+records all mappings produced by the attempt, including applications from
+parents completed recursively in the same source. On `BlockedOn`, the client
+schedules the dependency in its own source and retries. A typing error or a
+conflicting mapping rolls back the attempt. Previously completed headers can
+still be planned with the same arena and bindings.
+Configure each planner with `with_header_bindings(&typed_ast, &bindings)`
+using the final session arena. The planner finds the parent application and
+checks its single argument against the mapped reference to the child's own
+constructor parameter. Mismatched bindings yield
+`ClassPlanError::InvalidParentApplication`. Literal arguments such as
+`extends Base(1)` remain outside the facade's scope.
+
+Across files, complete the parent class and its constructor in the parent's
+source context before completing the child header. The parent constructor
+belongs to its declaring source. The call and argument trees belong to the
+child's source.
+
+The planner matches the supplied methods by canonical
+symbol and returns them in source order. Unexpected, repeated and missing
+method plans produce distinct errors before emission. All plans and IDs must
+belong to the same session.
+
 Each method plan may also carry `JvmLocalBinding` entries for ordinary local
 `val` and `var` declarations. A binding pairs the exact typed `ValDef`
 `TreeId<Typed>` with the existing canonical `SymbolId::Local` whose owner is
@@ -70,8 +166,12 @@ the planned method. The Typer source adapter obtains the tree identity from
 `SourceTypedIndex` and the symbol from `SourceTyper::local_symbol_at` through
 `typed_local_binding_at`; it does not search by a name, span, or tree order.
 The adapter records mutability from the symbol flags and orders bindings by
-typed declaration ID for deterministic plan validation. Bindings live only in
-their containing method plan. Validation rejects stale or non-`ValDef` trees,
+typed declaration ID for deterministic plan validation. A consumer building its plan after typing can use
+`SourceTyper::into_typed_output` to take the session arena, the source-to-typed
+index and all ordinary local bindings produced by that driver. The bindings
+carry distinct typed declarations, symbols and scopes for shadowed values.
+Group them by the symbol's method owner when building multi-method plans.
+Bindings live only in their containing method plan. Validation rejects stale or non-`ValDef` trees,
 foreign owners, duplicate declaration or symbol IDs, parameter reuse,
 incomplete types, type or mutability disagreement, and unsupported lazy,
 given, implicit, erased, or inline flags. The semantic store and typed arena
@@ -1164,8 +1264,13 @@ constructor parameters and direct allocations, canonical `Int.+`, canonical
 Boolean negation, empty-statement blocks, and reads of earlier initialized
 primitive or planned-reference fields. A body accessor field uses its exact
 class-body source proof and typed RHS; it never borrows a constructor formal.
-Self and forward field reads, user method calls, `this` escape, control-flow
-expressions, and other unsupported typed nodes fail with contextual
+An initializer may call a public zero-argument method returning `Int` declared
+by the exact planned class of a constructor parameter. For
+`val answer = provider.value()`, the receiver is loaded from the canonical
+constructor formal's local slot. The validated virtual call target supplies the
+owner, name and `()I` descriptor, and the constructor stores the result in
+`answer`. Calls on `this`, self and forward field reads, `this` escape,
+control-flow expressions, and other unsupported typed nodes fail with contextual
 `JvmCodegenError`s.
 
 The plan stores constructor accessor copies separately as
@@ -1304,3 +1409,36 @@ A first `implicit` clause uses the same JVM calling convention. The
 source-to-JVM pipeline. On the JVM, an inferred or positional argument goes
 straight to `legacy(I)I`. A call with no evidence first invokes
 `legacy$default$1()I`.
+
+## Emitting several classes from one unit
+
+Call `unit.prepare_emission(&definitions)` after building the complete unit.
+The returned `PreparedJvmEmission` borrows that unit and its definitions.
+Its `emit_class(symbol)` method reuses unit metadata, class identities and
+the verifier hierarchy across classes. Method call lowering also borrows the
+validated semantic hierarchy for reference projection and assignability. Workers can share the prepared value by
+reference. Each call returns one owned artifact or a class-specific error.
+The caller chooses task order and decides when to publish a completed batch.
+Some expression-specific checks still query the unit during lowering.
+
+The standalone client compares single-class and concurrent prepared output
+byte for byte and executes a cross-file call on JDK 21. To measure the JVM
+phases independently of parsing, typing and filesystem output, run
+
+```sh
+cargo test --release --manifest-path tests/fixtures/compiler-client/Cargo.toml \
+  --target-dir target --locked measure_jvm_batch -- --ignored --nocapture
+```
+
+Local medians over five release-mode samples with Rust 1.98.1, in microseconds,
+for distinct Object-rooted classes with one integer-literal method each:
+
+| Classes | Validate | Metadata including validation | Original per-class API, full batch¹ | Prepare once | Emit prepared batch, one thread |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.26 | 2.48 | 14.8 | 2.29 | 6.32 |
+| 10 | 0.91 | 22.4 | 867 | 21.8 | 52.6 |
+| 100 | 8.62 | 305 | 95,734 | 369 | 797 |
+
+¹ Baseline at `8ea7c987d7` using the same client workload. Preparation includes
+validation and metadata projection. The last column starts after preparation.
+These numbers measure a simple method shape and exclude parallel scheduling.

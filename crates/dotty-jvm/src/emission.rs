@@ -4,13 +4,14 @@ use std::collections::HashSet;
 
 use dotty_classfile::access_flags::{ACC_PUBLIC, MethodAccessFlags};
 use dotty_classfile::bytecode::CodeBuilder;
+use dotty_classfile::bytecode::{ClassHierarchy, ClassHierarchyError};
 use dotty_classfile::class_file::ClassFileVersion;
 use dotty_classfile::class_file_builder::ClassFileBuilder;
 use dotty_classfile::tasty_link::TastyLinkId;
-use dotty_core::ids::SymbolId;
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::{SymbolInfo, SymbolKind};
 use dotty_core::types::{MethodType, Type, TypeRefTarget};
+use dotty_core::{Definitions, ids::SymbolId};
 
 use crate::{
     GeneratedClass, JVM_CLASSFILE_MAJOR_VERSION, JvmClassInitializationPlan, JvmCodegenError,
@@ -40,20 +41,80 @@ fn emit_class_with_optional_tasty_link(
     definitions: &dotty_core::definitions::Definitions,
     tasty_link: Option<TastyLinkId>,
 ) -> Result<GeneratedClass, JvmCodegenError> {
-    unit.validate()?;
-    let plan = unit
+    if !unit.classes.iter().any(|plan| plan.class == class_symbol) {
+        unit.validate()?;
+        return Err(JvmCodegenError::MissingClassPlan {
+            class: class_symbol,
+        });
+    }
+    emit_prepared_class(
+        &unit.prepare_emission(definitions)?,
+        class_symbol,
+        tasty_link,
+    )
+}
+
+/// Immutable unit-wide metadata shared by class emission workers.
+/// Class-specific lowering and verification may still return errors.
+pub struct PreparedJvmEmission<'a> {
+    unit: &'a JvmCompilationUnit<'a>,
+    definitions: &'a Definitions,
+    hierarchy: crate::JvmClassHierarchy,
+    metadata: Vec<crate::JvmClassMetadata>,
+    identities: Vec<crate::JvmClassIdentity>,
+    verification: Result<ClassHierarchy, ClassHierarchyError>,
+}
+
+impl JvmCompilationUnit<'_> {
+    /// Validates the unit and projects metadata once for subsequent class emission.
+    /// The returned value can be borrowed by multiple scoped worker threads.
+    pub fn prepare_emission<'a>(
+        &'a self,
+        definitions: &'a Definitions,
+    ) -> Result<PreparedJvmEmission<'a>, JvmCodegenError> {
+        let hierarchy = self.class_hierarchy(definitions)?;
+        let metadata = crate::identity::metadata_with_hierarchy(self, definitions, &hierarchy)?;
+        crate::identity::validate_accessor_inheritance_for_emission(&metadata)?;
+        let identities = metadata
+            .iter()
+            .map(|class| class.identity().clone())
+            .collect();
+        let verification = ClassHierarchy::from_edges(
+            hierarchy
+                .internal_name_edges()
+                .into_iter()
+                .map(|edge| (edge.child_internal_name, edge.parent_internal_name)),
+        );
+        Ok(PreparedJvmEmission {
+            unit: self,
+            definitions,
+            hierarchy,
+            metadata,
+            identities,
+            verification,
+        })
+    }
+}
+
+impl PreparedJvmEmission<'_> {
+    /// Emits one complete class from this plan, using only worker-local bytecode state.
+    pub fn emit_class(&self, class: SymbolId) -> Result<GeneratedClass, JvmCodegenError> {
+        emit_prepared_class(self, class, None)
+    }
+}
+
+fn emit_prepared_class(
+    prepared: &PreparedJvmEmission<'_>,
+    class_symbol: SymbolId,
+    tasty_link: Option<TastyLinkId>,
+) -> Result<GeneratedClass, JvmCodegenError> {
+    let unit = prepared.unit;
+    let definitions = prepared.definitions;
+    let (plan, metadata) = unit
         .classes
         .iter()
-        .find(|plan| plan.class == class_symbol)
-        .ok_or(JvmCodegenError::MissingClassPlan {
-            class: class_symbol,
-        })?;
-
-    let all_metadata = unit.metadata(definitions)?;
-    super::identity::validate_accessor_inheritance_for_emission(&all_metadata)?;
-    let metadata = all_metadata
-        .iter()
-        .find(|metadata| metadata.identity().symbol() == class_symbol)
+        .zip(&prepared.metadata)
+        .find(|(plan, _)| plan.class == class_symbol)
         .ok_or(JvmCodegenError::MissingClassPlan {
             class: class_symbol,
         })?;
@@ -76,7 +137,13 @@ fn emit_class_with_optional_tasty_link(
     let constructor_initializers = match &plan.initialization {
         JvmClassInitializationPlan::ImplicitNoArg
         | JvmClassInitializationPlan::PrimaryConstructor(_) => {
-            Some(unit.lower_constructor_field_initializers(class_symbol, definitions)?)
+            Some(crate::constructor_initializers::lower_with_metadata(
+                unit,
+                plan,
+                definitions,
+                &prepared.metadata,
+                &prepared.identities,
+            )?)
         }
         JvmClassInitializationPlan::Unsupported => {
             return Err(JvmCodegenError::UnsupportedConstructor {
@@ -101,20 +168,7 @@ fn emit_class_with_optional_tasty_link(
             .tasty_link(tasty_link)
             .map_err(|error| class_file_error(class_symbol, None, error))?;
     }
-    let verification_hierarchy = unit
-        .class_hierarchy(definitions)?
-        .internal_name_edges()
-        .into_iter()
-        .map(|edge| {
-            (
-                edge.child_internal_name().to_owned(),
-                edge.parent_internal_name().to_owned(),
-            )
-        });
-    let verification_hierarchy = dotty_classfile::bytecode::ClassHierarchy::from_edges(
-        verification_hierarchy,
-    )
-    .map_err(|error| {
+    let verification_hierarchy = prepared.verification.clone().map_err(|error| {
         class_file_error(
             class_symbol,
             None,
@@ -174,8 +228,10 @@ fn emit_class_with_optional_tasty_link(
             let mut constructor = CodeBuilder::new();
             if !crate::constructor_initializers::append_direct_super_constructor_call(
                 unit,
-                class_symbol,
+                plan,
                 definitions,
+                &prepared.metadata,
+                &prepared.identities,
                 &mut constructor,
             )? {
                 constructor = constructor_prefix(class_symbol, superclass.parent_internal_name())?;
@@ -294,9 +350,13 @@ fn emit_class_with_optional_tasty_link(
             method: method_plan.method,
         })?;
         let code = crate::expression::lower_planned_method_body(
-            unit,
+            crate::reference::ReferenceUnit {
+                unit,
+                hierarchy: Some(&prepared.hierarchy),
+            },
             metadata,
             definitions,
+            &prepared.metadata,
             method_metadata,
             body,
         )?;

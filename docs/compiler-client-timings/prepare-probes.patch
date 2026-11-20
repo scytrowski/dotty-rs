@@ -1,0 +1,99 @@
+diff --git a/crates/dotty-jvm/src/emission.rs b/crates/dotty-jvm/src/emission.rs
+index 2fe0fff98a..f7c5c40edf 100644
+--- a/crates/dotty-jvm/src/emission.rs
++++ b/crates/dotty-jvm/src/emission.rs
+@@ -64,6 +64,19 @@ pub struct PreparedJvmEmission<'a> {
+     verification: Result<ClassHierarchy, ClassHierarchyError>,
+ }
+
++// Temporary probes for the release benchmark. Collect on the preparing thread.
++#[derive(Clone, Copy, Default)]
++pub(super) struct MetadataProbe {
++    pub(super) reference_hierarchies: usize,
++    pub(super) reference_hierarchy_time: std::time::Duration,
++    pub(super) validations: usize,
++    pub(super) validation_time: std::time::Duration,
++}
++
++std::thread_local! {
++    pub(super) static METADATA_PROBE: std::cell::Cell<Option<MetadataProbe>> = const { std::cell::Cell::new(None) };
++}
++
+ impl JvmCompilationUnit<'_> {
+     /// Validates the unit and projects metadata once for subsequent class emission.
+     /// The returned value can be borrowed by multiple scoped worker threads.
+@@ -71,8 +84,13 @@ impl JvmCompilationUnit<'_> {
+         &'a self,
+         definitions: &'a Definitions,
+     ) -> Result<PreparedJvmEmission<'a>, JvmCodegenError> {
++        let start = std::time::Instant::now();
+         let hierarchy = self.class_hierarchy(definitions)?;
++        let hierarchy_done = std::time::Instant::now();
++        METADATA_PROBE.set(Some(MetadataProbe::default()));
+         let metadata = crate::identity::metadata_with_hierarchy(self, definitions, &hierarchy)?;
++        let metadata_done = std::time::Instant::now();
++        let probe = METADATA_PROBE.take().unwrap();
+         crate::identity::validate_accessor_inheritance_for_emission(&metadata)?;
+         let identities = metadata
+             .iter()
+@@ -84,6 +102,18 @@ impl JvmCompilationUnit<'_> {
+                 .into_iter()
+                 .map(|edge| (edge.child_internal_name, edge.parent_internal_name)),
+         );
++        let end = std::time::Instant::now();
++        eprintln!(
++            "prepare_probe,{},{},{},{},{},{},{},{}",
++            self.classes.len(),
++            (hierarchy_done - start).as_nanos(),
++            (metadata_done - hierarchy_done).as_nanos(),
++            (end - metadata_done).as_nanos(),
++            probe.reference_hierarchies,
++            probe.reference_hierarchy_time.as_nanos(),
++            probe.validations,
++            probe.validation_time.as_nanos(),
++        );
+         Ok(PreparedJvmEmission {
+             unit: self,
+             definitions,
+diff --git a/crates/dotty-jvm/src/identity.rs b/crates/dotty-jvm/src/identity.rs
+index 8712600e36..d474bb250d 100644
+--- a/crates/dotty-jvm/src/identity.rs
++++ b/crates/dotty-jvm/src/identity.rs
+@@ -172,7 +172,16 @@ pub(super) fn unit_hierarchy(
+     unit: &crate::JvmCompilationUnit<'_>,
+     definitions: &Definitions,
+ ) -> Result<crate::JvmClassHierarchy, JvmCodegenError> {
++    let probe_start = crate::emission::METADATA_PROBE
++        .get()
++        .map(|_| std::time::Instant::now());
+     unit.validate()?;
++    if let Some(start) = probe_start {
++        let mut probe = crate::emission::METADATA_PROBE.get().unwrap();
++        probe.validations += 1;
++        probe.validation_time += start.elapsed();
++        crate::emission::METADATA_PROBE.set(Some(probe));
++    }
+     let plans = unit
+         .classes
+         .iter()
+diff --git a/crates/dotty-jvm/src/reference.rs b/crates/dotty-jvm/src/reference.rs
+index 0a0fedffe1..d48ef67513 100644
+--- a/crates/dotty-jvm/src/reference.rs
++++ b/crates/dotty-jvm/src/reference.rs
+@@ -487,7 +487,16 @@ fn project_class(
+     }
+
+     let object_rooted = if let Some(unit) = unit {
++        let probe_start = crate::emission::METADATA_PROBE
++            .get()
++            .map(|_| std::time::Instant::now());
+         let hierarchy = unit.class_hierarchy(definitions)?;
++        if let Some(start) = probe_start {
++            let mut probe = crate::emission::METADATA_PROBE.get().unwrap();
++            probe.reference_hierarchies += 1;
++            probe.reference_hierarchy_time += start.elapsed();
++            crate::emission::METADATA_PROBE.set(Some(probe));
++        }
+         let mut cursor = class;
+         let mut rooted = false;
+         while let Some(edge) = hierarchy

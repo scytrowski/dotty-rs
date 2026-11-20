@@ -23,6 +23,7 @@ use crate::{SourceTypeIndex, SourceTypedIndex};
 mod application;
 pub use application::ConstructorCandidate;
 mod completion;
+pub use completion::SignatureCompletion;
 mod context;
 mod contextual;
 mod error;
@@ -201,6 +202,17 @@ impl ActiveLocalTypeScope {
     }
 }
 
+/// Owned results for consumers that plan code generation after typing several files.
+pub struct TypedSourceOutput {
+    /// Session arena, including all trees passed to `new_with_typed_ast`.
+    pub typed_ast: AstArena<Typed>,
+    /// Mappings produced while typing this source.
+    pub source_typed_index: SourceTypedIndex,
+    /// Ordinary local values from this source in typed declaration ID order.
+    /// The owning method of each symbol is available in the session store.
+    pub local_bindings: Vec<TypedLocalBinding>,
+}
+
 /// Canonical identity for one successfully typed ordinary local value.
 ///
 /// The declaration is the exact typed `ValDef` recorded for its source tree;
@@ -276,6 +288,29 @@ impl<'a> SourceTyper<'a> {
         definitions: Definitions,
         packages: &'a Packages,
     ) -> Self {
+        Self::new_with_typed_ast(
+            arena,
+            source,
+            index,
+            store,
+            definitions,
+            packages,
+            AstArena::new(),
+        )
+    }
+
+    /// Starts typing a fresh source unit, appending trees to the session's output arena.
+    /// All existing trees must belong to the same semantic store. Source indexes
+    /// and expression contexts remain local to this driver.
+    pub fn new_with_typed_ast(
+        arena: &'a AstArena<Untyped>,
+        source: SourceId,
+        index: &'a SourceSemanticIndex,
+        store: &'a mut SemanticStore,
+        definitions: Definitions,
+        packages: &'a Packages,
+        typed_arena: AstArena<Typed>,
+    ) -> Self {
         Self {
             arena,
             source,
@@ -310,7 +345,7 @@ impl<'a> SourceTyper<'a> {
             import_member_cache: HashMap::new(),
             semantic_transaction_depth: 0,
             diagnostics: Vec::new(),
-            typed_arena: AstArena::new(),
+            typed_arena,
             typed_index: SourceTypedIndex::new(),
             generated_factory_bodies: HashMap::new(),
             function_literals: expression::FunctionLiteralIndex::default(),
@@ -388,6 +423,21 @@ impl<'a> SourceTyper<'a> {
             self.active_local_type_scopes.pop();
         }
         result
+    }
+
+    /// Types the initializer of a canonical class-body field in its declaration context.
+    ///
+    /// Completes the field's type if needed and checks its source initializer against it.
+    /// Returns the typed root recorded for the source RHS in this driver's index.
+    /// A root already produced by field inference in this driver is reused. When only
+    /// the field type survives from an earlier driver, this driver types the RHS anew.
+    /// Failure rolls back both completion and expression typing.
+    pub fn type_field_initializer(&mut self, field: SymbolId) -> Result<TreeId<Typed>, TyperError> {
+        let (rhs, context) = self.field_initializer_and_context(field)?;
+        self.run_expression_transaction(|typer, journal, mappings| {
+            let expected = typer.completed_expression_symbol_info(field, journal)?;
+            typer.type_expression_expected_inner(rhs, context, expected, journal, mappings)
+        })
     }
 
     /// Types one canonical source method definition, including its signature,
@@ -809,6 +859,34 @@ impl<'a> SourceTyper<'a> {
             })?;
         new_mappings.push((self.source, tree));
         Ok(typed)
+    }
+
+    /// Releases the semantic store borrow and transfers the exact output arena
+    /// for backend use or for typing another source in the same session.
+    pub fn into_typed_ast(self) -> AstArena<Typed> {
+        self.typed_arena
+    }
+
+    /// Transfers the accumulated session arena and this source unit's mappings.
+    /// The caller can retain the index while passing the arena to the next typer.
+    pub fn into_typed_ast_and_index(self) -> (AstArena<Typed>, SourceTypedIndex) {
+        (self.typed_arena, self.typed_index)
+    }
+
+    /// Moves the arena and index out of the driver and retains its ordinary
+    /// local bindings. Uses the same eligibility rules as [`Self::typed_local_binding_at`].
+    pub fn into_typed_output(self) -> TypedSourceOutput {
+        let mut local_bindings: Vec<_> = self
+            .local_symbols
+            .keys()
+            .filter_map(|&(source, tree)| self.typed_local_binding_at(source, tree))
+            .collect();
+        local_bindings.sort_unstable_by_key(|binding| binding.declaration().index());
+        TypedSourceOutput {
+            typed_ast: self.typed_arena,
+            source_typed_index: self.typed_index,
+            local_bindings,
+        }
     }
 
     /// Returns this driver's source type cache.
@@ -1493,6 +1571,378 @@ mod tests {
         let index =
             name_compilation_unit(&parsed.ast, parsed.root, source, file, store, packages).unwrap();
         (parsed, index)
+    }
+
+    #[test]
+    fn signature_attempt_exposes_only_a_missing_foreign_method_in_the_callers_batch() {
+        let (caller, mut store, mut packages, defs, caller_index, caller_source) =
+            parse_and_name("class Caller { def read(p: Provider) = p.value() }");
+        let provider_source = SourceId::from_index(12);
+        let (provider, provider_index) = parse_and_name_unit(
+            "class Provider { def value() = 7 }",
+            provider_source,
+            &mut store,
+            &mut packages,
+        );
+        let (read, rhs) =
+            method_definition_and_rhs(&caller, &store, &caller_index, caller_source, "read");
+        let value = method_symbol(&provider, &store, &provider_index, provider_source, "value");
+        for (source, parsed, index, method) in [
+            (caller_source, &caller, &caller_index, read),
+            (provider_source, &provider, &provider_index, value),
+        ] {
+            let owner = store.symbols.owner(method).unwrap();
+            SourceTyper::new(&parsed.ast, source, index, &mut store, defs, &packages)
+                .complete_symbol(owner)
+                .unwrap();
+        }
+        let checkpoint = store.checkpoint();
+        {
+            let mut typer = SourceTyper::new(
+                &caller.ast,
+                caller_source,
+                &caller_index,
+                &mut store,
+                defs,
+                &packages,
+            );
+            let ast = typer.typed_ast().checkpoint();
+            assert!(
+                matches!(typer.try_complete_signature(read, |_| false), Err(TyperError::MemberTypeUnavailable { symbol }) if symbol == value)
+            );
+            assert_eq!(
+                typer
+                    .try_complete_signature(read, |candidate| candidate == value)
+                    .unwrap(),
+                SignatureCompletion::BlockedOn(value)
+            );
+            assert_eq!(typer.store().checkpoint(), checkpoint);
+            assert_eq!(typer.typed_ast().checkpoint(), ast);
+            assert_eq!(typer.source_typed_index().get(caller_source, rhs), None);
+            for method in [read, value] {
+                assert!(matches!(
+                    typer.store().symbols.info(method),
+                    SymbolInfo::Missing
+                ));
+            }
+        }
+        // These unavailable members retain the underlying typing error even in batch.
+        for (origin, info) in [
+            (SymbolOrigin::Source(provider_source), SymbolInfo::Error),
+            (
+                SymbolOrigin::Classfile(store.origins.register_classfile()),
+                SymbolInfo::Missing,
+            ),
+            (SymbolOrigin::Synthetic, SymbolInfo::Missing),
+        ] {
+            store.symbols.get_mut(value).origin = origin;
+            store.symbols.set_info(value, info);
+            let mut typer = SourceTyper::new(
+                &caller.ast,
+                caller_source,
+                &caller_index,
+                &mut store,
+                defs,
+                &packages,
+            );
+            assert!(
+                matches!(typer.try_complete_signature(read, |_| true), Err(TyperError::MemberTypeUnavailable { symbol }) if symbol == value)
+            );
+        }
+    }
+
+    #[test]
+    fn signature_attempt_blocks_on_an_in_batch_public_field_after_rollback() {
+        let (caller, mut store, mut packages, defs, index, source) =
+            parse_and_name("class Caller { def read(p: Provider) = p.seed }");
+        let provider_source = SourceId::from_index(12);
+        let (provider, provider_index) = parse_and_name_unit(
+            "class Provider { val seed = 40 }",
+            provider_source,
+            &mut store,
+            &mut packages,
+        );
+        let (read, rhs) = method_definition_and_rhs(&caller, &store, &index, source, "read");
+        let (seed, _) = val_symbol(&provider, &store, &provider_index, provider_source, "seed");
+        let owner = store.symbols.owner(seed).unwrap();
+        SourceTyper::new(
+            &provider.ast,
+            provider_source,
+            &provider_index,
+            &mut store,
+            defs,
+            &packages,
+        )
+        .complete_symbol(owner)
+        .unwrap();
+        let checkpoint = store.checkpoint();
+        let mut typer = SourceTyper::new(&caller.ast, source, &index, &mut store, defs, &packages);
+        let arena = typer.typed_ast().checkpoint();
+        assert!(matches!(typer.try_complete_signature(read, |_| false),
+            Err(TyperError::MemberTypeUnavailable { symbol }) if symbol == seed));
+        assert_eq!(
+            typer
+                .try_complete_signature(read, |dep| dep == seed)
+                .unwrap(),
+            SignatureCompletion::BlockedOn(seed)
+        );
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert_eq!(typer.typed_ast().checkpoint(), arena);
+        assert_eq!(typer.source_typed_index().get(source, rhs), None);
+        for symbol in [read, seed] {
+            assert_eq!(typer.store().symbols.info(symbol), &SymbolInfo::Missing);
+        }
+    }
+
+    #[test]
+    fn signature_attempt_retries_a_class_header_after_its_foreign_parent_is_complete() {
+        let (derived_unit, mut store, mut packages, defs, child_index, child_source) =
+            parse_and_name("class Derived(start: Int) extends Base(start)");
+        let base_source = SourceId::from_index(12);
+        let (base_unit, base_index) = parse_and_name_unit(
+            "class Base(seed: Int)",
+            base_source,
+            &mut store,
+            &mut packages,
+        );
+        let base = class_symbol(&base_unit, &store, &base_index, base_source, "Base");
+        let child = class_symbol(&derived_unit, &store, &child_index, child_source, "Derived");
+        let template = |parsed: &dotty_parser::ParseResult| {
+            parsed
+                .ast
+                .iter()
+                .find_map(|(_, node)| {
+                    if let TreeKind::Template(template) = &node.kind {
+                        Some((template.constructor, template.parents.first().copied()))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap()
+        };
+        let base_ctor = base_index
+            .symbol_at(base_source, template(&base_unit).0)
+            .unwrap();
+        SourceTyper::new(
+            &base_unit.ast,
+            base_source,
+            &base_index,
+            &mut store,
+            defs,
+            &packages,
+        )
+        .complete_symbol(base_ctor)
+        .unwrap();
+        let (constructor_tree, Some(call)) = template(&derived_unit) else {
+            panic!("expected a parent application")
+        };
+        let constructor = child_index
+            .symbol_at(child_source, constructor_tree)
+            .unwrap();
+        let TreeKind::DefDef(definition) = &derived_unit.ast.get(constructor_tree).kind else {
+            panic!("expected constructor")
+        };
+        let formal = child_index
+            .derived_symbol_at(
+                constructor,
+                child_source,
+                definition.value_param_clauses[0][0],
+            )
+            .unwrap();
+        let TreeKind::Apply(application) = &derived_unit.ast.get(call).kind else {
+            panic!("expected parent arguments")
+        };
+        let arg = application.args[0];
+
+        let checkpoint = store.checkpoint();
+        {
+            let mut typer = SourceTyper::new(
+                &derived_unit.ast,
+                child_source,
+                &child_index,
+                &mut store,
+                defs,
+                &packages,
+            );
+            let arena = typer.typed_ast().checkpoint();
+            assert!(matches!(typer.try_complete_signature(child, |_| false),
+                Err(TyperError::NewClassInfoUnavailable { symbol }) if symbol == base));
+            assert_eq!(
+                typer
+                    .try_complete_signature(child, |symbol| symbol == base)
+                    .unwrap(),
+                SignatureCompletion::BlockedOn(base)
+            );
+            assert_eq!(typer.store().checkpoint(), checkpoint);
+            assert_eq!(typer.typed_ast().checkpoint(), arena);
+            assert!(typer.source_typed_index().is_empty());
+            for symbol in [base, child, constructor, formal] {
+                assert_eq!(*typer.store().symbols.info(symbol), SymbolInfo::Missing);
+            }
+        }
+        SourceTyper::new(
+            &base_unit.ast,
+            base_source,
+            &base_index,
+            &mut store,
+            defs,
+            &packages,
+        )
+        .complete_symbol(base)
+        .unwrap();
+        let mut typer = SourceTyper::new(
+            &derived_unit.ast,
+            child_source,
+            &child_index,
+            &mut store,
+            defs,
+            &packages,
+        );
+        let SignatureCompletion::Complete(header) =
+            typer.try_complete_signature(child, |_| false).unwrap()
+        else {
+            panic!("parent is complete")
+        };
+        let Type::ClassInfo(info) = typer.store().types.get(header) else {
+            panic!("expected class header")
+        };
+        assert_eq!(type_symbol(typer.store(), info.parents[0]), base);
+        let mapped = |tree| typer.source_typed_index().get(child_source, tree).unwrap();
+        let TreeKind::Apply(typed_call) = &typer.typed_ast().get(mapped(call)).kind else {
+            panic!("expected typed call")
+        };
+        assert_eq!(typed_call.args, [mapped(arg)]);
+        assert!(
+            matches!(typer.store().types.get(typer.typed_ast().get(mapped(arg)).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == formal)
+        );
+    }
+
+    #[test]
+    fn signature_attempt_preserves_parent_argument_type_errors() {
+        let (parsed, mut store, packages, defs, index, source) = parse_and_name(
+            "class Base(seed: Int); class Derived(start: Boolean) extends Base(start)",
+        );
+        let derived = class_symbol(&parsed, &store, &index, source, "Derived");
+        let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+        assert!(
+            matches!(typer.try_complete_signature(derived, |_| panic!("no dependency to schedule")),
+            Err(TyperError::ApplicationArgumentTypeMismatch { source: site, argument_index: 0, expected, .. })
+            if site == source && expected == defs.int)
+        );
+    }
+
+    #[test]
+    fn conflicting_header_binding_rolls_back_and_can_be_retried() {
+        let (parsed, mut store, packages, defs, index, source) =
+            parse_and_name("class Base(x: Int); class Child(x: Int) extends Base(x)");
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let base = class_symbol(&parsed, &store, &index, source, "Base");
+        let call = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::Template(template) => template.parents.first().copied(),
+                _ => None,
+            })
+            .unwrap();
+        let mut arena = AstArena::new();
+        let prior = TypedAstBuilder::new(&mut arena, &store.types).literal(
+            dotty_core::Constant::Int(9),
+            defs.int,
+            None,
+        );
+        let mut bindings = SourceTypedIndex::new();
+        bindings.insert(source, call, prior).unwrap();
+        let before = (arena.checkpoint(), store.checkpoint());
+        let typer = SourceTyper::new_with_typed_ast(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            defs,
+            &packages,
+            arena,
+        );
+        let (arena, result) = typer.try_complete_signature_into(child, |_| false, &mut bindings);
+        assert!(
+            matches!(result, Err(TyperError::ConflictingTypedExpression { source: site, tree_index, existing, .. })
+            if site == source && tree_index == call.index() && existing == prior.index())
+        );
+        assert_eq!((arena.checkpoint(), store.checkpoint()), before);
+        for symbol in [base, child] {
+            assert_eq!(store.symbols.info(symbol), &SymbolInfo::Missing);
+        }
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings.remove(source, call), Some(prior));
+        let typer = SourceTyper::new_with_typed_ast(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            defs,
+            &packages,
+            arena,
+        );
+        let (arena, result) = typer.try_complete_signature_into(child, |_| false, &mut bindings);
+        assert!(matches!(result, Ok(SignatureCompletion::Complete(_))));
+        assert!(matches!(
+            arena.get(bindings.get(source, call).unwrap()).kind,
+            TreeKind::Apply(_)
+        ));
+    }
+
+    #[test]
+    fn appending_a_source_to_the_typed_arena_preserves_prior_roots_on_rollback() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let a = SourceId::from_index(1);
+        let b = SourceId::from_index(2);
+        let (first, ai) =
+            parse_and_name_unit("class A { def f(): Int = 1 }", a, &mut store, &mut packages);
+        let (second, bi) =
+            parse_and_name_unit("class B { def g(): Int = 2 }", b, &mut store, &mut packages);
+        let (f, a_rhs) = method_definition_and_rhs(&first, &store, &ai, a, "f");
+        let (g, b_rhs) = method_definition_and_rhs(&second, &store, &bi, b, "g");
+        assert_eq!(a_rhs, b_rhs); // Same slot in different input arenas.
+
+        let mut typer = SourceTyper::new(&first.ast, a, &ai, &mut store, definitions, &packages);
+        let context = typer.expression_context_for(f).unwrap();
+        let first_root = typer.type_expression(a_rhs, context).unwrap();
+        let (output, first_index) = typer.into_typed_ast_and_index();
+        let checkpoint = output.checkpoint();
+        let mut typer = SourceTyper::new_with_typed_ast(
+            &second.ast,
+            b,
+            &bi,
+            &mut store,
+            definitions,
+            &packages,
+            output,
+        );
+        let context = typer.expression_context_for(g).unwrap();
+        assert!(
+            matches!(typer.type_expression_expected(b_rhs, context, definitions.boolean),
+            Err(TyperError::ExpectedExpressionTypeMismatch { source, .. }) if source == b)
+        );
+        assert_eq!(typer.typed_ast().checkpoint(), checkpoint);
+        assert_eq!(typer.source_typed_index().get(b, b_rhs), None);
+
+        let second_root = typer.type_expression(b_rhs, context).unwrap();
+        assert_ne!(first_root, second_root);
+        let (output, second_index) = typer.into_typed_ast_and_index();
+        assert_eq!(first_index.get(a, a_rhs), Some(first_root));
+        assert_eq!(second_index.get(b, b_rhs), Some(second_root));
+        assert_eq!(second_index.get(a, a_rhs), None);
+        assert_eq!(
+            output.get(first_root).position,
+            first.ast.get(a_rhs).position
+        );
+        assert_eq!(
+            output.get(second_root).position,
+            second.ast.get(b_rhs).position
+        );
     }
 
     fn val_symbol(
@@ -25948,6 +26398,24 @@ mod tests {
             typer.store().types.get(typer.typed_ast().get(typed_inner_ref).ty),
             Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == inner_local
         ));
+
+        let output = typer.into_typed_output();
+        let [outer, inner] = output.local_bindings.as_slice() else {
+            panic!("expected both nested local bindings");
+        };
+        assert_eq!((outer.symbol(), inner.symbol()), (outer_local, inner_local));
+        assert_ne!(outer.scope(), inner.scope());
+        for (tree, binding) in [(outer_local_tree, outer), (inner_local_tree, inner)] {
+            assert_eq!(
+                output.source_typed_index.get(source, tree),
+                Some(binding.declaration())
+            );
+            assert_eq!(store.symbols.get(binding.symbol()).owner, Some(method));
+            assert!(matches!(
+                output.typed_ast.get(binding.declaration()).kind,
+                TreeKind::ValDef(_)
+            ));
+        }
     }
 
     #[test]
@@ -28745,6 +29213,86 @@ mod tests {
             .expression_term_candidates(name, context, parameter_tree.index(), None)
             .unwrap();
         assert_eq!(candidates, vec![parameter]);
+    }
+
+    #[test]
+    fn type_field_initializer_reuses_inference_and_rebuilds_in_a_fresh_typer() {
+        let (parsed, mut store, packages, defs, index, source) =
+            parse_and_name("class Base(seed: Int) { private val initial = seed }");
+        let (field, _, rhs) = val_definition_and_rhs(&parsed, &store, &index, source, "initial");
+        let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+        assert_eq!(typer.complete_symbol(field).unwrap(), defs.int);
+        let cached = typer.source_typed_index().get(source, rhs).unwrap();
+        let arena = typer.typed_ast().checkpoint();
+        assert_eq!(typer.type_field_initializer(field).unwrap(), cached);
+        assert_eq!(typer.typed_ast().checkpoint(), arena);
+        let previous = typer.into_typed_ast();
+
+        let mut typer = SourceTyper::new_with_typed_ast(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            defs,
+            &packages,
+            previous,
+        );
+        assert_eq!(typer.source_typed_index().get(source, rhs), None);
+        let fresh = typer.type_field_initializer(field).unwrap();
+        assert_ne!(fresh, cached);
+        assert_eq!(typer.source_typed_index().get(source, rhs), Some(fresh));
+        assert_eq!(
+            typer.store().types.get(typer.typed_ast().get(fresh).ty),
+            typer.store().types.get(typer.typed_ast().get(cached).ty)
+        );
+        assert_eq!(typer.type_field_initializer(field).unwrap(), fresh);
+    }
+
+    #[test]
+    fn type_field_initializer_checks_declared_type_and_rolls_back_failed_completion() {
+        let (parsed, mut store, packages, defs, index, source) =
+            parse_and_name("class C { var good: Int = 7; val bad: Int = false }");
+        let (good, _, rhs) = val_definition_and_rhs(&parsed, &store, &index, source, "good");
+        let (bad, _, bad_rhs) = val_definition_and_rhs(&parsed, &store, &index, source, "bad");
+        let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+        let root = typer.type_field_initializer(good).unwrap();
+        assert_eq!(
+            *typer.store().symbols.info(good),
+            SymbolInfo::Complete(defs.int)
+        );
+        let checkpoint = typer.store().checkpoint();
+        let arena = typer.typed_ast().checkpoint();
+        let mappings = typer.source_typed_index().len();
+        assert!(matches!(typer.type_field_initializer(bad),
+            Err(TyperError::ExpectedExpressionTypeMismatch {source: site, tree_index, expected, ..})
+            if site == source && tree_index == bad_rhs.index() && expected == defs.int));
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert_eq!(typer.typed_ast().checkpoint(), arena);
+        assert_eq!(*typer.store().symbols.info(bad), SymbolInfo::Missing);
+        assert_eq!(typer.source_typed_index().len(), mappings);
+        assert_eq!(typer.source_typed_index().get(source, bad_rhs), None);
+        assert_eq!(typer.source_typed_index().get(source, rhs), Some(root));
+    }
+
+    #[test]
+    fn type_field_initializer_checks_a_cached_rhs_against_an_existing_signature() {
+        let (parsed, mut store, packages, defs, index, source) =
+            parse_and_name("class C { val n: Int = false }");
+        let (field, _, rhs) = val_definition_and_rhs(&parsed, &store, &index, source, "n");
+        let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+        let expected = typer.complete_symbol(field).unwrap();
+        let context = typer.field_initializer_context_for(field).unwrap();
+        let cached = typer.type_expression(rhs, context).unwrap();
+        let arena = typer.typed_ast().checkpoint();
+        assert!(matches!(typer.type_field_initializer(field),
+            Err(TyperError::ExpectedExpressionTypeMismatch { source: site, tree_index, expected: ty, .. })
+            if site == source && tree_index == rhs.index() && ty == expected));
+        assert_eq!(
+            *typer.store().symbols.info(field),
+            SymbolInfo::Complete(expected)
+        );
+        assert_eq!(typer.typed_ast().checkpoint(), arena);
+        assert_eq!(typer.source_typed_index().get(source, rhs), Some(cached));
     }
 
     #[test]

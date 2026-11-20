@@ -75,8 +75,8 @@ one-way dependency boundaries:
   semantics to class files. Its production dependencies are `dotty-core` and
   `dotty-classfile`; it must not assemble or rerun the source frontend.
 - the root `dotty` crate exposes selected compiler libraries and hosts
-  cross-component integration tests. It does not re-export every workspace
-  crate; the lexer, namer, JVM backend, and semantic pickler are used directly.
+  cross-component integration tests. It exposes the source frontend and JVM
+  backend as modules. The semantic pickler is also available as a separate crate.
 - `tools/` contains compatibility, corpus, oracle, and diagnostic tooling. It
   is part of the validation infrastructure, not production compiler logic.
 

@@ -38,6 +38,7 @@ pub use constructor_initializers::{
     JvmConstructorInitializerInstruction,
 };
 mod emission;
+pub use emission::PreparedJvmEmission;
 mod expression;
 mod identity;
 mod locals;
@@ -2836,7 +2837,14 @@ impl JvmCompilationUnit<'_> {
         let body = method_plan
             .body
             .ok_or(JvmCodegenError::MissingTypedBody { method })?;
-        expression::lower_planned_method_body(self, metadata, definitions, method_metadata, body)
+        expression::lower_planned_method_body(
+            self.into(),
+            metadata,
+            definitions,
+            &all_metadata,
+            method_metadata,
+            body,
+        )
     }
 
     /// Lowers checked private and public-body field initializers into
@@ -2898,7 +2906,15 @@ impl JvmCompilationUnit<'_> {
         call: TreeId<Typed>,
         definitions: &Definitions,
     ) -> Result<JvmCallTarget, JvmCodegenError> {
-        call_target::resolve_instance_call(self, caller_class, caller_method, call, definitions)
+        call_target::resolve_instance_call(
+            self.into(),
+            caller_class,
+            caller_method,
+            call,
+            definitions,
+            JvmInvocationKind::Virtual,
+            None,
+        )
     }
 
     /// Resolves an explicitly typed `super.method(args)` call to the canonical
@@ -2916,7 +2932,15 @@ impl JvmCompilationUnit<'_> {
         call: TreeId<Typed>,
         definitions: &Definitions,
     ) -> Result<JvmCallTarget, JvmCodegenError> {
-        call_target::resolve_direct_super_call(self, caller_class, caller_method, call, definitions)
+        call_target::resolve_instance_call(
+            self.into(),
+            caller_class,
+            caller_method,
+            call,
+            definitions,
+            JvmInvocationKind::SpecialSuper,
+            None,
+        )
     }
 
     /// Resolves a typed `Apply(Select(New(...), <init>), args)` to the exact
