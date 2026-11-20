@@ -1012,6 +1012,51 @@ fn public_field_cycle_reports_the_closed_symbol_path_in_either_order() {
 }
 
 #[test]
+fn wrong_second_method_argument_points_to_true_in_both_file_orders() {
+    let text = "class Consumer { def run(provider: Provider) = provider.diff(9, true) }";
+    for provider_first in [false, true] {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let units = field_signature_units(
+            text,
+            "class Provider { def diff(x: Int, y: Int): Int = x - y }",
+            provider_first,
+            &mut store,
+            &mut packages,
+        );
+        let consumer = &units[usize::from(provider_first)];
+        let provider = &units[usize::from(!provider_first)];
+        let error = complete_signatures(&units, &mut store, defs, &packages).unwrap_err();
+        let super::SignatureError::Member(dotty::MemberSignatureError::Typing {
+            member,
+            error,
+            ..
+        }) = error
+        else {
+            panic!("expected a member typing error, got {error:?}")
+        };
+        assert_eq!(member, consumer.method_symbol());
+        assert!(
+            matches!(error, dotty::typer::TyperError::ApplicationArgumentTypeMismatch {
+            argument_index: 1, actual, expected, ..
+        } if actual == defs.boolean && expected == defs.int),
+            "{error:?}"
+        );
+        let span = dotty::typer_error_span(&error, &consumer.ast).unwrap();
+        assert_eq!(span.source(), consumer.source);
+        assert_eq!(
+            dotty::core::SourceText::new(text)
+                .unwrap()
+                .slice(span.span().range())
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(dotty::typer_error_span(&error, &provider.ast), None);
+    }
+}
+
+#[test]
 fn field_scheduler_reports_the_bad_call_in_consumer_in_both_orders() {
     use dotty::core::{SourceText, SymbolInfo};
     use dotty::typer::{SignatureCompletion, TyperError};
@@ -1750,11 +1795,25 @@ fn wrong_parent_argument_reports_the_same_error_in_both_file_orders() {
         } else {
             assert!(blocked.is_empty());
         }
+        let super::SignatureError::Typing(error) = error else {
+            panic!("expected a header typing error, got {error:?}")
+        };
         assert!(
-            matches!(error, super::SignatureError::Typing(TyperError::ApplicationArgumentTypeMismatch {
-            source, argument_index: 0, expected, ..
-        }) if source == derived.0 && expected == defs.int),
+            matches!(error, TyperError::ApplicationArgumentTypeMismatch {
+            argument_index: 0, actual, expected, ..
+        } if actual == defs.boolean && expected == defs.int),
             "{error:?}"
+        );
+        let span = dotty::typer_error_span(&error, &units[child_index].ast).unwrap();
+        let start = derived.2.rfind("start").unwrap() as u32;
+        assert_eq!(span.source(), derived.0);
+        assert_eq!(
+            span.span().range(),
+            dotty::core::TextRange::new(start, start + 5).unwrap()
+        );
+        assert_eq!(
+            dotty::typer_error_span(&error, &units[parent_index].ast),
+            None
         );
         assert_eq!(
             store.symbols.info(child.symbol),

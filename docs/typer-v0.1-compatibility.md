@@ -1999,9 +1999,13 @@ For a call with the wrong number of arguments, pass the original
 `dotty::typer_error_span`. The returned `SourceSpan` covers the call
 expression, including the receiver in `provider.value(1)`. The caller can
 use the source ID and byte range to display the expression alongside the
-expected and actual argument counts. A missing tree or position, a position
-in a different source, or another error variant yields `None`. Use the AST
-from the same parse because tree slots and source IDs can be reused.
+expected and actual argument counts. For `ApplicationArgumentTypeMismatch`
+on a source `Apply`, the same function returns the position of the argument
+at the index carried by the error. For example, it locates `true` in
+`provider.diff(9, true)` and the use of `start` in `extends Base(start)`.
+A missing tree or position, a foreign source, an out-of-range argument, or
+an unsupported expression shape or error variant yields `None`. Use the
+AST from the same parse because tree slots and source IDs can be reused.
 
 For `A.f(b: B) = b.g()`, the external client observes the symbol of `B.g`,
 completes it and retries `A.f`. A call to the same zero-argument method with
