@@ -19,10 +19,11 @@ struct Client {
     stdin: Option<ChildStdin>,
     incoming: Receiver<Message>,
     next_id: i32,
+    initially_clean: Vec<&'static str>,
 }
 
 impl Client {
-    fn start() -> Self {
+    fn start(encoding: &str, initially_clean: Vec<&'static str>) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_dotty-lsp"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -38,12 +39,31 @@ impl Client {
                 }
             }
         });
-        Self {
+        let mut client = Self {
             child,
             stdin,
             incoming,
             next_id: 1,
-        }
+            initially_clean,
+        };
+        let init = client.request(
+            "initialize",
+            json!({
+                "processId": null, "rootUri": null,
+                "capabilities": {
+                    "general": {"positionEncodings": [encoding]},
+                    "textDocument": {
+                        "definition": {"linkSupport": true},
+                        "publishDiagnostics": {"versionSupport": true}
+                    }
+                }
+            }),
+        );
+        assert_eq!(init["capabilities"]["positionEncoding"], encoding);
+        assert_eq!(init["capabilities"]["definitionProvider"], true);
+        assert_eq!(init["capabilities"]["textDocumentSync"]["change"], 2);
+        client.notify("initialized", json!({}));
+        client
     }
 
     fn receive(&self) -> Message {
@@ -56,12 +76,14 @@ impl Client {
                 .incoming
                 .recv_timeout(remaining)
                 .expect("expected an LSP message");
-            // The server can republish diagnostics for unchanged A while B is edited.
+            // A rebuild can republish clean documents opened at version one.
             if let Message::Notification(n) = &message
                 && n.method == "textDocument/publishDiagnostics"
-                && n.params["uri"] == A
+                && n.params["version"] == 1
+                && n.params["uri"]
+                    .as_str()
+                    .is_some_and(|uri| self.initially_clean.contains(&uri))
             {
-                assert_eq!(n.params["version"], 1);
                 assert_eq!(n.params["diagnostics"], json!([]));
                 continue;
             }
@@ -98,24 +120,27 @@ impl Client {
         );
     }
 
-    fn edit_b(&mut self, version: i32, range: Value, text: &str) {
+    fn edit(&mut self, uri: &str, version: i32, range: Value, text: &str) {
         self.notify(
             "textDocument/didChange",
             json!({
-                "textDocument": {"uri": B, "version": version},
+                "textDocument": {"uri": uri, "version": version},
                 "contentChanges": [{"range":range, "text":text}]
             }),
         );
     }
 
-    fn diagnostics_b(&self, version: i32, diagnostics: Value) {
+    fn diagnostics(&self, uri: &str, version: i32, diagnostics: Value) {
         let Message::Notification(n) = self.receive() else {
-            panic!("expected diagnostics for B version {version}")
+            panic!("expected diagnostics for {uri} version {version}")
         };
         assert_eq!(n.method, "textDocument/publishDiagnostics");
-        assert_eq!(n.params["uri"], B);
+        assert_eq!(n.params["uri"], uri);
         assert_eq!(n.params["version"], version);
-        assert_eq!(n.params["diagnostics"], diagnostics, "B version {version}");
+        assert_eq!(
+            n.params["diagnostics"], diagnostics,
+            "{uri} version {version}"
+        );
     }
 
     fn definition(&mut self, origin: usize, target_line: usize, declaration: &str) {
@@ -165,17 +190,7 @@ fn range(line: usize, start: usize, end: usize) -> Value {
 }
 
 fn exercise(encoding: &str, take_column: usize) {
-    let mut client = Client::start();
-    let init = client.request("initialize", json!({
-        "processId":null, "rootUri":null, "capabilities":{
-            "general":{"positionEncodings":[encoding]},
-            "textDocument":{"definition":{"linkSupport":true}, "publishDiagnostics":{"versionSupport":true}}
-        }
-    }));
-    assert_eq!(init["capabilities"]["positionEncoding"], encoding);
-    assert_eq!(init["capabilities"]["definitionProvider"], true);
-    assert_eq!(init["capabilities"]["textDocumentSync"]["change"], 2);
-    client.notify("initialized", json!({}));
+    let mut client = Client::start(encoding, vec![A]);
     client.open(
         A,
         &format!("class A {{\r\n{INT_METHOD}\r\n{BOOL_METHOD}\r\n}}\r\n"),
@@ -190,15 +205,16 @@ fn exercise(encoding: &str, take_column: usize) {
             "}\r\n"
         ),
     );
-    client.diagnostics_b(1, json!([]));
+    client.diagnostics(B, 1, json!([]));
     client.definition(take_column, 1, INT_METHOD);
 
-    client.edit_b(2, range(1, take_column + 5, take_column + 7), "false");
-    client.diagnostics_b(2, json!([]));
+    client.edit(B, 2, range(1, take_column + 5, take_column + 7), "false");
+    client.diagnostics(B, 2, json!([]));
     client.definition(take_column, 2, BOOL_METHOD);
 
-    client.edit_b(3, range(3, 24, 25), "false");
-    client.diagnostics_b(
+    client.edit(B, 3, range(3, 24, 25), "false");
+    client.diagnostics(
+        B,
         3,
         json!([{
             "range":range(3, 24, 29), "severity":1, "source":"dotty",
@@ -207,8 +223,8 @@ fn exercise(encoding: &str, take_column: usize) {
     );
     client.definition(take_column, 2, BOOL_METHOD);
 
-    client.edit_b(4, range(3, 24, 29), "1");
-    client.diagnostics_b(4, json!([]));
+    client.edit(B, 4, range(3, 24, 29), "1");
+    client.diagnostics(B, 4, json!([]));
     client.definition(take_column, 2, BOOL_METHOD);
     client.shutdown();
 }
@@ -221,4 +237,48 @@ fn overload_navigation_and_diagnostics_utf8() {
 #[test]
 fn overload_navigation_and_diagnostics_utf16() {
     exercise("utf-16", 35);
+}
+
+#[test]
+fn inferred_field_reports_one_call_error_and_clears_it_in_either_file_order() {
+    let initial = "class Consumer {}";
+    let broken = "class Consumer(provider: Provider) { val answer = provider.value(1) }";
+    let provider_text = "class Provider { def value() = 40 }";
+    let start = broken.find("provider.value(1)").unwrap();
+
+    // Opening order and URI sort order both change, so analysis also visits the files in reverse.
+    for provider_first in [false, true] {
+        let (provider, consumer) = if provider_first {
+            (
+                "file:///first/Provider.scala",
+                "file:///second/Consumer.scala",
+            )
+        } else {
+            (
+                "file:///second/Provider.scala",
+                "file:///first/Consumer.scala",
+            )
+        };
+        let mut client = Client::start("utf-16", vec![provider, consumer]);
+        if provider_first {
+            client.open(provider, provider_text);
+            client.open(consumer, initial);
+        } else {
+            client.open(consumer, initial);
+            client.open(provider, provider_text);
+        }
+        client.edit(consumer, 2, range(0, 0, initial.len()), broken);
+        client.diagnostics(
+            consumer,
+            2,
+            json!([{
+                "range": range(0, start, start + "provider.value(1)".len()),
+                "severity":1, "source":"dotty", "message":"Expected 0 arguments, got 1"
+            }]),
+        );
+        let arg = start + "provider.value(".len();
+        client.edit(consumer, 3, range(0, arg, arg + 1), "");
+        client.diagnostics(consumer, 3, json!([]));
+        client.shutdown();
+    }
 }

@@ -104,6 +104,9 @@ fn member_signature_rejects_the_other_seed_before_and_after_completion() {
             )
             .unwrap_err();
             assert!(matches!(error, MemberSignatureError::InvalidMember(id) if id == seed));
+            let report = error.diagnostic(|_| panic!("invalid member has no source site"));
+            assert_eq!(report.location, None);
+            assert_eq!(report.message, error.to_string());
             assert_eq!(store.checkpoint(), checkpoint);
             assert_eq!(store.symbols.info(seed), &expected);
             assert_eq!(store.symbols.info(other), &SymbolInfo::Missing);
@@ -1241,13 +1244,15 @@ fn wrong_second_method_argument_points_to_true_in_both_file_orders() {
         let consumer = &units[usize::from(provider_first)];
         let provider = &units[usize::from(!provider_first)];
         let error = complete_signatures(&units, &mut store, defs, &packages).unwrap_err();
-        let super::SignatureError::Member(dotty::MemberSignatureError::Typing {
-            member,
-            error,
-            ..
-        }) = error
-        else {
-            panic!("expected a member typing error, got {error:?}")
+        let super::SignatureError::Member(failure) = error else {
+            panic!("expected a member signature error, got {error:?}");
+        };
+        let sources = SignatureSources::new(&units, &store);
+        let diagnostic = failure.diagnostic(|id| sources.by_source.get(&id).map(|u| &u.ast));
+        assert_eq!(diagnostic.message, "Expected Int, found Boolean");
+        assert_eq!(failure.diagnostic(|_| Some(&provider.ast)).location, None);
+        let dotty::MemberSignatureError::Typing { member, error, .. } = failure else {
+            panic!("expected a member typing error");
         };
         assert_eq!(member, consumer.method_symbol());
         assert!(
@@ -1256,9 +1261,7 @@ fn wrong_second_method_argument_points_to_true_in_both_file_orders() {
         } if actual == defs.boolean && expected == defs.int),
             "{error:?}"
         );
-        let span = SignatureSources::new(&units, &store)
-            .error_span(&error)
-            .unwrap();
+        let span = diagnostic.location.unwrap();
         assert_eq!(span.source(), consumer.source);
         assert_eq!(
             dotty::core::SourceText::new(text)
@@ -1330,13 +1333,40 @@ fn field_scheduler_reports_the_bad_call_in_consumer_in_both_orders() {
         )
         .unwrap_err();
         assert_eq!(edges, [(answer.symbol, value)]);
-        let super::SignatureError::Member(dotty::MemberSignatureError::Typing {
+        let super::SignatureError::Member(failure) = error else {
+            panic!("unexpected signature error for answer: {error:?}");
+        };
+        let diagnostic = failure.diagnostic(|id| sources.by_source.get(&id).map(|u| &u.ast));
+        assert_eq!(diagnostic.severity, dotty::core::DiagnosticSeverity::Error);
+        let span = diagnostic.location.expect("source of the failed call");
+        let (_, filename, text) = files
+            .iter()
+            .find(|(id, _, _)| *id == span.source())
+            .unwrap();
+        let call = SourceText::new(text)
+            .unwrap()
+            .slice(span.span().range())
+            .unwrap();
+        assert_eq!(
+            (*filename, call, diagnostic.message.as_str()),
+            (
+                "Consumer.scala",
+                "provider.value(1)",
+                "Expected 0 arguments, got 1"
+            )
+        );
+        for ast in [Some(&provider.ast), None] {
+            let unlocated = failure.diagnostic(|_| ast);
+            assert_eq!(unlocated.location, None);
+            assert_eq!(unlocated.message, diagnostic.message);
+        }
+        let dotty::MemberSignatureError::Typing {
             declaration,
             member,
             error: member_error,
-        }) = error
+        } = failure
         else {
-            panic!("unexpected error for answer: {error:?}")
+            panic!("expected a member typing error");
         };
         assert_eq!(
             declaration,
@@ -1373,20 +1403,8 @@ fn field_scheduler_reports_the_bad_call_in_consumer_in_both_orders() {
             };
             assert_eq!((*source, *tree_index), (consumer.source, rhs.index()));
             assert_eq!(dotty::typer_error_span(&error, &provider.ast), None);
-            let span = sources.error_span(&error).unwrap();
-            let (_, filename, text) = files
-                .iter()
-                .find(|(id, _, _)| *id == span.source())
-                .unwrap();
-            let call = SourceText::new(text)
-                .unwrap()
-                .slice(span.span().range())
-                .unwrap();
-            let report = format!("{filename}: {call}: expected {expected} arguments, got {actual}");
-            assert_eq!(
-                report,
-                "Consumer.scala: provider.value(1): expected 0 arguments, got 1"
-            );
+            assert_eq!((*expected, *actual), (0, 1));
+            assert_eq!(sources.error_span(&error), Some(span));
         }
     }
 }

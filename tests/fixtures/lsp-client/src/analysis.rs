@@ -10,7 +10,7 @@ use dotty::jvm_class_plan::ClassHeaderBindings;
 use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty::source_declarations::{ClassMember, SourceClass, source_classes};
 use dotty::typer::{SignatureCompletion, SourceTyper};
-use dotty::{SourceDeclarationIndex, SourceFileCalls};
+use dotty::{ClassBodyError, SourceDeclarationIndex, SourceFileCalls, TypingDiagnostic};
 
 #[derive(Clone)]
 pub struct Document {
@@ -20,10 +20,23 @@ pub struct Document {
 
 pub type Documents = BTreeMap<String, Document>;
 
+#[derive(PartialEq, Eq)]
 pub struct Problem {
     pub range: Option<TextRange>,
     pub message: String,
     pub severity: DiagnosticSeverity,
+}
+
+fn typing_problem(owner_file: usize, diagnostic: TypingDiagnostic) -> (usize, Problem) {
+    let file = diagnostic
+        .location
+        .map_or(owner_file, |span| span.source().index() as usize);
+    let problem = Problem {
+        range: diagnostic.location.map(|span| span.span().range()),
+        severity: diagnostic.severity,
+        message: diagnostic.message,
+    };
+    (file, problem)
 }
 
 pub struct Link {
@@ -114,10 +127,11 @@ fn name(
 }
 
 // Each pass removes all completed or rejected entries. A pass with no progress ends cycles.
-fn complete(
+// Report None for a dependency still blocked after a full pass.
+fn complete<E>(
     mut pending: Vec<(usize, SymbolId)>,
-    mut attempt: impl FnMut(usize, SymbolId) -> Result<SignatureCompletion, String>,
-    mut report: impl FnMut(usize, SymbolId, String),
+    mut attempt: impl FnMut(usize, SymbolId) -> Result<SignatureCompletion, E>,
+    mut report: impl FnMut(usize, SymbolId, Option<E>),
 ) {
     while !pending.is_empty() {
         let before = pending.len();
@@ -125,13 +139,13 @@ fn complete(
             Ok(SignatureCompletion::Complete(_)) => false,
             Ok(SignatureCompletion::BlockedOn(_)) => true,
             Err(error) => {
-                report(file, symbol, error);
+                report(file, symbol, Some(error));
                 false
             }
         });
         if pending.len() == before {
             for (file, symbol) in pending {
-                report(file, symbol, "Unresolved signature dependency".into());
+                report(file, symbol, None);
             }
             break;
         }
@@ -206,7 +220,10 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
         },
         |i, symbol, e| {
             unavailable.insert(symbol);
-            results[i].error(ranges[&symbol], e);
+            results[i].error(
+                ranges[&symbol],
+                e.unwrap_or_else(|| "Unresolved signature dependency".into()),
+            );
         },
     );
     let mut members = Vec::new();
@@ -227,6 +244,8 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
             }
         }
     }
+    let ast_for = |id: SourceId| units.get(&(id.index() as usize)).map(|unit| &unit.ast);
+    let mut signature_problems = HashMap::new();
     complete(
         members,
         |i, s| {
@@ -240,10 +259,15 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
                 defs,
                 &packages,
             )
-            .map_err(|e| e.to_string())
         },
-        |i, s, e| {
-            results[i].error(ranges[&s], e);
+        |i, symbol, error| {
+            if let Some(error) = error {
+                let (file, problem) = typing_problem(i, error.diagnostic(ast_for));
+                signature_problems.insert(symbol, (file, results[file].problems.len()));
+                results[file].problems.push(problem);
+            } else {
+                results[i].error(ranges[&symbol], "Unresolved signature dependency".into());
+            }
         },
     );
     let mut checks = HashMap::new();
@@ -264,16 +288,19 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
             }
             if let Err(errors) = &check.body {
                 for error in errors {
-                    let diagnostic = error
-                        .diagnostic(|id| units.get(&(id.index() as usize)).map(|unit| &unit.ast));
-                    let file = diagnostic
-                        .location
-                        .map_or(i, |span| span.source().index() as usize);
-                    results[file].problems.push(Problem {
-                        range: diagnostic.location.map(|span| span.span().range()),
-                        message: diagnostic.message,
-                        severity: diagnostic.severity,
-                    });
+                    let (file, problem) = typing_problem(i, error.diagnostic(ast_for));
+                    // Body checking can retry a failed signature. Suppress only its own repeated report.
+                    if let ClassBodyError::Member {
+                        member: ClassMember::Field(d) | ClassMember::Method(d),
+                        ..
+                    } = error
+                        && let Some(&(previous_file, index)) = signature_problems.get(&d.symbol)
+                        && previous_file == file
+                        && results[file].problems[index] == problem
+                    {
+                        continue;
+                    }
+                    results[file].problems.push(problem);
                 }
             }
             checks.insert(c.symbol, check);
@@ -304,6 +331,24 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_signature_failure_preserves_an_independent_body_error() {
+        let uri = "file:///Consumer.scala";
+        let text = "class Consumer { def value(): Int = 40; val answer = value(1); def next(): Int = value(2) }";
+        let doc = Document {
+            version: 1,
+            text: Arc::new(DocumentText::new(text.into()).unwrap()),
+        };
+        let files = analyze(&[(uri.to_owned(), doc)].into());
+        let problems = &files[uri].problems;
+        assert_eq!(problems.len(), 2);
+        for (problem, call) in problems.iter().zip(["value(1)", "value(2)"]) {
+            let range = problem.range.unwrap();
+            assert_eq!(&text[range.start() as usize..range.end() as usize], call);
+            assert_eq!(problem.message, "Expected 0 arguments, got 1");
+        }
+    }
 
     #[test]
     fn valid_method_navigates_while_sibling_reports_its_argument() {
