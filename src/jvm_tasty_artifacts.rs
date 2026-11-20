@@ -187,6 +187,18 @@ pub fn emit_paired_jvm_tasty_batch(
     source_id: SourceId,
 ) -> Result<PairedJvmTastyBatchArtifacts, PairedBatchArtifactError> {
     with_paired_jvm_tasty_batch_plan(source_text, source_name, source_id, |plan| {
+        if plan
+            .constructor_call_proofs
+            .iter()
+            .any(|proof| proof.conditional_mutable_reference_assignment().is_some())
+        {
+            return Err(PairedBatchArtifactError::Plan(PairedPlanError::BatchUnit {
+                phase: "artifact producer admission",
+                reason: "conditional mutable assignment artifacts are deferred to issue #2352"
+                    .to_owned(),
+            }));
+        }
+
         let tasty_plans = plan
             .classes
             .iter()

@@ -528,6 +528,52 @@ fn check_conditional_source(source: &str, should_emit: bool) {
             return;
         }
         body_validation.unwrap();
+
+        for mutation in 0..5 {
+            let mut changed_bindings = bindings.clone();
+            if mutation == 4 {
+                changed_bindings.conditional = None;
+            } else {
+                let receipt = changed_bindings
+                    .conditional
+                    .as_mut()
+                    .expect("the original canonical receipt is present");
+                match mutation {
+                    0 => receipt.source_rhss.swap(0, 1),
+                    1 => receipt.typed_rhss.swap(0, 1),
+                    2 => receipt.local = first.symbol(),
+                    3 => receipt.condition_formal = formals[3],
+                    _ => unreachable!(),
+                }
+            }
+            let changed_plan = ClassStatePicklePlan {
+                store: typer.store(),
+                definitions: &definitions,
+                source_ast: &parsed.ast,
+                typed_ast: typer.typed_ast(),
+                source_index: &source_index,
+                typed_bindings: &changed_bindings,
+                source: SourceMetadata {
+                    id: source_id,
+                    name: "ConditionalMutableReferenceAssignment.scala".into(),
+                },
+                class,
+                class_tree: factory_tree,
+                constructor: PrimaryConstructorInputPlan {
+                    symbol: constructor,
+                    source_tree: constructor_tree,
+                    parameter_clauses: vec![],
+                },
+                members: &members,
+            };
+            assert!(
+                changed_plan
+                    .validate()
+                    .and_then(|validated| validated.validate_method_bodies())
+                    .is_err(),
+                "forged conditional receipt mutation {mutation} is rejected before output"
+            );
+        }
         validated.pickle().unwrap().bytes().to_vec()
     };
     if let Ok(output_path) = env::var("DOTTY_CONDITIONAL_MUTABLE_TASTY_OUTPUT") {

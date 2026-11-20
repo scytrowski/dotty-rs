@@ -123,7 +123,7 @@ pub fn validate_immutable_local_counter_set_calls_proof<'session>(
     CrossClassConstructorCallProofError,
 > {
     let initializer_pair =
-        validate_immutable_local_initializer_pair_proof_inner(input, 2, false, false, None)?;
+        validate_immutable_local_initializer_pair_proof_inner(input, 2, false, false, None, false)?;
     let first = validate_immutable_local_counter_set_call_at(input, 0, 2, usize::MAX, None, None)?;
     let second = validate_immutable_local_counter_set_call_at(input, 1, 2, usize::MAX, None, None)?;
     if first.source_call == second.source_call
@@ -252,7 +252,7 @@ fn validate_immutable_local_counter_set_call_at<'session>(
     let pair = match alias {
         Some(alias) => alias.initializers,
         None => validate_immutable_local_initializer_pair_proof_inner(
-            input, call_count, false, false, None,
+            input, call_count, false, false, None, false,
         )?,
     };
     let statement_prefix = if alias.is_some() { 3 } else { 2 };
