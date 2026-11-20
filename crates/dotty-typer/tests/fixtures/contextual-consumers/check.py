@@ -14,6 +14,16 @@ def main():
     toolchain = runpy.run_path(str(ROOT / "tools/tasty-pickler-oracle/run.py"))["Toolchain"]()
     with tempfile.TemporaryDirectory() as out:
         for sources, status, *expected in [
+            (["ConditionalMemberConversion.scala"], 0,
+             "this.wrap[Int](tc).apply(x).show", "this.modern[Int](tc).apply(x).show",
+             "this.inheritedAlternative(x).show",
+             "def withoutEvidence(x: conditionalviews.Alternate[Int]): Int = conditionalviews.Alternate.fallback.apply(x).show",
+             "second: conditionalviews.TC[Int]): Int = conditionalviews.Alternate.fallback.apply(x).show"),
+            (["ConditionalMemberConversion.scala", "ConditionalMemberRejected.scala"], 1,
+             "value show is not a member of conditionalviews.Box[Int]",
+             "/* missing */summon[conditionalviews.TC[Int]]",
+             "both parameter second and parameter first match type conditionalviews.TC[Int]",
+             "2 errors found"),
             (["LegacyMemberConversions.scala"], 0,
              "legacymembers.Box.wrap[Int](x).show", "this.local[Int](x).show",
              "def keep(x: legacymembers.Box[Int]): Int = x.direct", "this.modern.apply(x).show",
