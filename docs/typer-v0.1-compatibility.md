@@ -2199,10 +2199,13 @@ string literal against a source method parameter.
 After signature completion, `dotty::check_class_body` uses the same resolver
 to check every member in declaration order. Each failed method or field
 initializer contributes its first error and rolls back its own typing attempt.
-On success, the client receives the complete `TypedClassBody`. On failure,
-it receives the ordered errors and retains the arena with the successful
-members' trees. The original `type_class_body` entry points stop at the
-first failure.
+The returned `ClassBodyCheck.body` holds the complete `TypedClassBody` on
+success or the ordered member errors on failure. On either outcome,
+`ClassBodyCheck.diagnostics` pairs each committed typer diagnostic with its
+`SourceId`. For example, a successful positional call to a legacy implicit
+clause warns at the argument even if another method fails. The arena retains
+the successful members' trees. The original `type_class_body` entry points
+stop at the first failure.
 
 For a call with the wrong number of arguments, pass the original
 `TyperError::ApplicationArityMismatch` and its untyped AST to

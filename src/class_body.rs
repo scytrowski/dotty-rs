@@ -3,8 +3,8 @@
 use std::fmt;
 
 use crate::core::{
-    AstArena, Definitions, NoResolver, Packages, SemanticStore, SourceSemanticIndex, SymbolId,
-    SymbolResolver, Typed, Untyped,
+    AstArena, Definitions, Diagnostic, NoResolver, Packages, SemanticStore, SourceId,
+    SourceSemanticIndex, SymbolId, SymbolResolver, Typed, Untyped,
 };
 use crate::jvm_class_plan::TypedClassBody;
 use crate::source_declarations::{ClassMember, SourceClass};
@@ -94,7 +94,19 @@ pub fn type_class_body_with_resolver(
         arena,
         resolver,
         |first, _| first,
+        None,
     )
+}
+
+/// Outcome and non-fatal diagnostics of one class body check.
+#[must_use]
+#[derive(Debug)]
+pub struct ClassBodyCheck {
+    /// A complete body, or the errors that prevented it from being fully typed.
+    pub body: Result<TypedClassBody, Vec<ClassBodyError>>,
+    /// Diagnostics emitted by committed typing operations, with their source file.
+    /// Their ranges are byte offsets into that file, in emission order.
+    pub diagnostics: Vec<(SourceId, Diagnostic)>,
 }
 
 /// Checks each method and field initializer of a named class after signature completion.
@@ -102,6 +114,8 @@ pub fn type_class_body_with_resolver(
 /// yields a single [`ClassBodyError::InvalidClass`] before typing begins.
 /// Each failed member rolls back its typing attempt. Successful members can extend
 /// the session arena and store. Only a completely checked class yields a body.
+/// Diagnostics from successful members are available on either outcome in
+/// [`ClassBodyCheck::diagnostics`]. Failed attempts discard their own diagnostics.
 /// Pass [`NoResolver`] for source-only checking, or borrow a session resolver.
 #[allow(clippy::too_many_arguments)]
 pub fn check_class_body(
@@ -113,8 +127,9 @@ pub fn check_class_body(
     packages: &Packages,
     arena: &mut AstArena<Typed>,
     resolver: impl SymbolResolver,
-) -> Result<TypedClassBody, Vec<ClassBodyError>> {
-    visit_class_body(
+) -> ClassBodyCheck {
+    let mut diagnostics = Vec::new();
+    let body = visit_class_body(
         class,
         ast,
         index,
@@ -124,7 +139,9 @@ pub fn check_class_body(
         arena,
         resolver,
         |first, rest| std::iter::once(first).chain(rest).collect(),
-    )
+        Some(&mut diagnostics),
+    );
+    ClassBodyCheck { body, diagnostics }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -138,6 +155,7 @@ fn visit_class_body<E>(
     arena: &mut AstArena<Typed>,
     resolver: impl SymbolResolver,
     collect_errors: impl FnOnce(ClassBodyError, &mut dyn Iterator<Item = ClassBodyError>) -> E,
+    diagnostics: Option<&mut Vec<(SourceId, Diagnostic)>>,
 ) -> Result<TypedClassBody, E> {
     let Some(source) = class.body_source(ast, index, store) else {
         return Err(collect_errors(
@@ -168,8 +186,18 @@ fn visit_class_body<E>(
             error,
         })
     });
-    if let Some(first) = failures.next() {
-        let errors = collect_errors(first, &mut failures);
+    let errors = failures
+        .next()
+        .map(|first| collect_errors(first, &mut failures));
+    if let Some(diagnostics) = diagnostics {
+        diagnostics.extend(
+            typer
+                .take_diagnostics()
+                .into_iter()
+                .map(|item| (source, item)),
+        );
+    }
+    if let Some(errors) = errors {
         *arena = typer.into_typed_ast();
         return Err(errors);
     }

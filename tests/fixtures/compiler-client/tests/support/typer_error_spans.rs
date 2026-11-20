@@ -51,7 +51,7 @@ fn cross_file_diagnostics_track_two_unsaved_edits_in_utf16() {
         for (unit, class) in named_classes(&units) {
             let before = store.checkpoint();
             let resolver_before = resolver.checkpoint();
-            let errors = match dotty::check_class_body(
+            let report = dotty::check_class_body(
                 class,
                 &unit.ast,
                 &unit.index,
@@ -60,7 +60,9 @@ fn cross_file_diagnostics_track_two_unsaved_edits_in_utf16() {
                 &local_packages,
                 &mut headers.arena,
                 &mut resolver,
-            ) {
+            );
+            assert!(report.diagnostics.is_empty());
+            let errors = match report.body {
                 Ok(body) => {
                     bodies.record(body).unwrap();
                     continue;
@@ -170,6 +172,76 @@ fn cross_file_diagnostics_track_two_unsaved_edits_in_utf16() {
     assert_eq!(analyze(&buffer), [boolean_error]);
     buffer = buffer.replace("false", "7");
     assert!(analyze(&buffer).is_empty());
+}
+
+#[test]
+fn migration_warning_survives_a_sibling_error_and_tracks_source_edits() {
+    use dotty::core::{DiagnosticSeverity, NoResolver};
+
+    let check = |text: &str, warning: bool, bad_argument: bool| {
+        let (mut store, defs, packages, unit) = named(text);
+        let mut headers =
+            complete_signatures(std::slice::from_ref(&unit), &mut store, defs, &packages).unwrap();
+        let report = dotty::check_class_body(
+            &unit.classes[0],
+            &unit.ast,
+            &unit.index,
+            &mut store,
+            defs,
+            &packages,
+            &mut headers.arena,
+            NoResolver,
+        );
+
+        if warning {
+            let [(source, diagnostic)] = report.diagnostics.as_slice() else {
+                panic!("expected one warning: {:?}", report.diagnostics)
+            };
+            assert_eq!(*source, unit.source);
+            assert_eq!(diagnostic.severity(), DiagnosticSeverity::Warning);
+            assert_eq!(
+                diagnostic.message(),
+                "Implicit parameters should be provided with a `using` clause."
+            );
+            let start = (text.find("f(1)").unwrap() + 2) as u32;
+            assert_eq!(diagnostic.span(), TextRange::new(start, start + 1).unwrap());
+        } else {
+            assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+        }
+
+        if bad_argument {
+            let errors = report.body.unwrap_err();
+            let [dotty::ClassBodyError::Member { error, .. }] = errors.as_slice() else {
+                panic!("expected one member error: {errors:?}")
+            };
+            assert!(
+                matches!(error, TyperError::ApplicationArgumentTypeMismatch { actual, expected, .. } if *actual == defs.boolean && *expected == defs.int)
+            );
+            let span = dotty::typer_error_span(error, &unit.ast).unwrap();
+            assert_eq!(span.source(), unit.source);
+            let start = text.find("false").unwrap() as u32;
+            assert_eq!(
+                span.span().range(),
+                TextRange::new(start, start + 5).unwrap()
+            );
+        } else {
+            report.body.expect("complete class body");
+        }
+    };
+
+    let text = "class C { def f(implicit x: Int): Int = x; def take(n: Int): Int = n; def use(): Int = f(1); def bad(): Int = take(false) }";
+    check(text, true, true);
+    let fixed = text.replace("false", "42");
+    check(&fixed, true, false);
+    let explicit = fixed.replace("f(1)", "f(using 1)");
+    check(&explicit, false, false);
+
+    // A warning produced earlier in the same failed method must roll back with it.
+    check(
+        &explicit.replace("take(42)", "{ val x = f(2); take(false) }"),
+        false,
+        true,
+    );
 }
 
 /// The delimiters mark the expected byte range, even when its spelling is repeated.

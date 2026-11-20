@@ -381,6 +381,7 @@ fn class_body_checks_interleaved_members_and_keeps_successes_after_a_failure() {
         &mut headers.arena,
         NoResolver,
     )
+    .body
     .unwrap_err();
     let expected = [
         (0, defs.boolean, defs.int),
@@ -436,7 +437,7 @@ fn type_class_body_rejects_substituted_member_before_typing() {
     .unwrap_err();
     assert!(matches!(error, dotty::ClassBodyError::InvalidClass(class) if class == a.symbol));
     assert_eq!(arena.checkpoint(), before);
-    let errors = dotty::check_class_body(
+    let report = dotty::check_class_body(
         a,
         &unit.ast,
         &unit.index,
@@ -445,8 +446,9 @@ fn type_class_body_rejects_substituted_member_before_typing() {
         &packages,
         &mut arena,
         dotty::core::NoResolver,
-    )
-    .unwrap_err();
+    );
+    assert!(report.diagnostics.is_empty());
+    let errors = report.body.unwrap_err();
     assert!(
         matches!(errors.as_slice(), [dotty::ClassBodyError::InvalidClass(id)] if *id == a.symbol)
     );
