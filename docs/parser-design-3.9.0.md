@@ -48,6 +48,12 @@ parse_compilation_unit(source, source_id, tokens, names) -> ParseResult
 parser diagnostics. Syntax errors are represented both by diagnostics and,
 where recovery needs a tree-shaped placeholder, by `UntypedNode::Error`.
 
+`ParseResult::call_names` pairs the name token of a direct parenthesized call
+with its application tree. For `a.take(42)` the range covers only `take`.
+Ranges use UTF-8 byte offsets and include the delimiters on backquoted names.
+Entries are in source order and retain their tree IDs when a detached parse
+is bound to a session.
+
 Parser tooling also exposes `parse_pattern_fragment(...)`. It parses one
 standalone source pattern through the real pattern productions, requires the
 fragment to end at EOF, and is not a separate pattern dialect.

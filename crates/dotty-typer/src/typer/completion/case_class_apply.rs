@@ -142,13 +142,14 @@ impl SourceTyper<'_> {
                 let symbol = self.method_parameter_symbol(method, param, true)?;
                 let actual = self.complete_signature_parameter(symbol, journal)?;
                 if !self.contextual_conforms(actual, formal.ty, param.index(), journal)? {
-                    return Err(TyperError::ApplicationArgumentTypeMismatch {
+                    return Err(TyperError::argument_type_mismatch(
+                        self.store,
                         source,
-                        tree_index: tree.index(),
-                        argument_index: index,
+                        tree.index(),
+                        index,
                         actual,
-                        expected: formal.ty,
-                    });
+                        formal.ty,
+                    ));
                 }
                 let path = self
                     .store

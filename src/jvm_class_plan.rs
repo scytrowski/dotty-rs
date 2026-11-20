@@ -49,6 +49,44 @@ pub struct TypedClassBody {
 }
 
 impl TypedClassBody {
+    /// Resolves a byte offset on the name of a direct parenthesized call in this body.
+    /// Use the call names and source arena from the same parse, and the typed arena
+    /// and store from its typing session. Positions outside the token, including
+    /// its exclusive end, yield `None`. See [`Self::selected_method`] for supported callees.
+    pub fn selected_method_at(
+        &self,
+        offset: u32,
+        names: &crate::parser::SourceCallNames,
+        source_ast: &AstArena<Untyped>,
+        typed_ast: &AstArena<Typed>,
+        store: &SemanticStore,
+    ) -> Option<SymbolId> {
+        let call = names.call_at(offset)?;
+        if source_ast.try_get(call)?.position?.source() != names.source() {
+            return None;
+        }
+        self.selected_method(call, source_ast, typed_ast, store)
+    }
+
+    /// Returns the method chosen by the typer for a direct source call such as `a.take(42)`.
+    /// Pass a call node in its original parse and the typed arena and store from the same session.
+    /// The call and its function must map to the corresponding typed application and callee.
+    /// Returns `None` for unmapped or unpositioned calls, indirect or rewritten shapes
+    /// without that correspondence, and targets other than methods.
+    pub fn selected_method(
+        &self,
+        call: TreeId<Untyped>,
+        source_ast: &AstArena<Untyped>,
+        typed_ast: &AstArena<Typed>,
+        store: &SemanticStore,
+    ) -> Option<SymbolId> {
+        selected_method(&self.index, call, source_ast, typed_ast, store)
+    }
+
+    pub(crate) fn bindings(&self) -> &SourceTypedIndex {
+        &self.index
+    }
+
     /// Split the output of the typer used for this class's body. Pass the arena
     /// to the next typer and keep the body for [`JvmClassPlanner::plan_typed_class`].
     /// All declarations, outputs and the final arena must come from one session.
@@ -62,6 +100,40 @@ impl TypedClassBody {
             },
         )
     }
+}
+
+pub(crate) fn selected_method(
+    index: &SourceTypedIndex,
+    call: TreeId<Untyped>,
+    source_ast: &AstArena<Untyped>,
+    typed_ast: &AstArena<Typed>,
+    store: &SemanticStore,
+) -> Option<SymbolId> {
+    let node = source_ast.try_get(call)?;
+    let TreeKind::Apply(source_call) = &node.kind else {
+        return None;
+    };
+    let source = node.position?.source();
+    let typed = index.get(source, call)?;
+    let TreeKind::Apply(application) = &typed_ast.try_get(typed)?.kind else {
+        return None;
+    };
+    if index.get(source, source_call.function)? != application.function {
+        return None;
+    }
+    let callee = typed_ast.try_get(application.function)?;
+    if !matches!(callee.kind, TreeKind::Ident(_) | TreeKind::Select(_)) {
+        return None;
+    }
+    let Type::TermRef {
+        target: TermRefTarget::Symbol(method),
+        ..
+    } = store.types.try_get(callee.ty)?
+    else {
+        return None;
+    };
+    (store.symbols.contains(*method) && store.symbols.get(*method).kind == SymbolKind::Method)
+        .then_some(*method)
 }
 
 /// Class bodies retained for deferred planning in a single naming and typing session.

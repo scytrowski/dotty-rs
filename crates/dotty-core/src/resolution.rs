@@ -298,6 +298,124 @@ pub trait SymbolResolver {
     }
 }
 
+/// A borrowed resolver retains the underlying adapter's identity and rollback state.
+/// Forward the package-aware operations as well as the ordinary lookups.
+impl<R: SymbolResolver + ?Sized> SymbolResolver for &mut R {
+    fn has_package_root(&self) -> bool {
+        (**self).has_package_root()
+    }
+
+    fn take_packages(&mut self) -> Option<Packages> {
+        (**self).take_packages()
+    }
+
+    fn checkpoint_with_packages(&self, packages: &Packages) -> ResolverCheckpoint {
+        (**self).checkpoint_with_packages(packages)
+    }
+
+    fn class_type_parameters(
+        &self,
+        store: &SemanticStore,
+        class: SymbolId,
+    ) -> Option<Vec<ClassTypeParameter>> {
+        (**self).class_type_parameters(store, class)
+    }
+
+    fn package_object_collision(
+        &mut self,
+        store: &mut SemanticStore,
+        package: SymbolId,
+        name: Name,
+    ) -> Result<bool, ResolutionError> {
+        (**self).package_object_collision(store, package, name)
+    }
+
+    fn module_class_of_object(
+        &self,
+        store: &SemanticStore,
+        object: SymbolId,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        (**self).module_class_of_object(store, object)
+    }
+
+    fn complete_module_class(
+        &mut self,
+        store: &mut SemanticStore,
+        module_class: SymbolId,
+    ) -> Result<bool, ResolutionError> {
+        (**self).complete_module_class(store, module_class)
+    }
+
+    fn complete_class(
+        &mut self,
+        store: &mut SemanticStore,
+        symbol: SymbolId,
+    ) -> Result<bool, ResolutionError> {
+        (**self).complete_class(store, symbol)
+    }
+
+    fn checkpoint(&self) -> ResolverCheckpoint {
+        (**self).checkpoint()
+    }
+
+    fn rollback_to(&mut self, store: &mut SemanticStore, checkpoint: ResolverCheckpoint) {
+        (**self).rollback_to(store, checkpoint)
+    }
+
+    fn rollback_to_with_packages(
+        &mut self,
+        store: &mut SemanticStore,
+        checkpoint: ResolverCheckpoint,
+        packages: &mut Packages,
+    ) {
+        (**self).rollback_to_with_packages(store, checkpoint, packages)
+    }
+
+    fn resolve_member(
+        &mut self,
+        store: &mut SemanticStore,
+        request: &MemberRequest,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        (**self).resolve_member(store, request)
+    }
+
+    fn resolve_member_with_packages(
+        &mut self,
+        store: &mut SemanticStore,
+        packages: &mut Packages,
+        request: &MemberRequest,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        (**self).resolve_member_with_packages(store, packages, request)
+    }
+
+    fn resolve_package(
+        &mut self,
+        store: &mut SemanticStore,
+        path: &[&str],
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        (**self).resolve_package(store, path)
+    }
+
+    fn resolve_package_with_packages(
+        &mut self,
+        store: &mut SemanticStore,
+        packages: &mut Packages,
+        path: &[&str],
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        (**self).resolve_package_with_packages(store, packages, path)
+    }
+
+    fn enter_synthetic_package_member(
+        &mut self,
+        store: &mut SemanticStore,
+        package: SymbolId,
+        name: Name,
+        member: SymbolId,
+    ) -> Result<bool, ResolutionError> {
+        (**self).enter_synthetic_package_member(store, package, name, member)
+    }
+}
+
 /// The resolver that knows nothing: every request is unresolved.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NoResolver;
@@ -469,6 +587,29 @@ mod tests {
         assert_eq!(resolver.resolve_member(&mut store, &request), Ok(None));
         assert_eq!(resolver.resolve_package(&mut store, &["scala"]), Ok(None));
         assert_eq!(store.checkpoint(), checkpoint);
+    }
+
+    #[test]
+    fn borrowing_a_resolver_preserves_its_journal_for_the_owner() {
+        let mut store = SemanticStore::new();
+        let request = request(&mut store);
+        let mut owner = MemberResolver::default();
+        let checkpoint = owner.checkpoint();
+        let before = store.checkpoint();
+        let symbol = {
+            let mut borrowed: Box<dyn SymbolResolver + '_> = Box::new(&mut owner);
+            borrowed
+                .resolve_member(&mut store, &request)
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(owner.members.get(&request.name), Some(&symbol));
+        let mut borrowed: Box<dyn SymbolResolver + '_> = Box::new(&mut owner);
+        borrowed.rollback_to(&mut store, checkpoint);
+        drop(borrowed);
+        store.rollback_to(before);
+        assert_eq!(owner.checkpoint(), checkpoint);
+        assert!(owner.members.is_empty());
     }
 
     #[test]

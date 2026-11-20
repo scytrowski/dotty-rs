@@ -2244,7 +2244,71 @@ individual member symbols, reports a closed path for cycles involving fields,
 and retries blocked fields after their dependencies complete. Completed fields
 retain their types across retries. A field error includes the class and field
 symbols and the original `TyperError`. The later `type_class_body` call
-produces the typed initializers used by the backend.
+produces the typed initializers used by the backend. Clients that resolve
+binary dependencies can pass the same mutable `SymbolResolver` to
+`dotty::type_class_body_with_resolver` for successive classes in that session.
+For example, the external client uses the JDK classpath resolver to check a
+string literal against a source method parameter.
+
+After signature completion, `dotty::check_class_body` uses the same resolver
+to check every member in declaration order. Each failed method or field
+initializer contributes its first error and rolls back its own typing attempt.
+The returned `ClassBodyCheck.body` holds the complete `TypedClassBody` on
+success or the ordered member errors on failure. On either outcome,
+`ClassBodyCheck.diagnostics` pairs each committed typer diagnostic with its
+`SourceId`. For example, a successful positional call to a legacy implicit
+clause warns at the argument even if another method fails. The arena retains
+the successful members' trees. The original `type_class_body` entry points
+stop at the first failure.
+
+Both entry points return failures reportable with `ClassBodyError::diagnostic`.
+Look up the original untyped AST by source ID. The report carries severity,
+a message and an optional `SourceSpan`. For an `Int` parameter, `only(false)`
+reports `Expected Int, found Boolean` at the five bytes of `false`. A missing
+AST or one belonging to another source leaves the location empty and preserves
+the message. `MemberSignatureError::diagnostic` uses the same
+`TypingDiagnostic` when the failure occurs during signature inference.
+For a parameterless method, `provider.value(1)` reports
+`Expected 0 arguments, got 1` at the whole call in either phase.
+Other typer errors retain their display text.
+
+`ClassFieldSignatureError::diagnostic` produces the same report for a field
+completed through the class-wide field pass. For constructor and class header
+errors, pass the original `TyperError` directly to `TypingDiagnostic::from_typer`.
+For example, if `Base` expects an `Int`, checking
+`class Derived(start: Boolean) extends Base(start)` locates the argument
+`start` in the parent call in Derived.scala.
+
+For a direct method call such as `a.take(42)`, pass the original call tree to
+`TypedClassBody::selected_method` with its source arena, the typed arena and
+the store from the same session. The resulting symbol identifies the overload
+chosen by the typer. For a source method, `SourceDeclarationIndex::get` locates
+its file and class, and that file's `SourceSemanticIndex::definition_of` gives
+the declaration tree and hence its source range. The query returns `None` when
+the body has no binding for the call or the source callee has no direct typed
+counterpart, as in an inserted `apply` selection.
+
+For an editor query, retain `ParseResult::call_names` alongside the source
+arena. `TypedClassBody::selected_method_at` takes a UTF-8 byte offset in
+that file and resolves a cursor on the written name of a parenthesized call.
+In `a.take(42)` each byte of `take` selects the method. The receiver, dot,
+parentheses and argument yield `None`. After an edit, query the new parse
+and its corresponding typed body.
+
+For a file containing several top-level classes, build `dotty::SourceFileCalls`
+once after naming, using the parser's call names and the source-ordered class
+views. Keep it alongside the file's source arena. Its `selected_method_at`
+query finds the enclosing class by binary search, then looks up its body in
+`TypedClassBodies`. If only the first class has been typed, calls in that
+class can already resolve. A call in the second class yields `None` until
+its body is recorded. Both queries use the same file index.
+
+With `check_class_body`, the file index can also navigate from a successfully
+typed member of a class with errors. `SourceFileCalls::definition_at` takes a
+lookup for the enclosing class check and one for the defining file. Its result
+contains the source ID, the declaration range and the exact name token range.
+Only committed bindings participate. JVM planning still requires a complete
+`TypedClassBody`.
 
 For a call with the wrong number of arguments, pass the original
 `TyperError::ApplicationArityMismatch` and its untyped AST to
@@ -2255,6 +2319,10 @@ expected and actual argument counts. For `ApplicationArgumentTypeMismatch`
 on a source `Apply`, the same function returns the position of the argument
 at the index carried by the error. For example, it locates `true` in
 `provider.diff(9, true)` and the use of `start` in `extends Base(start)`.
+The error owns `expected_description` and `actual_description` for reporting
+after rollback. These short labels use simple declaration names and summarize
+complex types. The raw type IDs describe the state at the point of failure:
+their slots may disappear or be reused after rollback.
 A missing tree or position, a foreign source, an out-of-range argument, or
 an unsupported expression shape or error variant yields `None`. Use the
 AST from the same parse because tree slots and source IDs can be reused.

@@ -12,6 +12,13 @@ pub struct LineIndex {
 impl LineIndex {
     /// Builds an index whose first line starts at byte offset zero.
     pub fn new(source: &str) -> Result<Self, SourceTextError> {
+        Self::build(source, is_line_break_char)
+    }
+
+    pub(super) fn build(
+        source: &str,
+        extra_break: impl Fn(char) -> bool,
+    ) -> Result<Self, SourceTextError> {
         if source.len() > u32::MAX as usize {
             return Err(SourceTextError::TextTooLong {
                 byte_len: source.len(),
@@ -33,7 +40,7 @@ impl LineIndex {
                         line_starts.push((offset + character.len_utf8()) as u32);
                     }
                 }
-                character if is_line_break_char(character) => {
+                character if extra_break(character) => {
                     line_starts.push((offset + character.len_utf8()) as u32);
                 }
                 _ => {}

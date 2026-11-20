@@ -57,7 +57,7 @@ where
         };
         self.advance();
 
-        let name = self.parse_method_name();
+        let (name, name_range) = self.parse_method_name();
         self.consume_newlines_before_parameter_clause(TokenKind::Punctuation(
             dotty_core::Punctuation::LeftBracket,
         ));
@@ -153,6 +153,9 @@ where
                 metadata: prefix.metadata,
             }),
         );
+        if let Some(range) = name_range {
+            self.method_names.push((definition, range));
+        }
         ParsedStatement::Definition(definition)
     }
 
@@ -228,19 +231,20 @@ where
             .map(|offset| self.cursor.lookahead(offset).span.start())
     }
 
-    fn parse_method_name(&mut self) -> TermName {
+    fn parse_method_name(&mut self) -> (TermName, Option<dotty_core::TextRange>) {
         let secondary_constructor_allowed = self.context.secondary_constructor_allowed;
         self.context.secondary_constructor_allowed = false;
+        let range = self.current().span;
         match self.current().kind {
             TokenKind::Keyword(HardKeyword::This) => {
                 self.advance();
                 if secondary_constructor_allowed {
-                    TermName::new(self.names.intern("<init>"))
+                    (TermName::new(self.names.intern("<init>")), None)
                 } else {
                     self.report_issue(ParseIssue::Declaration(
                         DeclarationIssue::SecondaryConstructorOutsideTemplate,
                     ));
-                    self.missing_method_name()
+                    (self.missing_method_name(), None)
                 }
             }
             TokenKind::Identifier
@@ -249,9 +253,9 @@ where
             | TokenKind::ColonOp => match self.intern_current_term_name() {
                 Ok(name) => {
                     self.advance();
-                    name
+                    (name, Some(range))
                 }
-                Err(_) => self.missing_method_name(),
+                Err(_) => (self.missing_method_name(), None),
             },
             _ => {
                 self.report_issue(ParseIssue::Declaration(
@@ -259,7 +263,7 @@ where
                         found: self.current().kind,
                     },
                 ));
-                self.missing_method_name()
+                (self.missing_method_name(), None)
             }
         }
     }
@@ -1271,6 +1275,10 @@ mod tests {
         let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
             panic!("expected DefDef");
         };
+        assert_eq!(
+            parser.method_names,
+            [(id, dotty_core::TextRange::new(4, 5).unwrap())]
+        );
         assert_eq!(parser.names.resolve(definition.name.as_name().text()), "f");
         assert!(definition.type_params.is_empty());
         assert!(definition.value_param_clauses.is_empty());

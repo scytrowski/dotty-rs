@@ -1170,12 +1170,15 @@ impl SourceTyper<'_> {
                             context,
                             info_journal,
                         )?
-                        .ok_or(TyperError::ApplicationArgumentTypeMismatch {
-                            source: self.source,
-                            tree_index,
-                            argument_index,
-                            actual,
-                            expected: expected_type,
+                        .ok_or_else(|| {
+                            TyperError::argument_type_mismatch(
+                                self.store,
+                                self.source,
+                                tree_index,
+                                argument_index,
+                                actual,
+                                expected_type,
+                            )
                         })?;
                 }
                 Err(error) => {

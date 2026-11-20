@@ -13,6 +13,60 @@ use dotty_core::{
 };
 
 #[test]
+fn direct_call_names_keep_exact_source_tokens_in_nested_calls() {
+    use Punctuation::{Dot, LeftParen, RightParen};
+    let text = "take(a. `żółć`(ż()))";
+    let tokens = [
+        (TokenKind::Identifier, "take"),
+        (TokenKind::Punctuation(LeftParen), "("),
+        (TokenKind::Identifier, "a"),
+        (TokenKind::Punctuation(Dot), "."),
+        (TokenKind::BackquotedIdentifier, "`żółć`"),
+        (TokenKind::Punctuation(LeftParen), "("),
+        (TokenKind::Identifier, "ż"),
+        (TokenKind::Punctuation(LeftParen), "("),
+        (TokenKind::Punctuation(RightParen), ")"),
+        (TokenKind::Punctuation(RightParen), ")"),
+        (TokenKind::Punctuation(RightParen), ")"),
+        (TokenKind::Eof, ""),
+    ];
+    let mut end = 0;
+    let tokens = tokens
+        .into_iter()
+        .map(|(kind, spelling)| {
+            let start = end + text[end..].find(spelling).unwrap();
+            end = start + spelling.len();
+            token(kind, start as u32, end as u32)
+        })
+        .collect();
+    let mut names = NameInterner::new();
+    let parsed = parser_for(text, tokens, &mut names).parse_expression_fragment();
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut expected_call = parsed.root;
+    let mut entries = parsed.call_names.iter();
+    for spelling in ["take", "`żółć`", "ż"] {
+        let (range, call) = entries.next().unwrap();
+        assert_eq!(call, expected_call);
+        for offset in range.start()..range.end() {
+            assert_eq!(parsed.call_names.call_at(offset), Some(call));
+        }
+        assert_eq!(parsed.call_names.call_at(range.end()), None);
+        assert_eq!(
+            &text[range.start() as usize..range.end() as usize],
+            spelling
+        );
+        let TreeKind::Apply(app) = &parsed.ast.get(call).kind else {
+            panic!("expected call")
+        };
+        if let Some(&arg) = app.args.first() {
+            expected_call = arg;
+        }
+    }
+    assert_eq!(entries.next(), None);
+    assert_eq!(parsed.call_names.call_at(u32::MAX), None);
+}
+
+#[test]
 fn nested_macro_expressions_preserve_each_body_span() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(

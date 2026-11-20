@@ -26,6 +26,7 @@ mod completion;
 pub use completion::SignatureCompletion;
 mod context;
 mod contextual;
+mod diagnostic_types;
 mod error;
 mod expression;
 use expression::LocalMethodIndex;
@@ -919,6 +920,11 @@ impl<'a> SourceTyper<'a> {
     /// Diagnostics emitted by successful typing operations in this source session.
     pub fn diagnostics(&self) -> &[dotty_core::Diagnostic] {
         &self.diagnostics
+    }
+
+    /// Moves out the diagnostics committed since the previous call in emission order.
+    pub fn take_diagnostics(&mut self) -> Vec<dotty_core::Diagnostic> {
+        std::mem::take(&mut self.diagnostics)
     }
 
     /// Typed expression trees produced by this typer instance.
@@ -39169,6 +39175,10 @@ mod tests {
             warning.span().start() as usize,
             source_text.rfind('1').unwrap()
         );
+        let emitted = warning.clone();
+        assert_eq!(typer.take_diagnostics(), [emitted]);
+        assert!(typer.diagnostics().is_empty());
+        assert!(typer.take_diagnostics().is_empty());
     }
 
     #[test]

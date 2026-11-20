@@ -1235,8 +1235,12 @@ pub enum TyperError {
         source: SourceId,
         tree_index: u32,
         argument_index: usize,
+        /// Session IDs at the point of failure. Rollback can invalidate or reuse their slots.
         actual: TypeId,
         expected: TypeId,
+        /// Short type descriptions captured before rollback, owned by this error.
+        actual_description: Box<str>,
+        expected_description: Box<str>,
     },
     /// The supported conformance relation cannot decide an argument comparison.
     ApplicationArgumentConformanceUnsupported {

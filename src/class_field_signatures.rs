@@ -2,9 +2,10 @@
 
 use std::fmt;
 
+use crate::TypingDiagnostic;
 use crate::core::{
-    AstArena, Definitions, Packages, SemanticStore, SourceSemanticIndex, SymbolId, SymbolInfo,
-    Untyped,
+    AstArena, Definitions, Packages, SemanticStore, SourceId, SourceSemanticIndex, SymbolId,
+    SymbolInfo, Untyped,
 };
 use crate::source_declarations::signature_fields;
 use crate::typer::{SignatureCompletion, SourceTyper, TyperError};
@@ -33,6 +34,20 @@ pub enum ClassFieldSignatureError {
         field: SymbolId,
         error: TyperError,
     },
+}
+
+impl ClassFieldSignatureError {
+    /// Reports a field failure using [`TypingDiagnostic::from_typer`] and the original
+    /// untyped arena for its source. An invalid class has no source location.
+    pub fn diagnostic<'a>(
+        &self,
+        ast_for: impl FnOnce(SourceId) -> Option<&'a AstArena<Untyped>>,
+    ) -> TypingDiagnostic {
+        match self {
+            Self::InvalidClass(_) => TypingDiagnostic::error(self.to_string(), None),
+            Self::Field { error, .. } => TypingDiagnostic::from_typer(error, ast_for),
+        }
+    }
 }
 
 impl fmt::Display for ClassFieldSignatureError {
@@ -93,4 +108,20 @@ pub fn try_complete_class_field_signatures(
         }
     }
     Ok(ClassFieldSignatureCompletion::Complete)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::DiagnosticSeverity;
+
+    #[test]
+    fn invalid_class_reports_an_unlocated_error_without_an_ast_lookup() {
+        let defs = Definitions::bootstrap(&mut SemanticStore::new());
+        let failure = ClassFieldSignatureError::InvalidClass(defs.object_class);
+        let report = failure.diagnostic(|_| panic!("invalid class has no source site"));
+        assert_eq!(report.severity, DiagnosticSeverity::Error);
+        assert_eq!(report.message, failure.to_string());
+        assert_eq!(report.location, None);
+    }
 }

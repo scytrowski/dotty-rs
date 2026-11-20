@@ -14,7 +14,6 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use dotty::SourceDeclarationIndex;
 use dotty::core::{
     AstArena, Definitions, Packages, SemanticStore, SourceId, SourceSemanticIndex, SymbolId,
     SymbolInfo, SymbolKind, TreeKind, Typed, Untyped,
@@ -30,10 +29,12 @@ use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_
 use dotty::parser::{DetachedParse, ParseResult};
 use dotty::source_declarations::{Declaration, SourceClass, source_classes};
 use dotty::typer::{SignatureCompletion, SourceTyper, TyperError};
+use dotty::{SourceDeclarationIndex, SourceFileCalls};
 
 struct NamedUnit {
     source: SourceId,
     ast: AstArena<Untyped>,
+    calls: SourceFileCalls,
     index: SourceSemanticIndex,
     classes: Vec<SourceClass>,
 }
@@ -105,9 +106,11 @@ fn enter(
 ) -> NamedUnit {
     let index = name_source(id, name, &parsed, store, packages);
     let classes = source_classes(&parsed.ast, parsed.root, id, &index, store).unwrap();
+    let calls = SourceFileCalls::new(parsed.call_names, &parsed.ast, &index, &classes).unwrap();
     NamedUnit {
         source: id,
         ast: parsed.ast,
+        calls,
         index,
         classes,
     }
@@ -488,6 +491,325 @@ fn compile<const N: usize>(files: [(SourceId, &str, &str); N]) -> Vec<GeneratedC
         }
         concurrent
     })
+}
+
+const OVERLOADS: &str = "class A {
+  def take(n: Int): Int = n
+  def take(flag: Boolean): Int = 7
+}";
+
+fn assert_overload_target(
+    sources: &SignatureSources<'_>,
+    method: SymbolId,
+    provider: &NamedUnit,
+    expected: Declaration,
+    declaration: &str,
+) {
+    use dotty::core::{SourceDefinition, TextRange};
+
+    assert_eq!(method, expected.symbol);
+    let location = sources.declarations.get(method).unwrap();
+    assert_eq!(
+        (location.source, location.class),
+        (provider.source, provider.classes[0].symbol)
+    );
+    let target = sources.by_source[&location.source];
+    let Some(SourceDefinition::Canonical { source, tree }) = target.index.definition_of(method)
+    else {
+        panic!("expected source method")
+    };
+    assert_eq!((source, tree), (provider.source, expected.tree));
+    let span = target.ast.get(tree).position.unwrap();
+    assert_eq!(span.source(), provider.source);
+    let start = OVERLOADS.find(declaration).unwrap() as u32;
+    assert_eq!(
+        span.span().range(),
+        TextRange::new(start, start + declaration.len() as u32).unwrap()
+    );
+}
+
+#[test]
+fn selected_method_tracks_an_edited_overload_in_both_file_orders() {
+    const BEFORE: &str = "class B { def read(a: A): Int = a.take(42) }";
+    let a = SourceId::from_index(7);
+    let b = SourceId::from_index(2);
+    let edited = BEFORE.replace("42", "false");
+    for reverse in [false, true] {
+        for (text, overload, declaration) in [
+            (BEFORE, 0, "def take(n: Int): Int = n"),
+            (edited.as_str(), 1, "def take(flag: Boolean): Int = 7"),
+        ] {
+            let mut files = [(a, "A.scala", OVERLOADS), (b, "B.scala", text)];
+            if reverse {
+                files.reverse();
+            }
+            let mut store = SemanticStore::new();
+            let defs = Definitions::bootstrap(&mut store);
+            let mut packages = Packages::new();
+            let units = name_units(
+                &files,
+                parsing::parse_files(&files, 2),
+                &mut store,
+                &mut packages,
+            );
+            let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
+            let sources = SignatureSources::new(&units, &store);
+            let (output, bodies) = type_bodies(&units, &mut store, defs, &packages, headers);
+            let caller = sources.by_source[&b];
+            let provider = sources.by_source[&a];
+            let calls = &caller.calls;
+            let method_at = |offset| {
+                calls.selected_method_at(offset, &caller.ast, &bodies, &output.arena, &store)
+            };
+            let name_start = text.find("take(").unwrap() as u32;
+            let method = method_at(name_start).unwrap();
+            for offset in name_start..name_start + 4 {
+                assert_eq!(method_at(offset), Some(method));
+            }
+            // Receiver, dot, opening parenthesis, argument and closing parenthesis.
+            let close = text.rfind(')').unwrap() as u32;
+            for offset in (name_start - 2..name_start).chain(name_start + 4..=close) {
+                assert_eq!(method_at(offset), None, "offset {offset} in {text}");
+            }
+            assert_eq!(method_at(text.len() as u32), None);
+            let expected = provider.methods().nth(overload).unwrap();
+            assert_overload_target(&sources, method, provider, expected, declaration);
+
+            let body = bodies.get(caller.classes[0].symbol).unwrap();
+            let read = caller.methods().next().unwrap();
+            let TreeKind::DefDef(def) = &caller.ast.get(read.tree).kind else {
+                panic!("expected B.read")
+            };
+            let call = def.rhs.unwrap();
+            assert_eq!(
+                body.selected_method(read.tree, &caller.ast, &output.arena, &store),
+                None
+            );
+            let other_body = bodies.get(provider.classes[0].symbol).unwrap();
+            assert_eq!(
+                other_body.selected_method_at(
+                    name_start,
+                    caller.calls.call_names(),
+                    &caller.ast,
+                    &output.arena,
+                    &store
+                ),
+                None
+            );
+            assert_eq!(
+                other_body.selected_method(call, &caller.ast, &output.arena, &store),
+                None
+            );
+        }
+    }
+}
+
+#[test]
+fn checked_calls_survive_a_failing_sibling_in_both_file_orders() {
+    let a = SourceId::from_index(7);
+    let b = SourceId::from_index(2);
+    for reverse in [false, true] {
+        for (argument, broken) in [("false, 1", true), ("1", false)] {
+            let text = format!(
+                "class B {{ def good(a: A): Int = a.take(42); def bad(a: A): Int = a.take({argument}) }}"
+            );
+            let mut files = [(a, "A.scala", OVERLOADS), (b, "B.scala", text.as_str())];
+            if reverse {
+                files.reverse();
+            }
+            let mut store = SemanticStore::new();
+            let defs = Definitions::bootstrap(&mut store);
+            let mut packages = Packages::new();
+            let units = name_units(
+                &files,
+                parsing::parse_files(&files, 2),
+                &mut store,
+                &mut packages,
+            );
+            let mut headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
+            let sources = SignatureSources::new(&units, &store);
+            let caller = sources.by_source[&b];
+            let class = &caller.classes[0];
+            let check = dotty::check_class_body(
+                class,
+                &caller.ast,
+                &caller.index,
+                &mut store,
+                defs,
+                &packages,
+                &mut headers.arena,
+                dotty::core::NoResolver,
+            );
+            let at = |offset| {
+                caller.calls.checked_method_at(
+                    offset,
+                    &caller.ast,
+                    &headers.arena,
+                    &store,
+                    |owner| (owner == class.symbol).then_some(&check),
+                )
+            };
+            let provider = sources.by_source[&a];
+            let method = at(text.find("take").unwrap() as u32).unwrap();
+            assert_overload_target(
+                &sources,
+                method,
+                provider,
+                provider.methods().next().unwrap(),
+                "def take(n: Int): Int = n",
+            );
+            assert_eq!(
+                at(text.rfind("take").unwrap() as u32),
+                (!broken).then_some(method)
+            );
+            let target = caller
+                .calls
+                .definition_at(
+                    text.find("take").unwrap() as u32,
+                    &caller.ast,
+                    &headers.arena,
+                    &store,
+                    |owner| (owner == class.symbol).then_some(&check),
+                    |id| sources.by_source.get(&id).map(|unit| &unit.calls),
+                )
+                .unwrap();
+            assert_eq!(target.source, a);
+            let slice = |range: dotty::core::TextRange| {
+                &OVERLOADS[range.start() as usize..range.end() as usize]
+            };
+            assert_eq!(slice(target.declaration), "def take(n: Int): Int = n");
+            assert_eq!(slice(target.name), "take");
+            assert_eq!(target.name.start(), OVERLOADS.find("take").unwrap() as u32);
+            if broken {
+                let errors = check.body.unwrap_err();
+                let [dotty::ClassBodyError::Member { member, .. }] = errors.as_slice() else {
+                    panic!("expected one failed member")
+                };
+                assert_eq!(
+                    *member,
+                    dotty::source_declarations::ClassMember::Method(
+                        class.methods().nth(1).unwrap()
+                    )
+                );
+            } else {
+                JvmClassPlanner::new(&store, &caller.ast, &caller.index)
+                    .with_header_bindings(&headers.arena, &headers.bindings)
+                    .plan_typed_class(class, &headers.arena, &check.body.unwrap())
+                    .unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn selected_method_routes_two_classes_in_one_file_as_their_bodies_arrive() {
+    const B: &str = "class First { def read(a: A): Int = a.take(42) }
+class Second { def read(a: A): Int = a.take(false) }";
+    let a = SourceId::from_index(7);
+    let b = SourceId::from_index(2);
+    for reverse in [false, true] {
+        let mut files = [(a, "A.scala", OVERLOADS), (b, "B.scala", B)];
+        if reverse {
+            files.reverse();
+        }
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let units = name_units(
+            &files,
+            parsing::parse_files(&files, 2),
+            &mut store,
+            &mut packages,
+        );
+        let mut headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
+        let sources = SignatureSources::new(&units, &store);
+        let caller = sources.by_source[&b];
+        let provider = sources.by_source[&a];
+        let calls = &caller.calls;
+        let offsets = [
+            B.find("take(42)").unwrap() as u32,
+            B.find("take(false)").unwrap() as u32,
+        ];
+        let targets = [
+            provider.methods().next().unwrap(),
+            provider.methods().nth(1).unwrap(),
+        ];
+        let mut bodies = TypedClassBodies::default();
+        for (n, class) in caller.classes.iter().enumerate() {
+            let body = dotty::type_class_body(
+                class,
+                &caller.ast,
+                &caller.index,
+                &mut store,
+                defs,
+                &packages,
+                &mut headers.arena,
+            )
+            .unwrap();
+            bodies.record(body).unwrap();
+            assert_eq!(
+                offsets.map(|offset| calls.selected_method_at(
+                    offset,
+                    &caller.ast,
+                    &bodies,
+                    &headers.arena,
+                    &store
+                )),
+                [
+                    Some(targets[0].symbol),
+                    (n == 1).then_some(targets[1].symbol)
+                ]
+            );
+        }
+        for ((offset, expected), declaration) in offsets.into_iter().zip(targets).zip([
+            "def take(n: Int): Int = n",
+            "def take(flag: Boolean): Int = 7",
+        ]) {
+            let method = calls
+                .selected_method_at(offset, &caller.ast, &bodies, &headers.arena, &store)
+                .unwrap();
+            assert_overload_target(&sources, method, provider, expected, declaration);
+        }
+    }
+}
+
+#[test]
+fn selected_method_distinguishes_a_direct_call_from_an_inserted_apply() {
+    let text = "class Callable {
+           def apply(n: Int): Int = n
+           def direct(): Int = apply(42)
+           def indirect(c: Callable): Int = c(42)
+         }";
+    let (mut store, defs, packages, unit) = class_planning::named(text);
+    let units = std::slice::from_ref(&unit);
+    let headers = complete_signatures(units, &mut store, defs, &packages).unwrap();
+    let (output, bodies) = type_bodies(units, &mut store, defs, &packages, headers);
+    let body = bodies.get(unit.classes[0].symbol).unwrap();
+    let mut methods = unit.methods();
+    let apply = methods.next().unwrap().symbol;
+    for (spelling, expected) in [("apply(42)", Some(apply)), ("c(42)", None)] {
+        let TreeKind::DefDef(def) = &unit.ast.get(methods.next().unwrap().tree).kind else {
+            panic!("expected method")
+        };
+        let call = def.rhs.unwrap();
+        assert!(matches!(unit.ast.get(call).kind, TreeKind::Apply(_)));
+        assert_eq!(
+            body.selected_method(call, &unit.ast, &output.arena, &store),
+            expected
+        );
+        let offset = text.find(spelling).unwrap() as u32;
+        assert_eq!(unit.calls.call_names().call_at(offset), Some(call));
+        assert_eq!(
+            body.selected_method_at(
+                offset,
+                unit.calls.call_names(),
+                &unit.ast,
+                &output.arena,
+                &store
+            ),
+            expected
+        );
+    }
 }
 
 #[test]

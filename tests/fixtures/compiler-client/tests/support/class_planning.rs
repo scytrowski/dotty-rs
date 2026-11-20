@@ -104,6 +104,9 @@ fn member_signature_rejects_the_other_seed_before_and_after_completion() {
             )
             .unwrap_err();
             assert!(matches!(error, MemberSignatureError::InvalidMember(id) if id == seed));
+            let report = error.diagnostic(|_| panic!("invalid member has no source site"));
+            assert_eq!(report.location, None);
+            assert_eq!(report.message, error.to_string());
             assert_eq!(store.checkpoint(), checkpoint);
             assert_eq!(store.symbols.info(seed), &expected);
             assert_eq!(store.symbols.info(other), &SymbolInfo::Missing);
@@ -348,6 +351,76 @@ fn method_error_keeps_a_executable_and_b_unpublished() {
 }
 
 #[test]
+fn class_body_checks_interleaved_members_and_keeps_successes_after_a_failure() {
+    use dotty::{ClassBodyError, core::NoResolver, typer::TyperError};
+
+    let (mut store, defs, packages, unit) = named(
+        "class C { val bad: Int = false; def good(): Int = 7; def wrong(): Int = true; val last: Boolean = 3 }",
+    );
+    let mut headers =
+        complete_signatures(std::slice::from_ref(&unit), &mut store, defs, &packages).unwrap();
+    let class = &unit.classes[0];
+    let before = headers.arena.checkpoint();
+    let first = dotty::type_class_body(
+        class,
+        &unit.ast,
+        &unit.index,
+        &mut store,
+        defs,
+        &packages,
+        &mut headers.arena,
+    )
+    .unwrap_err();
+    assert!(matches!(first, ClassBodyError::Member { member, .. } if member == class.members[0]));
+    assert_eq!(headers.arena.checkpoint(), before);
+
+    let errors = dotty::check_class_body(
+        class,
+        &unit.ast,
+        &unit.index,
+        &mut store,
+        defs,
+        &packages,
+        &mut headers.arena,
+        NoResolver,
+    )
+    .body
+    .unwrap_err();
+    let expected = [
+        (0, defs.boolean, defs.int),
+        (2, defs.boolean, defs.int),
+        (3, defs.int, defs.boolean),
+    ];
+    assert_eq!(errors.len(), expected.len());
+    for (error, (index, found, required)) in errors.into_iter().zip(expected) {
+        let ClassBodyError::Member {
+            class: owner,
+            member,
+            error:
+                TyperError::ExpectedExpressionTypeMismatch {
+                    actual, expected, ..
+                },
+        } = error
+        else {
+            panic!("unexpected member error: {error:?}");
+        };
+        assert_eq!(
+            (owner, member, actual, expected),
+            (class.symbol, class.members[index], found, required)
+        );
+    }
+    let typed_methods: Vec<_> = headers
+        .arena
+        .iter()
+        .filter_map(|(_, tree)| match &tree.kind {
+            TreeKind::DefDef(method) => Some(store.names.resolve(method.name.as_name().text())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(typed_methods, ["good"]);
+}
+
+#[test]
 fn type_class_body_rejects_substituted_member_before_typing() {
     let (mut store, defs, packages, mut unit) =
         named("class A { def value(): Int = 40 }; class B { def value(): Int = 7 }");
@@ -366,6 +439,22 @@ fn type_class_body_rejects_substituted_member_before_typing() {
     )
     .unwrap_err();
     assert!(matches!(error, dotty::ClassBodyError::InvalidClass(class) if class == a.symbol));
+    assert_eq!(arena.checkpoint(), before);
+    let report = dotty::check_class_body(
+        a,
+        &unit.ast,
+        &unit.index,
+        &mut store,
+        defs,
+        &packages,
+        &mut arena,
+        dotty::core::NoResolver,
+    );
+    assert!(report.diagnostics.is_empty());
+    let errors = report.body.unwrap_err();
+    assert!(
+        matches!(errors.as_slice(), [dotty::ClassBodyError::InvalidClass(id)] if *id == a.symbol)
+    );
     assert_eq!(arena.checkpoint(), before);
 }
 
@@ -1155,13 +1244,15 @@ fn wrong_second_method_argument_points_to_true_in_both_file_orders() {
         let consumer = &units[usize::from(provider_first)];
         let provider = &units[usize::from(!provider_first)];
         let error = complete_signatures(&units, &mut store, defs, &packages).unwrap_err();
-        let super::SignatureError::Member(dotty::MemberSignatureError::Typing {
-            member,
-            error,
-            ..
-        }) = error
-        else {
-            panic!("expected a member typing error, got {error:?}")
+        let super::SignatureError::Member(failure) = error else {
+            panic!("expected a member signature error, got {error:?}");
+        };
+        let sources = SignatureSources::new(&units, &store);
+        let diagnostic = failure.diagnostic(|id| sources.by_source.get(&id).map(|u| &u.ast));
+        assert_eq!(diagnostic.message, "Expected Int, found Boolean");
+        assert_eq!(failure.diagnostic(|_| Some(&provider.ast)).location, None);
+        let dotty::MemberSignatureError::Typing { member, error, .. } = failure else {
+            panic!("expected a member typing error");
         };
         assert_eq!(member, consumer.method_symbol());
         assert!(
@@ -1170,9 +1261,7 @@ fn wrong_second_method_argument_points_to_true_in_both_file_orders() {
         } if actual == defs.boolean && expected == defs.int),
             "{error:?}"
         );
-        let span = SignatureSources::new(&units, &store)
-            .error_span(&error)
-            .unwrap();
+        let span = diagnostic.location.unwrap();
         assert_eq!(span.source(), consumer.source);
         assert_eq!(
             dotty::core::SourceText::new(text)
@@ -1244,13 +1333,41 @@ fn field_scheduler_reports_the_bad_call_in_consumer_in_both_orders() {
         )
         .unwrap_err();
         assert_eq!(edges, [(answer.symbol, value)]);
-        let super::SignatureError::Member(dotty::MemberSignatureError::Typing {
+        let super::SignatureError::Member(failure) = error else {
+            panic!("unexpected signature error for answer: {error:?}");
+        };
+        let ast_for = |id| sources.by_source.get(&id).map(|u| &u.ast);
+        let diagnostic = failure.diagnostic(ast_for);
+        assert_eq!(diagnostic.severity, dotty::core::DiagnosticSeverity::Error);
+        let span = diagnostic.location.expect("source of the failed call");
+        let (_, filename, text) = files
+            .iter()
+            .find(|(id, _, _)| *id == span.source())
+            .unwrap();
+        let call = SourceText::new(text)
+            .unwrap()
+            .slice(span.span().range())
+            .unwrap();
+        assert_eq!(
+            (*filename, call, diagnostic.message.as_str()),
+            (
+                "Consumer.scala",
+                "provider.value(1)",
+                "Expected 0 arguments, got 1"
+            )
+        );
+        for ast in [Some(&provider.ast), None] {
+            let unlocated = failure.diagnostic(|_| ast);
+            assert_eq!(unlocated.location, None);
+            assert_eq!(unlocated.message, diagnostic.message);
+        }
+        let dotty::MemberSignatureError::Typing {
             declaration,
             member,
             error: member_error,
-        }) = error
+        } = failure
         else {
-            panic!("unexpected error for answer: {error:?}")
+            panic!("expected a member typing error");
         };
         assert_eq!(
             declaration,
@@ -1266,13 +1383,17 @@ fn field_scheduler_reports_the_bad_call_in_consumer_in_both_orders() {
 
         // With the dependency complete, the class field pass encounters the same call.
         let retry = complete_signatures(&units, &mut store, defs, &packages).unwrap_err();
-        let super::SignatureError::Field(dotty::ClassFieldSignatureError::Field {
+        let super::SignatureError::Field(failure) = retry else {
+            panic!("unexpected error on retry: {retry:?}")
+        };
+        assert_eq!(failure.diagnostic(ast_for), diagnostic);
+        let dotty::ClassFieldSignatureError::Field {
             class: owner,
             field,
             error: field_error,
-        }) = retry
+        } = failure
         else {
-            panic!("unexpected error on retry: {retry:?}")
+            panic!("expected a field typing failure");
         };
         assert_eq!((owner, field), (class.symbol, answer.symbol));
         for error in [member_error, field_error] {
@@ -1287,20 +1408,8 @@ fn field_scheduler_reports_the_bad_call_in_consumer_in_both_orders() {
             };
             assert_eq!((*source, *tree_index), (consumer.source, rhs.index()));
             assert_eq!(dotty::typer_error_span(&error, &provider.ast), None);
-            let span = sources.error_span(&error).unwrap();
-            let (_, filename, text) = files
-                .iter()
-                .find(|(id, _, _)| *id == span.source())
-                .unwrap();
-            let call = SourceText::new(text)
-                .unwrap()
-                .slice(span.span().range())
-                .unwrap();
-            let report = format!("{filename}: {call}: expected {expected} arguments, got {actual}");
-            assert_eq!(
-                report,
-                "Consumer.scala: provider.value(1): expected 0 arguments, got 1"
-            );
+            assert_eq!((*expected, *actual), (0, 1));
+            assert_eq!(sources.error_span(&error), Some(span));
         }
     }
 }
@@ -1906,8 +2015,9 @@ fn wrong_parent_argument_reports_the_same_error_in_both_file_orders() {
         let child = &units[child_index].classes[0];
         let parent = units[parent_index].classes[0].symbol;
         let mut blocked = Vec::new();
+        let sources = SignatureSources::new(&units, &store);
         let error = super::complete_headers(
-            &SignatureSources::new(&units, &store),
+            &sources,
             &mut store,
             defs,
             &packages,
@@ -1933,17 +2043,25 @@ fn wrong_parent_argument_reports_the_same_error_in_both_file_orders() {
         } if actual == defs.boolean && expected == defs.int),
             "{error:?}"
         );
-        let span = dotty::typer_error_span(&error, &units[child_index].ast).unwrap();
+        let diagnostic = dotty::TypingDiagnostic::from_typer(&error, |id| {
+            sources.by_source.get(&id).map(|u| &u.ast)
+        });
+        assert_eq!(diagnostic.message, "Expected Int, found Boolean");
+        assert_eq!(diagnostic.severity, dotty::core::DiagnosticSeverity::Error);
+        let span = diagnostic
+            .location
+            .expect("parent argument in Derived.scala");
         let start = derived.2.rfind("start").unwrap() as u32;
         assert_eq!(span.source(), derived.0);
         assert_eq!(
             span.span().range(),
             dotty::core::TextRange::new(start, start + 5).unwrap()
         );
-        assert_eq!(
-            dotty::typer_error_span(&error, &units[parent_index].ast),
-            None
-        );
+        for ast in [Some(&units[parent_index].ast), None] {
+            let unlocated = dotty::TypingDiagnostic::from_typer(&error, |_| ast);
+            assert_eq!(unlocated.location, None);
+            assert_eq!(unlocated.message, diagnostic.message);
+        }
         assert_eq!(
             store.symbols.info(child.symbol),
             &dotty::core::SymbolInfo::Missing
@@ -2046,6 +2164,7 @@ fn failed_header_preserves_good_parent_call_for_execution() {
         argument_index,
         actual,
         expected,
+        ..
     } = error
     else {
         panic!("unexpected error for Bad: {error:?}")
