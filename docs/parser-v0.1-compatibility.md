@@ -1157,3 +1157,9 @@ Recreate the report from the pinned checkout with:
 tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output tools/parser-corpus-report/parser-post-issue-712-scala3-3.9.0.json
 ```
+
+Compiler and editor clients can present a `ParseDiagnostic` with
+`dotty::SourceDiagnostic::from_parser`. Declaration issues have messages for
+method headers, value names, patterns and initializers. Other issue groups
+carry a generic parser message with the original issue code. The report
+preserves the parser's severity, source ID and UTF-8 byte range.

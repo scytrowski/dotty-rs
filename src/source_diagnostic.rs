@@ -1,5 +1,6 @@
 //! Presentation of source diagnostics for external compiler and editor clients.
-use crate::core::{AstArena, DiagnosticSeverity, SourceId, SourceSpan, Untyped};
+use crate::core::{AstArena, DiagnosticSeverity, SourceId, SourceSpan, Span, Untyped};
+use crate::parser::{DeclarationIssue, ParseDiagnostic, ParseIssue, ValueDefinitionKind};
 use crate::typer::TyperError;
 
 /// A source diagnostic reported to a compiler or editor client.
@@ -21,6 +22,25 @@ impl SourceDiagnostic {
             severity: DiagnosticSeverity::Error,
             message,
             location,
+        }
+    }
+
+    /// Presents a parser diagnostic with its stable issue code and original byte range.
+    /// Declaration errors have specific messages. Other groups retain their code in the text.
+    pub fn from_parser(diagnostic: &ParseDiagnostic) -> Self {
+        let issue = diagnostic.issue();
+        let message = match issue {
+            ParseIssue::Declaration(declaration) => declaration_message(declaration).to_owned(),
+            _ => format!("Parser diagnostic ({})", issue.code()),
+        };
+        Self {
+            code: Some(issue.code()),
+            severity: diagnostic.severity(),
+            message,
+            location: Some(SourceSpan::new(
+                diagnostic.source(),
+                Span::without_point(diagnostic.span()),
+            )),
         }
     }
 
@@ -51,5 +71,75 @@ impl SourceDiagnostic {
             _ => error.to_string(),
         };
         Self::error(message, crate::typer_error_span_with(error, ast_for))
+    }
+}
+
+fn declaration_message(issue: &DeclarationIssue) -> &'static str {
+    use DeclarationIssue::*;
+    match issue {
+        ExpectedMethodSeparator { .. } => "Expected ':' for a result type or '=' for a method body",
+        SecondaryConstructorOutsideTemplate => "A secondary constructor must appear inside a class",
+        ExpectedMethodName { .. } => "Expected a method name after 'def'",
+        ExpectedValueName {
+            declaration: ValueDefinitionKind::Val,
+            ..
+        } => "Expected a name after 'val'",
+        ExpectedValueName {
+            declaration: ValueDefinitionKind::Var,
+            ..
+        } => "Expected a name after 'var'",
+        ExpectedValueEquals { .. } => "Expected '=' before the initializer",
+        ExpectedValueTypeOrEquals { .. } => "Expected a type annotation or '=' after the name",
+        ExpectedPatternAfterValueKeyword {
+            declaration: ValueDefinitionKind::Val,
+            ..
+        } => "Expected a pattern after 'val'",
+        ExpectedPatternAfterValueKeyword {
+            declaration: ValueDefinitionKind::Var,
+            ..
+        } => "Expected a pattern after 'var'",
+        CommaSeparatedValuePatternsMustBeIdentifiers { .. } => {
+            "Expected simple names in a comma-separated declaration"
+        }
+        ExpectedIdentifierAfterValuePatternComma { .. } => "Expected a name after ','",
+        ExpectedEqualsAfterPatternDefinition { .. } => "Expected '=' after the pattern",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{TextRange, TokenKind};
+
+    #[test]
+    fn parser_reports_preserve_the_phase_code_and_source_location() {
+        let span = SourceSpan::new(
+            SourceId::from_index(4),
+            Span::without_point(TextRange::new(7, 8).unwrap()),
+        );
+        let found = TokenKind::Eof;
+        for (issue, code, message) in [
+            (
+                ParseIssue::Declaration(DeclarationIssue::ExpectedValueEquals { found }),
+                "parser.declaration.expected_value_equals",
+                "Expected '=' before the initializer",
+            ),
+            (
+                ParseIssue::Declaration(DeclarationIssue::ExpectedMethodName { found }),
+                "parser.declaration.expected_method_name",
+                "Expected a method name after 'def'",
+            ),
+            (
+                ParseIssue::ExpectedExpression { found },
+                "parser.expected_expression",
+                "Parser diagnostic (parser.expected_expression)",
+            ),
+        ] {
+            let report = SourceDiagnostic::from_parser(&ParseDiagnostic::with_issue(span, issue));
+            assert_eq!(report.code, Some(code));
+            assert_eq!(report.message, message);
+            assert_eq!(report.location, Some(span));
+            assert_eq!(report.severity, DiagnosticSeverity::Error);
+        }
     }
 }
