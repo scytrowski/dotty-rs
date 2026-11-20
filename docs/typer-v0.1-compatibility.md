@@ -124,6 +124,10 @@ If that provider also offers `render(b: Boolean): Boolean`, the ordinary
 argument selects the overload before contextual arguments are synthesized.
 Thus `x.render(true)` needs only the factory witness. A call with no applicable
 overload reports the attempted provider at the selection.
+When the ordinary clauses tie, an immediately following explicit `using`
+clause can select the overload by its written argument types. For overloads
+taking `Compact` and `Detailed`, omitting that clause leaves the selection
+ambiguous even when only a `Compact` witness is in scope.
 
 Conversion insertion covers value adaptation to
 a known expected type, including ordinary method arguments. For a unary

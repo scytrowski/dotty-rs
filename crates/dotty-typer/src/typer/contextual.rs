@@ -138,6 +138,7 @@ impl SourceTyper<'_> {
             return Ok(adapted);
         }
         let request = ApplicationRequest {
+            following_using: None,
             function_tree: source_tree,
             argument_trees: &[],
             application_kind: ApplyKind::Using,

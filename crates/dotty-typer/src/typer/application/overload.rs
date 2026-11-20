@@ -523,6 +523,7 @@ impl SourceTyper<'_> {
             application_kind,
             context,
             tree_index: application_tree_index,
+            ..
         } = request;
         let Some(function_node) = self.arena.try_get(function_tree).cloned() else {
             return Err(TyperError::TreeOutsideArena {
@@ -744,11 +745,7 @@ impl SourceTyper<'_> {
                         if let Some(resolved) = self.resolve_local_extension_application(
                             selection,
                             qualifier,
-                            argument_trees,
-                            application_kind,
-                            context,
-                            function_tree,
-                            application_tree_index,
+                            request,
                             info_journal,
                             new_mappings,
                         )? {
@@ -813,11 +810,7 @@ impl SourceTyper<'_> {
                                         .resolve_local_extension_application(
                                             selection,
                                             qualifier,
-                                            argument_trees,
-                                            application_kind,
-                                            context,
-                                            function_tree,
-                                            application_tree_index,
+                                            request,
                                             info_journal,
                                             new_mappings,
                                         )?
@@ -1028,11 +1021,7 @@ impl SourceTyper<'_> {
                     && let Some(resolved) = self.resolve_local_extension_application(
                         *selection,
                         *qualifier,
-                        argument_trees,
-                        application_kind,
-                        context,
-                        function_tree,
-                        application_tree_index,
+                        request,
                         info_journal,
                         new_mappings,
                     )?
@@ -1124,19 +1113,22 @@ impl SourceTyper<'_> {
         }))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn resolve_local_extension_application(
         &mut self,
         selection: dotty_core::ast::Select<Untyped>,
         qualifier: TreeId<Typed>,
-        argument_trees: &[TreeId<Untyped>],
-        application_kind: ApplyKind,
-        context: ExpressionContext,
-        function_tree: TreeId<Untyped>,
-        application_tree_index: u32,
+        request: ApplicationRequest<'_>,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<Option<ResolvedApplicationFunction>, TyperError> {
+        let ApplicationRequest {
+            function_tree,
+            argument_trees,
+            application_kind,
+            context,
+            tree_index: application_tree_index,
+            following_using,
+        } = request;
         if application_kind != ApplyKind::Regular {
             return Ok(None);
         }
@@ -1197,6 +1189,7 @@ impl SourceTyper<'_> {
                 context,
                 function_tree.index(),
                 Some(ExtensionCall {
+                    following_using,
                     arguments: argument_trees,
                     typed_arguments: &mut typed_arguments,
                     mappings: new_mappings,

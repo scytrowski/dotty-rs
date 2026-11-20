@@ -1541,3 +1541,158 @@ fn overloaded_extension_with_no_match_permits_a_companion_conversion() {
     };
     assert_eq!(typer.store.names.resolve(given.name.text()), "view");
 }
+
+const USING_OVERLOADS: &str =
+    include_str!("../../../tests/fixtures/contextual-consumers/ExtensionUsingOverloads.scala");
+
+#[test]
+fn overloaded_extension_explicit_using_selects_the_method_and_preserves_both_witnesses() {
+    let mut swapped: Vec<_> = USING_OVERLOADS.lines().collect();
+    let first = swapped
+        .iter()
+        .position(|line| line.contains("extension ("))
+        .unwrap();
+    swapped.swap(first, first + 1);
+    for text in [USING_OVERLOADS, &swapped.join("\n")] {
+        let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+        let factory = method_symbol(&parsed, &store, &index, source, "ops");
+        let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+        for (name, arg_index, formal) in [
+            ("compact", 1, "c"),
+            ("detailed", 2, "d"),
+            ("parenthesized", 1, "c"),
+        ] {
+            let (method, rhs) =
+                method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+            let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+                panic!()
+            };
+            let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+                panic!()
+            };
+            let param = |clause: usize, n: usize| {
+                index
+                    .symbol_at(source, def.value_param_clauses[clause][n])
+                    .unwrap()
+            };
+            typer
+                .type_method_definition(tree)
+                .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            let root = typer.typed_index.get(source, rhs).unwrap();
+            let ast = typer.typed_ast();
+            assert_eq!(ast.get(root).ty, defs.int);
+            let TreeKind::Apply(using) = &ast.get(root).kind else {
+                panic!()
+            };
+            assert_eq!(using.kind, ApplyKind::Using);
+            assert_eq!(typed_reference(&typer, using.args[0]), param(1, arg_index));
+            let selected = assert_render_call_with_literal(
+                &typer,
+                using.function,
+                factory,
+                param(0, 0),
+                param(1, 0),
+                dotty_core::Constant::Int(3),
+            );
+            let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(selected)
+            else {
+                panic!()
+            };
+            let TreeKind::DefDef(render) = &parsed.ast.get(tree).kind else {
+                panic!()
+            };
+            let witness = index
+                .symbol_at(source, render.value_param_clauses[1][0])
+                .unwrap();
+            assert_eq!(
+                typer
+                    .store
+                    .names
+                    .resolve(typer.store.symbols.get(witness).name.text()),
+                formal
+            );
+        }
+    }
+}
+
+#[test]
+fn overloaded_extension_requires_a_written_using_to_break_the_tie() {
+    let extra = include_str!(
+        "../../../tests/fixtures/contextual-consumers/ExtensionUsingOverloadsRejected.scala"
+    );
+    let text = format!(
+        "{USING_OVERLOADS}\n{}",
+        extra.strip_prefix("package sameargs").unwrap()
+    );
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(&text);
+    let factory = method_symbol(&parsed, &store, &index, source, "ops");
+    let mut methods = parsed
+        .ast
+        .iter()
+        .filter_map(|(id, node)| match &node.kind {
+            TreeKind::DefDef(d) if store.names.resolve(d.name.as_name().text()) == "render" => {
+                index.symbol_at(source, id)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    methods.sort_by_key(|symbol| symbol.index());
+    assert_eq!(methods.len(), 2);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for name in ["probeOne", "probeBoth", "probeWrong"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+            panic!()
+        };
+        let TreeKind::Apply(call) = &parsed.ast.get(rhs).kind else {
+            panic!()
+        };
+        let select = if let TreeKind::Apply(inner) = &parsed.ast.get(call.function).kind {
+            inner.function
+        } else {
+            call.function
+        };
+        let before = typer.store.checkpoint();
+        let trees = typer.typed_arena.checkpoint();
+        let error = typer.type_method_definition(tree).unwrap_err();
+        let TyperError::ExtensionOverload {
+            tree_index,
+            provider,
+            cause,
+            ..
+        } = error
+        else {
+            panic!("{error:?}")
+        };
+        assert_eq!(tree_index, select.index());
+        assert_eq!(provider, factory);
+        let mut reported = match *cause {
+            TyperError::AmbiguousOverloadApplication { candidates, .. } if name != "probeWrong" => {
+                candidates
+            }
+            TyperError::OverloadApplicationNoApplicable { candidates, .. }
+                if name == "probeWrong" =>
+            {
+                candidates
+                    .into_iter()
+                    .map(|(symbol, rejection)| {
+                        assert!(matches!(
+                            rejection,
+                            OverloadRejection::ArgumentNonConformance {
+                                argument_index: 0,
+                                ..
+                            }
+                        ));
+                        symbol
+                    })
+                    .collect()
+            }
+            other => panic!("{name}: {other:?}"),
+        };
+        reported.sort_by_key(|symbol| symbol.index());
+        assert_eq!(reported, methods);
+        assert_eq!(typer.store.checkpoint(), before);
+        assert_eq!(typer.typed_arena.checkpoint(), trees);
+        assert!(typer.typed_index.is_empty());
+    }
+}

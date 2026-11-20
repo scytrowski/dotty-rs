@@ -415,14 +415,21 @@ impl SourceTyper<'_> {
         &mut self,
         inner: TreeId<Untyped>,
         context: ExpressionContext,
+        following_using: Option<&[TreeId<Untyped>]>,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
         // Parens is source-only. Dotty's typed tree keeps the enclosed
         // expression, including its position and own type, as the result.
-        // `type_expression_inner` records the inner source mapping; the
+        // Typing the inner tree records its source mapping. The
         // dispatcher records the wrapper against this same typed identity.
-        self.type_expression_inner(inner, context, info_journal, new_mappings)
+        self.type_expression_with_following_using(
+            inner,
+            context,
+            following_using,
+            info_journal,
+            new_mappings,
+        )
     }
 
     pub(in crate::typer) fn type_expression_expected_inner(

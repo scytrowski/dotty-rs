@@ -9,6 +9,7 @@ pub(in crate::typer) enum ExtensionLookup {
 
 pub(in crate::typer) struct ExtensionCall<'a> {
     pub arguments: &'a [TreeId<Untyped>],
+    pub following_using: Option<&'a [TreeId<Untyped>]>,
     pub typed_arguments: &'a mut Option<Vec<TypedArgument>>,
     pub mappings: &'a mut Vec<(SourceId, TreeId<Untyped>)>,
 }
@@ -191,37 +192,36 @@ impl SourceTyper<'_> {
                         name,
                     });
                 };
-                let arguments = match &mut *call.typed_arguments {
-                    Some(typed) => typed.as_slice(),
-                    slot @ None => slot
-                        .insert(self.type_extension_arguments(
-                            call.arguments,
-                            context,
-                            journal,
-                            call.mappings,
-                        )?)
-                        .as_slice(),
-                };
-                let winner =
-                    match self.choose_extension_overload(&alternatives, arguments, tree_index) {
-                        Ok(symbol) => symbol,
-                        Err(
-                            cause @ (TyperError::OverloadApplicationNoApplicable { .. }
-                            | TyperError::AmbiguousOverloadApplication { .. }),
-                        ) => {
-                            search.dependency_failure.get_or_insert(
-                                TyperError::ExtensionOverload {
-                                    source: self.source,
-                                    tree_index,
-                                    name,
-                                    provider: evidence.symbol,
-                                    cause: Box::new(cause),
-                                },
-                            );
-                            continue;
+                let winner = match self.choose_extension_overload(
+                    &alternatives,
+                    call,
+                    context,
+                    tree_index,
+                    journal,
+                ) {
+                    Ok(symbol) => symbol,
+                    Err(
+                        cause @ (TyperError::OverloadApplicationNoApplicable {
+                            tree_index: site,
+                            ..
                         }
-                        Err(error) => return Err(error),
-                    };
+                        | TyperError::AmbiguousOverloadApplication {
+                            tree_index: site, ..
+                        }),
+                    ) if site == tree_index => {
+                        search
+                            .dependency_failure
+                            .get_or_insert(TyperError::ExtensionOverload {
+                                source: self.source,
+                                tree_index,
+                                name,
+                                provider: evidence.symbol,
+                                cause: Box::new(cause),
+                            });
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
                 alternatives.retain(|alt| alt.symbol == winner);
             }
             if let Some(alt) = alternatives.pop() {
@@ -246,9 +246,59 @@ impl SourceTyper<'_> {
     fn choose_extension_overload(
         &mut self,
         alternatives: &[ExtensionAlternative],
-        arguments: &[TypedArgument],
+        call: &mut ExtensionCall<'_>,
+        context: ExpressionContext,
         tree_index: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<SymbolId, TyperError> {
+        let arguments = match &mut *call.typed_arguments {
+            Some(typed) => typed.as_slice(),
+            slot @ None => slot
+                .insert(self.type_extension_arguments(
+                    call.arguments,
+                    context,
+                    journal,
+                    call.mappings,
+                )?)
+                .as_slice(),
+        };
+        let mut candidates = self.extension_overload_candidates(alternatives, tree_index)?;
+        let mut resolution = self.choose_overload_candidate(
+            &mut candidates,
+            arguments,
+            tree_index,
+            ApplyKind::Regular,
+        );
+        if let Err(TyperError::AmbiguousOverloadApplication {
+            candidates: tied, ..
+        }) = &resolution
+            && let Some(using) = call.following_using
+        {
+            // Only written arguments can distinguish otherwise identical ordinary clauses.
+            candidates.retain_mut(|candidate| {
+                let Type::Method(ordinary) = self.store.types.get(candidate.callable) else {
+                    return false;
+                };
+                candidate.callable = ordinary.result;
+                tied.contains(&candidate.symbol)
+                    && matches!(self.store.types.get(candidate.callable), Type::Method(_))
+            });
+            let explicit = self.type_extension_arguments(using, context, journal, call.mappings)?;
+            resolution = self.choose_overload_candidate(
+                &mut candidates,
+                &explicit,
+                tree_index,
+                ApplyKind::Using,
+            );
+        }
+        resolution.map(|candidate| candidate.symbol)
+    }
+
+    fn extension_overload_candidates(
+        &self,
+        alternatives: &[ExtensionAlternative],
+        tree_index: u32,
+    ) -> Result<Vec<ApplicationCandidate>, TyperError> {
         let mut candidates = Vec::with_capacity(alternatives.len());
         for alt in alternatives {
             let Type::Method(receiver) = self.store.types.get(alt.signature) else {
@@ -272,8 +322,7 @@ impl SourceTyper<'_> {
                 rejection: None,
             });
         }
-        self.choose_overload_candidate(&mut candidates, arguments, tree_index, ApplyKind::Regular)
-            .map(|candidate| candidate.symbol)
+        Ok(candidates)
     }
 
     fn extension_receiver(&self, signature: TypeId) -> Option<TypeId> {

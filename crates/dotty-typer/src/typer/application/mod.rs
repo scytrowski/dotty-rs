@@ -52,6 +52,7 @@ pub(in crate::typer) struct InfixApplicationRequest {
 pub(in crate::typer) struct ApplicationRequest<'a> {
     pub(in crate::typer) function_tree: TreeId<Untyped>,
     pub(in crate::typer) argument_trees: &'a [TreeId<Untyped>],
+    pub(in crate::typer) following_using: Option<&'a [TreeId<Untyped>]>,
     pub(in crate::typer) application_kind: ApplyKind,
     pub(in crate::typer) context: ExpressionContext,
     pub(in crate::typer) tree_index: u32,
@@ -164,11 +165,12 @@ impl SourceTyper<'_> {
         &mut self,
         tree: TreeId<Untyped>,
         application: dotty_core::ast::Apply<Untyped>,
-        position: Option<SourceSpan>,
+        following_using: Option<&[TreeId<Untyped>]>,
         context: ExpressionContext,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
+        let position = self.arena.get(tree).position;
         if application.args.len() == 1 {
             self.prepare_source_owner_for_qualified_this_argument(
                 application.function,
@@ -194,6 +196,7 @@ impl SourceTyper<'_> {
         let request = ApplicationRequest {
             function_tree: application.function,
             argument_trees: &application.args,
+            following_using,
             application_kind: application.kind,
             context,
             tree_index: tree.index(),
@@ -223,9 +226,10 @@ impl SourceTyper<'_> {
                 // Keep a Java nullary method selection as a method reference
                 // here: explicit `f()` syntax must not be auto-applied before
                 // the application consumes it.
-                let function = self.type_expression_inner(
+                let function = self.type_expression_with_following_using(
                     application.function,
                     context,
+                    (application.kind == ApplyKind::Using).then_some(application.args.as_slice()),
                     info_journal,
                     new_mappings,
                 )?;
