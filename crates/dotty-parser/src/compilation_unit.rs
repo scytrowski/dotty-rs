@@ -11,6 +11,7 @@ use crate::{Location, ParseDiagnostic, ParseIssue, ParseKind, Parser};
 pub struct SourceCallNames {
     source: SourceId,
     entries: Vec<(TextRange, TreeId<Untyped>)>,
+    methods: Vec<(TreeId<Untyped>, TextRange)>,
 }
 
 impl SourceCallNames {
@@ -23,6 +24,15 @@ impl SourceCallNames {
     /// Backquoted names include both backticks.
     pub fn iter(&self) -> impl Iterator<Item = (TextRange, TreeId<Untyped>)> + '_ {
         self.entries.iter().copied()
+    }
+
+    /// Returns the exact token of an explicitly named method from this parse.
+    pub fn method_name(&self, definition: TreeId<Untyped>) -> Option<TextRange> {
+        let i = self
+            .methods
+            .binary_search_by_key(&definition.index(), |(tree, _)| tree.index())
+            .ok()?;
+        Some(self.methods[i].1)
     }
 
     /// Finds the application whose written name contains this byte offset.
@@ -92,6 +102,7 @@ where
             call_names: SourceCallNames {
                 source: self.source_id,
                 entries: self.call_names,
+                methods: self.method_names,
             },
         }
     }

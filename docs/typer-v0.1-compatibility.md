@@ -2231,6 +2231,13 @@ query finds the enclosing class by binary search, then looks up its body in
 class can already resolve. A call in the second class yields `None` until
 its body is recorded. Both queries use the same file index.
 
+With `check_class_body`, the file index can also navigate from a successfully
+typed member of a class with errors. `SourceFileCalls::definition_at` takes a
+lookup for the enclosing class check and one for the defining file. Its result
+contains the source ID, the declaration range and the exact name token range.
+Only committed bindings participate. JVM planning still requires a complete
+`TypedClassBody`.
+
 For a call with the wrong number of arguments, pass the original
 `TyperError::ApplicationArityMismatch` and its untyped AST to
 `dotty::typer_error_span`. The returned `SourceSpan` covers the call

@@ -1,16 +1,27 @@
+use std::collections::HashMap;
+
 use crate::core::{
-    AstArena, SemanticStore, SourceDefinition, SourceSemanticIndex, SymbolId, TextRange, TreeKind,
-    Typed, Untyped,
+    AstArena, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex, SymbolId,
+    SymbolOrigin, TextRange, TreeKind, Typed, Untyped,
 };
 use crate::jvm_class_plan::TypedClassBodies;
 use crate::parser::SourceCallNames;
 use crate::source_declarations::{DeclarationError, SourceClass};
+
+/// A source definition and the written token to select inside it, in UTF-8 bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceMethodTarget {
+    pub source: SourceId,
+    pub declaration: TextRange,
+    pub name: TextRange,
+}
 
 /// Direct call names and the ranges of their top-level classes in one named source file.
 #[derive(Debug)]
 pub struct SourceFileCalls {
     names: SourceCallNames,
     classes: Vec<(TextRange, SymbolId)>,
+    targets: HashMap<SymbolId, SourceMethodTarget>,
 }
 
 impl SourceFileCalls {
@@ -26,6 +37,7 @@ impl SourceFileCalls {
     ) -> Result<Self, DeclarationError> {
         let source = names.source();
         let mut ranges = Vec::with_capacity(classes.len());
+        let mut targets = HashMap::new();
         let mut previous_end = 0;
         for class in classes {
             let tree = class.tree;
@@ -47,12 +59,46 @@ impl SourceFileCalls {
             {
                 return Err(invalid);
             }
+            for method in class.methods() {
+                if let Some(name) = names.method_name(method.tree) {
+                    let tree = method.tree;
+                    let invalid = DeclarationError::InvalidBinding { source, tree };
+                    if index.definition_of(method.symbol)
+                        != Some(SourceDefinition::Canonical { source, tree })
+                    {
+                        return Err(invalid);
+                    }
+                    let declaration = ast
+                        .try_get(tree)
+                        .and_then(|node| node.position)
+                        .filter(|p| p.source() == source)
+                        .ok_or(invalid)?
+                        .span()
+                        .range();
+                    if name.start() < declaration.start()
+                        || name.end() > declaration.end()
+                        || declaration.start() < range.start()
+                        || declaration.end() > range.end()
+                    {
+                        return Err(invalid);
+                    }
+                    targets.insert(
+                        method.symbol,
+                        SourceMethodTarget {
+                            source,
+                            declaration,
+                            name,
+                        },
+                    );
+                }
+            }
             ranges.push((range, class.symbol));
             previous_end = range.end();
         }
         Ok(Self {
             names,
             classes: ranges,
+            targets,
         })
     }
 
@@ -85,6 +131,28 @@ impl SourceFileCalls {
         }
         let bindings = check(self.class_at(offset)?)?.bindings()?;
         crate::jvm_class_plan::selected_method(bindings, call, ast, typed_ast, store)
+    }
+
+    /// Follows a checked source call to the defining file, declaration and name token.
+    /// Both lookups must return data from the caller's current analysis session.
+    pub fn definition_at<'a>(
+        &self,
+        offset: u32,
+        ast: &AstArena<Untyped>,
+        typed_ast: &AstArena<Typed>,
+        store: &SemanticStore,
+        check: impl FnOnce(SymbolId) -> Option<&'a crate::ClassBodyCheck>,
+        file: impl FnOnce(SourceId) -> Option<&'a SourceFileCalls>,
+    ) -> Option<SourceMethodTarget> {
+        let method = self.checked_method_at(offset, ast, typed_ast, store, check)?;
+        let SymbolOrigin::Source(source) = store.symbols.get(method).origin else {
+            return None;
+        };
+        file(source)?
+            .targets
+            .get(&method)
+            .copied()
+            .filter(|target| target.source == source)
     }
 
     /// Resolve a UTF-8 byte offset on a method name using the current bodies from

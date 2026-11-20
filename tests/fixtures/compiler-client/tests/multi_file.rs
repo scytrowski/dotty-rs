@@ -662,6 +662,24 @@ fn checked_calls_survive_a_failing_sibling_in_both_file_orders() {
                 at(text.rfind("take").unwrap() as u32),
                 (!broken).then_some(method)
             );
+            let target = caller
+                .calls
+                .definition_at(
+                    text.find("take").unwrap() as u32,
+                    &caller.ast,
+                    &headers.arena,
+                    &store,
+                    |owner| (owner == class.symbol).then_some(&check),
+                    |id| sources.by_source.get(&id).map(|unit| &unit.calls),
+                )
+                .unwrap();
+            assert_eq!(target.source, a);
+            let slice = |range: dotty::core::TextRange| {
+                &OVERLOADS[range.start() as usize..range.end() as usize]
+            };
+            assert_eq!(slice(target.declaration), "def take(n: Int): Int = n");
+            assert_eq!(slice(target.name), "take");
+            assert_eq!(target.name.start(), OVERLOADS.find("take").unwrap() as u32);
             if broken {
                 let errors = check.body.unwrap_err();
                 let [dotty::ClassBodyError::Member { member, .. }] = errors.as_slice() else {
