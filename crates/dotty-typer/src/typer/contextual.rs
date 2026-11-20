@@ -12,7 +12,7 @@ pub(super) use conversions::{
 };
 mod defaults;
 mod extension;
-pub(super) use extension::ExtensionLookup;
+pub(super) use extension::{ExtensionCall, ExtensionLookup};
 mod opaque;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

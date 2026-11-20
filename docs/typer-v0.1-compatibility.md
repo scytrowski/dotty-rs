@@ -120,6 +120,10 @@ on the selected method is filled at the call site after the ordinary arguments.
 For `render(i: Int)(using fmt: Format)`, the full application is
 `ops[Int](tc).render(x)(3)(fmt)`. An explicit `(using chosen)` supplies
 the method argument even when implicit search for `Format` would be ambiguous.
+If that provider also offers `render(b: Boolean): Boolean`, the ordinary
+argument selects the overload before contextual arguments are synthesized.
+Thus `x.render(true)` needs only the factory witness. A call with no applicable
+overload reports the attempted provider at the selection.
 
 Conversion insertion covers value adaptation to
 a known expected type, including ordinary method arguments. For a unary
