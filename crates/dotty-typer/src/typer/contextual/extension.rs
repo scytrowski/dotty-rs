@@ -9,6 +9,7 @@ pub(in crate::typer) enum ExtensionLookup {
 
 pub(in crate::typer) struct ExtensionCall<'a> {
     pub arguments: &'a [TreeId<Untyped>],
+    pub expected_result: Option<TypeId>,
     pub following_using: Option<&'a [TreeId<Untyped>]>,
     pub typed_arguments: &'a mut Option<Vec<TypedArgument>>,
     pub mappings: &'a mut Vec<(SourceId, TreeId<Untyped>)>,
@@ -16,6 +17,7 @@ pub(in crate::typer) struct ExtensionCall<'a> {
 
 struct ExtensionAlternative {
     provider: Provider,
+    receiver: TypeId,
     symbol: SymbolId,
     signature: TypeId,
 }
@@ -179,6 +181,7 @@ impl SourceTyper<'_> {
                     continue;
                 }
                 alternatives.push(ExtensionAlternative {
+                    receiver: input,
                     provider,
                     symbol: member.symbol,
                     signature,
@@ -263,12 +266,26 @@ impl SourceTyper<'_> {
                 .as_slice(),
         };
         let mut candidates = self.extension_overload_candidates(alternatives, tree_index)?;
-        let mut resolution = self.choose_overload_candidate(
-            &mut candidates,
-            arguments,
-            tree_index,
-            ApplyKind::Regular,
-        );
+        let mut resolution = if candidates
+            .iter()
+            .any(|c| matches!(self.store.types.get(c.callable), Type::Poly(_)))
+        {
+            self.choose_mixed_extension_overload(
+                alternatives,
+                &mut candidates,
+                arguments,
+                call.expected_result,
+                tree_index,
+                journal,
+            )
+        } else {
+            self.choose_overload_candidate(
+                &mut candidates,
+                arguments,
+                tree_index,
+                ApplyKind::Regular,
+            )
+        };
         if let Err(TyperError::AmbiguousOverloadApplication {
             candidates: tied, ..
         }) = &resolution
@@ -294,6 +311,105 @@ impl SourceTyper<'_> {
         resolution.map(|candidate| candidate.symbol)
     }
 
+    fn choose_mixed_extension_overload(
+        &mut self,
+        alternatives: &[ExtensionAlternative],
+        candidates: &mut [ApplicationCandidate],
+        arguments: &[TypedArgument],
+        expected: Option<TypeId>,
+        site: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<ApplicationCandidate, TyperError> {
+        // The ordinary clause can decide specificity only after the receivers tie.
+        if let Some((first, rest)) = alternatives.split_first() {
+            for alt in rest {
+                if !self.contextual_conforms(first.receiver, alt.receiver, site, journal)?
+                    || !self.contextual_conforms(alt.receiver, first.receiver, site, journal)?
+                {
+                    return Err(TyperError::OverloadResolutionRequiresUnsupportedCandidate {
+                        source: self.source,
+                        tree_index: site,
+                        candidate: alt.symbol,
+                    });
+                }
+            }
+        }
+
+        let mut concrete: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|c| matches!(self.store.types.get(c.callable), Type::Method(_)))
+            .collect();
+        // Rank concrete formals first. Inferring B = Int for [B](b: B) makes
+        // it applicable, but does not make its declaration as specific as (i: Int).
+        let ordinary =
+            self.choose_overload_candidate(&mut concrete, arguments, site, ApplyKind::Regular);
+        let retry = match ordinary {
+            Ok(best)
+                if let Some(expected) = expected
+                    && let Type::Method(method) = self.store.types.get(best.callable)
+                    && !matches!(
+                        self.store.types.get(method.result),
+                        Type::Method(_) | Type::Poly(_)
+                    )
+                    && !self.contextual_conforms(method.result, expected, site, journal)? =>
+            {
+                Some((best, expected))
+            }
+            Err(TyperError::OverloadApplicationNoApplicable { .. }) => None,
+            other => return other,
+        };
+        self.instantiate_generic_overload_candidates(
+            candidates,
+            arguments,
+            site,
+            ApplyKind::Regular,
+            false,
+            journal,
+        )?;
+        let Some((preferred, expected)) = retry else {
+            return self.choose_overload_candidate(candidates, arguments, site, ApplyKind::Regular);
+        };
+
+        // Scala retries the other alternatives when the preferred result does
+        // not fit. Keep the original choice if no unique replacement fits.
+        let mut compatible = Vec::new();
+        for candidate in candidates.iter().copied() {
+            if candidate.symbol != preferred.symbol
+                && candidate.rejection.is_none()
+                && let Type::Method(method) = self.store.types.get(candidate.callable)
+                && !matches!(
+                    self.store.types.get(method.result),
+                    Type::Method(_) | Type::Poly(_)
+                )
+                && self.contextual_conforms(method.result, expected, site, journal)?
+            {
+                compatible.push(candidate);
+            }
+        }
+        concrete.retain(|c| compatible.iter().any(|alt| alt.symbol == c.symbol));
+        let mut retry =
+            self.choose_overload_candidate(&mut concrete, arguments, site, ApplyKind::Regular);
+        if matches!(
+            retry,
+            Err(TyperError::OverloadApplicationNoApplicable { .. })
+        ) {
+            retry = self.choose_overload_candidate(
+                &mut compatible,
+                arguments,
+                site,
+                ApplyKind::Regular,
+            );
+        }
+        match retry {
+            Err(
+                TyperError::OverloadApplicationNoApplicable { .. }
+                | TyperError::AmbiguousOverloadApplication { .. },
+            ) => Ok(preferred),
+            other => other,
+        }
+    }
+
     fn extension_overload_candidates(
         &self,
         alternatives: &[ExtensionAlternative],
@@ -308,7 +424,9 @@ impl SourceTyper<'_> {
                 });
             };
             let callable = receiver.result;
-            if !matches!(self.store.types.get(callable), Type::Method(_)) {
+            if !matches!(self.store.types.get(callable), Type::Method(_))
+                && !self.is_unbounded_unary_extension(callable)
+            {
                 return Err(TyperError::OverloadResolutionRequiresUnsupportedCandidate {
                     source: self.source,
                     tree_index,
@@ -323,6 +441,29 @@ impl SourceTyper<'_> {
             });
         }
         Ok(candidates)
+    }
+
+    pub(in crate::typer) fn is_unbounded_unary_extension(&self, callable: TypeId) -> bool {
+        let types = &self.store.types;
+        let Type::Poly(poly) = types.get(callable) else {
+            return false;
+        };
+        let [parameter] = poly.params.as_slice() else {
+            return false;
+        };
+        let Type::Method(method) = types.get(poly.result) else {
+            return false;
+        };
+        let [arg] = method.params.as_slice() else {
+            return false;
+        };
+        matches!(types.get(parameter.bounds), Type::Bounds { low, high }
+            if *low == self.definitions.nothing_type && *high == self.definitions.any_type)
+            && method.kind == MethodKind::Plain
+            && !arg.erased
+            && !arg.varargs
+            && matches!(types.get(arg.ty), Type::ParamRef { binder, index: 0 } if *binder == callable)
+            && !matches!(types.get(method.result), Type::Method(_) | Type::Poly(_))
     }
 
     fn extension_receiver(&self, signature: TypeId) -> Option<TypeId> {
