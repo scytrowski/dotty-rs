@@ -69,6 +69,24 @@ impl SourceFileCalls {
         range.contains(offset).then_some(symbol)
     }
 
+    /// Resolve a call in a successfully checked member even when another member failed.
+    /// Supply the current check for the enclosing class from this session.
+    pub fn checked_method_at<'a>(
+        &self,
+        offset: u32,
+        ast: &AstArena<Untyped>,
+        typed_ast: &AstArena<Typed>,
+        store: &SemanticStore,
+        check: impl FnOnce(SymbolId) -> Option<&'a crate::ClassBodyCheck>,
+    ) -> Option<SymbolId> {
+        let call = self.names.call_at(offset)?;
+        if ast.try_get(call)?.position?.source() != self.names.source() {
+            return None;
+        }
+        let bindings = check(self.class_at(offset)?)?.bindings()?;
+        crate::jvm_class_plan::selected_method(bindings, call, ast, typed_ast, store)
+    }
+
     /// Resolve a UTF-8 byte offset on a method name using the current bodies from
     /// the same session. Pass the original parse arena and the bodies' typed arena.
     /// Returns `None` if the enclosing class has no recorded body or the position

@@ -4,7 +4,7 @@ use std::fmt;
 
 use crate::core::{
     AstArena, Definitions, Diagnostic, NoResolver, Packages, SemanticStore, SourceId,
-    SourceSemanticIndex, SymbolId, SymbolResolver, Typed, Untyped,
+    SourceSemanticIndex, SourceTypedIndex, SymbolId, SymbolResolver, Typed, Untyped,
 };
 use crate::jvm_class_plan::TypedClassBody;
 use crate::source_declarations::{ClassMember, SourceClass};
@@ -95,6 +95,7 @@ pub fn type_class_body_with_resolver(
         resolver,
         |first, _| first,
         None,
+        None,
     )
 }
 
@@ -107,6 +108,18 @@ pub struct ClassBodyCheck {
     /// Diagnostics emitted by committed typing operations, with their source file.
     /// Their ranges are byte offsets into that file, in emission order.
     pub diagnostics: Vec<(SourceId, Diagnostic)>,
+    partial_bindings: Option<SourceTypedIndex>,
+}
+
+impl ClassBodyCheck {
+    /// Committed bindings for navigation, including successful siblings of a failed member.
+    pub(crate) fn bindings(&self) -> Option<&SourceTypedIndex> {
+        self.body
+            .as_ref()
+            .ok()
+            .map(TypedClassBody::bindings)
+            .or(self.partial_bindings.as_ref())
+    }
 }
 
 /// Checks each method and field initializer of a named class after signature completion.
@@ -129,6 +142,7 @@ pub fn check_class_body(
     resolver: impl SymbolResolver,
 ) -> ClassBodyCheck {
     let mut diagnostics = Vec::new();
+    let mut partial_bindings = None;
     let body = visit_class_body(
         class,
         ast,
@@ -140,8 +154,13 @@ pub fn check_class_body(
         resolver,
         |first, rest| std::iter::once(first).chain(rest).collect(),
         Some(&mut diagnostics),
+        Some(&mut partial_bindings),
     );
-    ClassBodyCheck { body, diagnostics }
+    ClassBodyCheck {
+        body,
+        diagnostics,
+        partial_bindings,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -156,6 +175,7 @@ fn visit_class_body<E>(
     resolver: impl SymbolResolver,
     collect_errors: impl FnOnce(ClassBodyError, &mut dyn Iterator<Item = ClassBodyError>) -> E,
     diagnostics: Option<&mut Vec<(SourceId, Diagnostic)>>,
+    partial_bindings: Option<&mut Option<SourceTypedIndex>>,
 ) -> Result<TypedClassBody, E> {
     let Some(source) = class.body_source(ast, index, store) else {
         return Err(collect_errors(
@@ -198,7 +218,13 @@ fn visit_class_body<E>(
         );
     }
     if let Some(errors) = errors {
-        *arena = typer.into_typed_ast();
+        if let Some(bindings) = partial_bindings {
+            let output = typer.into_typed_output();
+            *bindings = Some(output.source_typed_index);
+            *arena = output.typed_ast;
+        } else {
+            *arena = typer.into_typed_ast();
+        }
         return Err(errors);
     }
     let (extended, body) = TypedClassBody::from_output(class, typer.into_typed_output());

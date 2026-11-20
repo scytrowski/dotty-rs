@@ -605,6 +605,85 @@ fn selected_method_tracks_an_edited_overload_in_both_file_orders() {
 }
 
 #[test]
+fn checked_calls_survive_a_failing_sibling_in_both_file_orders() {
+    let a = SourceId::from_index(7);
+    let b = SourceId::from_index(2);
+    for reverse in [false, true] {
+        for (argument, broken) in [("false, 1", true), ("1", false)] {
+            let text = format!(
+                "class B {{ def good(a: A): Int = a.take(42); def bad(a: A): Int = a.take({argument}) }}"
+            );
+            let mut files = [(a, "A.scala", OVERLOADS), (b, "B.scala", text.as_str())];
+            if reverse {
+                files.reverse();
+            }
+            let mut store = SemanticStore::new();
+            let defs = Definitions::bootstrap(&mut store);
+            let mut packages = Packages::new();
+            let units = name_units(
+                &files,
+                parsing::parse_files(&files, 2),
+                &mut store,
+                &mut packages,
+            );
+            let mut headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
+            let sources = SignatureSources::new(&units, &store);
+            let caller = sources.by_source[&b];
+            let class = &caller.classes[0];
+            let check = dotty::check_class_body(
+                class,
+                &caller.ast,
+                &caller.index,
+                &mut store,
+                defs,
+                &packages,
+                &mut headers.arena,
+                dotty::core::NoResolver,
+            );
+            let at = |offset| {
+                caller.calls.checked_method_at(
+                    offset,
+                    &caller.ast,
+                    &headers.arena,
+                    &store,
+                    |owner| (owner == class.symbol).then_some(&check),
+                )
+            };
+            let provider = sources.by_source[&a];
+            let method = at(text.find("take").unwrap() as u32).unwrap();
+            assert_overload_target(
+                &sources,
+                method,
+                provider,
+                provider.methods().next().unwrap(),
+                "def take(n: Int): Int = n",
+            );
+            assert_eq!(
+                at(text.rfind("take").unwrap() as u32),
+                (!broken).then_some(method)
+            );
+            if broken {
+                let errors = check.body.unwrap_err();
+                let [dotty::ClassBodyError::Member { member, .. }] = errors.as_slice() else {
+                    panic!("expected one failed member")
+                };
+                assert_eq!(
+                    *member,
+                    dotty::source_declarations::ClassMember::Method(
+                        class.methods().nth(1).unwrap()
+                    )
+                );
+            } else {
+                JvmClassPlanner::new(&store, &caller.ast, &caller.index)
+                    .with_header_bindings(&headers.arena, &headers.bindings)
+                    .plan_typed_class(class, &headers.arena, &check.body.unwrap())
+                    .unwrap();
+            }
+        }
+    }
+}
+
+#[test]
 fn selected_method_routes_two_classes_in_one_file_as_their_bodies_arrive() {
     const B: &str = "class First { def read(a: A): Int = a.take(42) }
 class Second { def read(a: A): Int = a.take(false) }";

@@ -80,31 +80,11 @@ impl TypedClassBody {
         typed_ast: &AstArena<Typed>,
         store: &SemanticStore,
     ) -> Option<SymbolId> {
-        let node = source_ast.try_get(call)?;
-        let TreeKind::Apply(source_call) = &node.kind else {
-            return None;
-        };
-        let source = node.position?.source();
-        let typed = self.index.get(source, call)?;
-        let TreeKind::Apply(application) = &typed_ast.try_get(typed)?.kind else {
-            return None;
-        };
-        if self.index.get(source, source_call.function)? != application.function {
-            return None;
-        }
-        let callee = typed_ast.try_get(application.function)?;
-        if !matches!(callee.kind, TreeKind::Ident(_) | TreeKind::Select(_)) {
-            return None;
-        }
-        let Type::TermRef {
-            target: TermRefTarget::Symbol(method),
-            ..
-        } = store.types.try_get(callee.ty)?
-        else {
-            return None;
-        };
-        (store.symbols.contains(*method) && store.symbols.get(*method).kind == SymbolKind::Method)
-            .then_some(*method)
+        selected_method(&self.index, call, source_ast, typed_ast, store)
+    }
+
+    pub(crate) fn bindings(&self) -> &SourceTypedIndex {
+        &self.index
     }
 
     /// Split the output of the typer used for this class's body. Pass the arena
@@ -120,6 +100,40 @@ impl TypedClassBody {
             },
         )
     }
+}
+
+pub(crate) fn selected_method(
+    index: &SourceTypedIndex,
+    call: TreeId<Untyped>,
+    source_ast: &AstArena<Untyped>,
+    typed_ast: &AstArena<Typed>,
+    store: &SemanticStore,
+) -> Option<SymbolId> {
+    let node = source_ast.try_get(call)?;
+    let TreeKind::Apply(source_call) = &node.kind else {
+        return None;
+    };
+    let source = node.position?.source();
+    let typed = index.get(source, call)?;
+    let TreeKind::Apply(application) = &typed_ast.try_get(typed)?.kind else {
+        return None;
+    };
+    if index.get(source, source_call.function)? != application.function {
+        return None;
+    }
+    let callee = typed_ast.try_get(application.function)?;
+    if !matches!(callee.kind, TreeKind::Ident(_) | TreeKind::Select(_)) {
+        return None;
+    }
+    let Type::TermRef {
+        target: TermRefTarget::Symbol(method),
+        ..
+    } = store.types.try_get(callee.ty)?
+    else {
+        return None;
+    };
+    (store.symbols.contains(*method) && store.symbols.get(*method).kind == SymbolKind::Method)
+        .then_some(*method)
 }
 
 /// Class bodies retained for deferred planning in a single naming and typing session.
