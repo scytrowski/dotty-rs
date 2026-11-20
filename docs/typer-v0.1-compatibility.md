@@ -115,7 +115,11 @@ selecting `x.render(3)` on a `Box[Int]` uses `ops[Int](tc).render(x)(3)`.
 The receiver must determine the factory's type arguments within their bounds.
 A missing or ambiguous factory dependency permits a viable alternative in the
 receiver companion, including a conversion. If lookup fails, the selection
-reports the provider and its unsatisfied dependency.
+reports the provider and its unsatisfied dependency. A trailing `using`
+on the selected method is filled at the call site after the ordinary arguments.
+For `render(i: Int)(using fmt: Format)`, the full application is
+`ops[Int](tc).render(x)(3)(fmt)`. An explicit `(using chosen)` supplies
+the method argument even when implicit search for `Format` would be ambiguous.
 
 Conversion insertion covers value adaptation to
 a known expected type, including ordinary method arguments. For a unary

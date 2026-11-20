@@ -1091,8 +1091,29 @@ fn conditional_extension_infers_the_factory_and_selects_its_method() {
     let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
     typer.type_method_definition(tree).unwrap();
     let root = typer.typed_index.get(source, rhs).unwrap();
+    assert_eq!(typer.typed_ast().get(root).ty, defs.int);
+    assert_render_call(
+        &typer,
+        root,
+        factory,
+        index
+            .symbol_at(source, def.value_param_clauses[0][0])
+            .unwrap(),
+        index
+            .symbol_at(source, def.value_param_clauses[1][0])
+            .unwrap(),
+    );
+}
+
+fn assert_render_call(
+    typer: &SourceTyper<'_>,
+    call: TreeId<Typed>,
+    factory: SymbolId,
+    box_arg: SymbolId,
+    witness: SymbolId,
+) {
     let ast = typer.typed_ast();
-    let TreeKind::Apply(ordinary) = &ast.get(root).kind else {
+    let TreeKind::Apply(ordinary) = &ast.get(call).kind else {
         panic!("ordinary clause")
     };
     let TreeKind::Apply(receiver) = &ast.get(ordinary.function).kind else {
@@ -1107,18 +1128,28 @@ fn conditional_extension_infers_the_factory_and_selects_its_method() {
     let TreeKind::TypeApply(poly) = &ast.get(provider.function).kind else {
         panic!("inferred type argument")
     };
-    assert_eq!(typed_reference(&typer, poly.function), factory);
-    assert_eq!(ast.get(poly.args[0]).ty, defs.int);
-    assert_eq!(ast.get(root).ty, defs.int);
+    let [index_arg] = ordinary.args[..] else {
+        panic!("one render argument")
+    };
+    assert!(
+        matches!(&ast.get(index_arg).kind, TreeKind::Literal(lit) if lit.value == dotty_core::Constant::Int(3))
+    );
+    let Type::Applied { tycon, args } = typer.store.types.get(ast.get(render.qualifier).ty) else {
+        panic!("instantiated provider result")
+    };
+    assert_eq!(args, &[typer.definitions.int]);
+    assert_eq!(
+        typer
+            .store
+            .symbols
+            .owner(typed_reference(typer, receiver.function)),
+        typer.store.types.get(*tycon).reference_symbol()
+    );
+    assert_eq!(typed_reference(typer, poly.function), factory);
+    assert_eq!(ast.get(poly.args[0]).ty, typer.definitions.int);
     assert_eq!(typer.store.names.resolve(render.name.text()), "render");
-    assert_eq!(
-        Some(typed_reference(&typer, receiver.args[0])),
-        index.symbol_at(source, def.value_param_clauses[0][0])
-    );
-    assert_eq!(
-        Some(typed_reference(&typer, provider.args[0])),
-        index.symbol_at(source, def.value_param_clauses[1][0])
-    );
+    assert_eq!(typed_reference(typer, receiver.args[0]), box_arg);
+    assert_eq!(typed_reference(typer, provider.args[0]), witness);
 }
 
 #[test]
@@ -1213,6 +1244,114 @@ fn conditional_extension_attributes_missing_and_ambiguous_evidence_to_the_select
                 assert_eq!(
                     candidates,
                     def.value_param_clauses[1]
+                        .iter()
+                        .map(|&p| index.symbol_at(source, p).unwrap())
+                        .collect::<Vec<_>>()
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(typer.store.checkpoint(), before);
+        assert!(typer.typed_index.is_empty());
+    }
+}
+
+#[test]
+fn conditional_extension_separates_provider_evidence_from_inferred_or_explicit_format() {
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(CONDITIONAL_EXTENSIONS);
+    let factory = method_symbol(&parsed, &store, &index, source, "formatted");
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for (name, format_clause, kind) in [
+        ("inferred", 1, ApplyKind::Regular),
+        ("explicit", 0, ApplyKind::Using),
+    ] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+            panic!()
+        };
+        let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+            panic!()
+        };
+        let param = |clause: usize, n: usize| {
+            index
+                .symbol_at(source, def.value_param_clauses[clause][n])
+                .unwrap()
+        };
+        typer
+            .type_method_definition(tree)
+            .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let root = typer.typed_index.get(source, rhs).unwrap();
+        let ast = typer.typed_ast();
+        assert_eq!(ast.get(root).ty, defs.int);
+        let TreeKind::Apply(format) = &ast.get(root).kind else {
+            panic!("format clause")
+        };
+        let [arg] = format.args[..] else {
+            panic!("format argument")
+        };
+        assert_eq!(format.kind, kind);
+        assert_eq!(typed_reference(&typer, arg), param(format_clause, 1));
+        assert_render_call(&typer, format.function, factory, param(0, 0), param(1, 0));
+    }
+}
+
+#[test]
+fn conditional_extension_reports_format_errors_at_the_application() {
+    let extra = include_str!(
+        "../../../tests/fixtures/contextual-consumers/ConditionalExtensionsRejected.scala"
+    );
+    let text = format!(
+        "{CONDITIONAL_EXTENSIONS}\n{}",
+        extra.strip_prefix("package conditionalext").unwrap()
+    );
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(&text);
+    let factory = method_symbol(&parsed, &store, &index, source, "formatted");
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for name in ["noProvider", "noFormat", "twoFormats"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+            panic!()
+        };
+        let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+            panic!()
+        };
+        let TreeKind::Apply(call) = &parsed.ast.get(rhs).kind else {
+            panic!()
+        };
+        let before = typer.store.checkpoint();
+        let err = typer.type_method_definition(tree).unwrap_err();
+        match (name, err) {
+            (
+                "noProvider",
+                TyperError::ExtensionProviderDependency {
+                    tree_index,
+                    provider,
+                    cause,
+                    ..
+                },
+            ) => {
+                assert_eq!(tree_index, call.function.index());
+                assert_eq!(provider, factory);
+                assert!(matches!(
+                    *cause,
+                    TyperError::MissingContextualArgument { .. }
+                ));
+            }
+            ("noFormat", TyperError::MissingContextualArgument { tree_index, .. }) => {
+                assert_eq!(tree_index, rhs.index())
+            }
+            (
+                "twoFormats",
+                TyperError::AmbiguousContextualArgument {
+                    tree_index,
+                    candidates,
+                    ..
+                },
+            ) => {
+                assert_eq!(tree_index, rhs.index());
+                assert_eq!(
+                    candidates,
+                    def.value_param_clauses[1][1..]
                         .iter()
                         .map(|&p| index.symbol_at(source, p).unwrap())
                         .collect::<Vec<_>>()
