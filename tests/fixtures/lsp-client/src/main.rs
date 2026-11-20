@@ -136,10 +136,25 @@ impl Workspace {
         if let Some(files) = &self.ready {
             for (uri, file) in files {
                 let doc = &self.docs[uri];
-                let diagnostics:Vec<_>=file.problems.iter().filter_map(|d|{
-                    let severity=match d.severity {DiagnosticSeverity::Error=>1,DiagnosticSeverity::Warning=>2,DiagnosticSeverity::Note=>3};
-                    Some(json!({"range":wire_range(&doc.text,d.range,enc)?,"severity":severity,"source":"dotty","message":d.message}))
-                }).collect();
+                let mut diagnostics = Vec::new();
+                for problem in &file.problems {
+                    let severity = match problem.severity {
+                        DiagnosticSeverity::Error => 1,
+                        DiagnosticSeverity::Warning => 2,
+                        DiagnosticSeverity::Note => 3,
+                    };
+                    if let Some(range) = problem.range.and_then(|r| wire_range(&doc.text, r, enc)) {
+                        diagnostics.push(json!({
+                            "range": range, "severity": severity,
+                            "source": "dotty", "message": problem.message
+                        }));
+                    } else {
+                        // LSP document diagnostics require a range. Keep unlocated errors visible.
+                        let params = json!({"type": severity, "message": format!("{uri}: {}", problem.message)});
+                        conn.sender
+                            .send(Notification::new("window/logMessage".into(), params).into())?;
+                    }
+                }
                 notify(conn, uri, Some(doc.version), diagnostics)?;
             }
         }
@@ -288,6 +303,50 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unlocated_problem_is_logged_without_a_document_marker() {
+        let uri = "file:///A.scala";
+        let mut ws = Workspace::default();
+        let enc = PositionEncoding::Utf16;
+        let open = json!({"textDocument":{"uri":uri,"version":1,"text":"class A {}"}});
+        assert!(ws.changed("textDocument/didOpen", &open, enc));
+        let file = FileResult {
+            problems: vec![dotty_lsp::analysis::Problem {
+                range: None,
+                message: "Expected Int, found Boolean".into(),
+                severity: DiagnosticSeverity::Error,
+            }],
+            ..FileResult::default()
+        };
+        assert!(ws.accept((ws.revision, [(uri.into(), file)].into())));
+        let (server, client) = Connection::memory();
+        ws.publish(&server, enc).unwrap();
+        let mut notifications: BTreeMap<_, _> = client
+            .receiver
+            .try_iter()
+            .map(|message| {
+                let Message::Notification(n) = message else {
+                    panic!("expected notification")
+                };
+                (n.method, n.params)
+            })
+            .collect();
+        assert_eq!(
+            notifications.remove("window/logMessage"),
+            Some(json!({
+                "type": 1, "message":"file:///A.scala: Expected Int, found Boolean"
+            }))
+        );
+        assert_eq!(
+            notifications.remove("textDocument/publishDiagnostics"),
+            Some(json!({
+                "uri":uri, "version":1, "diagnostics":[]
+            }))
+        );
+        assert!(notifications.is_empty());
+    }
+
     #[test]
     fn late_results_cannot_replace_current_diagnostics_or_definitions() {
         let mut ws = Workspace::default();

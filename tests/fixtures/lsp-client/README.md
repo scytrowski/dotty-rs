@@ -18,7 +18,9 @@ to select a different overload, and checks the declaration and name ranges in
 the other document. A type error in a sibling method produces a versioned
 diagnostic while navigation still works. Repairing the method clears the
 diagnostic. The test runs with UTF-8 and UTF-16 positions and an emoji before
-the call.
+the call. The fixture uses `ClassBodyError::diagnostic` for body failures.
+When no source range is available, it sends the message to the editor log
+and leaves the document free of a marker for that error.
 
 For a quick interoperability check with Neovim 0.10+, run from this directory:
 

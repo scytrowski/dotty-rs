@@ -9,8 +9,8 @@ use dotty::core::{
 use dotty::jvm_class_plan::ClassHeaderBindings;
 use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty::source_declarations::{ClassMember, SourceClass, source_classes};
-use dotty::typer::{SignatureCompletion, SourceTyper, TyperError};
-use dotty::{ClassBodyError, SourceDeclarationIndex, SourceFileCalls};
+use dotty::typer::{SignatureCompletion, SourceTyper};
+use dotty::{SourceDeclarationIndex, SourceFileCalls};
 
 #[derive(Clone)]
 pub struct Document {
@@ -21,7 +21,7 @@ pub struct Document {
 pub type Documents = BTreeMap<String, Document>;
 
 pub struct Problem {
-    pub range: TextRange,
+    pub range: Option<TextRange>,
     pub message: String,
     pub severity: DiagnosticSeverity,
 }
@@ -42,7 +42,7 @@ pub struct FileResult {
 impl FileResult {
     fn error(&mut self, range: Option<TextRange>, message: String) {
         self.problems.push(Problem {
-            range: range.unwrap_or_else(|| TextRange::new(0, 0).unwrap()),
+            range,
             message,
             severity: DiagnosticSeverity::Error,
         });
@@ -257,32 +257,23 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
             );
             for (source, d) in &check.diagnostics {
                 results[source.index() as usize].problems.push(Problem {
-                    range: d.span(),
+                    range: Some(d.span()),
                     message: d.message().to_owned(),
                     severity: d.severity(),
                 });
             }
             if let Err(errors) = &check.body {
                 for error in errors {
-                    if let ClassBodyError::Member { error, .. } = error {
-                        let span = dotty::typer_error_span_with(error, |id| {
-                            units.get(&(id.index() as usize)).map(|u| &u.ast)
-                        });
-                        let message = match error {
-                            TyperError::ApplicationArgumentTypeMismatch {
-                                expected_description,
-                                actual_description,
-                                ..
-                            } => format!(
-                                "Expected {expected_description}, found {actual_description}"
-                            ),
-                            _ => error.to_string(),
-                        };
-                        let file = span.map_or(i, |p| p.source().index() as usize);
-                        results[file].error(span.map(|p| p.span().range()), message);
-                    } else {
-                        results[i].error(ranges[&c.symbol], error.to_string());
-                    }
+                    let diagnostic = error
+                        .diagnostic(|id| units.get(&(id.index() as usize)).map(|unit| &unit.ast));
+                    let file = diagnostic
+                        .location
+                        .map_or(i, |span| span.source().index() as usize);
+                    results[file].problems.push(Problem {
+                        range: diagnostic.location.map(|span| span.span().range()),
+                        message: diagnostic.message,
+                        severity: diagnostic.severity,
+                    });
                 }
             }
             checks.insert(c.symbol, check);
@@ -334,7 +325,8 @@ mod tests {
         let caller = &files["file:///B.scala"];
         assert_eq!(caller.problems.len(), 1);
         let d = &caller.problems[0];
-        assert_eq!(&b[d.range.start() as usize..d.range.end() as usize], "x");
+        let range = d.range.expect("argument position");
+        assert_eq!(&b[range.start() as usize..range.end() as usize], "x");
         assert_eq!(caller.links.len(), 1);
         let l = &caller.links[0];
         assert_eq!(l.uri, "file:///A.scala");

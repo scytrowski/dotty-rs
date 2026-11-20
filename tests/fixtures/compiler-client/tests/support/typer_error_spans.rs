@@ -1,6 +1,6 @@
 //! Source ranges observed by a compiler client reporting class body errors.
 use super::{SignatureSources, class_planning::named, complete_signatures};
-use dotty::core::{Definitions, TextRange};
+use dotty::core::{Definitions, DiagnosticSeverity, TextRange};
 use dotty::source_declarations::SourceClass;
 use dotty::typer::TyperError;
 
@@ -75,6 +75,8 @@ fn cross_file_diagnostics_track_two_unsaved_edits_in_utf16() {
                 assert_eq!(resolver.checkpoint(), resolver_before);
             }
             for failure in errors {
+                let diagnostic = failure
+                    .diagnostic(|source| sources.by_source.get(&source).map(|unit| &unit.ast));
                 let dotty::ClassBodyError::Member {
                     class: owner,
                     member,
@@ -88,15 +90,14 @@ fn cross_file_diagnostics_track_two_unsaved_edits_in_utf16() {
                     source,
                     argument_index,
                     expected,
-                    ref actual_description,
-                    ref expected_description,
                     ..
                 } = error
                 else {
                     panic!("expected a mismatched argument, got {error:?}");
                 };
                 assert_eq!((source, argument_index, expected), (b, 0, defs.int));
-                let span = sources.error_span(&error).expect("argument position");
+                assert_eq!(diagnostic.severity, DiagnosticSeverity::Error);
+                let span = diagnostic.location.expect("argument position");
                 let &(_, name, text) = files.iter().find(|file| file.0 == span.source()).unwrap();
                 let source = SourceText::new(text).unwrap();
                 let range = span.span().range();
@@ -115,13 +116,11 @@ fn cross_file_diagnostics_track_two_unsaved_edits_in_utf16() {
                         lines.utf16_column(text, offset).unwrap(),
                     )
                 };
-                let message =
-                    format!("expected {expected_description}, found {actual_description}");
                 diagnostics.push((
                     name,
                     position(range.start()),
                     position(range.end()),
-                    message,
+                    diagnostic.message,
                     spelling,
                     member_name,
                 ));
@@ -155,7 +154,7 @@ fn cross_file_diagnostics_track_two_unsaved_edits_in_utf16() {
         "B.scala",
         (1, 40),
         (1, 45),
-        "expected Int, found String".into(),
+        "Expected Int, found String".into(),
         "\"bad\"".into(),
         "read".into(),
     );
@@ -163,7 +162,7 @@ fn cross_file_diagnostics_track_two_unsaved_edits_in_utf16() {
         "B.scala",
         (2, 31),
         (2, 36),
-        "expected Int, found Boolean".into(),
+        "Expected Int, found Boolean".into(),
         "false".into(),
         "next".into(),
     );
@@ -176,7 +175,7 @@ fn cross_file_diagnostics_track_two_unsaved_edits_in_utf16() {
 
 #[test]
 fn migration_warning_survives_a_sibling_error_and_tracks_source_edits() {
-    use dotty::core::{DiagnosticSeverity, NoResolver};
+    use dotty::core::NoResolver;
 
     let check = |text: &str, warning: bool, bad_argument: bool| {
         let (mut store, defs, packages, unit) = named(text);
@@ -211,13 +210,15 @@ fn migration_warning_survives_a_sibling_error_and_tracks_source_edits() {
 
         if bad_argument {
             let errors = report.body.unwrap_err();
-            let [dotty::ClassBodyError::Member { error, .. }] = errors.as_slice() else {
+            let [failure @ dotty::ClassBodyError::Member { error, .. }] = errors.as_slice() else {
                 panic!("expected one member error: {errors:?}")
             };
             assert!(
                 matches!(error, TyperError::ApplicationArgumentTypeMismatch { actual, expected, .. } if *actual == defs.boolean && *expected == defs.int)
             );
-            let span = dotty::typer_error_span(error, &unit.ast).unwrap();
+            let diagnostic = failure.diagnostic(|id| (id == unit.source).then_some(&unit.ast));
+            assert_eq!(diagnostic.message, "Expected Int, found Boolean");
+            let span = diagnostic.location.expect("argument position");
             assert_eq!(span.source(), unit.source);
             let start = text.find("false").unwrap() as u32;
             assert_eq!(
@@ -229,7 +230,7 @@ fn migration_warning_survives_a_sibling_error_and_tracks_source_edits() {
         }
     };
 
-    let text = "class C { def f(implicit x: Int): Int = x; def take(n: Int): Int = n; def use(): Int = f(1); def bad(): Int = take(false) }";
+    let text = "class C { def f(implicit x: Int): Int = x; def only(n: Int): Int = n; def use(): Int = f(1); def bad(): Int = only(false) }";
     check(text, true, true);
     let fixed = text.replace("false", "42");
     check(&fixed, true, false);
@@ -238,7 +239,7 @@ fn migration_warning_survives_a_sibling_error_and_tracks_source_edits() {
 
     // A warning produced earlier in the same failed method must roll back with it.
     check(
-        &explicit.replace("take(42)", "{ val x = f(2); take(false) }"),
+        &explicit.replace("only(42)", "{ val x = f(2); only(false) }"),
         false,
         true,
     );
