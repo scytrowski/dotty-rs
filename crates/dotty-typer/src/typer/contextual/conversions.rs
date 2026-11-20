@@ -61,9 +61,15 @@ impl SourceTyper<'_> {
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Option<ConversionTarget>, TyperError> {
         if let Some(instance) = goal.instance {
+            let mut instance_refs = Vec::with_capacity(refs.len());
+            for &reference in &refs {
+                if !self.is_unresolved_conversion_feature_import(reference)? {
+                    instance_refs.push(reference);
+                }
+            }
             let mut history = SearchHistory::default();
             if let Some(value) = self.choose_contextual_refs(
-                refs.clone(),
+                instance_refs,
                 instance,
                 context,
                 tree_index,
@@ -83,53 +89,208 @@ impl SourceTyper<'_> {
             }
             let signature =
                 self.contextual_reference_signature(reference, context.owner, tree_index, journal)?;
-            let Some(Type::Method(method)) = self.store.types.try_get(signature).cloned() else {
-                continue;
-            };
-            let [parameter] = method.params.as_slice() else {
-                continue;
-            };
-            if method.kind != MethodKind::Plain
-                || parameter.erased
-                || parameter.varargs
-                || self.type_contains_param_ref(method.result, signature)?
-                || !self.contextual_conforms(goal.actual, parameter.ty, tree_index, journal)?
-                || matches!(
-                    self.store.types.get(method.result),
-                    Type::Poly(_) | Type::Method(_)
-                )
-                || !self.contextual_conforms(method.result, goal.expected, tree_index, journal)?
-            {
-                continue;
+            if let Some((candidate, _)) = self.legacy_conversion_candidate(
+                reference,
+                signature,
+                goal.actual,
+                Some(goal.expected),
+                tree_index,
+                journal,
+            )? {
+                candidates.push((candidate, None));
             }
-            // Legacy conversion specificity compares the accepted inputs.
-            candidates.push((
-                Provider {
-                    reference,
-                    type_arguments: Vec::new(),
-                    callable: signature,
-                    result: parameter.ty,
-                },
-                None,
-            ));
         }
         let Some(winner) =
             self.choose_contextual_candidate(candidates, goal.expected, tree_index, journal)?
         else {
             return Ok(None);
         };
-        let function =
-            self.contextual_reference_tree(winner.reference, context, tree_index, None, journal)?;
+        let function = self.provider_reference_tree(&winner, context, tree_index, journal)?;
         Ok(Some(ConversionTarget::Method {
             function,
             signature: winner.callable,
         }))
     }
+
+    // Scala 3.9 declares this library val as languageFeature.implicitConversions,
+    // a marker trait unrelated to Conversion. Its nested type can be unresolved
+    // on a TASTy-only classpath. Keep ordinary contextual searches independent.
+    fn is_unresolved_conversion_feature_import(
+        &self,
+        reference: ContextualRef,
+    ) -> Result<bool, TyperError> {
+        let field = self.store.symbols.get(reference.symbol);
+        if field.kind != SymbolKind::Field
+            || !matches!(field.origin, SymbolOrigin::Tasty(_))
+            || self.store.names.resolve(field.name.text()) != "implicitConversions"
+            || !matches!(field.info, SymbolInfo::Complete(ty) if matches!(self.store.types.get(ty), Type::Error(_)))
+        {
+            return Ok(false);
+        }
+        let Some(ContextualReceiver::Import(qualifier)) = reference.receiver else {
+            return Ok(false);
+        };
+        let Type::TermRef {
+            target: TermRefTarget::Symbol(object),
+            ..
+        } = self.store.types.get(self.typed_arena.get(qualifier).ty)
+        else {
+            return Ok(false);
+        };
+        let owner = self.store.symbols.get(*object);
+        Ok(owner.kind == SymbolKind::Object
+            && matches!(owner.origin, SymbolOrigin::Tasty(_))
+            && self.store.names.resolve(owner.name.text()) == "language"
+            && owner
+                .owner
+                .is_some_and(|package| self.package_path(package) == ["scala"])
+            && field.owner == Some(self.module_class_of_object(*object)?))
+    }
+
+    fn legacy_conversion_candidate(
+        &mut self,
+        reference: ContextualRef,
+        signature: TypeId,
+        actual: TypeId,
+        expected: Option<TypeId>,
+        tree_index: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Option<(Provider, TypeId)>, TyperError> {
+        let (method_type, arity) = match self.store.types.get(signature) {
+            Type::Poly(poly) => (poly.result, poly.params.len()),
+            _ => (signature, 0),
+        };
+        let Some(Type::Method(method)) = self.store.types.try_get(method_type) else {
+            return Ok(None);
+        };
+        let [parameter] = method.params.as_slice() else {
+            return Ok(None);
+        };
+        let input = parameter.ty;
+        let output = method.result;
+        if method.kind != MethodKind::Plain
+            || parameter.erased
+            || parameter.varargs
+            || matches!(
+                self.store.types.get(output),
+                Type::Poly(_) | Type::Method(_)
+            )
+            || self.type_contains_param_ref(output, method_type)?
+        {
+            return Ok(None);
+        }
+        let mut callable = method_type;
+        let mut type_arguments = Vec::new();
+        if arity > 0 {
+            let mut inferred = vec![None; arity];
+            // Match the receiver at the declared input class, e.g. Child extends Box[Int].
+            let views = if let Type::Applied { tycon, .. } = self.store.types.get(input)
+                && let Some(class) = self.store.types.get(*tycon).reference_symbol()
+                && self.type_contains_param_ref(input, signature)?
+                && matches!(
+                    self.store.types.get(actual),
+                    Type::TypeRef { .. } | Type::Applied { .. } | Type::ThisType { .. }
+                ) {
+                self.complete_relation_type(actual, journal, &mut HashSet::new(), 0)?;
+                self.nominal_views_as(actual, class).map_err(|error| {
+                    TyperError::ExpectedExpressionConformanceUnsupported {
+                        source: self.source,
+                        tree_index,
+                        actual,
+                        expected: input,
+                        error: Box::new(error),
+                    }
+                })?
+            } else {
+                vec![actual]
+            };
+            if views.is_empty() {
+                return Ok(None);
+            }
+            let location = InferenceLocation {
+                result_pattern: false,
+                tree_index,
+                argument_index: 0,
+                depth: 0,
+            };
+            for view in views {
+                match self.infer_type_constraints(
+                    input,
+                    view,
+                    signature,
+                    &mut inferred,
+                    location,
+                    journal,
+                ) {
+                    Ok(()) => {}
+                    Err(
+                        TyperError::UnsupportedInferenceShape { .. }
+                        | TyperError::ConflictingInferenceConstraints { .. }
+                        | TyperError::ApplicationArgumentTypeMismatch { .. },
+                    ) => return Ok(None),
+                    Err(error) => return Err(error),
+                }
+            }
+            if inferred.contains(&None)
+                && let Some(expected) = expected
+            {
+                // The expected type can be wider in a covariant position. Keep
+                // arguments fixed by the receiver and check result conformance below.
+                let mut from_result = vec![None; arity];
+                if !self.infer_provider_result(
+                    signature,
+                    output,
+                    expected,
+                    &mut from_result,
+                    tree_index,
+                    journal,
+                )? {
+                    return Ok(None);
+                }
+                for (slot, result) in inferred.iter_mut().zip(from_result) {
+                    *slot = slot.or(result);
+                }
+            }
+            let Some(arguments) = inferred.into_iter().collect::<Option<Vec<_>>>() else {
+                return Ok(None);
+            };
+            let Some(instance) =
+                self.instantiate_provider_signature(signature, &arguments, tree_index, journal)?
+            else {
+                return Ok(None);
+            };
+            callable = instance;
+            type_arguments = arguments;
+        }
+        let Some(Type::Method(method)) = self.store.types.try_get(callable) else {
+            return Ok(None);
+        };
+        let input = method.params[0].ty;
+        let output = method.result;
+        if !self.contextual_conforms(actual, input, tree_index, journal)? {
+            return Ok(None);
+        }
+        if let Some(expected) = expected
+            && !self.contextual_conforms(output, expected, tree_index, journal)?
+        {
+            return Ok(None);
+        }
+        // Legacy conversion specificity compares the accepted inputs.
+        Ok(Some((
+            Provider {
+                reference,
+                type_arguments,
+                callable,
+                result: input,
+            },
+            output,
+        )))
+    }
 }
 
 #[derive(Clone, Copy)]
 pub(in crate::typer) struct MemberConversionGoal {
-    pub(in crate::typer) class: SymbolId,
+    pub(in crate::typer) class: Option<SymbolId>,
     pub(in crate::typer) receiver: TypeId,
     pub(in crate::typer) name: Name,
 }
@@ -141,7 +302,7 @@ impl SourceTyper<'_> {
         context: ExpressionContext,
         site: u32,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
-    ) -> Result<Option<(TreeId<Typed>, TypeId)>, TyperError> {
+    ) -> Result<Option<(ConversionTarget, TypeId)>, TyperError> {
         for level in self.contextual_scopes(context, site)? {
             let refs = self.contextual_scope_refs(level, site, journal)?;
             if let Some(winner) =
@@ -163,7 +324,7 @@ impl SourceTyper<'_> {
         context: ExpressionContext,
         site: u32,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
-    ) -> Result<Option<(TreeId<Typed>, TypeId)>, TyperError> {
+    ) -> Result<Option<(ConversionTarget, TypeId)>, TyperError> {
         let mut candidates = Vec::new();
         for reference in refs {
             if self.initializing_local_symbols.contains(&reference.symbol) {
@@ -171,14 +332,41 @@ impl SourceTyper<'_> {
             }
             let view =
                 self.contextual_reference_signature(reference, context.owner, site, journal)?;
-            let Some((base, input, output)) =
-                self.member_conversion_signature(view, goal.class, site, journal)?
-            else {
-                continue;
+            let (candidate, output) = if let Some(class) = goal.class
+                && let Some((base, input, output)) =
+                    self.member_conversion_signature(view, class, site, journal)?
+            {
+                if !self.contextual_conforms(goal.receiver, input, site, journal)? {
+                    continue;
+                }
+                (
+                    Provider {
+                        reference,
+                        type_arguments: Vec::new(),
+                        callable: base,
+                        result: view,
+                    },
+                    output,
+                )
+            } else {
+                let entry = self.store.symbols.get(reference.symbol);
+                if entry.kind != SymbolKind::Method || !entry.flags.contains(SymbolFlags::IMPLICIT)
+                {
+                    continue;
+                }
+                let Some(method) = self.legacy_conversion_candidate(
+                    reference,
+                    view,
+                    goal.receiver,
+                    None,
+                    site,
+                    journal,
+                )?
+                else {
+                    continue;
+                };
+                method
             };
-            if !self.contextual_conforms(goal.receiver, input, site, journal)? {
-                continue;
-            }
             // An abstract result can only offer members visible through its upper bound.
             let lookup_type = match self.store.types.get(output) {
                 Type::TypeRef {
@@ -203,15 +391,7 @@ impl SourceTyper<'_> {
                     context,
                     site,
                 )? {
-                    candidates.push((
-                        Provider {
-                            reference,
-                            type_arguments: Vec::new(),
-                            callable: base,
-                            result: view,
-                        },
-                        None,
-                    ));
+                    candidates.push((candidate, None));
                     break;
                 }
             }
@@ -233,15 +413,22 @@ impl SourceTyper<'_> {
         let Some(winner) = winner else {
             return Ok(None);
         };
-        let Some(Type::Applied { args, .. }) = self.store.types.try_get(winner.callable) else {
-            return Err(TyperError::MemberTypeUnavailable {
+        let tree = self.provider_reference_tree(&winner, context, site, journal)?;
+        match self.store.types.get(winner.callable) {
+            Type::Method(method) => Ok(Some((
+                ConversionTarget::Method {
+                    function: tree,
+                    signature: winner.callable,
+                },
+                method.result,
+            ))),
+            Type::Applied { args, .. } if args.len() == 2 => {
+                Ok(Some((ConversionTarget::Instance(tree), args[1])))
+            }
+            _ => Err(TyperError::MemberTypeUnavailable {
                 symbol: winner.reference.symbol,
-            });
-        };
-        let output = args[1];
-        let evidence =
-            self.contextual_reference_tree(winner.reference, context, site, None, journal)?;
-        Ok(Some((evidence, output)))
+            }),
+        }
     }
 
     /// Project a monomorphic evidence value to its canonical `Conversion[In, Out]` base.

@@ -107,22 +107,18 @@ impl SourceTyper<'_> {
                     .ok_or_else(|| missing(expected))?;
                 (target, expected)
             }
-            ConversionUse::Member { name, .. } => {
-                let class = class.ok_or_else(|| missing(actual))?;
-                let (evidence, output) = self
-                    .member_conversion_target(
-                        MemberConversionGoal {
-                            class,
-                            receiver: actual,
-                            name,
-                        },
-                        context,
-                        tree_index,
-                        journal,
-                    )?
-                    .ok_or_else(|| missing(actual))?;
-                (ConversionTarget::Instance(evidence), output)
-            }
+            ConversionUse::Member { name, .. } => self
+                .member_conversion_target(
+                    MemberConversionGoal {
+                        class,
+                        receiver: actual,
+                        name,
+                    },
+                    context,
+                    tree_index,
+                    journal,
+                )?
+                .ok_or_else(|| missing(actual))?,
         };
         let missing = missing(expected);
         let (function, callable) = match target {
