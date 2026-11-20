@@ -115,6 +115,10 @@ a known expected type, including ordinary method arguments. For a unary
 `Wrapped[Int]` produces `wrap[Int](x)`. The typer infers type arguments from
 the receiver and can fill remaining arguments from the expected result. It
 checks the instantiated bounds, input, and result before selecting a method.
+With `import scala.language.implicitConversions`, this search still reaches a
+receiver companion when the classpath adapter cannot project the feature
+marker’s nested type. An imported user conversion with the same name remains
+eligible.
 For a missing source selection
 such as `x.show`, the typer considers monomorphic `scala.Conversion[From, To]`
 values and unary `implicit def` methods. For a generic method the receiver

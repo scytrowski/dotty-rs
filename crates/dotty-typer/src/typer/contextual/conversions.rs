@@ -61,9 +61,15 @@ impl SourceTyper<'_> {
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Option<ConversionTarget>, TyperError> {
         if let Some(instance) = goal.instance {
+            let mut instance_refs = Vec::with_capacity(refs.len());
+            for &reference in &refs {
+                if !self.is_unresolved_conversion_feature_import(reference)? {
+                    instance_refs.push(reference);
+                }
+            }
             let mut history = SearchHistory::default();
             if let Some(value) = self.choose_contextual_refs(
-                refs.clone(),
+                instance_refs,
                 instance,
                 context,
                 tree_index,
@@ -104,6 +110,41 @@ impl SourceTyper<'_> {
             function,
             signature: winner.callable,
         }))
+    }
+
+    // Scala 3.9 declares this library val as languageFeature.implicitConversions,
+    // a marker trait unrelated to Conversion. Its nested type can be unresolved
+    // on a TASTy-only classpath. Keep ordinary contextual searches independent.
+    fn is_unresolved_conversion_feature_import(
+        &self,
+        reference: ContextualRef,
+    ) -> Result<bool, TyperError> {
+        let field = self.store.symbols.get(reference.symbol);
+        if field.kind != SymbolKind::Field
+            || !matches!(field.origin, SymbolOrigin::Tasty(_))
+            || self.store.names.resolve(field.name.text()) != "implicitConversions"
+            || !matches!(field.info, SymbolInfo::Complete(ty) if matches!(self.store.types.get(ty), Type::Error(_)))
+        {
+            return Ok(false);
+        }
+        let Some(ContextualReceiver::Import(qualifier)) = reference.receiver else {
+            return Ok(false);
+        };
+        let Type::TermRef {
+            target: TermRefTarget::Symbol(object),
+            ..
+        } = self.store.types.get(self.typed_arena.get(qualifier).ty)
+        else {
+            return Ok(false);
+        };
+        let owner = self.store.symbols.get(*object);
+        Ok(owner.kind == SymbolKind::Object
+            && matches!(owner.origin, SymbolOrigin::Tasty(_))
+            && self.store.names.resolve(owner.name.text()) == "language"
+            && owner
+                .owner
+                .is_some_and(|package| self.package_path(package) == ["scala"])
+            && field.owner == Some(self.module_class_of_object(*object)?))
     }
 
     fn legacy_conversion_candidate(

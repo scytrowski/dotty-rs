@@ -485,6 +485,7 @@ fn generic_legacy_conversion_keeps_inferred_arguments_and_receiver_identity() {
     for (name, conversion, type_args) in [
         ("result", "wrap", vec![definitions.int]),
         ("argument", "wrap", vec![definitions.int]),
+        ("viaCompanion", "fromParcel", vec![definitions.int]),
         ("inherited", "wrap", vec![definitions.int]),
         (
             "fromExpected",
@@ -561,6 +562,29 @@ fn generic_legacy_conversion_keeps_inferred_arguments_and_receiver_identity() {
 }
 
 #[test]
+fn conversion_search_keeps_a_user_import_named_implicit_conversions() {
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(GENERIC_LEGACY);
+    let (field, _) = val_symbol(&parsed, &store, &index, source, "implicitConversions");
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "viaNamesake");
+    let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+        panic!()
+    };
+    let resolver = super::contextual_binary::library_resolver(defs, &packages);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages)
+        .with_resolver(Box::new(resolver));
+    typer.type_method_definition(tree).unwrap();
+    let adapted = typer.typed_index.get(source, rhs).unwrap();
+    let TreeKind::Apply(call) = &typer.typed_arena.get(adapted).kind else {
+        panic!("expected conversion")
+    };
+    let TreeKind::Select(apply) = &typer.typed_arena.get(call.function).kind else {
+        panic!("expected Conversion.apply")
+    };
+    assert_eq!(typer.store.names.resolve(apply.name.text()), "apply");
+    assert_eq!(typed_reference(&typer, apply.qualifier), field);
+}
+
+#[test]
 fn generic_legacy_conversion_rejects_mismatch_bounds_and_ambiguity_without_partial_trees() {
     let rejected =
         include_str!("../../../tests/fixtures/contextual-consumers/GenericLegacyRejected.scala");
@@ -581,7 +605,12 @@ fn generic_legacy_conversion_rejects_mismatch_bounds_and_ambiguity_without_parti
         &packages,
     )
     .with_resolver(Box::new(resolver));
-    for name in ["wrongResult", "outsideBound", "ambiguous"] {
+    for name in [
+        "wrongCompanionResult",
+        "wrongResult",
+        "outsideBound",
+        "ambiguous",
+    ] {
         let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
         let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
             panic!()
