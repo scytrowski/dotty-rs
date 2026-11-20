@@ -604,6 +604,17 @@ impl<E: ClassPathEntry> CounterResolver<E> {
 }
 
 impl<E: ClassPathEntry> SymbolResolver for CounterResolver<E> {
+    fn class_type_parameters(
+        &self,
+        store: &SemanticStore,
+        class: SymbolId,
+    ) -> Option<Vec<dotty_core::ClassTypeParameter>> {
+        self.inner
+            .as_ref()
+            .expect("counter resolver is available")
+            .class_type_parameters(store, class)
+    }
+
     fn package_object_collision(
         &mut self,
         store: &mut SemanticStore,
@@ -1119,6 +1130,17 @@ impl<E: ClassPathEntry> Drop for TimingOnlyResolver<E> {
 }
 
 impl<E: ClassPathEntry> SymbolResolver for TimingOnlyResolver<E> {
+    fn class_type_parameters(
+        &self,
+        store: &SemanticStore,
+        class: SymbolId,
+    ) -> Option<Vec<dotty_core::ClassTypeParameter>> {
+        self.inner
+            .as_ref()
+            .expect("timing-only resolver is available")
+            .class_type_parameters(store, class)
+    }
+
     fn package_object_collision(
         &mut self,
         store: &mut SemanticStore,
@@ -1630,6 +1652,14 @@ fn counter_resolver_tracks_calls_and_outcomes_without_request_identities() {
 }
 
 impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
+    fn class_type_parameters(
+        &self,
+        store: &SemanticStore,
+        class: SymbolId,
+    ) -> Option<Vec<dotty_core::ClassTypeParameter>> {
+        self.resolver().class_type_parameters(store, class)
+    }
+
     // Module-port maintenance contract: module_class_of_object and
     // complete_module_class are forwarded here. The trait also has default
     // hooks, so changes to module-specific SymbolResolver operations must be
@@ -8147,7 +8177,7 @@ fn pinned_scala39_local_definition_audit() {
             .failures
             .get("LocalValueModifierDeferred::anonymous given has no local term identity")
             .map_or(0, |bucket| bucket.count),
-        4
+        0
     );
     assert_eq!(
         audit.local_method_signature_profile.total, local_method_signature_failure_count,
@@ -20357,6 +20387,9 @@ fn classify_namer_error(error: &NamerError) -> FailureClassification {
             "NamerError::DuplicateExtensionPrefixClauses"
         }
         NamerError::DuplicateSourceExportSite { .. } => "NamerError::DuplicateSourceExportSite",
+        NamerError::ConflictingSourcePackageWrapper { .. } => {
+            "NamerError::ConflictingSourcePackageWrapper"
+        }
         NamerError::DuplicateDeclarationScope { .. } => "NamerError::DuplicateDeclarationScope",
         NamerError::DuplicateDeclarationContext { .. } => "NamerError::DuplicateDeclarationContext",
         NamerError::DuplicateFieldInitializerContext { .. } => {
@@ -20680,6 +20713,10 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::TypeAscriptionTreeCannotBeReified { .. } => "TypeAscriptionTreeCannotBeReified",
         TyperError::ApplicationMethodKindMismatch { .. } => "ApplicationMethodKindMismatch",
         TyperError::UnsupportedApplicationMethodKind { .. } => "UnsupportedApplicationMethodKind",
+        TyperError::DivergentContextualArgument { .. } => "DivergentContextualArgument",
+        TyperError::ContextualSearchLimit { .. } => "ContextualSearchLimit",
+        TyperError::MissingContextualArgument { .. } => "MissingContextualArgument",
+        TyperError::AmbiguousContextualArgument { .. } => "AmbiguousContextualArgument",
         TyperError::UsingApplicationDeferred { .. } => "UsingApplicationDeferred",
         TyperError::ApplicationArityMismatch { .. } => "ApplicationArityMismatch",
         TyperError::ErasedApplicationParameterDeferred { .. } => {
@@ -20834,6 +20871,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::PatDefBinderInventoryConflict { .. } => "PatDefBinderInventoryConflict",
         TyperError::PatDefAggregateArityDeferred { .. } => "PatDefAggregateArityDeferred",
         TyperError::UnsupportedProduct1FieldType { .. } => "UnsupportedProduct1FieldType",
+        TyperError::MemberPrefixRebinding { .. } => "MemberPrefixRebinding",
         TyperError::UnsupportedProduct2FieldTypes { .. } => "UnsupportedProduct2FieldTypes",
     }
 }

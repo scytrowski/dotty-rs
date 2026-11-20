@@ -20,11 +20,12 @@
 pub mod ast;
 /// Fresh wire AST construction with symbolic address labels.
 pub mod construction;
+mod default_getters;
 /// File-level parsing, validation, encoding, and AST queries.
 pub mod file;
 /// TASTy header parsing and version validation.
 pub mod header;
-/// One-based TASTy names, compound names, and name-table builders.
+/// Zero-based TASTy names, compound names, and name-table builders.
 pub mod name_table;
 /// Bounded zero-copy readers for TASTy binary values.
 pub mod reader;
@@ -41,6 +42,7 @@ pub mod tasty {
     pub use super::ast::*;
     pub use super::construction;
     pub use super::construction::*;
+    pub use super::default_getters::{DefaultGetterSite, template_default_getters};
     pub use super::file;
     pub use super::file::*;
     pub use super::header;
@@ -73,14 +75,14 @@ pub use ast::{
     INLINED_TAG, INLINEPROXY_TAG, INTO_TAG, INVISIBLE_TAG, IdentNode, IfNode, ImportExportKind,
     ImportExportNode, ImportSelector, InReferenceNode, LAMBDA_TAG, LAMBDATPT_TAG, LAZY_TAG,
     LOCAL_TAG, LambdaNode, LambdaTptNode, MACRO_TAG, MATCH_TAG, MATCHCASETYPE_TAG, MATCHTPT_TAG,
-    MATCHTYPE_TAG, METHODTYPE_TAG, MUTABLE_TAG, MatchTptNode, MatchTypeNode, NAMEDARG_TAG, NEW_TAG,
-    NameReference, NamedArgNode, NodeCategory, OBJECT_TAG, OPAQUE_TAG, OPEN_TAG, ORTYPE_TAG,
-    OVERRIDE_TAG, PACKAGE_TAG, PARAM_TAG, PARAMALIAS_TAG, PARAMSETTER_TAG, PARAMTYPE_TAG,
-    POLYTYPE_TAG, PRIVATE_TAG, PRIVATEQUALIFIED_TAG, PROTECTED_TAG, PROTECTEDQUALIFIED_TAG,
-    PackageNode, ParamTypeNode, ParameterBody, ParameterNode, PolyTypeNode, QUALTHIS_TAG,
-    QUOTE_TAG, QUOTEPATTERN_TAG, QuoteNode, QuotePatternNode, RECTHIS_TAG, RECTYPE_TAG,
-    REFINEDTPT_TAG, REFINEDTYPE_TAG, RENAMED_TAG, REPEATED_TAG, RETURN_TAG, RawNode, RawNodes,
-    ReferenceNode, RefinedTptNode, RefinedTypeNode, RepeatedNode, ReturnNode, SEALED_TAG,
+    MATCHTYPE_TAG, METHODTYPE_TAG, MUTABLE_TAG, MatchCase, MatchTptNode, MatchTypeNode,
+    NAMEDARG_TAG, NEW_TAG, NameReference, NamedArgNode, NodeCategory, OBJECT_TAG, OPAQUE_TAG,
+    OPEN_TAG, ORTYPE_TAG, OVERRIDE_TAG, PACKAGE_TAG, PARAM_TAG, PARAMALIAS_TAG, PARAMSETTER_TAG,
+    PARAMTYPE_TAG, POLYTYPE_TAG, PRIVATE_TAG, PRIVATEQUALIFIED_TAG, PROTECTED_TAG,
+    PROTECTEDQUALIFIED_TAG, PackageNode, ParamTypeNode, ParameterBody, ParameterNode, PolyTypeNode,
+    QUALTHIS_TAG, QUOTE_TAG, QUOTEPATTERN_TAG, QuoteNode, QuotePatternNode, RECTHIS_TAG,
+    RECTYPE_TAG, REFINEDTPT_TAG, REFINEDTYPE_TAG, RENAMED_TAG, REPEATED_TAG, RETURN_TAG, RawNode,
+    RawNodes, ReferenceNode, RefinedTptNode, RefinedTypeNode, RepeatedNode, ReturnNode, SEALED_TAG,
     SELECT_TAG, SELECTIN_TAG, SELECTOUTER_TAG, SELECTTPT_TAG, SELFDEF_TAG, SHAREDTERM_TAG,
     SHAREDTYPE_TAG, SINGLETONTPT_TAG, SPLICE_TAG, SPLICEPATTERN_TAG, SPLITCLAUSE_TAG, STABLE_TAG,
     STATIC_TAG, SUBMATCH_TAG, SUPER_TAG, SUPERTYPE_TAG, SYNTHETIC_TAG, SelectInNode, SelectNode,
@@ -104,10 +106,10 @@ pub use name_table::{
 };
 pub use reader::{ReadError, Reader};
 pub use section::{
-    Attribute, CAPTURECHECKED_ATTR, Comment, EXPLICITNULLS_ATTR, EncodedAstSection, EncodedSection,
-    JAVA_ATTR, OUTLINE_ATTR, PositionCoordinate, PositionEntry, PositionSection, ResolvedPosition,
-    ResolvedPositionEntry, SCALA2STANDARDLIBRARY_ATTR, SOURCEFILE_ATTR, Section, SectionError,
-    SectionTable, StandardSection, WITHPUREFUNS_ATTR,
+    AstNodeIdentityMap, Attribute, CAPTURECHECKED_ATTR, Comment, EXPLICITNULLS_ATTR,
+    EncodedAstSection, EncodedSection, JAVA_ATTR, OUTLINE_ATTR, PositionCoordinate, PositionEntry,
+    PositionSection, ResolvedPosition, ResolvedPositionEntry, SCALA2STANDARDLIBRARY_ATTR,
+    SOURCEFILE_ATTR, Section, SectionError, SectionTable, StandardSection, WITHPUREFUNS_ATTR,
 };
 pub use term::{
     AstRef, AstRefKind, AstTreeNode, BYTECONST_TAG, CHARCONST_TAG, ConstantValue,

@@ -65,14 +65,13 @@ fn rust_batch_writer_emits_two_distinct_ordered_nested_constructor_receipts() {
     let factory_tasty = tasty(factory_bytes);
     let (create_address, body) = method_body(&factory_tasty, "create");
     assert_eq!(
-        body.parameters
-            .iter()
+        body.parameters()
             .map(|parameter| factory_tasty.names().render(parameter.name()).unwrap())
             .collect::<Vec<_>>(),
         ["first", "second"]
     );
-    assert_eq!(body.parameters.len(), 2);
-    for (ordinal, parameter) in body.parameters.iter().enumerate() {
+    assert_eq!(body.parameters().count(), 2);
+    for (ordinal, parameter) in body.parameters().enumerate() {
         let parameter_type = parameter.decode_body().unwrap().type_tree;
         let type_names = parameter_type
             .name_refs()
@@ -80,7 +79,7 @@ fn rust_batch_writer_emits_two_distinct_ordered_nested_constructor_receipts() {
             .map(|name| factory_tasty.names().render(name).unwrap())
             .collect::<Vec<_>>();
         if ordinal == 0 {
-            assert_eq!(type_names, ["Int", "scala"]);
+            assert_eq!(type_names, ["Int", "Int", "scala"]);
         } else {
             assert_eq!(type_names, ["Int"]);
             assert!(
@@ -97,7 +96,7 @@ fn rust_batch_writer_emits_two_distinct_ordered_nested_constructor_receipts() {
             .into_iter()
             .map(|name| factory_tasty.names().render(name).unwrap())
             .collect::<Vec<_>>(),
-        ["Pair", "example"]
+        ["Pair", "Pair", "example"]
     );
     let index = factory_tasty.ast_address_index().unwrap();
     let first_address = parameter_address(&index, create_address);
@@ -135,7 +134,7 @@ fn rust_batch_writer_emits_two_distinct_ordered_nested_constructor_receipts() {
         3
     );
 
-    let RawTree::LengthNode(outer_node) = body.rhs.expect("create has a body") else {
+    let RawTree::LengthNode(outer_node) = body.rhs.as_ref().expect("create has a body") else {
         panic!("outer expression is an APPLY node");
     };
     assert_eq!(outer_node.tag, APPLY_TAG);
@@ -541,20 +540,18 @@ fn scala_oracle_pins_three_class_abi_tasty_identity_and_sibling_tree_order() {
 
     let factory_tasty = &classes[2].1;
     let (create_address, body) = method_body(factory_tasty, "create");
-    assert_eq!(body.parameters.len(), 2);
+    assert_eq!(body.parameters().count(), 2);
     assert_eq!(
-        body.parameters
-            .iter()
+        body.parameters()
             .map(|parameter| factory_tasty.names().render(parameter.name()).unwrap())
             .collect::<Vec<_>>(),
         ["first", "second"]
     );
     assert!(
-        body.parameters
-            .iter()
+        body.parameters()
             .all(|parameter| parameter.tag() == PARAM_TAG)
     );
-    for (ordinal, parameter) in body.parameters.iter().enumerate() {
+    for (ordinal, parameter) in body.parameters().enumerate() {
         let parameter_type = parameter.decode_body().unwrap().type_tree;
         let names = parameter_type
             .name_refs()
@@ -562,7 +559,7 @@ fn scala_oracle_pins_three_class_abi_tasty_identity_and_sibling_tree_order() {
             .map(|name| factory_tasty.names().render(name).unwrap())
             .collect::<Vec<_>>();
         if ordinal == 0 {
-            assert_eq!(names, ["Int", "scala"]);
+            assert_eq!(names, ["Int", "Int", "scala"]);
         } else {
             assert_eq!(names, ["Int"]);
             assert!(
@@ -580,7 +577,7 @@ fn scala_oracle_pins_three_class_abi_tasty_identity_and_sibling_tree_order() {
             .into_iter()
             .map(|name| factory_tasty.names().render(name).unwrap())
             .collect::<Vec<_>>(),
-        ["Pair", "example"]
+        ["Pair", "Pair", "example"]
     );
     let index = factory_tasty.ast_address_index().unwrap();
     let first_address = parameter_address(&index, create_address);
@@ -601,7 +598,7 @@ fn scala_oracle_pins_three_class_abi_tasty_identity_and_sibling_tree_order() {
         .expect("create owns a second distinct PARAM")
         .offset as u32;
     assert_ne!(first_address, second_address);
-    let RawTree::LengthNode(outer_node) = body.rhs.expect("create has a body") else {
+    let RawTree::LengthNode(outer_node) = body.rhs.as_ref().expect("create has a body") else {
         panic!("outer expression is an APPLY node");
     };
     assert_eq!(outer_node.tag, APPLY_TAG);
@@ -687,7 +684,7 @@ fn scala_oracle_pins_three_class_abi_tasty_identity_and_sibling_tree_order() {
         assert_eq!(
             factory_tasty
                 .names()
-                .render(body.parameters[ordinal].name())
+                .render(body.parameters().nth(ordinal).unwrap().name())
                 .unwrap(),
             if ordinal == 0 { "first" } else { "second" }
         );

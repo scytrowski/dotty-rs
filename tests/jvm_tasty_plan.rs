@@ -1218,7 +1218,10 @@ fn same_batch_class_result_emits_identity_tasty_and_rejects_nonformal_constructo
                 .collect::<Vec<_>>();
             assert!(result_names.iter().any(|name| name == "Counter"));
             assert!(result_names.iter().any(|name| name == "example"));
-            let formal_type_names = body.parameters[0]
+            let formal_type_names = body
+                .parameters()
+                .next()
+                .unwrap()
                 .decode_body()
                 .unwrap()
                 .type_tree

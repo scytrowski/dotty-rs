@@ -444,6 +444,18 @@ impl SourceTyper<'_> {
         Ok(info.clone())
     }
 
+    pub(crate) fn is_source_package_wrapper(&self, symbol: SymbolId) -> bool {
+        if !self.store.symbols.contains(symbol) {
+            return false;
+        }
+        let entry = self.store.symbols.get(symbol);
+        entry.kind == SymbolKind::ModuleClass
+            && entry.origin == dotty_core::SymbolOrigin::Synthetic
+            && entry.owner.is_some_and(|package| {
+                self.index.source_package_wrapper(self.source, package) == Some(symbol)
+            })
+    }
+
     pub(crate) fn is_current_source_symbol(&self, symbol: SymbolId) -> bool {
         self.index
             .definition_of(symbol)
@@ -451,6 +463,7 @@ impl SourceTyper<'_> {
                 dotty_core::SourceDefinition::Canonical { source, .. }
                 | dotty_core::SourceDefinition::Derived { source, .. } => source == self.source,
             })
+            || self.is_source_package_wrapper(symbol)
     }
 
     fn direct_candidates(

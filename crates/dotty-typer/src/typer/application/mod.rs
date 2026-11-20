@@ -232,11 +232,51 @@ impl SourceTyper<'_> {
                 let function_type = self.typed_arena.get(function).ty;
                 let callable =
                     self.widen_expression_type_journaled(function_type, info_journal, 0)?;
+                // In f(x) a context function supplies its own arguments first.
+                // The written argument belongs to the resulting callable.
+                let (function, callable) = if application.kind == ApplyKind::Regular
+                    && self.is_applied_context_function(callable)
+                {
+                    let applied = self.apply_context_function_at_value(
+                        application.function,
+                        function,
+                        context,
+                        info_journal,
+                    )?;
+                    (applied, self.typed_arena.get(applied).ty)
+                } else {
+                    (function, callable)
+                };
                 let (function, callable) =
                     self.resolve_apply_function(function, callable, request, info_journal)?;
                 (function, callable, None, None)
             };
-        self.type_resolved_application(
+        // Keep bindings from inferred clauses around the entire written call.
+        // A later default getter may replay the arguments bound here.
+        let mut shared = Vec::new();
+        let (function, callable) = if application.kind == ApplyKind::Regular
+            && let Some(Type::Method(clause)) = self.store.types.try_get(callable)
+            && clause.kind == MethodKind::Contextual
+            && (!is_constructor_application
+                || matches!(
+                    self.store.types.try_get(clause.result),
+                    Some(Type::Method(_))
+                )) {
+            let adapted = self.supply_contextual_clauses(
+                application.function,
+                function,
+                callable,
+                context,
+                &mut shared,
+                info_journal,
+            )?;
+            let result_type = self.typed_arena.get(adapted).ty;
+            let result_type = self.widen_expression_type_journaled(result_type, info_journal, 0)?;
+            self.resolve_apply_function(adapted, result_type, request, info_journal)?
+        } else {
+            (function, callable)
+        };
+        let applied = self.type_resolved_application(
             ResolvedApplication {
                 tree_index: tree.index(),
                 application_kind: application.kind,
@@ -251,7 +291,8 @@ impl SourceTyper<'_> {
             },
             info_journal,
             new_mappings,
-        )
+        )?;
+        Ok(self.bind_default_operands(shared, applied, position))
     }
 
     pub(in crate::typer) fn prepare_source_owner_for_qualified_this_argument(
@@ -456,7 +497,7 @@ impl SourceTyper<'_> {
         Ok(())
     }
 
-    fn resolve_apply_function(
+    pub(super) fn resolve_apply_function(
         &mut self,
         function: TreeId<Typed>,
         callable: TypeId,
@@ -525,7 +566,7 @@ impl SourceTyper<'_> {
                 if matches!(
                     class_origin,
                     SymbolOrigin::Source(_) | SymbolOrigin::Tasty(_)
-                ) =>
+                ) || self.synthesized_context_function_arity(class).is_some() =>
             {
                 receiver
             }
@@ -784,7 +825,7 @@ impl SourceTyper<'_> {
             argument_trees,
             position,
             context,
-            function,
+            mut function,
             mut callable,
             mut typed_arguments,
             is_constructor_application,
@@ -857,7 +898,14 @@ impl SourceTyper<'_> {
                     _ => None,
                 }
             };
-            let type_arguments = self.infer_poly_application_arguments(
+            let copy_defaults = self.copy_default_inference_types(
+                self.typed_arena.get(function).ty,
+                &poly,
+                arguments.len(),
+                tree_index,
+                info_journal,
+            )?;
+            let type_arguments = self.infer_poly_application_with_defaults(
                 PolyApplicationInference {
                     binder: callable,
                     poly: &poly,
@@ -866,6 +914,7 @@ impl SourceTyper<'_> {
                     tree_index,
                     unused_covariant_parameter,
                 },
+                copy_defaults.as_deref().unwrap_or_default(),
                 info_journal,
             )?;
             let instantiated =
@@ -927,6 +976,14 @@ impl SourceTyper<'_> {
                     error => error,
                 })?;
             }
+            if copy_defaults.is_some() {
+                let mut b = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types);
+                let targs = type_arguments
+                    .iter()
+                    .map(|&ty| b.type_tree(ty, position))
+                    .collect();
+                function = b.type_apply(function, targs, instantiated.result, position);
+            }
             callable = instantiated.result;
             typed_arguments = Some(arguments);
         }
@@ -948,14 +1005,31 @@ impl SourceTyper<'_> {
                 method_kind: method.kind,
             });
         }
-        if argument_trees.len() != method.params.len() {
+        let mut shared = Vec::new();
+        let defaults = if argument_trees.len() == method.params.len() {
+            Vec::new()
+        } else if argument_trees.len() < method.params.len()
+            && method.kind == MethodKind::Plain
+            && application_kind == ApplyKind::Regular
+            && !is_constructor_application
+        {
+            self.trailing_source_defaults(
+                &mut function,
+                &method,
+                argument_trees.len(),
+                context,
+                tree_index,
+                &mut shared,
+                info_journal,
+            )?
+        } else {
             return Err(TyperError::ApplicationArityMismatch {
                 source: self.source,
                 tree_index,
                 expected: method.params.len(),
                 actual: argument_trees.len(),
             });
-        }
+        };
         for (parameter_index, parameter) in method.params.iter().enumerate() {
             if parameter.erased {
                 return Err(TyperError::ErasedApplicationParameterDeferred {
@@ -972,7 +1046,9 @@ impl SourceTyper<'_> {
                 });
             }
         }
-        if self.type_contains_param_ref(method.result, callable)? {
+        if method.kind == MethodKind::Plain
+            && self.type_contains_param_ref(method.result, callable)?
+        {
             return Err(TyperError::DependentMethodApplicationDeferred {
                 source: self.source,
                 tree_index,
@@ -995,7 +1071,7 @@ impl SourceTyper<'_> {
                 Some(Type::ByName { result }) => *result,
                 _ => parameter.ty,
             };
-            let (argument, actual) = if let Some(typed_arguments) = &typed_arguments {
+            let (mut argument, actual) = if let Some(typed_arguments) = &typed_arguments {
                 let typed_argument = typed_arguments[argument_index];
                 debug_assert_eq!(
                     self.typed_arena.get(typed_argument.typed).ty,
@@ -1048,6 +1124,16 @@ impl SourceTyper<'_> {
             };
             let expected_type =
                 self.rebind_active_type_parameter_symbols(expected_type, actual, tree_index)?;
+            // A selected abstract type and a transparent member alias have the
+            // same symbol kind. The completed bounds distinguish them.
+            for ty in [actual, expected_type] {
+                if let Some(member) = self.projected_type_member(ty)
+                    && self.is_current_source_symbol(member)
+                    && matches!(self.store.symbols.info(member), SymbolInfo::Missing)
+                {
+                    self.complete_symbol_inner(member, info_journal)?;
+                }
+            }
             match self.conforms(actual, expected_type) {
                 Ok(true) => {}
                 Ok(false)
@@ -1059,13 +1145,22 @@ impl SourceTyper<'_> {
                             0,
                         )? => {}
                 Ok(false) => {
-                    return Err(TyperError::ApplicationArgumentTypeMismatch {
-                        source: self.source,
-                        tree_index,
-                        argument_index,
-                        actual,
-                        expected: expected_type,
-                    });
+                    argument = self
+                        .try_implicit_conversion(
+                            *argument_tree,
+                            argument,
+                            actual,
+                            expected_type,
+                            context,
+                            info_journal,
+                        )?
+                        .ok_or(TyperError::ApplicationArgumentTypeMismatch {
+                            source: self.source,
+                            tree_index,
+                            argument_index,
+                            actual,
+                            expected: expected_type,
+                        })?;
                 }
                 Err(error) => {
                     return Err(TyperError::ApplicationArgumentConformanceUnsupported {
@@ -1080,15 +1175,39 @@ impl SourceTyper<'_> {
             }
             arguments.push(argument);
         }
-        Ok(
-            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply_with_kind(
+        arguments.extend(defaults);
+        if application_kind == ApplyKind::Regular
+            && method.kind == MethodKind::Implicit
+            && let Some(span) = argument_trees
+                .first()
+                .and_then(|tree| self.arena.get(*tree).position)
+                .or(position)
+        {
+            self.diagnostics.push(dotty_core::Diagnostic::new(
+                dotty_core::DiagnosticSeverity::Warning,
+                span.span().range(),
+                "Implicit parameters should be provided with a `using` clause.",
+            ));
+        }
+        if method.kind != MethodKind::Plain {
+            return self.finish_contextual_call(
                 function,
+                callable,
+                method.result,
                 arguments,
                 application_kind,
-                method.result,
                 position,
-            ),
-        )
+                tree_index,
+            );
+        }
+        let call = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply_with_kind(
+            function,
+            arguments,
+            application_kind,
+            method.result,
+            position,
+        );
+        Ok(self.bind_default_operands(shared, call, position))
     }
 
     pub(in crate::typer) fn type_type_application(

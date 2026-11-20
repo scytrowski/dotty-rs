@@ -1028,12 +1028,20 @@ fn assert_live_report_matches_frozen_with_selected_option_member_delta(
         .zip(&frozen_members)
         .filter(|(current, frozen)| current != frozen)
         .collect::<Vec<_>>();
+    let mut changes = Vec::new();
+    for (current, frozen) in changed_members {
+        let (name, _) = current.split_once(':').unwrap();
+        if name != "getOrElse" {
+            // These four Option signatures each have a single legacy implicit
+            // clause in the pinned Scala library. Freeze the entire rest of the row.
+            assert_eq!(*current, frozen.replace(")Plain:", ")Implicit:"));
+        }
+        changes.push(name);
+    }
     assert_eq!(
-        changed_members.len(),
-        1,
-        "the member decoder change must not expand to neighboring Option signatures"
+        changes,
+        ["flatten", "getOrElse", "orNull", "unzip3", "unzip"]
     );
-    assert!(changed_members[0].0.starts_with("getOrElse:"));
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1743,7 +1751,11 @@ fn complete_visibility_constructor_once(unit_id: &str) -> Result<String, String>
                 }
                 _ => "<non-reference-result-tree>".to_owned(),
             };
-            (body.clauses.len(), result_name, format!("{:?}", body.tail))
+            (
+                body.clauses().count(),
+                result_name,
+                format!("{:?}", body.tail),
+            )
         }
         other => return Err(format!("constructor address decoded as {other:?}")),
     };
@@ -2106,7 +2118,7 @@ fn neighboring_non_empty_constructor_is_explicitly_completed_as_a_bounded_probe(
         panic!("Body constructor is not a DEFDEF")
     };
     assert_eq!(
-        body.parameters.len(),
+        body.parameters().count(),
         1,
         "Body constructor has one parameter"
     );
@@ -2133,7 +2145,7 @@ fn neighboring_non_empty_constructor_is_explicitly_completed_as_a_bounded_probe(
     if std::env::var_os("DOTTY_DUMP_VISIBILITY_AUDIT").is_some() {
         eprintln!(
             "probe=fields-body\tconstructor_address={constructor_address}\tparameter_count={}\tresult=SUPPORTED(one Int parameter, owning class result)",
-            body.parameters.len()
+            body.parameters().count()
         );
     }
 }

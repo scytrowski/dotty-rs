@@ -768,6 +768,7 @@ impl Validator<'_, '_> {
         source_name: dotty_core::Name,
         prefix: TypeId,
         source_tree: TreeId<Untyped>,
+        application: ApplyKind,
     ) -> Result<usize, PickleError> {
         let p = self.plan;
         let target_method = p
@@ -811,8 +812,14 @@ impl Validator<'_, '_> {
                 role: TypeRole::Parameter,
             });
         };
-        if signature.kind != MethodKind::Plain
-            || signature.params.len() != target_method.parameter_clauses[0].len()
+        if !matches!(
+            (application, signature.kind),
+            (ApplyKind::Regular, MethodKind::Plain | MethodKind::Implicit)
+                | (
+                    ApplyKind::Using,
+                    MethodKind::Contextual | MethodKind::Implicit
+                )
+        ) || signature.params.len() != target_method.parameter_clauses[0].len()
             || signature.result != p.definitions.int
         {
             return Err(PickleError::MalformedType {
@@ -881,8 +888,7 @@ impl Validator<'_, '_> {
                 expected: SourceRole::Body,
             });
         };
-        if source_apply.kind != ApplyKind::Regular
-            || typed_apply.kind != ApplyKind::Regular
+        if source_apply.kind != typed_apply.kind
             || source_apply.args.is_empty()
             || source_apply.args.len() != typed_apply.args.len()
         {
@@ -975,6 +981,7 @@ impl Validator<'_, '_> {
             name,
             *prefix,
             source_apply.function,
+            source_apply.kind,
         )?;
         if count != source_apply.args.len() {
             return Err(PickleError::BodyType {
@@ -1413,20 +1420,95 @@ impl Validator<'_, '_> {
         let source_if = *source_if;
         let typed_if = *typed_if;
         self.validate_if_condition(source_if.cond, typed_if.cond, method, depth, visited)?;
-        let then_type = self.validate_if_branch(
-            source_if.then_branch,
-            typed_if.then_branch,
-            method,
-            depth,
-            visited,
-        )?;
-        let else_type = self.validate_if_branch(
-            source_if.else_branch,
-            typed_if.else_branch,
-            method,
-            depth,
-            visited,
-        )?;
+        let conditional_assignment = self.conditional_mutable_assignment.filter(|binding| {
+            binding.method == method.symbol
+                && binding.source_if == source_id
+                && binding.typed_if == typed_id
+                && binding.source_assignments == [source_if.then_branch, source_if.else_branch]
+                && binding.typed_assignments == [typed_if.then_branch, typed_if.else_branch]
+        });
+        let (then_type, else_type) = if let Some(binding) = conditional_assignment {
+            for (source_branch, typed_branch) in [
+                (source_if.then_branch, typed_if.then_branch),
+                (source_if.else_branch, typed_if.else_branch),
+            ] {
+                if !binding
+                    .source_assignments
+                    .iter()
+                    .zip(binding.typed_assignments)
+                    .any(|(&source, typed)| source == source_branch && typed == typed_branch)
+                {
+                    return Err(
+                        self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                    );
+                }
+                self.validate_assignment_statement(
+                    source_branch,
+                    typed_branch,
+                    method,
+                    depth,
+                    visited,
+                )?;
+            }
+            (
+                self.plan.typed_ast.get(typed_if.then_branch).ty,
+                self.plan.typed_ast.get(typed_if.else_branch).ty,
+            )
+        } else {
+            (
+                self.validate_if_branch(
+                    source_if.then_branch,
+                    typed_if.then_branch,
+                    method,
+                    depth,
+                    visited,
+                )?,
+                self.validate_if_branch(
+                    source_if.else_branch,
+                    typed_if.else_branch,
+                    method,
+                    depth,
+                    visited,
+                )?,
+            )
+        };
+
+        if let Some(binding) = conditional_assignment {
+            let condition = self.plan.typed_ast.try_get(typed_if.cond).ok_or(
+                PickleError::InvalidTypedTree {
+                    tree: typed_if.cond,
+                },
+            )?;
+            let source_condition = self.source_tree(source_if.cond)?;
+            let condition_symbol = self.symbol(binding.condition_formal)?;
+            if binding.source_id != self.plan.source.id
+                || binding.owner != self.plan.class
+                || binding.source_condition != source_if.cond
+                || binding.typed_condition != typed_if.cond
+                || binding.source_assignments != [source_if.then_branch, source_if.else_branch]
+                || binding.typed_assignments != [typed_if.then_branch, typed_if.else_branch]
+                || condition_symbol.kind != SymbolKind::Parameter
+                || condition_symbol.owner != Some(method.symbol)
+                || condition_symbol.flags != SymbolFlags::EMPTY
+                || !matches!(source_condition.kind, TreeKind::Ident(ident) if ident.name == condition_symbol.name)
+                || !matches!(condition.kind, TreeKind::Ident(ident) if ident.name == condition_symbol.name)
+                || !matches!(self.ty(condition.ty)?, Type::TermRef {
+                    prefix,
+                    target: TermRefTarget::Symbol(symbol),
+                } if *prefix == self.plan.definitions.no_prefix && *symbol == binding.condition_formal)
+                || binding.local_type != self.complete(binding.local)?
+                || self.symbol(binding.local)?.owner != Some(method.symbol)
+                || self.symbol(binding.local)?.flags != SymbolFlags::MUTABLE
+                || typed.ty != self.plan.definitions.unit
+                || then_type != self.plan.definitions.unit
+                || else_type != self.plan.definitions.unit
+            {
+                return Err(
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                );
+            }
+            return Ok(self.plan.definitions.unit);
+        }
 
         let branch_join = match self.ty(typed.ty)? {
             Type::Constant(Constant::Int(value)) => {
@@ -1728,7 +1810,13 @@ impl Validator<'_, '_> {
                 } else {
                     let parameter = target;
                     self.kind(*parameter, SymbolKind::Parameter)?;
-                    self.owner(*parameter, Some(method.symbol))?;
+                    let owner = self.symbol(method.symbol)?;
+                    // A validated closure plan lists its formal and its exact enclosing captures.
+                    if owner.origin != SymbolOrigin::Synthetic
+                        || self.symbol(*parameter)?.owner != owner.owner
+                    {
+                        self.owner(*parameter, Some(method.symbol))?;
+                    }
                     if !method
                         .parameter_clauses
                         .iter()
@@ -1933,8 +2021,7 @@ impl Validator<'_, '_> {
                 if !visited.insert(body) {
                     return Err(PickleError::RepeatedExpression { tree: body });
                 }
-                if source_apply.kind != ApplyKind::Regular
-                    || typed_apply.kind != ApplyKind::Regular
+                if source_apply.kind != typed_apply.kind
                     || source_apply.args.len() != typed_apply.args.len()
                 {
                     return Err(
@@ -2028,6 +2115,7 @@ impl Validator<'_, '_> {
                     name,
                     *prefix,
                     source_apply.function,
+                    source_apply.kind,
                 )?;
                 if source_apply.args.len() != parameter_count {
                     return Err(PickleError::BodyType {
@@ -2264,6 +2352,92 @@ impl Validator<'_, '_> {
                     tree: rhs,
                     expected: SourceRole::Body,
                 })?)
+            }
+            (TreeKind::Ident(ident), TreeKind::Apply(call)) if method.body == Some(body) => {
+                // The source identifier binds to the adapted call. Its function
+                // and inserted argument therefore have no separate source roots.
+                let unsupported = || PickleError::Unsupported {
+                    feature: UnsupportedFeature::BodyExpression,
+                    symbol: Some(method.symbol),
+                };
+                let [arg] = call.args.as_slice() else {
+                    return Err(unsupported());
+                };
+                if call.kind != ApplyKind::Regular
+                    || result_type != p.definitions.int
+                    || node.ty != result_type
+                    || self.unqualified_name_is_shadowed(ident.name, method)
+                {
+                    return Err(unsupported());
+                }
+                self.charge(3)?;
+                let function =
+                    p.typed_ast
+                        .try_get(call.function)
+                        .ok_or(PickleError::InvalidTypedTree {
+                            tree: call.function,
+                        })?;
+                let argument = p
+                    .typed_ast
+                    .try_get(*arg)
+                    .ok_or(PickleError::InvalidTypedTree { tree: *arg })?;
+                let (TreeKind::Ident(head), TreeKind::Ident(actual)) =
+                    (&function.kind, &argument.kind)
+                else {
+                    return Err(unsupported());
+                };
+                if head != ident || argument.position.is_some() {
+                    return Err(unsupported());
+                }
+                self.paired_source_typed_span(
+                    source_rhs.position,
+                    function.position,
+                    call.function,
+                )?;
+                let Type::TermRef {
+                    prefix,
+                    target: TermRefTarget::Symbol(target),
+                } = self.ty(function.ty)?
+                else {
+                    return Err(unsupported());
+                };
+                if self.same_class_method_application_target(
+                    *target,
+                    ident.name,
+                    *prefix,
+                    rhs,
+                    ApplyKind::Using,
+                )? != 1
+                {
+                    return Err(unsupported());
+                }
+                let Type::TermRef {
+                    prefix,
+                    target: TermRefTarget::Symbol(evidence),
+                } = self.ty(argument.ty)?
+                else {
+                    return Err(unsupported());
+                };
+                let [params] = method.parameter_clauses.as_slice() else {
+                    return Err(unsupported());
+                };
+                let [formal] = params.as_slice() else {
+                    return Err(unsupported());
+                };
+                let entry = self.symbol(*formal)?;
+                if evidence != formal
+                    || actual.name != entry.name
+                    || actual.backquoted
+                    || *prefix != p.definitions.no_prefix
+                    || entry.kind != SymbolKind::Parameter
+                    || entry.owner != Some(method.symbol)
+                    || !(entry.flags.contains(SymbolFlags::GIVEN)
+                        || entry.flags.contains(SymbolFlags::IMPLICIT))
+                    || self.complete(*formal)? != p.definitions.int
+                {
+                    return Err(unsupported());
+                }
+                None
             }
             (TreeKind::Ident(_), _) => {
                 return Err(PickleError::SourceShape {
@@ -2532,6 +2706,9 @@ impl Validator<'_, '_> {
         let conditional_selection = p
             .typed_bindings
             .conditional_local_reference_selection(p.source.id, method.symbol);
+        let conditional_mutable_assignment = p
+            .typed_bindings
+            .conditional_mutable_reference_assignment(p.source.id, method.symbol);
         let conditional_pair_shape = argument_count == 2
             && method.parameter_clauses.len() == 1
             && method.parameter_clauses[0].len() == 4
@@ -2539,6 +2716,14 @@ impl Validator<'_, '_> {
                 selection.method == method.symbol
                     && selection.owner == p.class
                     && method.parameter_clauses[0][2] == selection.condition_formal
+            });
+        let conditional_mutable_pair_shape = argument_count == 2
+            && method.parameter_clauses.len() == 1
+            && method.parameter_clauses[0].len() == 4
+            && conditional_mutable_assignment.is_some_and(|assignment| {
+                assignment.method == method.symbol
+                    && assignment.owner == p.class
+                    && assignment.condition_formal == method.parameter_clauses[0][2]
             });
         let mutable_rebinding_pair_shape = argument_count == 2
             && method.parameter_clauses.len() == 1
@@ -2561,6 +2746,7 @@ impl Validator<'_, '_> {
         if method.parameter_clauses.len() != 1
             || (method.parameter_clauses[0].len() != argument_count
                 && !conditional_pair_shape
+                && !conditional_mutable_pair_shape
                 && !mutable_rebinding_pair_shape)
         {
             return Err(self.unsupported(UnsupportedFeature::ParameterClauses, Some(method.symbol)));
@@ -3046,12 +3232,25 @@ impl Validator<'_, '_> {
                         .local_receiver_unit_call(p.source.id, method.symbol)
                         .is_some()
             });
+        let conditional_mutable_rebinding = p
+            .typed_bindings
+            .conditional_mutable_reference_assignment(p.source.id, method.symbol)
+            .is_some_and(|assignment| {
+                assignment.method == method.symbol
+                    && assignment.owner == p.class
+                    && assignment.rhs_locals[0] != assignment.rhs_locals[1]
+                    && p.store.scopes.contains(assignment.scope)
+                    && p.store.scopes.get(assignment.scope).owner == Some(method.symbol)
+            });
         let formal_clause_matches =
             match (method.parameter_clauses.as_slice(), conditional_selection) {
                 ([formals], None) => {
                     formals.as_slice() == binding.method_formals
                         || (mutable_rebinding
                             && formals.len() == 3
+                            && formals[..2] == binding.method_formals)
+                        || (conditional_mutable_rebinding
+                            && formals.len() == 4
                             && formals[..2] == binding.method_formals)
                 }
                 ([formals], Some(selection)) => {
@@ -3085,6 +3284,15 @@ impl Validator<'_, '_> {
                     || (mutable_rebinding
                         && formals.len() == 3
                         && formals[..2] == binding.source_method_formals)
+                    || (conditional_mutable_rebinding
+                        && formals.len() == 4
+                        && formals[..2] == binding.source_method_formals
+                        && p.typed_bindings
+                            .conditional_mutable_reference_assignment(p.source.id, method.symbol)
+                            .is_some_and(|assignment| {
+                                p.source_index.symbol_at(p.source.id, formals[2])
+                                    == Some(assignment.condition_formal)
+                            }))
             }
             ([formals], Some(selection)) => {
                 formals.len() == 4
@@ -3105,7 +3313,7 @@ impl Validator<'_, '_> {
             });
         };
         if method_signature.params.len()
-            != if conditional_selection.is_some() {
+            != if conditional_selection.is_some() || conditional_mutable_rebinding {
                 4
             } else if mutable_rebinding {
                 3
@@ -3123,6 +3331,11 @@ impl Validator<'_, '_> {
                     || method_signature.params[2].ty != p.definitions.boolean
                     || method_signature.params[3].ty != p.definitions.int
             })
+            || (conditional_mutable_rebinding
+                && (method_signature.params[0].ty != p.definitions.int
+                    || method_signature.params[1].ty != p.definitions.int
+                    || method_signature.params[2].ty != p.definitions.boolean
+                    || method_signature.params[3].ty != p.definitions.int))
         {
             return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
         }

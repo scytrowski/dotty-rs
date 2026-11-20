@@ -4,6 +4,9 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 
+use dotty_core::ast::given_name::{
+    UnsupportedGivenNameTree, extract_given_type_name, given_type_tree_kind,
+};
 use dotty_core::ast::{
     ExtensionMethods, Modifier, Modifiers, Select, UntypedNode, VisibilitySyntax,
 };
@@ -44,6 +47,8 @@ pub enum NamerError {
     DuplicateSourceExportSite { source: SourceId, tree_index: u32 },
     /// A semantic owner was assigned more than one declaration scope.
     DuplicateDeclarationScope { symbol: SymbolId },
+    /// The file and package disagree with an existing wrapper registration.
+    ConflictingSourcePackageWrapper { source: SourceId, package: SymbolId },
     /// A declaration symbol was assigned two different source contexts.
     DuplicateDeclarationContext {
         symbol: SymbolId,
@@ -139,6 +144,12 @@ impl fmt::Display for NamerError {
                     symbol.index()
                 )
             }
+            Self::ConflictingSourcePackageWrapper { source, package } => write!(
+                f,
+                "conflicting wrapper registration for source {} and package {}",
+                source.index(),
+                package.index()
+            ),
             Self::DuplicateDeclarationContext {
                 symbol,
                 existing,
@@ -266,6 +277,9 @@ impl From<SourceSemanticIndexError> for NamerError {
             SourceSemanticIndexError::DuplicateDeclarationScope { symbol } => {
                 Self::DuplicateDeclarationScope { symbol }
             }
+            SourceSemanticIndexError::ConflictingSourcePackageWrapper { source, package } => {
+                Self::ConflictingSourcePackageWrapper { source, package }
+            }
             SourceSemanticIndexError::DuplicateDeclarationContext {
                 symbol,
                 existing,
@@ -286,235 +300,6 @@ impl From<SourceSemanticIndexError> for NamerError {
             }
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct UnsupportedGivenNameTree {
-    tree: TreeId<Untyped>,
-    kind: &'static str,
-}
-
-fn given_type_tree_kind(tree: &TreeKind<Untyped>) -> &'static str {
-    match tree {
-        TreeKind::Ident(_) => "Ident",
-        TreeKind::Select(_) => "Select",
-        TreeKind::TypeTree(_) => "TypeTree",
-        TreeKind::SingletonTypeTree(_) => "SingletonTypeTree",
-        TreeKind::RefinedTypeTree(_) => "RefinedTypeTree",
-        TreeKind::MatchTypeTree(_) => "MatchTypeTree",
-        TreeKind::ByNameTypeTree(_) => "ByNameTypeTree",
-        TreeKind::TypeBoundsTree(_) => "TypeBoundsTree",
-        TreeKind::This(_) => "This",
-        TreeKind::Super(_) => "Super",
-        TreeKind::Literal(_) => "Literal",
-        TreeKind::Apply(_) => "Apply",
-        TreeKind::TypeApply(_) => "TypeApply",
-        TreeKind::New(_) => "New",
-        TreeKind::Typed(_) => "Typed",
-        TreeKind::AppliedTypeTree(_) => "AppliedTypeTree",
-        TreeKind::LambdaTypeTree(_) => "LambdaTypeTree",
-        TreeKind::NamedArg(_) => "NamedArg",
-        TreeKind::Assign(_) => "Assign",
-        TreeKind::Block(_) => "Block",
-        TreeKind::If(_) => "If",
-        TreeKind::Match(_) => "Match",
-        TreeKind::CaseDef(_) => "CaseDef",
-        TreeKind::Return(_) => "Return",
-        TreeKind::While(_) => "While",
-        TreeKind::Try(_) => "Try",
-        TreeKind::Closure(_) => "Closure",
-        TreeKind::ValDef(_) => "ValDef",
-        TreeKind::DefDef(_) => "DefDef",
-        TreeKind::TypeDef(_) => "TypeDef",
-        TreeKind::Template(_) => "Template",
-        TreeKind::PackageDef(_) => "PackageDef",
-        TreeKind::Import(_) => "Import",
-        TreeKind::Export(_) => "Export",
-        TreeKind::PhaseSpecific(UntypedNode::Error(_)) => "Error",
-        TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_)) => "ModuleDef",
-        TreeKind::PhaseSpecific(UntypedNode::PolyFunction(_)) => "PolyFunction",
-        TreeKind::PhaseSpecific(UntypedNode::PrefixOp(_)) => "PrefixOp",
-        TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_)) => "PostfixOp",
-        TreeKind::PhaseSpecific(UntypedNode::ForYield(_)) => "ForYield",
-        TreeKind::PhaseSpecific(UntypedNode::ForDo(_)) => "ForDo",
-        TreeKind::PhaseSpecific(UntypedNode::GenFrom(_)) => "GenFrom",
-        TreeKind::PhaseSpecific(UntypedNode::GenAlias(_)) => "GenAlias",
-        TreeKind::PhaseSpecific(UntypedNode::PatDef(_)) => "PatDef",
-        TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(_)) => "ExtensionMethods",
-        TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(_)) => "InterpolatedString",
-        TreeKind::PhaseSpecific(UntypedNode::ContextBounds(_)) => "ContextBounds",
-        TreeKind::PhaseSpecific(UntypedNode::Number(_)) => "Number",
-        TreeKind::PhaseSpecific(UntypedNode::Throw(_)) => "Throw",
-        TreeKind::PhaseSpecific(UntypedNode::InlineIf(_)) => "InlineIf",
-        TreeKind::PhaseSpecific(UntypedNode::InlineMatch(_)) => "InlineMatch",
-        TreeKind::PhaseSpecific(UntypedNode::MacroTree(_)) => "MacroTree",
-        TreeKind::PhaseSpecific(UntypedNode::ParsedTry(_)) => "ParsedTry",
-        TreeKind::PhaseSpecific(UntypedNode::Function(_)) => "Function",
-        TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_)) => "FunctionWithMods",
-        TreeKind::PhaseSpecific(UntypedNode::CapturesAndResult(_)) => "CapturesAndResult",
-        TreeKind::PhaseSpecific(UntypedNode::InfixOp(_)) => "InfixOp",
-        TreeKind::PhaseSpecific(UntypedNode::Parens(_)) => "Parens",
-        TreeKind::PhaseSpecific(UntypedNode::Tuple(_)) => "Tuple",
-        TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(_)) => "ContextBoundTypeTree",
-        TreeKind::Bind(_) => "Bind",
-        TreeKind::Alternative(_) => "Alternative",
-        TreeKind::UnApply(_) => "UnApply",
-        TreeKind::Annotated(_) => "Annotated",
-        TreeKind::Quote(_) => "Quote",
-        TreeKind::Splice(_) => "Splice",
-        TreeKind::QuotePattern(_) => "QuotePattern",
-        TreeKind::SplicePattern(_) => "SplicePattern",
-        TreeKind::Inlined(_) => "Inlined",
-    }
-}
-
-fn extract_given_type_name(
-    arena: &AstArena<Untyped>,
-    names: &dotty_core::NameInterner,
-    tree: TreeId<Untyped>,
-    follow_args: bool,
-) -> Result<String, UnsupportedGivenNameTree> {
-    enum Task<'a> {
-        Visit(TreeId<Untyped>, bool),
-        Arguments(&'a [TreeId<Untyped>]),
-        Text(&'a str),
-        Finish(TreeId<Untyped>, usize),
-    }
-
-    fn append_reference(
-        output: &mut String,
-        name: dotty_core::Name,
-        names: &dotty_core::NameInterner,
-    ) {
-        output.push_str(names.resolve(name.text()));
-        if name.is_term() {
-            output.push_str("_type");
-        }
-    }
-
-    let mut output = String::new();
-    let mut active = HashSet::new();
-    let mut pending = vec![Task::Visit(tree, follow_args)];
-    while let Some(task) = pending.pop() {
-        let (tree, follow_args) = match task {
-            Task::Text(text) => {
-                output.push_str(text);
-                continue;
-            }
-            Task::Arguments(args) => {
-                for (ordinal, arg) in args.iter().enumerate().rev() {
-                    pending.push(Task::Visit(*arg, false));
-                    if ordinal > 0 {
-                        pending.push(Task::Text("_"));
-                    }
-                }
-                continue;
-            }
-            Task::Finish(tree, start) => {
-                active.remove(&tree);
-                if output.len() == start {
-                    return Err(UnsupportedGivenNameTree {
-                        tree,
-                        kind: given_type_tree_kind(&arena.get(tree).kind),
-                    });
-                }
-                continue;
-            }
-            Task::Visit(tree, follow_args) => (tree, follow_args),
-        };
-        if !active.insert(tree) {
-            return Err(UnsupportedGivenNameTree {
-                tree,
-                kind: "cyclic type tree",
-            });
-        }
-        // Append each component once. Recursive string concatenation copies
-        // the accumulated name at every level of an applied/function type.
-        pending.push(Task::Finish(tree, output.len()));
-        match &arena.get(tree).kind {
-            TreeKind::Ident(ident) => append_reference(&mut output, ident.name, names),
-            TreeKind::Select(select) if names.resolve(select.name.text()) == "<init>" => {
-                pending.push(Task::Visit(select.qualifier, follow_args));
-            }
-            TreeKind::Select(select) => append_reference(&mut output, select.name, names),
-            TreeKind::TypeDef(definition) => {
-                output.push_str(names.resolve(definition.name.as_name().text()));
-            }
-            TreeKind::AppliedTypeTree(applied) => {
-                if follow_args && !applied.args.is_empty() {
-                    pending.push(Task::Arguments(&applied.args));
-                    pending.push(Task::Text("_"));
-                }
-                pending.push(Task::Visit(applied.tpt, follow_args));
-            }
-            // Structural given parents currently use Apply in the parser.
-            TreeKind::Apply(applied) => {
-                if follow_args && !applied.args.is_empty() {
-                    pending.push(Task::Arguments(&applied.args));
-                    pending.push(Task::Text("_"));
-                }
-                pending.push(Task::Visit(applied.function, follow_args));
-            }
-            TreeKind::LambdaTypeTree(lambda) => {
-                pending.push(Task::Visit(lambda.body, follow_args));
-            }
-            TreeKind::RefinedTypeTree(refined) if refined.refinements.is_empty() => {
-                pending.push(Task::Visit(refined.tpt, follow_args));
-            }
-            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => {
-                pending.push(Task::Visit(parens.inner, follow_args));
-            }
-            TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) => {
-                pending.push(Task::Arguments(&tuple.elements));
-            }
-            TreeKind::PhaseSpecific(UntypedNode::Function(function))
-                if !function.params.is_empty() =>
-            {
-                if follow_args {
-                    pending.push(Task::Visit(function.body, true));
-                    pending.push(Task::Text("_to_"));
-                    pending.push(Task::Arguments(&function.params));
-                } else {
-                    output.push_str("Function");
-                }
-            }
-            TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function))
-                if !function.params.is_empty() =>
-            {
-                if follow_args {
-                    pending.push(Task::Visit(function.result, true));
-                    pending.push(Task::Text("_to_"));
-                    pending.push(Task::Arguments(&function.params));
-                } else {
-                    output.push_str("Function");
-                }
-            }
-            TreeKind::PhaseSpecific(UntypedNode::CapturesAndResult(captures)) => {
-                pending.push(Task::Visit(captures.result, follow_args));
-            }
-            TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => {
-                output.push_str(names.resolve(infix.op.text()));
-                if follow_args {
-                    pending.push(Task::Visit(infix.right, false));
-                    pending.push(Task::Text("_"));
-                    pending.push(Task::Visit(infix.left, false));
-                    pending.push(Task::Text("_"));
-                }
-            }
-            TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(bound)) => {
-                pending.push(Task::Text(names.resolve(bound.parameter.as_name().text())));
-                pending.push(Task::Text("_"));
-                pending.push(Task::Visit(bound.bound, true));
-            }
-            node => {
-                return Err(UnsupportedGivenNameTree {
-                    tree,
-                    kind: given_type_tree_kind(node),
-                });
-            }
-        }
-    }
-    Ok(output)
 }
 
 /// Dynamic traversal state for naming declarations.
@@ -715,7 +500,6 @@ fn run_name_compilation_unit(
             scope_insertions: Vec::new(),
             companion_links: Vec::new(),
             package_private_boundary: None,
-            source_package_wrappers: HashMap::new(),
             synthetic_enum_module_classes: HashSet::new(),
             wrapped_type_names: HashMap::new(),
             source_diagnostics_allowed,
@@ -749,7 +533,6 @@ struct Namer<'a> {
     scope_insertions: Vec<(ScopeId, SymbolId)>,
     companion_links: Vec<PendingCompanion>,
     package_private_boundary: Option<(SymbolId, SymbolId)>,
-    source_package_wrappers: HashMap<SymbolId, (SymbolId, ScopeId)>,
     synthetic_enum_module_classes: HashSet<SymbolId>,
     wrapped_type_names: HashMap<Vec<String>, HashSet<TypeName>>,
     source_diagnostics_allowed: bool,
@@ -923,10 +706,10 @@ impl Namer<'_> {
         package_context: &NamingContext,
         stats: Vec<ContextualStat>,
     ) -> Result<EnteredHeader, NamerError> {
-        if let Some((module_class, scope)) = self
-            .source_package_wrappers
-            .get(&package_context.owner)
-            .copied()
+        if let Some(module_class) = self
+            .index
+            .source_package_wrapper(self.source, package_context.owner)
+            && let Some(scope) = self.index.scope_of(module_class)
         {
             return Ok(EnteredHeader::SourcePackageWrapper {
                 stats,
@@ -977,9 +760,12 @@ impl Namer<'_> {
         });
         self.enter_in_scope(package_context.scope, module_class_name, module_class);
         let scope = self.store.scopes.alloc(Scope::new(Some(module_class)));
-        self.index.record_scope(module_class, scope)?;
-        self.source_package_wrappers
-            .insert(package_context.owner, (module_class, scope));
+        self.index.record_source_package_wrapper(
+            self.source,
+            package_context.owner,
+            module_class,
+            scope,
+        )?;
 
         Ok(EnteredHeader::SourcePackageWrapper {
             stats,
@@ -1370,6 +1156,29 @@ impl Namer<'_> {
 
         let scope = self.store.scopes.alloc(Scope::new(Some(symbol)));
         self.index.record_scope(symbol, scope)?;
+        if flags.contains(SymbolFlags::GIVEN)
+            && kind == SymbolKind::Class
+            && (!constructor.type_params.is_empty() || !constructor.value_param_clauses.is_empty())
+        {
+            let factory = self.enter_derived_symbol(
+                tree,
+                *dotty_core::TermName::new(name.text()).as_name(),
+                owner_context.owner,
+                owner_context.scope,
+                SymbolSpec {
+                    kind: SymbolKind::Method,
+                    flags: SymbolFlags::GIVEN | SymbolFlags::FINAL | (flags & SymbolFlags::INLINE),
+                    visibility: mapped.visibility,
+                },
+            )?;
+            self.enter_derived_method_parameters(
+                factory,
+                owner_context.source_context,
+                &constructor.type_params,
+                constructor.value_param_clauses.iter().flatten().copied(),
+                Some(SymbolFlags::GIVEN),
+            )?;
+        }
         Ok(Some(EnteredHeader::ClassLike {
             tree,
             symbol,
@@ -1613,8 +1422,9 @@ impl Namer<'_> {
         enclosing_scope: ScopeId,
     ) -> Option<SymbolId> {
         let name = *TypeName::new(object_name.text()).as_name();
-        self.unique_companion_candidate(enclosing_scope, name, |kind| {
-            matches!(kind, SymbolKind::Class | SymbolKind::Trait)
+        self.unique_companion_candidate(enclosing_scope, name, |entry| {
+            matches!(entry.kind, SymbolKind::Class | SymbolKind::Trait)
+                || entry.kind == SymbolKind::TypeAlias && entry.flags.contains(SymbolFlags::OPAQUE)
         })
     }
 
@@ -1622,7 +1432,7 @@ impl Namer<'_> {
         &self,
         scope: ScopeId,
         name: dotty_core::Name,
-        matches_kind: impl Fn(SymbolKind) -> bool,
+        matches_kind: impl Fn(&Symbol) -> bool,
     ) -> Option<SymbolId> {
         let mut candidates = self
             .store
@@ -1632,7 +1442,7 @@ impl Namer<'_> {
             .iter()
             .copied()
             .filter(|id| {
-                matches_kind(self.store.symbols.get(*id).kind)
+                matches_kind(self.store.symbols.get(*id))
                     && self.index.declaration_context_of(*id).is_some()
             });
         let candidate = candidates.next()?;
@@ -1646,9 +1456,9 @@ impl Namer<'_> {
         for link in &self.companion_links {
             let name = self.store.symbols.get(link.object).name;
             if self.source_companion_class(name, link.scope) == Some(link.class)
-                && self
-                    .unique_companion_candidate(link.scope, name, |kind| kind == SymbolKind::Object)
-                    == Some(link.object)
+                && self.unique_companion_candidate(link.scope, name, |entry| {
+                    entry.kind == SymbolKind::Object
+                }) == Some(link.object)
             {
                 pairs.push((link.class, link.object));
             } else if let Some(tree) = link.required_by {
@@ -1749,7 +1559,13 @@ impl Namer<'_> {
                 ));
             }
         }
-        let value_parameters = if constructor.value_param_clauses.len() == 1
+        let has_witnesses = constructor.context_bound_trees(self.arena).next().is_some();
+        let has_second_clause = has_witnesses
+            && matches!(
+                constructor.value_param_clauses.as_slice(),
+                [_, second] if !second.is_empty()
+            );
+        let value_parameters = if (constructor.value_param_clauses.len() == 1 || has_second_clause)
             && (!top_level || !leading_clause.is_empty())
         {
             leading_clause
@@ -1783,7 +1599,13 @@ impl Namer<'_> {
             {
                 synthesize_apply = false;
             }
-            let TreeKind::TypeBoundsTree(bounds) = &self.arena.get(parameter.rhs).kind else {
+            let bounds_tree = match &self.arena.get(parameter.rhs).kind {
+                TreeKind::PhaseSpecific(UntypedNode::ContextBounds(bounds)) => bounds.bounds,
+                _ => parameter.rhs,
+            };
+            let Some(TreeKind::TypeBoundsTree(bounds)) =
+                self.arena.try_get(bounds_tree).map(|tree| &tree.kind)
+            else {
                 synthesize_apply = false;
                 continue;
             };
@@ -1791,44 +1613,50 @@ impl Namer<'_> {
                 synthesize_apply = false;
             }
         }
-        for parameter_tree in constructor
-            .value_param_clauses
-            .iter()
-            .flat_map(|clause| clause.iter())
-        {
-            let TreeKind::ValDef(parameter) = &self.arena.get(*parameter_tree).kind else {
-                return Err(NamerError::MalformedAstShape {
-                    tree_index: parameter_tree.index(),
-                    expected: "case class constructor parameter ValDef",
-                });
+        for (clause_index, clause) in constructor.value_param_clauses.iter().enumerate() {
+            let expected_modifiers: &[_] = if clause_index == 0 {
+                &[Modifier::ParamAccessor]
+            } else {
+                &[
+                    Modifier::Given,
+                    Modifier::ParamAccessor,
+                    Modifier::PrivateLocal,
+                ]
             };
-            if parameter.rhs.is_some()
-                || parameter.metadata.visibility.is_some()
-                || !parameter.metadata.annotations.is_empty()
-                || parameter.metadata.modifiers != [Modifier::ParamAccessor]
-            {
-                synthesize_apply = false;
-            }
-            if matches!(
-                self.arena.get(parameter.tpt).kind,
-                TreeKind::ByNameTypeTree(_)
-            ) {
-                if top_level {
+            for parameter_tree in clause {
+                let TreeKind::ValDef(parameter) = &self.arena.get(*parameter_tree).kind else {
+                    return Err(NamerError::MalformedAstShape {
+                        tree_index: parameter_tree.index(),
+                        expected: "case class constructor parameter ValDef",
+                    });
+                };
+                if parameter.rhs.is_some()
+                    || parameter.metadata.visibility.is_some()
+                    || !parameter.metadata.annotations.is_empty()
+                    || parameter.metadata.modifiers != expected_modifiers
+                {
                     synthesize_apply = false;
-                } else {
-                    return Err(unsupported(
-                        "by-name constructor parameters are invalid for case classes",
-                    ));
+                }
+                if matches!(
+                    self.arena.get(parameter.tpt).kind,
+                    TreeKind::ByNameTypeTree(_)
+                ) {
+                    if top_level {
+                        synthesize_apply = false;
+                    } else {
+                        return Err(unsupported(
+                            "by-name constructor parameters are invalid for case classes",
+                        ));
+                    }
+                }
+                if matches!(
+                    self.arena.get(parameter.tpt).kind,
+                    TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_))
+                ) {
+                    synthesize_apply = false;
                 }
             }
-            if matches!(
-                self.arena.get(parameter.tpt).kind,
-                TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_))
-            ) {
-                synthesize_apply = false;
-            }
         }
-
         let owner =
             self.store
                 .symbols
@@ -2006,12 +1834,45 @@ impl Namer<'_> {
                 ));
             }
         };
-        let case_class_shape_supported = synthesize_apply;
-        let explicit_apply_comparison = if top_level && synthesize_apply {
+        let class_clauses = constructor.context_bound_clauses(self.arena, &self.store.names);
+        if has_second_clause && class_clauses.len() != 2 {
+            // A dependency on a named witness can require its own earlier clause.
+            synthesize_apply = false;
+        }
+        if has_witnesses && class_clauses.first().map(Vec::as_slice) != Some(leading_clause) {
+            // A public case accessor cannot expose a path through the private witness.
+            synthesize_apply = false;
+        }
+        if has_witnesses
+            && synthesize_apply
+            && !template
+                .body
+                .iter()
+                .chain(constructor.value_param_clauses.iter().flatten())
+                .any(|&member| {
+                    let name = match &self.arena.get(member).kind {
+                        TreeKind::DefDef(def) => def.name,
+                        TreeKind::ValDef(def) => def.name,
+                        TreeKind::PhaseSpecific(UntypedNode::ModuleDef(def)) => def.name,
+                        _ => return false,
+                    };
+                    self.store.names.resolve(name.as_name().text()) == "copy"
+                })
+        {
+            self.enter_case_class_copy(
+                tree,
+                class_symbol,
+                declaration_context,
+                constructor,
+                &class_clauses,
+            )?;
+        }
+        let product_shape_supported = synthesize_apply && !has_witnesses;
+        let explicit_apply_comparison = if (top_level || has_witnesses) && synthesize_apply {
             self.explicit_companion_apply_collides(
                 companion_module_class,
                 &constructor.type_params,
-                value_parameters,
+                &class_clauses,
             )
         } else {
             Some(false)
@@ -2030,12 +1891,12 @@ impl Namer<'_> {
                 class_symbol,
                 companion_module_class,
                 declaration_context,
-                &constructor.type_params,
-                value_parameters,
+                constructor,
+                &class_clauses,
             )?;
         }
         let synthesize_product_selectors = top_level
-            && case_class_shape_supported
+            && product_shape_supported
             && constructor.type_params.is_empty()
             && constructor.value_param_clauses.len() == 1
             && (value_parameters.len() == 1
@@ -2046,7 +1907,7 @@ impl Namer<'_> {
                     value_parameters,
                 ));
         let generic_product1_source_shape = top_level
-            && case_class_shape_supported
+            && product_shape_supported
             && constructor.value_param_clauses.len() == 1
             && self.is_generic_product1_source_shape(
                 tree,
@@ -2383,7 +2244,7 @@ impl Namer<'_> {
         &self,
         companion_module_class: SymbolId,
         class_type_parameters: &[TreeId<Untyped>],
-        class_value_parameters: &[TreeId<Untyped>],
+        class_clauses: &[Vec<TreeId<Untyped>>],
     ) -> Option<bool> {
         let Some(SourceDefinition::Derived { source, tree }) =
             self.index.definition_of(companion_module_class)
@@ -2407,14 +2268,25 @@ impl Namer<'_> {
             };
             if self.store.names.resolve(method.name.as_name().text()) != "apply"
                 || method.type_params.len() != class_type_parameters.len()
-                || method.value_param_clauses.len() != 1
-                || method.value_param_clauses[0].len() != class_value_parameters.len()
             {
+                continue;
+            }
+            let method_clauses = method.context_bound_clauses(self.arena, &self.store.names);
+            if !method_clauses
+                .iter()
+                .map(Vec::len)
+                .eq(class_clauses.iter().map(Vec::len))
+            {
+                continue;
+            }
+            if class_clauses.len() != 1 || method.value_param_clauses.len() != 1 {
+                // Comparing evidence types across declaration scopes needs type completion.
+                unsupported_comparison = true;
                 continue;
             }
             let comparison = method.value_param_clauses[0]
                 .iter()
-                .zip(class_value_parameters)
+                .zip(&class_clauses[0])
                 .map(|(method_parameter, class_parameter)| {
                     let (TreeKind::ValDef(method_parameter), TreeKind::ValDef(class_parameter)) = (
                         &self.arena.get(*method_parameter).kind,
@@ -2558,8 +2430,8 @@ impl Namer<'_> {
         class_symbol: SymbolId,
         companion_module_class: SymbolId,
         declaration_context: SourceContextId,
-        type_parameters: &[TreeId<Untyped>],
-        value_parameters: &[TreeId<Untyped>],
+        constructor: &dotty_core::ast::DefDef<Untyped>,
+        clauses: &[Vec<TreeId<Untyped>>],
     ) -> Result<(), NamerError> {
         let companion_scope =
             self.index
@@ -2587,54 +2459,165 @@ impl Namer<'_> {
             class_tree,
             apply,
         )?;
-        let apply_scope = self.store.scopes.alloc(Scope::new(Some(apply)));
-        self.index.record_scope(apply, apply_scope)?;
-        let apply_context =
-            self.child_source_context(apply, apply_scope, Some(declaration_context));
-        self.index
-            .record_declaration_context(apply, apply_context)?;
+        self.enter_derived_method_parameters(
+            apply,
+            declaration_context,
+            &constructor.type_params,
+            clauses.iter().flatten().copied(),
+            Some(self.context_bound_flag(constructor)),
+        )
+    }
+
+    fn enter_case_class_copy(
+        &mut self,
+        tree: TreeId<Untyped>,
+        class: SymbolId,
+        declaration_context: SourceContextId,
+        constructor: &dotty_core::ast::DefDef<Untyped>,
+        clauses: &[Vec<TreeId<Untyped>>],
+    ) -> Result<(), NamerError> {
+        let scope = self
+            .index
+            .scope_of(class)
+            .ok_or(NamerError::MalformedAstShape {
+                tree_index: tree.index(),
+                expected: "case class declaration scope",
+            })?;
+        let context = self.child_source_context(class, scope, Some(declaration_context));
+        let spec = SymbolSpec {
+            kind: SymbolKind::Method,
+            flags: SymbolFlags::SYNTHETIC,
+            visibility: Visibility::Public,
+        };
+        let name = *dotty_core::TermName::new(self.store.names.intern("copy")).as_name();
+        let copy = self.enter_derived_symbol(tree, name, class, scope, spec)?;
+        self.index.record_generated_case_class_method(
+            class,
+            GeneratedCaseClassMethodRole::Copy,
+            self.source,
+            tree,
+            copy,
+        )?;
+        self.enter_derived_method_parameters(
+            copy,
+            context,
+            &constructor.type_params,
+            clauses.iter().flatten().copied(),
+            Some(self.context_bound_flag(constructor)),
+        )?;
+        for (ordinal, &param) in constructor.value_param_clauses[0].iter().enumerate() {
+            let name = *dotty_core::TermName::new(
+                self.store
+                    .names
+                    .intern(&format!("copy$default${}", ordinal + 1)),
+            )
+            .as_name();
+            // Generated default getters are selectable by compiler identity only.
+            let getter = self.allocate_source_symbol(tree, name, class, spec);
+            self.index.record_generated_case_class_method(
+                class,
+                GeneratedCaseClassMethodRole::CopyDefault(ordinal),
+                self.source,
+                tree,
+                getter,
+            )?;
+            self.enter_derived_method_parameters(
+                getter,
+                context,
+                &constructor.type_params,
+                std::iter::empty(),
+                None,
+            )?;
+            let parameter = self
+                .index
+                .derived_symbol_at(copy, self.source, param)
+                .ok_or(NamerError::MalformedAstShape {
+                    tree_index: param.index(),
+                    expected: "copy parameter",
+                })?;
+            self.store
+                .record_default_getter(copy, ordinal, parameter, getter)
+                .map_err(|_| NamerError::MalformedAstShape {
+                    tree_index: param.index(),
+                    expected: "unique copy default getter",
+                })?;
+        }
+        Ok(())
+    }
+
+    fn enter_derived_method_parameters(
+        &mut self,
+        factory: SymbolId,
+        declaration_context: SourceContextId,
+        type_parameters: &[TreeId<Untyped>],
+        value_parameters: impl Iterator<Item = TreeId<Untyped>>,
+        witness_flag: Option<SymbolFlags>,
+    ) -> Result<(), NamerError> {
+        let scope = self.store.scopes.alloc(Scope::new(Some(factory)));
+        self.index.record_scope(factory, scope)?;
+        let context = self.child_source_context(factory, scope, Some(declaration_context));
+        self.index.record_declaration_context(factory, context)?;
 
         for parameter_tree in type_parameters {
             let TreeKind::TypeDef(parameter) = &self.arena.get(*parameter_tree).kind else {
                 return Err(NamerError::MalformedAstShape {
                     tree_index: parameter_tree.index(),
-                    expected: "case class type parameter TypeDef",
+                    expected: "factory type parameter TypeDef",
                 });
             };
             let symbol = self.enter_derived_symbol(
                 *parameter_tree,
                 *parameter.name.as_name(),
-                apply,
-                apply_scope,
+                factory,
+                scope,
                 SymbolSpec {
                     kind: SymbolKind::TypeParameter,
                     flags: SymbolFlags::EMPTY,
                     visibility: Visibility::Public,
                 },
             )?;
-            self.index
-                .record_declaration_context(symbol, apply_context)?;
+            self.index.record_declaration_context(symbol, context)?;
         }
+        let mut anonymous = 0;
         for parameter_tree in value_parameters {
-            let TreeKind::ValDef(parameter) = &self.arena.get(*parameter_tree).kind else {
-                return Err(NamerError::MalformedAstShape {
-                    tree_index: parameter_tree.index(),
-                    expected: "case class constructor parameter ValDef",
-                });
+            let (name, flags) = match (&self.arena.get(parameter_tree).kind, witness_flag) {
+                (TreeKind::ValDef(parameter), flags) => (
+                    parameter.name,
+                    if flags.is_some() {
+                        Self::source_flags(&parameter.metadata.modifiers)
+                            & (SymbolFlags::GIVEN | SymbolFlags::IMPLICIT | SymbolFlags::ERASED)
+                    } else {
+                        SymbolFlags::EMPTY
+                    },
+                ),
+                (TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(bound)), Some(flag)) => {
+                    let name = bound.name.unwrap_or_else(|| {
+                        anonymous += 1;
+                        dotty_core::TermName::new(
+                            self.store.names.intern(&format!("evidence${anonymous}")),
+                        )
+                    });
+                    (name, flag)
+                }
+                _ => {
+                    return Err(NamerError::MalformedAstShape {
+                        tree_index: parameter_tree.index(),
+                        expected: "derived method value parameter or context bound",
+                    });
+                }
             };
             let symbol = self.enter_derived_symbol(
-                *parameter_tree,
-                *parameter.name.as_name(),
-                apply,
-                apply_scope,
+                parameter_tree,
+                *name.as_name(),
+                factory,
+                scope,
                 SymbolSpec {
                     kind: SymbolKind::Parameter,
-                    flags: SymbolFlags::EMPTY,
+                    flags,
                     visibility: Visibility::Public,
                 },
             )?;
-            self.index
-                .record_declaration_context(symbol, apply_context)?;
+            self.index.record_declaration_context(symbol, context)?;
         }
         Ok(())
     }
@@ -2925,6 +2908,17 @@ impl Namer<'_> {
                     )?;
                     private_local_parameters.push(parameter_symbol);
                 } else {
+                    if self
+                        .store
+                        .symbols
+                        .get(symbol)
+                        .flags
+                        .contains(SymbolFlags::GIVEN)
+                        && spec.flags.contains(SymbolFlags::GIVEN)
+                        && spec.visibility == Visibility::Public
+                    {
+                        spec.visibility = Visibility::Protected;
+                    }
                     let field = self.enter_symbol(
                         *parameter_tree,
                         *parameter.name.as_name(),
@@ -3029,6 +3023,65 @@ impl Namer<'_> {
             }
         }
 
+        let class = self.store.symbols.get(symbol);
+        if class.kind == SymbolKind::Class && !class.flags.contains(SymbolFlags::ENUM) {
+            let factory = if class.flags.contains(SymbolFlags::GIVEN)
+                && let Some(SourceDefinition::Canonical { tree, .. }) =
+                    self.index.definition_of(symbol)
+                && let Some(factory) = class
+                    .owner
+                    .and_then(|owner| self.index.derived_symbol_at(owner, self.source, tree))
+            {
+                let factory_scope =
+                    self.index
+                        .scope_of(factory)
+                        .ok_or(NamerError::MalformedAstShape {
+                            tree_index: tree.index(),
+                            expected: "structural given factory scope",
+                        })?;
+                let factory_context = self.index.declaration_context_of(factory).ok_or(
+                    NamerError::MalformedAstShape {
+                        tree_index: tree.index(),
+                        expected: "structural given factory context",
+                    },
+                )?;
+                Some((factory, factory_scope, factory_context))
+            } else {
+                None
+            };
+            let witness_flag = self.context_bound_flag(&constructor);
+            let mut anonymous = 0;
+            for parameter in &constructor.type_params {
+                let TreeKind::TypeDef(parameter) = &self.arena.get(*parameter).kind else {
+                    continue;
+                };
+                for (bound, name) in self.context_bound_witnesses(parameter, &mut anonymous)? {
+                    let spec = SymbolSpec {
+                        kind: SymbolKind::Field,
+                        flags: witness_flag,
+                        visibility: Visibility::Private,
+                    };
+                    let field = self.enter_symbol(bound, *name.as_name(), symbol, scope, spec)?;
+                    self.index
+                        .record_declaration_context(field, class_source_context)?;
+                    let ctor = (constructor_symbol, constructor_scope, constructor_context);
+                    for (owner, scope, context) in std::iter::once(ctor).chain(factory) {
+                        let copy = self.enter_derived_symbol(
+                            bound,
+                            *name.as_name(),
+                            owner,
+                            scope,
+                            SymbolSpec {
+                                kind: SymbolKind::Parameter,
+                                flags: witness_flag,
+                                visibility: Visibility::Public,
+                            },
+                        )?;
+                        self.index.record_declaration_context(copy, context)?;
+                    }
+                }
+            }
+        }
         let mut nested_headers = Vec::new();
         let mut active_source_context = class_source_context;
         let is_enum_class = self
@@ -3428,6 +3481,64 @@ impl Namer<'_> {
                 .record_extension_prefix_clauses(method, clauses)?;
         }
 
+        if extension_prefix_clauses.is_none() {
+            let mut ordinal = 0;
+            let mut follows_contextual_clause = false;
+            let clauses = definition.context_bound_clauses(self.arena, &self.store.names);
+            for (clause_index, clause) in clauses.iter().enumerate() {
+                let mut contextual_clause = false;
+                for &parameter_tree in clause {
+                    ordinal += 1;
+                    if matches!(
+                        self.arena.get(parameter_tree).kind,
+                        TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(_))
+                    ) {
+                        contextual_clause = true;
+                        continue;
+                    }
+                    let TreeKind::ValDef(parameter) = &self.arena.get(parameter_tree).kind else {
+                        continue;
+                    };
+                    let contextual_parameter = parameter
+                        .metadata
+                        .modifiers
+                        .iter()
+                        .any(|m| matches!(m, Modifier::Given | Modifier::Implicit));
+                    contextual_clause |= contextual_parameter;
+                    if parameter.rhs.is_none()
+                        || !(contextual_parameter || follows_contextual_clause)
+                    {
+                        continue;
+                    }
+                    let getter_name = format!(
+                        "{}$default${ordinal}",
+                        self.store.names.resolve(name.text())
+                    );
+                    let getter_name =
+                        dotty_core::TermName::new(self.store.names.intern(&getter_name));
+                    let getter = self.enter_derived_symbol(
+                        parameter_tree,
+                        *getter_name.as_name(),
+                        owner,
+                        class_scope,
+                        SymbolSpec {
+                            kind: SymbolKind::Method,
+                            flags: SymbolFlags::SYNTHETIC,
+                            visibility: self.store.symbols.get(method).visibility,
+                        },
+                    )?;
+                    self.enter_derived_method_parameters(
+                        getter,
+                        declaration_context,
+                        &definition.type_params,
+                        clauses[..clause_index].iter().flatten().copied(),
+                        Some(self.context_bound_flag(definition)),
+                    )?;
+                }
+                follows_contextual_clause |= contextual_clause;
+            }
+        }
+
         Ok(EnteredHeader::Method {
             tree,
             symbol: method,
@@ -3569,6 +3680,56 @@ impl Namer<'_> {
         })
     }
 
+    fn context_bound_witnesses(
+        &mut self,
+        parameter: &dotty_core::ast::TypeDef<Untyped>,
+        anonymous_witnesses: &mut usize,
+    ) -> Result<Vec<(TreeId<Untyped>, dotty_core::TermName)>, NamerError> {
+        let mut witnesses = Vec::new();
+        let bounds_tree =
+            self.arena
+                .try_get(parameter.rhs)
+                .ok_or(NamerError::MalformedAstShape {
+                    tree_index: parameter.rhs.index(),
+                    expected: "method type parameter bounds",
+                })?;
+        if let TreeKind::PhaseSpecific(UntypedNode::ContextBounds(bounds)) = &bounds_tree.kind {
+            for &tree in &bounds.context_bounds {
+                let Some(TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(bound))) =
+                    self.arena.try_get(tree).map(|node| &node.kind)
+                else {
+                    return Err(NamerError::MalformedAstShape {
+                        tree_index: tree.index(),
+                        expected: "context bound on method type parameter",
+                    });
+                };
+                if bound.parameter != parameter.name {
+                    return Err(NamerError::MalformedAstShape {
+                        tree_index: tree.index(),
+                        expected: "context bound of its enclosing type parameter",
+                    });
+                }
+                let name = bound.name.unwrap_or_else(|| {
+                    *anonymous_witnesses += 1;
+                    dotty_core::TermName::new(
+                        self.store
+                            .names
+                            .intern(&format!("evidence${anonymous_witnesses}")),
+                    )
+                });
+                witnesses.push((tree, name));
+            }
+        }
+        Ok(witnesses)
+    }
+
+    fn context_bound_flag(&self, definition: &dotty_core::ast::DefDef<Untyped>) -> SymbolFlags {
+        definition.value_param_clauses.last().and_then(|clause| clause.first())
+            .and_then(|tree| self.arena.try_get(*tree))
+            .filter(|node| matches!(&node.kind, TreeKind::ValDef(parameter) if parameter.metadata.modifiers.contains(&Modifier::Implicit)))
+            .map_or(SymbolFlags::GIVEN, |_| SymbolFlags::IMPLICIT)
+    }
+
     fn scan_method_parameters(
         &mut self,
         tree: TreeId<Untyped>,
@@ -3579,6 +3740,8 @@ impl Namer<'_> {
         let TreeKind::DefDef(definition) = &self.arena.get(tree).kind else {
             return Ok(());
         };
+        let witness_flag = self.context_bound_flag(definition);
+        let mut anonymous_witnesses = 0;
         for parameter_tree in &definition.type_params {
             let TreeKind::TypeDef(parameter) = &self.arena.get(*parameter_tree).kind else {
                 return Err(NamerError::MalformedAstShape {
@@ -3601,38 +3764,71 @@ impl Namer<'_> {
             )?;
             self.index
                 .record_declaration_context(parameter_symbol, method_context)?;
-        }
-        for clause in &definition.value_param_clauses {
-            for parameter_tree in clause {
-                let TreeKind::ValDef(parameter) = &self.arena.get(*parameter_tree).kind else {
-                    return Err(NamerError::MalformedAstShape {
-                        tree_index: parameter_tree.index(),
-                        expected: "ValDef method value parameter",
-                    });
-                };
-                if parameter.metadata.modifiers.iter().any(|modifier| {
-                    matches!(modifier, Modifier::ParamAccessor | Modifier::PrivateLocal)
-                }) {
-                    return Err(NamerError::MalformedAstShape {
-                        tree_index: parameter_tree.index(),
-                        expected: "ordinary method ValDef without constructor-role metadata",
-                    });
-                }
-                let spec = self.source_symbol_spec(
-                    *parameter_tree,
-                    &parameter.metadata,
-                    method,
-                    SymbolKind::Parameter,
-                )?;
-                let parameter_symbol = self.enter_symbol(
-                    *parameter_tree,
-                    *parameter.name.as_name(),
+            for (tree, name) in self.context_bound_witnesses(parameter, &mut anonymous_witnesses)? {
+                let witness = self.enter_symbol(
+                    tree,
+                    *name.as_name(),
                     method,
                     method_scope,
-                    spec,
+                    SymbolSpec {
+                        kind: SymbolKind::Parameter,
+                        flags: witness_flag,
+                        visibility: Visibility::Public,
+                    },
                 )?;
                 self.index
-                    .record_declaration_context(parameter_symbol, method_context)?;
+                    .record_declaration_context(witness, method_context)?;
+            }
+        }
+        let clauses = definition.context_bound_clauses(self.arena, &self.store.names);
+        for (ordinal, parameter_tree) in clauses.iter().flatten().enumerate() {
+            if matches!(
+                self.arena.get(*parameter_tree).kind,
+                TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(_))
+            ) {
+                continue; // The witness symbol was entered with its type parameter.
+            }
+            let TreeKind::ValDef(parameter) = &self.arena.get(*parameter_tree).kind else {
+                return Err(NamerError::MalformedAstShape {
+                    tree_index: parameter_tree.index(),
+                    expected: "ValDef method value parameter",
+                });
+            };
+            if parameter.metadata.modifiers.iter().any(|modifier| {
+                matches!(modifier, Modifier::ParamAccessor | Modifier::PrivateLocal)
+            }) {
+                return Err(NamerError::MalformedAstShape {
+                    tree_index: parameter_tree.index(),
+                    expected: "ordinary method ValDef without constructor-role metadata",
+                });
+            }
+            let spec = self.source_symbol_spec(
+                *parameter_tree,
+                &parameter.metadata,
+                method,
+                SymbolKind::Parameter,
+            )?;
+            let parameter_symbol = self.enter_symbol(
+                *parameter_tree,
+                *parameter.name.as_name(),
+                method,
+                method_scope,
+                spec,
+            )?;
+            self.index
+                .record_declaration_context(parameter_symbol, method_context)?;
+            if parameter.rhs.is_some()
+                && let Some(getter) = self.store.symbols.owner(method).and_then(|owner| {
+                    self.index
+                        .derived_symbol_at(owner, self.source, *parameter_tree)
+                })
+            {
+                self.store
+                    .record_default_getter(method, ordinal, parameter_symbol, getter)
+                    .map_err(|_| NamerError::MalformedAstShape {
+                        tree_index: parameter_tree.index(),
+                        expected: "a unique default getter for this parameter",
+                    })?;
             }
         }
         Ok(())
@@ -4149,6 +4345,7 @@ mod tests {
             kind: TreeKind::Select(Select {
                 qualifier,
                 name: *dotty_core::TermName::new(name).as_name(),
+                is_type_projection: false,
                 backquoted: false,
             }),
             position: None,
@@ -4535,6 +4732,7 @@ mod tests {
             kind: TreeKind::Select(Select {
                 qualifier,
                 name: *selected.as_name(),
+                is_type_projection: false,
                 backquoted: false,
             }),
             position: None,
@@ -4557,6 +4755,7 @@ mod tests {
             kind: TreeKind::Select(Select {
                 qualifier,
                 name: *constructor.as_name(),
+                is_type_projection: false,
                 backquoted: false,
             }),
             position: None,
@@ -7211,13 +7410,38 @@ mod tests {
             position: None,
             ty: (),
         });
-        let class = class_definition(&mut arena, &mut store, "C", vec![], vec![alias], None);
+        let (object, _, _) = module_definition(
+            &mut arena,
+            &mut store,
+            "OpaqueAlias",
+            vec![],
+            None,
+            vec![],
+            None,
+        );
+        let class = class_definition(
+            &mut arena,
+            &mut store,
+            "C",
+            vec![],
+            vec![object, alias],
+            None,
+        );
         let root = package_with_stat(&mut arena, &mut store, "aliases", vec![class]);
         let mut packages = Packages::new();
 
         let index = name_package(&arena, root, 45, &mut store, &mut packages).unwrap();
         let alias_symbol = index.symbol_at(SourceId::from_index(45), alias).unwrap();
 
+        let object_symbol = index.symbol_at(SourceId::from_index(45), object).unwrap();
+        assert_eq!(
+            store.symbols.get(alias_symbol).links.companion,
+            Some(object_symbol)
+        );
+        assert_eq!(
+            store.symbols.get(object_symbol).links.companion,
+            Some(alias_symbol)
+        );
         assert_eq!(store.symbols.get(alias_symbol).kind, SymbolKind::TypeAlias);
         assert_eq!(store.symbols.get(alias_symbol).flags, SymbolFlags::OPAQUE);
         assert_eq!(

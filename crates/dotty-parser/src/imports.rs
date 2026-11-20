@@ -163,6 +163,7 @@ where
                     TreeKind::Select(Select {
                         qualifier,
                         name,
+                        is_type_projection: false,
                         backquoted,
                     }),
                 );

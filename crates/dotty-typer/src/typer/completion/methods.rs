@@ -194,6 +194,44 @@ impl SourceTyper<'_> {
         .then_some(class)
     }
 
+    pub(in crate::typer) fn generated_case_class_for_copy(
+        &self,
+        method: SymbolId,
+    ) -> Option<SymbolId> {
+        let identity = self.index.generated_case_class_method_identity(method)?;
+        let class = identity.class;
+        let entry = self.store.symbols.get(method);
+        let SourceDefinition::Derived { source, tree } = self.index.definition_of(method)? else {
+            return None;
+        };
+        (source == self.source
+            && self.index.symbol_at(source, tree) == Some(class)
+            && self.index.derived_symbol_at(class, source, tree) == Some(method)
+            && self.store.symbols.get(class).kind == SymbolKind::Class
+            && identity.role == dotty_core::GeneratedCaseClassMethodRole::Copy
+            && entry.owner == Some(class)
+            && entry.kind == SymbolKind::Method
+            && entry.flags.contains(SymbolFlags::SYNTHETIC)
+            && entry.origin == SymbolOrigin::Source(self.source)
+            && self
+                .store
+                .symbols
+                .get(class)
+                .flags
+                .contains(SymbolFlags::CASE))
+        .then_some(class)
+    }
+
+    pub(in crate::typer) fn generated_case_class_for_factory(
+        &self,
+        method: SymbolId,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+    ) -> Option<SymbolId> {
+        self.generated_case_class_for_copy(method)
+            .or_else(|| self.generated_case_class_for_apply(method, source, tree))
+    }
+
     pub(in crate::typer) fn generated_case_class_for_apply(
         &self,
         method: SymbolId,
@@ -710,7 +748,7 @@ impl SourceTyper<'_> {
         }
     }
 
-    pub(super) fn complete_generated_case_class_apply_signature(
+    pub(super) fn complete_generated_case_class_factory_signature(
         &mut self,
         method: SymbolId,
         class: SymbolId,
@@ -750,7 +788,7 @@ impl SourceTyper<'_> {
                 clause_index: 0,
             });
         };
-        if constructor.value_param_clauses.len() != 1 {
+        if !(1..=2).contains(&constructor.value_param_clauses.len()) {
             return Err(TyperError::MalformedMethodClause {
                 method,
                 method_tree_index: class_tree.index(),
@@ -822,20 +860,29 @@ impl SourceTyper<'_> {
             });
             substitutions.push((class_parameter, replacement));
         }
-        let (value_parameters, kind) = self.generated_case_class_apply_parameter_specs(
-            method,
-            class_tree,
-            &constructor.value_param_clauses[0],
-            field_context,
-            &substitutions,
-            info_journal,
-        )?;
-        if kind != MethodKind::Plain {
-            return Err(TyperError::MalformedMethodClause {
+        let mut clauses = Vec::new();
+        for trees in self.context_bound_clauses(constructor).iter() {
+            let (parameters, kind) = self.generated_case_class_apply_parameter_specs(
                 method,
-                method_tree_index: class_tree.index(),
-                clause_index: usize::from(!type_parameters.is_empty()),
-            });
+                class_tree,
+                trees,
+                field_context,
+                &substitutions,
+                info_journal,
+            )?;
+            let expected = if trees == &constructor.value_param_clauses[0] {
+                MethodKind::Plain
+            } else {
+                MethodKind::Contextual
+            };
+            if kind != expected {
+                return Err(TyperError::MalformedMethodClause {
+                    method,
+                    method_tree_index: class_tree.index(),
+                    clause_index: clauses.len() + usize::from(!type_parameters.is_empty()),
+                });
+            }
+            clauses.push(MethodClauseSpec::Terms(parameters, kind));
         }
 
         let class_owner = self
@@ -869,23 +916,10 @@ impl SourceTyper<'_> {
                 args: arguments,
             })
         };
-        let method_type = method_type_from_symbols(self.store, &value_parameters, result, kind)
-            .map_err(|error| TyperError::TypeRebinding {
-                source,
-                tree_index: class_tree.index(),
-                error,
-            })?;
-        if type_parameters.is_empty() {
-            Ok(method_type)
-        } else {
-            poly_type_from_symbols(self.store, &type_parameters, method_type).map_err(|error| {
-                TyperError::TypeRebinding {
-                    source,
-                    tree_index: class_tree.index(),
-                    error,
-                }
-            })
+        if !type_parameters.is_empty() {
+            clauses.insert(0, MethodClauseSpec::Types(type_parameters));
         }
+        self.bind_method_clauses(clauses, result, class_tree.index())
     }
 
     fn generated_case_class_apply_parameter_specs(
@@ -907,14 +941,21 @@ impl SourceTyper<'_> {
                     tree_index: tree.index(),
                 });
             };
-            let TreeKind::ValDef(definition) = &node.kind else {
-                return Err(TyperError::MalformedMethodClause {
-                    method,
-                    method_tree_index: class_tree.index(),
-                    clause_index: 0,
-                });
-            };
             let symbol = self.method_parameter_symbol(method, tree, true)?;
+            let (name, tpt) = match &node.kind {
+                TreeKind::ValDef(definition) => (definition.name, definition.tpt),
+                TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(_)) => (
+                    dotty_core::TermName::new(self.store.symbols.get(symbol).name.text()),
+                    tree,
+                ),
+                _ => {
+                    return Err(TyperError::MalformedMethodClause {
+                        method,
+                        method_tree_index: class_tree.index(),
+                        clause_index: 0,
+                    });
+                }
+            };
             if self.store.symbols.get(symbol).kind != SymbolKind::Parameter {
                 return Err(TyperError::MalformedMethodClause {
                     method,
@@ -948,7 +989,7 @@ impl SourceTyper<'_> {
             }
             clause_kind = Some(parameter_kind);
             let repeated_parameter = matches!(
-                self.arena.try_get(definition.tpt).map(|node| &node.kind),
+                self.arena.try_get(tpt).map(|node| &node.kind),
                 Some(TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)))
                     if self.store.names.resolve(postfix.op.text()) == "*"
             );
@@ -969,11 +1010,8 @@ impl SourceTyper<'_> {
                     parameter_index,
                 });
             }
-            let class_owned_type = self.type_of_parameter_tpt_inner_journaled(
-                definition.tpt,
-                field_context,
-                info_journal,
-            )?;
+            let class_owned_type =
+                self.type_of_parameter_tpt_inner_journaled(tpt, field_context, info_journal)?;
             let completed_parameter_type = dotty_core::types::substitute_type_symbols(
                 self.store,
                 class_owned_type,
@@ -981,7 +1019,7 @@ impl SourceTyper<'_> {
             )
             .map_err(|error| TyperError::TypeRebinding {
                 source,
-                tree_index: definition.tpt.index(),
+                tree_index: tpt.index(),
                 error,
             })?;
             let previous = *self.store.symbols.info(symbol);
@@ -1029,7 +1067,7 @@ impl SourceTyper<'_> {
             };
             parameters.push(MethodParamSpec {
                 symbol,
-                name: definition.name,
+                name,
                 ty,
                 erased: flags.contains(SymbolFlags::ERASED),
                 varargs: repeated_parameter,
@@ -1148,7 +1186,7 @@ impl SourceTyper<'_> {
                 clauses.len(),
             )?));
         }
-        for trees in &definition.value_param_clauses {
+        for trees in self.context_bound_clauses(definition).iter() {
             let clause_index = clauses.len();
             let (parameters, kind) = self.method_parameter_specs(
                 method,
@@ -1197,7 +1235,15 @@ impl SourceTyper<'_> {
                 info_journal,
             )?
         };
-        let mut signature = result_type;
+        self.bind_method_clauses(clauses, result_type, method_tree_index)
+    }
+
+    pub(super) fn bind_method_clauses(
+        &mut self,
+        clauses: Vec<MethodClauseSpec>,
+        mut signature: TypeId,
+        method_tree_index: u32,
+    ) -> Result<TypeId, TyperError> {
         for clause in clauses.into_iter().rev() {
             signature = match clause {
                 MethodClauseSpec::Types(parameters) => {
@@ -1363,12 +1409,22 @@ impl SourceTyper<'_> {
                     tree_index: tree.index(),
                 });
             };
-            let TreeKind::ValDef(definition) = &node.kind else {
-                return Err(TyperError::MalformedMethodClause {
-                    method,
-                    method_tree_index,
-                    clause_index,
-                });
+            let (name, tpt) = match &node.kind {
+                TreeKind::ValDef(definition) => (definition.name, definition.tpt),
+                TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(_)) => {
+                    let witness = self.method_parameter_symbol(method, *tree, derived)?;
+                    (
+                        dotty_core::TermName::new(self.store.symbols.get(witness).name.text()),
+                        *tree,
+                    )
+                }
+                _ => {
+                    return Err(TyperError::MalformedMethodClause {
+                        method,
+                        method_tree_index,
+                        clause_index,
+                    });
+                }
             };
             let symbol = self.method_parameter_symbol(method, *tree, derived)?;
             if self.store.symbols.get(symbol).kind != SymbolKind::Parameter {
@@ -1404,7 +1460,7 @@ impl SourceTyper<'_> {
             }
             clause_kind = Some(parameter_kind);
             let repeated_parameter = matches!(
-                self.arena.try_get(definition.tpt).map(|node| &node.kind),
+                self.arena.try_get(tpt).map(|node| &node.kind),
                 Some(TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)))
                     if self.store.names.resolve(postfix.op.text()) == "*"
             );
@@ -1443,7 +1499,7 @@ impl SourceTyper<'_> {
             };
             parameters.push(MethodParamSpec {
                 symbol,
-                name: definition.name,
+                name,
                 ty,
                 erased: flags.contains(SymbolFlags::ERASED),
                 varargs: repeated_parameter,
@@ -1475,5 +1531,14 @@ impl SourceTyper<'_> {
             method,
             parameter_tree_index: tree.index(),
         })
+    }
+}
+
+impl SourceTyper<'_> {
+    pub(in crate::typer) fn context_bound_clauses<'d>(
+        &self,
+        definition: &'d dotty_core::ast::DefDef<Untyped>,
+    ) -> std::borrow::Cow<'d, [Vec<TreeId<Untyped>>]> {
+        definition.context_bound_clauses(self.arena, &self.store.names)
     }
 }

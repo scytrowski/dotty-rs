@@ -30,7 +30,16 @@ impl SourceTyper<'_> {
                 clause_index,
             )?));
         }
-        for trees in &definition.value_param_clauses {
+        let class = self.store.symbols.get(owner);
+        let term_clauses = if is_primary
+            && class.kind == SymbolKind::Class
+            && !class.flags.contains(SymbolFlags::ENUM)
+        {
+            self.context_bound_clauses(definition)
+        } else {
+            std::borrow::Cow::Borrowed(definition.value_param_clauses.as_slice())
+        };
+        for trees in term_clauses.iter() {
             let clause_index = clauses.len();
             let (parameters, kind) = self.method_parameter_specs(
                 constructor,

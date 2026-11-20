@@ -172,11 +172,11 @@ impl<'a> JvmMethodPlanner<'a> {
             {
                 return Err(MethodPlanError::Local(id));
             }
-            locals.push(JvmLocalBinding {
-                symbol: id,
-                declaration: binding.declaration(),
-                mutable: symbol.flags.contains(SymbolFlags::MUTABLE),
-            });
+            locals.push(JvmLocalBinding::ordinary(
+                binding.declaration(),
+                id,
+                symbol.flags.contains(SymbolFlags::MUTABLE),
+            ));
         }
         Ok(JvmMethodPlan {
             method,

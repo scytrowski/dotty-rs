@@ -1646,6 +1646,7 @@ fn constructor_field_initializer_rejects_qualified_parameter_references() {
                     kind: TreeKind::Select(Select {
                         qualifier,
                         name: typer.store().symbols.get(parameters[0]).name,
+                        is_type_projection: false,
                         backquoted: false,
                     }),
                     position: None,
@@ -5614,16 +5615,16 @@ fn real_typed_mutable_field_assignments_lower_to_putfield_in_evaluation_order() 
                     let binding = typer
                         .typed_local_binding_at(source, declaration)
                         .expect("local shadow should have a canonical typed binding");
-                    vec![dotty_jvm::JvmLocalBinding {
-                        declaration: binding.declaration(),
-                        symbol: binding.symbol(),
-                        mutable: typer
+                    vec![dotty_jvm::JvmLocalBinding::ordinary(
+                        binding.declaration(),
+                        binding.symbol(),
+                        typer
                             .store()
                             .symbols
                             .get(binding.symbol())
                             .flags
                             .contains(SymbolFlags::MUTABLE),
-                    }]
+                    )]
                 } else {
                     Vec::new()
                 };

@@ -6,8 +6,8 @@ use std::fmt;
 use dotty_core::Namespace;
 use dotty_core::types::{ClassInfo, Type, TypeRefTarget};
 use dotty_core::{
-    ClassTypeParameter, Constant, ResolutionError, ScopeId, SymbolId, SymbolInfo, SymbolKind,
-    SymbolOrigin, TypeId, Variance,
+    ClassTypeParameter, Constant, ResolutionError, ScopeId, SymbolFlags, SymbolId, SymbolInfo,
+    SymbolKind, SymbolOrigin, TypeId, Variance,
 };
 
 use crate::types::{SymbolInfoState, TypeNormalizeError, TypeNormalizer};
@@ -90,6 +90,40 @@ impl fmt::Display for TypeRelationError {
 impl std::error::Error for TypeRelationError {}
 
 impl SourceTyper<'_> {
+    /// The type member selected from a term path. Opaque aliases have separate
+    /// visibility and completion rules.
+    pub(crate) fn projected_type_member(&self, ty: TypeId) -> Option<SymbolId> {
+        let Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(member),
+        } = self.store.types.try_get(ty)?
+        else {
+            return None;
+        };
+        if !matches!(
+            self.store.types.try_get(*prefix),
+            Some(Type::TermRef { .. })
+        ) || !self.store.symbols.contains(*member)
+        {
+            return None;
+        }
+        let declaration = self.store.symbols.get(*member);
+        (declaration.kind == SymbolKind::TypeAlias
+            && !declaration.flags.contains(SymbolFlags::OPAQUE))
+        .then_some(*member)
+    }
+
+    pub(crate) fn is_unbounded_member_projection(&self, ty: TypeId) -> bool {
+        let Some(member) = self.projected_type_member(ty) else {
+            return false;
+        };
+        let SymbolInfo::Complete(info) = self.store.symbols.info(member) else {
+            return false;
+        };
+        matches!(self.store.types.try_get(*info), Some(Type::Bounds {low, high})
+            if *low == self.definitions.nothing_type && *high == self.definitions.any_type)
+    }
+
     /// Tests the supported nominal subtype relation without completing source symbols.
     ///
     /// Nominal parent checks read already completed class information. Call
@@ -119,6 +153,32 @@ impl SourceTyper<'_> {
     /// numeric adaptations are intentionally absent.
     pub fn conforms(&mut self, found: TypeId, expected: TypeId) -> Result<bool, TypeRelationError> {
         self.is_subtype(found, expected)
+    }
+
+    /// Align an applied provider result with the goal's constructor before
+    /// inferring binders. Collect all matching paths through a nominal diamond.
+    pub(crate) fn contextual_inference_views(
+        &mut self,
+        result: TypeId,
+        goal: TypeId,
+    ) -> Result<Vec<TypeId>, TypeRelationError> {
+        if !matches!(self.store.types.try_get(result), Some(Type::Applied { .. }))
+            || !matches!(self.store.types.try_get(goal), Some(Type::Applied { .. }))
+        {
+            return Ok(vec![result]);
+        }
+        let mut relation = TypeRelation::new(self);
+        let declared = relation.class_view(result)?;
+        let expected = relation.class_view(goal)?;
+        if declared.class == expected.class {
+            return Ok(vec![result]);
+        }
+        let mut views = Vec::new();
+        relation.visit_inherited_views(declared, expected.class, |_, view| {
+            views.push(view.ty);
+            Ok(())
+        })?;
+        Ok(views)
     }
 
     #[cfg(test)]
@@ -272,6 +332,23 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         }
         if self.is_class(expected, self.typer.definitions.any_class) {
             return Ok(true);
+        }
+        let mut opaque = false;
+        for ty in [found, expected] {
+            if let Some(symbol) = self.opaque_alias(ty) {
+                opaque = true;
+                // Nontrivial public bounds can prove further subtype relations.
+                // Leave them explicit until this relation substitutes the bounds.
+                if !self.has_unbounded_source_opaque_rhs(symbol) {
+                    return Err(TypeRelationError::UnsupportedType { found, expected });
+                }
+            }
+        }
+        if opaque
+            || self.typer.is_unbounded_member_projection(found)
+            || self.typer.is_unbounded_member_projection(expected)
+        {
+            return Ok(false);
         }
         if self.is_class(expected, self.typer.definitions.null_class) {
             return Ok(false);
@@ -547,6 +624,9 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
     }
 
     fn normalize(&mut self, ty: TypeId) -> Result<TypeId, TypeRelationError> {
+        if self.typer.is_unbounded_member_projection(ty) {
+            return Ok(ty);
+        }
         TypeNormalizer::new(self.typer.store)
             .normalize_for_relation(ty)
             .map_err(TypeRelationError::Normalization)
@@ -629,6 +709,57 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             && root.owner.is_none()
     }
 
+    fn has_unbounded_source_opaque_rhs(&self, symbol: SymbolId) -> bool {
+        use dotty_core::ast::TreeKind;
+        let Some((source, tree)) = self.typer.source_tree_for_symbol(symbol) else {
+            return false;
+        };
+        if source != self.typer.source {
+            return false;
+        }
+        let Some(TreeKind::TypeDef(definition)) =
+            self.typer.arena.try_get(tree).map(|node| &node.kind)
+        else {
+            return false;
+        };
+        match self
+            .typer
+            .arena
+            .try_get(definition.rhs)
+            .map(|node| &node.kind)
+        {
+            Some(TreeKind::TypeBoundsTree(bounds)) => {
+                bounds.low.is_none() && bounds.high.is_none() && bounds.alias.is_some()
+            }
+            Some(_) => true,
+            None => false,
+        }
+    }
+
+    fn opaque_alias(&self, ty: TypeId) -> Option<SymbolId> {
+        let head = match self.typer.store.types.try_get(ty) {
+            Some(Type::Applied { tycon, .. }) => *tycon,
+            _ => ty,
+        };
+        let Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        } = self.typer.store.types.try_get(head)?
+        else {
+            return None;
+        };
+        (self.typer.store.symbols.contains(*symbol)
+            && self.typer.store.symbols.get(*symbol).kind == SymbolKind::TypeAlias
+            && self
+                .typer
+                .store
+                .symbols
+                .get(*symbol)
+                .flags
+                .contains(SymbolFlags::OPAQUE))
+        .then_some(*symbol)
+    }
+
     fn is_class(&self, ty: TypeId, symbol: SymbolId) -> bool {
         matches!(
             self.typer.store.types.try_get(ty),
@@ -690,6 +821,21 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         expected: ClassView,
         expected_type: TypeId,
     ) -> Result<bool, TypeRelationError> {
+        let mut matched_expected = false;
+        self.visit_inherited_views(found, expected.class, |relation, view| {
+            relation.check_view_arity(view, &expected, view.ty, expected_type)?;
+            matched_expected |= relation.subtype_class_views(view, &expected, 0)?;
+            Ok(())
+        })?;
+        Ok(matched_expected)
+    }
+
+    fn visit_inherited_views(
+        &mut self,
+        found: ClassView,
+        target: SymbolId,
+        mut visit: impl FnMut(&mut Self, &ClassView) -> Result<(), TypeRelationError>,
+    ) -> Result<(), TypeRelationError> {
         let found_class = found.class;
         let mut pending_views = vec![PendingView {
             view: found,
@@ -697,7 +843,6 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             path: vec![found_class],
         }];
         let mut inspected_views = 1;
-        let mut matched_expected = false;
 
         while let Some(pending) = pending_views.pop() {
             let info = self.class_info(pending.view.class)?;
@@ -734,11 +879,8 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
                     });
                 }
 
-                if parent_view.class == expected.class {
-                    self.check_view_arity(&parent_view, &expected, parent, expected_type)?;
-                    if self.subtype_class_views(&parent_view, &expected, 0)? {
-                        matched_expected = true;
-                    }
+                if parent_view.class == target {
+                    visit(self, &parent_view)?;
                 }
 
                 if matches!(
@@ -768,7 +910,7 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             pending_views.extend(children.into_iter().rev());
         }
 
-        Ok(matched_expected)
+        Ok(())
     }
 
     fn subtype_class_views(
@@ -967,6 +1109,17 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         let mut children = Vec::new();
         match node {
             Type::NoPrefix if !value_position => {}
+            Type::TermRef {
+                prefix,
+                target: dotty_core::types::TermRefTarget::Symbol(symbol),
+            } if !value_position => {
+                if !self.typer.store.symbols.contains(symbol)
+                    || !matches!(self.typer.is_stable_selection_prefix(found), Ok(true))
+                {
+                    return Err(TypeRelationError::UnsupportedType { found, expected });
+                }
+                children.push((prefix, false));
+            }
             Type::TypeRef {
                 prefix,
                 target: TypeRefTarget::Symbol(symbol),
@@ -976,6 +1129,9 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
                 }
                 let declaration = self.typer.store.symbols.get(symbol);
                 if value_position
+                    && !self.typer.is_unbounded_member_projection(found)
+                    && !(declaration.kind == SymbolKind::TypeAlias
+                        && declaration.flags.contains(SymbolFlags::OPAQUE))
                     && !matches!(
                         declaration.kind,
                         SymbolKind::Class
@@ -1106,6 +1262,16 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         let right_node = self.type_at(right)?.clone();
         let result: Result<bool, TypeRelationError> = (|| match (left_node, right_node) {
             (Type::NoPrefix, Type::NoPrefix) => Ok(true),
+            (
+                Type::TermRef {
+                    prefix: left,
+                    target: dotty_core::types::TermRefTarget::Symbol(l),
+                },
+                Type::TermRef {
+                    prefix: right,
+                    target: dotty_core::types::TermRefTarget::Symbol(r),
+                },
+            ) => Ok(l == r && self.equivalent(left, right, depth + 1)?),
             (
                 Type::TypeRef {
                     prefix: left_prefix,

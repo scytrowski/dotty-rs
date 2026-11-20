@@ -1791,12 +1791,12 @@ fn repoint_mutable_assignment_lhs_to_second(tasty_bytes: &mut Vec<u8>) {
         );
         let old_payload_len = node_reader.read_nat().unwrap() as usize;
         let mut old_prefix = TastyWriter::new();
-        old_prefix.write_nat(old_payload_len as u32);
+        old_prefix.write_nat(old_payload_len as u32).unwrap();
         let prefix_start = address as usize + 1;
         let old_prefix_end = prefix_start + old_prefix.as_slice().len();
         let updated_len = (old_payload_len as isize + delta) as u32;
         let mut new_prefix = TastyWriter::new();
-        new_prefix.write_nat(updated_len);
+        new_prefix.write_nat(updated_len).unwrap();
         rewritten_asts.splice(
             prefix_start..old_prefix_end,
             new_prefix.as_slice().iter().copied(),
@@ -7630,10 +7630,9 @@ fn dual_reference_forwarding_emits_six_linked_artifacts_with_ordered_formal_load
         );
         if index == 2 {
             let (wrap_address, wrap) = tasty_method_body(&tasty, "wrap");
-            assert_eq!(wrap.parameters.len(), 2);
+            assert_eq!(wrap.parameters().count(), 2);
             assert_eq!(
-                wrap.parameters
-                    .iter()
+                wrap.parameters()
                     .map(|parameter| tasty.names().render(parameter.name()).unwrap())
                     .collect::<Vec<_>>(),
                 ["first", "second"]
@@ -8155,11 +8154,10 @@ fn mixed_constructor_pair_emits_both_original_argument_orientations() {
             classes.push(class);
             if index == 2 {
                 let (method_address, method) = tasty_method_body(&tasty, method_name);
-                assert_eq!(method.parameters.len(), 2);
+                assert_eq!(method.parameters().count(), 2);
                 assert_eq!(
                     method
-                        .parameters
-                        .iter()
+                        .parameters()
                         .map(|parameter| tasty.names().render(parameter.name()).unwrap())
                         .collect::<Vec<_>>(),
                     ["existing", "seed"]

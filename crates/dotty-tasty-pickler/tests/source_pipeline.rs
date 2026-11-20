@@ -131,9 +131,10 @@ fn plain_int_primary_constructor_preserves_both_parameter_identities_and_wire_sh
     );
     let constructor_node = addresses.get(constructor.address).unwrap();
     let constructor = constructor_node.decode_defdef_body().unwrap();
-    assert_eq!(constructor.parameters.len(), 1);
+    assert_eq!(constructor.parameters().count(), 1);
     assert_eq!(
-        file.render_name(constructor.parameters[0].name()).unwrap(),
+        file.render_name(constructor.parameters().next().unwrap().name())
+            .unwrap(),
         "start"
     );
     assert!(constructor.rhs.is_none());
@@ -1157,6 +1158,14 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
     );
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let mut packages = Packages::new();
+    if parsed.ast.iter().any(|(_, t)| {
+        matches!(
+            &t.kind,
+            TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_))
+        )
+    }) {
+        packages.enter(&mut store, SymbolOrigin::Synthetic, &["scala"]);
+    }
     let index = match name_compilation_unit_with_diagnostics(
         &parsed.ast,
         parsed.root,
@@ -1241,9 +1250,24 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
             definitions.int
         };
         let body = definition.rhs.map(|rhs| {
-            typer
-                .type_expression_expected(rhs, context, expected_result)
-                .unwrap()
+            if !definition.type_params.is_empty()
+                || definition
+                    .value_param_clauses
+                    .iter()
+                    .flatten()
+                    .any(|&tree| index.derived_symbol_at(class, source, tree).is_some())
+                || matches!(
+                    parsed.ast.get(definition.tpt).kind,
+                    TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_))
+                )
+            {
+                typer.type_method_definition(tree).unwrap();
+                typer.source_typed_index().get(source, rhs).unwrap()
+            } else {
+                typer
+                    .type_expression_expected(rhs, context, expected_result)
+                    .unwrap()
+            }
         });
         if let (Some(rhs), Some(body)) = (definition.rhs, body) {
             assert_eq!(typer.source_typed_index().get(source, rhs), Some(body));
@@ -1288,14 +1312,14 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
         &mut typed_bindings,
         typer.store(),
     );
-    let bindings = |source, tree| typed_bindings.get(source, tree);
+
     let mut plan = PicklePlan {
         store: typer.store(),
         definitions: &definitions,
         typed_ast: &typed_ast,
         source_ast: &source_ast,
         source_index: &index,
-        typed_bindings: &bindings,
+        typed_bindings: &typed_bindings,
         source: SourceMetadata {
             id: source,
             name: source_name.into(),
@@ -1368,6 +1392,7 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
                 | TreeKind::Apply(_)
                 | TreeKind::If(_)
                 | TreeKind::Block(_)
+                | TreeKind::Closure(_)
         ));
     }
     let body = checked.plan().methods[0].body.unwrap();
@@ -1377,7 +1402,8 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
         | TreeKind::Select(_)
         | TreeKind::Apply(_)
         | TreeKind::If(_)
-        | TreeKind::Block(_) => None,
+        | TreeKind::Block(_)
+        | TreeKind::Closure(_) => None,
         other => panic!("unexpected typed method body: {other:?}"),
     };
     let output = checked.pickle_with_limits(pickle_limits)?;
@@ -1440,9 +1466,28 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
         skeleton.omitted_bodies(),
         methods
             .iter()
-            .map(|method| OmittedMethodBody {
-                method: method.symbol,
-                typed_root: method.body.unwrap(),
+            .flat_map(|method| {
+                let mut omitted = vec![OmittedMethodBody {
+                    method: method.symbol,
+                    typed_root: method.body.unwrap(),
+                }];
+                let TreeKind::DefDef(definition) = &source_ast.get(method.source_tree).kind else {
+                    panic!()
+                };
+                for &parameter in definition.value_param_clauses.iter().flatten() {
+                    if let Some(getter) = index.derived_symbol_at(class, source, parameter) {
+                        let TreeKind::ValDef(p) = &source_ast.get(parameter).kind else {
+                            panic!()
+                        };
+                        let typed = typed_bindings.get(source, p.rhs.unwrap()).unwrap();
+                        assert_eq!(output.body(getter), Some(typed));
+                        omitted.push(OmittedMethodBody {
+                            method: getter,
+                            typed_root: typed,
+                        });
+                    }
+                }
+                omitted
             })
             .collect::<Vec<_>>()
     );
@@ -3064,6 +3109,7 @@ fn multiple_literal_methods_and_empty_clause_match_the_scala_390_oracle() {
                 .decode_defdef_body()
                 .unwrap();
             let name = file.render_name(method.name).unwrap();
+            let clauses = method.clauses().collect::<Vec<_>>();
             let rhs = match method.rhs.unwrap() {
                 RawTree::Leaf(leaf) if leaf.tag == INTCONST_TAG => match leaf.value {
                     TermValue::Int(value) => value,
@@ -3071,7 +3117,7 @@ fn multiple_literal_methods_and_empty_clause_match_the_scala_390_oracle() {
                 },
                 other => panic!("unexpected literal body: {other:?}"),
             };
-            (name.to_owned(), method.clauses, rhs)
+            (name.to_owned(), clauses, rhs)
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -3135,11 +3181,10 @@ fn source_int_parameters_emit_ordered_canonical_param_declarations() {
         .unwrap()
         .decode_defdef_body()
         .unwrap();
-    assert!(method.clauses.is_empty());
+    assert!(method.clauses().next().is_none());
     assert_eq!(
         method
-            .parameters
-            .iter()
+            .parameters()
             .map(|parameter| file.render_name(parameter.name()).unwrap())
             .collect::<Vec<_>>(),
         ["first", "second"]
@@ -3320,26 +3365,281 @@ fn real_source_default_constructor_clauses_normalize_without_fabricating_method_
 }
 
 #[test]
-fn contextual_and_type_parameter_methods_remain_explicitly_unsupported() {
-    for (text, feature) in [
-        (
-            "package example; class Answer { def value(using x: Int): Int = x }",
-            UnsupportedFeature::SourceMetadata,
-        ),
-        (
-            "package example; class Answer { def value[A]: Int = 42 }",
-            UnsupportedFeature::TypeParameters,
-        ),
-    ] {
-        let result = source_plan(text, |_| {});
-        assert!(
-            matches!(
-                &result,
-                Err(PickleError::Unsupported { feature: actual, .. }) if *actual == feature
-            ),
-            "{text}: {result:?}"
+fn contextual_parameters_retain_their_wire_flags_and_reference_identity() {
+    use dotty_tasty::tasty::*;
+    let text = "package example; class Evidence { def read(using x: Int): Int = x; def old(implicit x: Int): Int = x; def forward(using n: Int): Int = read; def explicit(n: Int): Int = old(using n) }";
+    let (_, output) = source_outputs_named(text, "Evidence.scala", |_| {}).unwrap();
+    assert_eq!(
+        output.bytes(),
+        source_outputs_named(text, "Evidence.scala", |_| {})
+            .unwrap()
+            .1
+            .bytes()
+    );
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let index = file.ast_address_index().unwrap();
+    let mut counts = [0; 2];
+    for node in index.iter().filter(|node| node.tag == DEFDEF_TAG) {
+        let method = node.decode_defdef_body().unwrap();
+        let (tag, slot) = match file.render_name(method.name).unwrap().as_str() {
+            "read" => (GIVEN_TAG, 0),
+            "old" => (IMPLICIT_TAG, 1),
+            _ => continue,
+        };
+        let Some(RawTree::Leaf(reference)) = &method.rhs else {
+            panic!("expected a parameter reference")
+        };
+        assert_eq!(reference.tag, TERMREFDIRECT_TAG);
+        let target = index.get(reference.ast_ref().unwrap().address).unwrap();
+        let parameter = method.parameters().next().unwrap();
+        assert!(std::ptr::eq(target.payload, parameter.payload()));
+        counts[slot] += 1;
+        assert_eq!(
+            parameter.decode_body().unwrap().tail,
+            [DefinitionTail::Modifier(tag)]
         );
     }
+    assert_eq!(counts, [1, 1]);
+    if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let directory = root.join("target/contextual-pickler/example");
+        std::fs::create_dir_all(&directory).unwrap();
+        let candidate = directory.join("Evidence.tasty");
+        std::fs::write(&candidate, output.bytes()).unwrap();
+        assert!(
+            Command::new("python3")
+                .arg(root.join("crates/dotty-typer/tests/fixtures/contextual-arguments/check.py"))
+                .arg(candidate)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+}
+
+#[test]
+fn legacy_default_preserves_implicit_marker_and_separate_client_resolution() {
+    use dotty_tasty::tasty::*;
+    let text = "package example; class LegacyDefaults { def legacy(implicit n: Int = 7): Int = n; def offset(x: Int)(implicit n: Int = x): Int = n }";
+    let (_, output) = source_outputs_named(text, "LegacyDefaults.scala", |_| {}).unwrap();
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let index = file.ast_address_index().unwrap();
+    let declaration = index
+        .iter()
+        .filter(|node| node.tag == DEFDEF_TAG)
+        .map(|node| node.decode_defdef_body().unwrap())
+        .find(|method| file.names().get_utf8(method.name) == Some("legacy"))
+        .unwrap();
+    assert_eq!(
+        declaration
+            .parameters()
+            .next()
+            .unwrap()
+            .decode_body()
+            .unwrap()
+            .tail,
+        [
+            DefinitionTail::Modifier(IMPLICIT_TAG),
+            DefinitionTail::Modifier(HASDEFAULT_TAG),
+        ]
+    );
+    verify_contextual_client(
+        "LegacyDefaults",
+        output.bytes(),
+        r#"
+        val library = new example.LegacyDefaults
+        assert(library.legacy == 7)
+        assert(library.offset(17) == 17)
+        locally { implicit val chosen: Int = 11; assert(library.legacy == 11) }
+        assert(library.legacy(using 9) == 9)
+        val errors = scala.compiletime.testing.typeCheckErrors(
+          """{
+            implicit val first: Int = 1
+            implicit val second: Int = 2
+            (new example.LegacyDefaults).legacy
+          }"""
+        )
+        assert(errors.exists(_.message.contains("Ambiguous given instances")), errors)
+    "#,
+    );
+}
+
+#[test]
+fn curried_contextual_parameters_preserve_clause_boundaries_in_scala() {
+    use dotty_tasty::tasty::*;
+    let source = "package example; class Curried { def pick(first: Int)(using second: Int): Int = second; def empty()(using second: Int): Int = second }";
+    let (_, output) = source_outputs_named(source, "Curried.scala", |_| {}).unwrap();
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let index = file.ast_address_index().unwrap();
+    let mut checked = 0;
+    for node in index.iter().filter(|node| node.tag == DEFDEF_TAG) {
+        let method = node.decode_defdef_body().unwrap();
+        let marker = match file.render_name(method.name).unwrap().as_str() {
+            "pick" => SPLITCLAUSE_TAG,
+            "empty" => EMPTYCLAUSE_TAG,
+            _ => continue,
+        };
+        checked += 1;
+        assert_eq!(method.clauses().collect::<Vec<_>>(), [marker]);
+        let evidence = method.parameters().next_back().unwrap();
+        assert_eq!(
+            evidence.decode_body().unwrap().tail,
+            [DefinitionTail::Modifier(GIVEN_TAG)]
+        );
+        let Some(RawTree::Leaf(reference)) = &method.rhs else {
+            panic!("expected evidence reference")
+        };
+        let target = index.get(reference.ast_ref().unwrap().address).unwrap();
+        assert!(std::ptr::eq(target.payload, evidence.payload()));
+    }
+    assert_eq!(checked, 2);
+    verify_contextual_client(
+        "Curried",
+        output.bytes(),
+        "val c = new example.Curried; given Int = 42; assert(c.pick(1) == 42); assert(c.pick(1)(using 7) == 7); assert(c.empty() == 42)",
+    );
+}
+
+#[test]
+fn polymorphic_evidence_result_preserves_its_own_type_binder() {
+    use dotty_tasty::tasty::*;
+    let source = "package example; class Generic { def evidence[A](using a: A): A = a }";
+    let (_, output) = source_outputs_named(source, "Generic.scala", |_| {}).unwrap();
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let index = file.ast_address_index().unwrap();
+    let method = index
+        .iter()
+        .filter(|node| node.tag == DEFDEF_TAG)
+        .filter_map(|node| node.decode_defdef_body().ok())
+        .find(|d| file.render_name(d.name).unwrap() == "evidence")
+        .unwrap();
+    let parameters = method.parameters().collect::<Vec<_>>();
+    let [tparam, evidence] = parameters.as_slice() else {
+        panic!("expected type and term parameter")
+    };
+    assert_eq!(file.render_name(tparam.name()).unwrap(), "A");
+    assert_eq!(
+        evidence.decode_body().unwrap().tail,
+        [DefinitionTail::Modifier(GIVEN_TAG)]
+    );
+    verify_contextual_client(
+        "Generic",
+        output.bytes(),
+        "val c = new example.Generic; given String = new String(\"evidence\"); assert(c.evidence[String] eq summon[String]); assert(c.evidence[Int](using 42) == 42)",
+    );
+}
+
+#[test]
+fn generic_evidence_output_rejects_another_methods_evidence_symbol() {
+    let source = "package example; class Generic { def first[A](using x: A): A = x; def second[A](using x: A): A = x }";
+    let error = source_outputs_named_with_tree_edits(
+        source,
+        "Generic.scala",
+        ValidationLimits::default(),
+        |untyped, typed, bindings, store| {
+            let rhs = |name: &str| {
+                let tree = untyped
+                    .iter()
+                    .find_map(|(_, node)| match &node.kind {
+                        TreeKind::DefDef(def)
+                            if store.names.resolve(def.name.as_name().text()) == name =>
+                        {
+                            def.rhs
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                bindings.get(SourceId::from_index(7), tree).unwrap()
+            };
+            let foreign = typed.get(rhs("second")).ty;
+            typed.get_mut(rhs("first")).ty = foreign;
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(error, PickleError::Owner { .. }), "{error:?}");
+}
+
+fn verify_contextual_client(class: &str, bytes: &[u8], main_body: &str) {
+    if std::env::var_os(RUN_SCALA_ORACLE).is_none() {
+        return;
+    }
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let directory = root
+        .join("target/contextual-pickler")
+        .join(class)
+        .join("example");
+    std::fs::create_dir_all(&directory).unwrap();
+    let candidate = directory.join(format!("{class}.tasty"));
+    let client = directory.join("Client.scala");
+    std::fs::write(&candidate, bytes).unwrap();
+    std::fs::write(
+        &client,
+        format!("object Client {{ def main(args: Array[String]): Unit = {{ {main_body} }} }}"),
+    )
+    .unwrap();
+    assert!(
+        Command::new("python3")
+            .arg(root.join("crates/dotty-typer/tests/fixtures/contextual-arguments/check.py"))
+            .arg(candidate)
+            .arg(client)
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
+fn synthesized_context_call_rejects_a_foreign_evidence_parameter_with_the_same_name() {
+    let text = "package example; class Evidence { def read(using n: Int): Int = n; def forward(using n: Int): Int = read }";
+    let error = source_outputs_named_with_tree_edits(
+        text,
+        "Evidence.scala",
+        ValidationLimits::default(),
+        |source, typed, bindings, store| {
+            let body = |name: &str| {
+                let rhs = source
+                    .iter()
+                    .find_map(|(_, tree)| match &tree.kind {
+                        TreeKind::DefDef(d)
+                            if store.names.resolve(d.name.as_name().text()) == name =>
+                        {
+                            d.rhs
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                bindings.get(SourceId::from_index(7), rhs).unwrap()
+            };
+            let foreign_type = typed.get(body("read")).ty;
+            let TreeKind::Apply(call) = &typed.get(body("forward")).kind else {
+                panic!()
+            };
+            let argument = call.args[0];
+            typed.get_mut(argument).ty = foreign_type;
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        PickleError::Unsupported {
+            feature: UnsupportedFeature::BodyExpression,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn type_parameter_methods_remain_explicitly_unsupported() {
+    let text = "package example; class Answer { def value[A]: Int = 42 }";
+    assert!(matches!(
+        source_plan(text, |_| {}),
+        Err(PickleError::Unsupported {
+            feature: UnsupportedFeature::TypeParameters,
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -4119,4 +4419,576 @@ fn mutable_local_assignments_reject_forged_flags_swapped_children_and_non_unit_r
         assignment_before_declaration,
         PickleError::Reference { .. }
     ));
+}
+
+const CONTEXT_CLOSURES: &str = "package example; class Functions { def closure: Int ?=> Int = (n: Int) ?=> n; def capture(x: Int): Int ?=> Int = (n: Int) ?=> n + x; def twice(x: Int): Int ?=> Int = (n: Int) ?=> x + x; def constant: Int ?=> Int = (n: Int) ?=> 9 }";
+
+#[test]
+fn context_result_closures_preserve_identity_capture_and_scala_interoperability() {
+    let (_, first) = source_outputs_named(CONTEXT_CLOSURES, "Functions.scala", |_| {}).unwrap();
+    let (_, repeat) = source_outputs_named(CONTEXT_CLOSURES, "Functions.scala", |_| {}).unwrap();
+    assert_eq!(first.bytes(), repeat.bytes());
+    use dotty_tasty::tasty::*;
+    let file = TastyFile::parse_and_validate_scala_3_9(first.bytes()).unwrap();
+    let index = file.ast_address_index().unwrap();
+    for declaration in &first.declarations()[2..6] {
+        let method = index
+            .get(declaration.address)
+            .unwrap()
+            .decode_defdef_body()
+            .unwrap();
+        assert!(
+            matches!(&method.return_type,RawTree::LengthNode(applied) if applied.tag==APPLIEDTPT_TAG)
+        );
+        let [DefinitionTail::Annotation(annotation)] = method.tail.as_slice() else {
+            panic!("expected ContextResultCount")
+        };
+        let annotation = annotation.decode_annotation().unwrap();
+        let RawTree::NatAst { tag, value, .. } = annotation.tycon else {
+            panic!("expected annotation class")
+        };
+        assert_eq!(tag, TYPEREF_TAG);
+        assert_eq!(file.render_name(value).unwrap(), "ContextResultCount");
+        let RawTree::LengthNode(value) = annotation.full_annotation else {
+            panic!("expected the annotation constructor application");
+        };
+        let call = value.decode_apply().unwrap();
+        assert!(
+            matches!(call.arguments.as_slice(),[RawTree::Leaf(arg)] if arg.tag==INTCONST_TAG && arg.value==TermValue::Int(1))
+        );
+
+        let RawTree::LengthNode(block) = method.rhs.unwrap() else {
+            panic!("expected closure block")
+        };
+        let block = block.decode_block().unwrap();
+        let [RawTree::LengthNode(implementation)] = block.stats.as_slice() else {
+            panic!("expected synthetic definition")
+        };
+        let RawTree::LengthNode(lambda) = block.expression else {
+            panic!("expected lambda")
+        };
+        let RawTree::Leaf(target) = lambda.decode_lambda().unwrap().method else {
+            panic!("expected direct reference")
+        };
+        assert_eq!(target.tag, TERMREFDIRECT_TAG);
+        assert!(std::ptr::eq(
+            index
+                .get(target.ast_ref().unwrap().address)
+                .unwrap()
+                .payload,
+            implementation.payload
+        ));
+        let generated = implementation.decode_defdef_body().unwrap();
+        assert_eq!(file.render_name(generated.name).unwrap(), "$anonfun");
+        assert_eq!(
+            generated.tail,
+            [
+                DefinitionTail::Modifier(SYNTHETIC_TAG),
+                DefinitionTail::Modifier(ARTIFACT_TAG)
+            ]
+        );
+        assert_eq!(
+            generated
+                .parameters()
+                .next()
+                .unwrap()
+                .decode_body()
+                .unwrap()
+                .tail,
+            [DefinitionTail::Modifier(GIVEN_TAG)]
+        );
+    }
+    verify_contextual_client(
+        "Functions",
+        first.bytes(),
+        r#"val f = new example.Functions
+           assert(f.closure(using 17) == 17)
+           assert(f.capture(23)(using 7) == 30)
+           assert(f.twice(6)(using 5) == 12)
+           assert(f.constant(using 2) == 9)
+           assert(f.getClass.getDeclaredMethod("closure", classOf[Int]).getReturnType == classOf[Int])
+           assert(f.getClass.getDeclaredMethod("capture", classOf[Int], classOf[Int]).getReturnType == classOf[Int])"#,
+    );
+}
+
+#[test]
+fn context_result_closures_require_exact_capture_and_receipted_implementation() {
+    enum Mutation {
+        RemoveCapture,
+        SwapMethod,
+        CopyMethod,
+    }
+    for mutation in [
+        Mutation::RemoveCapture,
+        Mutation::SwapMethod,
+        Mutation::CopyMethod,
+    ] {
+        let error = source_outputs_named_with_tree_edits(
+            CONTEXT_CLOSURES,
+            "Functions.scala",
+            ValidationLimits::default(),
+            |_, ast, _, _| {
+                let mut closures = ast.iter().filter_map(|(tree, node)| {
+                    matches!(&node.kind, TreeKind::Closure(_)).then_some(tree)
+                });
+                let first = closures.next().unwrap();
+                let second = closures.next().unwrap();
+                drop(closures);
+                let TreeKind::Closure(first) = &ast.get(first).kind else {
+                    panic!()
+                };
+                let duplicate = first.implementation.clone();
+                let TreeKind::Closure(capture) = &ast.get(second).kind else {
+                    panic!()
+                };
+                let original = capture.implementation.as_ref().unwrap().definition;
+                let copied = ast.alloc(ast.get(original).clone());
+                let TreeKind::Closure(second) = &mut ast.get_mut(second).kind else {
+                    panic!()
+                };
+                match mutation {
+                    Mutation::SwapMethod => second.implementation = duplicate,
+                    Mutation::CopyMethod => {
+                        second.implementation.as_mut().unwrap().definition = copied
+                    }
+                    Mutation::RemoveCapture => {
+                        assert_eq!(second.env.len(), 1);
+                        second.env.clear();
+                    }
+                }
+            },
+            |_| {},
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                PickleError::Unsupported {
+                    feature: UnsupportedFeature::BodyExpression,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
+fn a_foreign_same_named_parameter_cannot_become_a_context_closure_capture() {
+    let text = "package example; class Shadow { def f(n: Int): Int ?=> Int = (n: Int) ?=> n; def original(n: Int): Int = n }";
+    // Forging a reference to another owner with the same spelling must not turn
+    // a contextual parameter access into a capture.
+    let error = source_outputs_named_with_tree_edits(
+        text,
+        "Shadow.scala",
+        ValidationLimits::default(),
+        |source, ast, bindings, _| {
+            let source_id = SourceId::from_index(7);
+            let (lambda, reference) = source
+                .iter()
+                .find_map(|(tree, node)| {
+                    let TreeKind::PhaseSpecific(UntypedNode::Function(lambda)) = &node.kind else {
+                        return None;
+                    };
+                    Some((
+                        bindings.get(source_id, tree).unwrap(),
+                        bindings.get(source_id, lambda.body).unwrap(),
+                    ))
+                })
+                .unwrap();
+            let original = source
+                .iter()
+                .find_map(|(_, node)| {
+                    let TreeKind::DefDef(method) = &node.kind else {
+                        return None;
+                    };
+                    let rhs = method.rhs?;
+                    matches!(&source.get(rhs).kind, TreeKind::Ident(_))
+                        .then(|| bindings.get(source_id, rhs).unwrap())
+                })
+                .unwrap();
+            ast.get_mut(reference).ty = ast.get(original).ty;
+            let TreeKind::Closure(closure) = &mut ast.get_mut(lambda).kind else {
+                panic!()
+            };
+            closure.env.push(reference);
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        PickleError::Unsupported {
+            feature: UnsupportedFeature::BodyExpression,
+            ..
+        }
+    ));
+}
+
+const CONTEXT_DEFAULT: &str =
+    "package example; class Reader { def offset(x: Int)(using n: Int = x): Int = n }";
+
+#[test]
+fn contextual_default_getter_preserves_its_own_parameter_and_scala_client_semantics() {
+    use dotty_tasty::tasty::*;
+    let (_, output) = source_outputs_named(CONTEXT_DEFAULT, "Reader.scala", |_| {}).unwrap();
+    let (_, repeat) = source_outputs_named(CONTEXT_DEFAULT, "Reader.scala", |_| {}).unwrap();
+    assert_eq!(output.bytes(), repeat.bytes());
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let addresses = file.ast_address_index().unwrap();
+    let member = |name: &str| {
+        addresses
+            .iter()
+            .filter(|node| node.tag == DEFDEF_TAG)
+            .map(|node| node.decode_defdef_body().unwrap())
+            .find(|body| file.render_name(body.name).unwrap() == name)
+            .unwrap()
+    };
+    let original = member("offset");
+    let getter = member("offset$default$2");
+    assert_eq!(
+        original
+            .parameters()
+            .nth(1)
+            .unwrap()
+            .decode_body()
+            .unwrap()
+            .tail,
+        [
+            DefinitionTail::Modifier(GIVEN_TAG),
+            DefinitionTail::Modifier(HASDEFAULT_TAG)
+        ]
+    );
+    assert!(
+        matches!(file.names().get(getter.name).unwrap(),RawName::DefaultGetter{underlying,index:1} if *underlying==original.name)
+    );
+    let RawTree::LengthNode(return_type) = &getter.return_type else {
+        panic!("expected annotated getter result")
+    };
+    let RawTree::LengthNode(annotation) = return_type.decode_annotated().unwrap().annotation else {
+        panic!("expected annotation application")
+    };
+    let application = annotation.decode_apply().unwrap();
+    assert!(application.arguments.is_empty());
+    let RawTree::LengthNode(constructor) = application.function else {
+        panic!("expected annotation constructor")
+    };
+    let signed = file
+        .render_signed_name(constructor.decode_select_in().unwrap().name)
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(signed,RenderedSignedName::Signed{original,signature} if original=="<init>" && signature.parameters.is_empty() && signature.result=="scala.annotation.unchecked.uncheckedVariance")
+    );
+
+    let Some(RawTree::Leaf(reference)) = &getter.rhs else {
+        panic!("missing default expression")
+    };
+    assert_eq!(reference.tag, TERMREFDIRECT_TAG);
+    let rebound = addresses.get(reference.ast_ref().unwrap().address).unwrap();
+    assert!(std::ptr::eq(
+        rebound.payload,
+        getter.parameters().next().unwrap().payload()
+    ));
+    assert!(!std::ptr::eq(
+        rebound.payload,
+        original.parameters().next().unwrap().payload()
+    ));
+    verify_contextual_client(
+        "Reader",
+        output.bytes(),
+        "val reader = new example.Reader; assert(reader.offset(7) == 7); assert(reader.offset(7)(using 9) == 9)",
+    );
+}
+
+#[test]
+fn contextual_default_getter_rejects_a_reference_to_the_original_same_named_parameter() {
+    let text = CONTEXT_DEFAULT.replace("Int = n }", "Int = x }");
+    let mut corrupted = None;
+    let error = source_outputs_named_with_tree_edits(
+        &text,
+        "Reader.scala",
+        ValidationLimits::default(),
+        |source, typed, bindings, _| {
+            let source_id = SourceId::from_index(7);
+            let (method_body, default) = source
+                .iter()
+                .find_map(|(_, node)| {
+                    let TreeKind::DefDef(method) = &node.kind else {
+                        return None;
+                    };
+                    let p = method.value_param_clauses.get(1)?.first()?;
+                    let TreeKind::ValDef(parameter) = &source.get(*p).kind else {
+                        return None;
+                    };
+                    Some((method.rhs?, parameter.rhs?))
+                })
+                .unwrap();
+            let enclosing = typed.get(bindings.get(source_id, method_body).unwrap()).ty;
+            let body = bindings.get(source_id, default).unwrap();
+            assert_ne!(enclosing, typed.get(body).ty);
+            typed.get_mut(body).ty = enclosing;
+            corrupted = Some((body, enclosing));
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error,PickleError::BodyType{tree,ty} if Some((tree,ty))==corrupted),
+        "{error:?}"
+    );
+}
+
+const FIRST_CONTEXT_DEFAULT: &str = "package example; class LiteralReader { def read(using n: Int = 7): Int = n; def offset(x: Int)(using n: Int = x): Int = n }";
+
+#[test]
+fn first_contextual_default_getter_has_no_clause_and_a_literal_body() {
+    use dotty_tasty::tasty::*;
+    let (_, output) =
+        source_outputs_named(FIRST_CONTEXT_DEFAULT, "LiteralReader.scala", |_| {}).unwrap();
+    let (_, repeat) =
+        source_outputs_named(FIRST_CONTEXT_DEFAULT, "LiteralReader.scala", |_| {}).unwrap();
+    assert_eq!(output.bytes(), repeat.bytes());
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let addresses = file.ast_address_index().unwrap();
+    let member = |name: &str| {
+        addresses
+            .iter()
+            .filter(|node| node.tag == DEFDEF_TAG)
+            .map(|node| node.decode_defdef_body().unwrap())
+            .find(|method| file.render_name(method.name).unwrap() == name)
+            .unwrap()
+    };
+    let read = member("read");
+    assert_eq!(
+        read.parameters()
+            .next()
+            .unwrap()
+            .decode_body()
+            .unwrap()
+            .tail,
+        [
+            DefinitionTail::Modifier(GIVEN_TAG),
+            DefinitionTail::Modifier(HASDEFAULT_TAG)
+        ]
+    );
+    let getter = member("read$default$1");
+    assert!(getter.header_items.is_empty());
+    assert!(
+        matches!(file.names().get(getter.name),Some(RawName::DefaultGetter{underlying,index:0}) if *underlying==read.name)
+    );
+    let RawTree::LengthNode(result) = getter.return_type else {
+        panic!("expected annotated Int")
+    };
+    let RawTree::Leaf(underlying) = result.decode_annotated().unwrap().underlying else {
+        panic!("expected shared Int")
+    };
+    assert_eq!(underlying.tag, SHAREDTYPE_TAG);
+    let shared = underlying.ast_ref().unwrap().address;
+    let RawTree::NatAst { child, .. } = read.return_type else {
+        panic!("expected Int syntax")
+    };
+    assert!(
+        matches!(*child,RawTree::Leaf(reference) if reference.tag==SHAREDTYPE_TAG && reference.ast_ref().unwrap().address==shared)
+    );
+    assert!(
+        matches!(getter.rhs,Some(RawTree::Leaf(literal)) if literal.tag==INTCONST_TAG && literal.value==TermValue::Int(7))
+    );
+    verify_contextual_client(
+        "LiteralReader",
+        output.bytes(),
+        r#"val reader = new example.LiteralReader
+        assert(reader.read == 7)
+        locally { given Int = 11; assert(reader.read == 11); assert(reader.read(using 9) == 9) }
+        assert(reader.offset(17) == 17)"#,
+    );
+}
+
+#[test]
+fn first_contextual_default_getter_rejects_a_substituted_literal_even_with_its_matching_type() {
+    let source = "package example; class LiteralReader { def read(using n: Int = 7): Int = n; def other: Int = 11 }";
+    let mut corrupted = None;
+    let error = source_outputs_named_with_tree_edits(
+        source,
+        "LiteralReader.scala",
+        ValidationLimits::default(),
+        |ast, typed, bindings, store| {
+            let id = SourceId::from_index(7);
+            let literal = |text: &str| {
+                ast.iter()
+                    .find_map(|(tree, node)| {
+                        let TreeKind::PhaseSpecific(UntypedNode::Number(number)) = &node.kind
+                        else {
+                            return None;
+                        };
+                        (store.names.resolve(number.text) == text).then_some(tree)
+                    })
+                    .unwrap()
+            };
+            let original = literal("7");
+            let body = bindings.get(id, original).unwrap();
+            let other = typed.get(bindings.get(id, literal("11")).unwrap()).clone();
+            typed.get_mut(body).kind = other.kind;
+            typed.get_mut(body).ty = other.ty;
+            corrupted = Some((original, body));
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error,PickleError::BodySourceValue{source_tree,typed_tree,expected:7,actual:11} if Some((source_tree,typed_tree))==corrupted),
+        "{error:?}"
+    );
+}
+
+const PAIR_DEFAULTS: &str = "package example; class PairDefaults {
+  def pick(x: Int, y: Int)(using n: Int = y): Int = n
+  def first(x: Int, y: Int)(implicit n: Int = x): Int = n
+}";
+
+#[test]
+fn two_formal_default_getters_preserve_copy_order_source_syntax_and_scala_calls() {
+    use dotty_tasty::tasty::*;
+    let emit = || source_outputs_named(PAIR_DEFAULTS, "PairDefaults.scala", |_| {}).unwrap();
+    let (skeleton, output) = emit();
+    let (second_skeleton, second_output) = emit();
+    assert_eq!(skeleton, second_skeleton);
+    assert_eq!(output.bytes(), second_output.bytes());
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let index = file.ast_address_index().unwrap();
+    let member = |name: &str| {
+        index
+            .iter()
+            .filter(|n| n.tag == DEFDEF_TAG)
+            .map(|n| n.decode_defdef_body().unwrap())
+            .find(|m| file.render_name(m.name).unwrap() == name)
+            .unwrap()
+    };
+    for (name, modifier, selected) in [("pick", GIVEN_TAG, 1), ("first", IMPLICIT_TAG, 0)] {
+        let original = member(name);
+        assert_eq!(original.clauses().collect::<Vec<_>>(), [SPLITCLAUSE_TAG]);
+        let original_parameters = original.parameters().collect::<Vec<_>>();
+        assert_eq!(original_parameters.len(), 3);
+        assert_eq!(
+            original_parameters[2].decode_body().unwrap().tail,
+            [
+                DefinitionTail::Modifier(modifier),
+                DefinitionTail::Modifier(HASDEFAULT_TAG)
+            ]
+        );
+        let getter = member(&format!("{name}$default$3"));
+        assert!(
+            matches!(file.names().get(getter.name),Some(RawName::DefaultGetter{underlying,index:2}) if *underlying==original.name)
+        );
+        assert!(getter.clauses().next().is_none());
+        let getter_parameters = getter.parameters().collect::<Vec<_>>();
+        assert_eq!(getter_parameters.len(), 2);
+        for (i, expected_name) in ["x", "y"].into_iter().enumerate() {
+            let original_formal = original_parameters[i];
+            let copy = getter_parameters[i];
+            assert_eq!(file.render_name(copy.name()).unwrap(), expected_name);
+            assert_eq!(copy.name(), original_formal.name());
+            assert!(!std::ptr::eq(copy.payload(), original_formal.payload()));
+            let RawTree::Leaf(shared) = copy.decode_body().unwrap().type_tree else {
+                panic!("expected shared parameter type syntax")
+            };
+            assert_eq!(shared.tag, SHAREDTERM_TAG);
+            let target = shared.ast_ref().unwrap().address;
+            assert_eq!(index.get_node(target).unwrap().tag, IDENTTPT_TAG);
+            let parent = index.parent_of(target).unwrap();
+            let original_declaration = index.get(parent.offset as u32).unwrap();
+            assert!(std::ptr::eq(
+                original_declaration.payload,
+                original_formal.payload()
+            ));
+        }
+        let Some(RawTree::Leaf(reference)) = &getter.rhs else {
+            panic!("expected reference to a copied formal")
+        };
+        assert_eq!(reference.tag, TERMREFDIRECT_TAG);
+        let target = index.resolve(reference.ast_ref().unwrap()).unwrap();
+        assert!(std::ptr::eq(
+            target.payload,
+            getter_parameters[selected].payload()
+        ));
+    }
+    verify_contextual_client(
+        "PairDefaults",
+        output.bytes(),
+        r#"val reader = new example.PairDefaults
+        var trace = ""
+        def argument(label: String, value: Int): Int = { trace += label; value }
+        assert(reader.pick(argument("x", 21), argument("y", 37)) == 37)
+        assert(trace == "xy")
+        trace = ""
+        assert(reader.pick(argument("x", 13), argument("y", 29))(using argument("n", 41)) == 41)
+        assert(trace == "xyn")
+        locally { given Int = 59; assert(reader.pick(13, 29) == 59) }
+        assert(reader.first(13, 29) == 13)"#,
+    );
+}
+
+#[test]
+fn two_formal_default_getter_rejects_the_other_copy_owned_by_the_same_getter() {
+    // Type both references in the getter scope so the mutation can use the
+    // real copy of x. Select y's existing source/typed pair as the default.
+    let fixture =
+        "package example; class PairDefaults { def pick(x:Int,y:Int)(using n:Int=x+y):Int=n }";
+    for corrupt in [false, true] {
+        let mut changed = None;
+        let output = source_outputs_named_with_tree_edits(
+            fixture,
+            "PairDefaults.scala",
+            ValidationLimits::default(),
+            |source, typed, bindings, store| {
+                let id = SourceId::from_index(7);
+                let (parameter, left, right) = source
+                    .iter()
+                    .find_map(|(tree, node)| {
+                        let TreeKind::ValDef(parameter) = &node.kind else {
+                            return None;
+                        };
+                        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(op)) =
+                            &source.get(parameter.rhs?).kind
+                        else {
+                            return None;
+                        };
+                        Some((tree, op.left, op.right))
+                    })
+                    .unwrap();
+                let TreeKind::ValDef(parameter) = &mut source.get_mut(parameter).kind else {
+                    panic!()
+                };
+                parameter.rhs = Some(right);
+                let x = typed.get(bindings.get(id, left).unwrap()).ty;
+                let body = bindings.get(id, right).unwrap();
+                let y = typed.get(body).ty;
+                let copy = |ty| {
+                    store
+                        .symbols
+                        .get(store.types.get(ty).reference_symbol().unwrap())
+                };
+                assert_eq!(store.names.resolve(copy(x).name.text()), "x");
+                assert_eq!(store.names.resolve(copy(y).name.text()), "y");
+                assert_eq!(copy(x).owner, copy(y).owner);
+                assert_eq!(copy(x).info, copy(y).info);
+                let (_, ordinal) = store.default_getter_origin(copy(x).owner.unwrap()).unwrap();
+                assert_eq!(ordinal, 2);
+                if corrupt {
+                    typed.get_mut(body).ty = x;
+                    changed = Some((body, x));
+                }
+            },
+            |_| {},
+        );
+        if corrupt {
+            let error = output.unwrap_err();
+            assert!(
+                matches!(error,PickleError::BodyType{tree,ty} if Some((tree,ty))==changed),
+                "{error:?}"
+            );
+        } else {
+            output.unwrap();
+        }
+    }
 }

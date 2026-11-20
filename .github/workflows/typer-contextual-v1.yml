@@ -1,0 +1,72 @@
+name: Typer contextual arguments v1
+
+on:
+  pull_request:
+    branches: [main]
+    paths: &audit_paths
+      - '.github/workflows/typer-contextual-v1.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'crates/dotty-core/**'
+      - 'crates/dotty-lexer/**'
+      - 'crates/dotty-parser/**'
+      - 'crates/dotty-namer/**'
+      - 'crates/dotty-typer/**'
+      - 'crates/dotty-classfile/**'
+      - 'crates/dotty-classloader/**'
+      - 'crates/dotty-tasty/**'
+      - 'crates/dotty-tasty-unpickler/**'
+      - 'tools/tasty-pickler-oracle/run.py'
+      - 'tests/fixtures/tasty_pickler/provenance.json'
+  push:
+    branches: [main]
+    paths: *audit_paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: typer-contextual-v1-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  parity:
+    name: Contextual argument parity with Scala 3.9.0
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SCALA39_ROOT: ${{ github.workspace }}/scala39-source
+      COURSIER_MAVEN_ROOT: ${{ github.workspace }}/target/contextual-v1-maven
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check out pinned Scala sources
+        uses: actions/checkout@v4
+        with:
+          repository: scala/scala3
+          ref: 777528f19a58e794c9954a42f433373472ec57f8
+          path: scala39-source
+          persist-credentials: false
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21.0.8+9.0.LTS'
+
+      - name: Fetch pinned Scala compiler and runtime jars
+        shell: bash
+        run: |
+          while IFS=$'\t' read -r sha256 artifact; do
+            jar="$COURSIER_MAVEN_ROOT/$artifact"
+            curl --fail --location --silent --show-error --retry 3 --create-dirs \
+              --output "$jar" "https://repo1.maven.org/maven2/$artifact"
+            printf '%s  %s\n' "$sha256" "$jar" | sha256sum --check
+          done < crates/dotty-typer/tests/fixtures/lexical-closure-contract/scala-artifacts.sha256.tsv
+
+      - name: Run contextual argument acceptance audit
+        run: python3 crates/dotty-typer/tests/fixtures/contextual-v1/check.py --require-parity

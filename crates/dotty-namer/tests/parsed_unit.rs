@@ -537,6 +537,46 @@ fn anonymous_structural_module_given_derives_object_and_module_class_names() {
 }
 
 #[test]
+fn anonymous_given_constructor_parent_keeps_type_arguments_and_ignores_value_arguments() {
+    let named = named_source(
+        r#"class Context(val str: String)
+           class Container[T](val t: T)(val count: Int)
+           object Values { val name = "alpha" }
+           given Context("alpha")
+           given Container[String](Values.name)(2)"#,
+        116,
+    );
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("expected a package");
+    };
+    let [_, _, _, context, container] = package.stats[..] else {
+        panic!("expected two anonymous constructor givens");
+    };
+    for (given, expected) in [
+        (context, "given_Context"),
+        (container, "given_Container_String"),
+    ] {
+        let object = named.index.symbol_at(named.source, given).unwrap();
+        let owner = named.store.symbols.owner(object).unwrap();
+        let module = named
+            .index
+            .derived_symbol_at(owner, named.source, given)
+            .unwrap();
+        let symbol = named.store.symbols.get(object);
+        assert_eq!(symbol.kind, SymbolKind::Object);
+        assert!(symbol.flags.contains(SymbolFlags::GIVEN));
+        assert_eq!(named.store.names.resolve(symbol.name.text()), expected);
+        let module = named.store.symbols.get(module);
+        assert_eq!(module.kind, SymbolKind::ModuleClass);
+        assert_eq!(module.owner, Some(owner));
+        assert_eq!(
+            named.store.names.resolve(module.name.text()),
+            format!("{expected}$")
+        );
+    }
+}
+
+#[test]
 fn anonymous_structural_given_joins_multiple_parent_names_in_source_order() {
     let named = named_source("given First with Second:\n  def value = result", 111);
     let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
@@ -597,6 +637,234 @@ fn anonymous_parameterized_structural_given_uses_a_type_namespace_name() {
     );
 }
 
+#[test]
+fn structural_given_factory_and_its_binders_have_distinct_source_identities() {
+    for declaration in [
+        "given boxes: [A] => (base: TC[A]) => TC[Box[A]]:\n  def tag = 1",
+        "given [A] => (base: TC[A]) => TC[Box[A]]:\n  def tag = 1",
+    ] {
+        let named = named_source(declaration, 109);
+        let parts = primary_constructor_parts(&named);
+        let class = named
+            .index
+            .symbol_at(named.source, parts.class_tree)
+            .unwrap();
+        let class_entry = named.store.symbols.get(class);
+        let owner = class_entry.owner.unwrap();
+        let factory = named
+            .index
+            .derived_symbol_at(owner, named.source, parts.class_tree)
+            .unwrap();
+        let entry = named.store.symbols.get(factory);
+        assert_eq!(entry.kind, SymbolKind::Method);
+        assert_eq!(entry.name.text(), class_entry.name.text());
+        assert!(entry.name.is_term());
+        assert_eq!(entry.owner, Some(owner));
+        assert_eq!(entry.visibility, class_entry.visibility);
+        assert!(
+            entry
+                .flags
+                .contains(SymbolFlags::GIVEN | SymbolFlags::FINAL)
+        );
+        let scope = named.store.scopes.get(named.index.scope_of(owner).unwrap());
+        assert_eq!(scope.lookup_all(&entry.name), &[factory]);
+        assert_eq!(scope.lookup_all(&class_entry.name), &[class]);
+
+        let ctor = named
+            .index
+            .symbol_at(named.source, parts.constructor_tree)
+            .unwrap();
+        let field = named
+            .index
+            .symbol_at(named.source, parts.value_param_clauses[0][0])
+            .unwrap();
+        assert_eq!(
+            named.store.symbols.get(field).visibility,
+            dotty_core::Visibility::Protected
+        );
+        for (tree, kind) in [
+            (parts.type_params[0], SymbolKind::TypeParameter),
+            (parts.value_param_clauses[0][0], SymbolKind::Parameter),
+        ] {
+            let copy = named
+                .index
+                .derived_symbol_at(factory, named.source, tree)
+                .unwrap();
+            let param = named.store.symbols.get(copy);
+            assert_eq!(param.owner, Some(factory));
+            assert_eq!(param.kind, kind);
+            assert_eq!(
+                param.flags.contains(SymbolFlags::GIVEN),
+                kind == SymbolKind::Parameter
+            );
+            assert_ne!(Some(copy), named.index.symbol_at(named.source, tree));
+            assert_ne!(
+                Some(copy),
+                named.index.derived_symbol_at(ctor, named.source, tree)
+            );
+        }
+    }
+}
+
+#[test]
+fn contextual_default_getters_copy_only_earlier_clauses() {
+    let named = named_source(
+        "class Reader { def read[A](x: A)(using n: A = x, extra: A = x)(end: A = n): A = end }",
+        110,
+    );
+    let (method_tree, definition) = named
+        .parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::DefDef(def)
+                if named.store.names.resolve(def.name.as_name().text()) == "read" =>
+            {
+                Some((tree, def))
+            }
+            _ => None,
+        })
+        .unwrap();
+    let method = named.index.symbol_at(named.source, method_tree).unwrap();
+    let owner = named.store.symbols.owner(method).unwrap();
+    for (i, &param) in definition.value_param_clauses[1].iter().enumerate() {
+        let getter = named
+            .index
+            .derived_symbol_at(owner, named.source, param)
+            .unwrap();
+        assert_eq!(named.store.default_getter(method, i + 1), Some(getter));
+        assert_eq!(
+            named.store.default_getter_origin(getter),
+            Some((method, i + 1))
+        );
+        let entry = named.store.symbols.get(getter);
+        assert_eq!(entry.kind, SymbolKind::Method);
+        assert_eq!(
+            named.store.names.resolve(entry.name.text()),
+            format!("read$default${}", i + 2)
+        );
+        for &source in &[
+            definition.type_params[0],
+            definition.value_param_clauses[0][0],
+        ] {
+            let copy = named
+                .index
+                .derived_symbol_at(getter, named.source, source)
+                .unwrap();
+            assert_eq!(named.store.symbols.owner(copy), Some(getter));
+        }
+        assert!(
+            named
+                .index
+                .derived_symbol_at(getter, named.source, param)
+                .is_none()
+        );
+    }
+    let final_param = definition.value_param_clauses[2][0];
+    let getter = named
+        .index
+        .derived_symbol_at(owner, named.source, final_param)
+        .unwrap();
+    assert_eq!(named.store.default_getter(method, 3), Some(getter));
+    assert_eq!(named.store.default_getter_origin(getter), Some((method, 3)));
+    assert_eq!(
+        named
+            .store
+            .names
+            .resolve(named.store.symbols.get(getter).name.text()),
+        "read$default$4"
+    );
+    for param in &definition.value_param_clauses[1] {
+        let copy = named
+            .index
+            .derived_symbol_at(getter, named.source, *param)
+            .unwrap();
+        let entry = named.store.symbols.get(copy);
+        assert_eq!(entry.owner, Some(getter));
+        assert!(entry.flags.contains(SymbolFlags::GIVEN));
+    }
+    assert!(
+        named
+            .index
+            .derived_symbol_at(getter, named.source, final_param)
+            .is_none()
+    );
+}
+
+#[test]
+fn contextual_getter_counts_the_context_bound_before_the_defaulted_parameter() {
+    let named = named_source(
+        "trait Show[A]; class C { def read[A: Show](x: A)(using n: Int = 1): Int = n }",
+        110,
+    );
+    let (tree, def) = named
+        .parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::DefDef(def)
+                if named.store.names.resolve(def.name.as_name().text()) == "read" =>
+            {
+                Some((tree, def))
+            }
+            _ => None,
+        })
+        .unwrap();
+    let method = named.index.symbol_at(named.source, tree).unwrap();
+    let getter = named
+        .index
+        .derived_symbol_at(
+            named.store.symbols.owner(method).unwrap(),
+            named.source,
+            def.value_param_clauses[1][0],
+        )
+        .unwrap();
+    assert_eq!(named.store.default_getter_origin(getter), Some((method, 2)));
+    assert_eq!(named.store.default_getter(method, 2), Some(getter));
+    assert_eq!(named.store.default_getter(method, 1), None);
+    assert_eq!(
+        named
+            .store
+            .names
+            .resolve(named.store.symbols.get(getter).name.text()),
+        "read$default$3"
+    );
+}
+
+#[test]
+fn a_default_getter_copies_the_bound_needed_by_an_earlier_dependent_clause() {
+    let named = named_source(
+        "trait TC[A]; class C { def read[A: TC as tc](v: tc.type)(using n: Int = 1): Int = n }",
+        111,
+    );
+    let (tree, def) = named
+        .parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::DefDef(def)
+                if named.store.names.resolve(def.name.as_name().text()) == "read" =>
+            {
+                Some((tree, def))
+            }
+            _ => None,
+        })
+        .unwrap();
+    let method = named.index.symbol_at(named.source, tree).unwrap();
+    let getter = named.store.default_getter(method, 2).unwrap();
+    let clauses = def.context_bound_clauses(&named.parsed.ast, &named.store.names);
+    let witness = clauses[0][0];
+    let copy = named
+        .index
+        .derived_symbol_at(getter, named.source, witness)
+        .unwrap();
+    assert_ne!(Some(copy), named.index.symbol_at(named.source, witness));
+    let param = named.store.symbols.get(copy);
+    assert_eq!(param.owner, Some(getter));
+    assert!(param.flags.contains(SymbolFlags::GIVEN));
+    assert_eq!(named.store.names.resolve(param.name.text()), "tc");
+}
+
 struct PrimaryConstructorParts {
     class_tree: dotty_core::TreeId<dotty_core::Untyped>,
     constructor_tree: dotty_core::TreeId<dotty_core::Untyped>,
@@ -625,6 +893,177 @@ fn primary_constructor_parts(named: &NamedSource) -> PrimaryConstructorParts {
         type_params: constructor.type_params.clone(),
         value_param_clauses: constructor.value_param_clauses.clone(),
     }
+}
+
+#[test]
+fn ordinary_class_bounds_enter_private_fields_and_distinct_constructor_parameters() {
+    for (tail, flag) in [
+        ("", SymbolFlags::GIVEN),
+        ("(implicit n: Int)", SymbolFlags::IMPLICIT),
+    ] {
+        let named = named_source(&format!("class Box[A: {{ TC as tc, Show }}]{tail}"), 402);
+        let parts = primary_constructor_parts(&named);
+        let class = named
+            .index
+            .symbol_at(named.source, parts.class_tree)
+            .unwrap();
+        let ctor = named
+            .index
+            .symbol_at(named.source, parts.constructor_tree)
+            .unwrap();
+        let TreeKind::DefDef(def) = &named.parsed.ast.get(parts.constructor_tree).kind else {
+            panic!("expected primary constructor")
+        };
+        let clauses = def.context_bound_clauses(&named.parsed.ast, &named.store.names);
+        for (bound, name) in clauses[0][..2].iter().zip(["tc", "evidence$1"]) {
+            let field = named.index.symbol_at(named.source, *bound).unwrap();
+            let parameter = named
+                .index
+                .derived_symbol_at(ctor, named.source, *bound)
+                .unwrap();
+            assert_ne!(field, parameter);
+            for (id, owner, kind, visibility) in [
+                (field, class, SymbolKind::Field, Visibility::Private),
+                (parameter, ctor, SymbolKind::Parameter, Visibility::Public),
+            ] {
+                let entry = named.store.symbols.get(id);
+                assert_eq!(
+                    (entry.owner, entry.kind, entry.visibility),
+                    (Some(owner), kind, visibility)
+                );
+                assert!(entry.flags.contains(flag));
+                assert_eq!(named.store.names.resolve(entry.name.text()), name);
+                let scope = named.store.scopes.get(named.index.scope_of(owner).unwrap());
+                assert_eq!(scope.lookup_all(&entry.name), &[id]);
+            }
+        }
+    }
+}
+
+#[test]
+fn case_class_bound_enters_separate_witnesses_and_compares_effective_companion_clauses() {
+    for (companion, generated) in [
+        ("", true),
+        ("object Box { def apply[A](x: A): A = x }", true),
+        (
+            "object Box { def apply[A](x: A)(using e: TC[A]): A = x }",
+            false,
+        ),
+    ] {
+        let named = named_source(
+            &format!("case class Box[A: TC as tc](value: A); {companion}"),
+            403,
+        );
+        let parts = primary_constructor_parts(&named);
+        let class = named
+            .index
+            .symbol_at(named.source, parts.class_tree)
+            .unwrap();
+        let ctor = named
+            .index
+            .symbol_at(named.source, parts.constructor_tree)
+            .unwrap();
+        let TreeKind::DefDef(def) = &named.parsed.ast.get(parts.constructor_tree).kind else {
+            panic!("expected constructor")
+        };
+        let bound = def.context_bound_trees(&named.parsed.ast).next().unwrap();
+        let field = named.index.symbol_at(named.source, bound).unwrap();
+        let formal = named
+            .index
+            .derived_symbol_at(ctor, named.source, bound)
+            .unwrap();
+        assert_eq!(named.store.symbols.owner(field), Some(class));
+        assert_eq!(
+            named.store.symbols.get(field).visibility,
+            Visibility::Private
+        );
+        assert_eq!(named.store.symbols.owner(formal), Some(ctor));
+        let factory = named
+            .index
+            .generated_case_class_method(class, GeneratedCaseClassMethodRole::Apply);
+        assert_eq!(factory.is_some(), generated);
+        if let Some(factory) = factory {
+            let copy = named
+                .index
+                .derived_symbol_at(factory, named.source, bound)
+                .unwrap();
+            let entry = named.store.symbols.get(copy);
+            assert_eq!(entry.owner, Some(factory));
+            assert!(entry.flags.contains(SymbolFlags::GIVEN));
+            assert_eq!(named.store.names.resolve(entry.name.text()), "tc");
+        }
+    }
+}
+
+#[test]
+fn case_class_trailing_using_member_named_copy_preserves_the_companion_apply() {
+    let named = named_source(
+        "case class Envelope[A: TC](value: A)(using copy: Trace)",
+        404,
+    );
+    let parts = primary_constructor_parts(&named);
+    let class = named
+        .index
+        .symbol_at(named.source, parts.class_tree)
+        .unwrap();
+    assert!(
+        named
+            .index
+            .generated_case_class_method(class, GeneratedCaseClassMethodRole::Apply)
+            .is_some()
+    );
+    assert!(
+        named
+            .index
+            .generated_case_class_method(class, GeneratedCaseClassMethodRole::Copy)
+            .is_none()
+    );
+}
+
+#[test]
+fn case_class_copy_indexes_only_the_ordinary_defaults_on_the_instance() {
+    let named = named_source("case class Pair[A: TC as tc](left: A, right: A)", 404);
+    let parts = primary_constructor_parts(&named);
+    let class = named
+        .index
+        .symbol_at(named.source, parts.class_tree)
+        .unwrap();
+    let copy = named
+        .index
+        .generated_case_class_method(class, GeneratedCaseClassMethodRole::Copy)
+        .unwrap();
+    assert_eq!(named.store.symbols.owner(copy), Some(class));
+    let scope = named.store.scopes.get(named.index.scope_of(class).unwrap());
+    assert_eq!(
+        scope.lookup_all(&named.store.symbols.get(copy).name),
+        &[copy]
+    );
+    for (ordinal, param) in parts.value_param_clauses[0].iter().enumerate() {
+        let getter = named.store.default_getter(copy, ordinal).unwrap();
+        assert_eq!(
+            named.index.generated_case_class_method(
+                class,
+                GeneratedCaseClassMethodRole::CopyDefault(ordinal)
+            ),
+            Some(getter)
+        );
+        assert_eq!(
+            named.store.default_getter_origin(getter),
+            Some((copy, ordinal))
+        );
+        assert_eq!(named.store.symbols.owner(getter), Some(class));
+        assert!(
+            scope
+                .lookup_all(&named.store.symbols.get(getter).name)
+                .is_empty()
+        );
+        let copy_param = named
+            .index
+            .derived_symbol_at(copy, named.source, *param)
+            .unwrap();
+        assert_eq!(named.store.symbols.owner(copy_param), Some(copy));
+    }
+    assert_eq!(named.store.default_getter(copy, 2), None);
 }
 
 struct VecTokenSource {
@@ -4551,7 +4990,16 @@ fn wrapper_partition_uses_the_full_package_path_across_clauses() {
         SymbolKind::ModuleClass
     );
     assert_eq!(owner_of(first_stat(first_stat(*nested))), wrapped);
+    let package = named.index.symbol_at(named.source, *qualified).unwrap();
+    assert_eq!(
+        named.index.source_package_wrapper(named.source, package),
+        Some(wrapped)
+    );
     let ordinary = owner_of(first_stat(*unrelated));
+    assert_eq!(
+        named.index.source_package_wrapper(named.source, ordinary),
+        None
+    );
     assert_eq!(
         Some(ordinary),
         named.index.symbol_at(named.source, *unrelated)
@@ -4609,6 +5057,14 @@ fn source_wrappers_keep_distinct_file_stems_in_a_shared_package() {
                 .as_name(),
             )
             .unwrap();
+        assert_eq!(
+            index.source_package_wrapper(source, root_package.symbol),
+            Some(wrapper)
+        );
+        assert_eq!(
+            index.source_package_wrapper(SourceId::from_index(89), root_package.symbol),
+            None
+        );
         let symbol = index.symbol_at(source, method).unwrap();
         assert_eq!(store.symbols.get(symbol).owner, Some(wrapper));
         assert_eq!(
@@ -8584,6 +9040,8 @@ fn unsupported_top_level_case_class_apply_shapes_keep_the_class_and_defer_apply(
 
     let sources = [
         "case class Node(value: Int = 1)",
+        "case class Node[A: TC](value: A)(tag: Int)",
+        "case class Node[A: TC](value: A)(using trace: Trace = log)",
         "case class Node(value: Int)(tag: Int)",
         "case class Node()",
         "case class Node[A <: AnyRef](value: A)",
@@ -9062,7 +9520,7 @@ fn valid_nested_case_class_shapes_defer_apply_without_losing_the_companion_or_si
         "object Owners { case class Node private (value: Int); def unrelated: Int = 1 }",
         "object Owners { case class Node(value: Int) { def this() = this(0) }; def unrelated: Int = 1 }",
         "object Owners { case class Node[A <: AnyRef](value: A); def unrelated: Int = 1 }",
-        "object Owners { case class Node[A: Ordering](value: A); def unrelated: Int = 1 }",
+        "object Owners { case class Node[A <: AnyRef: Ordering](value: A); def unrelated: Int = 1 }",
         "object Owners { case class Node(private val value: Int); def unrelated: Int = 1 }",
         "object Owners { abstract case class Node(value: Int); def unrelated: Int = 1 }",
     ];

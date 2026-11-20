@@ -1,8 +1,13 @@
 use std::collections::{HashMap, HashSet};
 
 mod class_state;
+mod contextual_closure;
+mod contextual_default;
+mod contextual_poly;
 mod expression_validation;
 mod source_binding;
+
+pub(crate) use contextual_default::ContextualDefault;
 
 pub use class_state::{
     ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan,
@@ -41,6 +46,11 @@ pub struct SourceMetadata {
 /// not a way to authenticate arbitrary arena-relative numeric IDs.
 pub trait SourceTypedBindings {
     fn typed_at(&self, source: SourceId, tree: TreeId<Untyped>) -> Option<TreeId<Typed>>;
+
+    /// The frontend's receipt for a generated method or parameter declaration.
+    fn synthetic_definition_symbol(&self, _tree: TreeId<Typed>) -> Option<SymbolId> {
+        None
+    }
 
     /// Canonical classes present in the complete source/JVM/TASTy batch, when
     /// the producer has such a batch plan. The pickler validates each listed
@@ -174,6 +184,17 @@ pub trait SourceTypedBindings {
         _source: SourceId,
         _method: SymbolId,
     ) -> Option<ConditionalLocalReferenceSelectionBinding> {
+        None
+    }
+
+    /// Borrowed identity receipt for the original Unit-valued conditional
+    /// whose THEN and ELSE arms assign one initialized mutable Counter local.
+    /// It does not authorize arbitrary reference assignments or nested flow.
+    fn conditional_mutable_reference_assignment(
+        &self,
+        _source: SourceId,
+        _method: SymbolId,
+    ) -> Option<ConditionalMutableReferenceAssignmentBinding> {
         None
     }
 
@@ -498,6 +519,15 @@ pub struct PlannedCallBinding {
     pub result_type: TypeId,
 }
 
+impl SourceTypedBindings for dotty_core::SourceTypedIndex {
+    fn typed_at(&self, source: SourceId, tree: TreeId<Untyped>) -> Option<TreeId<Typed>> {
+        self.get(source, tree)
+    }
+    fn synthetic_definition_symbol(&self, tree: TreeId<Typed>) -> Option<SymbolId> {
+        dotty_core::SourceTypedIndex::synthetic_definition_symbol(self, tree)
+    }
+}
+
 impl<F> SourceTypedBindings for F
 where
     F: Fn(SourceId, TreeId<Untyped>) -> Option<TreeId<Typed>>,
@@ -591,6 +621,8 @@ impl ValidationLimits {
 pub struct ValidatedPicklePlan<'p, 'a> {
     plan: &'p PicklePlan<'a>,
     package: SymbolId,
+    pub(crate) context_closures: HashMap<SymbolId, dotty_core::CheckedUnaryContextClosure>,
+    pub(crate) context_defaults: HashMap<SymbolId, ContextualDefault>,
 }
 
 /// Validated input for the explicitly incomplete #2300 declaration fragment.
@@ -646,16 +678,21 @@ impl<'a> PicklePlan<'a> {
             reference_fields: &[],
             planned_class_symbols: &[],
             mutable_counter_assignment: None,
+            conditional_mutable_assignment: None,
             local_bindings: HashMap::new(),
             registered_local_symbols: HashSet::new(),
             seen_local_bindings: HashSet::new(),
             seen_local_symbols: HashSet::new(),
             visible_locals: HashSet::new(),
+            context_closures: HashMap::new(),
+            context_defaults: HashMap::new(),
         };
         let package = validator.validate(None)?;
         Ok(ValidatedPicklePlan {
             plan: self,
             package,
+            context_closures: validator.context_closures,
+            context_defaults: validator.context_defaults,
         })
     }
 }
@@ -704,11 +741,18 @@ pub(crate) fn validate_class_state_method(
                 .typed_bindings
                 .mutable_counter_reference_assignment(class.source.id, method.symbol)
         }),
+        conditional_mutable_assignment: methods.first().and_then(|method| {
+            class
+                .typed_bindings
+                .conditional_mutable_reference_assignment(class.source.id, method.symbol)
+        }),
         local_bindings: HashMap::new(),
         registered_local_symbols: HashSet::new(),
         seen_local_bindings: HashSet::new(),
         seen_local_symbols: HashSet::new(),
         visible_locals: HashSet::new(),
+        context_closures: HashMap::new(),
+        context_defaults: HashMap::new(),
     };
     for binding in local_values {
         if validator
@@ -785,11 +829,14 @@ pub(crate) fn validate_class_state_mutable_declaration_fragment(
         reference_fields,
         planned_class_symbols: class.typed_bindings.planned_class_symbols(),
         mutable_counter_assignment: None,
+        conditional_mutable_assignment: None,
         local_bindings: HashMap::new(),
         registered_local_symbols: HashSet::new(),
         seen_local_bindings: HashSet::new(),
         seen_local_symbols: HashSet::new(),
         visible_locals: HashSet::new(),
+        context_closures: HashMap::new(),
+        context_defaults: HashMap::new(),
     };
     for local in &local_values {
         if validator
@@ -845,11 +892,14 @@ pub(crate) fn validate_class_state_mutable_reference_assignment_fragment(
         reference_fields,
         planned_class_symbols: class.typed_bindings.planned_class_symbols(),
         mutable_counter_assignment: Some(assignment),
+        conditional_mutable_assignment: None,
         local_bindings: HashMap::new(),
         registered_local_symbols: HashSet::new(),
         seen_local_bindings: HashSet::new(),
         seen_local_symbols: HashSet::new(),
         visible_locals: HashSet::new(),
+        context_closures: HashMap::new(),
+        context_defaults: HashMap::new(),
     };
     for local in &local_values {
         if validator
@@ -876,11 +926,14 @@ struct Validator<'p, 'a> {
     reference_fields: &'a [SymbolId],
     planned_class_symbols: &'a [SymbolId],
     mutable_counter_assignment: Option<MutableCounterReferenceAssignmentBinding>,
+    conditional_mutable_assignment: Option<ConditionalMutableReferenceAssignmentBinding>,
     local_bindings: HashMap<TreeId<Untyped>, LocalValueBinding>,
     registered_local_symbols: HashSet<SymbolId>,
     seen_local_bindings: HashSet<TreeId<Untyped>>,
     seen_local_symbols: HashSet<SymbolId>,
     visible_locals: HashSet<SymbolId>,
+    context_closures: HashMap<SymbolId, dotty_core::CheckedUnaryContextClosure>,
+    context_defaults: HashMap<SymbolId, ContextualDefault>,
 }
 
 impl<'a> Validator<'_, 'a> {
@@ -1082,7 +1135,9 @@ impl<'a> Validator<'_, 'a> {
         }
         self.span(record.position)?;
         if record.visibility != Visibility::Public
-            || record.flags != SymbolFlags::EMPTY
+            || !(record.flags.is_empty()
+                || (kind == SymbolKind::Parameter
+                    && matches!(record.flags, SymbolFlags::GIVEN | SymbolFlags::IMPLICIT)))
             || !record.annotations.is_empty()
         {
             return Err(self.unsupported(UnsupportedFeature::SymbolMetadata, Some(symbol)));
@@ -1108,11 +1163,21 @@ impl<'a> Validator<'_, 'a> {
         self.charge(metadata.modifiers.len())?;
         self.charge(metadata.annotations.len())?;
         let mut saw_param = false;
+        let mut contextual = SymbolFlags::EMPTY;
         for modifier in &metadata.modifiers {
-            if *modifier != dotty_core::ast::Modifier::Param || saw_param {
-                return Err(self.unsupported(UnsupportedFeature::SourceMetadata, Some(symbol)));
+            match modifier {
+                dotty_core::ast::Modifier::Param if !saw_param => saw_param = true,
+                dotty_core::ast::Modifier::Given if contextual.is_empty() => {
+                    contextual = SymbolFlags::GIVEN
+                }
+                dotty_core::ast::Modifier::Implicit if contextual.is_empty() => {
+                    contextual = SymbolFlags::IMPLICIT
+                }
+                _ => return Err(self.unsupported(UnsupportedFeature::SourceMetadata, Some(symbol))),
             }
-            saw_param = true;
+        }
+        if self.symbol(symbol)?.flags != contextual {
+            return Err(self.unsupported(UnsupportedFeature::SymbolMetadata, Some(symbol)));
         }
         if metadata.visibility.is_some() || !metadata.annotations.is_empty() {
             return Err(self.unsupported(UnsupportedFeature::SourceMetadata, Some(symbol)));
@@ -1235,7 +1300,12 @@ impl<'a> Validator<'_, 'a> {
                     });
                 };
                 self.parameter_metadata(&parameter.metadata, symbol)?;
-                if parameter.rhs.is_some() {
+                if parameter.rhs.is_some()
+                    && !self
+                        .context_defaults
+                        .get(&method)
+                        .is_some_and(|d| d.defaulted == symbol)
+                {
                     return Err(
                         self.unsupported(UnsupportedFeature::ParameterClauses, Some(symbol))
                     );
@@ -1457,6 +1527,16 @@ impl<'a> Validator<'_, 'a> {
         // that scope, but this serializer slice must report it as an
         // unsupported constructor form rather than an opaque scope mismatch.
         let has_two_reference_parameters = self.constructor(template.constructor)?;
+        for method in p.methods {
+            if let Some(default) = self.contextual_default(method)? {
+                if !expected.insert(default.getter) {
+                    return Err(PickleError::DuplicateDeclaration {
+                        symbol: default.getter,
+                    });
+                }
+                self.context_defaults.insert(method.symbol, default);
+            }
+        }
         let mut entered = HashSet::new();
         let mut invalid_scope = false;
         for symbol in class_scope.entered_symbols() {
@@ -2291,7 +2371,7 @@ impl<'a> Validator<'_, 'a> {
         }
         self.metadata(&definition.metadata, method.symbol)?;
         if !definition.type_params.is_empty() {
-            return Err(self.unsupported(UnsupportedFeature::TypeParameters, Some(method.symbol)));
+            return self.polymorphic_evidence_method(definition, method, signature_only);
         }
         self.parameters(method.symbol, definition, &method.parameter_clauses)?;
         let mutable_rebinding_method = self
@@ -2310,15 +2390,19 @@ impl<'a> Validator<'_, 'a> {
                                 && declaration.typed_block == assignment.typed_block
                         })
             });
-        if definition.value_param_clauses.len() > 1
+        let curried = method.parameter_clauses.len() > 1;
+        if (curried
+            && !method.parameter_clauses.iter().flatten().any(|&parameter| {
+                matches!(
+                    p.store.symbols.get(parameter).flags,
+                    SymbolFlags::GIVEN | SymbolFlags::IMPLICIT
+                )
+            }))
             || (definition.source_param_clause_order.is_some() && !mutable_rebinding_method)
         {
             return Err(self.unsupported(UnsupportedFeature::ParameterClauses, Some(method.symbol)));
         }
         let ty = self.complete(method.symbol)?;
-        let TreeKind::Ident(result) = &self.source_tree(definition.tpt)?.kind else {
-            return Err(self.unsupported(UnsupportedFeature::ResultTypeSyntax, Some(method.symbol)));
-        };
         let int =
             self.ty(p.definitions.int)?
                 .reference_symbol()
@@ -2339,47 +2423,34 @@ impl<'a> Validator<'_, 'a> {
                     ty: p.definitions.unit,
                     role: TypeRole::Builtin(Builtin::Unit),
                 })?;
-        self.name(result.name)?;
-        let supports_result = |validator: &Self, result_ty| {
-            result_ty == p.definitions.int
-                || result_ty == p.definitions.boolean
-                || result_ty == p.definitions.unit
-                || validator.is_planned_sibling_class_type(result_ty, Some(result.name))
-        };
-        match definition.value_param_clauses.as_slice() {
-            [] if supports_result(self, ty) => {}
-            [] => {
+        let mut result_type = ty;
+        for parameters in &method.parameter_clauses {
+            let Type::Method(signature) = self.ty(result_type)? else {
                 return Err(PickleError::MalformedType {
                     ty,
-                    role: TypeRole::MethodResult,
+                    role: if parameters.is_empty() {
+                        TypeRole::MethodResult
+                    } else {
+                        TypeRole::Parameter
+                    },
+                });
+            };
+            if (parameters.is_empty() && signature.kind != MethodKind::Plain)
+                || signature.params.len() != parameters.len()
+            {
+                return Err(PickleError::MalformedType {
+                    ty,
+                    role: TypeRole::Parameter,
                 });
             }
-            [clause] => {
-                let Type::Method(signature) = self.ty(ty)? else {
-                    return Err(PickleError::MalformedType {
-                        ty,
-                        role: if clause.is_empty() {
-                            TypeRole::MethodResult
-                        } else {
-                            TypeRole::Parameter
-                        },
-                    });
-                };
-                if signature.kind != MethodKind::Plain
-                    || signature.params.len() != method.parameter_clauses[0].len()
-                {
-                    return Err(PickleError::MalformedType {
-                        ty,
-                        role: TypeRole::Parameter,
-                    });
-                }
-                let planned_class_parameters = signature
-                    .params
-                    .iter()
-                    .filter(|formal| self.is_planned_sibling_class_type(formal.ty, None))
-                    .count();
-                if planned_class_parameters != 0
-                    && !((planned_class_parameters == 1 && signature.params.len() == 1)
+            let planned_class_parameters = signature
+                .params
+                .iter()
+                .filter(|formal| self.is_planned_sibling_class_type(formal.ty, None))
+                .count();
+            if planned_class_parameters != 0
+                && (curried
+                    || !((planned_class_parameters == 1 && signature.params.len() == 1)
                         || (planned_class_parameters == 1
                             && signature.params.len() == 2
                             && self.is_planned_sibling_class_type(signature.params[0].ty, None)
@@ -2399,47 +2470,59 @@ impl<'a> Validator<'_, 'a> {
                             && !self.same_planned_sibling_class_type(
                                 signature.params[0].ty,
                                 signature.result,
-                            )))
+                            ))))
+            {
+                return Err(PickleError::MalformedType {
+                    ty,
+                    role: TypeRole::Parameter,
+                });
+            }
+            for (formal, &parameter) in signature.params.iter().zip(parameters) {
+                let expected_kind = match self.symbol(parameter)?.flags {
+                    SymbolFlags::GIVEN => MethodKind::Contextual,
+                    SymbolFlags::IMPLICIT => MethodKind::Implicit,
+                    _ => MethodKind::Plain,
+                };
+                if signature.kind != expected_kind
+                    || formal.name.as_name() != &self.symbol(parameter)?.name
+                    || (formal.ty != p.definitions.int
+                        && formal.ty != p.definitions.boolean
+                        && !self.is_planned_sibling_class_type(formal.ty, None))
+                    || self.complete(parameter)? != formal.ty
+                    || formal.erased
+                    || formal.varargs
                 {
                     return Err(PickleError::MalformedType {
                         ty,
                         role: TypeRole::Parameter,
                     });
                 }
-                if !supports_result(self, signature.result) {
-                    return Err(PickleError::MalformedType {
-                        ty,
-                        role: TypeRole::MethodResult,
-                    });
-                }
-                for (formal, &parameter) in
-                    signature.params.iter().zip(&method.parameter_clauses[0])
-                {
-                    if formal.name.as_name() != &self.symbol(parameter)?.name
-                        || (formal.ty != p.definitions.int
-                            && formal.ty != p.definitions.boolean
-                            && !self.is_planned_sibling_class_type(formal.ty, None))
-                        || self.complete(parameter)? != formal.ty
-                        || formal.erased
-                        || formal.varargs
-                    {
-                        return Err(PickleError::MalformedType {
-                            ty,
-                            role: TypeRole::Parameter,
-                        });
-                    }
-                }
             }
-            _ => {
-                return Err(
-                    self.unsupported(UnsupportedFeature::ParameterClauses, Some(method.symbol))
-                );
-            }
+            result_type = signature.result;
         }
-        let result_type = match self.ty(ty)? {
-            Type::Method(signature) => signature.result,
-            _ => ty,
+        if matches!(
+            self.source_tree(definition.tpt)?.kind,
+            TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_))
+        ) && self.class_members.is_none()
+        {
+            return self.context_result_closure(definition, method, result_type);
+        }
+        let TreeKind::Ident(result) = &self.source_tree(definition.tpt)?.kind else {
+            return Err(self.unsupported(UnsupportedFeature::ResultTypeSyntax, Some(method.symbol)));
         };
+        self.name(result.name)?;
+        let supports_result = |validator: &Self, result_ty| {
+            result_ty == p.definitions.int
+                || result_ty == p.definitions.boolean
+                || result_ty == p.definitions.unit
+                || validator.is_planned_sibling_class_type(result_ty, Some(result.name))
+        };
+        if !supports_result(self, result_type) {
+            return Err(PickleError::MalformedType {
+                ty: result_type,
+                role: TypeRole::MethodResult,
+            });
+        }
         let expected_result_name = if result_type == p.definitions.int {
             self.symbol(int)?.name
         } else if result_type == p.definitions.boolean {

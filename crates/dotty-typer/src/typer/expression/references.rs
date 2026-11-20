@@ -150,6 +150,13 @@ impl SourceTyper<'_> {
         let typed = self.type_expression_inner(source_tree, context, info_journal, new_mappings)?;
         let typed =
             self.adapt_java_nullary_method_value(source_tree, typed, info_journal, new_mappings)?;
+        let adapted = self.apply_contextual_arguments(source_tree, typed, context, info_journal)?;
+        let adapted =
+            self.apply_context_function_at_value(source_tree, adapted, context, info_journal)?;
+        if adapted != typed {
+            self.record_adapted_value(source_tree, adapted, new_mappings)?;
+        }
+        let typed = adapted;
         self.validate_value_expression(source_tree, typed)?;
         Ok(typed)
     }
@@ -205,6 +212,16 @@ impl SourceTyper<'_> {
             method.result,
             position,
         );
+        self.record_adapted_value(source_tree, applied, new_mappings)?;
+        Ok(applied)
+    }
+
+    pub(in crate::typer) fn record_adapted_value(
+        &mut self,
+        source_tree: TreeId<Untyped>,
+        applied: TreeId<Typed>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<(), TyperError> {
         self.typed_index.remove(self.source, source_tree);
         self.typed_index
             .insert(self.source, source_tree, applied)
@@ -217,7 +234,7 @@ impl SourceTyper<'_> {
         if !new_mappings.contains(&(self.source, source_tree)) {
             new_mappings.push((self.source, source_tree));
         }
-        Ok(applied)
+        Ok(())
     }
 
     pub(in crate::typer) fn enclosing_this_owner(
@@ -262,7 +279,22 @@ impl SourceTyper<'_> {
         qualifier_type: TypeId,
         tree_index: u32,
     ) -> Result<(), TyperError> {
-        let stable = match self.store.types.try_get(qualifier_type) {
+        if self.is_stable_selection_prefix(qualifier_type)? {
+            Ok(())
+        } else {
+            Err(TyperError::UnstableSelectionPrefix {
+                source: self.source,
+                tree_index,
+                qualifier_type,
+            })
+        }
+    }
+
+    pub(in crate::typer) fn is_stable_selection_prefix(
+        &self,
+        qualifier_type: TypeId,
+    ) -> Result<bool, TyperError> {
+        Ok(match self.store.types.try_get(qualifier_type) {
             Some(Type::ThisType { .. } | Type::Constant(_)) => true,
             Some(Type::TermRef {
                 target: TermRefTarget::Symbol(symbol),
@@ -292,16 +324,7 @@ impl SourceTyper<'_> {
                 }
             }
             _ => false,
-        };
-        if stable {
-            Ok(())
-        } else {
-            Err(TyperError::UnstableSelectionPrefix {
-                source: self.source,
-                tree_index,
-                qualifier_type,
-            })
-        }
+        })
     }
 
     pub(in crate::typer) fn require_stable_application_selection_prefix(
@@ -322,7 +345,9 @@ impl SourceTyper<'_> {
                 _ => None,
             })
             .is_some_and(|tree| matches!(tree.kind, TreeKind::New(_)));
-        if is_initialized_constructor_result {
+        if is_initialized_constructor_result
+            || self.is_structural_factory_result(qualifier, qualifier_type)
+        {
             Ok(())
         } else if self
             .typed_arena
@@ -344,6 +369,82 @@ impl SourceTyper<'_> {
         } else {
             self.require_stable_selection_prefix(qualifier_type, tree_index)
         }
+    }
+
+    fn is_structural_factory_result(&self, mut tree: TreeId<Typed>, result: TypeId) -> bool {
+        let tycon = match self.store.types.try_get(result) {
+            Some(Type::Applied { tycon, .. }) => *tycon,
+            _ => result,
+        };
+        let Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(class),
+            ..
+        }) = self.store.types.try_get(tycon)
+        else {
+            return false;
+        };
+        if !self.store.symbols.contains(*class)
+            || self.store.symbols.get(*class).kind != SymbolKind::Class
+        {
+            return false;
+        }
+        for _ in 0..crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
+            let node = self.typed_arena.get(tree);
+            match &node.kind {
+                TreeKind::Apply(call) => tree = call.function,
+                TreeKind::TypeApply(call) => tree = call.function,
+                TreeKind::Ident(_) | TreeKind::Select(_) => {
+                    let Some(Type::TermRef {
+                        target: TermRefTarget::Symbol(method),
+                        ..
+                    }) = self.store.types.try_get(node.ty)
+                    else {
+                        return false;
+                    };
+                    if !self.store.symbols.contains(*method) {
+                        return false;
+                    }
+                    if let Some(SourceDefinition::Derived { source, tree }) =
+                        self.index.definition_of(*method)
+                    {
+                        return source == self.source
+                            && self.structural_given_class(*method, tree) == Some(*class);
+                    }
+                    return self.binary_given_returns_class(*method, *class);
+                }
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    /// A separately compiled provider can be used as an expression receiver
+    /// when its declared result identifies the exact class under the same owner.
+    fn binary_given_returns_class(&self, method: SymbolId, class: SymbolId) -> bool {
+        let callable = self.store.symbols.get(method);
+        if !matches!(callable.origin, SymbolOrigin::Tasty(_))
+            || callable.kind != SymbolKind::Method
+            || !callable.flags.contains(SymbolFlags::GIVEN)
+            || callable.owner != self.store.symbols.owner(class)
+        {
+            return false;
+        }
+        let SymbolInfo::Complete(mut result) = callable.info else {
+            return false;
+        };
+        for _ in 0..crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
+            result = match self.store.types.try_get(result) {
+                Some(Type::Method(m)) => m.result,
+                Some(Type::Poly(p)) => p.result,
+                Some(Type::Applied { tycon, .. }) => *tycon,
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(declared),
+                    ..
+                }) => return *declared == class,
+                _ => return false,
+            };
+        }
+        false
     }
 
     fn is_source_parameterless_method_value(
@@ -445,6 +546,17 @@ impl SourceTyper<'_> {
         tree_index: u32,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
+        self.term_reference_type(symbol, None, expression_owner, tree_index, info_journal)
+    }
+
+    pub(in crate::typer) fn term_reference_type(
+        &mut self,
+        symbol: SymbolId,
+        selected_prefix: Option<TypeId>,
+        expression_owner: SymbolId,
+        tree_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
         if !self.store.symbols.contains(symbol) {
             return Err(TyperError::UnknownSymbol { symbol });
         }
@@ -514,8 +626,12 @@ impl SourceTyper<'_> {
                 });
             }
         }
-        let prefix =
-            self.expression_term_prefix(symbol, expression_owner, tree_index, info_journal)?;
+        let prefix = match selected_prefix {
+            Some(prefix) => prefix,
+            None => {
+                self.expression_term_prefix(symbol, expression_owner, tree_index, info_journal)?
+            }
+        };
         Ok(self.store.types.alloc(Type::TermRef {
             prefix,
             target: TermRefTarget::Symbol(symbol),
@@ -756,7 +872,8 @@ impl SourceTyper<'_> {
         let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
             .this(this.qual, ty, position);
         if capture_this {
-            self.function_literals.capture(context.owner, class, typed);
+            self.function_literals
+                .capture(self.store, context.owner, class, typed);
         }
         Ok(typed)
     }
@@ -791,7 +908,8 @@ impl SourceTyper<'_> {
             position,
             ty,
         });
-        self.function_literals.capture(method, class, this);
+        self.function_literals
+            .capture(self.store, method, class, this);
         Ok(())
     }
 
@@ -911,13 +1029,46 @@ impl SourceTyper<'_> {
         context: ExpressionContext,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TreeId<Typed>, TyperError> {
-        let symbol = self.resolve_expression_term_with_inherited(
+        let symbol = match self.resolve_expression_term_with_inherited(
             ident.name,
             context,
             tree.index(),
             position,
             info_journal,
-        )?;
+        ) {
+            Err(error @ TyperError::TermNameNotFound { .. }) => {
+                let Some((object, symbol)) =
+                    self.predef_context_member(ident.name, tree.index())?
+                else {
+                    return Err(error);
+                };
+                let qualifier = self.type_resolved_identifier_expression(
+                    object,
+                    Ident {
+                        name: self.store.symbols.get(object).name,
+                        backquoted: false,
+                    },
+                    None,
+                    context,
+                    tree.index(),
+                    info_journal,
+                )?;
+                let ty = self.store.types.alloc(Type::TermRef {
+                    prefix: self.typed_arena.get(qualifier).ty,
+                    target: TermRefTarget::Symbol(symbol),
+                });
+                return Ok(
+                    TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).select(
+                        qualifier,
+                        ident.name,
+                        ident.backquoted,
+                        ty,
+                        position,
+                    ),
+                );
+            }
+            result => result?,
+        };
         if self.is_deferred_case_class_companion_apply(ident.name, symbol) {
             return Err(TyperError::OverloadedSelectionDeferred {
                 source: self.source,
@@ -990,6 +1141,8 @@ impl SourceTyper<'_> {
                 context.owner,
                 symbol,
             );
+        let capture_constructor_parameter = self.function_literals.is_method(context.owner)
+            && self.can_capture_constructor_parameter(context.owner, symbol);
         let capture_local =
             self.function_literals
                 .can_capture_local_value(self.store, context.owner, symbol)
@@ -1010,6 +1163,7 @@ impl SourceTyper<'_> {
             && (matches!(declaration.kind, SymbolKind::Parameter | SymbolKind::Local)
                 || (instance_member && !shared_owner && capture_member_owner.is_none()))
             && !capture_parameter
+            && !capture_constructor_parameter
             && !capture_local
         {
             return Err(TyperError::FunctionLiteralCaptureUnsupported {
@@ -1019,13 +1173,26 @@ impl SourceTyper<'_> {
             });
         }
         let ty = self.expression_type_of_symbol(symbol, context.owner, tree_index, info_journal)?;
+        if capture_constructor_parameter
+            && matches!(
+                self.store.types.try_get(ty),
+                Some(Type::ByName { .. } | Type::Repeated { .. })
+            )
+        {
+            return Err(TyperError::FunctionLiteralCaptureUnsupported {
+                source: self.source,
+                tree_index,
+                symbol: Some(symbol),
+            });
+        }
         let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
             .ident_with_backquoted(ident.name, ident.backquoted, ty, position);
         if let Some(class) = capture_member_owner {
             self.capture_implicit_enclosing_this(context.owner, class, tree_index, position)?;
         }
-        if capture_parameter || capture_local {
-            self.function_literals.capture(context.owner, symbol, typed);
+        if capture_parameter || capture_constructor_parameter || capture_local {
+            self.function_literals
+                .capture(self.store, context.owner, symbol, typed);
         }
         Ok(typed)
     }
@@ -1045,7 +1212,7 @@ impl SourceTyper<'_> {
                 tree_index: tree.index(),
             });
         }
-        let qualifier_candidate = self.type_selection_qualifier(
+        let qualifier = self.type_selection_qualifier(
             selection.qualifier,
             context,
             tree.index(),
@@ -1053,11 +1220,6 @@ impl SourceTyper<'_> {
             info_journal,
             new_mappings,
         )?;
-        let qualifier = if let Some(qualifier) = qualifier_candidate {
-            qualifier
-        } else {
-            self.type_expression_inner(selection.qualifier, context, info_journal, new_mappings)?
-        };
         let receiver_type = self.typed_arena.get(qualifier).ty;
         if matches!(self.typed_arena.get(qualifier).kind, TreeKind::Super(_)) {
             return self.type_super_selected_member(
@@ -1350,8 +1512,56 @@ impl SourceTyper<'_> {
                         .contains(SymbolFlags::STATIC)
             });
         }
+        if candidates.len() > 1
+            && let Some(expected) = self.expected_value_at(tree_index)
+            && candidates
+                .iter()
+                .all(|m| self.store.symbols.get(m.symbol).kind == SymbolKind::Method)
+        {
+            let mut signatures = Vec::with_capacity(candidates.len());
+            for member in &candidates {
+                if self.is_selected_member_accessible(
+                    member.symbol,
+                    member.declaring_class,
+                    context,
+                    tree_index,
+                )? {
+                    signatures.push((
+                        member.symbol,
+                        self.member_type_on_journaled(member, info_journal)?,
+                    ));
+                }
+            }
+            if let Some(winner) = self.overload_with_contextual_result(
+                &signatures,
+                expected,
+                tree_index,
+                info_journal,
+            )? {
+                candidates.retain(|m| m.symbol == winner);
+            }
+        }
         let candidate = match candidates.as_slice() {
             [] => {
+                if !java_class_qualifier
+                    && let Some((extension, signature)) = self.contextual_extension(
+                        name,
+                        receiver,
+                        context,
+                        tree_index,
+                        info_journal,
+                    )?
+                    && let Some(Type::Method(clause)) = self.store.types.try_get(signature)
+                {
+                    return Ok(
+                        TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply(
+                            extension,
+                            vec![qualifier],
+                            clause.result,
+                            position,
+                        ),
+                    );
+                }
                 return Err(TyperError::MemberNotFound {
                     source: self.source,
                     tree_index,
@@ -1952,8 +2162,8 @@ impl SourceTyper<'_> {
         Ok(true)
     }
 
-    /// Type a selection qualifier without treating a package path as a value.
-    /// The resulting source mappings still retain every node in the path.
+    /// Supply omitted contextual method clauses before looking up a term member.
+    /// Packages and Java classes can also qualify a selection.
     pub(in crate::typer) fn type_selection_qualifier(
         &mut self,
         tree: TreeId<Untyped>,
@@ -1961,6 +2171,50 @@ impl SourceTyper<'_> {
         tree_index: u32,
         position: Option<SourceSpan>,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        if let Some(path) =
+            self.try_type_namespace_qualifier(tree, context, tree_index, position, new_mappings)?
+        {
+            return Ok(path);
+        }
+        let raw = self.type_expression_inner(tree, context, info_journal, new_mappings)?;
+        // An instantiated method exposes its remaining clause directly. Probing
+        // the signatures of unrelated TermRefs here would change which ordinary
+        // method references qualify as stable receivers.
+        let receiver_type = self.typed_arena.get(raw).ty;
+        if !matches!(self.store.types.try_get(receiver_type), Some(Type::Method(m)) if m.kind != MethodKind::Plain)
+        {
+            return Ok(raw);
+        }
+
+        // Parens share the enclosed expression's typed identity. Adapt the
+        // inner call at its own source location and keep those mappings together.
+        let mut inner = tree;
+        let mut parens = Vec::new();
+        while let TreeKind::PhaseSpecific(UntypedNode::Parens(wrapper)) =
+            &self.arena.get(inner).kind
+            && self.typed_index.get(self.source, wrapper.inner) == Some(raw)
+        {
+            parens.push(inner);
+            inner = wrapper.inner;
+        }
+        let qualifier = self.apply_contextual_arguments(inner, raw, context, info_journal)?;
+        if qualifier != raw {
+            self.record_adapted_value(inner, qualifier, new_mappings)?;
+            for wrapper in parens {
+                self.record_adapted_value(wrapper, qualifier, new_mappings)?;
+            }
+        }
+        Ok(qualifier)
+    }
+
+    fn try_type_namespace_qualifier(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: ExpressionContext,
+        tree_index: u32,
+        position: Option<SourceSpan>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<Option<TreeId<Typed>>, TyperError> {
         if let Some(typed) = self.typed_index.get(self.source, tree) {
@@ -1975,11 +2229,6 @@ impl SourceTyper<'_> {
                 tree_index: tree.index(),
             });
         };
-        if let TreeKind::Select(_) = node.kind {
-            return self
-                .type_expression_inner(tree, context, info_journal, new_mappings)
-                .map(Some);
-        }
         let TreeKind::Ident(ident) = &node.kind else {
             return Ok(None);
         };

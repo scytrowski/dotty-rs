@@ -18,6 +18,7 @@ mod class;
 mod companions;
 mod completion;
 mod constructor;
+mod default_getters;
 mod discovery;
 mod enter;
 mod error;

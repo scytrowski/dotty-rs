@@ -1335,6 +1335,81 @@ private cross-class access, inherited accessor call-site lowering,
 child-declared accessors above an accessor-bearing parent, traits, generics, or
 general combined Scala ABI/TASTy output outside the audited Counter pair path.
 
+A monomorphic instance method with one nonempty contextual or legacy implicit
+clause uses the ordinary JVM parameter descriptor and slots. A typed call
+carries its explicit or synthesized argument trees. The source execution
+regression forwards a context parameter and invokes an implicit method with
+explicit `using`, then checks both results under JDK 21 verification.
+
+An ordinary instance method may also take one plain clause followed by a
+nonempty `using` or legacy `implicit` clause. The descriptor lists both
+clauses in source order. At a fully applied call the backend checks the
+intermediate method type, each clause's arity and the ordered parameter
+bindings, then evaluates the receiver and both sets of arguments in order
+and emits one virtual invocation. The JDK test covers explicit and inferred
+evidence with different argument values.
+
+A method `def evidence[A](using a: A): A = a` with default type bounds has
+erased parameter and return type `java.lang.Object`. The producer verifies
+the binder and the returned parameter symbol before emitting `aload_1` and
+`areturn`. The class-file interface exposes the erased descriptor. The Scala
+type parameter and contextual clause are available through the semantic pickler.
+
+A method returning `Int ?=> Int` can return a unary context lambda directly.
+Its evidence parameter occupies the slot after the enclosing method's zero or
+one ordinary `Int` parameter. Supported bodies return a parameter or add two
+parameters using the canonical `Int.+`. Captured reads must match the closure
+environment. In the source pipeline, `def closure: Int ?=> Int` emits `(I)I`
+and `def capture(x: Int): Int ?=> Int` emits `(II)I`, matching Scala 3.9's
+integration of direct context-function results into the enclosing method.
+
+### Default arguments in a contextual clause
+
+For `def offset(x: Int)(using n: Int = x): Int`, a source session types the
+whole definition. `JvmMethodPlan::source_default_getters` follows the registered
+method and parameter position to the getter, its own copy of `x`, and the typed
+default expression. Scala 3.9 and this backend both emit the public instance
+method `offset$default$2(I)I`. The semantic getter signature copies the
+preceding ordinary clause and returns the type of the contextual or legacy
+implicit parameter. Context bounds can change parameter order and remain outside this
+source getter contract.
+
+`JvmMethodPlan::bind_generated_locals` reads the typer's symbol bindings for
+temporary declarations reachable from the method body. For
+`choose(reader).offset(next())`, the generated code evaluates `choose` and
+`next` in order, each once. The getter and `offset` read the same two slots.
+The JDK 21 test checks the call order, counters, and virtual dispatch to an
+overridden getter.
+
+For `def pick(x: Int, y: Int)(using n: Int = y): Int = n`, the emitted
+`pick$default$3(II)I` returns its second argument. The JDK 21 harness runs
+`choose(reader).pick(nextX(), nextY())` with overrides that record the
+evaluation order. The selected receiver gets both calls, and the getter and
+`pick(III)I` receive the same two values in source order. A local given and
+an explicit contextual argument each bypass the overridden getter.
+
+For a first contextual clause, `def read(using n: Int = 7): Int = n` emits
+`read(I)I` and the public instance method `read$default$1()I`. Scala 3.9
+and this backend invoke the latter with `invokevirtual` only when the caller
+omits the argument and contextual search finds no evidence. The typer
+represents this getter with its result type directly and an `Ident` or
+`Select` at the call site. An explicit empty argument list on the getter or
+an empty method clause in its semantic signature fails validation.
+
+The source pipeline also proves an immutable named local
+`given evidence: Int = 11` using its source declaration, typed initializer
+and canonical local symbol. Only a matching integer literal can use an eager
+JVM local slot, because evaluating it early cannot cause a side effect.
+General lazy initializers remain unsupported. The JDK 21 test overrides the
+getter and checks that calls with this local evidence and with an explicit
+`using 9` leave its invocation count unchanged.
+
+A first `implicit` clause uses the same JVM calling convention. The
+`LegacyDefaults.scala` fixture runs through the Scala 3.9 typer and the Rust
+source-to-JVM pipeline. On the JVM, an inferred or positional argument goes
+straight to `legacy(I)I`. A call with no evidence first invokes
+`legacy$default$1()I`.
+
 ## Emitting several classes from one unit
 
 Call `unit.prepare_emission(&definitions)` after building the complete unit.

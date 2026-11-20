@@ -527,9 +527,9 @@ fn counter_constructor_parameter_initializes_its_own_mutable_field() {
 
     let constructor_node = addresses.get(constructor.address).unwrap();
     let constructor_body = constructor_node.decode_defdef_body().unwrap();
-    assert_eq!(constructor_body.parameters.len(), 1);
+    assert_eq!(constructor_body.parameters().count(), 1);
     assert_eq!(
-        file.render_name(constructor_body.parameters[0].name())
+        file.render_name(constructor_body.parameters().next().unwrap().name())
             .unwrap(),
         "start"
     );
@@ -1086,7 +1086,7 @@ fn validated_private_fields_emit_source_ordered_valdefs_and_preserve_methods() {
         .decode_defdef_body()
         .unwrap();
     assert_eq!(file.render_name(method.name).unwrap(), "constant");
-    assert_eq!(method.clauses, [EMPTYCLAUSE_TAG]);
+    assert_eq!(method.clauses().collect::<Vec<_>>(), [EMPTYCLAUSE_TAG]);
     assert_eq!(raw_tree_tag(&method.rhs.unwrap()), INTCONST_TAG);
 }
 
@@ -1155,19 +1155,17 @@ fn mixed_counter_int_method_signatures_project_ordered_params_without_bodies() {
             method.rhs, None,
             "signature projection must omit body syntax"
         );
-        assert_eq!(method.parameters.len(), 2);
+        assert_eq!(method.parameters().count(), 2);
         assert_eq!(
             method
-                .parameters
-                .iter()
+                .parameters()
                 .map(|parameter| file.render_name(parameter.name()).unwrap())
                 .collect::<Vec<_>>(),
             parameter_names
         );
         assert_eq!(
             method
-                .parameters
-                .iter()
+                .parameters()
                 .map(|parameter| {
                     let body = parameter.decode_body().unwrap();
                     assert_eq!(raw_tree_tag(&body.type_tree), IDENTTPT_TAG);

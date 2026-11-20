@@ -13,9 +13,9 @@ use dotty_tasty::ast::{
     APPLY_TAG, BLOCK_TAG, DEFDEF_TAG, PARAM_TAG, SELECTIN_TAG, SHAREDTYPE_TAG, TERMREFDIRECT_TAG,
     TYPEREF_TAG, VALDEF_TAG,
 };
+use dotty_tasty::file::{TastyFile, TastyFileError};
 use dotty_tasty::reader::Reader as TastyReader;
 use dotty_tasty::section::StandardSection;
-use dotty_tasty::tasty::TastyFile;
 use dotty_tasty::term::{AstTreeNode, RawTree, TermValue};
 use dotty_tasty::writer::Writer;
 use std::fs;
@@ -415,7 +415,7 @@ fn block_address(tasty_bytes: &[u8], method_name: &str) -> u32 {
 
 fn direct_termref_bytes(address: u32) -> Vec<u8> {
     let mut writer = Writer::default();
-    writer.write_nat(address);
+    writer.write_nat(address).unwrap();
     let mut bytes = vec![TERMREFDIRECT_TAG];
     bytes.extend(writer.into_inner());
     bytes
@@ -429,7 +429,7 @@ fn change_termref_target(
 ) -> Vec<u8> {
     let reference = direct_termref_bytes(address);
     let mut writer = Writer::default();
-    writer.write_nat(replacement);
+    writer.write_nat(replacement).unwrap();
     let replacement = writer.into_inner();
     assert_eq!(
         reference.len() - 1,
@@ -504,9 +504,9 @@ fn change_local_type_ref(
         .get(reference_index)
         .unwrap_or_else(|| panic!("local VALDEF has Counter type reference #{reference_index}"));
     let mut original_encoded = Writer::default();
-    original_encoded.write_nat(original);
+    original_encoded.write_nat(original).unwrap();
     let mut replacement_encoded = Writer::default();
-    replacement_encoded.write_nat(replacement);
+    replacement_encoded.write_nat(replacement).unwrap();
     let original_encoded = original_encoded.into_inner();
     let replacement_encoded = replacement_encoded.into_inner();
     assert_eq!(
@@ -569,9 +569,9 @@ fn change_initializer_constructor(tasty_bytes: &[u8], method_name: &str) -> Vec<
         panic!("SHAREDTYPE carries an AST address")
     };
     let mut original_encoded = Writer::default();
-    original_encoded.write_nat(original);
+    original_encoded.write_nat(original).unwrap();
     let mut replacement_encoded = Writer::default();
-    replacement_encoded.write_nat(pair_type);
+    replacement_encoded.write_nat(pair_type).unwrap();
     let original_encoded = original_encoded.into_inner();
     let replacement_encoded = replacement_encoded.into_inner();
     assert_eq!(original_encoded.len(), replacement_encoded.len());
@@ -643,9 +643,9 @@ fn change_first_local_signed_constructor(tasty_bytes: &[u8]) -> Vec<u8> {
                 .contains("Signed Signature(List(example.Counter, example.Counter),example.Pair)")
     }));
     let mut original = Writer::default();
-    original.write_nat(selected.name);
+    original.write_nat(selected.name).unwrap();
     let mut replacement = Writer::default();
-    replacement.write_nat(20);
+    replacement.write_nat(20).unwrap();
     let original = original.into_inner();
     let replacement = replacement.into_inner();
     assert_eq!(
@@ -756,6 +756,14 @@ fn rust_two_local_graph(
 ) -> (u32, Vec<u32>, Vec<u32>) {
     let tasty = TastyFile::parse_and_validate_scala_3_9(tasty_bytes)
         .expect("Rust PairFactory TASTy is valid Scala 3.9 TASTy");
+    inspect_two_local_graph(&tasty, expected_names, expected_arg_ordinals)
+}
+
+fn inspect_two_local_graph(
+    tasty: &TastyFile<'_>,
+    expected_names: [&str; 2],
+    expected_arg_ordinals: Option<[usize; 2]>,
+) -> (u32, Vec<u32>, Vec<u32>) {
     let index = tasty
         .ast_address_index()
         .expect("PairFactory has AST index");
@@ -775,7 +783,11 @@ fn rust_two_local_graph(
         .unwrap()
         .decode_defdef_body()
         .expect("decode create signature");
-    assert_eq!(body.parameters.len(), 2, "create retains both Int formals");
+    assert_eq!(
+        body.parameters().count(),
+        2,
+        "create retains both Int formals"
+    );
     let parameter_addresses = index
         .iter_nodes_with_tag(PARAM_TAG)
         .filter(|node| {
@@ -1357,7 +1369,11 @@ fn alias_local_graph_named(
         .unwrap()
         .decode_defdef_body()
         .unwrap();
-    assert_eq!(body.parameters.len(), 2, "create retains both Int formals");
+    assert_eq!(
+        body.parameters().count(),
+        2,
+        "create retains both Int formals"
+    );
     let block = index
         .iter_nodes_with_tag(BLOCK_TAG)
         .find(|node| {
@@ -1542,10 +1558,10 @@ fn change_alias_initializer_target(tasty_bytes: &[u8], target: usize) -> Vec<u8>
         "alias initializer has one direct term reference"
     );
     let mut writer = Writer::default();
-    writer.write_nat(locals[target]);
+    writer.write_nat(locals[target]).unwrap();
     let replacement = writer.into_inner();
     let mut original = Writer::default();
-    original.write_nat(locals[0]);
+    original.write_nat(locals[0]).unwrap();
     let original = original.into_inner();
     assert_eq!(
         replacement.len(),
@@ -1610,11 +1626,13 @@ fn forge_alias_setter_name(tasty_bytes: &[u8]) -> Vec<u8> {
         .expect("first local initializer has its signed Counter constructor")
         .name;
     let mut replacement = Writer::default();
-    replacement.write_nat(constructor_name);
+    replacement.write_nat(constructor_name).unwrap();
     let replacement = replacement.into_inner();
     let raw = index.get(selected.offset as u32).unwrap();
     let mut original = Writer::default();
-    original.write_nat(raw.decode_select_in().unwrap().name);
+    original
+        .write_nat(raw.decode_select_in().unwrap().name)
+        .unwrap();
     let original = original.into_inner();
     assert_eq!(
         replacement.len(),
@@ -2452,15 +2470,29 @@ fn second_local_reference_negative_probes(
         fs::create_dir_all(&output_dir).unwrap();
         write_batch(&classes, batch);
         let changed_tasty = change_termref_target(factory.tasty_bytes(), locals[1], replacement, 0);
-        let (block, changed_locals, changed_arguments) = rust_two_local_graph(
-            &changed_tasty,
-            ["first", "second"],
-            (label != "dangling-second-local").then_some([0, 0]),
-        );
         if label == "dangling-second-local" {
+            let parsed = TastyFile::parse_scala_3_9(&changed_tasty).unwrap();
+            let asts_length = parsed.section(StandardSection::Asts).unwrap().payload.len();
+            let expected_error = if replacement as usize >= asts_length {
+                TastyFileError::InvalidAstAddress {
+                    context: "AST reference",
+                    address: i64::from(replacement),
+                    asts_length,
+                }
+            } else {
+                TastyFileError::InvalidAstNodeAddress {
+                    context: "AST reference",
+                    address: replacement,
+                }
+            };
+            assert_eq!(parsed.validate(), Err(expected_error));
+            let (_, changed_locals, changed_arguments) =
+                inspect_two_local_graph(&parsed, ["first", "second"], None);
             assert_eq!(changed_locals, locals);
-            assert_eq!(changed_arguments, [locals[0], 127]);
+            assert_eq!(changed_arguments, [locals[0], replacement]);
         } else {
+            let (block, changed_locals, changed_arguments) =
+                rust_two_local_graph(&changed_tasty, ["first", "second"], Some([0, 0]));
             assert_eq!(changed_locals, locals);
             assert_eq!(changed_arguments, [locals[0], locals[0]]);
             let contract_error = source_contract_result(

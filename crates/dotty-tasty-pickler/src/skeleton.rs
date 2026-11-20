@@ -401,13 +401,47 @@ impl ValidatedPicklePlan<'_, '_> {
             AstField::Tree(constructor_label),
         ]);
         let mut bodies = Vec::new();
+        let mut type_parameters = Vec::new();
+        let mut getter_declarations = Vec::new();
         for method in p.methods {
             let name = context.intern_name(symbol(self, method.symbol)?.name)?;
-            // Preserve the source distinction: no clause has no marker; one
-            // explicit empty clause has EMPTYCLAUSE before the result type.
             let mut fields = vec![AstField::Nat(name)];
-            if method.parameter_clauses.len() == 1 {
-                let parameters = &method.parameter_clauses[0];
+            let method_source = p.source_ast.get(method.source_tree);
+            let dotty_core::ast::TreeKind::DefDef(definition) = &method_source.kind else {
+                return Err(PickleError::SourceShape {
+                    tree: method.source_tree,
+                    expected: crate::SourceRole::Method,
+                });
+            };
+            let mut type_parameter = None;
+            if let [tree] = definition.type_params.as_slice() {
+                let parameter = p.source_index.symbol_at(p.source.id, *tree).ok_or(
+                    PickleError::SourceDefinition {
+                        symbol: method.symbol,
+                    },
+                )?;
+                let label = context.reserve_declaration(parameter)?;
+                let parameter_name = context.intern_name(symbol(self, parameter)?.name)?;
+                let low = context.scala_named_type("Nothing")?;
+                let high = context.scala_named_type("Any")?;
+                let bounds = context.wire_node(AstNode::Length {
+                    tag: TYPEBOUNDSTPT_TAG,
+                    fields: vec![AstField::Tree(low), AstField::Tree(high)],
+                })?;
+                context.bind_declaration(
+                    parameter,
+                    AstNode::Length {
+                        tag: TYPEPARAM_TAG,
+                        fields: vec![AstField::Nat(parameter_name), AstField::Tree(bounds)],
+                    },
+                )?;
+                fields.push(AstField::Tree(label));
+                type_parameter = Some(parameter);
+                type_parameters.push(parameter);
+            }
+            let default = self.context_defaults.get(&method.symbol);
+            let mut previous_types = Vec::new();
+            for (index, parameters) in method.parameter_clauses.iter().enumerate() {
                 if parameters.is_empty() {
                     fields.push(AstField::Tree(marker(&mut context, EMPTYCLAUSE_TAG)?));
                 } else {
@@ -431,16 +465,35 @@ impl ValidatedPicklePlan<'_, '_> {
                                 });
                             }
                         };
-                        let parameter_type =
-                            method_type_syntax(self, &mut context, parameter_semantic_type)?;
+                        let parameter_type = if let Some(tparam) = type_parameter {
+                            context.method_type_parameter_syntax(tparam)?
+                        } else {
+                            method_type_syntax(self, &mut context, parameter_semantic_type)?
+                        };
+                        if default.is_some_and(|d| !d.previous.is_empty()) && index == 0 {
+                            previous_types.push(parameter_type);
+                        }
+                        let mut parameter_fields = vec![
+                            AstField::Nat(parameter_name),
+                            AstField::Tree(parameter_type),
+                        ];
+                        let contextual_tag = match symbol(self, parameter)?.flags {
+                            dotty_core::SymbolFlags::GIVEN => Some(GIVEN_TAG),
+                            dotty_core::SymbolFlags::IMPLICIT => Some(IMPLICIT_TAG),
+                            _ => None,
+                        };
+                        if let Some(tag) = contextual_tag {
+                            parameter_fields.push(AstField::Tree(marker(&mut context, tag)?));
+                        }
+                        if default.is_some_and(|d| d.defaulted == parameter) {
+                            parameter_fields
+                                .push(AstField::Tree(marker(&mut context, HASDEFAULT_TAG)?));
+                        }
                         context.bind_declaration(
                             parameter,
                             AstNode::Length {
                                 tag: PARAM_TAG,
-                                fields: vec![
-                                    AstField::Nat(parameter_name),
-                                    AstField::Tree(parameter_type),
-                                ],
+                                fields: parameter_fields,
                             },
                         )?;
                         fields.push(AstField::Tree(context.declaration_label(parameter).ok_or(
@@ -449,6 +502,13 @@ impl ValidatedPicklePlan<'_, '_> {
                                 reason: ReferenceError::NotRegistered,
                             },
                         )?));
+                    }
+                    if method
+                        .parameter_clauses
+                        .get(index + 1)
+                        .is_some_and(|next| !next.is_empty())
+                    {
+                        fields.push(AstField::Tree(marker(&mut context, SPLITCLAUSE_TAG)?));
                     }
                 }
             }
@@ -461,12 +521,25 @@ impl ValidatedPicklePlan<'_, '_> {
                     });
                 }
             };
-            let result_semantic_type = match p.store.types.try_get(method_info) {
-                Some(Type::Method(signature)) => signature.result,
-                Some(_) => method_info,
-                None => return Err(PickleError::IncompleteType { ty: method_info }),
+            let closure = self.context_closures.get(&method.symbol);
+            let result = if closure.is_some() {
+                context.context_function_int_syntax()?
+            } else if let Some(tparam) = type_parameter {
+                context.method_type_parameter_syntax(tparam)?
+            } else {
+                let mut result_semantic_type = method_info;
+                for _ in &method.parameter_clauses {
+                    let Some(Type::Method(signature)) = p.store.types.try_get(result_semantic_type)
+                    else {
+                        return Err(PickleError::MalformedType {
+                            ty: result_semantic_type,
+                            role: TypeRole::MethodResult,
+                        });
+                    };
+                    result_semantic_type = signature.result;
+                }
+                method_type_syntax(self, &mut context, result_semantic_type)?
             };
-            let result = method_type_syntax(self, &mut context, result_semantic_type)?;
             // No invented METHODtype payload, abstract modifier or substitute
             // for the method's real RHS.
             fields.push(AstField::Tree(result));
@@ -474,21 +547,30 @@ impl ValidatedPicklePlan<'_, '_> {
                 let body = method.body.ok_or(PickleError::MissingBody {
                     method: method.symbol,
                 })?;
-                let parameters = method
+                let mut parameters = method
                     .parameter_clauses
                     .iter()
                     .flatten()
                     .copied()
                     .collect::<Vec<_>>();
-                fields.push(AstField::Tree(crate::expression::lower_expression(
-                    p.store,
-                    p.typed_ast,
-                    body,
-                    method.symbol,
-                    &parameters,
-                    limits,
-                    &mut context,
-                )?));
+                let encoded = if let Some(closure) = closure {
+                    parameters.push(closure.parameter);
+                    context.context_function_body(p.typed_ast, *closure, &parameters, limits)?
+                } else {
+                    crate::expression::lower_expression(
+                        p.store,
+                        p.typed_ast,
+                        body,
+                        method.symbol,
+                        &parameters,
+                        limits,
+                        &mut context,
+                    )?
+                };
+                fields.push(AstField::Tree(encoded));
+            }
+            if closure.is_some() {
+                fields.push(AstField::Tree(context.context_result_annotation()?));
             }
             context.bind_declaration(
                 method.symbol,
@@ -510,6 +592,20 @@ impl ValidatedPicklePlan<'_, '_> {
                     method: method.symbol,
                 })?,
             ));
+            if let Some(default) = default {
+                let getter = context.contextual_default_getter(
+                    self,
+                    default,
+                    name,
+                    &previous_types,
+                    complete.is_some(),
+                    limits,
+                )?;
+                stats.push(AstField::Tree(getter));
+                bodies.push((default.getter, default.body));
+                getter_declarations.push(default.getter);
+                getter_declarations.extend(default.previous.iter().map(|p| p.copied));
+            }
         }
         // All supported semantic visibility/flags/annotations are public/empty,
         // as validated from symbol records, not Typed's unit metadata. Unsupported
@@ -545,6 +641,8 @@ impl ValidatedPicklePlan<'_, '_> {
         for id in std::iter::once(p.class)
             .chain(std::iter::once(p.constructor.symbol))
             .chain(p.methods.iter().map(|m| m.symbol))
+            .chain(type_parameters)
+            .chain(getter_declarations)
             .chain(
                 p.methods
                     .iter()

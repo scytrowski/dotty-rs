@@ -271,8 +271,26 @@ fn lower_expression_inner(
                             )
                         })
                 });
+        let conditional_mutable_assignment = context
+            .conditional_mutable_assignment(method, root)
+            .filter(|(binding, index)| {
+                binding.typed_lhss[*index] == assignment.lhs
+                    && binding.local == target
+                    && binding.typed_rhss[*index] == assignment.rhs
+                    && ast.try_get(assignment.rhs).is_some_and(|rhs| {
+                        matches!(
+                            store.types.try_get(rhs.ty),
+                            Some(Type::TermRef {
+                                target: TermRefTarget::Symbol(rhs_local),
+                                ..
+                            }) if *rhs_local == binding.rhs_locals[*index]
+                        )
+                    })
+            });
+        let authenticated_mutable_reference_assignment =
+            mutable_counter_assignment.is_some() || conditional_mutable_assignment.is_some();
         let lhs = match symbol.kind {
-            dotty_core::SymbolKind::Local if mutable_counter_assignment.is_some() => {
+            dotty_core::SymbolKind::Local if authenticated_mutable_reference_assignment => {
                 context.local_reference(target, None)?
             }
             dotty_core::SymbolKind::Local
@@ -435,17 +453,24 @@ fn lower_expression_inner(
         );
     }
     if let TreeKind::Apply(application) = &tree.kind {
-        if application.kind != ApplyKind::Regular {
-            return Err(PickleError::Unsupported {
-                feature: UnsupportedFeature::BodyExpression,
-                symbol: Some(method),
-            });
-        }
         let function = ast
             .try_get(application.function)
             .ok_or(PickleError::InvalidTypedTree {
                 tree: application.function,
             })?;
+        if application.kind == ApplyKind::Using
+            && !matches!(
+                store.types.try_get(function.ty),
+                Some(Type::TermRef {target: TermRefTarget::Symbol(target), ..})
+                    if store.symbols.contains(*target) && store.symbols.get(*target).kind == dotty_core::SymbolKind::Method
+                    && matches!(store.symbols.info(*target),SymbolInfo::Complete(ty) if matches!(store.types.try_get(*ty), Some(Type::Method(m)) if m.kind != dotty_core::types::MethodKind::Plain))
+            )
+        {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::BodyExpression,
+                symbol: Some(method),
+            });
+        }
         budget.visit(application.function, depth)?;
         if let TreeKind::Select(selection) = &function.kind
             && let Some(Type::TermRef {

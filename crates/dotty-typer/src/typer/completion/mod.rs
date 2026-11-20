@@ -2,8 +2,12 @@
 
 use super::*;
 
+mod case_class_apply;
+mod case_class_copy;
 mod constructors;
 mod declarations;
+mod default_getters;
+mod given_factory;
 mod local_methods;
 mod methods;
 
@@ -152,6 +156,25 @@ impl SourceTyper<'_> {
         symbol: SymbolId,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
+        // File owners have a declaration scope but no source template.
+        if self.is_source_package_wrapper(symbol) {
+            return self.complete_synthetic_module_class(symbol, info_journal);
+        }
+        let getter_projection = self.contextual_getter_source(symbol).is_some()
+            || self
+                .store
+                .symbols
+                .owner(symbol)
+                .is_some_and(|owner| self.contextual_getter_source(owner).is_some());
+        if self.is_context_bound_or_given_parameter_copy(symbol) || getter_projection {
+            // Constructor and factory binders share syntax with the canonical
+            // class declaration. Project each copy in its own lexical scope
+            // without publishing those types under the shared source tree.
+            let canonical = std::mem::take(&mut self.type_index);
+            let result = self.complete_symbol_inner_body(symbol, info_journal);
+            self.type_index = canonical;
+            return result;
+        }
         if let Some(method) = self.generated_case_class_apply_owner_for_parameter(symbol) {
             self.complete_symbol_inner(method, info_journal)?;
             if let SymbolInfo::Complete(info) = *self.store.symbols.info(symbol) {
@@ -240,7 +263,7 @@ impl SourceTyper<'_> {
         if source != self.source
             || method_source != source
             || self
-                .generated_case_class_for_apply(method, source, class_tree)
+                .generated_case_class_for_factory(method, source, class_tree)
                 .is_none()
             || self.index.derived_symbol_at(method, source, parameter_tree) != Some(symbol)
         {
@@ -259,7 +282,9 @@ impl SourceTyper<'_> {
             .value_param_clauses
             .iter()
             .flatten()
-            .any(|tree| *tree == parameter_tree)
+            .copied()
+            .chain(constructor.context_bound_trees(self.arena))
+            .any(|tree| tree == parameter_tree)
             .then_some(method)
     }
 
@@ -396,6 +421,15 @@ impl SourceTyper<'_> {
                 | SymbolKind::Parameter,
                 TreeKind::ValDef(definition),
             ) => Some(definition.tpt),
+            (
+                SymbolKind::Parameter | SymbolKind::Field,
+                TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(_)),
+            ) => Some(tree),
+            (SymbolKind::Method, TreeKind::ValDef(_))
+                if self.contextual_getter_source(symbol).is_some() =>
+            {
+                None
+            }
             (SymbolKind::Method | SymbolKind::Constructor, TreeKind::DefDef(_)) => None,
             (
                 SymbolKind::TypeParameter
@@ -412,8 +446,14 @@ impl SourceTyper<'_> {
                 None
             }
             (SymbolKind::Method, TreeKind::TypeDef(_))
+                if self.structural_given_class(symbol, tree).is_some()
+                    || self.copy_default_field(symbol).is_some() =>
+            {
+                None
+            }
+            (SymbolKind::Method, TreeKind::TypeDef(_))
                 if self
-                    .generated_case_class_for_apply(symbol, source, tree)
+                    .generated_case_class_for_factory(symbol, source, tree)
                     .is_some() =>
             {
                 None
@@ -519,10 +559,31 @@ impl SourceTyper<'_> {
                 self.complete_type_alias(symbol, rhs, tree.index(), context, info_journal)
             }
             SymbolKind::Method => {
-                let info = if let Some(class) =
-                    self.generated_case_class_for_apply(symbol, source, tree)
+                let info = if let Some((method, param, preceding)) =
+                    self.contextual_getter_source(symbol)
                 {
-                    self.complete_generated_case_class_apply_signature(
+                    self.complete_contextual_getter(symbol, method, param, preceding, info_journal)?
+                } else if let Some((field, ctor)) = self.copy_default_field(symbol) {
+                    let parameters = self.type_parameter_specs(
+                        symbol,
+                        &ctor.type_params,
+                        true,
+                        info_journal,
+                        tree.index(),
+                        0,
+                    )?;
+                    let ty = self.complete_signature_parameter(field, info_journal)?;
+                    self.bind_method_clauses(
+                        vec![MethodClauseSpec::Types(parameters)],
+                        ty,
+                        tree.index(),
+                    )?
+                } else if let Some(class) = self.structural_given_class(symbol, tree) {
+                    self.complete_structural_given_factory(symbol, class, tree, info_journal)?
+                } else if let Some(class) =
+                    self.generated_case_class_for_factory(symbol, source, tree)
+                {
+                    self.complete_generated_case_class_factory_signature(
                         symbol,
                         class,
                         source,
@@ -621,6 +682,57 @@ impl SourceTyper<'_> {
         let result = self.complete_signature_parameter(symbol, info_journal);
         self.signature_parameter_in_progress = previous;
         result
+    }
+
+    fn is_context_bound_or_given_parameter_copy(&self, symbol: SymbolId) -> bool {
+        let entry = self.store.symbols.get(symbol);
+        if !matches!(
+            entry.kind,
+            SymbolKind::TypeParameter | SymbolKind::Parameter
+        ) {
+            return false;
+        }
+        let Some(method) = entry.owner else {
+            return false;
+        };
+        let Some(SourceDefinition::Derived { source, .. }) = self.index.definition_of(symbol)
+        else {
+            return false;
+        };
+        if source != self.source {
+            return false;
+        }
+        if self.store.symbols.get(method).kind == SymbolKind::Constructor {
+            if self.store.symbols.owner(method).is_some_and(|class| {
+                self.store
+                    .symbols
+                    .get(class)
+                    .flags
+                    .contains(SymbolFlags::GIVEN)
+            }) {
+                return true;
+            }
+            let Some(SourceDefinition::Canonical { tree, .. }) = self.index.definition_of(method)
+            else {
+                return false;
+            };
+            let Some(TreeKind::DefDef(ctor)) = self.arena.try_get(tree).map(|n| &n.kind) else {
+                return false;
+            };
+            return ctor
+                .context_bound_trees(self.arena)
+                .next()
+                .is_some_and(|bound| {
+                    self.index
+                        .derived_symbol_at(method, self.source, bound)
+                        .is_some()
+                });
+        }
+        let Some(SourceDefinition::Derived { source, tree }) = self.index.definition_of(method)
+        else {
+            return false;
+        };
+        source == self.source && self.structural_given_class(method, tree).is_some()
     }
 
     pub(super) fn source_tree_for_symbol(

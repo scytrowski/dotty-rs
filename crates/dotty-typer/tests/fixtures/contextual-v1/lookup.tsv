@@ -1,0 +1,4 @@
+lookup_legacy_member	tests/pos/test-implicits1.scala	0	val y: Int = Implicits.foo(1)(Implicits.impl)
+lookup_legacy_block	tests/pos/test-implicits.scala	0	implicit val x: String = "abc" ~~ implicitly[String](x)
+lookup_nested_priority	tests/run/implicit-disambiguation.scala	0	def f(using x$1: B, x$2: C): String ~~ final lazy given val a: A = x$1 ~~ a.show:String
+lookup_inherited_priority	tests/pos/given-priority.scala	0	import NormalImplicits.given ~~ val x: NormalImplicits.g2.type = NormalImplicits.g2

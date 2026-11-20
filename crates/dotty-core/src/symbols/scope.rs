@@ -7,6 +7,7 @@
 //! `children` field; child membership is reconstructed via scopes.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use crate::ids::{ScopeId, SymbolId, checked_index};
 use crate::names::Name;
@@ -16,10 +17,23 @@ use crate::names::Name;
 /// Each name maps to a `Vec<SymbolId>` rather than a single symbol because
 /// overloads (`def foo(x: Int)` / `def foo(x: String)`) are ordinary, not an
 /// edge case.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Scope {
     pub owner: Option<SymbolId>,
     entries: HashMap<Name, Vec<SymbolId>>,
+}
+
+impl fmt::Debug for Scope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Bucket order has no lookup meaning and may change when a transaction
+        // temporarily enters names. Order within each overload bucket does matter.
+        let mut entries: Vec<_> = self.entries.iter().collect();
+        entries.sort_unstable_by_key(|(name, _)| (name.text().index(), name.is_type()));
+        f.debug_struct("Scope")
+            .field("owner", &self.owner)
+            .field("entries", &entries)
+            .finish()
+    }
 }
 
 impl Scope {
@@ -115,6 +129,32 @@ mod tests {
 
     fn name(raw: u32) -> Name {
         Name::new(NameId::new(raw), Namespace::Term)
+    }
+
+    #[test]
+    fn debug_orders_name_buckets_and_preserves_owner_namespace_and_overload_order() {
+        let owner = SymbolId::new(10);
+        let term = name(1);
+        let ty = Name::new(term.text(), Namespace::Type);
+        let later = name(4);
+        let first = SymbolId::new(3);
+        let second = SymbolId::new(2);
+        let mut scope = Scope::new(Some(owner));
+        scope.enter(later, first);
+        scope.enter(ty, first);
+        scope.enter(term, first);
+        scope.enter(term, second);
+        scope.enter(term, first);
+
+        let expected_entries = [
+            (term, &[first, second, first][..]),
+            (ty, &[first][..]),
+            (later, &[first][..]),
+        ];
+        assert_eq!(
+            format!("{scope:?}"),
+            format!("Scope {{ owner: Some({owner:?}), entries: {expected_entries:?} }}")
+        );
     }
 
     #[test]

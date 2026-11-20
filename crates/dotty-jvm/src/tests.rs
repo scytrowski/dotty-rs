@@ -120,11 +120,7 @@ fn add_local_binding(fixture: &mut Fixture, name: &str, mutable: bool) -> JvmLoc
         position: None,
         ty: fixture.value_type,
     });
-    JvmLocalBinding {
-        declaration,
-        symbol,
-        mutable,
-    }
+    JvmLocalBinding::ordinary(declaration, symbol, mutable)
 }
 
 #[test]
@@ -300,11 +296,11 @@ fn rejects_stale_duplicate_foreign_and_parameter_local_bindings() {
     );
     let binding = add_local_binding(&mut fixture, "foreign", false);
     let mut unit = fixture.unit();
-    unit.classes[0].methods[0].locals = vec![JvmLocalBinding {
-        declaration: binding.declaration,
-        symbol: foreign_local,
-        mutable: false,
-    }];
+    unit.classes[0].methods[0].locals = vec![JvmLocalBinding::ordinary(
+        binding.declaration,
+        foreign_local,
+        false,
+    )];
     assert_eq!(
         unit.validate(),
         Err(JvmCodegenError::WrongOwner {
@@ -331,11 +327,7 @@ fn rejects_stale_duplicate_foreign_and_parameter_local_bindings() {
         position: None,
         ty: fixture.value_type,
     });
-    let binding = JvmLocalBinding {
-        declaration,
-        symbol,
-        mutable: false,
-    };
+    let binding = JvmLocalBinding::ordinary(declaration, symbol, false);
     let other_method = alloc_symbol(
         &mut fixture.store,
         SymbolKind::Method,
@@ -369,11 +361,11 @@ fn rejects_stale_duplicate_foreign_and_parameter_local_bindings() {
     let mut fixture = Fixture::new();
     let binding = add_local_binding(&mut fixture, "parameter", false);
     let mut unit = fixture.unit();
-    unit.classes[0].methods[0].locals = vec![JvmLocalBinding {
-        declaration: binding.declaration,
-        symbol: fixture.parameter,
-        mutable: false,
-    }];
+    unit.classes[0].methods[0].locals = vec![JvmLocalBinding::ordinary(
+        binding.declaration,
+        fixture.parameter,
+        false,
+    )];
     assert_eq!(
         unit.validate(),
         Err(JvmCodegenError::LocalIsMethodParameter {
@@ -2646,11 +2638,7 @@ fn local_layout_allocates_after_parameters_by_canonical_identity() {
             position: None,
             ty: fixture.definitions.int,
         });
-        bindings.push(JvmLocalBinding {
-            declaration,
-            symbol,
-            mutable,
-        });
+        bindings.push(JvmLocalBinding::ordinary(declaration, symbol, mutable));
     }
     fixture.bodies[1] = body;
 
@@ -2749,11 +2737,7 @@ fn local_layout_rejects_unsupported_semantic_types() {
         position: None,
         ty: fixture.definitions.int,
     });
-    let binding = JvmLocalBinding {
-        declaration,
-        symbol,
-        mutable: false,
-    };
+    let binding = JvmLocalBinding::ordinary(declaration, symbol, false);
     let mut unit = fixture.unit();
     unit.classes[0].methods[0].locals.push(binding);
 
@@ -2807,11 +2791,7 @@ fn local_layout_reserves_exact_category_one_slots_for_planned_references() {
         position: None,
         ty: fixture.definitions.int,
     });
-    let binding = JvmLocalBinding {
-        declaration,
-        symbol,
-        mutable: true,
-    };
+    let binding = JvmLocalBinding::ordinary(declaration, symbol, true);
     let mut unit = fixture.unit();
     unit.classes[0].methods[0].locals = vec![binding];
 
@@ -2887,11 +2867,7 @@ fn reference_local_layout_keeps_same_named_symbols_tied_to_distinct_classes() {
             position: None,
             ty: reference_type,
         });
-        bindings.push(JvmLocalBinding {
-            declaration,
-            symbol,
-            mutable: false,
-        });
+        bindings.push(JvmLocalBinding::ordinary(declaration, symbol, false));
         declarations.push(declaration);
     }
     let nested_body = fixture.ast.alloc(Tree {
@@ -3008,11 +2984,7 @@ fn reference_local_read_before_store_returns_a_typed_error() {
         position: None,
         ty: fixture.definitions.int,
     });
-    let binding = JvmLocalBinding {
-        declaration,
-        symbol: local,
-        mutable: false,
-    };
+    let binding = JvmLocalBinding::ordinary(declaration, local, false);
     let mut unit = fixture.unit();
     unit.classes[0].methods.push(JvmMethodPlan {
         method,
@@ -3059,11 +3031,7 @@ fn assignments_reject_immutable_nonlocal_and_mistyped_targets_without_class_outp
                 int_ty,
                 Some(initial_value),
             );
-            let local_binding = JvmLocalBinding {
-                declaration,
-                symbol: local,
-                mutable,
-            };
+            let local_binding = JvmLocalBinding::ordinary(declaration, local, mutable);
             let lhs = if invalid_lhs {
                 initial_value
             } else if parameter_target {
@@ -3163,11 +3131,8 @@ fn loop_body_initialization_is_not_assumed_after_a_zero_iteration_path() {
     fixture.bodies[method_index] = typed_block(&mut fixture, vec![loop_tree], result, int_ty);
 
     let mut unit = fixture.unit();
-    unit.classes[0].methods[method_index].locals = vec![JvmLocalBinding {
-        declaration,
-        symbol: local,
-        mutable: false,
-    }];
+    unit.classes[0].methods[method_index].locals =
+        vec![JvmLocalBinding::ordinary(declaration, local, false)];
     assert!(matches!(
         emit_class(&unit, fixture.class, &fixture.definitions),
         Err(JvmCodegenError::UninitializedLocalRead { tree, symbol })
@@ -3241,16 +3206,8 @@ fn emits_local_initializers_once_in_declaration_order_with_canonical_slots() {
 
     let mut unit = fixture.unit();
     unit.classes[0].methods[method_index].locals = vec![
-        JvmLocalBinding {
-            declaration: first_decl,
-            symbol: first_symbol,
-            mutable: false,
-        },
-        JvmLocalBinding {
-            declaration: second_decl,
-            symbol: second_symbol,
-            mutable: true,
-        },
+        JvmLocalBinding::ordinary(first_decl, first_symbol, false),
+        JvmLocalBinding::ordinary(second_decl, second_symbol, true),
     ];
     let generated = emit_class(&unit, fixture.class, &fixture.definitions).unwrap();
     let mut reader = Reader::new(generated.bytes());
@@ -3294,11 +3251,8 @@ fn loads_initialized_local_by_symbol_slot_when_it_shadows_a_parameter() {
     fixture.bodies[method_index] = typed_block(&mut fixture, vec![declaration], local_ref, int_ty);
 
     let mut unit = fixture.unit();
-    unit.classes[0].methods[method_index].locals = vec![JvmLocalBinding {
-        declaration,
-        symbol: local,
-        mutable: false,
-    }];
+    unit.classes[0].methods[method_index].locals =
+        vec![JvmLocalBinding::ordinary(declaration, local, false)];
     let generated = emit_class(&unit, fixture.class, &fixture.definitions).unwrap();
     let repeated = emit_class(&unit, fixture.class, &fixture.definitions).unwrap();
     assert_eq!(generated.bytes(), repeated.bytes());
@@ -3363,16 +3317,8 @@ fn nested_same_named_local_references_keep_their_canonical_slots() {
 
     let mut unit = fixture.unit();
     unit.classes[0].methods[method_index].locals = vec![
-        JvmLocalBinding {
-            declaration: outer_declaration,
-            symbol: outer,
-            mutable: false,
-        },
-        JvmLocalBinding {
-            declaration: inner_declaration,
-            symbol: inner,
-            mutable: false,
-        },
+        JvmLocalBinding::ordinary(outer_declaration, outer, false),
+        JvmLocalBinding::ordinary(inner_declaration, inner, false),
     ];
     let generated = emit_class(&unit, fixture.class, &fixture.definitions).unwrap();
     let mut reader = Reader::new(generated.bytes());
@@ -3482,11 +3428,8 @@ fn rejects_local_reads_when_a_control_flow_join_has_an_uninitialized_path() {
     fixture.bodies[method_index] = typed_block(&mut fixture, vec![conditional], local_ref, int_ty);
 
     let mut unit = fixture.unit();
-    unit.classes[0].methods[method_index].locals = vec![JvmLocalBinding {
-        declaration,
-        symbol: local,
-        mutable: false,
-    }];
+    unit.classes[0].methods[method_index].locals =
+        vec![JvmLocalBinding::ordinary(declaration, local, false)];
     assert_eq!(
         emit_class(&unit, fixture.class, &fixture.definitions),
         Err(JvmCodegenError::UninitializedLocalRead {
@@ -3515,11 +3458,8 @@ fn rejects_missing_initializer_type_mismatch_and_self_reference() {
     missing.bodies[method_index] =
         typed_block(&mut missing, vec![declaration], final_expr, missing_int);
     let mut unit = missing.unit();
-    unit.classes[0].methods[method_index].locals = vec![JvmLocalBinding {
-        declaration,
-        symbol,
-        mutable: false,
-    }];
+    unit.classes[0].methods[method_index].locals =
+        vec![JvmLocalBinding::ordinary(declaration, symbol, false)];
     assert_eq!(
         emit_class(&unit, missing.class, &missing.definitions),
         Err(JvmCodegenError::MissingLocalInitializer {
@@ -3556,11 +3496,8 @@ fn rejects_missing_initializer_type_mismatch_and_self_reference() {
     mismatch.bodies[method_index] =
         typed_block(&mut mismatch, vec![declaration], final_expr, mismatch_int);
     let mut unit = mismatch.unit();
-    unit.classes[0].methods[method_index].locals = vec![JvmLocalBinding {
-        declaration,
-        symbol,
-        mutable: false,
-    }];
+    unit.classes[0].methods[method_index].locals =
+        vec![JvmLocalBinding::ordinary(declaration, symbol, false)];
     assert!(matches!(
         emit_class(&unit, mismatch.class, &mismatch.definitions),
         Err(JvmCodegenError::LocalInitializerFlowMismatch {
@@ -3610,11 +3547,8 @@ fn rejects_missing_initializer_type_mismatch_and_self_reference() {
     recursive.bodies[method_index] =
         typed_block(&mut recursive, vec![declaration], final_expr, recursive_int);
     let mut unit = recursive.unit();
-    unit.classes[0].methods[method_index].locals = vec![JvmLocalBinding {
-        declaration,
-        symbol,
-        mutable: false,
-    }];
+    unit.classes[0].methods[method_index].locals =
+        vec![JvmLocalBinding::ordinary(declaration, symbol, false)];
     assert_eq!(
         emit_class(&unit, recursive.class, &recursive.definitions),
         Err(JvmCodegenError::UninitializedLocalRead {
@@ -3683,11 +3617,8 @@ fn lowers_conditional_initializer_before_its_single_store() {
     let final_expr = fixture.bodies[method_index];
     fixture.bodies[method_index] = typed_block(&mut fixture, vec![declaration], final_expr, int_ty);
     let mut unit = fixture.unit();
-    unit.classes[0].methods[method_index].locals = vec![JvmLocalBinding {
-        declaration,
-        symbol,
-        mutable: false,
-    }];
+    unit.classes[0].methods[method_index].locals =
+        vec![JvmLocalBinding::ordinary(declaration, symbol, false)];
 
     let generated = emit_class(&unit, fixture.class, &fixture.definitions).unwrap();
     let mut reader = Reader::new(generated.bytes());
@@ -3741,11 +3672,8 @@ fn rejects_inline_local_modifiers_before_lowering() {
     let final_expr = fixture.bodies[method_index];
     fixture.bodies[method_index] = typed_block(&mut fixture, vec![declaration], final_expr, int_ty);
     let mut unit = fixture.unit();
-    unit.classes[0].methods[method_index].locals = vec![JvmLocalBinding {
-        declaration,
-        symbol,
-        mutable: false,
-    }];
+    unit.classes[0].methods[method_index].locals =
+        vec![JvmLocalBinding::ordinary(declaration, symbol, false)];
     assert_eq!(
         emit_class(&unit, fixture.class, &fixture.definitions),
         Err(JvmCodegenError::UnsupportedLocalFlag {
@@ -3758,11 +3686,7 @@ fn rejects_inline_local_modifiers_before_lowering() {
 #[test]
 fn local_slot_u16_boundary_does_not_publish_an_overflow_assignment() {
     let fixture = Fixture::new();
-    let binding = JvmLocalBinding {
-        declaration: fixture.body,
-        symbol: fixture.parameter,
-        mutable: false,
-    };
+    let binding = JvmLocalBinding::ordinary(fixture.body, fixture.parameter, false);
     let mut allocator = JvmLocalAllocator::empty(fixture.method);
     allocator.next_slot = u16::MAX as usize - 1;
 
@@ -4660,6 +4584,47 @@ fn rejects_unit_parameters_polymorphic_methods_and_curried_results() {
             method: curried.method,
             ty: inner,
             kind: UnsupportedMethodShapeKind::NestedCurriedClause,
+        })
+    );
+}
+
+#[test]
+fn curried_contextual_descriptor_rejects_swapped_same_typed_formals() {
+    let mut fixture = SignatureFixture::new(2);
+    let method = fixture.method;
+    let SymbolInfo::Complete(original) = *fixture.store.symbols.info(method) else {
+        panic!()
+    };
+    let Type::Method(flat) = fixture.store.types.get(original).clone() else {
+        panic!()
+    };
+    let tail = fixture.store.types.alloc(Type::Method(MethodType {
+        params: flat.params[1..].to_vec(),
+        result: flat.result,
+        kind: MethodKind::Contextual,
+    }));
+    let outer = fixture.store.types.alloc(Type::Method(MethodType {
+        params: flat.params[..1].to_vec(),
+        result: tail,
+        kind: MethodKind::Plain,
+    }));
+    fixture
+        .store
+        .symbols
+        .set_info(method, SymbolInfo::Complete(outer));
+    fixture
+        .store
+        .symbols
+        .get_mut(fixture.plan.parameters[1])
+        .flags = SymbolFlags::GIVEN;
+    assert_eq!(fixture.descriptor().unwrap().as_str(), "(II)I");
+    fixture.plan.parameters.swap(0, 1);
+    assert_eq!(
+        fixture.descriptor(),
+        Err(JvmCodegenError::UnsupportedMethodParameter {
+            method,
+            index: 0,
+            kind: crate::UnsupportedMethodParameterKind::ClauseBinding
         })
     );
 }
@@ -5609,6 +5574,7 @@ fn typed_call_to(
             kind: TreeKind::Select(Select {
                 qualifier: receiver,
                 name: fixture.store.symbols.get(method).name,
+                is_type_projection: false,
                 backquoted: false,
             }),
             position: None,
@@ -5636,6 +5602,7 @@ fn typed_boolean_intrinsic_call(
         kind: TreeKind::Select(Select {
             qualifier: receiver,
             name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -5668,6 +5635,7 @@ fn typed_boolean_not(
         kind: TreeKind::Select(Select {
             qualifier: receiver,
             name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -5692,6 +5660,7 @@ fn typed_int_intrinsic_call(
         kind: TreeKind::Select(Select {
             qualifier: receiver,
             name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -5998,22 +5967,14 @@ fn emits_canonical_boolean_intrinsics_and_evaluates_boolean_truth_tables() {
 
     let mut unit = fixture.unit();
     unit.classes[0].methods[local_method_index].locals = vec![
-        JvmLocalBinding {
-            declaration: first_declaration,
-            symbol: first_local,
-            mutable: false,
-        },
-        JvmLocalBinding {
-            declaration: second_declaration,
-            symbol: second_local,
-            mutable: true,
-        },
+        JvmLocalBinding::ordinary(first_declaration, first_local, false),
+        JvmLocalBinding::ordinary(second_declaration, second_local, true),
     ];
-    unit.classes[0].methods[loop_method_index].locals = vec![JvmLocalBinding {
-        declaration: loop_declaration,
-        symbol: loop_local,
-        mutable: true,
-    }];
+    unit.classes[0].methods[loop_method_index].locals = vec![JvmLocalBinding::ordinary(
+        loop_declaration,
+        loop_local,
+        true,
+    )];
     let generated = emit_class(&unit, fixture.class, &fixture.definitions).unwrap();
     let mut reader = Reader::new(generated.bytes());
     let class = ClassFile::decode(&mut reader).unwrap();
@@ -6371,16 +6332,8 @@ fn emits_short_circuit_boolean_intrinsics_without_evaluating_skipped_rhs() {
 
     let mut unit = fixture.unit();
     unit.classes[0].methods[while_index].locals = vec![
-        JvmLocalBinding {
-            declaration: flag_declaration,
-            symbol: flag_local,
-            mutable: true,
-        },
-        JvmLocalBinding {
-            declaration: seen_declaration,
-            symbol: seen_local,
-            mutable: true,
-        },
+        JvmLocalBinding::ordinary(flag_declaration, flag_local, true),
+        JvmLocalBinding::ordinary(seen_declaration, seen_local, true),
     ];
     let generated = emit_class(&unit, fixture.class, &fixture.definitions).unwrap();
     let mut reader = Reader::new(generated.bytes());
@@ -6565,11 +6518,8 @@ fn short_circuit_rhs_local_effects_run_once_and_join_initialization_safely() {
 
     let mut unit = fixture.unit();
     for (method_index, symbol, declaration) in planned_locals {
-        unit.classes[0].methods[method_index].locals = vec![JvmLocalBinding {
-            declaration,
-            symbol,
-            mutable: true,
-        }];
+        unit.classes[0].methods[method_index].locals =
+            vec![JvmLocalBinding::ordinary(declaration, symbol, true)];
     }
     let generated = emit_class(&unit, fixture.class, &fixture.definitions).unwrap();
     if require_jdk_or_skip() {
@@ -6638,11 +6588,11 @@ fn short_circuit_rhs_local_effects_run_once_and_join_initialization_safely() {
     );
     uninitialized.bodies[method_index] = body;
     let mut unit = uninitialized.unit();
-    unit.classes[0].methods[method_index].locals = vec![JvmLocalBinding {
+    unit.classes[0].methods[method_index].locals = vec![JvmLocalBinding::ordinary(
         declaration,
-        symbol: conditional_local,
-        mutable: false,
-    }];
+        conditional_local,
+        false,
+    )];
     assert_eq!(
         emit_class(&unit, uninitialized.class, &uninitialized.definitions).unwrap_err(),
         JvmCodegenError::UninitializedLocalRead {
@@ -6779,6 +6729,7 @@ fn resolves_ident_this_calls_and_supported_zero_argument_results_by_symbol() {
         kind: TreeKind::Select(Select {
             qualifier: this_tree,
             name: fixture.store.symbols.get(identity).name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -6909,6 +6860,7 @@ fn lowers_explicit_and_implicit_same_class_call_receivers_once() {
         kind: TreeKind::Select(Select {
             qualifier: this_tree,
             name: fixture.store.symbols.get(target).name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -7127,6 +7079,7 @@ fn reference_call_values_are_forwarded_and_used_as_receivers_once() {
         kind: TreeKind::Select(Select {
             qualifier: receiver,
             name: fixture.store.symbols.get(get).name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -7197,6 +7150,7 @@ fn reference_call_values_are_forwarded_and_used_as_receivers_once() {
         kind: TreeKind::Select(Select {
             qualifier: receiver_call,
             name: fixture.store.symbols.get(get).name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -7293,6 +7247,7 @@ fn reference_call_receiver_resolution_rejects_cycles_and_excessive_depth() {
         kind: TreeKind::Select(Select {
             qualifier: this,
             name: cyclic.store.symbols.get(identity).name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -7353,6 +7308,7 @@ fn reference_call_receiver_resolution_rejects_cycles_and_excessive_depth() {
             kind: TreeKind::Select(Select {
                 qualifier: receiver,
                 name: deep.store.symbols.get(identity).name,
+                is_type_projection: false,
                 backquoted: false,
             }),
             position: None,
@@ -8142,6 +8098,7 @@ fn emits_parameter_arithmetic_once_before_the_approved_constructor_call() {
         kind: TreeKind::Select(dotty_core::ast::Select {
             qualifier: seed,
             name: fixture.store.symbols.get(operator).name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -8492,11 +8449,8 @@ fn reference_locals_initialized_only_in_a_branch_or_loop_are_not_definite_after_
         let read = typed_emission_symbol_ident(&mut fixture, local);
         fixture.bodies[method_index] = typed_block(&mut fixture, vec![control], read, class_type);
         let mut unit = fixture.unit();
-        unit.classes[0].methods[method_index].locals = vec![JvmLocalBinding {
-            declaration,
-            symbol: local,
-            mutable: false,
-        }];
+        unit.classes[0].methods[method_index].locals =
+            vec![JvmLocalBinding::ordinary(declaration, local, false)];
 
         assert_eq!(
             emit_class(&unit, fixture.class, &fixture.definitions),
@@ -9151,6 +9105,7 @@ fn rejects_unsupported_call_receivers_and_static_caller_contexts() {
         kind: TreeKind::Select(Select {
             qualifier: receiver,
             name: fixture.store.symbols.get(target).name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -9197,6 +9152,7 @@ fn rejects_unsupported_call_receivers_and_static_caller_contexts() {
         kind: TreeKind::Select(Select {
             qualifier: qualified_this,
             name: fixture.store.symbols.get(target).name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -9243,6 +9199,7 @@ fn rejects_unsupported_call_receivers_and_static_caller_contexts() {
         kind: TreeKind::Select(Select {
             qualifier: other_this,
             name: fixture.store.symbols.get(target).name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -9759,6 +9716,7 @@ fn rejects_non_this_receivers_non_current_this_and_nullary_methods() {
         kind: TreeKind::Select(Select {
             qualifier: receiver,
             name: fixture.store.symbols.get(identity).name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -9824,6 +9782,7 @@ fn rejects_non_this_receivers_non_current_this_and_nullary_methods() {
         kind: TreeKind::Select(Select {
             qualifier: other_this,
             name: fixture.store.symbols.get(identity).name,
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -10428,6 +10387,7 @@ fn planned_field_reads_reject_stale_targets_and_forged_this_prefixes() {
         kind: TreeKind::Select(Select {
             qualifier: receiver,
             name: Name::new(field_name, Namespace::Term),
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -10458,6 +10418,7 @@ fn planned_field_reads_reject_stale_targets_and_forged_this_prefixes() {
         kind: TreeKind::Select(Select {
             qualifier: receiver,
             name: Name::new(field_name, Namespace::Term),
+            is_type_projection: false,
             backquoted: false,
         }),
         position: None,
@@ -10543,11 +10504,9 @@ fn same_named_planned_local_keeps_its_local_load() {
         source_visibility: crate::JvmFieldSourceVisibility::PlainPrivate,
         initializer: Some(field_initializer),
     });
-    unit.classes[0].methods[0].locals.push(JvmLocalBinding {
-        declaration,
-        symbol: local,
-        mutable: false,
-    });
+    unit.classes[0].methods[0]
+        .locals
+        .push(JvmLocalBinding::ordinary(declaration, local, false));
     let code = unit
         .lower_method_body(fixture.class, fixture.methods[0], &fixture.definitions)
         .unwrap();
@@ -10619,6 +10578,7 @@ impl PrimitiveIntrinsicFixture {
             kind: TreeKind::Select(Select {
                 qualifier: receiver,
                 name,
+                is_type_projection: false,
                 backquoted: false,
             }),
             position: None,

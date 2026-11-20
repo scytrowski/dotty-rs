@@ -13,6 +13,22 @@ are relative to the pinned Scala checkout and are validated against
 `library/src` and `compiler/src`. Blank lines and comments are ignored;
 duplicate paths are deduplicated and the selected paths are sorted.
 
+The profiling resolvers forward the classpath loader's ordered type parameters
+and variance. This lets member lookup traverse applied parents such as
+`Comparable[String]` when typing `String.length()`. With that metadata enabled
+on both `main` at `0a4dec01f2` and the contextual-arguments branch, all 31
+smoke methods had identical typing outcomes and first blockers. The updated
+baseline records the additional resolver requests made before reaching those
+blockers, including contextual lookups. Two fresh runs produced identical
+normalized reports.
+
+In the separate 25 + 25 ordinary-method check, Scala's `SortedMap.unsorted`
+still reaches tree 50 and compares `SortedMap.this` with `Map[K, V]`.
+Both revisions report missing class information for the same source symbol.
+The receipt verifier accepts the measured change in the two session-local type
+IDs, from 1714/1713 to 1718/1717, and checks every other field against the
+frozen receipt. Both live passes must agree.
+
 Two frozen method cohorts are available:
 
 | Name | Frozen rows | Stable identity | Use |

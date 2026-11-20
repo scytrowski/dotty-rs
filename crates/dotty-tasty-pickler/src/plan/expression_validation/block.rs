@@ -140,6 +140,10 @@ impl Validator<'_, '_> {
                 .plan
                 .typed_bindings
                 .mutable_counter_reference_assignment(self.plan.source.id, method.symbol);
+            let conditional_assignment = self
+                .plan
+                .typed_bindings
+                .conditional_mutable_reference_assignment(self.plan.source.id, method.symbol);
             let call_bindings = match (call_binding, call_pair_binding) {
                 (Some(call), None) => vec![call],
                 (None, Some(calls)) => calls.to_vec(),
@@ -157,6 +161,9 @@ impl Validator<'_, '_> {
                 }
                 [formals] if formals.len() == 4 && selection_binding.is_some() => {
                     Some([formals[2], formals[3]])
+                }
+                [formals] if formals.len() == 4 && conditional_assignment.is_some() => {
+                    Some([formals[0], formals[1]])
                 }
                 _ => None,
             };
@@ -394,6 +401,153 @@ impl Validator<'_, '_> {
                         .map(|tree| &tree.kind),
                     Some(TreeKind::Apply(_))
                 );
+            let conditional_rhs_roles_valid = conditional_assignment.is_some_and(|assignment| {
+                let mut seed_locals = [None, None];
+                let (Some(source_declarations), Some(typed_declarations)) =
+                    (source_block.stats.get(..2), typed_block.stats.get(..2))
+                else {
+                    return false;
+                };
+                let [formals] = method.parameter_clauses.as_slice() else {
+                    return false;
+                };
+                if formals.len() != 4 {
+                    return false;
+                }
+                for (index, (&source_declaration, &typed_declaration)) in source_declarations
+                    .iter()
+                    .zip(typed_declarations)
+                    .enumerate()
+                {
+                    let Some(local) = self.local_bindings.get(&source_declaration) else {
+                        return false;
+                    };
+                    let Some(TreeKind::ValDef(typed_declaration)) = self
+                        .plan
+                        .typed_ast
+                        .try_get(typed_declaration)
+                        .map(|tree| &tree.kind)
+                    else {
+                        return false;
+                    };
+                    let Some(typed_initializer) = typed_declaration.rhs else {
+                        return false;
+                    };
+                    let Some(TreeKind::Apply(initializer)) = self
+                        .plan
+                        .typed_ast
+                        .try_get(typed_initializer)
+                        .map(|tree| &tree.kind)
+                    else {
+                        return false;
+                    };
+                    let [argument] = initializer.args.as_slice() else {
+                        return false;
+                    };
+                    let Some(argument) = self.plan.typed_ast.try_get(*argument) else {
+                        return false;
+                    };
+                    let Some(Type::TermRef {
+                        target: TermRefTarget::Symbol(seed),
+                        ..
+                    }) = self.plan.store.types.try_get(argument.ty)
+                    else {
+                        return false;
+                    };
+                    let Some(formal_index) = formals.iter().position(|formal| formal == seed)
+                    else {
+                        return false;
+                    };
+                    if formal_index > 1 || seed_locals[formal_index].replace(local.symbol).is_some()
+                    {
+                        return false;
+                    }
+                    if local.typed_declaration != typed_block.stats[index] {
+                        return false;
+                    }
+                }
+                matches!(
+                    (seed_locals, assignment.rhs_locals),
+                    ([Some(first), Some(second)], [actual_second, actual_first])
+                        if first == actual_first && second == actual_second && first != second
+                )
+            });
+            let conditional_mutable_reassignment_shape = source_block.stats.len() == 5
+                && call_bindings.len() == 1
+                && call_bindings[0].source_apply == source_block.stats[4]
+                && call_bindings[0].typed_apply == typed_block.stats[4]
+                && conditional_assignment.is_some_and(|assignment| {
+                    assignment.source_id == self.plan.source.id
+                        && assignment.owner == self.plan.class
+                        && assignment.method == method.symbol
+                        && self.plan.store.scopes.contains(assignment.scope)
+                        && self.plan.store.scopes.get(assignment.scope).owner == Some(method.symbol)
+                        && assignment.source_block == source_id
+                        && assignment.typed_block == typed_id
+                        && assignment.source_if == source_block.stats[3]
+                        && assignment.typed_if == typed_block.stats[3]
+                        && assignment
+                            .source_assignments
+                            .iter()
+                            .all(|source_assignment| {
+                                matches!(
+                                    self.source_tree(*source_assignment).map(|tree| &tree.kind),
+                                    Ok(TreeKind::Assign(_))
+                                )
+                            })
+                        && assignment.typed_assignments.iter().all(|typed_assignment| {
+                            matches!(
+                                self.plan
+                                    .typed_ast
+                                    .try_get(*typed_assignment)
+                                    .map(|tree| &tree.kind),
+                                Some(TreeKind::Assign(_))
+                            )
+                        })
+                        && self
+                            .complete(assignment.local)
+                            .is_ok_and(|ty| ty == assignment.local_type)
+                })
+                && conditional_rhs_roles_valid
+                && source_block.stats[..3]
+                    .iter()
+                    .zip(&typed_block.stats[..3])
+                    .all(|(&source_stat, &typed_stat)| {
+                        matches!(
+                            self.source_tree(source_stat).map(|tree| &tree.kind),
+                            Ok(TreeKind::ValDef(_))
+                        ) && matches!(
+                            self.plan
+                                .typed_ast
+                                .try_get(typed_stat)
+                                .map(|tree| &tree.kind),
+                            Some(TreeKind::ValDef(_))
+                        )
+                    })
+                && matches!(
+                    self.source_tree(source_block.stats[3])
+                        .map(|tree| &tree.kind),
+                    Ok(TreeKind::If(_))
+                )
+                && matches!(
+                    self.plan
+                        .typed_ast
+                        .try_get(typed_block.stats[3])
+                        .map(|tree| &tree.kind),
+                    Some(TreeKind::If(_))
+                )
+                && matches!(
+                    self.source_tree(source_block.stats[4])
+                        .map(|tree| &tree.kind),
+                    Ok(TreeKind::Apply(_))
+                )
+                && matches!(
+                    self.plan
+                        .typed_ast
+                        .try_get(typed_block.stats[4])
+                        .map(|tree| &tree.kind),
+                    Some(TreeKind::Apply(_))
+                );
             let local_stat_shape = (((1..=2).contains(&source_block.stats.len())
                 || selected_local_shape)
                 && source_block.stats.iter().zip(&typed_block.stats).all(
@@ -414,7 +568,8 @@ impl Validator<'_, '_> {
             let exact_shape = (local_stat_shape
                 || verified_call_stat_shape
                 || alias_call_stat_shape
-                || mutable_reassignment_shape)
+                || mutable_reassignment_shape
+                || conditional_mutable_reassignment_shape)
                 && matches!(
                     self.source_tree(source_block.expr)?.kind,
                     TreeKind::Apply(_)
@@ -468,15 +623,36 @@ impl Validator<'_, '_> {
                         && initializers.iter().any(|initializer| initializer.local == first)
                         && initializers.iter().any(|initializer| initializer.local == second))
             });
+            let conditional_pair_matches_rhs_roles = !conditional_mutable_reassignment_shape
+                || conditional_assignment.is_some_and(|assignment| {
+                    pair.is_some_and(|pair| {
+                        let local_symbols = pair.arguments.map(|argument| match argument.origin {
+                            crate::FormalLocalConstructorCallArgumentOrigin::LocalValue {
+                                symbol,
+                                ..
+                            } => Some(symbol),
+                            crate::FormalLocalConstructorCallArgumentOrigin::Formal { .. } => None,
+                        });
+                        matches!(
+                            local_symbols,
+                            [Some(first), Some(second)]
+                                if first == assignment.rhs_locals[1]
+                                    && second == assignment.rhs_locals[0]
+                        )
+                    })
+                });
             let two_local_shape = (source_block.stats.len() == 2
                 || verified_call_stat_shape
                 || selected_local_shape
                 || selected_call_shape
-                || mutable_reassignment_shape)
+                || mutable_reassignment_shape
+                || conditional_mutable_reassignment_shape)
                 && (selected_call_shape
                     || mutable_reassignment_shape
+                    || conditional_mutable_reassignment_shape
                     || source_block.stats.len() == 2 + call_bindings.len())
                 && (call_bindings.is_empty() || distinct_local_pair_matches_initializers)
+                && conditional_pair_matches_rhs_roles
                 && local_argument_indices.len() == 2
                 && initializers.len() == 2
                 && initializers[0].local != initializers[1].local
@@ -622,6 +798,10 @@ impl Validator<'_, '_> {
             .plan
             .typed_bindings
             .mutable_counter_reference_assignment(self.plan.source.id, method.symbol);
+        let conditional_assignment = self
+            .plan
+            .typed_bindings
+            .conditional_mutable_reference_assignment(self.plan.source.id, method.symbol);
         let selected_call = self
             .plan
             .typed_bindings
@@ -663,7 +843,25 @@ impl Validator<'_, '_> {
                 )?;
                 continue;
             }
-            let call_start = if mutable_assignment.is_some() {
+            if conditional_assignment.is_some_and(|assignment| {
+                assignment.source_if == source_stat && assignment.typed_if == typed_stat
+            }) {
+                let branch_type = self.validate_if_expression(
+                    source_stat,
+                    typed_stat,
+                    method,
+                    depth + 1,
+                    visited,
+                )?;
+                if branch_type != self.plan.definitions.unit {
+                    return Err(PickleError::BodyType {
+                        tree: typed_stat,
+                        ty: branch_type,
+                    });
+                }
+                continue;
+            }
+            let call_start = if mutable_assignment.is_some() || conditional_assignment.is_some() {
                 4
             } else if source_block.stats.len() == 5 || selected_call {
                 3
@@ -737,7 +935,8 @@ impl Validator<'_, '_> {
             result_type,
             depth,
             (Some(visited), reference_result),
-        )
+        )?;
+        Ok(())
     }
 
     fn validate_local_receiver_unit_call(
@@ -806,6 +1005,9 @@ impl Validator<'_, '_> {
         let mutable_assignment = p
             .typed_bindings
             .mutable_counter_reference_assignment(p.source.id, method.symbol);
+        let conditional_assignment = p
+            .typed_bindings
+            .conditional_mutable_reference_assignment(p.source.id, method.symbol);
         let first_argument_local = method
             .parameter_clauses
             .first()
@@ -843,6 +1045,19 @@ impl Validator<'_, '_> {
                         && assignment.method == method.symbol
                 })
         });
+        let receiver_is_conditional_mutable_rebinding =
+            conditional_assignment.is_some_and(|assignment| {
+                assignment.local == binding.receiver
+                    && assignment.scope == binding.receiver_scope
+                    && assignment.method == method.symbol
+                    && assignment.owner == p.class
+            });
+        let conditional_receiver_is_exact = conditional_assignment.is_none_or(|assignment| {
+            assignment.local == binding.receiver
+                && assignment.scope == binding.receiver_scope
+                && assignment.method == method.symbol
+                && assignment.owner == p.class
+        });
         let receiver_class = receiver_initializer
             .map(|initializer| initializer.call.class)
             .or_else(|| {
@@ -875,6 +1090,17 @@ impl Validator<'_, '_> {
                         _ => None,
                     }
                 })
+            })
+            .or_else(|| {
+                conditional_assignment.and_then(|assignment| {
+                    match p.store.types.try_get(assignment.local_type) {
+                        Some(Type::TypeRef {
+                            target: TypeRefTarget::Symbol(class),
+                            ..
+                        }) => Some(*class),
+                        _ => None,
+                    }
+                })
             });
         let calls_pair = p
             .typed_bindings
@@ -892,6 +1118,9 @@ impl Validator<'_, '_> {
         let method_formals = match method.parameter_clauses.as_slice() {
             [formals] if formals.len() == 2 => Some([formals[0], formals[1]]),
             [formals] if formals.len() == 4 && selection_binding.is_some() => {
+                Some([formals[2], formals[3]])
+            }
+            [formals] if formals.len() == 4 && conditional_assignment.is_some() => {
                 Some([formals[2], formals[3]])
             }
             _ => None,
@@ -936,11 +1165,17 @@ impl Validator<'_, '_> {
             || typed_call.args.as_slice() != [binding.typed_argument]
             || source_selection.qualifier != binding.source_receiver
             || typed_selection.qualifier != binding.typed_receiver
-            || initializers.len() != 2
+            || (initializers.len() != 2
+                && !conditional_assignment.is_some_and(|assignment| {
+                    assignment.rhs_locals[0] != assignment.rhs_locals[1]
+                        && assignment.local == binding.receiver
+                }))
             || (receiver_initializer.is_none()
                 && !receiver_is_alias
                 && !receiver_is_selection
-                && !receiver_is_mutable_rebinding)
+                && !receiver_is_mutable_rebinding
+                && !receiver_is_conditional_mutable_rebinding)
+            || !conditional_receiver_is_exact
             || !self.visible_locals.contains(&binding.receiver)
             || !canonical_method
             || expected_argument_formal != Some(binding.argument_formal)

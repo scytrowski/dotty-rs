@@ -1247,6 +1247,17 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         self.load_semantic_class_with_tasty_unpickler_injected(name, false)
     }
 
+    pub(crate) fn load_semantic_class_for_selected_member(
+        &mut self,
+        name: &BinaryName,
+    ) -> Result<SymbolId, SemanticTastyLoadError> {
+        if let Some(resource) = self.semantic_chain_candidate_resource(name) {
+            self.load_semantic_chain_with_tasty_unpickler(name, resource)
+        } else {
+            self.load_semantic_class_with_tasty_unpickler_without_chain(name)
+        }
+    }
+
     fn semantic_chain_candidate_resource(
         &mut self,
         requested: &BinaryName,
@@ -1519,8 +1530,17 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                         return Err(error);
                     }
                 };
+                let answer = match Self::semantic_chain_answer_address(
+                    file, &index, self.store, root, name, resource,
+                ) {
+                    Ok(address) => address,
+                    Err(error) => {
+                        self.restore_tasty_pair_packages(file, session);
+                        return Err(error);
+                    }
+                };
                 unit_symbols[position] = Some(index.symbol_at(root).expect("indexed root symbol"));
-                indexes[position] = Some((index, root, constructor));
+                indexes[position] = Some((index, root, constructor, answer));
                 tasty_session = session;
             }
 
@@ -1534,7 +1554,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     continue;
                 };
                 let name = &names[position];
-                let (index, root, constructor) = indexes[position]
+                let (index, root, constructor, answer) = indexes[position]
                     .take()
                     .expect("every newly entered unit has its source index");
                 let mut unpickler = TastyUnpickler::with_session_and_index(
@@ -1544,7 +1564,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     tasty_session,
                     index,
                 );
-                for address in [root, constructor] {
+                for address in [Some(root), Some(constructor), answer]
+                    .into_iter()
+                    .flatten()
+                {
                     if let Err(error) = unpickler.complete_symbol(address) {
                         let (_, session) = unpickler.into_session_parts();
                         self.restore_tasty_pair_packages(file, session);
@@ -1933,20 +1956,101 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 tasty_symbol::TastyDecodeError::Ast(error),
             ))
         })?;
-        if !template.type_params.is_empty()
-            || !template.term_params.is_empty()
-            || template.stats.len() != 1
-            || !matches!(
+        let has_only_constructor = template.stats.len() == 1
+            && matches!(
                 template.stats.first(),
                 Some(dotty_tasty::tasty::RawTree::LengthNode(node))
                     if node.tag == dotty_tasty::tasty::DEFDEF_TAG
-            )
+            );
+        let has_indexed_answer = name.as_internal() == "convergence/ChainLeaf"
+            && template.stats.len() == 2
+            && template.stats.iter().all(|stat| {
+                matches!(stat, dotty_tasty::tasty::RawTree::LengthNode(node)
+                    if node.tag == dotty_tasty::tasty::DEFDEF_TAG)
+            })
+            && template.stats.iter().any(|stat| {
+                let dotty_tasty::tasty::RawTree::LengthNode(node) = stat else {
+                    return false;
+                };
+                matches!(node.decode_structured(),
+                    Ok(dotty_tasty::tasty::StructuredNode::DefDef(body))
+                        if file.names().get_utf8(body.name) == Some("answer")
+                            && body.header_items.is_empty()
+                            && body.rhs.is_some()
+                            && !has_unsupported_class_annotations(file, &body.tail))
+            });
+        if !template.type_params.is_empty()
+            || !template.term_params.is_empty()
+            || !(has_only_constructor || has_indexed_answer)
         {
             return Err(SemanticTastyLoadError::UnsupportedShape(
-                "a chain unit must have no parameters and only its constructor stat",
+                "a chain unit must have no parameters and only its constructor, or the indexed ChainLeaf.answer declaration",
             ));
         }
         Ok(())
+    }
+
+    fn semantic_chain_answer_address(
+        file: &dotty_tasty::tasty::TastyFile<'_>,
+        index: &TastySemanticIndex,
+        store: &SemanticStore,
+        root: u32,
+        name: &BinaryName,
+        resource: &ClassResource,
+    ) -> Result<Option<u32>, SemanticTastyLoadError> {
+        if name.as_internal() != "convergence/ChainLeaf" {
+            return Ok(None);
+        }
+        let nodes = file.ast_address_index().map_err(|error| {
+            SemanticTastyLoadError::for_pair_unit(
+                name,
+                resource,
+                SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                    name.clone(),
+                    tasty_symbol::TastyDecodeError::Parse(error),
+                )),
+            )
+        })?;
+        let root_symbol = index.symbol_at(root).ok_or_else(|| {
+            SemanticTastyLoadError::for_pair_unit(
+                name,
+                resource,
+                SemanticTastyLoadError::UnsupportedShape(
+                    "the indexed ChainLeaf root has no semantic symbol",
+                ),
+            )
+        })?;
+        let answers = nodes
+            .iter()
+            .filter_map(|node| {
+                let address = u32::try_from(node.offset).ok()?;
+                let symbol = index.symbol_at(address)?;
+                let is_answer = match node.decode_structured().ok()? {
+                    dotty_tasty::tasty::StructuredNode::DefDef(body) => {
+                        file.names().get_utf8(body.name) == Some("answer")
+                            && body.header_items.is_empty()
+                            && body.rhs.is_some()
+                            && !has_unsupported_class_annotations(file, &body.tail)
+                    }
+                    _ => false,
+                };
+                (is_answer
+                    && store.symbols.get(symbol).owner == Some(root_symbol)
+                    && store.symbols.get(symbol).kind == SymbolKind::Method)
+                    .then_some(address)
+            })
+            .collect::<Vec<_>>();
+        match answers.as_slice() {
+            [answer] => Ok(Some(*answer)),
+            [] => Ok(None),
+            _ => Err(SemanticTastyLoadError::for_pair_unit(
+                name,
+                resource,
+                SemanticTastyLoadError::UnsupportedShape(
+                    "the bounded ChainLeaf template has multiple indexed answer methods",
+                ),
+            )),
+        }
     }
 
     fn semantic_chain_root_and_constructor(
@@ -3426,7 +3530,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         name: &BinaryName,
     ) -> Result<TastyHeaderFieldSelection, SemanticTastyLoadError> {
         use dotty_tasty::tasty::{
-            DefDefHeaderItem, DefinitionBody, ParameterNode, RawTree, TEMPLATE_TAG, TYPEDEF_TAG,
+            DefinitionBody, ParameterNode, RawTree, TEMPLATE_TAG, TYPEDEF_TAG,
         };
 
         let asts = file.asts().map_err(|error| {
@@ -3557,22 +3661,24 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 tasty_symbol::TastyDecodeError::Ast(error),
             ))
         })?;
-        let [
-            ParameterNode::TermParam {
-                name: formal_name, ..
-            },
-        ] = constructor.parameters.as_slice()
+        let mut parameters = constructor.parameters();
+        let (
+            Some(
+                formal @ ParameterNode::TermParam {
+                    name: formal_name, ..
+                },
+            ),
+            None,
+        ) = (parameters.next(), parameters.next())
         else {
             return Err(SemanticTastyLoadError::UnsupportedShape(
                 "the field projection requires one ordinary constructor parameter",
             ));
         };
         if field_name != formal_name
-            || file.names().get_utf8(constructor.name) != Some("<init>")
             || constructor.header_items.len() != 1
-            || !matches!(constructor.header_items.first(), Some(DefDefHeaderItem::Parameter(ParameterNode::TermParam { name, .. })) if name == formal_name)
-            || !constructor.clauses.is_empty()
-            || !Self::constructor_parameter_is_ordinary(constructor.parameters.first())
+            || file.names().get_utf8(constructor.name) != Some("<init>")
+            || !Self::constructor_parameter_is_ordinary(Some(formal))
             || has_unsupported_definition_annotations(&constructor.tail)
         {
             return Err(SemanticTastyLoadError::UnsupportedShape(
@@ -3660,8 +3766,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .iter()
             .find(|node| {
                 node.tag == dotty_tasty::tasty::PARAM_TAG
-                    && node.payload.as_ptr() == constructor.parameters[0].payload().as_ptr()
-                    && node.payload.len() == constructor.parameters[0].payload().len()
+                    && node.payload.as_ptr() == formal.payload().as_ptr()
+                    && node.payload.len() == formal.payload().len()
                     && address_index.parent_of(node.offset as u32) == Some(constructor_tree_node)
             })
             .ok_or(SemanticTastyLoadError::UnsupportedShape(
@@ -3935,53 +4041,26 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                         ..
                     },
                 ] => {
-                    let term_parameter_is_valid = if has_class_type_parameter {
-                        matches!(
-                            constructor.parameters.as_slice(),
-                            [
-                                dotty_tasty::tasty::ParameterNode::TypeParam { .. },
-                                dotty_tasty::tasty::ParameterNode::TermParam {
-                                    name: constructor_parameter_name,
-                                    ..
-                                },
-                            ] if constructor_parameter_name == template_parameter_name
-                        ) && matches!(
-                            constructor.header_items.as_slice(),
-                            [
-                                dotty_tasty::tasty::DefDefHeaderItem::Parameter(
-                                    dotty_tasty::tasty::ParameterNode::TypeParam { .. }
-                                ),
-                                dotty_tasty::tasty::DefDefHeaderItem::Parameter(
-                                    dotty_tasty::tasty::ParameterNode::TermParam {
-                                        name: constructor_parameter_name,
-                                        ..
-                                    }
-                                ),
-                            ] if constructor_parameter_name == template_parameter_name
-                        ) && Self::constructor_parameter_is_ordinary(constructor.parameters.last())
-                    } else {
-                        matches!(
-                            constructor.parameters.as_slice(),
-                            [dotty_tasty::tasty::ParameterNode::TermParam {
-                                name: constructor_parameter_name,
-                                ..
-                            }] if constructor_parameter_name == template_parameter_name
-                        ) && constructor.header_items.len() == 1
-                            && matches!(
-                                &constructor.header_items[0],
-                                dotty_tasty::tasty::DefDefHeaderItem::Parameter(
-                                    dotty_tasty::tasty::ParameterNode::TermParam {
-                                        name: constructor_parameter_name,
-                                        ..
-                                    }
-                                ) if constructor_parameter_name == template_parameter_name
-                            )
-                            && Self::constructor_parameter_is_ordinary(
-                                constructor.parameters.first(),
-                            )
+                    use dotty_tasty::tasty::{
+                        DefDefHeaderItem::Parameter,
+                        ParameterNode::{TermParam, TypeParam},
                     };
-                    term_parameter_is_valid
-                        && constructor.clauses.is_empty()
+                    let formal = match (
+                        has_class_type_parameter,
+                        constructor.header_items.as_slice(),
+                    ) {
+                        (
+                            true,
+                            [
+                                Parameter(TypeParam { .. }),
+                                Parameter(formal @ TermParam { .. }),
+                            ],
+                        )
+                        | (false, [Parameter(formal @ TermParam { .. })]) => Some(formal),
+                        _ => None,
+                    };
+                    formal.is_some_and(|p| p.name() == *template_parameter_name)
+                        && Self::constructor_parameter_is_ordinary(formal)
                         && (header_field_selection.is_some()
                             || Self::template_parameter_is_plain(
                                 template_shape.term_params.first(),
@@ -3990,11 +4069,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 _ => false,
             }
         } else {
-            constructor.parameters.is_empty()
-                && constructor.header_items
-                    == [dotty_tasty::tasty::DefDefHeaderItem::Clause(
-                        dotty_tasty::tasty::EMPTYCLAUSE_TAG,
-                    )]
+            constructor.header_items
+                == [dotty_tasty::tasty::DefDefHeaderItem::Clause(
+                    dotty_tasty::tasty::EMPTYCLAUSE_TAG,
+                )]
         };
         if !valid_constructor_parameters {
             return Err(SemanticTastyLoadError::UnsupportedShape(
@@ -4002,13 +4080,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             ));
         }
         let constructor_parameter_address = if has_single_term_parameter {
-            let parameter = if has_class_type_parameter {
-                constructor.parameters.last()
-            } else {
-                constructor.parameters.first()
-            };
-            let Some(parameter) = parameter else {
-                unreachable!("supported constructor has one parameter")
+            let Some(parameter) = constructor.parameters().next_back() else {
+                unreachable!("supported constructor has one term parameter")
             };
             let Some(parameter_node) = address_index.iter().find(|node| {
                 node.tag == dotty_tasty::tasty::PARAM_TAG
@@ -4187,13 +4260,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 .ok_or(SemanticTastyLoadError::UnsupportedShape(
                     "the generic constructor formal is missing from the AST address index",
                 ))?;
-        let formal =
-            constructor
-                .parameters
-                .last()
-                .ok_or(SemanticTastyLoadError::UnsupportedShape(
-                    "the generic constructor requires one ordinary formal",
-                ))?;
+        let formal = constructor.parameters().next_back().ok_or(
+            SemanticTastyLoadError::UnsupportedShape(
+                "the generic constructor requires one ordinary formal",
+            ),
+        )?;
         if formal_tree_node.tag != dotty_tasty::tasty::PARAM_TAG
             || formal_node.payload.as_ptr() != formal.payload().as_ptr()
             || formal_node.payload.len() != formal.payload().len()
@@ -5656,7 +5727,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         for field in &decoded.fields {
             let resolved_type = self
                 .lower_tasty_member_type(&identity.module_class_name, field.declared_type.as_ref());
-            self.enter_field(
+            let symbol = self.enter_field(
                 identity.module_class,
                 declarations,
                 &field.name,
@@ -5664,18 +5735,17 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 resolved_type,
                 origin,
             );
+            let flags = self.store.symbols.get(symbol).flags | field.contextual_flags;
+            self.store.symbols.get_mut(symbol).flags = flags;
         }
-        for method in &decoded.methods {
-            let resolved_type = self.lower_tasty_method(&identity.module_class_name, method);
-            self.enter_method(
-                identity.module_class,
-                declarations,
-                &method.name,
-                method.flags,
-                resolved_type,
-                origin,
-            );
-        }
+        self.enter_tasty_methods(
+            &identity.module_class_name,
+            identity.module_class,
+            declarations,
+            &decoded.methods,
+            &[],
+            origin,
+        )?;
         if let Some(alias) = predef_string_alias {
             debug_assert_eq!(alias.address, 378);
             let text = self.store.names.intern(&alias.name);
@@ -7244,8 +7314,17 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     ) -> Result<TypeId, ClassLoadError> {
         let dependency = class_type_signature_binary_name(signature);
         let class_symbol = self.ensure_dependency_identity(owner, &dependency)?;
-        let tycon = self.type_ref(class_symbol);
+        self.apply_class_signature_arguments(owner, env, class_symbol, signature)
+    }
 
+    fn apply_class_signature_arguments(
+        &mut self,
+        owner: &BinaryName,
+        env: &TypeVarEnv,
+        class_symbol: SymbolId,
+        signature: &ClassTypeSignature,
+    ) -> Result<TypeId, ClassLoadError> {
+        let tycon = self.type_ref(class_symbol);
         let type_arguments = signature
             .suffix
             .last()
@@ -7506,7 +7585,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 field.declared_type.as_ref(),
                 &class_type_parameters,
             );
-            self.enter_field(
+            let symbol = self.enter_field(
                 class_symbol,
                 declarations,
                 &field.name,
@@ -7514,22 +7593,119 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 resolved_type,
                 origin,
             );
+            let flags = self.store.symbols.get(symbol).flags | field.contextual_flags;
+            self.store.symbols.get_mut(symbol).flags = flags;
         }
-        for method in &decoded.methods {
-            let resolved_type =
-                self.lower_tasty_method_with_class_parameters(name, method, &class_type_parameters);
-            self.enter_method(
-                class_symbol,
-                declarations,
-                &method.name,
-                method.flags,
-                resolved_type,
-                origin,
-            );
-        }
+        self.enter_tasty_methods(
+            name,
+            class_symbol,
+            declarations,
+            &decoded.methods,
+            &class_type_parameters,
+            origin,
+        )?;
 
         self.complete_class_with_parent_types(class_symbol, declarations, parents);
         Ok(class_symbol)
+    }
+
+    fn enter_tasty_methods(
+        &mut self,
+        class_name: &BinaryName,
+        owner: SymbolId,
+        declarations: ScopeId,
+        methods: &[tasty_symbol::DecodedTastyMethod],
+        class_parameters: &[TypeId],
+        origin: SymbolOrigin,
+    ) -> Result<(), ClassLoadError> {
+        // Only methods participating in a getter relation need this offset index.
+        let endpoints: HashSet<_> = methods
+            .iter()
+            .filter_map(|getter| {
+                getter
+                    .default_for
+                    .map(|(target, _)| [target, getter.offset])
+            })
+            .flatten()
+            .collect();
+        let mut entries = HashMap::new();
+        for method in methods {
+            let info =
+                self.lower_tasty_method_with_class_parameters(class_name, method, class_parameters);
+            let symbol = self.enter_method(
+                owner,
+                declarations,
+                &method.name,
+                method.flags,
+                info,
+                origin,
+            );
+            let flags = self.store.symbols.get(symbol).flags | method.contextual_flags;
+            self.store.symbols.get_mut(symbol).flags = flags;
+            if endpoints.contains(&method.offset) {
+                entries.insert(method.offset, (symbol, info, method));
+            }
+        }
+        for getter in methods {
+            let Some((target_offset, ordinal)) = getter.default_for else {
+                continue;
+            };
+            let Some(&(method, mut signature, target)) = entries.get(&target_offset) else {
+                continue;
+            };
+            let getter_symbol = entries[&getter.offset].0;
+            if self
+                .store
+                .scopes
+                .get(declarations)
+                .lookup_all(&self.store.symbols.get(getter_symbol).name)
+                != [getter_symbol]
+            {
+                continue;
+            }
+            let Some(decoded_param) = target.parameters.get(ordinal) else {
+                continue;
+            };
+            let mut remaining = ordinal;
+            let parameter = loop {
+                match self.store.types.get(signature) {
+                    Type::Poly(poly) => signature = poly.result,
+                    Type::Method(clause) if remaining >= clause.params.len() => {
+                        remaining -= clause.params.len();
+                        signature = clause.result;
+                    }
+                    Type::Method(clause) => break Some(clause.params[remaining]),
+                    _ => break None,
+                }
+            };
+            let Some(parameter) = parameter else {
+                continue;
+            };
+            let param = self.store.symbols.alloc(Symbol {
+                name: *parameter.name.as_name(),
+                kind: SymbolKind::Parameter,
+                owner: Some(method),
+                flags: decoded_param.contextual_flags
+                    | if parameter.erased {
+                        SymbolFlags::ERASED
+                    } else {
+                        SymbolFlags::EMPTY
+                    },
+                visibility: Visibility::Public,
+                info: SymbolInfo::Complete(parameter.ty),
+                origin,
+                annotations: vec![],
+                position: None,
+                links: SymbolLinks::default(),
+            });
+            self.store
+                .record_default_getter(method, ordinal, param, getter_symbol)
+                .map_err(|error| ClassLoadError::IdentityConflict {
+                    name: class_name.clone(),
+                    reason: error.to_string(),
+                })?;
+        }
+        Ok(())
     }
 
     fn enter_tasty_class_type_parameters(
@@ -7680,6 +7856,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// does not yet recognize (see `tasty_symbol`'s doc comments), rather
     /// than a flag alongside an ordinary array type the way JVMS
     /// `ACC_VARARGS` is.
+    #[cfg(test)]
     fn lower_tasty_method(
         &mut self,
         owner: &BinaryName,
@@ -7766,7 +7943,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             params.push(MethodParam {
                 name: TermName::new(text),
                 ty,
-                erased: false,
+                erased: parameter.erased,
                 varargs: false,
             });
         }
@@ -7782,7 +7959,38 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             )
         };
 
-        let method_type = if method.has_term_clause || method.name == "<init>" {
+        let method_type = if let Some(clauses) = &method.contextual_clauses {
+            if clauses.iter().map(|(_, n)| n).sum::<usize>() != params.len() {
+                self.unresolved_tasty_type("incomplete contextual parameter clause")
+            } else {
+                let mut inner = result;
+                for (depth, &(kind, count)) in clauses.iter().rev().enumerate() {
+                    let start = params.len() - count;
+                    let clause = params.split_off(start);
+                    let binder = self.store.types.reserve();
+                    if depth == 0
+                        && let Some(index) = method
+                            .singleton_result_parameter
+                            .and_then(|index| index.checked_sub(start))
+                            .filter(|index| *index < count)
+                    {
+                        inner = self.store.types.alloc(Type::ParamRef {
+                            binder: binder.id(),
+                            index: index as u32,
+                        });
+                    }
+                    inner = self.store.types.fill(
+                        binder,
+                        Type::Method(MethodType {
+                            params: clause,
+                            result: inner,
+                            kind,
+                        }),
+                    );
+                }
+                inner
+            }
+        } else if method.has_term_clause || method.name == "<init>" {
             self.store.types.alloc(Type::Method(MethodType {
                 params,
                 result,
@@ -7990,6 +8198,41 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             )?);
         }
 
+        let parents = if let Some(signature) = &signature {
+            let env = self.class_type_var_env(declarations, None);
+            let parent_indices = class_file.super_class.iter().chain(&class_file.interfaces);
+            let parent_signatures =
+                std::iter::once(&signature.superclass).chain(&signature.superinterfaces);
+            if parent_indices.clone().count() != parent_signatures.clone().count() {
+                return Err(ClassLoadError::IdentityConflict {
+                    name: name.clone(),
+                    reason: "generic and erased parent counts disagree".into(),
+                });
+            }
+            let mut parents = Vec::with_capacity(parent_indices.clone().count());
+            for ((index, parent), symbol) in parent_indices
+                .zip(parent_signatures)
+                .zip(super_class.into_iter().chain(interfaces))
+            {
+                if self.resolve_name(name, &class_file, *index)?
+                    != class_type_signature_binary_name(parent)
+                {
+                    return Err(ClassLoadError::IdentityConflict {
+                        name: name.clone(),
+                        reason: "generic and erased parent identities disagree".into(),
+                    });
+                }
+                parents.push(self.apply_class_signature_arguments(name, &env, symbol, parent)?);
+            }
+            parents
+        } else {
+            super_class
+                .into_iter()
+                .chain(interfaces)
+                .map(|symbol| self.type_ref(symbol))
+                .collect()
+        };
+
         let mut fields = Vec::with_capacity(class_file.fields.len());
         for field in &class_file.fields {
             let field_name =
@@ -8111,7 +8354,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             },
         );
 
-        self.complete_class(class_symbol, declarations, super_class, interfaces);
+        self.complete_class_with_parent_types(class_symbol, declarations, parents);
         self.in_progress_classes.remove(&class_symbol);
         Ok(class_symbol)
     }
@@ -17275,6 +17518,63 @@ mod tests {
         );
     }
 
+    #[test]
+    fn generic_parent_signature_preserves_the_class_parameter_and_checks_erasure() {
+        for (signature, valid) in [
+            ("<A:Ljava/lang/Object;>Ljava/lang/Object;LBase<TA;>;", true),
+            (
+                "<A:Ljava/lang/Object;>Ljava/lang/Object;LOther<TA;>;",
+                false,
+            ),
+            ("<A:Ljava/lang/Object;>Ljava/lang/Object;", false),
+        ] {
+            let name = BinaryName::from_internal("Child");
+            let classes = HashMap::from([
+                (
+                    name.clone(),
+                    signature_class(
+                        "Child",
+                        Some("java/lang/Object"),
+                        &["Base"],
+                        Some(signature),
+                        &[],
+                        &[],
+                    ),
+                ),
+                (
+                    BinaryName::from_internal("java/lang/Object"),
+                    synthetic_class("java/lang/Object", None),
+                ),
+                (
+                    BinaryName::from_internal("Base"),
+                    synthetic_class("Base", None),
+                ),
+            ]);
+            let mut store = SemanticStore::new();
+            let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
+            let result = loader.load_class(&name);
+            if !valid {
+                assert!(
+                    matches!(result, Err(ClassLoadError::IdentityConflict { name: rejected, .. }) if rejected == name)
+                );
+                continue;
+            }
+            let class = result.unwrap();
+            let parameter = type_parameter_symbol(loader.store, class, "A");
+            let parents = &class_info(loader.store, class).parents;
+            assert_eq!(parents.len(), 2);
+            let Type::Applied { tycon, args } = loader.store.types.get(parents[1]) else {
+                panic!("expected Base[A]")
+            };
+            assert_eq!(
+                symbol_name(loader.store, parent_symbol(loader.store, *tycon)),
+                "Base"
+            );
+            assert_eq!(args.len(), 1);
+            assert_eq!(parent_symbol(loader.store, args[0]), parameter);
+        }
+    }
+
     /// The `SymbolId` of the `SymbolKind::TypeParameter` symbol entered
     /// under `type_param_name` into `class_symbol`'s declarations scope by
     /// `ClassLoader::enter_class_type_parameters`.
@@ -22919,6 +23219,60 @@ mod tests {
         let original_root = fixture_root.join("tests/fixtures/semantic_chain_3_9_0");
         let simple_root = fixture_root.join("tests/fixtures/semantic_chain_simple_3_9_0");
         let foreign_root = fixture_root.join("tests/fixtures/semantic_chain_controls_3_9_0");
+        for (root, expected) in [
+            (
+                &original_root,
+                [
+                    (
+                        "ChainRoot",
+                        "4c5ab08bcd61019347716e88c5edb0a0f03fc07bb124ad063318809b389d41b3",
+                    ),
+                    (
+                        "ChainMiddle",
+                        "b737055909e3839893f8e2bcaee0faa10aceac1260da01efa82e3e6864751d00",
+                    ),
+                    (
+                        "ChainLeaf",
+                        "8cefb2d2e8c74c6c65a9a9dce0df69f320ad7cae08f8b2c4af0679fbbcd72868",
+                    ),
+                ],
+            ),
+            (
+                &simple_root,
+                [
+                    (
+                        "ChainRoot",
+                        "7cbca928d379b6593ca5c9360316ff5e02960e8a19f81696ff418c1da2cd762f",
+                    ),
+                    (
+                        "ChainMiddle",
+                        "58e5dbb5914bd8b6406591be74152dc22adb5c320b80df632a84f611a1d15bac",
+                    ),
+                    (
+                        "ChainLeaf",
+                        "cf64ad9429db6a20cfe1d36045a0d80655fd267ed98ed1fd4df7398a72ad3d57",
+                    ),
+                ],
+            ),
+        ] {
+            for (class, expected_hash) in expected {
+                let path = root.join("convergence").join(format!("{class}.tasty"));
+                let output = Command::new("sha256sum")
+                    .arg("--")
+                    .arg(&path)
+                    .output()
+                    .expect("sha256sum is available to fixture tests");
+                assert!(output.status.success());
+                assert_eq!(
+                    String::from_utf8(output.stdout)
+                        .expect("sha256sum output is UTF-8")
+                        .split_whitespace()
+                        .next(),
+                    Some(expected_hash),
+                    "fixture hash for {path:?}"
+                );
+            }
+        }
         let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
         let class_path = |root: PathBuf, include_foreign: bool| {
             let mut entries: Vec<Box<dyn ClassPathEntry>> =
@@ -23055,14 +23409,7 @@ mod tests {
             original, original_fresh,
             "fresh-store outcomes are normalized"
         );
-        assert_eq!(
-            original,
-            [
-                "Loaded",
-                "Loaded",
-                "UnsupportedShape:the class template must have no type parameters and one constructor declaration",
-            ]
-        );
+        assert_eq!(original, ["Loaded", "Loaded", "Loaded"]);
         let simple = load_each(simple_root.clone());
         let simple_fresh = load_each(simple_root.clone());
         assert_eq!(simple, simple_fresh, "fresh-store outcomes are normalized");
@@ -23106,6 +23453,7 @@ mod tests {
             let selected_name = BinaryName::from_internal("convergence/ChainLeaf");
             let normalize_result =
                 |result: &Result<Option<SymbolId>, dotty_core::ResolutionError>| match result {
+                    Ok(Some(_)) => format!("requested={selected_name}; selected"),
                     Err(dotty_core::ResolutionError::Malformed { reason }) => {
                         format!("requested={selected_name}; {}", normalize_type_ids(reason))
                     }
@@ -23121,12 +23469,7 @@ mod tests {
         };
         let selected = observe_selected_resolver(simple_root.clone());
         let selected_fresh = observe_selected_resolver(simple_root.clone());
-        let expected_selected = concat!(
-            "requested=convergence/ChainLeaf; ",
-            "semantic loading of convergence/ChainLeaf failed: ",
-            "Unpickle { address: 4, error: UnresolvedMember { address: 17, ",
-            "prefix: TypeId(_), space: None, name: \"ChainMiddle\", namespace: Type } }"
-        );
+        let expected_selected = "requested=convergence/ChainLeaf; selected";
         assert_eq!(selected, expected_selected);
         assert_eq!(selected_fresh, expected_selected);
         assert_eq!(
@@ -23390,6 +23733,97 @@ mod tests {
         assert!(first[1].starts_with("ChainMiddle:convergence:["));
         assert!(first[1].contains("ChainRoot"));
         assert!(first[2].starts_with("ChainLeaf:convergence:[\"ChainMiddle\"]"));
+    }
+
+    #[test]
+    fn original_semantic_chain_leaf_completes_indexed_direct_answer() {
+        let fixture_root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/semantic_chain_3_9_0");
+        let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            CompositeClassPath::new(vec![
+                Box::new(crate::class_path::DirectoryClassPath::new(
+                    fixture_root.clone(),
+                )),
+                Box::new(
+                    crate::jdk_class_path::JdkClassPath::new(java_home.join("jmods"))
+                        .expect("JDK 21 jmods"),
+                ),
+            ]),
+            &mut store,
+        );
+        let root_name = BinaryName::from_internal("convergence/ChainRoot");
+        let middle_name = BinaryName::from_internal("convergence/ChainMiddle");
+        let leaf_name = BinaryName::from_internal("convergence/ChainLeaf");
+
+        let leaf = loader
+            .load_semantic_class_with_tasty_unpickler(&leaf_name)
+            .expect("original ChainLeaf completes through its bounded semantic hierarchy");
+        assert_eq!(
+            loader
+                .load_semantic_class_with_tasty_unpickler(&leaf_name)
+                .expect("repeated request reuses the selected class"),
+            leaf
+        );
+        let middle = parent_symbol(loader.store, class_info(loader.store, leaf).parents[0]);
+        assert_eq!(symbol_name(loader.store, middle), "ChainMiddle");
+        let root = class_info(loader.store, middle)
+            .parents
+            .iter()
+            .map(|parent| parent_symbol(loader.store, *parent))
+            .find(|parent| symbol_name(loader.store, *parent) == "ChainRoot")
+            .expect("ChainMiddle has the authentic ChainRoot parent");
+        assert_eq!(loader.store.symbols.get(root).kind, SymbolKind::Trait);
+        for (name, symbol) in [
+            ("ChainLeaf", leaf),
+            ("ChainMiddle", middle),
+            ("ChainRoot", root),
+        ] {
+            assert_eq!(symbol_name(loader.store, symbol), name);
+            assert!(matches!(
+                loader.store.symbols.get(symbol).info,
+                SymbolInfo::Complete(_)
+            ));
+            assert_eq!(
+                loader.session.origins.get(&symbol),
+                Some(&ClassOrigin::Directory(fixture_root.clone()))
+            );
+        }
+
+        let declarations = class_info(loader.store, leaf).declarations;
+        let answer_name = Name::new(loader.store.names.intern("answer"), Namespace::Term);
+        let answer = loader
+            .store
+            .scopes
+            .get(declarations)
+            .lookup(&answer_name)
+            .expect("the indexed direct answer declaration belongs to ChainLeaf");
+        assert_eq!(loader.store.symbols.get(answer).owner, Some(leaf));
+        assert_eq!(loader.store.symbols.get(answer).kind, SymbolKind::Method);
+        let SymbolInfo::Complete(answer_info) = loader.store.symbols.get(answer).info else {
+            panic!("answer must be fully completed, not merely entered");
+        };
+        let Type::ByName { result } = loader.store.types.get(answer_info) else {
+            panic!("answer's complete serialized info is ByName(Int)");
+        };
+        assert_eq!(
+            type_ref_symbol(loader.store, *result),
+            type_ref_symbol(loader.store, loader.definitions.int),
+            "answer uses the canonical scala.Int definition"
+        );
+        assert_eq!(
+            loader
+                .load_semantic_class_with_tasty_unpickler(&middle_name)
+                .expect("explicit ancestor request reuses the completed hierarchy"),
+            middle
+        );
+        assert_eq!(
+            loader
+                .load_semantic_class_with_tasty_unpickler(&root_name)
+                .expect("explicit trait request reuses the completed hierarchy"),
+            root
+        );
     }
 
     #[test]

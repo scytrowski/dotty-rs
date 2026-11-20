@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::{SourceId, TreeId, Typed, Untyped};
+use crate::ast::{AstArena, Tree};
+use crate::{SourceId, SymbolId, TreeId, Typed, Untyped};
 
 /// A source tree already has a different typed tree recorded in the index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +31,7 @@ impl std::error::Error for ConflictingTypedTree {}
 #[derive(Clone, Debug, Default)]
 pub struct SourceTypedIndex {
     trees: HashMap<(SourceId, TreeId<Untyped>), TreeId<Typed>>,
+    synthetic_definitions: HashMap<TreeId<Typed>, SymbolId>,
 }
 
 impl SourceTypedIndex {
@@ -97,6 +99,24 @@ impl SourceTypedIndex {
         self.trees.remove(&(source, untyped))
     }
 
+    /// Allocates a compiler-generated definition and binds it to its symbol.
+    /// The typed arena and index must belong to the same compiler session.
+    pub fn alloc_synthetic_definition(
+        &mut self,
+        arena: &mut AstArena<Typed>,
+        symbol: SymbolId,
+        definition: Tree<Typed>,
+    ) -> TreeId<Typed> {
+        let tree = arena.alloc(definition);
+        self.synthetic_definitions.insert(tree, symbol);
+        tree
+    }
+
+    /// Returns the canonical symbol of a source-free typed definition.
+    pub fn synthetic_definition_symbol(&self, tree: TreeId<Typed>) -> Option<SymbolId> {
+        self.synthetic_definitions.get(&tree).copied()
+    }
+
     /// Returns the number of recorded source trees.
     pub fn len(&self) -> usize {
         self.trees.len()
@@ -113,6 +133,34 @@ mod tests {
     use super::*;
     use crate::ast::{AstArena, Ident, Tree, TreeKind};
     use crate::{SemanticStore, Type};
+
+    #[test]
+    fn synthetic_definitions_with_the_same_name_bind_distinct_symbols() {
+        let mut store = SemanticStore::new();
+        let definitions = crate::Definitions::bootstrap(&mut store);
+        let name = crate::TermName::new(store.names.intern("evidence"));
+        let mut arena = AstArena::new();
+        let tpt = crate::ast::TypedAstBuilder::new(&mut arena, &store.types)
+            .type_tree(definitions.int, None);
+        let definition = Tree {
+            kind: TreeKind::ValDef(crate::ast::ValDef {
+                name,
+                tpt,
+                rhs: None,
+                metadata: (),
+            }),
+            ty: definitions.int,
+            position: None,
+        };
+        let mut index = SourceTypedIndex::new();
+        let first = SymbolId::new(1);
+        let second = SymbolId::new(2);
+        let first_tree = index.alloc_synthetic_definition(&mut arena, first, definition.clone());
+        let second_tree = index.alloc_synthetic_definition(&mut arena, second, definition);
+        assert_eq!(index.synthetic_definition_symbol(first_tree), Some(first));
+        assert_eq!(index.synthetic_definition_symbol(second_tree), Some(second));
+        assert_eq!(index.synthetic_definition_symbol(tpt), None);
+    }
 
     #[test]
     fn source_tree_lookup_is_scoped_by_source_id() {

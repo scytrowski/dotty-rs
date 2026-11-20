@@ -268,7 +268,7 @@ pub enum TyperError {
         class: SymbolId,
         tree_index: u32,
     },
-    /// A `new` type tree is a template; anonymous-class lowering is deferred.
+    /// The anonymous template exceeds the supported empty source marker-trait shape.
     AnonymousClassInstantiationDeferred {
         source: SourceId,
         tree_index: u32,
@@ -795,6 +795,12 @@ pub enum TyperError {
         existing: TypeId,
         attempted: TypeId,
     },
+    /// A member's declaration-relative this type could not be adapted to its receiver.
+    MemberPrefixRebinding {
+        symbol: SymbolId,
+        prefix: TypeId,
+        error: dotty_core::types::TypeRebindError,
+    },
     /// A future completion operation could not rebind a semantic type.
     TypeRebinding {
         source: SourceId,
@@ -1124,6 +1130,30 @@ pub enum TyperError {
         source: SourceId,
         tree_index: u32,
         kind: MethodKind,
+    },
+    /// No eligible contextual value conforms to the formal parameter.
+    MissingContextualArgument {
+        source: SourceId,
+        tree_index: u32,
+        expected: TypeId,
+    },
+    /// A recursive provider revisited the same goal.
+    DivergentContextualArgument {
+        source: SourceId,
+        tree_index: u32,
+        expected: TypeId,
+    },
+    /// Context argument search exceeded its nesting or work budget.
+    ContextualSearchLimit {
+        source: SourceId,
+        tree_index: u32,
+    },
+    /// Multiple contextual values at the same priority conform to the formal.
+    AmbiguousContextualArgument {
+        source: SourceId,
+        tree_index: u32,
+        expected: TypeId,
+        candidates: Vec<SymbolId>,
     },
     /// A call requires contextual argument insertion or implicit search.
     UsingApplicationDeferred {

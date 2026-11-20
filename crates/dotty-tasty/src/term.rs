@@ -41,18 +41,35 @@ pub const DEFAULT_MAX_TREE_DEPTH: usize = 1024;
 pub enum AstRefKind {
     /// Reference to a shared term.
     SharedTerm,
+    /// A shared term in a MATCH case slot, which must target a CASEDEF.
+    SharedCase,
     /// Reference to a shared type.
     SharedType,
     /// Direct term reference.
     TermRefDirect,
     /// Direct type reference.
     TypeRefDirect,
+    /// Declaring term symbol of a qualified reference.
+    TermRefSymbol,
+    /// Declaring type symbol of a qualified reference.
+    TypeRefSymbol,
     /// Recursive `this` reference.
     RecursiveThis,
     /// Reference to a parameter-type binder.
     ParamTypeBinder,
     /// Reference to a return target.
     ReturnTarget,
+}
+
+impl AstRef {
+    pub(crate) fn symbol_operand(tag: u8, address: u32) -> Option<Self> {
+        let kind = match tag {
+            crate::TERMREFSYMBOL_TAG => AstRefKind::TermRefSymbol,
+            crate::TYPEREFSYMBOL_TAG => AstRefKind::TypeRefSymbol,
+            _ => return None,
+        };
+        Some(Self { kind, address })
+    }
 }
 
 /// An AST reference together with its wire-level kind.
@@ -71,6 +88,11 @@ pub struct AstTreeNode {
     pub tag: u8,
     /// Absolute offset of the node in the enclosing AST payload.
     pub offset: usize,
+}
+
+pub(crate) enum WireReference {
+    Ast(AstRef),
+    Name(NameRef),
 }
 
 /// Value carried by a category-one or category-two term leaf.
@@ -208,6 +230,16 @@ pub enum TermError {
 /// Errors returned while encoding a raw term tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TermEncodeError {
+    /// Multiple edited nodes claim the same original identity.
+    DuplicateNodeIdentity {
+        /// Repeated original AST address.
+        address: u32,
+    },
+    /// The supplied identity would put a node under a different parent.
+    RelocationParentMismatch {
+        /// Original address of the node whose parent changed.
+        address: u32,
+    },
     /// A binary writer failed.
     Write(WriteError),
     /// An AST reference or raw AST node failed validation.
@@ -227,6 +259,14 @@ pub enum TermEncodeError {
 impl fmt::Display for TermEncodeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::DuplicateNodeIdentity { address } => write!(
+                formatter,
+                "duplicate original AST identity at address {address}"
+            ),
+            Self::RelocationParentMismatch { address } => write!(
+                formatter,
+                "relocation changes the parent of original AST node {address}"
+            ),
             Self::Write(error) => error.fmt(formatter),
             Self::Ast(error) => error.fmt(formatter),
             Self::InvalidTag { tag } => write!(formatter, "invalid term tag {tag} for encoding"),
@@ -452,9 +492,9 @@ impl SimpleTerm {
             | (TermValue::Boolean(false), 3)
             | (TermValue::Boolean(true), 4)
             | (TermValue::Null, 5) => {}
-            (TermValue::AstRef(value), 60..=63 | 66) => writer.write_ast_ref(*value),
+            (TermValue::AstRef(value), 60..=63 | 66) => writer.write_ast_ref(*value)?,
             (TermValue::NameRef(value), 64..=65 | 74..=76) | (TermValue::Nat(value), 69) => {
-                writer.write_nat(*value)
+                writer.write_nat(*value)?
             }
             (TermValue::Int(value), 67 | 68 | 70 | 72) => writer.write_int(*value),
             (TermValue::LongInt(value), 71 | 73) => writer.write_long_int(*value),
@@ -490,7 +530,7 @@ impl ConstantValue {
             }
             Self::Char(value) => {
                 writer.write_u8(CHARCONST_TAG);
-                writer.write_nat(u32::from(*value));
+                writer.write_nat(u32::from(*value))?;
             }
             Self::Int(value) => {
                 writer.write_u8(INTCONST_TAG);
@@ -510,7 +550,7 @@ impl ConstantValue {
             }
             Self::String(reference) => {
                 writer.write_u8(STRINGCONST_TAG);
-                writer.write_nat(*reference);
+                writer.write_nat(*reference)?;
             }
         }
         Ok(())
@@ -606,14 +646,55 @@ impl<'a> RawTree<'a> {
     /// opaque; their tag-specific child trees are exposed by the structured
     /// AST decoders instead.
     pub fn visit_ast_refs(&self, visitor: &mut impl FnMut(AstRef)) {
-        match self {
-            Self::Leaf(term) => {
-                if let Some(reference) = term.ast_ref() {
-                    visitor(reference);
+        self.visit_references_until_length_node(&mut |reference| {
+            if let WireReference::Ast(reference) = reference {
+                visitor(reference);
+            }
+        });
+    }
+
+    /// Walks the unary wrapper chain and returns the bounded node where the
+    /// structured visitor must resume with a tag-specific decoder.
+    pub(crate) fn visit_references_until_length_node(
+        &self,
+        visitor: &mut impl FnMut(WireReference),
+    ) -> Option<&RawNode<'a>> {
+        let mut tree = self;
+        loop {
+            tree = match tree {
+                Self::Leaf(term) => {
+                    if let Some(reference) = term.ast_ref() {
+                        visitor(WireReference::Ast(reference));
+                    }
+                    if let Some(name) = term.name_ref() {
+                        visitor(WireReference::Name(name));
+                    }
+                    return None;
+                }
+                Self::LengthNode(node) => return Some(node),
+                Self::Ast { child, .. } => child,
+                Self::NatAst {
+                    tag, value, child, ..
+                } => {
+                    if let Some(reference) = AstRef::symbol_operand(*tag, *value) {
+                        visitor(WireReference::Ast(reference));
+                    }
+                    if matches!(
+                        *tag,
+                        IDENT_TAG
+                            | IDENTTPT_TAG
+                            | SELECT_TAG
+                            | SELECTTPT_TAG
+                            | crate::TERMREF_TAG
+                            | crate::TYPEREF_TAG
+                            | SELFDEF_TAG
+                            | NAMEDARG_TAG
+                    ) {
+                        visitor(WireReference::Name(*value));
+                    }
+                    child
                 }
             }
-            Self::Ast { child, .. } | Self::NatAst { child, .. } => child.visit_ast_refs(visitor),
-            Self::LengthNode(_) => {}
         }
     }
 
@@ -632,31 +713,11 @@ impl<'a> RawTree<'a> {
     /// Visits all name-table references visible in this raw tree in source
     /// order without allocating a result vector.
     pub fn visit_name_refs(&self, visitor: &mut impl FnMut(NameRef)) {
-        match self {
-            Self::Leaf(term) => {
-                if let Some(reference) = term.name_ref() {
-                    visitor(reference);
-                }
+        self.visit_references_until_length_node(&mut |reference| {
+            if let WireReference::Name(name) = reference {
+                visitor(name);
             }
-            Self::Ast { child, .. } => child.visit_name_refs(visitor),
-            Self::NatAst {
-                tag, value, child, ..
-            } => {
-                if matches!(
-                    *tag,
-                    IDENT_TAG
-                        | IDENTTPT_TAG
-                        | SELECT_TAG
-                        | SELECTTPT_TAG
-                        | SELFDEF_TAG
-                        | NAMEDARG_TAG
-                ) {
-                    visitor(*value);
-                }
-                child.visit_name_refs(visitor);
-            }
-            Self::LengthNode(_) => {}
-        }
+        });
     }
 
     /// Returns the AST reference if this tree is a direct reference leaf.
@@ -798,7 +859,7 @@ impl<'a> RawTree<'a> {
                     return Err(TermEncodeError::InvalidTag { tag: *tag });
                 }
                 writer.write_u8(*tag);
-                writer.write_nat(*value);
+                writer.write_nat_ast_operand(*tag, *value)?;
                 child.encode(writer)
             }
             Self::LengthNode(node) if writer.has_ast_address_map() => {
@@ -817,8 +878,7 @@ mod tests {
     };
     use crate::ast::{
         IDENT_TAG, IDENTTPT_TAG, NAMEDARG_TAG, RECTHIS_TAG, SELECT_TAG, SELECTTPT_TAG, SELFDEF_TAG,
-        SHAREDTERM_TAG, SHAREDTYPE_TAG, TERMREF_TAG, TERMREFDIRECT_TAG, THIS_TAG,
-        TYPEREFDIRECT_TAG,
+        SHAREDTERM_TAG, SHAREDTYPE_TAG, TERMREFDIRECT_TAG, THIS_TAG, TYPEREFDIRECT_TAG,
     };
     use crate::reader::{ReadError, Reader};
     use crate::writer::Writer;
@@ -1157,7 +1217,7 @@ mod tests {
     fn rejects_a_char_constant_outside_the_16_bit_range() {
         let mut writer = Writer::new();
         writer.write_u8(69);
-        writer.write_nat(0x1_0000);
+        writer.write_nat(0x1_0000).unwrap();
         let bytes = writer.into_inner();
         let mut reader = Reader::new(&bytes);
         let term = SimpleTerm::decode(&mut reader).unwrap();
@@ -1332,7 +1392,7 @@ mod tests {
 
     #[test]
     fn does_not_treat_a_category_four_ast_reference_as_a_name_reference() {
-        let mut reader = Reader::new(&[TERMREF_TAG, 0x85, 2]);
+        let mut reader = Reader::new(&[crate::TERMREFSYMBOL_TAG, 0x85, 2]);
         let tree = RawTree::decode(&mut reader).unwrap();
 
         assert!(tree.name_refs().is_empty());
@@ -1391,13 +1451,13 @@ mod tests {
 
     #[test]
     fn rejects_a_maximal_length_node_before_allocating_its_payload() {
-        let mut reader = Reader::new(&[128, 0x0f, 0x7f, 0x7f, 0x7f, 0xff]);
+        let mut reader = Reader::new(&[128, 0x07, 0x7f, 0x7f, 0x7f, 0xff]);
 
         assert_eq!(
             RawTree::decode(&mut reader),
             Err(TermError::Read(ReadError::UnexpectedEof {
                 offset: 6,
-                needed: u32::MAX as usize,
+                needed: i32::MAX as usize,
                 remaining: 0,
             }))
         );

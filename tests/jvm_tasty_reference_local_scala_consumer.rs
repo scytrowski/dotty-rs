@@ -237,7 +237,7 @@ fn assert_rust_local_tasty_structure(bytes: &[u8]) {
 
     let mut missing_local = bytes.to_vec();
     missing_local[asts_offset + local_address as usize] = 0;
-    let missing_local_file = TastyFile::parse_and_validate_scala_3_9(&missing_local)
+    let missing_local_file = TastyFile::parse_scala_3_9(&missing_local)
         .expect("the parser reaches the lazily indexed nested declaration");
     let missing_local_index = missing_local_file.ast_address_index();
     let missing_local_index = missing_local_index.expect("index actual corrupted file bytes");
@@ -251,6 +251,15 @@ fn assert_rust_local_tasty_structure(bytes: &[u8]) {
         - missing_asts_section.payload.as_ptr() as usize;
     let missing_local_offset = local_address as usize - block_payload_address;
     assert_eq!(missing_local_offset, 14);
+    assert_eq!(
+        missing_local_file.validate(),
+        Err(dotty_tasty::TastyFileError::Asts(AstError::Term(
+            TermError::InvalidTag {
+                tag: 0,
+                offset: missing_local_offset,
+            }
+        )))
+    );
     let missing_local_error = missing_local_block_node.decode_block();
     assert!(
         matches!(

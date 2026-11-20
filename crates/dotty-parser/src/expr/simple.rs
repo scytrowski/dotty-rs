@@ -684,6 +684,7 @@ where
             TreeKind::Select(Select {
                 qualifier: super_tree,
                 name,
+                is_type_projection: false,
                 backquoted,
             }),
         )
@@ -782,6 +783,7 @@ where
             TreeKind::Select(Select {
                 qualifier: function,
                 name: *name.as_name(),
+                is_type_projection: false,
                 backquoted: false,
             }),
             position,
@@ -847,6 +849,7 @@ where
                         TreeKind::Select(Select {
                             qualifier,
                             name,
+                            is_type_projection: false,
                             backquoted,
                         }),
                     );

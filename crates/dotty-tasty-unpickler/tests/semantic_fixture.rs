@@ -219,8 +219,7 @@ fn the_template_stats_hold_the_constructor_and_the_method() {
     assert_eq!(names, ["<init>", "bar"]);
 
     let parameter_names = |def: &dotty_tasty::tasty::DefDefBody<'_>| {
-        def.parameters
-            .iter()
+        def.parameters()
             .map(|parameter| {
                 let kind = match parameter {
                     ParameterNode::TypeParam { .. } => "type",

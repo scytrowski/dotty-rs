@@ -24,3 +24,17 @@ fn a_node_with_a_padded_length_is_indexed_at_its_tag() {
     );
     assert_eq!(index.get_node(327), None);
 }
+
+#[test]
+fn raw_file_encoding_preserves_padded_signed_name_lengths() {
+    for bytes in [
+        include_bytes!("fixtures/scala3-library/scala/quoted/FromExpr.tasty").as_slice(),
+        include_bytes!("fixtures/scala3-library/scala/quoted/ToExpr.tasty").as_slice(),
+    ] {
+        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+        assert!(file.encode().unwrap() == bytes);
+        let encoded = file.encode_with_ast_addresses().unwrap();
+        assert!(encoded.as_slice() == bytes);
+        assert_eq!(encoded.ast_addresses(), &[0]);
+    }
+}

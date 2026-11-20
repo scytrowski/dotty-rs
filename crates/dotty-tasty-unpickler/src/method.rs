@@ -180,11 +180,7 @@ pub(crate) fn defdef_header<'a>(
         .iter()
         .map(|child| (address(child.offset), child.tag))
         .collect();
-    let count = body
-        .header_items
-        .iter()
-        .filter(|item| matches!(item, DefDefHeaderItem::Parameter(_)))
-        .count();
+    let count = body.parameters().count();
     let Some(&(result_at, _)) = parameter_nodes.get(count) else {
         return Err(UnpickleError::MalformedDefinition {
             address: at,
@@ -207,15 +203,7 @@ pub(crate) fn defdef_header<'a>(
 pub(crate) fn guard_parameter_modifiers(header: &DefDefHeader<'_>) -> Result<(), UnpickleError> {
     // The parameter items and the parameter nodes were aligned by
     // `clauses_of`, so they zip.
-    let items = header
-        .body
-        .header_items
-        .iter()
-        .filter_map(|item| match item {
-            DefDefHeaderItem::Parameter(parameter) => Some(parameter),
-            DefDefHeaderItem::Clause(_) => None,
-        })
-        .zip(&header.parameter_nodes);
+    let items = header.body.parameters().zip(&header.parameter_nodes);
     for (parameter, (param_at, _)) in items {
         for entry in &parameter.decode_body()?.tail {
             if let DefinitionTail::Modifier(tag @ (INLINE_TAG | TRACKED_TAG | INTO_TAG)) = entry {

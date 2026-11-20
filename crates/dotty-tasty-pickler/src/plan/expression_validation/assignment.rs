@@ -180,6 +180,33 @@ impl Validator<'_, '_> {
                 expected: SourceRole::Body,
             });
         };
+        if let Some(binding) = self
+            .conditional_mutable_assignment
+            .filter(|binding| binding.method == method.symbol)
+            .and_then(|binding| {
+                binding
+                    .source_assignments
+                    .iter()
+                    .zip(binding.typed_assignments)
+                    .position(|(source, typed)| *source == source_id && typed == typed_id)
+                    .map(|index| (binding, index))
+            })
+        {
+            let (binding, index) = binding;
+            if binding.source_id != self.plan.source.id
+                || binding.owner != self.plan.class
+                || binding.source_lhss[index] != source_assign.lhs
+                || binding.typed_lhss[index] != typed_assign.lhs
+                || binding.source_rhss[index] != source_assign.rhs
+                || binding.typed_rhss[index] != typed_assign.rhs
+                || !self.plan.store.scopes.contains(binding.scope)
+                || self.plan.store.scopes.get(binding.scope).owner != Some(method.symbol)
+            {
+                return Err(
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                );
+            }
+        }
         if typed.ty != self.plan.definitions.unit {
             return Err(PickleError::BodyType {
                 tree: typed_id,
@@ -224,15 +251,32 @@ impl Validator<'_, '_> {
         };
         let target = *target;
         let assignment_binding = self.mutable_counter_assignment;
+        let conditional_binding = self
+            .conditional_mutable_assignment
+            .filter(|binding| binding.method == method.symbol)
+            .and_then(|binding| {
+                binding
+                    .source_assignments
+                    .iter()
+                    .zip(binding.typed_assignments)
+                    .position(|(source, typed)| *source == source_id && typed == typed_id)
+                    .map(|index| (binding, index))
+            });
         let target_type = if self.registered_local_symbols.contains(&target) {
             let complete_type = self.complete(target)?;
-            let authenticated_counter_target = assignment_binding.is_some_and(|binding| {
-                binding.source_assignment == source_id
-                    && binding.typed_assignment == typed_id
-                    && binding.local == target
-                    && binding.local_type == complete_type
-                    && binding.method == method.symbol
-            });
+            let authenticated_counter_target =
+                assignment_binding.is_some_and(|binding| {
+                    binding.source_assignment == source_id
+                        && binding.typed_assignment == typed_id
+                        && binding.local == target
+                        && binding.local_type == complete_type
+                        && binding.method == method.symbol
+                }) || conditional_binding.is_some_and(|(binding, _)| {
+                    binding.local == target
+                        && binding.local_type == complete_type
+                        && self.plan.store.scopes.contains(binding.scope)
+                        && self.plan.store.scopes.get(binding.scope).owner == Some(method.symbol)
+                });
             if !self.visible_locals.contains(&target)
                 || self.symbol(target)?.flags != SymbolFlags::MUTABLE
                 || (complete_type != self.plan.definitions.int && !authenticated_counter_target)
@@ -330,11 +374,35 @@ impl Validator<'_, '_> {
         } else if target_type == self.plan.definitions.boolean {
             self.validate_if_condition(source_assign.rhs, typed_assign.rhs, method, depth, visited)
         } else {
-            self.validate_mutable_counter_assignment_rhs(
-                assignment_binding.ok_or(PickleError::Reference {
+            let binding = if let Some(binding) = assignment_binding {
+                binding
+            } else if let Some((binding, index)) = conditional_binding {
+                crate::MutableCounterReferenceAssignmentBinding {
+                    source_id: binding.source_id,
+                    owner: binding.owner,
+                    method: binding.method,
+                    scope: binding.scope,
+                    source_block: binding.source_block,
+                    typed_block: binding.typed_block,
+                    source_assignment: binding.source_assignments[index],
+                    typed_assignment: binding.typed_assignments[index],
+                    source_lhs: binding.source_lhss[index],
+                    typed_lhs: binding.typed_lhss[index],
+                    source_rhs: binding.source_rhss[index],
+                    typed_rhs: binding.typed_rhss[index],
+                    local: binding.local,
+                    rhs_local: binding.rhs_locals[index],
+                    second_local: binding.rhs_locals[index],
+                    local_type: binding.local_type,
+                }
+            } else {
+                return Err(PickleError::Reference {
                     symbol: target,
                     reason: crate::ReferenceError::NotRegistered,
-                })?,
+                });
+            };
+            self.validate_mutable_counter_reference_assignment_rhs(
+                binding,
                 source_assign.rhs,
                 typed_assign.rhs,
                 method,
@@ -343,7 +411,7 @@ impl Validator<'_, '_> {
         }
     }
 
-    fn validate_mutable_counter_assignment_rhs(
+    fn validate_mutable_counter_reference_assignment_rhs(
         &mut self,
         binding: crate::MutableCounterReferenceAssignmentBinding,
         source_rhs: TreeId<Untyped>,

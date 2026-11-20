@@ -30,6 +30,7 @@ enum Flow {
 
 enum ExpressionShape {
     Leaf,
+    ParameterlessGetter,
     Select,
     Block,
     If,
@@ -98,18 +99,41 @@ fn append_current_receiver(
             tree: call_id,
             node: "missing tree",
         })?;
-    let TreeKind::Apply(application) = &call.kind else {
-        return Err(JvmCodegenError::UnsupportedJvmCallShape {
-            tree: call_id,
-            kind: UnsupportedJvmCallShapeKind::NotApplication,
-        });
+    let function_id = match &call.kind {
+        TreeKind::Apply(application) => application.function,
+        TreeKind::Ident(_) | TreeKind::Select(_) => call_id, // Validated parameterless getter.
+        _ => {
+            return Err(JvmCodegenError::UnsupportedJvmCallShape {
+                tree: call_id,
+                kind: UnsupportedJvmCallShapeKind::NotApplication,
+            });
+        }
     };
-    let function = typed_ast.try_get(application.function).ok_or(
-        JvmCodegenError::UnsupportedTypedExpression {
-            tree: application.function,
-            node: "missing tree",
-        },
-    )?;
+    let source_function =
+        typed_ast
+            .try_get(function_id)
+            .ok_or(JvmCodegenError::UnsupportedTypedExpression {
+                tree: function_id,
+                node: "missing tree",
+            })?;
+    let function = if let Some(prior) = target.prior_application {
+        match &source_function.kind {
+            TreeKind::Apply(previous) if prior == function_id => typed_ast
+                .try_get(previous.function)
+                .ok_or(JvmCodegenError::UnsupportedTypedExpression {
+                    tree: previous.function,
+                    node: "missing tree",
+                })?,
+            _ => {
+                return Err(JvmCodegenError::UnsupportedJvmCallShape {
+                    tree: call_id,
+                    kind: UnsupportedJvmCallShapeKind::NestedApplication,
+                });
+            }
+        }
+    } else {
+        source_function
+    };
     if let TreeKind::Select(select) = &function.kind {
         let receiver = typed_ast.try_get(select.qualifier).ok_or(
             JvmCodegenError::UnsupportedTypedExpression {
@@ -134,7 +158,7 @@ fn append_current_receiver(
         }
     } else if !matches!(function.kind, TreeKind::Ident(_)) {
         return Err(JvmCodegenError::UnsupportedJvmCallShape {
-            tree: application.function,
+            tree: function_id,
             kind: UnsupportedJvmCallShapeKind::UnsupportedFunctionTree,
         });
     }
@@ -299,9 +323,20 @@ pub(super) fn lower_method_body(
     method: &JvmMethodMetadata,
     body: TreeId<Typed>,
 ) -> Result<CodeBuilder, JvmCodegenError> {
+    if let Some(code) =
+        crate::descriptor::contextual_poly::lower_body(store, typed_ast, method, body, definitions)?
+    {
+        return Ok(code);
+    }
+    let expression = match method.context_result {
+        Some(result) => {
+            result.standalone_body(store, typed_ast, method.symbol(), body, definitions)?
+        }
+        None => body,
+    };
     let mut code = CodeBuilder::new();
     let mut context = JvmLoweringContext::new(store, typed_ast, definitions, method);
-    let flow = emit_expression(&mut context, body, &mut code, 0)?;
+    let flow = emit_expression(&mut context, expression, &mut code, 0)?;
     append_method_return(None, definitions, method, body, flow, &mut code)?;
     Ok(code)
 }
@@ -339,16 +374,29 @@ pub(super) fn lower_planned_method_body(
         definitions,
         metadata,
     )?;
+    if let Some(code) = crate::descriptor::contextual_poly::lower_body(
+        unit.store,
+        unit.typed_ast,
+        method,
+        body,
+        definitions,
+    )? {
+        return Ok(code);
+    }
     let mut context = JvmLoweringContext::new(unit.store, unit.typed_ast, definitions, method);
     context.local_layout = Some(&local_layout);
     context.call_context = Some((scope, class, metadata));
-    let flow = emit_expression_with_expected(
-        &mut context,
-        body,
-        source_method_result_type(unit.store, method.symbol()),
-        &mut code,
-        0,
-    )?;
+    let (expression, expected) = match method.context_result {
+        Some(result) if result.root == body => (result.closure.body, Some(result.closure.result)),
+        Some(_) => {
+            return Err(JvmCodegenError::InvalidContextFunctionResult {
+                method: method.symbol(),
+                tree: body,
+            });
+        }
+        None => (body, source_method_result_type(unit.store, method.symbol())),
+    };
+    let flow = emit_expression_with_expected(&mut context, expression, expected, &mut code, 0)?;
     append_method_return(Some(scope), definitions, method, body, flow, &mut code)?;
     // Branched references are checked after all symbolic references have been
     // staged in ClassFileBuilder. Its encode preflight analyzes CFG states and
@@ -665,8 +713,13 @@ fn parameter_value_type(
         });
     }
     let parameter_symbol = context.store.symbols.get(symbol);
+    let owner = context
+        .method
+        .context_result
+        .filter(|result| result.closure.parameter == symbol)
+        .map_or(context.method.symbol(), |result| result.closure.method);
     if parameter_symbol.kind != dotty_core::symbols::SymbolKind::Parameter
-        || parameter_symbol.owner != Some(context.method.symbol())
+        || parameter_symbol.owner != Some(owner)
     {
         return Err(JvmCodegenError::InvalidParameterReference {
             tree,
@@ -911,6 +964,9 @@ fn emit_expression_with_identity_context(
     let shape = {
         let tree = context.tree(tree_id)?;
         match &tree.kind {
+            _ if crate::defaults::is_parameterless_getter(context.store, tree) => {
+                ExpressionShape::ParameterlessGetter
+            }
             TreeKind::Literal(_) | TreeKind::Ident(_) | TreeKind::This(_) => ExpressionShape::Leaf,
             TreeKind::Select(_) => ExpressionShape::Select,
             TreeKind::Block(_) => ExpressionShape::Block,
@@ -923,6 +979,9 @@ fn emit_expression_with_identity_context(
         }
     };
     let flow = match shape {
+        ExpressionShape::ParameterlessGetter => {
+            emit_planned_apply(context, tree_id, tree_id, Vec::new(), code, depth)
+        }
         ExpressionShape::Leaf => {
             if matches!(
                 &context.tree(tree_id)?.kind,
@@ -1119,7 +1178,11 @@ fn source_method_type(
 }
 
 fn source_method_result_type(store: &SemanticStore, method: SymbolId) -> Option<TypeId> {
-    source_method_type(store, method).map(|signature| signature.result)
+    source_method_type(store, method).map(|signature| {
+        crate::descriptor::contextual_tail(store, signature)
+            .unwrap_or(signature)
+            .result
+    })
 }
 
 fn source_method_parameter_type(
@@ -1128,7 +1191,12 @@ fn source_method_parameter_type(
     index: usize,
 ) -> Option<TypeId> {
     source_method_type(store, method)
-        .and_then(|signature| signature.params.get(index))
+        .and_then(|signature| {
+            signature.params.get(index).or_else(|| {
+                let tail = crate::descriptor::contextual_tail(store, signature)?;
+                tail.params.get(index.checked_sub(signature.params.len())?)
+            })
+        })
         .map(|parameter| parameter.ty)
 }
 
@@ -2648,6 +2716,10 @@ fn emit_apply(
         return emit_direct_super_call(context, tree_id, function, &arguments, code, depth);
     }
 
+    if matches!(context.tree(function)?.kind, TreeKind::Apply(_)) {
+        return emit_planned_apply(context, tree_id, function, arguments, code, depth);
+    }
+
     let reference_identity = crate::resolve_reference_identity_operator(
         context.store,
         context.typed_ast,
@@ -2704,6 +2776,17 @@ fn emit_apply(
         );
     }
 
+    emit_planned_apply(context, tree_id, function, arguments, code, depth)
+}
+
+fn emit_planned_apply(
+    context: &mut JvmLoweringContext<'_>,
+    tree_id: TreeId<Typed>,
+    mut function: TreeId<Typed>,
+    mut arguments: Vec<TreeId<Typed>>,
+    code: &mut CodeBuilder,
+    depth: usize,
+) -> Result<Flow, JvmCodegenError> {
     let Some((scope, class, metadata)) = context.call_context else {
         return Err(JvmCodegenError::JvmCallContextUnavailable {
             tree: tree_id,
@@ -2722,6 +2805,17 @@ fn emit_apply(
         JvmInvocationKind::Virtual,
         Some(metadata),
     )?;
+    if let Some(prior) = target.prior_application {
+        context.visit(prior, depth + 1)?;
+        let TreeKind::Apply(previous) = &context.tree(prior)?.kind else {
+            return Err(JvmCodegenError::UnsupportedTypedExpression {
+                tree: prior,
+                node: "curried call",
+            });
+        };
+        arguments.splice(0..0, previous.args.iter().copied());
+        function = previous.function;
+    }
     let parameters = target.descriptor().parameters().to_vec();
     if arguments.len() != parameters.len() {
         return Err(JvmCodegenError::JvmCallArityMismatch {
@@ -2731,7 +2825,9 @@ fn emit_apply(
             found: arguments.len(),
         });
     }
-    context.visit(function, depth + 1)?;
+    if function != tree_id {
+        context.visit(function, depth + 1)?;
+    }
     match target.receiver_tree() {
         Some(receiver) if matches!(context.tree(receiver)?.kind, TreeKind::This(_)) => {
             context.visit(receiver, depth + 2)?;
@@ -4765,6 +4861,7 @@ mod tests {
             );
             let descriptor = MethodDescriptor::parse(&descriptor_text).unwrap();
             let method = JvmMethodMetadata {
+                context_result: None,
                 symbol: method_symbol,
                 name: "value".to_owned(),
                 descriptor: JvmMethodDescriptor {

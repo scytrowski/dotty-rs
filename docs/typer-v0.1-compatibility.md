@@ -6,6 +6,130 @@ snapshots from the source parser/namer/Typer and the TASTy unpickler. They do
 not compare arena IDs, scope IDs, TASTy addresses, source positions, or
 allocation order.
 
+## Contextual arguments in Scala 3.9
+
+The [v1 acceptance audit](typer-contextual-acceptance-v1.md) compares selected
+upstream sites with the pinned compiler. All eleven in-scope observations agree.
+
+At the start of this work, the frontend preserved contextual clause kinds and
+typed a number of explicit `using` applications. It could complete the
+signature of `def read(using n: Int): Int` but a bare `read` could not
+generally supply evidence. The implementation now runs the following sequence
+through ordinary expression and method-definition typing.
+
+| Increment | Observable behavior | Acceptance check |
+| --- | --- | --- |
+| 1. Clause application | Explicit `using`, omitted evidence and positional arguments to a legacy `implicit` clause preserve their distinct behavior. | `read` forwards the caller's parameter, `read(using 9)` overrides an ambiguous environment, and a positional legacy call emits the migration warning. |
+| 2. Candidate discovery | Search parameters, block values, members, imports and nominal companions. Retain the receiver of each selection. | A nested local wins over an outer candidate. Bounded imports filter declarations, and a selected provider retains its type parameters at other use sites. |
+| 3. Conditional evidence | Infer first-order provider type arguments from the goal, including instantiated parent types. Resolve each dependency transactionally before committing the chosen tree. | A `TC[Box[Int]]` goal builds a type application for `Int` and a call with `TC[Int]`. A failed probe can be retried. Tests distinguish missing evidence, ambiguous dependencies and divergence. |
+| 4. Language entry points | The same search serves ordinary context bounds, curried methods, constructors, context functions and the supported library helpers. Overload resolution can use the expected result before evidence search. | Named witnesses have method-owned symbols. The body of a context lambda sees its own parameters. When evidence is absent, `NotGiven` selects the library companion's own `value` symbol. |
+| 5. Separate compilation and execution | The classloader exposes binary providers. The JVM and semantic pickler consume already typed arguments in their supported method subsets. | A Rust-typed client selects a conditional Scala provider and its leaf from binary TASTy. Separate tests execute a Rust-emitted class and compile and execute a Scala client of Rust-emitted TASTy. |
+
+Focused tests live in the typer’s [source search tests](../crates/dotty-typer/src/typer/tests/contextual_arguments.rs)
+and [binary search tests](../crates/dotty-typer/src/typer/tests/contextual_binary.rs).
+The [Scala controls](../crates/dotty-typer/tests/fixtures/contextual-arguments/check.py)
+check compiler-printed applications, negative diagnostics and the provenance
+of the binary evidence. Run them with `JAVA_HOME`, `SCALA39_ROOT` and
+`COURSIER_MAVEN_ROOT` as in the pickler oracle. The output contracts are documented in the
+[JVM backend](jvm-backend.md) and [semantic pickler](tasty-pickler-design.md#contextual-method-parameters).
+
+### Further contextual semantics covered by regression tests
+
+| Increment | Supported behavior | Regression control |
+| --- | --- | --- |
+| Case-class context bounds | For `case class Box[A: TC](value: A)`, `Box(1)` infers `A = Int` and supplies the caller’s `TC[Int]` to the generated companion method. `SourceTyper::type_generated_case_class_apply_body` types its constructor call using the value and witness parameters owned by `apply`. | The Scala 3.9 controls check both calls and the class-body witness. Missing and ambiguous evidence are diagnosed at `Box(1)`. Coverage is for generated `apply` with one written ordinary clause. |
+| Case-class copy with context bounds | For the same single ordinary constructor clause, a generated instance `copy` defaults omitted trailing values to fields on the original receiver. Type inference uses the receiver’s field types and any supplied values. The constructor takes the copy method’s contextual parameters. | For `box: Box[Int]`, a unique caller witness supplies `box.copy[Int](box.copy$default$1[Int])(current)`. Zero or two witnesses produce a diagnostic at `box.copy()`. |
+| Case-class bounds with written `using` | A trailing clause of plain contextual parameters can follow the ordinary constructor clause. For `Envelope[A: TC](value: A)(using trace: Trace)`, the constructor, generated `apply` and generated `copy` take `(using evidence$1: TC[A], trace: Trace)`. | The Scala 3.9 controls check both argument identities, the receiver field used by `copy`, and independent failures for each contextual argument. |
+| Ordinary class context bounds | For `class Box[A: TC]`, `summon[TC[A]]` in a member resolves to the class's private witness. The primary constructor takes a separately bound `TC[A]` parameter. | With `leaf: TC[Int]` in scope, `new Box[Int]` types as `new Box[Int](leaf)()`. Missing and ambiguous evidence fail at the constructor selection. The Rust tests and pinned Scala controls use the same three sources. |
+| Parameterized structural givens | A factory, its implementation class and its constructor have separately owned binders. The factory result retains the implementation type. | A client imports `Builders.given`, infers `boxes[Int]` and supplies its own leaf. Explicit selection of `.tag` works from source and from a Scala-generated TASTy/class-file pair. Type-only and contextual-only factories preserve their respective clauses. |
+| Contextual defaults | A missing argument can invoke the indexed default getter of a source method, a source conditional provider, or a method loaded from Scala TASTy. The getter receives the original receiver and earlier clauses. | Tests check the getter's parameter identity, supplied evidence, rejection of ambiguity, rejection of an ill-typed default, and single evaluation of effectful operands. |
+| Recursive by-name evidence | A successful recursive search across a by-name parameter creates a shared dictionary. Its synthetic definitions and references have canonical identities. | Two recursive dependencies refer to the same field. The strict variant diverges. Discarding a failed candidate rolls back its dictionary and symbols. |
+| Implicit scope and dependent types | Search can follow transparent aliases, use an opaque type's companion, and preserve the stable term prefix of a nested type. | `p.Item` and `q.Item` select evidence from their respective receivers. A later contextual clause and result can depend on a stable argument to an earlier clause. |
+| Other searches | A contextual receiver can provide an extension. A supported extractor can request trailing contextual clauses. Expected result and argument types can trigger a `scala.Conversion` instance or a unary monomorphic `implicit def`. | The contextual consumer fixtures check selected symbols, nested scopes, ambiguity, and the order of arguments passed to `unapply`. |
+| Output | The pickler and JVM backend accept selected curried contextual methods, polymorphic evidence identity methods, and methods returning a unary `Int ?=> Int` literal. | Scala 3.9 clients read the emitted TASTy. Separate JDK 21 harnesses verify and execute the emitted classes. |
+
+When a receiver's instantiated method type has a contextual clause, term
+member selection supplies its arguments before lookup. In `summon[A].show` the selected evidence is the
+receiver of `show`. Missing or ambiguous evidence is diagnosed at the
+`summon[A]` expression.
+
+In a top-level method body, contextual search checks method parameters and
+block-local evidence before members of the synthetic file owner. Those members
+take precedence over package-level imports. The typer completes the file
+owner with its indexed declaration scope and the canonical `Object` parent.
+
+Between eligible modern givens in the same search scope, a declaration in a
+derived class or trait takes priority over a declaration in its nominal base.
+Unrelated declaring classes can still produce an ambiguity. Recursive search
+first tries a compatible by-name dictionary reference. For closed nominal
+application types, repeating the same provider across a by-name edge with more
+applications and the same set of nominal declarations rules out that branch.
+A concrete alternative can still supply the missing argument. Other type
+shapes continue to use the existing recursion and resource limits.
+
+Dependent clause application substitutes stable argument paths. Within a
+simple source opaque alias's defining owner, contextual search can use its
+representation. Outside that owner it uses the nominal type and its companion.
+Higher-kinded inference and general proofs from opaque bounds remain open.
+
+A source method can omit trailing ordinary arguments with defaults after a
+contextual clause. In `narrow(using c: Context)(owner: String = root)`, the
+call `narrow()` passes the selected context to both `narrow` and
+`narrow$default$2`. The getter body resolves `root` using its own copy of
+`c`. Explicit ordinary arguments keep their positions, and effectful earlier
+operands shared with a getter are evaluated once.
+
+For a classpath method, replay uses the link between a defaulted parameter
+and its getter in the same TASTy template. The typer checks the copied clauses
+and the result type before accepting the default. The binary Reader fixture
+checks both a parameterless getter and a getter that reuses an earlier argument.
+For the separately compiled `PairReader.pick(x: Int, y: Int)(using n: Int = y)`,
+the typed client evaluates the parameterless method `reader`, then `left()`
+and `right()`, into three temporaries. Both `pick` and `pick$default$3`
+select the same receiver and take the same two argument symbols in source
+order. Calling `reader().pick(...)` when `reader` has an explicit empty
+clause still encounters the typer’s selection-prefix restriction for a
+method result whose class comes from TASTy.
+A legacy `implicit` clause also falls back only for missing evidence. Ambiguity
+retains both candidates and rolls back the failed application.
+The default getter of a method with a context bound takes the method type
+parameters and the preceding term clauses. Witnesses merged into the defaulted
+parameter’s own clause contribute to its ordinal only. In
+`read[A: Ev as tc](v: tc.Out)(using n: Int = 1)`, the witness is
+inserted before `v`. Both `read` and `read$default$3` bind `tc.Out` to their
+own witness parameter. A projection `tc#Out` from a class named `tc` leaves
+the witness in the final contextual clause. At a call site with
+`e: Ev[Int]` and `v: e.Out`, omitting `n` inserts `read$default$3[Int](e)(v)`.
+Both calls share the original typed arguments. An explicit `(using 1)`
+passes the literal directly. For the unbounded abstract member `type Out`, a
+value from an independent witness has a distinct type and is rejected.
+For the default
+`new Bar {}` in Scala’s `i8491.scala`, the typed tree binds an anonymous
+class to the getter, calls its constructor and widens the result to the
+source marker trait. Anonymous templates with members or inherited
+implementation obligations remain deferred.
+
+Conversion insertion covers value adaptation to
+a known expected type. This includes ordinary method arguments. Searching for
+a conversion solely because a member is missing, and instantiating generic
+old-style conversion methods, remain outside that implementation.
+
+The frontend accepts a wider range of typed trees than either producer can emit.
+In particular, the recursive dictionary tests inspect typed declarations and
+references. The context-function producer tests exercise a method returning a
+literal, including a reference to an enclosing `Int` parameter. Other closure
+representations and the precise supported method signatures are described in the
+[JVM backend](jvm-backend.md) and [pickler contracts](tasty-pickler-design.md#contextual-method-parameters).
+
+To reproduce the Scala controls, run the two fixture drivers in the pinned
+pickler-oracle environment. The first driver also checks the bytes of the
+separate-compilation fixtures.
+
+```sh
+python3 crates/dotty-typer/tests/fixtures/contextual-arguments/check.py
+python3 crates/dotty-typer/tests/fixtures/contextual-consumers/check.py
+```
+
 ## Reproduction and oracle
 
 Run the deterministic parity suite with:
@@ -649,9 +773,10 @@ no-applicable errors retain candidate identities and rejection reasons.
 Inference for raw generic `new` is supported when a generic primary constructor
 wins. If a raw generic `new` selects a secondary constructor, typing is
 explicitly rejected because its signature has not been adapted using inferred
-owner type arguments. Expected-type inference, automatic contextual constructor
-argument insertion, and implicit search remain explicit deferrals; explicit
-constructor `using` clauses are checked and can contribute inference constraints.
+owner type arguments. Explicit constructor `using` clauses can contribute
+inference constraints. Calls also insert monomorphic contextual arguments in
+normalized constructor clause order, including the empty clause generated
+for a context-only constructor. Expected-type constructor inference remains deferred.
 
 A secondary constructor in a generic class keeps the enclosing class's type
 parameters in its result, for example `C[A]`; those parameters remain owned by
@@ -852,8 +977,8 @@ aggregate temporaries retain only `SYNTHETIC`.
 measured source carry `FINAL | LAZY`). Explicit references after the
 declaration use ordinary local-scope lookup. Contextual declarations enter the
 scope only after their initializer and type checks succeed; their initializer
-does not see the new local as already initialized. Anonymous givens remain
-deferred when their AST has no authoritative local term name. The preserved
+does not see the new local as already initialized. Anonymous local alias givens use the same type-derived names as member givens;
+the local symbol and typed declaration carry the invented name. The preserved
 `LAZY` flag on named givens does not enable general lazy-value typing or runtime
 lowering. Local contextual and lazy values with source annotations or explicit
 visibility modifiers return `LocalValueMetadataDeferred` before symbol
@@ -895,8 +1020,8 @@ resolution/classpath blockers before the declarations are typed. This focused
 change therefore has no measured corpus uplift; the full typer corpus result
 remains 0 / 3,297 fully typed local methods.
 
-Contextual search, contextual argument insertion, implicit conversions, and
-summon remain unsupported. `inline val` declarations and lazy pattern
+Named local contextual values participate in omitted argument search, including
+lookup initiated by the supported library helpers and contextual consumers. `inline val` declarations and lazy pattern
 definitions remain deferred. Recursive inferred lazy initializers remain
 unsupported and report `RecursiveLazyLocalValueInitializer`; the acyclic
 forward-reference subset is described above.
@@ -1421,10 +1546,14 @@ members use receiver-adapted signatures, including inherited generic methods.
 Arguments are typed once per overload set. Candidate-local inference conflicts,
 argument mismatches, and bound violations reject that candidate; unsupported
 inference or conformance shapes remain conservative when they could compete.
-Standalone overloaded identifiers and selections remain deferred.
+A contextual overload can use the expected result of an identifier, selection,
+or tied application when exactly one result after omitted clauses conforms.
+Evidence availability does not break an overload tie. Other standalone
+overloaded identifiers and selections remain deferred.
 
 Application syntax is checked against the current method clause: regular
-applications consume plain clauses, while explicit `using` applications consume
+applications consume plain or legacy implicit clauses. Passing positional arguments
+to a legacy implicit clause emits a migration warning. Explicit `using` applications consume
 contextual or legacy implicit clauses. Explicit arguments use the ordinary
 typing, widening, arity, and conformance checks, and the typed `Apply` retains
 its `ApplyKind`. Overload applicability applies the same clause-kind filter, so
@@ -1433,9 +1562,48 @@ Generic inference uses the current explicit clause, including contextual or
 legacy implicit clauses passed with `using`, and the supported direct-parameter
 and matching applied-type constraints also participate in overload selection.
 Curried plain-then-contextual calls continue from the exact result callable of
-the first clause, including after generic inference. Automatic contextual or
-implicit argument insertion and implicit search remain deferred. Erased
-parameters remain unsupported for explicit application. Bounded by-name
+the first clause, including after generic inference. At a value use, a remaining
+contextual or legacy implicit clause can be supplied by monomorphic context
+parameters, local aliases or directly declared lexical members. For supported
+monomorphic values, the nearer matching scope takes precedence. At one level
+a strictly more general matching declared type wins, in line with Scala 3.9.
+Contextual lookup also reads named imports, exclusions, legacy implicit wildcard
+imports, and unbounded or nominally bounded given selectors. A bounded selector tests
+the declaration and preserves its polymorphism for later searches. Imported
+values retain their receiver in the typed selection. After lexical search finds
+no candidate, applied types contribute their constructor and argument anchors;
+nominal anchors contribute their linked companion and base classes. Candidates
+in these companions are ranked together. For ordinary member methods, context
+bounds enter a witness parameter for each source bound. Named and aggregate
+bounds preserve order. The witnesses precede the first term clause whose
+parameter type mentions them, merge into a trailing contextual clause, or
+form a final clause. Conditional providers with inferable
+result-type binders can infer through instantiated nominal parents. They build
+a typed type application and recursively supply their
+contextual clauses. Missing or cyclic dependencies can eliminate a candidate;
+ambiguity in a dependency propagates unless a strictly better viable provider
+resolves the search. Search has explicit depth and work limits.
+Each inserted ordinary typed application
+retains the exact selected parameter reference. Missing and ambiguous evidence
+report the expected type and source site. The binary Scala library's
+`Predef.implicitly` uses its real method signature. For the transparent inline
+`Predef.summon`, the singleton return type refers to the exact evidence
+parameter and the typed result retains the selected argument. Local definitions
+shadow the default import. For the library class `scala.util.NotGiven[T]`,
+failed candidate probes, including ambiguity in a nested search for `T`,
+produce a reference to the linked companion’s `value` method. Explicit `using` keeps its own kind.
+See the Scala 3.9 controls under `tests/fixtures/contextual-arguments` in the
+typer crate. Erased
+parameters remain unsupported for explicit application. A by-name contextual
+formal searches for evidence of its result type and keeps the argument
+expression under the by-name clause. A recursive dependency crossing a by-name
+position can reference an enclosing goal. The outermost search emits a local
+holder class with one field for each linked goal and one allocated instance.
+Initializers select the fields on `this`; the result selects them on that
+instance. Strict cycles report divergence. A failed candidate restores the
+dictionary together with the semantic and typed arenas. The synthetic class
+uses the frontend's Object parent. Scala's JVM serialization marker and binary
+emission of these local classes are outside this typing contract. Bounded by-name
 formals use their result type for argument conformance and retain the source
 argument node in the typed `Apply`; polymorphic inference and overload sets
 containing by-name candidates remain deferred. The Scala
@@ -1586,12 +1754,12 @@ are ready:
 - other local `def` signature/body shapes, class, type, and pattern
   declarations;
 - generic overload inference outside the structural candidate-local subset,
-  contextual/implicit argument insertion and search, dependent result
+  contextual overload disambiguation outside the supported clauses, general dependent result
   application, and right-associative extension normalization;
 - expected-type-driven constructor inference, selecting constructor overloads, and
   anonymous-class lowering;
 - enum semantics, case-class synthetic APIs, and `derives`;
-- context-bound evidence synthesis;
+- context-bound witnesses on traits, enums and polymorphic function literals;
 - default imports and general standard-library member lookup;
 - ordinary and bounded contextual source function types are projected as
   canonical applied function-class types (#827 below). Refined types, type
@@ -1718,11 +1886,33 @@ Missing parameter types, parameter modifiers, annotations, and duplicate
 parameter names remain explicit errors. Inferred one- and multi-parameter
 lambdas report `UnsupportedFunctionLiteralParameter`; this remains outside
 the increment even when the audit moves those inputs past the generic
-`UnsupportedExpression::Function` blocker. Contextual function types project
-to `ContextFunctionN`, but expression application, contextual argument search,
-and contextual lambda expressions are still unsupported. Captures requiring
-an environment are rejected explicitly; references to shared object-owned
-values do not count as closure captures. Failed lambda typing rolls back its
+`UnsupportedExpression::Function` blocker. The contextual-argument increment also types explicit `?=>` lambdas,
+including a single unannotated parameter with a contextual expectation. Its
+synthetic method owns the evidence parameters used in the body. Values of the
+canonical synthesized `ContextFunctionN` call the instantiated `apply` method
+with explicit or searched arguments. An expected contextual function can wrap
+a non-lambda body in a closure with fresh evidence parameters before typing
+the body. Two nested unary contextual expectations can introduce two synthetic
+methods at the same source expression. The source binding identifies the outer
+closure, and each typed closure links to its own definition and ordered formals.
+In `Int ?=> (Boolean ?=> Int)`, a call requiring both types reads one
+parameter from each method. When both layers supply the same type, the
+inner parameter wins. The inner closure captures an outer parameter only
+when it uses it. An instance method call also captures the receiver, which
+the outer closure retains for constructing the inner closure. Shared
+object-owned values do not require a capture. Deeper implicit abstractions
+remain unsupported.
+
+For a method `build: Int ?=> (Boolean ?=> Int)`, the client expression
+`build(using 7)(using true)` applies each layer explicitly. At an `Int`
+expectation, `build` searches for an `Int` and then a `Boolean`, while
+`build(using 7)` searches only for the `Boolean`. With an expected
+`Boolean ?=> Int`, the latter expression produces a closure whose binder
+supplies the second argument. Missing or ambiguous evidence at the second
+layer rolls back the first application. These checks cover typed client
+trees and the Scala 3.9.0 typer oracle.
+
+Failed lambda typing rolls back its
 synthetic method, parameter symbols, scopes, typed nodes, and source mappings. The pinned
 Scala 3.9.0 typer and `lambdaLift` shapes, including source positions, are
 recorded in the [function-literal fixture](../crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.oracle.md).

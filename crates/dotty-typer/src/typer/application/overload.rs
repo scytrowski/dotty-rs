@@ -579,7 +579,7 @@ impl SourceTyper<'_> {
                 )
             }
             TreeKind::Select(selection) if selection.name.is_term() => {
-                let qualifier_candidate = self.type_selection_qualifier(
+                let qualifier = self.type_selection_qualifier(
                     selection.qualifier,
                     context,
                     function_tree.index(),
@@ -587,16 +587,6 @@ impl SourceTyper<'_> {
                     info_journal,
                     new_mappings,
                 )?;
-                let qualifier = if let Some(qualifier) = qualifier_candidate {
-                    qualifier
-                } else {
-                    self.type_expression_inner(
-                        selection.qualifier,
-                        context,
-                        info_journal,
-                        new_mappings,
-                    )?
-                };
                 let receiver_type = self.typed_arena.get(qualifier).ty;
                 let receiver =
                     self.widen_expression_type_journaled(receiver_type, info_journal, 0)?;
@@ -770,6 +760,38 @@ impl SourceTyper<'_> {
                         return Ok(None);
                     }
                     if members.len() == 1 && !had_inaccessible_member {
+                        // Default replay binds a non-stable receiver before selecting
+                        // the copy getter(s). Keep the original polymorphic signature
+                        // until their result types participate in inference.
+                        if argument_trees.is_empty()
+                            && application_kind == ApplyKind::Regular
+                            && self
+                                .generated_case_class_for_copy(members[0].symbol)
+                                .is_some()
+                        {
+                            let callable =
+                                self.member_type_on_journaled(&members[0], info_journal)?;
+                            let reference = self
+                                .store
+                                .types
+                                .alloc(Type::term_ref(receiver_type, members[0].symbol));
+                            let typed =
+                                TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                                    .select(
+                                        qualifier,
+                                        selection.name,
+                                        selection.backquoted,
+                                        reference,
+                                        function_node.position,
+                                    );
+                            self.record_typed_child(function_tree, typed, new_mappings)?;
+                            return Ok(Some(ResolvedApplicationFunction {
+                                typed,
+                                callable,
+                                arguments: vec![],
+                                argument_trees: None,
+                            }));
+                        }
                         // Only a call to one already-applicable method may read
                         // a mutable local receiver; selecting a member as a value
                         // still requires the ordinary stable-prefix check.
@@ -1091,15 +1113,7 @@ impl SourceTyper<'_> {
                 )
             }
         };
-        self.typed_index
-            .insert(self.source, function_tree, function_type)
-            .map_err(|error| TyperError::ConflictingTypedExpression {
-                source: error.source,
-                tree_index: error.untyped.index(),
-                existing: error.existing.index(),
-                attempted: error.attempted.index(),
-            })?;
-        new_mappings.push((self.source, function_tree));
+        self.record_typed_child(function_tree, function_type, new_mappings)?;
         Ok(Some(ResolvedApplicationFunction {
             typed: function_type,
             callable: winner.callable,
@@ -1121,6 +1135,9 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<Option<ResolvedApplicationFunction>, TyperError> {
+        if application_kind != ApplyKind::Regular {
+            return Ok(None);
+        }
         let names = match self.expression_term_candidates(
             selection.name,
             context,
@@ -1128,9 +1145,12 @@ impl SourceTyper<'_> {
             self.arena.get(function_tree).position,
         ) {
             Ok(names) => names,
-            Err(TyperError::TermNameNotFound { .. }) => return Ok(None),
+            Err(TyperError::TermNameNotFound { .. }) => Vec::new(),
             Err(error) => return Err(error),
         };
+        let receiver_own_type = self.typed_arena.get(qualifier).ty;
+        let receiver_widened_type =
+            self.widen_expression_type_journaled(receiver_own_type, info_journal, 0)?;
         let mut extensions = names.into_iter().filter(|symbol| {
             self.local_methods.contains_symbol(*symbol)
                 && self
@@ -1140,26 +1160,46 @@ impl SourceTyper<'_> {
                     .flags
                     .contains(SymbolFlags::EXTENSION)
         });
-        let Some(symbol) = extensions.next() else {
-            return Ok(None);
+        let (typed_function, signature) = if let Some(symbol) = extensions.next() {
+            if extensions.next().is_some() {
+                return Err(TyperError::OverloadedSelectionDeferred {
+                    source: self.source,
+                    tree_index: application_tree_index,
+                    name: selection.name,
+                });
+            }
+            let Some(clauses) = self.extension_prefix_clauses(symbol) else {
+                return Ok(None);
+            };
+            if clauses.len() != 1 || clauses[0].len() != 1 {
+                return Ok(None);
+            }
+            let signature = self.completed_expression_symbol_info(symbol, info_journal)?;
+            let reference = self.type_resolved_identifier_expression(
+                symbol,
+                Ident {
+                    name: selection.name,
+                    backquoted: selection.backquoted,
+                },
+                self.arena.get(function_tree).position,
+                context,
+                function_tree.index(),
+                info_journal,
+            )?;
+            (reference, signature)
+        } else {
+            let Some(selected) = self.contextual_extension(
+                selection.name,
+                receiver_widened_type,
+                context,
+                application_tree_index,
+                info_journal,
+            )?
+            else {
+                return Ok(None);
+            };
+            selected
         };
-        if extensions.next().is_some() {
-            return Err(TyperError::OverloadedSelectionDeferred {
-                source: self.source,
-                tree_index: application_tree_index,
-                name: selection.name,
-            });
-        }
-        let Some(prefix_clauses) = self.local_methods.extension_prefix_clauses(symbol) else {
-            return Ok(None);
-        };
-        if prefix_clauses.len() != 1 || prefix_clauses[0].len() != 1 {
-            return Ok(None);
-        }
-        if application_kind != ApplyKind::Regular {
-            return Ok(None);
-        }
-        let signature = self.completed_expression_symbol_info(symbol, info_journal)?;
         let Some(Type::Method(receiver_clause)) = self.store.types.try_get(signature).cloned()
         else {
             return Ok(None);
@@ -1173,18 +1213,13 @@ impl SourceTyper<'_> {
         };
         if !supported_override_signature(&method, self.store)
             || self.type_contains_param_ref(method.result, receiver_clause.result)?
-            || matches!(
-                self.store.types.try_get(method.result),
-                Some(Type::Method(_) | Type::Poly(_))
-            )
+            || matches!(self.store.types.try_get(method.result), Some(Type::Poly(_)))
+            || matches!(self.store.types.try_get(method.result), Some(Type::Method(next)) if next.kind==MethodKind::Plain)
             || argument_trees.len() != method.params.len()
         {
             return Ok(None);
         }
         let receiver_parameter = receiver_clause.params[0];
-        let receiver_own_type = self.typed_arena.get(qualifier).ty;
-        let receiver_widened_type =
-            self.widen_expression_type_journaled(receiver_own_type, info_journal, 0)?;
         match self.conforms(receiver_widened_type, receiver_parameter.ty) {
             Ok(true) => {}
             Ok(false) => return Ok(None),
@@ -1239,19 +1274,8 @@ impl SourceTyper<'_> {
                 }
             }
         }
-        let reference_type = self.store.types.alloc(Type::TermRef {
-            prefix: self.definitions.no_prefix,
-            target: TermRefTarget::Symbol(symbol),
-        });
-        let typed_ident = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
-            .ident_with_backquoted(
-                selection.name,
-                selection.backquoted,
-                reference_type,
-                self.arena.get(function_tree).position,
-            );
         let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply_with_kind(
-            typed_ident,
+            typed_function,
             vec![receiver.typed],
             ApplyKind::Regular,
             receiver_clause.result,
@@ -1344,7 +1368,36 @@ impl SourceTyper<'_> {
                 candidates.len() == 1,
                 info_journal,
             )?;
-            self.choose_overload_candidate(candidates, arguments, tree_index, application_kind)
+            let resolution =
+                self.choose_overload_candidate(candidates, arguments, tree_index, application_kind);
+            if let Err(TyperError::AmbiguousOverloadApplication {
+                candidates: tied, ..
+            }) = &resolution
+                && let Some(expected) = self.expected_value_at(tree_index)
+            {
+                let signatures: Vec<_> = candidates
+                    .iter()
+                    .filter(|c| tied.contains(&c.symbol))
+                    .filter_map(|c| {
+                        let Type::Method(m) = self.store.types.try_get(c.callable)? else {
+                            return None;
+                        };
+                        Some((c.symbol, m.result))
+                    })
+                    .collect();
+                if signatures.len() == tied.len()
+                    && let Some(winner) = self.overload_with_contextual_result(
+                        &signatures,
+                        expected,
+                        tree_index,
+                        info_journal,
+                    )?
+                    && let Some(candidate) = candidates.iter().find(|c| c.symbol == winner)
+                {
+                    return Ok(*candidate);
+                }
+            }
+            resolution
         })();
         let selected = resolution?;
 
@@ -1611,6 +1664,23 @@ impl SourceTyper<'_> {
                     return Err(TyperError::UnknownSymbol { symbol });
                 }
                 children.push(prefix);
+                if self.store.symbols.get(symbol).kind == SymbolKind::TypeAlias
+                    && !self
+                        .store
+                        .symbols
+                        .get(symbol)
+                        .flags
+                        .contains(SymbolFlags::OPAQUE)
+                {
+                    if self.is_current_source_symbol(symbol)
+                        && matches!(*self.store.symbols.info(symbol), SymbolInfo::Missing)
+                    {
+                        self.complete_symbol_inner(symbol, info_journal)?;
+                    }
+                    if let SymbolInfo::Complete(info) = *self.store.symbols.info(symbol) {
+                        children.push(info);
+                    }
+                }
                 if matches!(
                     self.store.symbols.get(symbol).kind,
                     SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass

@@ -8,7 +8,8 @@ use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Default)]
 pub(in crate::typer) struct FunctionLiteralIndex {
-    definitions: HashMap<(SourceId, TreeId<Untyped>), FunctionLiteralDefinition>,
+    roots: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
+    definitions: HashMap<SymbolId, FunctionLiteralDefinition>,
     parameters: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
 }
 
@@ -19,20 +20,36 @@ pub(in crate::typer) struct FunctionLiteralTypingContext {
     pub poly_binder: Option<TypeId>,
 }
 
+struct LambdaParameter {
+    name: TermName,
+    ty: TypeId,
+    position: Option<SourceSpan>,
+    source: Option<(TreeId<Untyped>, TreeId<Untyped>)>,
+}
+
+struct LambdaBody {
+    tree: TreeId<Untyped>,
+    parameters: Vec<LambdaParameter>,
+    kind: SourceFunctionKind,
+    expected_result: Option<TypeId>,
+}
+
 #[derive(Clone)]
 struct FunctionLiteralDefinition {
-    method: SymbolId,
     scope: ScopeId,
     typed_definition: Option<TreeId<Typed>>,
     captures: Vec<(SymbolId, TreeId<Typed>)>,
-    capture_enclosing_values: bool,
+    unary_kind: Option<SourceFunctionKind>,
+    nested_context_parent: Option<SymbolId>,
 }
 
 impl FunctionLiteralIndex {
+    fn unary_kind(&self, method: SymbolId) -> Option<SourceFunctionKind> {
+        self.definitions.get(&method)?.unary_kind
+    }
+
     pub(in crate::typer) fn is_method(&self, method: SymbolId) -> bool {
-        self.definitions
-            .values()
-            .any(|definition| definition.method == method)
+        self.definitions.contains_key(&method)
     }
 
     pub(in crate::typer) fn method_at(
@@ -40,16 +57,11 @@ impl FunctionLiteralIndex {
         source: SourceId,
         tree: TreeId<Untyped>,
     ) -> Option<SymbolId> {
-        self.definitions
-            .get(&(source, tree))
-            .map(|entry| entry.method)
+        self.roots.get(&(source, tree)).copied()
     }
 
     pub(in crate::typer) fn scope_of(&self, method: SymbolId) -> Option<ScopeId> {
-        self.definitions
-            .values()
-            .find(|entry| entry.method == method)
-            .map(|entry| entry.scope)
+        self.definitions.get(&method).map(|entry| entry.scope)
     }
 
     pub(in crate::typer) fn definition_at(
@@ -58,7 +70,7 @@ impl FunctionLiteralIndex {
         tree: TreeId<Untyped>,
     ) -> Option<TreeId<Typed>> {
         self.definitions
-            .get(&(source, tree))
+            .get(&self.method_at(source, tree)?)
             .and_then(|entry| entry.typed_definition)
     }
 
@@ -72,27 +84,33 @@ impl FunctionLiteralIndex {
 
     pub(in crate::typer) fn capture(
         &mut self,
+        store: &SemanticStore,
         method: SymbolId,
         symbol: SymbolId,
         value: TreeId<Typed>,
     ) {
-        if let Some(definition) = self
+        let outer = self
             .definitions
-            .values_mut()
-            .find(|definition| definition.method == method)
-            && !definition
-                .captures
-                .iter()
-                .any(|(captured, _)| *captured == symbol)
-        {
-            definition.captures.push((symbol, value));
+            .get(&method)
+            .and_then(|definition| definition.nested_context_parent);
+        // The outer closure constructs the inner one. Its own binder is already
+        // in scope there, while every other inner capture must be available to it.
+        let forward_to = outer.filter(|outer| store.symbols.owner(symbol) != Some(*outer));
+        for owner in [Some(method), forward_to].into_iter().flatten() {
+            if let Some(definition) = self.definitions.get_mut(&owner)
+                && !definition
+                    .captures
+                    .iter()
+                    .any(|(captured, _)| *captured == symbol)
+            {
+                definition.captures.push((symbol, value));
+            }
         }
     }
 
     pub(in crate::typer) fn captures(&self, method: SymbolId) -> Vec<TreeId<Typed>> {
         self.definitions
-            .values()
-            .find(|definition| definition.method == method)
+            .get(&method)
             .map(|definition| {
                 definition
                     .captures
@@ -103,33 +121,49 @@ impl FunctionLiteralIndex {
             .unwrap_or_default()
     }
 
+    /// The enclosing source method and, for a nested context abstraction,
+    /// the synthetic method that constructs the current closure.
+    fn capture_owners(
+        &self,
+        store: &SemanticStore,
+        method: SymbolId,
+    ) -> Option<(SymbolId, Option<SymbolId>)> {
+        let definition = self.definitions.get(&method)?;
+        if definition.unary_kind.is_none()
+            || !store.symbols.contains(method)
+            || store.symbols.get(method).kind != SymbolKind::Method
+        {
+            return None;
+        }
+        let outer = definition.nested_context_parent.unwrap_or(method);
+        if outer != method
+            && (store.symbols.owner(method) != Some(outer)
+                || !self.is_method(outer)
+                || !store.symbols.contains(outer))
+        {
+            return None;
+        }
+        let source_method = store.symbols.owner(outer)?;
+        (store.symbols.contains(source_method)
+            && store.symbols.get(source_method).kind == SymbolKind::Method
+            && !self.is_method(source_method))
+        .then_some((source_method, definition.nested_context_parent))
+    }
+
     pub(in crate::typer) fn can_capture_enclosing_this(
         &self,
         store: &SemanticStore,
         method: SymbolId,
         class: SymbolId,
     ) -> bool {
-        if !self
-            .definitions
-            .values()
-            .any(|definition| definition.method == method && definition.capture_enclosing_values)
-            || !store.symbols.contains(method)
-            || !store.symbols.contains(class)
+        let Some((source_method, _)) = self.capture_owners(store, method) else {
+            return false;
+        };
+        if !store.symbols.contains(class)
             || !matches!(
                 store.symbols.get(class).kind,
                 SymbolKind::Class | SymbolKind::Trait
             )
-        {
-            return false;
-        }
-        let lambda = store.symbols.get(method);
-        let Some(source_method) = lambda.owner else {
-            return false;
-        };
-        if lambda.kind != SymbolKind::Method
-            || !store.symbols.contains(source_method)
-            || store.symbols.get(source_method).kind != SymbolKind::Method
-            || self.is_method(source_method)
         {
             return false;
         }
@@ -164,22 +198,8 @@ impl FunctionLiteralIndex {
         method: SymbolId,
         symbol: SymbolId,
     ) -> Option<SymbolId> {
-        if !self
-            .definitions
-            .values()
-            .any(|definition| definition.method == method && definition.capture_enclosing_values)
-            || !store.symbols.contains(method)
-            || !store.symbols.contains(symbol)
-        {
-            return None;
-        }
-        let lambda = store.symbols.get(method);
-        let source_method = lambda.owner?;
-        if lambda.kind != SymbolKind::Method
-            || !store.symbols.contains(source_method)
-            || store.symbols.get(source_method).kind != SymbolKind::Method
-            || self.is_method(source_method)
-        {
+        let (source_method, _) = self.capture_owners(store, method)?;
+        if !store.symbols.contains(symbol) {
             return None;
         }
         let owner = store.symbols.get(source_method).owner?;
@@ -243,26 +263,19 @@ impl FunctionLiteralIndex {
         method: SymbolId,
         symbol: SymbolId,
     ) -> bool {
-        if !self
-            .definitions
-            .values()
-            .any(|definition| definition.method == method && definition.capture_enclosing_values)
-        {
+        let Some((source_method, outer)) = self.capture_owners(store, method) else {
             return false;
-        }
+        };
         if !store.symbols.contains(symbol) {
             return false;
         }
         let parameter = store.symbols.get(symbol);
-        let Some(owner) = store.symbols.get(method).owner else {
-            return false;
-        };
-        if parameter.kind != SymbolKind::Parameter
-            || parameter.owner != Some(owner)
+        let in_scope = parameter
+            .owner
+            .is_some_and(|owner| owner == source_method || Some(owner) == outer);
+        if !in_scope
+            || parameter.kind != SymbolKind::Parameter
             || parameter.flags.contains(SymbolFlags::MUTABLE)
-            || !store.symbols.contains(owner)
-            || store.symbols.get(owner).kind != SymbolKind::Method
-            || self.is_method(owner)
         {
             return false;
         }
@@ -279,12 +292,7 @@ impl FunctionLiteralIndex {
         method: SymbolId,
         symbol: SymbolId,
     ) -> bool {
-        if !self
-            .definitions
-            .values()
-            .any(|definition| definition.method == method && definition.capture_enclosing_values)
-            || !store.symbols.contains(symbol)
-        {
+        if self.unary_kind(method).is_none() || !store.symbols.contains(symbol) {
             return false;
         }
         let local = store.symbols.get(symbol);
@@ -302,10 +310,91 @@ impl FunctionLiteralIndex {
 }
 
 impl SourceTyper<'_> {
+    pub(in crate::typer) fn literal_function_kind(
+        &self,
+        function: &Function,
+    ) -> SourceFunctionKind {
+        let first = function
+            .params
+            .first()
+            .and_then(|parameter| self.arena.try_get(*parameter));
+        if matches!(first.map(|tree| &tree.kind), Some(TreeKind::ValDef(parameter)) if parameter.metadata.modifiers == [Modifier::Given])
+        {
+            SourceFunctionKind::Contextual
+        } else {
+            SourceFunctionKind::Ordinary
+        }
+    }
+
+    pub(in crate::typer) fn can_capture_constructor_parameter(
+        &self,
+        method: SymbolId,
+        symbol: SymbolId,
+    ) -> bool {
+        let Some((source_method, None)) = self.function_literals.capture_owners(self.store, method)
+        else {
+            return false;
+        };
+        if self.function_literals.unary_kind(method) != Some(SourceFunctionKind::Ordinary)
+            || !self.is_current_source_symbol(source_method)
+            || !self.is_source_private_constructor_parameter(symbol)
+        {
+            return false;
+        }
+        let Some(class) = self.store.symbols.get(source_method).owner else {
+            return false;
+        };
+        if !self.store.symbols.contains(class)
+            || self.store.symbols.get(class).kind != SymbolKind::Class
+        {
+            return false;
+        }
+        let parameter = self.store.symbols.get(symbol);
+        if parameter.owner != Some(class) || parameter.flags.contains(SymbolFlags::MUTABLE) {
+            return false;
+        }
+        let Some(SourceDefinition::Canonical { source, tree }) = self.index.definition_of(symbol)
+        else {
+            return false;
+        };
+        if source != self.source || self.index.symbol_at(source, tree) != Some(symbol) {
+            return false;
+        }
+        let Some(TreeKind::ValDef(parameter_tree)) =
+            self.arena.try_get(tree).map(|node| &node.kind)
+        else {
+            return false;
+        };
+        if parameter_tree.metadata.modifiers.contains(&Modifier::Var) {
+            return false;
+        }
+        let Some(type_tree) = self.arena.try_get(parameter_tree.tpt) else {
+            return false;
+        };
+        match &type_tree.kind {
+            TreeKind::ByNameTypeTree(_) => false,
+            TreeKind::PhaseSpecific(UntypedNode::PostfixOp(PostfixOp { op, .. }))
+                if self.store.names.resolve(op.text()) == "*" =>
+            {
+                false
+            }
+            _ => true,
+        }
+    }
+
     pub(in crate::typer) fn ordinary_function1_parts(
         &mut self,
         expected: TypeId,
         tree_index: u32,
+    ) -> Result<Option<(TypeId, TypeId)>, TyperError> {
+        self.function1_parts(expected, tree_index, SourceFunctionKind::Ordinary)
+    }
+
+    pub(in crate::typer) fn function1_parts(
+        &mut self,
+        expected: TypeId,
+        tree_index: u32,
+        kind: SourceFunctionKind,
     ) -> Result<Option<(TypeId, TypeId)>, TyperError> {
         let Some(Type::Applied { tycon, args }) = self.store.types.try_get(expected) else {
             return Ok(None);
@@ -323,7 +412,7 @@ impl SourceTyper<'_> {
         };
         let class = *class;
         let prefix = *prefix;
-        let canonical = self.source_function_class(SourceFunctionKind::Ordinary, 1, tree_index)?;
+        let canonical = self.source_function_class(kind, 1, tree_index)?;
         let canonical_package = self.store.symbols.get(canonical).owner;
         let canonical_prefix = canonical_package.is_some_and(|package| {
             matches!(
@@ -344,7 +433,6 @@ impl SourceTyper<'_> {
         &mut self,
         tree: TreeId<Untyped>,
         function: Function,
-        position: Option<SourceSpan>,
         typing_context: FunctionLiteralTypingContext,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
@@ -354,6 +442,9 @@ impl SourceTyper<'_> {
             expected_function1,
             poly_binder,
         } = typing_context;
+        let kind = self.literal_function_kind(&function);
+        let contextual = kind == SourceFunctionKind::Contextual;
+        let allowed_modifiers: &[Modifier] = if contextual { &[Modifier::Given] } else { &[] };
         let mut parameters = Vec::with_capacity(function.params.len());
         for parameter_tree in function.params.iter().copied() {
             let Some(parameter_node) = self.arena.try_get(parameter_tree).cloned() else {
@@ -370,7 +461,7 @@ impl SourceTyper<'_> {
                 });
             };
             if parameter.metadata.visibility.is_some()
-                || !parameter.metadata.modifiers.is_empty()
+                || parameter.metadata.modifiers.as_slice() != allowed_modifiers
                 || !parameter.metadata.annotations.is_empty()
             {
                 return Err(TyperError::UnsupportedFunctionLiteralParameter {
@@ -403,14 +494,100 @@ impl SourceTyper<'_> {
                 }
                 result => result?,
             };
-            parameters.push((
-                parameter_tree,
-                parameter_node.position,
-                parameter,
-                parameter_type,
-            ));
+            parameters.push(LambdaParameter {
+                name: parameter.name,
+                ty: parameter_type,
+                position: parameter_node.position,
+                source: Some((parameter_tree, parameter.tpt)),
+            });
         }
+        let body = LambdaBody {
+            tree: function.body,
+            parameters,
+            kind,
+            expected_result: expected_function1.and_then(|(_, result)| result),
+        };
+        self.type_lambda_body(tree, body, context, poly_binder, info_journal, new_mappings)
+    }
 
+    pub(in crate::typer) fn synthesize_context_lambda(
+        &mut self,
+        tree: TreeId<Untyped>,
+        expected: TypeId,
+        context: ExpressionContext,
+        poly_binder: Option<TypeId>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let Some(Type::Applied { args, .. }) = self.store.types.try_get(expected) else {
+            return Err(TyperError::UnsupportedExpression {
+                source: self.source,
+                tree_index: tree.index(),
+                expression_kind: "context function requires an applied expected type",
+            });
+        };
+        let Some((&result, inputs)) = args.split_last() else {
+            return Err(TyperError::UnsupportedExpression {
+                source: self.source,
+                tree_index: tree.index(),
+                expression_kind: "context function result is missing",
+            });
+        };
+        if self.is_applied_context_function(result) {
+            let supported = inputs.len() == 1
+                && matches!(self.store.types.try_get(result), Some(Type::Applied { args, .. })
+                    if matches!(args.as_slice(), [_, output] if !self.is_applied_context_function(*output)));
+            if !supported {
+                return Err(TyperError::UnsupportedExpression {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    expression_kind: "nested context abstraction requires two unary layers",
+                });
+            }
+        }
+        // Both implicit lambdas share a source expression. Give their binders
+        // distinct names so the inner scope does not hide the outer evidence.
+        let nested = self.function_literals.method_at(self.source, tree) == Some(context.owner);
+        let layer = if nested { "$inner" } else { "" };
+        let parameters = inputs.iter().copied().enumerate().map(|(index, ty)| {
+            // Fresh with respect to identifiers actually present in the source.
+            // Interned names survive rollback, so interning alone is not freshness.
+            let mut spelling = format!("contextual${}{layer}${}", tree.index(), index + 1);
+            while self.store.names.get(&spelling).is_some_and(|id| self.arena.iter().any(|(_, tree)| matches!(&tree.kind, TreeKind::Ident(ident) if ident.name.text()==id))) {
+                spelling.push('$');
+            }
+            LambdaParameter {name:TermName::new(self.store.names.intern(&spelling)), ty, position:None, source:None}
+        }).collect();
+        let body = LambdaBody {
+            tree,
+            parameters,
+            kind: SourceFunctionKind::Contextual,
+            expected_result: Some(result),
+        };
+        let typed =
+            self.type_lambda_body(tree, body, context, poly_binder, info_journal, new_mappings)?;
+        self.record_adapted_value(tree, typed, new_mappings)?;
+        Ok(typed)
+    }
+
+    fn type_lambda_body(
+        &mut self,
+        tree: TreeId<Untyped>,
+        body: LambdaBody,
+        context: ExpressionContext,
+        poly_binder: Option<TypeId>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let LambdaBody {
+            tree: body,
+            parameters,
+            kind,
+            expected_result,
+        } = body;
+        let contextual = kind == SourceFunctionKind::Contextual;
+        let position = self.arena.get(tree).position;
+        let mut args: Vec<_> = parameters.iter().map(|p| p.ty).collect();
         let method_name_text = format!("$sourceLambda${}", tree.index());
         let method_name = Name::new(self.store.names.intern(&method_name_text), Namespace::Term);
         let method = self.store.symbols.alloc(Symbol {
@@ -426,20 +603,17 @@ impl SourceTyper<'_> {
             links: SymbolLinks::default(),
         });
         let method_scope = self.store.scopes.alloc(Scope::new(Some(method)));
-        if self
-            .function_literals
-            .definitions
-            .insert(
-                (self.source, tree),
-                FunctionLiteralDefinition {
-                    method,
-                    scope: method_scope,
-                    typed_definition: None,
-                    captures: Vec::new(),
-                    capture_enclosing_values: function.params.len() == 1,
-                },
-            )
-            .is_some()
+        // The source index names the outer closure. Both implementation
+        // methods remain directly addressable by symbol and typed closure.
+        let nested = contextual
+            && tree == body
+            && self.function_literals.method_at(self.source, tree) == Some(context.owner);
+        if !nested
+            && self
+                .function_literals
+                .roots
+                .insert((self.source, tree), method)
+                .is_some()
         {
             return Err(TyperError::UnsupportedExpression {
                 source: self.source,
@@ -447,10 +621,23 @@ impl SourceTyper<'_> {
                 expression_kind: "function literal identity was already assigned",
             });
         }
+        self.function_literals.definitions.insert(
+            method,
+            FunctionLiteralDefinition {
+                scope: method_scope,
+                typed_definition: None,
+                captures: Vec::new(),
+                unary_kind: (parameters.len() == 1).then_some(kind),
+                nested_context_parent: nested.then_some(context.owner),
+            },
+        );
 
+        let mut formal_symbols = Vec::with_capacity(parameters.len());
         let mut typed_parameters = Vec::with_capacity(parameters.len());
         let mut method_parameters = Vec::with_capacity(parameters.len());
-        for (parameter_tree, parameter_position, parameter, parameter_type) in parameters {
+        for parameter in parameters {
+            let parameter_position = parameter.position;
+            let parameter_type = parameter.ty;
             let name = *parameter.name.as_name();
             if !self
                 .store
@@ -461,7 +648,10 @@ impl SourceTyper<'_> {
             {
                 return Err(TyperError::UnsupportedFunctionLiteralParameter {
                     source: self.source,
-                    tree_index: parameter_tree.index(),
+                    tree_index: parameter
+                        .source
+                        .map_or(tree, |(parameter, _)| parameter)
+                        .index(),
                     reason: "duplicate parameter names are unsupported",
                 });
             }
@@ -469,7 +659,11 @@ impl SourceTyper<'_> {
                 name,
                 owner: Some(method),
                 kind: SymbolKind::Parameter,
-                flags: SymbolFlags::EMPTY,
+                flags: if contextual {
+                    SymbolFlags::GIVEN
+                } else {
+                    SymbolFlags::EMPTY
+                },
                 visibility: Visibility::Public,
                 info: SymbolInfo::Complete(parameter_type),
                 origin: SymbolOrigin::Synthetic,
@@ -478,30 +672,41 @@ impl SourceTyper<'_> {
                 links: SymbolLinks::default(),
             });
             self.store.scopes.get_mut(method_scope).enter(name, symbol);
-            let typed_tpt =
-                self.reify_constructor_type_tree(parameter.tpt, parameter_type, new_mappings)?;
-            let typed_parameter = self.typed_arena.alloc(Tree {
-                kind: TreeKind::ValDef(ValDef {
-                    name: parameter.name,
-                    tpt: typed_tpt,
-                    rhs: None,
-                    metadata: (),
-                }),
-                position: parameter_position,
-                ty: parameter_type,
-            });
-            self.typed_index
-                .insert(self.source, parameter_tree, typed_parameter)
-                .map_err(|error| TyperError::ConflictingTypedExpression {
-                    source: error.source,
-                    tree_index: error.untyped.index(),
-                    existing: error.existing.index(),
-                    attempted: error.attempted.index(),
-                })?;
-            new_mappings.push((self.source, parameter_tree));
-            self.function_literals
-                .parameters
-                .insert((self.source, parameter_tree), symbol);
+            let typed_tpt = if let Some((_, tpt)) = parameter.source {
+                self.reify_constructor_type_tree(tpt, parameter_type, new_mappings)?
+            } else {
+                TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                    .type_tree(parameter_type, None)
+            };
+            formal_symbols.push(symbol);
+            let typed_parameter = self.typed_index.alloc_synthetic_definition(
+                &mut self.typed_arena,
+                symbol,
+                Tree {
+                    kind: TreeKind::ValDef(ValDef {
+                        name: parameter.name,
+                        tpt: typed_tpt,
+                        rhs: None,
+                        metadata: (),
+                    }),
+                    position: parameter_position,
+                    ty: parameter_type,
+                },
+            );
+            if let Some((parameter_tree, _)) = parameter.source {
+                self.typed_index
+                    .insert(self.source, parameter_tree, typed_parameter)
+                    .map_err(|error| TyperError::ConflictingTypedExpression {
+                        source: error.source,
+                        tree_index: error.untyped.index(),
+                        existing: error.existing.index(),
+                        attempted: error.attempted.index(),
+                    })?;
+                new_mappings.push((self.source, parameter_tree));
+                self.function_literals
+                    .parameters
+                    .insert((self.source, parameter_tree), symbol);
+            }
             typed_parameters.push(typed_parameter);
             method_parameters.push(MethodParam {
                 name: parameter.name,
@@ -519,9 +724,9 @@ impl SourceTyper<'_> {
             },
             method_scope,
         )?;
-        let typed_body = if let Some((_, Some(expected_output))) = expected_function1 {
+        let typed_body = if let Some(expected_output) = expected_result {
             self.type_expression_expected_with_poly_binder(
-                function.body,
+                body,
                 lambda_context,
                 expected_output,
                 poly_binder,
@@ -529,12 +734,7 @@ impl SourceTyper<'_> {
                 new_mappings,
             )
         } else {
-            self.type_value_expression_inner(
-                function.body,
-                lambda_context,
-                info_journal,
-                new_mappings,
-            )
+            self.type_value_expression_inner(body, lambda_context, info_journal, new_mappings)
         };
         let typed_body = typed_body?;
         let body_result = self.widen_expression_type_journaled(
@@ -543,13 +743,15 @@ impl SourceTyper<'_> {
             0,
         )?;
 
-        let function_result = expected_function1
-            .and_then(|(_, result)| result)
-            .unwrap_or(body_result);
+        let function_result = expected_result.unwrap_or(body_result);
         let method_type = self.store.types.alloc(Type::Method(MethodType {
             params: method_parameters,
             result: function_result,
-            kind: MethodKind::Plain,
+            kind: if contextual {
+                MethodKind::Contextual
+            } else {
+                MethodKind::Plain
+            },
         }));
         self.store
             .symbols
@@ -560,24 +762,24 @@ impl SourceTyper<'_> {
         });
         let typed_result = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
             .type_tree(function_result, position);
-        let typed_method = self.typed_arena.alloc(Tree {
-            kind: TreeKind::DefDef(DefDef {
-                name: TermName::new(method_name.text()),
-                type_params: Vec::new(),
-                value_param_clauses: vec![typed_parameters],
-                source_param_clause_order: None,
-                tpt: typed_result,
-                rhs: Some(typed_body),
-                metadata: (),
-            }),
-            position,
-            ty: method_ref,
-        });
-        let Some(definition) = self
-            .function_literals
-            .definitions
-            .get_mut(&(self.source, tree))
-        else {
+        let typed_method = self.typed_index.alloc_synthetic_definition(
+            &mut self.typed_arena,
+            method,
+            Tree {
+                kind: TreeKind::DefDef(DefDef {
+                    name: TermName::new(method_name.text()),
+                    type_params: Vec::new(),
+                    value_param_clauses: vec![typed_parameters],
+                    source_param_clause_order: None,
+                    tpt: typed_result,
+                    rhs: Some(typed_body),
+                    metadata: (),
+                }),
+                position,
+                ty: method_ref,
+            },
+        );
+        let Some(definition) = self.function_literals.definitions.get_mut(&method) else {
             return Err(TyperError::UnsupportedExpression {
                 source: self.source,
                 tree_index: tree.index(),
@@ -586,28 +788,7 @@ impl SourceTyper<'_> {
         };
         definition.typed_definition = Some(typed_method);
 
-        let tycon = self.source_function_type_constructor(
-            SourceFunctionKind::Ordinary,
-            function.params.len(),
-            tree.index(),
-        )?;
-        let mut args = function
-            .params
-            .iter()
-            .map(|parameter| {
-                self.function_literals
-                    .parameter_at(self.source, *parameter)
-                    .and_then(|symbol| match self.store.symbols.info(symbol) {
-                        SymbolInfo::Complete(ty) => Some(*ty),
-                        _ => None,
-                    })
-                    .ok_or(TyperError::UnsupportedFunctionLiteralParameter {
-                        source: self.source,
-                        tree_index: parameter.index(),
-                        reason: "parameter type was not completed",
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let tycon = self.source_function_type_constructor(kind, args.len(), tree.index())?;
         args.push(function_result);
         let function_type = self.store.types.alloc(Type::Applied { tycon, args });
 
@@ -615,13 +796,18 @@ impl SourceTyper<'_> {
             .ident(method_name, method_ref, position);
         let captures = self.function_literals.captures(method);
         Ok(
-            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).closure(
-                captures,
-                typed_method_reference,
-                None,
-                function_type,
-                position,
-            ),
+            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                .closure_with_implementation(
+                    captures,
+                    typed_method_reference,
+                    None,
+                    Some(dotty_core::ast::ClosureImplementation {
+                        definition: typed_method,
+                        parameters: formal_symbols,
+                    }),
+                    function_type,
+                    position,
+                ),
         )
     }
 }

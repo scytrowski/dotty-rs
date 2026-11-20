@@ -30,6 +30,28 @@ impl SourceTyper<'_> {
             true,
             info_journal,
         )?;
+        if candidates.len() > 1
+            && let Some(expected) = self.expected_value_at(tree_index)
+            && candidates
+                .iter()
+                .all(|s| self.store.symbols.get(*s).kind == SymbolKind::Method)
+        {
+            let mut signatures = Vec::with_capacity(candidates.len());
+            for &symbol in &candidates {
+                signatures.push((
+                    symbol,
+                    self.completed_expression_symbol_info(symbol, info_journal)?,
+                ));
+            }
+            if let Some(winner) = self.overload_with_contextual_result(
+                &signatures,
+                expected,
+                tree_index,
+                info_journal,
+            )? {
+                return Ok(winner);
+            }
+        }
         self.unique_expression_term(&candidates, name, tree_index, position)
     }
 
@@ -718,6 +740,61 @@ impl SourceTyper<'_> {
             })
             .map(|candidate| candidate.symbol)
             .collect())
+    }
+
+    pub(in crate::typer) fn predef_context_member(
+        &mut self,
+        name: dotty_core::Name,
+        tree_index: u32,
+    ) -> Result<Option<(SymbolId, SymbolId)>, TyperError> {
+        if !matches!(
+            self.store.names.resolve(name.text()),
+            "summon" | "implicitly"
+        ) {
+            return Ok(None);
+        }
+        let object_name = *dotty_core::TermName::new(self.store.names.intern("Predef")).as_name();
+        let Some(object) = self.lookup_default_term_import(object_name, tree_index, None)? else {
+            return Ok(None);
+        };
+        if self.store.symbols.get(object).kind != SymbolKind::Object {
+            return Ok(None);
+        }
+        Ok(self
+            .resolved_object_method(object, name, tree_index)?
+            .map(|method| (object, method)))
+    }
+
+    pub(in crate::typer) fn resolved_object_method(
+        &mut self,
+        object: SymbolId,
+        name: dotty_core::Name,
+        tree_index: u32,
+    ) -> Result<Option<SymbolId>, TyperError> {
+        let module = self.module_class_of_object(object)?;
+        let prefix = self.store.types.alloc(Type::TermRef {
+            prefix: self.definitions.no_prefix,
+            target: TermRefTarget::Symbol(object),
+        });
+        let request = MemberRequest {
+            prefix,
+            name,
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+        let symbol = self
+            .resolver
+            .resolve_member(self.store, &request)
+            .map_err(|error| TyperError::SymbolResolution {
+                source: self.source,
+                tree_index,
+                error,
+            })?;
+        Ok(symbol.filter(|s| {
+            self.store.symbols.contains(*s)
+                && self.store.symbols.get(*s).owner == Some(module)
+                && self.store.symbols.get(*s).kind == SymbolKind::Method
+        }))
     }
 
     fn lookup_default_term_import(

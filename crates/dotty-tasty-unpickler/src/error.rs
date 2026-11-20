@@ -43,6 +43,8 @@ pub enum DefinitionReason {
     HeaderParameterTagMismatch,
     /// The AST contains more parameter nodes than the encoded header.
     ParameterNodesExceedHeader,
+    /// The verified parameter and getter disagree with the store's existing relation.
+    ConflictingDefaultGetter,
     /// An opaque alias does not have exactly one right-hand-side tree.
     OpaqueAliasRhsArity,
     /// Opaque bounds children disagree with their encoded shape.
@@ -1134,6 +1136,7 @@ impl DefinitionReason {
             Self::HeaderParametersExceedNodes => "more header parameters than parameter nodes",
             Self::HeaderParameterTagMismatch => "a header parameter disagrees with its node",
             Self::ParameterNodesExceedHeader => "more parameter nodes than header parameters",
+            Self::ConflictingDefaultGetter => "conflicting default getter relation",
             Self::OpaqueAliasRhsArity => "an opaque type alias has one right-hand-side tree",
             Self::OpaqueBoundsShape => "opaque bounds children do not match their encoded shape",
             Self::OpaqueAliasDepthLimit => {
@@ -1159,6 +1162,9 @@ impl DefinitionReason {
             }
             Self::ParameterNodesExceedHeader => {
                 "unpickler.malformed_definition.parameter_nodes_exceed_header"
+            }
+            Self::ConflictingDefaultGetter => {
+                "unpickler.malformed_definition.conflicting_default_getter"
             }
             Self::OpaqueAliasRhsArity => "unpickler.malformed_definition.opaque_alias_rhs_arity",
             Self::OpaqueBoundsShape => "unpickler.malformed_definition.opaque_bounds_shape",
@@ -1387,6 +1393,7 @@ fn ast_category(error: &AstError) -> UnpickleErrorCategory {
     use UnpickleErrorCategory::{InternalInvariant, MalformedInput, UnsupportedFeature};
     match error {
         AstError::UnsupportedCategory { .. }
+        | AstError::AmbiguousRelocation { .. }
         | AstError::UnsupportedRelocation { .. }
         | AstError::RecursionLimit { .. } => UnsupportedFeature,
         AstError::RelocationDidNotConverge { .. } => InternalInvariant,
@@ -1582,6 +1589,7 @@ mod tests {
             DefinitionReason::HeaderParametersExceedNodes,
             DefinitionReason::HeaderParameterTagMismatch,
             DefinitionReason::ParameterNodesExceedHeader,
+            DefinitionReason::ConflictingDefaultGetter,
             DefinitionReason::OpaqueAliasRhsArity,
             DefinitionReason::OpaqueBoundsShape,
             DefinitionReason::OpaqueAliasDepthLimit,
@@ -1639,7 +1647,7 @@ mod tests {
         ] {
             add(UnpickleError::MalformedType { address: 4, reason });
         }
-        assert_eq!(codes.len(), 57);
+        assert_eq!(codes.len(), 58);
     }
 
     #[test]

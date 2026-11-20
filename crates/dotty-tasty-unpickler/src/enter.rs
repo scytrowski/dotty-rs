@@ -383,6 +383,7 @@ impl TastyUnpickler<'_, '_, '_> {
             // declare no symbol of their own; a lambda type inside a parent
             // or the self type does (below).
         }
+        self.link_template_default_getters(ast, template_at, class)?;
         let parts = template_parts(ast, template_at);
         for parent in parts.parents {
             self.enter_parent_lambdas(ast, parent, class, 0)?;

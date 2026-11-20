@@ -268,10 +268,9 @@ fn scala_oracle_freezes_dual_reference_abi_wire_identity_and_bytecode() {
     let factory_tasty = &pairs[2].1;
     let (method_address, body) = method_body(factory_tasty, "wrap");
     assert_eq!(factory_tasty.names().render(body.name).unwrap(), "wrap");
-    assert_eq!(body.parameters.len(), 2);
+    assert_eq!(body.parameters().count(), 2);
     assert_eq!(
-        body.parameters
-            .iter()
+        body.parameters()
             .map(|p| factory_tasty.names().render(p.name()).unwrap())
             .collect::<Vec<_>>(),
         ["first", "second"]
@@ -282,7 +281,7 @@ fn scala_oracle_freezes_dual_reference_abi_wire_identity_and_bytecode() {
             .into_iter()
             .map(|n| factory_tasty.names().render(n).unwrap())
             .collect::<Vec<_>>(),
-        ["Pair"]
+        ["Pair", "Pair"]
     );
     let index = factory_tasty.ast_address_index().unwrap();
     let params = parameter_addresses(&index, method_address);
@@ -337,7 +336,7 @@ fn scala_oracle_freezes_dual_reference_abi_wire_identity_and_bytecode() {
 
     let pair_tasty = &pairs[1].1;
     let (constructor_address, constructor) = method_body(pair_tasty, "<init>");
-    assert_eq!(constructor.parameters.len(), 2);
+    assert_eq!(constructor.parameters().count(), 2);
     assert_eq!(
         parameter_addresses(
             &pair_tasty.ast_address_index().unwrap(),
@@ -433,10 +432,9 @@ fn rust_pair_factory_tasty_emits_ordered_direct_formal_constructor_arguments() {
     let bytes = rust_pair_factory_tasty(source, 19640);
     let file = tasty(&bytes);
     let (method_address, body) = method_body(&file, "wrap");
-    assert_eq!(body.parameters.len(), 2);
+    assert_eq!(body.parameters().count(), 2);
     assert_eq!(
-        body.parameters
-            .iter()
+        body.parameters()
             .map(|parameter| file.names().render(parameter.name()).unwrap())
             .collect::<Vec<_>>(),
         ["first", "second"]
@@ -581,7 +579,7 @@ fn source_variants_record_first_reachable_paired_stage_without_forging_ids() {
         ("swapped arguments", source.replace("new Pair(first, second)", "new Pair(second, first)"), "", ""),
         ("swapped formals", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(second: Counter, first: Counter)"), "", ""),
         ("third method formal", source.replace("second: Counter): Pair", "second: Counter, unused: Int): Pair"), "cross-class constructor-call identity proof", "SourceShape"),
-        ("contextual formal", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(first: Counter)(using second: Counter)"), "complete JVM unit validation", "ParameterCountMismatch"),
+        ("contextual formal", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(first: Counter)(using second: Counter)"), "cross-class constructor-call identity proof", "candidate method must have one plain formal clause and a concrete public body"),
         ("default formal", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(first: Counter, second: Counter = new Counter(0))"), "cross-class constructor-call identity proof", "factory formals cannot have default values"),
         ("generic method", source.replace("def wrap(", "def wrap[A]("), "member planning", "generic methods are unsupported"),
         ("erased formal used illegally", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(first: Counter, erased second: Counter)"), "parsing", "ExpectedParameterColonAndType"),

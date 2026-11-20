@@ -10,6 +10,8 @@ use crate::{
     ValidatedClassStatePlan, ValidatedPicklePlan, ValidatedSameBatchReferenceField,
 };
 
+mod contextual_closure;
+mod contextual_default;
 mod primitive_operator;
 
 /// Budgets for semantic projection; type and expression recursion have hard
@@ -42,6 +44,7 @@ impl Default for ProjectionLimits {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum NameKey {
     Utf8(String),
+    DefaultGetter(NameRef, u32),
     Qualified(NameRef, NameRef),
     SignedEmpty(NameRef, NameRef),
     SignedMany(NameRef, NameRef, Vec<i32>),
@@ -89,6 +92,8 @@ pub struct EncodingContext<'a> {
     local_receiver_unit_calls: HashMap<SymbolId, crate::LocalReceiverUnitCallBinding>,
     local_receiver_unit_call_pairs: HashMap<SymbolId, [crate::LocalReceiverUnitCallBinding; 2]>,
     mutable_counter_assignments: HashMap<SymbolId, crate::MutableCounterReferenceAssignmentBinding>,
+    conditional_mutable_assignments:
+        HashMap<SymbolId, crate::ConditionalMutableReferenceAssignmentBinding>,
     local_values_by_typed_declaration: HashMap<TreeId<Typed>, SymbolId>,
     local_value_symbols: HashSet<SymbolId>,
     proof_local_symbols: HashSet<SymbolId>,
@@ -205,6 +210,43 @@ impl<'a> EncodingContext<'a> {
             .filter(|binding| binding.typed_assignment == typed_assignment)
     }
 
+    pub(crate) fn register_conditional_mutable_assignment(
+        &mut self,
+        method: SymbolId,
+        binding: crate::ConditionalMutableReferenceAssignmentBinding,
+    ) -> Result<(), PickleError> {
+        self.run(|context| {
+            if binding.method != method || binding.source_id != context.source {
+                return Err(reference(binding.local, ReferenceError::Metadata));
+            }
+            if context
+                .conditional_mutable_assignments
+                .insert(method, binding)
+                .is_some()
+            {
+                return Err(reference(binding.local, ReferenceError::Metadata));
+            }
+            Ok(())
+        })
+    }
+
+    pub(crate) fn conditional_mutable_assignment(
+        &self,
+        method: SymbolId,
+        typed_assignment: TreeId<Typed>,
+    ) -> Option<(crate::ConditionalMutableReferenceAssignmentBinding, usize)> {
+        self.conditional_mutable_assignments
+            .get(&method)
+            .copied()
+            .and_then(|binding| {
+                binding
+                    .typed_assignments
+                    .iter()
+                    .position(|&assignment| assignment == typed_assignment)
+                    .map(|index| (binding, index))
+            })
+    }
+
     pub(crate) fn register_planned_call(
         &mut self,
         caller: SymbolId,
@@ -254,6 +296,7 @@ impl<'a> EncodingContext<'a> {
             local_receiver_unit_calls: HashMap::new(),
             local_receiver_unit_call_pairs: HashMap::new(),
             mutable_counter_assignments: HashMap::new(),
+            conditional_mutable_assignments: HashMap::new(),
             local_values_by_typed_declaration: HashMap::new(),
             local_value_symbols: HashSet::new(),
             proof_local_symbols: HashSet::new(),
@@ -350,6 +393,12 @@ impl<'a> EncodingContext<'a> {
                 .mutable_counter_reference_assignment(p.source.id, method.symbol)
             {
                 context.register_mutable_counter_assignment(method.symbol, assignment)?;
+            }
+            if let Some(assignment) = p
+                .typed_bindings
+                .conditional_mutable_reference_assignment(p.source.id, method.symbol)
+            {
+                context.register_conditional_mutable_assignment(method.symbol, assignment)?;
             }
         }
         let mut registered_classes = Vec::new();
@@ -699,6 +748,10 @@ impl<'a> EncodingContext<'a> {
             });
         }
         let raw = match &key {
+            NameKey::DefaultGetter(underlying, index) => RawName::DefaultGetter {
+                underlying: *underlying,
+                index: *index,
+            },
             NameKey::Utf8(text) => RawName::Utf8(text.clone()),
             NameKey::Qualified(prefix, selector) => RawName::Qualified {
                 prefix: *prefix,
@@ -844,6 +897,8 @@ impl<'a> EncodingContext<'a> {
         self.namespace(symbol, s.name.is_type())?;
         self.text(s.name.text())?;
         let flags_are_supported = s.flags.is_empty()
+            || (s.kind == SymbolKind::Parameter
+                && matches!(s.flags, SymbolFlags::GIVEN | SymbolFlags::IMPLICIT))
             || (s.flags == SymbolFlags::MUTABLE && self.local_value_symbols.contains(&symbol));
         if s.visibility != Visibility::Public || !flags_are_supported || !s.annotations.is_empty() {
             return Err(reference(symbol, ReferenceError::Metadata));
@@ -961,19 +1016,34 @@ impl<'a> EncodingContext<'a> {
         source: SourceId,
         tree: dotty_core::TreeId<dotty_core::Untyped>,
     ) -> Result<AstLabel, PickleError> {
+        self.reserve_derived(
+            symbol,
+            constructor,
+            source,
+            tree,
+            SymbolKind::Parameter,
+            SymbolFlags::EMPTY,
+        )
+    }
+    fn reserve_derived(
+        &mut self,
+        symbol: SymbolId,
+        owner: SymbolId,
+        source: SourceId,
+        tree: dotty_core::TreeId<dotty_core::Untyped>,
+        kind: SymbolKind,
+        flags: SymbolFlags,
+    ) -> Result<AstLabel, PickleError> {
         self.run(|context| {
             context.charge(1)?;
             let record = context.symbol(symbol)?;
             if context.source != source
-                || context
-                    .source_index
-                    .derived_symbol_at(constructor, source, tree)
-                    != Some(symbol)
-                || record.kind != SymbolKind::Parameter
+                || context.source_index.derived_symbol_at(owner, source, tree) != Some(symbol)
+                || record.kind != kind
                 || record.origin != SymbolOrigin::Source(source)
-                || record.owner != Some(constructor)
+                || record.owner != Some(owner)
                 || record.visibility != Visibility::Public
-                || !record.flags.is_empty()
+                || record.flags != flags
                 || !record.annotations.is_empty()
             {
                 return Err(reference(symbol, ReferenceError::Metadata));
@@ -1400,7 +1470,8 @@ impl<'a> EncodingContext<'a> {
                     role: crate::TypeRole::Parameter,
                 });
             };
-            if signature.kind != dotty_core::MethodKind::Plain
+            if (signature.kind != dotty_core::MethodKind::Plain
+                && signature.result != c.definitions.int)
                 || signature.params.len() != parameter_count
                 || signature.params.iter().any(|parameter| {
                     parameter.erased || parameter.varargs || parameter.ty != c.definitions.int
@@ -2249,6 +2320,38 @@ impl<'a> EncodingContext<'a> {
         self.type_order.push((ty, label));
         Ok(label)
     }
+    pub(crate) fn scala_named_type(&mut self, name: &str) -> Result<AstLabel, PickleError> {
+        self.run(|c| {
+            let package = c.utf8("scala")?;
+            let prefix = c.leaf(TERMREFPKG_TAG, TermValue::NameRef(package))?;
+            let name = c.utf8(name)?;
+            c.wire
+                .push(AstNode::NatAst {
+                    tag: TYPEREF_TAG,
+                    value: AstOperand::Nat(name),
+                    child: prefix,
+                })
+                .map_err(construction)
+        })
+    }
+
+    pub(crate) fn method_type_parameter_syntax(
+        &mut self,
+        parameter: SymbolId,
+    ) -> Result<AstLabel, PickleError> {
+        self.run(|c| {
+            let name = c.intern_name(c.symbol(parameter)?.name)?;
+            let child = c.local_inner(parameter, None, 0)?;
+            c.wire
+                .push(AstNode::NatAst {
+                    tag: IDENTTPT_TAG,
+                    value: AstOperand::Nat(name),
+                    child,
+                })
+                .map_err(construction)
+        })
+    }
+
     /// An explicit Int result syntax wrapper, distinct from its semantic type.
     pub fn int_type_syntax(&mut self) -> Result<AstLabel, PickleError> {
         self.run(|c| {

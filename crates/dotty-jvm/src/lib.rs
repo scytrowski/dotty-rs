@@ -24,6 +24,8 @@ mod call_target;
 mod constructor;
 mod constructor_call;
 mod constructor_initializers;
+mod context_result;
+mod defaults;
 mod descriptor;
 pub use constructor::{
     JvmConstructorAccessorBinding, JvmConstructorArgumentBinding, JvmConstructorIssue,
@@ -196,6 +198,7 @@ pub enum JvmConstructorInvocationKind {
 /// receiver can be that class or its validated direct subclass.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JvmCallTarget {
+    prior_application: Option<TreeId<Typed>>,
     owner_internal_name: String,
     method_name: String,
     descriptor: JvmMethodDescriptor,
@@ -307,6 +310,7 @@ pub struct JvmLocalLayout {
 /// JVM method identity and parameter layout for an ordinary instance method.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JvmMethodMetadata {
+    context_result: Option<context_result::ContextResult>,
     symbol: SymbolId,
     name: String,
     descriptor: JvmMethodDescriptor,
@@ -848,6 +852,19 @@ pub struct JvmLocalBinding {
     pub symbol: SymbolId,
     /// Whether the source declaration is mutable (`var`).
     pub mutable: bool,
+    literal_given: Option<defaults::LiteralGiven>,
+}
+
+impl JvmLocalBinding {
+    /// Records an ordinary eager local value or variable.
+    pub const fn ordinary(declaration: TreeId<Typed>, symbol: SymbolId, mutable: bool) -> Self {
+        Self {
+            declaration,
+            symbol,
+            mutable,
+            literal_given: None,
+        }
+    }
 }
 
 impl JvmMethodPlan {
@@ -860,6 +877,10 @@ impl JvmMethodPlan {
 /// A plan failed validation against its caller-owned semantic input.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum JvmCodegenError {
+    /// The contextual getter, its copied formals or its body disagree with the source plan.
+    InvalidContextualDefaultGetter { method: SymbolId },
+    /// A planned constant local given disagrees with its source or typed declaration.
+    InvalidLiteralGiven { symbol: SymbolId },
     /// A primary constructor plan or its source evidence is inconsistent.
     InvalidPrimaryConstructor {
         constructor: SymbolId,
@@ -1223,6 +1244,11 @@ pub enum JvmCodegenError {
     FieldTypedAstRequired { class: SymbolId },
     /// A method body's typed root does not belong to the supplied arena.
     UnknownBodyRoot {
+        method: SymbolId,
+        tree: TreeId<Typed>,
+    },
+    /// A context-function result has unsupported captures or inconsistent declaration links.
+    InvalidContextFunctionResult {
         method: SymbolId,
         tree: TreeId<Typed>,
     },
@@ -1831,6 +1857,8 @@ pub enum UnsupportedMethodShapeKind {
 pub enum UnsupportedJvmCallShapeKind {
     /// The supplied call root is not a term application.
     NotApplication,
+    /// A parameterless source default getter cannot take an explicit argument clause.
+    UnexpectedGetterApplication,
     /// The application uses a contextual/implicit argument clause.
     UsingClause,
     /// The function is explicitly type-applied.
@@ -1911,6 +1939,8 @@ pub enum PrimitiveBuiltin {
 /// An unsupported method parameter modifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnsupportedMethodParameterKind {
+    /// The supplied ordered parameter is not the formal of this contextual clause.
+    ClauseBinding,
     Erased,
     Varargs,
 }
@@ -2838,9 +2868,9 @@ impl JvmCompilationUnit<'_> {
 
     /// Resolves a typed ordinary call to a planned virtual target.
     ///
-    /// `call` must identify the complete typed `Apply` tree so the resolver can
-    /// reject contextual application and validate the call result. Its
-    /// function must be a canonical method reference in an `Ident` or a
+    /// `call` identifies the complete typed application or the bare selection
+    /// of a registered parameterless default getter. The callee must be a
+    /// canonical method reference in an `Ident` or a
     /// `Select` whose receiver has an exact planned class identity. Its selected
     /// method must be declared by that class or its validated direct parent and
     /// appear unchanged in the receiver's effective dispatch metadata.
@@ -2932,7 +2962,7 @@ impl JvmCompilationUnit<'_> {
 
     /// Lowers the receiver for a validated same-class instance call.
     ///
-    /// The complete `Apply` tree is first resolved through
+    /// The complete call tree is first resolved through
     /// [`Self::resolve_same_class_call`]. This proves an implicit identifier
     /// names a planned instance method, while an explicit selection must use
     /// the current class's unqualified `this`. On success, the returned
@@ -3320,6 +3350,14 @@ impl JvmCompilationUnit<'_> {
                             actual: local.owner,
                         });
                     }
+                    let literal_given = binding.literal_given.is_some_and(|proof| {
+                        proof.matches(binding, method_plan.method, self.typed_ast, self.store)
+                    });
+                    if binding.literal_given.is_some() && !literal_given {
+                        return Err(JvmCodegenError::InvalidLiteralGiven {
+                            symbol: binding.symbol,
+                        });
+                    }
                     for (flag, required_flag) in [
                         (UnsupportedJvmLocalFlag::Lazy, SymbolFlags::LAZY),
                         (UnsupportedJvmLocalFlag::Given, SymbolFlags::GIVEN),
@@ -3327,7 +3365,13 @@ impl JvmCompilationUnit<'_> {
                         (UnsupportedJvmLocalFlag::Erased, SymbolFlags::ERASED),
                         (UnsupportedJvmLocalFlag::Inline, SymbolFlags::INLINE),
                     ] {
-                        if local.flags.contains(required_flag) {
+                        if local.flags.contains(required_flag)
+                            && !(literal_given
+                                && matches!(
+                                    flag,
+                                    UnsupportedJvmLocalFlag::Given | UnsupportedJvmLocalFlag::Lazy
+                                ))
+                        {
                             return Err(JvmCodegenError::UnsupportedLocalFlag {
                                 symbol: binding.symbol,
                                 flag,
@@ -3415,14 +3459,22 @@ fn validate_type(store: &SemanticStore, ty: TypeId) -> Result<(), InvalidTypeRea
 }
 
 fn typed_tree_contains(ast: &TypedAst, root: TreeId<Typed>, sought: TreeId<Typed>) -> bool {
+    any_typed_tree(ast, root, |tree| tree == sought)
+}
+
+fn any_typed_tree(
+    ast: &TypedAst,
+    root: TreeId<Typed>,
+    mut visit: impl FnMut(TreeId<Typed>) -> bool,
+) -> bool {
     let mut pending = vec![root];
     let mut visited = HashSet::new();
     while let Some(id) = pending.pop() {
-        if id == sought {
-            return true;
-        }
         if !visited.insert(id) {
             continue;
+        }
+        if visit(id) {
+            return true;
         }
         let Some(tree) = ast.try_get(id) else {
             continue;

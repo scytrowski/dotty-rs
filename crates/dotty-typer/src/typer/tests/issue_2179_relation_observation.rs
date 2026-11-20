@@ -2097,6 +2097,30 @@ fn captures_acceptance_vii_charat_lookup_before_rollback() {
         .find(|(tree, _)| tree.index() == 602)
         .unwrap();
     let parameter = index.symbol_at(source, param_tree).unwrap();
+    let method_symbol = index
+        .symbol_at(source, method_tree)
+        .expect("original charAt has its canonical source symbol");
+    let class_symbol = store.symbols.get(method_symbol).owner.unwrap();
+    assert_eq!(
+        observed_symbol_path(&store, class_symbol),
+        ".scala.Predef$.SeqCharSequence"
+    );
+    assert_eq!(
+        observed_symbol_path(&store, method_symbol),
+        ".scala.Predef$.SeqCharSequence.charAt"
+    );
+    assert_eq!(store.symbols.get(parameter).owner, Some(class_symbol));
+    assert_eq!(store.symbols.get(parameter).kind, SymbolKind::Parameter);
+    assert_eq!(store.symbols.get(parameter).visibility, Visibility::Private);
+    let class_scope = index.scope_of(class_symbol).expect("canonical class scope");
+    assert!(
+        store
+            .scopes
+            .get(class_scope)
+            .lookup_all(&store.symbols.get(parameter).name)
+            .is_empty(),
+        "plain constructor parameter is not published as an accessor"
+    );
     let (java_home, jars) = scala_classpath();
     let mut entries: Vec<Box<dyn ClassPathEntry>> = vec![Box::new(
         JdkClassPath::new(java_home.join("jmods")).unwrap(),
@@ -2121,6 +2145,28 @@ fn captures_acceptance_vii_charat_lookup_before_rollback() {
     typer
         .type_method_definition(method_tree)
         .expect("parameter admission reaches the unchanged original charAt result");
+    let typed_method = typer
+        .source_typed_index()
+        .get(source, method_tree)
+        .expect("original charAt has a source-to-typed method mapping");
+    assert!(matches!(
+        typer.typed_ast().get(typed_method).kind,
+        TreeKind::DefDef(_)
+    ));
+    let SymbolInfo::Complete(method_signature) = *typer.store().symbols.info(method_symbol) else {
+        panic!("original charAt signature is complete");
+    };
+    let Type::Method(method_type) = typer.store().types.get(method_signature) else {
+        panic!("original charAt remains an ordinary method");
+    };
+    let Type::TypeRef {
+        target: TypeRefTarget::Symbol(result_char),
+        ..
+    } = typer.store().types.get(method_type.result)
+    else {
+        panic!("original charAt result remains canonical Char");
+    };
+    assert_eq!(observed_symbol_path(typer.store(), *result_char), "Char");
     let (reference_tree, _) = parsed
         .ast
         .iter()

@@ -89,6 +89,13 @@ resolution.
 ## 3. Scope
 
 ### Implemented
+
+- The loader links a Scala 3.9 contextual default getter to the marked parameter
+  of its sibling method using the structural TASTy name and parameter ordinal. Its result
+  can carry the compiler's `scala.annotation.unchecked.uncheckedVariance`
+  annotation. The member decoder checks the marker constructor and uses the
+  underlying result type for calls. Other annotated getter results remain
+  unsupported.
 - A canonical binary class name representation (`BinaryName`),
   internal-form (`java/lang/Object`), matching `docs/
   classfile-format-jdk25.md` §8. `$` stays a naming convention on the
@@ -722,7 +729,11 @@ evidence retain their contracts.
    it), using identity shells for referenced classes, and resolve+enter
    its annotations (`.class` only, §3).
 9. Complete the class: build its `Type::ClassInfo` (parents + the
-   declarations `Scope`) and set `SymbolInfo::Complete` on it.
+   declarations `Scope`) and set `SymbolInfo::Complete` on it. A classfile
+   generic parent signature must match the identities and order in the erased
+   hierarchy. Its arguments refer to the class's entered type parameters.
+   This preserves parents such as `TC[Box[A]]` for separately compiled Scala
+   structural given implementations.
 10. Mark `Loaded`, return the symbol.
 
 ## 6. Key types
@@ -1010,3 +1021,14 @@ The historic #1342 root weights total 8,949, while their separate
 source-attribution sidecar totals 8,948; this mismatch is explicitly retained
 pending final reconciliation. The focused policy is not a new full-corpus
 measurement.
+
+
+### Contextual TASTy members
+
+The bounded TASTy class and module loader retains the `given` and `implicit`
+member flags. When a signature contains a contextual term clause, its method
+types preserve the term-clause boundaries and order. A separately compiled
+companion can therefore supply both a polymorphic conditional given and the
+evidence needed to apply it. The typer regression uses `Evidence.scala` and
+its two Scala 3.9 TASTy files in
+`crates/dotty-typer/tests/fixtures/contextual-arguments`.

@@ -69,6 +69,36 @@ counted as completed-run structural failures. Synthetic enum APIs such as
 `values`, lookup methods, and `ordinal` are later synthesis work, not enum
 identity failures.
 
+## Structural given factories and contextual default getters
+
+A parameterized structural given has a class in the type namespace and a
+factory method in the term namespace. The class is the canonical binding for
+the declaration tree. Looking up the same tree as a derived definition of the
+enclosing owner returns the factory. Type parameters, contextual parameters,
+and context-bound witnesses have distinct symbols for the class, constructor
+and factory. The typer can therefore complete each signature in its own scope.
+A factory with only a type clause has no synthetic empty term clause.
+
+For ordinary classes, a context bound enters a private contextual field in the
+class scope and a distinct parameter in the primary constructor scope. Both
+bindings point to the same source bound. A named bound keeps its source name.
+
+An anonymous given with a constructor parent takes its name from the
+instantiated parent type. For example, `given Context("alpha")` introduces
+`given_Context`, and `given Container[String]("alpha")(2)` introduces
+`given_Container_String`.
+
+For a supported contextual parameter with a default, or an ordinary defaulted
+parameter following a contextual clause, the derived getter belongs to the
+method's owner. Its source tree is the defaulted parameter.
+Earlier parameter clauses have their own getter-owned bindings, which let the
+typer resolve a reference in the default expression to the correct parameter.
+The namer records the method, flattened zero-based parameter position,
+parameter symbol and getter symbol after placing context-bound witnesses.
+For `def read[A: Show](x: A)(using n: Int = 1)`, the witness precedes `n`
+in the last clause, so `read$default$3` copies `A` and `x`. A witness placed
+in an earlier clause has its own getter-owned parameter.
+
 ## Bounded nested case-class companions
 
 The namer now creates a companion `Object`/`ModuleClass` and a derived
@@ -81,19 +111,31 @@ original constructor parameter trees in declaration order. This keeps the
 generic source relationships recoverable without fabricating completed
 `SymbolInfo` or performing type resolution.
 
-Abstract case classes, constructor defaults, contextual/repeated or otherwise
-modified parameters, bounds/context bounds on type parameters, non-public
-constructors, secondary constructors, and conflicting same-name declarations
-are rejected with a typed Namer error. Abstract case classes do not receive a
+For a case class with one ordinary clause and context bounds, the companion’s
+generated `apply` owns a separate parameter for each constructor witness. The
+class field, constructor parameter and factory parameter share the source
+bound tree. A trailing written `(using trace: Trace)` also contributes a
+parameter to the generated `apply` and `copy`, after the synthesized witness.
+A case class in this subset without an explicit `copy` member
+also gets an instance method with separately owned parameters. The default
+getter for each ordinary copy parameter is indexed by method and position.
+The witness clause has no defaults. An explicit companion method with different effective clause
+arities can coexist with the generated factory. When contextual signatures
+have matching arities and the namer cannot compare their types, it defers
+factory synthesis.
+
+Abstract case classes, constructor defaults, other contextual clauses, repeated or otherwise
+modified parameters, explicit lower or upper type bounds, non-public
+constructors and secondary constructors remain outside the generated factory
+subset. Abstract case classes do not receive a
 generated `apply` in the pinned Scala 3.9.0 implementation.
 Erased and by-name case-class parameters are currently rejected by the parser
 and do not reach this Namer path. Ordinary nested classes do not receive
 case-class companions. The Scala 3.9.0 oracle fixture
 `tools/typer-classpath-corpus-audit/either-companion-oracle` verifies nested
-owners, explicit overloads, and negative call controls. This bounded increment
-does not synthesize `unapply` or `copy`, lower constructor calls, or claim
-Typer support. The corpus figures above are the checked-in measurement from
-revision `5edd6ee`; this focused change has not regenerated that full report.
+owners, explicit overloads, and negative call controls. The typer compatibility
+contract describes the generated factory body for context-bounded classes.
+The corpus figures above were recorded at revision `5edd6ee`.
 
 ## Export handoff
 
@@ -135,6 +177,11 @@ duplicate identities, transaction rollback, and package/source-wrapper
 identity reuse. All reported semantic invariant failures and transaction
 residue counts are zero. Parser-recovered detached enum nodes are listed as
 parser-blocked rather than charged as Namer invariant failures.
+
+For top-level definitions, the index records the synthetic module class by
+source unit and package. Repeated clauses of that package in the unit share
+its declaration scope. Each wrapped declaration keeps its original lexical
+context, including the imports visible at that point.
 
 The current source semantic index is suitable for the first source typer
 milestone, with the deferred local-scope, annotation, synthetic-member, and
