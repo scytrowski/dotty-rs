@@ -2,6 +2,7 @@
 
 use super::super::{ExpressionContext, SourceTyper, TyperError};
 use crate::typer::MemberLookupError;
+use crate::typer::contextual::ExtensionLookup;
 use dotty_core::ast::*;
 use dotty_core::types::*;
 use dotty_core::*;
@@ -1547,24 +1548,32 @@ impl SourceTyper<'_> {
         }
         let candidate = match candidates.as_slice() {
             [] => {
-                if !java_class_qualifier
-                    && let Some((extension, signature)) = self.contextual_extension(
+                let mut failure = None;
+                if !java_class_qualifier {
+                    match self.contextual_extension(
                         name,
                         receiver,
                         context,
                         tree_index,
                         info_journal,
-                    )?
-                    && let Some(Type::Method(clause)) = self.store.types.try_get(signature)
-                {
-                    return Ok(
-                        TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply(
-                            extension,
-                            vec![qualifier],
-                            clause.result,
-                            position,
-                        ),
-                    );
+                    )? {
+                        ExtensionLookup::Selected(extension, signature) => {
+                            if let Some(Type::Method(clause)) = self.store.types.try_get(signature)
+                            {
+                                return Ok(TypedAstBuilder::new(
+                                    &mut self.typed_arena,
+                                    &self.store.types,
+                                )
+                                .apply(
+                                    extension,
+                                    vec![qualifier],
+                                    clause.result,
+                                    position,
+                                ));
+                            }
+                        }
+                        ExtensionLookup::Missing(cause) => failure = cause,
+                    }
                 }
                 if !java_class_qualifier
                     && let Some(source) = source_qualifier
@@ -1589,12 +1598,12 @@ impl SourceTyper<'_> {
                         info_journal,
                     );
                 }
-                return Err(TyperError::MemberNotFound {
+                return Err(failure.unwrap_or(TyperError::MemberNotFound {
                     source: self.source,
                     tree_index,
                     receiver,
                     name,
-                });
+                }));
             }
             [candidate] => candidate,
             _ => {

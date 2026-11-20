@@ -12,6 +12,7 @@ pub(super) use conversions::{
 };
 mod defaults;
 mod extension;
+pub(super) use extension::ExtensionLookup;
 mod opaque;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,6 +44,64 @@ struct SearchHistory {
     current_goal_by_name: bool,
     attempts: usize,
     divergences: usize,
+}
+
+#[derive(Default)]
+struct AdaptationSearch {
+    history: SearchHistory,
+    dependency_failure: Option<TyperError>,
+}
+
+impl AdaptationSearch {
+    /// Keep searching other providers on an unsatisfied dependency, but propagate
+    /// lookup and resource-limit errors. Candidate probes roll back their trees.
+    fn dependency_error(
+        &mut self,
+        typer: &mut SourceTyper<'_>,
+        provider: &Provider,
+        context: ExpressionContext,
+        site: u32,
+    ) -> Result<Option<TyperError>, TyperError> {
+        if !matches!(typer.store.types.get(provider.callable), Type::Method(m) if m.kind != MethodKind::Plain)
+        {
+            return Ok(None);
+        }
+        match typer.try_contextual_provider(
+            provider,
+            provider.result,
+            context,
+            site,
+            &mut self.history,
+            None,
+        ) {
+            Ok(_) => Ok(None),
+            Err(
+                cause @ (TyperError::MissingContextualArgument { .. }
+                | TyperError::DivergentContextualArgument { .. }
+                | TyperError::AmbiguousContextualArgument { .. }),
+            ) => Ok(Some(cause)),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn materialize(
+        &mut self,
+        typer: &mut SourceTyper<'_>,
+        provider: &Provider,
+        context: ExpressionContext,
+        site: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let tree = typer.materialize_provider(
+            provider,
+            provider.result,
+            context,
+            site,
+            &mut self.history,
+            journal,
+        )?;
+        std::mem::take(&mut self.history.dictionary).emit(typer, tree, site)
+    }
 }
 
 struct ContextualScope {
@@ -940,6 +999,119 @@ impl SourceTyper<'_> {
             }
         }
         Ok(true)
+    }
+
+    fn infer_contextual_receiver(
+        &mut self,
+        signature: TypeId,
+        input: TypeId,
+        actual: TypeId,
+        inferred: &mut [Option<TypeId>],
+        tree_index: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<bool, TyperError> {
+        // Match the receiver at the declared input class, e.g. Child extends Box[Int].
+        let views = if let Type::Applied { tycon, .. } = self.store.types.get(input)
+            && let Some(class) = self.store.types.get(*tycon).reference_symbol()
+            && self.type_contains_param_ref(input, signature)?
+            && matches!(
+                self.store.types.get(actual),
+                Type::TypeRef { .. } | Type::Applied { .. } | Type::ThisType { .. }
+            ) {
+            self.complete_relation_type(actual, journal, &mut HashSet::new(), 0)?;
+            self.nominal_views_as(actual, class).map_err(|error| {
+                TyperError::ExpectedExpressionConformanceUnsupported {
+                    source: self.source,
+                    tree_index,
+                    actual,
+                    expected: input,
+                    error: Box::new(error),
+                }
+            })?
+        } else {
+            vec![actual]
+        };
+        if views.is_empty() {
+            return Ok(false);
+        }
+        let location = InferenceLocation {
+            result_pattern: false,
+            tree_index,
+            argument_index: 0,
+            depth: 0,
+        };
+        for view in views {
+            match self.infer_type_constraints(input, view, signature, inferred, location, journal) {
+                Ok(()) => {}
+                Err(
+                    TyperError::UnsupportedInferenceShape { .. }
+                    | TyperError::ConflictingInferenceConstraints { .. }
+                    | TyperError::ApplicationArgumentTypeMismatch { .. },
+                ) => return Ok(false),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(true)
+    }
+
+    fn contextual_provider_head(
+        &self,
+        reference: ContextualRef,
+        signature: TypeId,
+        site: u32,
+    ) -> Result<Option<Provider>, TyperError> {
+        let body = match self.store.types.get(signature) {
+            Type::Poly(poly) => poly.result,
+            _ => signature,
+        };
+        Ok(self
+            .contextual_factory_result(body, site)?
+            .map(|result| Provider {
+                reference,
+                callable: signature,
+                result,
+                type_arguments: Vec::new(),
+            }))
+    }
+
+    /// Infer a conversion or extension factory's type arguments from its receiver pattern.
+    fn instantiate_receiver_provider(
+        &mut self,
+        mut provider: Provider,
+        input: TypeId,
+        receiver: TypeId,
+        site: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Option<Provider>, TyperError> {
+        let signature = provider.callable;
+        if let Type::Poly(poly) = self.store.types.get(signature) {
+            let mut inferred = vec![None; poly.params.len()];
+            if !self.infer_contextual_receiver(
+                signature,
+                input,
+                receiver,
+                &mut inferred,
+                site,
+                journal,
+            )? {
+                return Ok(None);
+            }
+            let Some(arguments) = inferred.into_iter().collect::<Option<Vec<_>>>() else {
+                return Ok(None);
+            };
+            let Some(callable) =
+                self.instantiate_provider_signature(signature, &arguments, site, journal)?
+            else {
+                return Ok(None);
+            };
+            let Some(result) = self.contextual_factory_result(callable, site)? else {
+                return Ok(None);
+            };
+            provider.callable = callable;
+            provider.result = result;
+            provider.type_arguments = arguments;
+        }
+        Ok(Some(provider))
     }
 
     fn instantiate_provider_signature(

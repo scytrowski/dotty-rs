@@ -14,6 +14,19 @@ def main():
     toolchain = runpy.run_path(str(ROOT / "tools/tasty-pickler-oracle/run.py"))["Toolchain"]()
     with tempfile.TemporaryDirectory() as out:
         for sources, status, *expected in [
+            (["ConditionalExtensions.scala"], 0,
+             "this.ops[Int](tc).render(x)(3)", "conditionalext.Parcel.fallback.render(x)(3)",
+             "conditionalext.Converted.view.apply(x).render(3)",
+             "this.formatted[Int](tc).render(x)(3)(fmt)",
+             "this.formatted[Int](tc).render(x)(3)(using chosen)"),
+            (["ConditionalExtensions.scala", "ConditionalExtensionsRejected.scala"], 1,
+             "value render is not a member of conditionalext.Box[Int]",
+             "this.ops[Int](/* missing */summon[conditionalext.TC[Int]]).render()",
+             "both parameter second and parameter first match type conditionalext.TC[Int]",
+             "this.formatted[Int](/* missing */summon[conditionalext.TC[Int]]).render()",
+             "No given instance of type conditionalext.Format was found for parameter fmt of method render in trait FormattedOps",
+             "both parameter second and parameter first match type conditionalext.Format of parameter fmt of method render in trait FormattedOps",
+             "5 errors found"),
             (["TrailingImplicitConversions.scala"], 0,
              "this.wrap[Int](x)(tc).show", "this.accept(this.wrap[Int](x)(tc))",
              "trailingviews.Parcel.fallback(x).show", "this.accept(trailingviews.Parcel.fallback(x))"),
