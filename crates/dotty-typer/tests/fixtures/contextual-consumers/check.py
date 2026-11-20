@@ -13,7 +13,7 @@ ROOT = HERE.parents[4]
 def main():
     toolchain = runpy.run_path(str(ROOT / "tools/tasty-pickler-oracle/run.py"))["Toolchain"]()
     with tempfile.TemporaryDirectory() as out:
-        for sources, status, expected in [
+        for sources, status, *expected in [
             (["MemberConversionScope.scala"], 0, "memberscope.From.render.apply(x).show"),
             (["MemberConversionScope.scala"], 0, "chosen.apply(x).show"),
             (["MemberConversions.scala"], 0, "Int = x.show"),
@@ -24,6 +24,16 @@ def main():
              "both parameter second and parameter first provide an extension method `show`"),
             (["Conversions.scala"], 0, "this.accept(inner.apply(x))"),
             (["Conversions.scala", "ConversionsAmbiguous.scala"], 1, "implicit conversions cannot be applied because they are ambiguous"),
+            (["GenericLegacyConversions.scala"], 0,
+             "def result(x: genericconversions.Box[Int]): genericconversions.Wrapped[Int] = this.wrap[Int](x)",
+             "this.accept(this.wrap[Int](x))",
+             "def inherited(x: genericconversions.Child): genericconversions.Wrapped[Int] = this.wrap[Int](x)",
+             "this.make[Int, Boolean](x)", "this.special(x)", "this.pair[Int, Boolean](x)"),
+            (["GenericLegacyConversions.scala", "GenericLegacyRejected.scala"], 1,
+             "def outsideBound(x: Box[Int]): Wrapped[Int] = x",
+             "def wrongResult(x: Box[Int]): Wrapped[Boolean] = x",
+             "both method first in class Ambiguous and method second in class Ambiguous",
+             "3 errors found"),
             (["LegacyConversions.scala"], 0, "this.old(x)"),
             (["LegacyConversions.scala", "LegacyConversionsAmbiguous.scala"], 1, "implicit conversions cannot be applied because they are ambiguous"),
             (["Extensions.scala"], 0, "inner.render(box)(3)(fmt)"),
@@ -37,7 +47,8 @@ def main():
                  "-d", out, *sources],
                 cwd=HERE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             )
-            if result.returncode != status or expected not in " ".join(result.stdout.split()):
+            output = " ".join(result.stdout.split())
+            if result.returncode != status or any(needle not in output for needle in expected):
                 raise SystemExit(f"{sources} disagrees with pinned Scala 3.9\n{result.stdout}")
 
 

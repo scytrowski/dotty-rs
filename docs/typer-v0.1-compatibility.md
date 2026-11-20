@@ -45,7 +45,7 @@ of the binary evidence. Run them with `JAVA_HOME`, `SCALA39_ROOT` and
 | Contextual defaults | A missing argument can invoke the indexed default getter of a source method, a source conditional provider, or a method loaded from Scala TASTy. The getter receives the original receiver and earlier clauses. | Tests check the getter's parameter identity, supplied evidence, rejection of ambiguity, rejection of an ill-typed default, and single evaluation of effectful operands. |
 | Recursive by-name evidence | A successful recursive search across a by-name parameter creates a shared dictionary. Its synthetic definitions and references have canonical identities. | Two recursive dependencies refer to the same field. The strict variant diverges. Discarding a failed candidate rolls back its dictionary and symbols. |
 | Implicit scope and dependent types | Search can follow transparent aliases, use an opaque type's companion, and preserve the stable term prefix of a nested type. | `p.Item` and `q.Item` select evidence from their respective receivers. A later contextual clause and result can depend on a stable argument to an earlier clause. |
-| Other searches | A contextual receiver can provide an extension. A supported extractor can request trailing contextual clauses. Expected result and argument types can trigger a `scala.Conversion` instance or a unary monomorphic `implicit def`. | The contextual consumer fixtures check selected symbols, nested scopes, ambiguity, and the order of arguments passed to `unapply`. |
+| Other searches | A contextual receiver can provide an extension. A supported extractor can request trailing contextual clauses. Expected result and argument types can trigger a `scala.Conversion` instance or a unary `implicit def` with concrete or inferred type arguments. | The contextual consumer fixtures check selected symbols, nested scopes, ambiguity, and the order of arguments passed to `unapply`. |
 | Output | The pickler and JVM backend accept selected curried contextual methods, polymorphic evidence identity methods, and methods returning a unary `Int ?=> Int` literal. | Scala 3.9 clients read the emitted TASTy. Separate JDK 21 harnesses verify and execute the emitted classes. |
 
 When a receiver's instantiated method type has a contextual clause, term
@@ -110,7 +110,12 @@ source marker trait. Anonymous templates with members or inherited
 implementation obligations remain deferred.
 
 Conversion insertion covers value adaptation to
-a known expected type. This includes ordinary method arguments. For a missing source selection
+a known expected type, including ordinary method arguments. For a unary
+`implicit def wrap[A](x: Box[A]): Wrapped[A]`, adapting a `Box[Int]` to
+`Wrapped[Int]` produces `wrap[Int](x)`. The typer infers type arguments from
+the receiver and can fill remaining arguments from the expected result. It
+checks the instantiated bounds, input, and result before selecting a method.
+For a missing source selection
 such as `x.show`, the typer also considers contextual values of type
 `scala.Conversion[From, To]`. The receiver must conform to `From` and
 `To` must expose an accessible `show`. A direct member wins. Two equally
@@ -119,8 +124,7 @@ their output types differ. Search checks lexical scopes before the receiver’s
 companion. A monomorphic structural given can contribute its instantiated
 `Conversion` parent. An unrelated unary `apply` or a private member on a
 conversion’s result does not make that candidate eligible. Missing-member
-adaptation currently covers monomorphic conversion values. Generic old-style
-conversion methods remain deferred.
+adaptation currently covers monomorphic conversion values.
 
 The frontend accepts a wider range of typed trees than either producer can emit.
 In particular, the recursive dictionary tests inspect typed declarations and

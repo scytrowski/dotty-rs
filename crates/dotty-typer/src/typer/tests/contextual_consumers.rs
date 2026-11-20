@@ -465,3 +465,143 @@ fn member_conversion_uses_the_structural_given_in_the_receiver_companion() {
             .unwrap()
     );
 }
+
+const GENERIC_LEGACY: &str =
+    include_str!("../../../tests/fixtures/contextual-consumers/GenericLegacyConversions.scala");
+
+#[test]
+fn generic_legacy_conversion_keeps_inferred_arguments_and_receiver_identity() {
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(GENERIC_LEGACY);
+    let resolver = super::contextual_binary::library_resolver(definitions, &packages);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(resolver));
+    for (name, conversion, type_args) in [
+        ("result", "wrap", vec![definitions.int]),
+        ("argument", "wrap", vec![definitions.int]),
+        ("inherited", "wrap", vec![definitions.int]),
+        (
+            "fromExpected",
+            "make",
+            vec![definitions.int, definitions.boolean],
+        ),
+        ("split", "pair", vec![definitions.int, definitions.boolean]),
+        ("specialized", "special", vec![]),
+    ] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let target = method_symbol(&parsed, typer.store(), &index, source, conversion);
+        let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+            panic!()
+        };
+        let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+            panic!()
+        };
+        let receiver = index
+            .symbol_at(source, def.value_param_clauses[0][0])
+            .unwrap();
+        typer
+            .type_method_definition(tree)
+            .unwrap_or_else(|err| panic!("{name}: {err:?}"));
+        let expression = if name == "argument" {
+            let TreeKind::Apply(call) = &parsed.ast.get(rhs).kind else {
+                panic!()
+            };
+            call.args[0]
+        } else {
+            rhs
+        };
+        let adapted = typer.typed_index.get(source, expression).unwrap();
+        let TreeKind::Apply(call) = &typer.typed_arena.get(adapted).kind else {
+            panic!()
+        };
+        assert_eq!(typed_reference(&typer, call.args[0]), receiver);
+        let (class, args): (_, &[TypeId]) = match name {
+            "fromExpected" => ("Wrapped", &[definitions.boolean]),
+            "split" => ("Impl", &[definitions.int, definitions.boolean]),
+            _ => ("Wrapped", &[definitions.int]),
+        };
+        let Type::Applied {
+            tycon,
+            args: actual,
+        } = typer.store.types.get(typer.typed_arena.get(adapted).ty)
+        else {
+            panic!("expected instantiated result")
+        };
+        let symbol = typer.store.types.get(*tycon).reference_symbol().unwrap();
+        assert_eq!(
+            typer
+                .store
+                .names
+                .resolve(typer.store.symbols.get(symbol).name.text()),
+            class
+        );
+        assert_eq!(actual, args);
+        let callee = if type_args.is_empty() {
+            call.function
+        } else {
+            let TreeKind::TypeApply(poly) = &typer.typed_arena.get(call.function).kind else {
+                panic!("{name}: expected TypeApply")
+            };
+            let inferred: Vec<_> = poly
+                .args
+                .iter()
+                .map(|arg| typer.typed_arena.get(*arg).ty)
+                .collect();
+            assert_eq!(inferred, type_args);
+            poly.function
+        };
+        assert_eq!(typed_reference(&typer, callee), target);
+    }
+}
+
+#[test]
+fn generic_legacy_conversion_rejects_mismatch_bounds_and_ambiguity_without_partial_trees() {
+    let rejected =
+        include_str!("../../../tests/fixtures/contextual-consumers/GenericLegacyRejected.scala");
+    let text = format!(
+        "{GENERIC_LEGACY}\n{}",
+        rejected.strip_prefix("package genericconversions").unwrap()
+    );
+    let (parsed, mut store, packages, definitions, index, source) = parse_and_name(&text);
+    let candidates =
+        ["first", "second"].map(|name| method_symbol(&parsed, &store, &index, source, name));
+    let resolver = super::contextual_binary::library_resolver(definitions, &packages);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(resolver));
+    for name in ["wrongResult", "outsideBound", "ambiguous"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+            panic!()
+        };
+        let checkpoint = typer.store.checkpoint();
+        let err = typer.type_method_definition(tree).unwrap_err();
+        assert!(
+            match &err {
+                TyperError::AmbiguousContextualArgument {
+                    candidates: actual,
+                    tree_index,
+                    ..
+                } => name == "ambiguous" && actual == &candidates && *tree_index == rhs.index(),
+                TyperError::ExpectedExpressionTypeMismatch { tree_index, .. } =>
+                    name != "ambiguous" && *tree_index == rhs.index(),
+                _ => false,
+            },
+            "{name}: {err:?}"
+        );
+        assert_eq!(typer.store.checkpoint(), checkpoint);
+        assert!(typer.typed_index.is_empty());
+    }
+}

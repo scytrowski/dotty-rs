@@ -835,42 +835,15 @@ impl SourceTyper<'_> {
         let mut type_arguments = Vec::new();
         if let Some(poly) = poly {
             let mut inferred = vec![None; poly.params.len()];
-            self.complete_relation_type(result, journal, &mut HashSet::new(), 0)?;
-            let views = self
-                .contextual_inference_views(result, expected)
-                .map_err(
-                    |error| TyperError::ExpectedExpressionConformanceUnsupported {
-                        source: self.source,
-                        tree_index,
-                        actual: result,
-                        expected,
-                        error: Box::new(error),
-                    },
-                )?;
-            if views.is_empty() {
+            if !self.infer_provider_result(
+                signature,
+                result,
+                expected,
+                &mut inferred,
+                tree_index,
+                journal,
+            )? {
                 return Ok(None);
-            }
-            for view in views {
-                match self.infer_type_constraints(
-                    view,
-                    expected,
-                    signature,
-                    &mut inferred,
-                    InferenceLocation {
-                        result_pattern: true,
-                        tree_index,
-                        argument_index: 0,
-                        depth: 0,
-                    },
-                    journal,
-                ) {
-                    Ok(()) => {}
-                    Err(
-                        TyperError::UnsupportedInferenceShape { .. }
-                        | TyperError::ConflictingInferenceConstraints { .. },
-                    ) => return Ok(None),
-                    Err(error) => return Err(error),
-                }
             }
             let Some(arguments) = inferred.into_iter().collect::<Option<Vec<_>>>() else {
                 return Err(TyperError::UsingApplicationDeferred {
@@ -879,21 +852,16 @@ impl SourceTyper<'_> {
                 });
             };
             type_arguments = arguments;
-            let instance =
-                dotty_core::types::instantiate_poly(self.store, signature, &type_arguments)
-                    .map_err(TyperError::PolyInstantiation)?;
-            for (index, (&argument, bounds)) in
-                type_arguments.iter().zip(instance.bounds).enumerate()
-            {
-                match self.check_explicit_type_argument_bounds(
-                    argument, bounds, index, tree_index, journal,
-                ) {
-                    Ok(()) => {}
-                    Err(TyperError::ExplicitTypeArgumentBoundViolation { .. }) => return Ok(None),
-                    Err(error) => return Err(error),
-                }
-            }
-            callable = instance.result;
+            let Some(instance) = self.instantiate_provider_signature(
+                signature,
+                &type_arguments,
+                tree_index,
+                journal,
+            )?
+            else {
+                return Ok(None);
+            };
+            callable = instance;
             result = callable;
             for _ in 0..depth {
                 let Some(Type::Method(method)) = self.store.types.try_get(result) else {
@@ -915,6 +883,76 @@ impl SourceTyper<'_> {
             callable,
             result,
         }))
+    }
+
+    fn infer_provider_result(
+        &mut self,
+        signature: TypeId,
+        result: TypeId,
+        expected: TypeId,
+        inferred: &mut [Option<TypeId>],
+        tree_index: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<bool, TyperError> {
+        self.complete_relation_type(result, journal, &mut HashSet::new(), 0)?;
+        let views = self
+            .contextual_inference_views(result, expected)
+            .map_err(
+                |error| TyperError::ExpectedExpressionConformanceUnsupported {
+                    source: self.source,
+                    tree_index,
+                    actual: result,
+                    expected,
+                    error: Box::new(error),
+                },
+            )?;
+        if views.is_empty() {
+            return Ok(false);
+        }
+        for view in views {
+            match self.infer_type_constraints(
+                view,
+                expected,
+                signature,
+                inferred,
+                InferenceLocation {
+                    result_pattern: true,
+                    tree_index,
+                    argument_index: 0,
+                    depth: 0,
+                },
+                journal,
+            ) {
+                Ok(()) => {}
+                Err(
+                    TyperError::UnsupportedInferenceShape { .. }
+                    | TyperError::ConflictingInferenceConstraints { .. },
+                ) => return Ok(false),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(true)
+    }
+
+    fn instantiate_provider_signature(
+        &mut self,
+        signature: TypeId,
+        arguments: &[TypeId],
+        tree_index: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Option<TypeId>, TyperError> {
+        let instance = dotty_core::types::instantiate_poly(self.store, signature, arguments)
+            .map_err(TyperError::PolyInstantiation)?;
+        for (index, (&argument, bounds)) in arguments.iter().zip(instance.bounds).enumerate() {
+            match self
+                .check_explicit_type_argument_bounds(argument, bounds, index, tree_index, journal)
+            {
+                Ok(()) => {}
+                Err(TyperError::ExplicitTypeArgumentBoundViolation { .. }) => return Ok(None),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(Some(instance.result))
     }
 
     // A failed or speculative search must discard dictionary entries as well as
@@ -1092,6 +1130,27 @@ impl SourceTyper<'_> {
             .define(self, expected, result?, first_use, tree_index, journal)
     }
 
+    fn provider_reference_tree(
+        &mut self,
+        provider: &Provider,
+        context: ExpressionContext,
+        tree_index: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let mut tree =
+            self.contextual_reference_tree(provider.reference, context, tree_index, None, journal)?;
+        if !provider.type_arguments.is_empty() {
+            let mut builder = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types);
+            let args = provider
+                .type_arguments
+                .iter()
+                .map(|ty| builder.type_tree(*ty, None))
+                .collect();
+            tree = builder.type_apply(tree, args, provider.callable, None);
+        }
+        Ok(tree)
+    }
+
     fn build_provider(
         &mut self,
         provider: &Provider,
@@ -1100,18 +1159,8 @@ impl SourceTyper<'_> {
         history: &mut SearchHistory,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TreeId<Typed>, TyperError> {
-        let mut tree =
-            self.contextual_reference_tree(provider.reference, context, tree_index, None, journal)?;
+        let mut tree = self.provider_reference_tree(provider, context, tree_index, journal)?;
         let mut signature = provider.callable;
-        if !provider.type_arguments.is_empty() {
-            let mut builder = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types);
-            let args = provider
-                .type_arguments
-                .iter()
-                .map(|ty| builder.type_tree(*ty, None))
-                .collect();
-            tree = builder.type_apply(tree, args, signature, None);
-        }
         let mut shared = Vec::new();
         while let Some(Type::Method(method)) = self.store.types.try_get(signature).cloned() {
             let (args, kind) = self.contextual_call_arguments(
@@ -1618,7 +1667,14 @@ impl SourceTyper<'_> {
                     // old-style implicit in the specific direction.
                     let candidate_as_good = if candidate_legacy { narrower } else { broader };
                     let rival_as_good = if rival_legacy { broader } else { narrower };
-                    dominated = rival_as_good && !candidate_as_good;
+                    // For equivalent instantiated conversion inputs, a concrete
+                    // unary method wins over one requiring type inference.
+                    let specialized_conversion = narrower
+                        && broader
+                        && !candidate.type_arguments.is_empty()
+                        && rival.type_arguments.is_empty()
+                        && matches!(self.store.types.get(candidate.callable), Type::Method(m) if m.kind == MethodKind::Plain);
+                    dominated = rival_as_good && (!candidate_as_good || specialized_conversion);
                 }
                 if dominated {
                     break;
