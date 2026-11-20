@@ -2014,7 +2014,9 @@ For missing or ambiguous term and type names and for `WrongTypeNameKind`,
 a recorded position must belong to the same source and lie within the
 reported tree. If the error has no recorded position, the tree supplies
 the range. For `MemberNotFound` the reported tree supplies the range,
-including the qualifier in `obj.missing`.
+including the qualifier in `obj.missing`. For an `if` or `while` condition
+type mismatch, the range covers the condition. A return type mismatch
+locates the returned expression or, for a bare `return`, the instruction itself.
 
 For `A.f(b: B) = b.g()`, the external client observes the symbol of `B.g`,
 completes it and retries `A.f`. A call to the same zero-argument method with

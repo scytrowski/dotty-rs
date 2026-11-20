@@ -5,6 +5,8 @@ mod class_planning;
 mod parsing;
 #[path = "support/pipeline_timing.rs"]
 mod pipeline_timing;
+#[path = "support/typer_error_spans.rs"]
+mod typer_error_spans;
 
 use std::collections::HashMap;
 use std::fs;

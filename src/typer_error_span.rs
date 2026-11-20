@@ -4,6 +4,9 @@ use crate::typer::TyperError;
 enum ErrorSite {
     Tree,
     Argument(usize),
+    IfCondition,
+    WhileCondition,
+    ReturnValue,
     LocalInitializer,
     RecordedName(SourceSpan),
 }
@@ -14,6 +17,8 @@ enum ErrorSite {
 ///   explicit applications identify the offending argument.
 /// - Expected expression type mismatches identify the checked expression.
 ///   Local value type mismatches identify the initializer.
+/// - A condition type mismatch points to the condition of the `if` or `while`.
+///   A return type mismatch points to the returned expression, or the bare `return`.
 /// - Missing, ambiguous and wrong-kind names use the position carried by the
 ///   error when present, otherwise the reported tree's position. A missing
 ///   member points to its reported expression (the whole selection for `x.y`).
@@ -76,6 +81,15 @@ pub fn typer_error_span_with<'a>(
             tree_index,
             position.map_or(ErrorSite::Tree, ErrorSite::RecordedName),
         ),
+        TyperError::IfConditionTypeMismatch {
+            source, tree_index, ..
+        } => (source, tree_index, ErrorSite::IfCondition),
+        TyperError::WhileConditionTypeMismatch {
+            source, tree_index, ..
+        } => (source, tree_index, ErrorSite::WhileCondition),
+        TyperError::ReturnExpressionTypeMismatch {
+            source, tree_index, ..
+        } => (source, tree_index, ErrorSite::ReturnValue),
         TyperError::LocalValueTypeMismatch {
             source, tree_index, ..
         } => (source, tree_index, ErrorSite::LocalInitializer),
@@ -101,6 +115,12 @@ pub fn typer_error_span_with<'a>(
             .then_some(name);
         }
         (ErrorSite::Argument(index), TreeKind::Apply(call)) => *call.args.get(index)?,
+        (ErrorSite::IfCondition, TreeKind::If(expr)) => expr.cond,
+        (ErrorSite::WhileCondition, TreeKind::While(expr)) => expr.cond,
+        (ErrorSite::ReturnValue, TreeKind::Return(expr)) => match expr.expr {
+            Some(value) => value,
+            None => return Some(position),
+        },
         (ErrorSite::LocalInitializer, TreeKind::ValDef(def)) => def.rhs?,
         _ => return None,
     };
@@ -127,6 +147,34 @@ mod tests {
         .into_session(&mut store.names);
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         parsed.ast
+    }
+
+    #[test]
+    fn a_return_with_an_unpositioned_value_is_distinct_from_a_bare_return() {
+        let source = SourceId::from_index(1);
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut ast = parse_ast(
+            "class C { def f(): Int = return false }",
+            source,
+            &mut store,
+        );
+        let (tree, value) = ast
+            .iter()
+            .find_map(|(id, tree)| match &tree.kind {
+                TreeKind::Return(expr) => Some((id, expr.expr?)),
+                _ => None,
+            })
+            .unwrap();
+        let error = TyperError::ReturnExpressionTypeMismatch {
+            source,
+            tree_index: tree.index(),
+            actual: defs.boolean,
+            expected: defs.int,
+        };
+        assert_eq!(typer_error_span(&error, &ast), ast.get(value).position);
+        ast.get_mut(value).position = None;
+        assert_eq!(typer_error_span(&error, &ast), None);
     }
 
     #[test]

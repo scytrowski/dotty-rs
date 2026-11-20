@@ -6,7 +6,7 @@ use dotty::core::{Definitions, Packages, SemanticStore, SourceId, TreeKind};
 use dotty::jvm_class_plan::{ClassPlanError, JvmClassPlanner};
 use dotty::jvm_method_plan::JvmMethodPlanner;
 
-fn named(text: &str) -> (SemanticStore, Definitions, Packages, NamedUnit) {
+pub(super) fn named(text: &str) -> (SemanticStore, Definitions, Packages, NamedUnit) {
     let mut store = SemanticStore::new();
     let defs = Definitions::bootstrap(&mut store);
     let mut packages = Packages::new();
