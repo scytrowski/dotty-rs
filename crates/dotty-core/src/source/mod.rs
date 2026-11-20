@@ -1,11 +1,13 @@
 //! Source text, ranges, and line-index support for the Dotty frontend.
 
+mod document;
 mod escapes;
 mod line_index;
 mod source_span;
 mod source_text;
 mod span;
 
+pub use document::{DocumentText, PositionEncoding};
 pub use escapes::{decode_identifier_body, decode_literal_units};
 pub use line_index::LineIndex;
 pub use source_span::{SourceSpan, Span, SpanError};
