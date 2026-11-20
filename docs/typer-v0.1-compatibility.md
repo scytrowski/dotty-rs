@@ -129,6 +129,14 @@ clause can select the overload by its written argument types. For overloads
 taking `Compact` and `Detailed`, omitting that clause leaves the selection
 ambiguous even when only a `Compact` witness is in scope.
 
+For extensions on the same receiver, a concrete overload can compete with a
+unary method whose sole ordinary parameter has the type of its unbounded method
+type parameter. With `keep[B](b: B): B` and `keep(i: Int): Boolean`,
+`x.keep(2L)` becomes `ops[Int](tc).keep(x)[Long](2L)`. An `Int` argument
+selects the concrete method by default. An expected `Int` result selects
+`keep[Int](2)` instead. Other polymorphic parameter shapes and mixed
+overloads requiring receiver specificity remain deferred.
+
 Conversion insertion covers value adaptation to
 a known expected type, including ordinary method arguments. For a unary
 `implicit def wrap[A](x: Box[A]): Wrapped[A]`, adapting a `Box[Int]` to

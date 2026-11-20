@@ -1189,6 +1189,7 @@ impl SourceTyper<'_> {
                 context,
                 function_tree.index(),
                 Some(ExtensionCall {
+                    expected_result: self.expected_value_at(application_tree_index),
                     following_using,
                     arguments: argument_trees,
                     typed_arguments: &mut typed_arguments,
@@ -1238,12 +1239,35 @@ impl SourceTyper<'_> {
         if receiver_clause.kind != MethodKind::Plain || receiver_clause.params.len() != 1 {
             return Ok(None);
         }
-        let Some(Type::Method(method)) = self.store.types.try_get(receiver_clause.result).cloned()
-        else {
+        let mut callable = receiver_clause.result;
+        let mut type_arguments = Vec::new();
+        if let Some(Type::Poly(poly)) = self.store.types.try_get(callable).cloned() {
+            let Some(arguments) = typed_arguments.as_deref() else {
+                return Ok(None);
+            };
+            if !self.is_unbounded_unary_extension(callable) {
+                return Ok(None);
+            }
+            type_arguments = self.infer_poly_application_arguments(
+                PolyApplicationInference {
+                    binder: callable,
+                    poly: &poly,
+                    arguments,
+                    application_kind,
+                    tree_index: application_tree_index,
+                    unused_covariant_parameter: None,
+                },
+                info_journal,
+            )?;
+            callable = dotty_core::types::instantiate_poly(self.store, callable, &type_arguments)
+                .map_err(TyperError::PolyInstantiation)?
+                .result;
+        }
+        let Some(Type::Method(method)) = self.store.types.try_get(callable).cloned() else {
             return Ok(None);
         };
         if !supported_override_signature(&method, self.store)
-            || self.type_contains_param_ref(method.result, receiver_clause.result)?
+            || self.type_contains_param_ref(method.result, callable)?
             || matches!(self.store.types.try_get(method.result), Some(Type::Poly(_)))
             || matches!(self.store.types.try_get(method.result), Some(Type::Method(next)) if next.kind==MethodKind::Plain)
             || argument_trees.len() != method.params.len()
@@ -1302,18 +1326,21 @@ impl SourceTyper<'_> {
             receiver_clause.result,
             self.arena.get(function_tree).position,
         );
-        self.typed_index
-            .insert(self.source, function_tree, typed)
-            .map_err(|error| TyperError::ConflictingTypedExpression {
-                source: error.source,
-                tree_index: error.untyped.index(),
-                existing: error.existing.index(),
-                attempted: error.attempted.index(),
-            })?;
-        new_mappings.push((self.source, function_tree));
+        self.record_typed_child(function_tree, typed, new_mappings)?;
+        let typed = if type_arguments.is_empty() {
+            typed
+        } else {
+            let position = self.arena.get(function_tree).position;
+            let mut builder = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types);
+            let args = type_arguments
+                .into_iter()
+                .map(|ty| builder.type_tree(ty, position))
+                .collect();
+            builder.type_apply(typed, args, callable, position)
+        };
         Ok(Some(ResolvedApplicationFunction {
             typed,
-            callable: receiver_clause.result,
+            callable,
             arguments,
             argument_trees: None,
         }))

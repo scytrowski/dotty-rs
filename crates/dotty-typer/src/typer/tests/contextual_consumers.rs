@@ -1696,3 +1696,145 @@ fn overloaded_extension_requires_a_written_using_to_break_the_tie() {
         assert!(typer.typed_index.is_empty());
     }
 }
+
+const GENERIC_EXTENSION_OVERLOADS: &str =
+    include_str!("../../../tests/fixtures/contextual-consumers/GenericExtensionOverloads.scala");
+
+#[test]
+fn generic_extension_overload_keeps_method_inference_separate_from_the_provider() {
+    let mut reversed: Vec<_> = GENERIC_EXTENSION_OVERLOADS.lines().collect();
+    let first = reversed
+        .iter()
+        .position(|line| line.contains("extension ("))
+        .unwrap();
+    reversed.swap(first, first + 1);
+    for text in [GENERIC_EXTENSION_OVERLOADS, &reversed.join("\n")] {
+        let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+        let factory = method_symbol(&parsed, &store, &index, source, "ops");
+        let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+        for (name, result, inferred) in [
+            ("probeGeneric", defs.long, Some(defs.long)),
+            ("probeSpecific", defs.boolean, None),
+            ("expectedInt", defs.int, Some(defs.int)),
+            ("wideResult", defs.boolean, None),
+        ] {
+            let (method, rhs) =
+                method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+            let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+                panic!()
+            };
+            let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+                panic!()
+            };
+            typer
+                .type_method_definition(tree)
+                .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            let root = typer.typed_index.get(source, rhs).unwrap();
+            let ast = typer.typed_ast();
+            assert_eq!(ast.get(root).ty, result);
+            let TreeKind::Apply(call) = &ast.get(root).kind else {
+                panic!("ordinary application")
+            };
+            let after_receiver = if let Some(inferred) = inferred {
+                let TreeKind::TypeApply(method_types) = &ast.get(call.function).kind else {
+                    panic!("inferred method type argument")
+                };
+                let [b] = method_types.args[..] else { panic!() };
+                assert_eq!(ast.get(b).ty, inferred);
+                method_types.function
+            } else {
+                call.function
+            };
+            let TreeKind::Apply(receiver) = &ast.get(after_receiver).kind else {
+                panic!("extension receiver")
+            };
+            let target = typed_reference(&typer, receiver.function);
+            let Some(SourceDefinition::Canonical {
+                tree: declaration, ..
+            }) = index.definition_of(target)
+            else {
+                panic!()
+            };
+            let TreeKind::DefDef(keep) = &parsed.ast.get(declaration).kind else {
+                panic!()
+            };
+            assert_eq!(
+                typer.store.names.resolve(keep.name.as_name().text()),
+                "keep"
+            );
+            assert_eq!(keep.type_params.len(), usize::from(inferred.is_some()));
+            let TreeKind::Select(selected) = &ast.get(receiver.function).kind else {
+                panic!()
+            };
+            let TreeKind::Apply(provider) = &ast.get(selected.qualifier).kind else {
+                panic!()
+            };
+            let TreeKind::TypeApply(factory_types) = &ast.get(provider.function).kind else {
+                panic!()
+            };
+            assert_eq!(typed_reference(&typer, factory_types.function), factory);
+            let [a] = factory_types.args[..] else {
+                panic!()
+            };
+            assert_eq!(ast.get(a).ty, defs.int);
+            assert_eq!(
+                Some(typed_reference(&typer, provider.args[0])),
+                index.symbol_at(source, def.value_param_clauses[1][0])
+            );
+            assert_eq!(
+                Some(typed_reference(&typer, receiver.args[0])),
+                index.symbol_at(source, def.value_param_clauses[0][0])
+            );
+        }
+    }
+}
+
+#[test]
+fn generic_extension_overload_rejects_wrong_arity_without_partial_trees() {
+    let rejected = include_str!(
+        "../../../tests/fixtures/contextual-consumers/GenericExtensionOverloadsRejected.scala"
+    );
+    let text = format!(
+        "{GENERIC_EXTENSION_OVERLOADS}\n{}",
+        rejected.strip_prefix("package next").unwrap()
+    );
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(&text);
+    let factory = method_symbol(&parsed, &store, &index, source, "ops");
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "wrongArity");
+    let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+        panic!()
+    };
+    let TreeKind::Apply(call) = &parsed.ast.get(rhs).kind else {
+        panic!()
+    };
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let before = typer.store.checkpoint();
+    let trees = typer.typed_arena.checkpoint();
+    let err = typer.type_method_definition(tree).unwrap_err();
+    let TyperError::ExtensionOverload {
+        tree_index,
+        provider,
+        cause,
+        ..
+    } = err
+    else {
+        panic!("{err:?}")
+    };
+    assert_eq!(tree_index, call.function.index());
+    assert_eq!(provider, factory);
+    let TyperError::OverloadApplicationNoApplicable { candidates, .. } = *cause else {
+        panic!("{cause:?}")
+    };
+    assert_eq!(candidates.len(), 2);
+    assert_ne!(candidates[0].0, candidates[1].0);
+    assert!(candidates.iter().all(|(_, rejection)| matches!(
+        rejection,
+        OverloadRejection::WrongArity {
+            expected: 1,
+            actual: 2
+        }
+    )));
+    assert_eq!(typer.store.checkpoint(), before);
+    assert_eq!(typer.typed_arena.checkpoint(), trees);
+    assert!(typer.typed_index.is_empty());
+}

@@ -14,6 +14,12 @@ def main():
     toolchain = runpy.run_path(str(ROOT / "tools/tasty-pickler-oracle/run.py"))["Toolchain"]()
     with tempfile.TemporaryDirectory() as out:
         for sources, status, *expected in [
+            (["GenericExtensionOverloads.scala"], 0,
+             "this.ops[Int](tc).keep(x)[Long](2L)", "this.ops[Int](tc).keep(x)(2)",
+             "this.ops[Int](tc).keep(x)[Int](2)",
+             "def wideResult(x: next.Box[Int])(using tc: next.TC[Int]): Any = this.ops[Int](tc).keep(x)(2)"),
+            (["GenericExtensionOverloads.scala", "GenericExtensionOverloadsRejected.scala"], 1,
+             "[E008]", "value keep is not a member of next.Box[Int]", "this.ops[Int](tc).keep()", "1 error found"),
             (["ExtensionUsingOverloads.scala"], 0,
              "this.ops[Int](tc).render(x)(3)(using c)", "this.ops[Int](tc).render(x)(3)(using d)"),
             (["ExtensionUsingOverloads.scala", "ExtensionUsingOverloadsRejected.scala"], 1,
