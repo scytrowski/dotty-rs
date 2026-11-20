@@ -2223,6 +2223,14 @@ In `a.take(42)` each byte of `take` selects the method. The receiver, dot,
 parentheses and argument yield `None`. After an edit, query the new parse
 and its corresponding typed body.
 
+For a file containing several top-level classes, build `dotty::SourceFileCalls`
+once after naming, using the parser's call names and the source-ordered class
+views. Keep it alongside the file's source arena. Its `selected_method_at`
+query finds the enclosing class by binary search, then looks up its body in
+`TypedClassBodies`. If only the first class has been typed, calls in that
+class can already resolve. A call in the second class yields `None` until
+its body is recorded. Both queries use the same file index.
+
 For a call with the wrong number of arguments, pass the original
 `TyperError::ApplicationArityMismatch` and its untyped AST to
 `dotty::typer_error_span`. The returned `SourceSpan` covers the call

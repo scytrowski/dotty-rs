@@ -79,5 +79,8 @@ pub use source_declaration_index::{
     SourceDeclaration, SourceDeclarationIndex, SourceDeclarationIndexError,
 };
 
+mod source_file_calls;
+pub use source_file_calls::SourceFileCalls;
+
 mod typer_error_span;
 pub use typer_error_span::{typer_error_span, typer_error_span_with};
