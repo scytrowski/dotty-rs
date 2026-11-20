@@ -10,7 +10,7 @@ use dotty::jvm_class_plan::ClassHeaderBindings;
 use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty::source_declarations::{ClassMember, SourceClass, source_classes};
 use dotty::typer::{SignatureCompletion, SourceTyper, TyperError};
-use dotty::{ClassBodyError, SourceDeclarationIndex, SourceFileCalls, TypingDiagnostic};
+use dotty::{ClassBodyError, SourceDeclarationIndex, SourceDiagnostic, SourceFileCalls};
 
 #[derive(Clone)]
 pub struct Document {
@@ -22,21 +22,28 @@ pub type Documents = BTreeMap<String, Document>;
 
 #[derive(PartialEq, Eq)]
 pub struct Problem {
+    pub code: Option<&'static str>,
     pub range: Option<TextRange>,
     pub message: String,
     pub severity: DiagnosticSeverity,
 }
 
-fn typing_problem(owner_file: usize, diagnostic: TypingDiagnostic) -> (usize, Problem) {
+impl From<SourceDiagnostic> for Problem {
+    fn from(diagnostic: SourceDiagnostic) -> Self {
+        Self {
+            code: diagnostic.code,
+            range: diagnostic.location.map(|span| span.span().range()),
+            severity: diagnostic.severity,
+            message: diagnostic.message,
+        }
+    }
+}
+
+fn typing_problem(owner_file: usize, diagnostic: SourceDiagnostic) -> (usize, Problem) {
     let file = diagnostic
         .location
         .map_or(owner_file, |span| span.source().index() as usize);
-    let problem = Problem {
-        range: diagnostic.location.map(|span| span.span().range()),
-        severity: diagnostic.severity,
-        message: diagnostic.message,
-    };
-    (file, problem)
+    (file, diagnostic.into())
 }
 
 pub struct Link {
@@ -55,6 +62,7 @@ pub struct FileResult {
 impl FileResult {
     fn error(&mut self, range: Option<TextRange>, message: String) {
         self.problems.push(Problem {
+            code: None,
             range,
             message,
             severity: DiagnosticSeverity::Error,
@@ -85,9 +93,12 @@ fn name(
         &mut store.names,
     );
     if !parsed.diagnostics.is_empty() {
-        for issue in parsed.diagnostics {
-            result.error(Some(issue.span()), format!("{:?}", issue.issue()));
-        }
+        result.problems.extend(
+            parsed
+                .diagnostics
+                .iter()
+                .map(|d| SourceDiagnostic::from_parser(d).into()),
+        );
         return None;
     }
     let named = name_compilation_unit_with_diagnostics(
@@ -107,9 +118,11 @@ fn name(
             return None;
         }
     };
-    for d in diagnostics {
-        result.error(Some(d.span()), format!("{:?}", d.issue()));
-    }
+    result.problems.extend(
+        diagnostics
+            .iter()
+            .map(|d| SourceDiagnostic::from_namer(d).into()),
+    );
     let index = *index?;
     let classes = source_classes(&parsed.ast, parsed.root, source, &index, store)
         .map_err(|e| result.error(None, e.to_string()))
@@ -189,7 +202,7 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
     let mut ranges = HashMap::new();
     let ast_for = |id: SourceId| units.get(&(id.index() as usize)).map(|unit| &unit.ast);
     let typer_problem = |file, error: &TyperError| {
-        typing_problem(file, TypingDiagnostic::from_typer(error, ast_for))
+        typing_problem(file, SourceDiagnostic::from_typer(error, ast_for))
     };
     for (&i, u) in &units {
         let mut typer = SourceTyper::new(&u.ast, u.source, &u.index, &mut store, defs, &packages);
@@ -286,6 +299,7 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
             );
             for (source, d) in &check.diagnostics {
                 results[source.index() as usize].problems.push(Problem {
+                    code: None,
                     range: Some(d.span()),
                     message: d.message().to_owned(),
                     severity: d.severity(),
