@@ -2010,6 +2010,11 @@ A multi-file client can call `dotty::typer_error_span_with(error, ast_for)`
 to look up that AST by source ID. A missing file yields `None`.
 Both functions locate the checked expression for `ExpectedExpressionTypeMismatch`
 and the initializer of a local declaration for `LocalValueTypeMismatch`.
+For missing or ambiguous term and type names and for `WrongTypeNameKind`,
+a recorded position must belong to the same source and lie within the
+reported tree. If the error has no recorded position, the tree supplies
+the range. For `MemberNotFound` the reported tree supplies the range,
+including the qualifier in `obj.missing`.
 
 For `A.f(b: B) = b.g()`, the external client observes the symbol of `B.g`,
 completes it and retries `A.f`. A call to the same zero-argument method with

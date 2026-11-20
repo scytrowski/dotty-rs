@@ -173,6 +173,67 @@ fn assert_error_text(
     );
 }
 
+/// All examples put the offending occurrence last, including repeated names.
+fn name_error_at_last_use(text: &str, spelling: &str) -> dotty::typer::TyperError {
+    let (mut store, defs, packages, unit) = named(text);
+    let units = std::slice::from_ref(&unit);
+    let error = complete_signatures(units, &mut store, defs, &packages).unwrap_err();
+    let super::SignatureError::Member(dotty::MemberSignatureError::Typing { error, .. }) = error
+    else {
+        panic!("expected a member typing error: {error:?}")
+    };
+    let span = SignatureSources::new(units, &store)
+        .error_span(&error)
+        .unwrap_or_else(|| panic!("missing position for {error:?}"));
+    let start = text.rfind(spelling).unwrap() as u32;
+    assert_eq!(span.source(), unit.source);
+    assert_eq!(
+        span.span().range(),
+        dotty::core::TextRange::new(start, start + spelling.len() as u32).unwrap()
+    );
+    error
+}
+
+#[test]
+fn unresolved_names_locate_the_identifier_or_whole_selection() {
+    use dotty::typer::TyperError;
+    assert!(matches!(
+        name_error_at_last_use("class C { def f() = missing + 1 }", "missing"),
+        TyperError::TermNameNotFound { .. }
+    ));
+    assert!(matches!(
+        name_error_at_last_use("class C { def f(x: Missing) = 1 }", "Missing"),
+        TyperError::TypeNameNotFound { .. }
+    ));
+    assert!(matches!(
+        name_error_at_last_use(
+            "class P; class C { def f(obj: P) = obj.missing }",
+            "obj.missing"
+        ),
+        TyperError::MemberNotFound { .. }
+    ));
+}
+
+#[test]
+fn ambiguous_and_wrong_kind_names_locate_the_use() {
+    use dotty::typer::TyperError;
+    assert!(matches!(
+        name_error_at_last_use("class C(xs: Int, xs: Int) { def f() = xs }", "xs"),
+        TyperError::AmbiguousTermReference { .. }
+    ));
+    assert!(matches!(
+        name_error_at_last_use("class T; class T; class C { def f(x: T) = 1 }", "T"),
+        TyperError::AmbiguousTypeName { .. }
+    ));
+    assert!(matches!(
+        name_error_at_last_use(
+            "class C { val marker: Int = 1; def f(x: marker) = 1 }",
+            "marker"
+        ),
+        TyperError::WrongTypeNameKind { .. }
+    ));
+}
+
 #[test]
 fn field_and_local_value_errors_locate_the_initializer() {
     use dotty::typer::TyperError;

@@ -5,18 +5,21 @@ enum ErrorSite {
     Tree,
     Argument(usize),
     LocalInitializer,
+    RecordedName(SourceSpan),
 }
 
-/// Locates a call rejected with [`TyperError::ApplicationArityMismatch`] or
-/// the offending argument of an explicit application rejected with
-/// [`TyperError::ApplicationArgumentTypeMismatch`]. For
-/// [`TyperError::ExpectedExpressionTypeMismatch`] it locates the expression,
-/// and for [`TyperError::LocalValueTypeMismatch`] the initializer of the local value.
+/// Locates a supported typer error in the untyped AST from the original parse.
 ///
-/// Supply the untyped AST from the parse that produced the error. The
-/// reported tree and any selected child must carry positions in the error's source.
-/// An unavailable position, unsupported tree shape for the argument lookup,
-/// or unsupported error variant yields `None`.
+/// - Call arity errors identify the whole call. Argument type mismatches on
+///   explicit applications identify the offending argument.
+/// - Expected expression type mismatches identify the checked expression.
+///   Local value type mismatches identify the initializer.
+/// - Missing, ambiguous and wrong-kind names use the position carried by the
+///   error when present, otherwise the reported tree's position. A missing
+///   member points to its reported expression (the whole selection for `x.y`).
+///
+/// A missing source position, a foreign tree, an inconsistent recorded name
+/// position, or an unsupported tree shape or error variant yields `None`.
 pub fn typer_error_span(error: &TyperError, ast: &AstArena<Untyped>) -> Option<SourceSpan> {
     typer_error_span_with(error, |_| Some(ast))
 }
@@ -35,7 +38,44 @@ pub fn typer_error_span_with<'a>(
         }
         | TyperError::ExpectedExpressionTypeMismatch {
             source, tree_index, ..
+        }
+        | TyperError::MemberNotFound {
+            source, tree_index, ..
         } => (source, tree_index, ErrorSite::Tree),
+        TyperError::TermNameNotFound {
+            source,
+            tree_index,
+            position,
+            ..
+        }
+        | TyperError::AmbiguousTermReference {
+            source,
+            tree_index,
+            position,
+            ..
+        }
+        | TyperError::TypeNameNotFound {
+            source,
+            tree_index,
+            position,
+            ..
+        }
+        | TyperError::WrongTypeNameKind {
+            source,
+            tree_index,
+            position,
+            ..
+        }
+        | TyperError::AmbiguousTypeName {
+            source,
+            tree_index,
+            position,
+            ..
+        } => (
+            source,
+            tree_index,
+            position.map_or(ErrorSite::Tree, ErrorSite::RecordedName),
+        ),
         TyperError::LocalValueTypeMismatch {
             source, tree_index, ..
         } => (source, tree_index, ErrorSite::LocalInitializer),
@@ -52,6 +92,14 @@ pub fn typer_error_span_with<'a>(
     let position = tree.position.filter(|span| span.source() == source)?;
     let child = match (site, &tree.kind) {
         (ErrorSite::Tree, _) => return Some(position),
+        (ErrorSite::RecordedName(name), _) => {
+            let tree_range = position.span().range();
+            let name_range = name.span().range();
+            return (name.source() == source
+                && tree_range.start() <= name_range.start()
+                && name_range.end() <= tree_range.end())
+            .then_some(name);
+        }
         (ErrorSite::Argument(index), TreeKind::Apply(call)) => *call.args.get(index)?,
         (ErrorSite::LocalInitializer, TreeKind::ValDef(def)) => def.rhs?,
         _ => return None,
@@ -79,6 +127,45 @@ mod tests {
         .into_session(&mut store.names);
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         parsed.ast
+    }
+
+    #[test]
+    fn recorded_name_position_must_belong_to_the_reported_source_tree() {
+        let source = SourceId::from_index(1);
+        let other = SourceId::from_index(2);
+        let text = "class A { def f() = missing }";
+        let mut store = SemanticStore::new();
+        let ast = parse_ast(text, source, &mut store);
+        let foreign = parse_ast(text, other, &mut store);
+        let (tree, name, position) = ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::Ident(id) if store.names.resolve(id.name.text()) == "missing" => {
+                    Some((tree, id.name, node.position.unwrap()))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let error = |position| TyperError::TermNameNotFound {
+            source,
+            tree_index: tree.index(),
+            name,
+            position,
+        };
+        let range = position.span().range();
+        let recorded = SourceSpan::new(source, Span::new(range, Some(range.start())).unwrap());
+        assert_eq!(
+            typer_error_span(&error(Some(recorded)), &ast),
+            Some(recorded)
+        );
+        assert_eq!(typer_error_span(&error(None), &ast), Some(position));
+        assert_eq!(typer_error_span(&error(Some(recorded)), &foreign), None);
+        assert_eq!(
+            typer_error_span(&error(Some(SourceSpan::new(other, recorded.span()))), &ast),
+            None
+        );
+        let outside = SourceSpan::new(source, Span::without_point(TextRange::new(0, 1).unwrap()));
+        assert_eq!(typer_error_span(&error(Some(outside)), &ast), None);
     }
 
     #[test]
