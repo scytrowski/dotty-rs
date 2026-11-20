@@ -656,7 +656,7 @@ fn field_signature_retries_foreign_method_and_infers_int_in_both_orders() {
 const CONSUMER_OF_SEED: &str = "class Consumer(provider: Provider) { val answer = provider.seed }";
 
 #[test]
-fn field_method_field_chain_infers_int_in_both_file_orders() {
+fn field_method_field_chain_infers_int_and_executes_in_both_file_orders() {
     use dotty::core::{SymbolInfo, Type};
     use dotty::typer::SignatureCompletion;
 
@@ -695,7 +695,7 @@ fn field_method_field_chain_infers_int_in_both_file_orders() {
         let value = units[1].method_symbol();
         let seed = leaves.classes[0].fields().next().unwrap().symbol;
         let mut edges = Vec::new();
-        super::complete_signatures_in_order(
+        let headers = super::complete_signatures_in_order(
             &units,
             &units,
             &mut store,
@@ -720,7 +720,129 @@ fn field_method_field_chain_infers_int_in_both_file_orders() {
             panic!("missing value signature")
         };
         assert!(matches!(store.types.get(ty), Type::Method(method) if method.result == defs.int));
+        let (output, bodies) = type_bodies(&units, &mut store, defs, &packages, headers);
+        let classes = class_plans(&units, &bodies, &output, &store).unwrap();
+        let plan = dotty::jvm::JvmCompilationUnit {
+            store: &store,
+            typed_ast: &output.arena,
+            classes,
+        };
+        let prepared = plan.prepare_emission(&defs).unwrap();
+        let (artifacts, _) = super::emit_batch(&prepared, &plan.classes, 2);
+        let consumer = artifacts
+            .iter()
+            .find(|artifact| artifact.internal_name() == "Consumer")
+            .unwrap();
+        assert_answer_constructor(consumer.bytes());
+        assert_eq!(
+            super::run_java_client("initializer-call", "InitializerCallClient", &artifacts).trim(),
+            "40"
+        );
     }
+}
+
+#[test]
+fn initializer_parameter_call_checks_arity_and_result_type() {
+    for (method, initializer, reason) in [
+        (
+            "def value(n: Int): Int = n",
+            "provider.value(1)",
+            "non-approved constructor application",
+        ),
+        (
+            "def value(): Boolean = true",
+            "provider.value()",
+            "expected a public parameterless Int method on the parameter class",
+        ),
+    ] {
+        let provider = format!("class Provider {{ {method} }}");
+        let consumer =
+            format!("class Consumer(provider: Provider) {{ val answer = {initializer} }}");
+        let files = [
+            (SourceId::from_index(0), "Provider.scala", provider.as_str()),
+            (SourceId::from_index(1), "Consumer.scala", consumer.as_str()),
+        ];
+        super::with_plan(&files, |unit, defs| {
+            let consumer = &unit.classes[1];
+            let answer = &consumer.fields[0];
+            let error = dotty::jvm::emit_class(unit, consumer.class, defs).unwrap_err();
+            assert!(
+                matches!(error,
+                    dotty::jvm::JvmCodegenError::UnsupportedConstructorFieldInitializer { field, tree, node }
+                        if field == answer.field && Some(tree) == answer.initializer && node == reason
+                ),
+                "{error:?}"
+            );
+        });
+    }
+}
+
+fn assert_answer_constructor(bytes: &[u8]) {
+    use dotty::classfile::{Attribute, ClassFile, ConstantPoolEntry, ConstantPoolIndex, Reader};
+
+    let class = ClassFile::decode(&mut Reader::new(bytes)).unwrap();
+    let pool = &class.constant_pool;
+    let ctor = class
+        .methods
+        .iter()
+        .find(|m| pool.utf8(m.name_index) == Ok("<init>"))
+        .unwrap();
+    assert_eq!(pool.utf8(ctor.descriptor_index), Ok("(LProvider;)V"));
+    let [Attribute::Code(code)] = ctor.attributes.as_slice() else {
+        panic!("expected constructor code")
+    };
+    // aload_0, invokespecial, aload_0, aload_1, invokevirtual, putfield, return
+    let [
+        0x2a,
+        0xb7,
+        p1,
+        p2,
+        0x2a,
+        0x2b,
+        0xb6,
+        m1,
+        m2,
+        0xb5,
+        f1,
+        f2,
+        0xb1,
+    ] = *code.code
+    else {
+        panic!(
+            "unexpected Consumer constructor instructions: {:x?}",
+            code.code
+        )
+    };
+    let reference = |hi, lo| pool.get(ConstantPoolIndex(u16::from_be_bytes([hi, lo])));
+    for (hi, lo, owner, name, descriptor) in [
+        (p1, p2, "java/lang/Object", "<init>", "()V"),
+        (m1, m2, "Provider", "value", "()I"),
+    ] {
+        let Some(ConstantPoolEntry::Methodref {
+            class_index,
+            name_and_type_index,
+        }) = reference(hi, lo)
+        else {
+            panic!("expected method reference")
+        };
+        assert_eq!(pool.class_name(*class_index), Ok(owner));
+        assert_eq!(
+            pool.name_and_type(*name_and_type_index),
+            Ok((name, descriptor))
+        );
+    }
+    let Some(ConstantPoolEntry::Fieldref {
+        class_index,
+        name_and_type_index,
+    }) = reference(f1, f2)
+    else {
+        panic!("expected field reference")
+    };
+    assert_eq!(pool.class_name(*class_index), Ok("Consumer"));
+    assert_eq!(
+        pool.name_and_type(*name_and_type_index),
+        Ok(("answer", "I"))
+    );
 }
 
 #[test]

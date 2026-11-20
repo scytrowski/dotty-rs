@@ -172,6 +172,73 @@ fn resolve_instance_call_body(
             method: caller_method,
         })?;
 
+    resolve_call_with_receiver(
+        scope,
+        caller_class,
+        call,
+        definitions,
+        context,
+        invocation,
+        |receiver, context| {
+            resolve_receiver_class(
+                scope,
+                caller_class,
+                caller_method,
+                caller_method_plan,
+                receiver,
+                definitions,
+                context,
+            )
+        },
+    )
+}
+
+// Constructor initializer lowering has already checked the exact local supplying the receiver.
+pub(super) fn resolve_parameter_call(
+    unit: &JvmCompilationUnit<'_>,
+    caller_class: SymbolId,
+    call: TreeId<Typed>,
+    receiver: (TreeId<Typed>, SymbolId),
+    definitions: &Definitions,
+    metadata: &[JvmClassMetadata],
+) -> Result<JvmCallTarget, JvmCodegenError> {
+    let mut context = CallResolutionContext {
+        metadata: Some(Cow::Borrowed(metadata)),
+        ..Default::default()
+    };
+    resolve_call_with_receiver(
+        unit.into(),
+        caller_class,
+        call,
+        definitions,
+        &mut context,
+        JvmInvocationKind::Virtual,
+        |id, _| {
+            if id == receiver.0 {
+                Ok(receiver.1)
+            } else {
+                Err(unsupported_call(
+                    id,
+                    UnsupportedJvmCallShapeKind::UnsupportedReceiverPrefix,
+                ))
+            }
+        },
+    )
+}
+
+fn resolve_call_with_receiver(
+    scope: ReferenceUnit<'_>,
+    caller_class: SymbolId,
+    call: TreeId<Typed>,
+    definitions: &Definitions,
+    context: &mut CallResolutionContext<'_>,
+    invocation: JvmInvocationKind,
+    receiver_class_for: impl FnOnce(
+        TreeId<Typed>,
+        &mut CallResolutionContext<'_>,
+    ) -> Result<SymbolId, JvmCodegenError>,
+) -> Result<JvmCallTarget, JvmCodegenError> {
+    let unit = scope.unit;
     let call_tree = tree(unit.store, unit.typed_ast, call)?;
     let (function_id, apply_kind) = match &call_tree.kind {
         TreeKind::Apply(apply) => (apply.function, apply.kind),
@@ -208,15 +275,7 @@ fn resolve_instance_call_body(
         }
         TreeKind::Select(select) => {
             let receiver = select.qualifier;
-            let receiver_class = resolve_receiver_class(
-                scope,
-                caller_class,
-                caller_method,
-                caller_method_plan,
-                receiver,
-                definitions,
-                context,
-            )?;
+            let receiver_class = receiver_class_for(receiver, context)?;
             (Some(receiver), receiver_class, None)
         }
         TreeKind::TypeApply(_) => {

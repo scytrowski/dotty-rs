@@ -1264,8 +1264,13 @@ constructor parameters and direct allocations, canonical `Int.+`, canonical
 Boolean negation, empty-statement blocks, and reads of earlier initialized
 primitive or planned-reference fields. A body accessor field uses its exact
 class-body source proof and typed RHS; it never borrows a constructor formal.
-Self and forward field reads, user method calls, `this` escape, control-flow
-expressions, and other unsupported typed nodes fail with contextual
+An initializer may call a public zero-argument method returning `Int` declared
+by the exact planned class of a constructor parameter. For
+`val answer = provider.value()`, the receiver is loaded from the canonical
+constructor formal's local slot. The validated virtual call target supplies the
+owner, name and `()I` descriptor, and the constructor stores the result in
+`answer`. Calls on `this`, self and forward field reads, `this` escape,
+control-flow expressions, and other unsupported typed nodes fail with contextual
 `JvmCodegenError`s.
 
 The plan stores constructor accessor copies separately as

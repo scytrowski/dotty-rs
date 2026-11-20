@@ -131,6 +131,8 @@ pub enum JvmConstructorInitializerInstruction {
         /// Exact descriptor of the selected constructor.
         descriptor: String,
     },
+    /// Invoke a public, parameterless Int method on a checked constructor formal.
+    InvokeVirtual(crate::JvmCallTarget),
     /// Read a previously initialized current-class field.
     GetField {
         /// Canonical field identity.
@@ -241,6 +243,12 @@ impl JvmConstructorFieldInitializerPlan {
                     JvmConstructorInitializerInstruction::InvokeSpecial { owner, descriptor } => {
                         code.invokespecial(owner.clone(), "<init>", descriptor.clone())
                     }
+                    JvmConstructorInitializerInstruction::InvokeVirtual(target) => code
+                        .invokevirtual(
+                            target.owner_internal_name(),
+                            target.method_name(),
+                            target.descriptor().as_str(),
+                        ),
                     JvmConstructorInitializerInstruction::GetField {
                         name, descriptor, ..
                     } => code.aload(0).and_then(|code| {
@@ -383,6 +391,7 @@ pub(crate) fn append_direct_super_constructor_call(
         });
     }
     let mut context = ConstructorInitializerContext {
+        metadata: all_metadata,
         unit,
         store: unit.store,
         typed_ast: unit.typed_ast,
@@ -527,6 +536,7 @@ struct ConstructorInitializerContext<'a> {
     store: &'a SemanticStore,
     typed_ast: &'a TypedAst,
     definitions: &'a Definitions,
+    metadata: &'a [crate::JvmClassMetadata],
     class_identities: &'a [JvmClassIdentity],
     class: SymbolId,
     constructor: Option<&'a JvmConstructorMetadata>,
@@ -653,6 +663,7 @@ pub(super) fn lower_with_metadata(
         }
     }
     let mut context = ConstructorInitializerContext {
+        metadata: all_metadata,
         unit,
         store: unit.store,
         typed_ast: unit.typed_ast,
@@ -924,7 +935,7 @@ impl ConstructorInitializerContext<'_> {
                             error,
                         })?;
                 if intrinsic != Some(JvmIntIntrinsic::IntAdd) {
-                    return self.unsupported(tree_id, "non-approved constructor application");
+                    return self.lower_parameter_call(tree_id, application, instructions, depth);
                 }
                 let function = self.typed_ast.try_get(application.function).ok_or(
                     JvmCodegenError::UnsupportedConstructorFieldInitializer {
@@ -958,6 +969,66 @@ impl ConstructorInitializerContext<'_> {
             }
             _ => self.unsupported(tree_id, typed_node_name(&tree.kind)),
         }
+    }
+
+    fn lower_parameter_call(
+        &mut self,
+        call: TreeId<Typed>,
+        application: &dotty_core::ast::Apply<Typed>,
+        instructions: &mut Vec<JvmConstructorInitializerInstruction>,
+        depth: usize,
+    ) -> Result<JvmType, JvmCodegenError> {
+        let Some(function) = self.typed_ast.try_get(application.function) else {
+            return self.unsupported(call, "missing call function");
+        };
+        let TreeKind::Select(select) = &function.kind else {
+            return self.unsupported(call, "non-approved constructor application");
+        };
+        if application.kind != dotty_core::ast::ApplyKind::Regular || !application.args.is_empty() {
+            return self.unsupported(call, "non-approved constructor application");
+        }
+        let Some(receiver) = self.typed_ast.try_get(select.qualifier) else {
+            return self.unsupported(call, "missing call receiver");
+        };
+        // Only the exact constructor local may supply the receiver. In particular, do
+        // not dispatch on the current instance while its fields are being initialized.
+        let TreeKind::Ident(ident) = &receiver.kind else {
+            return self.unsupported(call, "call receiver is not a constructor parameter");
+        };
+        let parameter = self.term_ref_symbol(select.qualifier, receiver.ty)?;
+        if !self
+            .constructor
+            .is_some_and(|ctor| ctor.parameters().iter().any(|p| p.symbol() == parameter))
+            || self.store.symbols.get(parameter).name != ident.name
+        {
+            return self.unsupported(call, "call receiver is not a constructor parameter");
+        }
+        let JvmType::Reference(class) =
+            self.lower_expression(select.qualifier, instructions, depth + 1)?
+        else {
+            return self.unsupported(call, "call receiver is not a planned reference parameter");
+        };
+        let target = crate::call_target::resolve_parameter_call(
+            self.unit,
+            self.class,
+            call,
+            (select.qualifier, class),
+            self.definitions,
+            self.metadata,
+        )?;
+        let method = self.store.symbols.get(target.method_symbol());
+        if method.visibility != dotty_core::Visibility::Public
+            || method.owner != Some(class)
+            || method.name != select.name
+            || target.descriptor().as_str() != "()I"
+        {
+            return self.unsupported(
+                call,
+                "expected a public parameterless Int method on the parameter class",
+            );
+        }
+        instructions.push(JvmConstructorInitializerInstruction::InvokeVirtual(target));
+        Ok(JvmType::Int)
     }
 
     fn lower_reference(

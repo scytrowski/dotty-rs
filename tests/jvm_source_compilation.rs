@@ -13162,6 +13162,30 @@ fn body_field_initializer_failure_keeps_a_multi_class_batch_unpublished() {
 }
 
 #[test]
+fn constructor_call_on_this_rejects_the_initializer_without_publishing_the_batch() {
+    let output = TestOutputDirectory::new("this-call-in-field-initializer");
+    let result = compile_source_classes(
+        "class Ready { def value(): Int = 40 }
+class Consumer(other: Consumer) { def value(): Int = 40; val answer: Int = this.value() }",
+        "ThisCall.scala",
+        output.path(),
+    );
+    assert!(
+        matches!(
+            result,
+            Err(PipelineFailure::Codegen(
+                JvmCodegenError::UnsupportedConstructorFieldInitializer {
+                    node: "call receiver is not a constructor parameter",
+                    ..
+                }
+            ))
+        ),
+        "{result:?}"
+    );
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
 fn public_body_field_rejections_keep_source_batches_unpublished() {
     let cases: [SourceFailureExpectation; 11] = [
         (

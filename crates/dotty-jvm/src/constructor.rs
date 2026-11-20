@@ -1004,11 +1004,8 @@ impl JvmPrimaryConstructorPlan {
             else {
                 return Err(fail(JvmConstructorIssue::AccessorFieldSignature));
             };
-            let Some(field_type) = store.types.try_get(field_type) else {
-                return Err(fail(JvmConstructorIssue::AccessorFieldSignature));
-            };
-            if store.types.try_get(parameter_type) != Some(field_type)
-                || store.types.try_get(signature_parameter.ty) != Some(field_type)
+            if !accessor_type_matches(store, field_type, parameter_type)
+                || !accessor_type_matches(store, field_type, signature_parameter.ty)
             {
                 return Err(fail(JvmConstructorIssue::AccessorFieldSignature));
             }
@@ -1198,6 +1195,37 @@ impl JvmPrimaryConstructorPlan {
     }
 }
 
+// Completing the field and the formal separately may allocate the same package prefix twice.
+fn accessor_type_matches(
+    store: &SemanticStore,
+    field: dotty_core::TypeId,
+    formal: dotty_core::TypeId,
+) -> bool {
+    if exact_type_matches(store, field, formal) {
+        return true;
+    }
+    let (
+        Some(Type::TypeRef {
+            prefix: field_prefix,
+            target: dotty_core::TypeRefTarget::Symbol(class),
+        }),
+        Some(Type::TypeRef {
+            prefix: formal_prefix,
+            target: dotty_core::TypeRefTarget::Symbol(other),
+        }),
+    ) = (store.types.try_get(field), store.types.try_get(formal))
+    else {
+        return false;
+    };
+    let Some(Type::TypeRef { prefix: root, .. }) = store.types.try_get(*field_prefix) else {
+        return false;
+    };
+    class == other
+        && matches!(store.types.try_get(*root), Some(Type::NoPrefix))
+        && crate::identity::canonical_class_parent_prefix(store, *field_prefix, *class, *root)
+        && store.types.try_get(*field_prefix) == store.types.try_get(*formal_prefix)
+}
+
 fn exact_type_matches(
     store: &SemanticStore,
     actual: dotty_core::TypeId,
@@ -1237,6 +1265,34 @@ mod tests {
     use super::*;
     use dotty_core::ast::{AstArena, Tree, TypeTree};
     use dotty_core::{MethodType, Name, Namespace, Scope, Symbol, SymbolLinks, SymbolOrigin, Type};
+
+    #[test]
+    fn accessor_type_match_accepts_distinct_nodes_for_the_same_owning_package() {
+        use dotty_core::TypeRefTarget;
+        let (mut store, definitions, plan) = fixture();
+        let package = store.symbols.owner(plan.class).unwrap();
+        let package_type = Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(package),
+        };
+        let field_prefix = store.types.alloc(package_type.clone());
+        let formal_prefix = store.types.alloc(package_type);
+        let class_ref = |prefix| Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(plan.class),
+        };
+        let field = store.types.alloc(class_ref(field_prefix));
+        let formal = store.types.alloc(class_ref(formal_prefix));
+        assert_ne!(field_prefix, formal_prefix);
+        assert!(accessor_type_matches(&store, field, formal));
+        let foreign = store.types.alloc(Type::TypeRef {
+            prefix: formal_prefix,
+            target: TypeRefTarget::Symbol(definitions.object_class),
+        });
+        assert!(!accessor_type_matches(&store, field, foreign));
+        let wrong_prefix = store.types.alloc(class_ref(definitions.int));
+        assert!(!accessor_type_matches(&store, field, wrong_prefix));
+    }
 
     #[test]
     fn primitive_constructor_type_match_rejects_noncanonical_prefixes() {
