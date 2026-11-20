@@ -158,59 +158,6 @@ impl SourceTyper<'_> {
             && field.owner == Some(self.module_class_of_object(*object)?))
     }
 
-    fn infer_conversion_input(
-        &mut self,
-        signature: TypeId,
-        input: TypeId,
-        actual: TypeId,
-        inferred: &mut [Option<TypeId>],
-        tree_index: u32,
-        journal: &mut Vec<(SymbolId, SymbolInfo)>,
-    ) -> Result<bool, TyperError> {
-        // Match the receiver at the declared input class, e.g. Child extends Box[Int].
-        let views = if let Type::Applied { tycon, .. } = self.store.types.get(input)
-            && let Some(class) = self.store.types.get(*tycon).reference_symbol()
-            && self.type_contains_param_ref(input, signature)?
-            && matches!(
-                self.store.types.get(actual),
-                Type::TypeRef { .. } | Type::Applied { .. } | Type::ThisType { .. }
-            ) {
-            self.complete_relation_type(actual, journal, &mut HashSet::new(), 0)?;
-            self.nominal_views_as(actual, class).map_err(|error| {
-                TyperError::ExpectedExpressionConformanceUnsupported {
-                    source: self.source,
-                    tree_index,
-                    actual,
-                    expected: input,
-                    error: Box::new(error),
-                }
-            })?
-        } else {
-            vec![actual]
-        };
-        if views.is_empty() {
-            return Ok(false);
-        }
-        let location = InferenceLocation {
-            result_pattern: false,
-            tree_index,
-            argument_index: 0,
-            depth: 0,
-        };
-        for view in views {
-            match self.infer_type_constraints(input, view, signature, inferred, location, journal) {
-                Ok(()) => {}
-                Err(
-                    TyperError::UnsupportedInferenceShape { .. }
-                    | TyperError::ConflictingInferenceConstraints { .. }
-                    | TyperError::ApplicationArgumentTypeMismatch { .. },
-                ) => return Ok(false),
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(true)
-    }
-
     fn legacy_conversion_candidate(
         &mut self,
         reference: ContextualRef,
@@ -247,7 +194,7 @@ impl SourceTyper<'_> {
         let mut type_arguments = Vec::new();
         if arity > 0 {
             let mut inferred = vec![None; arity];
-            if !self.infer_conversion_input(
+            if !self.infer_contextual_receiver(
                 signature,
                 input,
                 actual,
@@ -402,12 +349,6 @@ pub(in crate::typer) struct MemberConversionGoal {
     pub(in crate::typer) name: Name,
 }
 
-#[derive(Default)]
-struct MemberConversionSearch {
-    history: SearchHistory,
-    dependency_failure: Option<TyperError>,
-}
-
 impl SourceTyper<'_> {
     pub(in crate::typer) fn member_conversion_target(
         &mut self,
@@ -416,7 +357,7 @@ impl SourceTyper<'_> {
         site: u32,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Option<(ConversionTarget, TypeId)>, TyperError> {
-        let mut search = MemberConversionSearch::default();
+        let mut search = AdaptationSearch::default();
         for level in self.contextual_scopes(context, site)? {
             let refs = self.contextual_scope_refs(level, site, journal)?;
             if let Some(winner) =
@@ -443,7 +384,7 @@ impl SourceTyper<'_> {
         goal: MemberConversionGoal,
         context: ExpressionContext,
         site: u32,
-        search: &mut MemberConversionSearch,
+        search: &mut AdaptationSearch,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Option<(ConversionTarget, TypeId)>, TyperError> {
         let mut candidates = Vec::new();
@@ -487,35 +428,17 @@ impl SourceTyper<'_> {
             if !self.conversion_result_has_member(output, goal.name, context, site, journal)? {
                 continue;
             }
-            if matches!(self.store.types.get(candidate.callable), Type::Method(m) if m.kind != MethodKind::Plain)
-            {
-                match self.try_contextual_provider(
-                    &candidate,
-                    candidate.result,
-                    context,
-                    site,
-                    &mut search.history,
-                    None,
-                ) {
-                    Ok(_) => {}
-                    Err(
-                        cause @ (TyperError::MissingContextualArgument { .. }
-                        | TyperError::AmbiguousContextualArgument { .. }
-                        | TyperError::DivergentContextualArgument { .. }),
-                    ) => {
-                        search.dependency_failure.get_or_insert_with(|| {
-                            TyperError::MemberConversionDependency {
-                                source: self.source,
-                                tree_index: site,
-                                name: goal.name,
-                                provider: reference.symbol,
-                                cause: Box::new(cause),
-                            }
-                        });
-                        continue;
+            if let Some(cause) = search.dependency_error(self, &candidate, context, site)? {
+                search.dependency_failure.get_or_insert_with(|| {
+                    TyperError::MemberConversionDependency {
+                        source: self.source,
+                        tree_index: site,
+                        name: goal.name,
+                        provider: reference.symbol,
+                        cause: Box::new(cause),
                     }
-                    Err(error) => return Err(error),
-                }
+                });
+                continue;
             }
             candidates.push((candidate, Ok(output)));
         }
@@ -545,17 +468,7 @@ impl SourceTyper<'_> {
                 journal,
             )?)
         } else {
-            let tree = self.materialize_provider(
-                &winner,
-                winner.result,
-                context,
-                site,
-                &mut search.history,
-                journal,
-            )?;
-            ConversionTarget::Instance(
-                std::mem::take(&mut search.history.dictionary).emit(self, tree, site)?,
-            )
+            ConversionTarget::Instance(search.materialize(self, &winner, context, site, journal)?)
         };
         Ok(Some((target, output)))
     }
@@ -607,62 +520,33 @@ impl SourceTyper<'_> {
         site: u32,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Option<(Provider, TypeId)>, TyperError> {
-        let (body, arity) = match self.store.types.get(signature) {
-            Type::Poly(poly) => (poly.result, poly.params.len()),
-            _ => (signature, 0),
-        };
-        let Some(result) = self.contextual_factory_result(body, site)? else {
+        let Some(open) = self.contextual_provider_head(reference, signature, site)? else {
             return Ok(None);
         };
         let Some((input, output)) =
-            self.member_conversion_signature(result, class, site, journal)?
+            self.member_conversion_signature(open.result, class, site, journal)?
         else {
             return Ok(None);
         };
-        let (type_arguments, callable, result, input, output) = if arity > 0 {
-            let mut inferred = vec![None; arity];
-            if !self.infer_conversion_input(
-                signature,
-                input,
-                receiver,
-                &mut inferred,
-                site,
-                journal,
-            )? {
-                return Ok(None);
-            }
-            let Some(arguments) = inferred.into_iter().collect::<Option<Vec<_>>>() else {
-                return Ok(None);
-            };
-            let Some(callable) =
-                self.instantiate_provider_signature(signature, &arguments, site, journal)?
-            else {
-                return Ok(None);
-            };
-            let Some(result) = self.contextual_factory_result(callable, site)? else {
-                return Ok(None);
-            };
-            let Some((input, output)) =
-                self.member_conversion_signature(result, class, site, journal)?
-            else {
-                return Ok(None);
-            };
-            (arguments, callable, result, input, output)
+        let Some(provider) =
+            self.instantiate_receiver_provider(open, input, receiver, site, journal)?
+        else {
+            return Ok(None);
+        };
+        let (input, output) = if provider.type_arguments.is_empty() {
+            (input, output)
         } else {
-            (Vec::new(), signature, result, input, output)
+            let Some(base) =
+                self.member_conversion_signature(provider.result, class, site, journal)?
+            else {
+                return Ok(None);
+            };
+            base
         };
         if !self.contextual_conforms(receiver, input, site, journal)? {
             return Ok(None);
         }
-        Ok(Some((
-            Provider {
-                reference,
-                type_arguments,
-                callable,
-                result,
-            },
-            output,
-        )))
+        Ok(Some((provider, output)))
     }
 
     /// Extract the input and output of a canonical `Conversion[In, Out]` base.

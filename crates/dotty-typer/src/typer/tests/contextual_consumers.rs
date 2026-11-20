@@ -1073,3 +1073,154 @@ fn trailing_implicit_conversion_preserves_the_failure_site_and_conflicting_witne
         assert!(typer.typed_index.is_empty());
     }
 }
+
+const CONDITIONAL_EXTENSIONS: &str =
+    include_str!("../../../tests/fixtures/contextual-consumers/ConditionalExtensions.scala");
+
+#[test]
+fn conditional_extension_infers_the_factory_and_selects_its_method() {
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(CONDITIONAL_EXTENSIONS);
+    let factory = method_symbol(&parsed, &store, &index, source, "ops");
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "selected");
+    let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+        panic!()
+    };
+    let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+        panic!()
+    };
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    typer.type_method_definition(tree).unwrap();
+    let root = typer.typed_index.get(source, rhs).unwrap();
+    let ast = typer.typed_ast();
+    let TreeKind::Apply(ordinary) = &ast.get(root).kind else {
+        panic!("ordinary clause")
+    };
+    let TreeKind::Apply(receiver) = &ast.get(ordinary.function).kind else {
+        panic!("extension receiver")
+    };
+    let TreeKind::Select(render) = &ast.get(receiver.function).kind else {
+        panic!("extension selection")
+    };
+    let TreeKind::Apply(provider) = &ast.get(render.qualifier).kind else {
+        panic!("provider evidence")
+    };
+    let TreeKind::TypeApply(poly) = &ast.get(provider.function).kind else {
+        panic!("inferred type argument")
+    };
+    assert_eq!(typed_reference(&typer, poly.function), factory);
+    assert_eq!(ast.get(poly.args[0]).ty, defs.int);
+    assert_eq!(ast.get(root).ty, defs.int);
+    assert_eq!(typer.store.names.resolve(render.name.text()), "render");
+    assert_eq!(
+        Some(typed_reference(&typer, receiver.args[0])),
+        index.symbol_at(source, def.value_param_clauses[0][0])
+    );
+    assert_eq!(
+        Some(typed_reference(&typer, provider.args[0])),
+        index.symbol_at(source, def.value_param_clauses[1][0])
+    );
+}
+
+#[test]
+fn conditional_extension_dependency_failure_preserves_alternatives() {
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(CONDITIONAL_EXTENSIONS);
+    let resolver = super::contextual_binary::library_resolver(defs, &packages);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages)
+        .with_resolver(Box::new(resolver));
+    for (name, companion_name, evidence) in [
+        ("fromCompanion", "Parcel", "fallback"),
+        ("fromConversion", "Converted", "view"),
+    ] {
+        let cls = class_symbol(&parsed, typer.store(), &index, source, companion_name);
+        let companion = typer.store.symbols.get(cls).links.companion.unwrap();
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+            panic!()
+        };
+        typer.type_method_definition(tree).unwrap();
+        let ast = typer.typed_ast();
+        let TreeKind::Apply(call) = &ast.get(typer.typed_index.get(source, rhs).unwrap()).kind
+        else {
+            panic!("ordinary arguments")
+        };
+        let select = |tree| match &ast.get(tree).kind {
+            TreeKind::Select(s) => s,
+            _ => panic!("selection"),
+        };
+        let apply = |tree| match &ast.get(tree).kind {
+            TreeKind::Apply(a) => a,
+            _ => panic!("application"),
+        };
+        let selected = if name == "fromCompanion" {
+            select(apply(call.function).function).qualifier
+        } else {
+            select(apply(select(call.function).qualifier).function).qualifier
+        };
+        assert_eq!(
+            typer.store.names.resolve(select(selected).name.text()),
+            evidence
+        );
+        assert_eq!(
+            typed_reference(&typer, select(selected).qualifier),
+            companion
+        );
+    }
+}
+
+#[test]
+fn conditional_extension_attributes_missing_and_ambiguous_evidence_to_the_selection() {
+    let extra = include_str!(
+        "../../../tests/fixtures/contextual-consumers/ConditionalExtensionsRejected.scala"
+    );
+    let text = format!(
+        "{CONDITIONAL_EXTENSIONS}\n{}",
+        extra.strip_prefix("package conditionalext").unwrap()
+    );
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(&text);
+    let factory = method_symbol(&parsed, &store, &index, source, "ops");
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for name in ["missing", "ambiguous"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+            panic!()
+        };
+        let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+            panic!()
+        };
+        let TreeKind::Apply(call) = &parsed.ast.get(rhs).kind else {
+            panic!()
+        };
+        let before = typer.store.checkpoint();
+        let err = typer.type_method_definition(tree).unwrap_err();
+        let TyperError::ExtensionProviderDependency {
+            source: at,
+            tree_index,
+            name: selected,
+            provider,
+            cause,
+        } = err
+        else {
+            panic!("{err:?}")
+        };
+        assert_eq!(
+            (at, tree_index, provider),
+            (source, call.function.index(), factory)
+        );
+        assert_eq!(typer.store.names.resolve(selected.text()), "render");
+        match *cause {
+            TyperError::MissingContextualArgument { .. } if name == "missing" => {}
+            TyperError::AmbiguousContextualArgument { candidates, .. } if name == "ambiguous" => {
+                assert_eq!(
+                    candidates,
+                    def.value_param_clauses[1]
+                        .iter()
+                        .map(|&p| index.symbol_at(source, p).unwrap())
+                        .collect::<Vec<_>>()
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(typer.store.checkpoint(), before);
+        assert!(typer.typed_index.is_empty());
+    }
+}

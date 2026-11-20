@@ -2,6 +2,11 @@
 
 use super::*;
 
+pub(in crate::typer) enum ExtensionLookup {
+    Selected(TreeId<Typed>, TypeId),
+    Missing(Option<TyperError>),
+}
+
 impl SourceTyper<'_> {
     /// Select an extension on a contextual receiver after ordinary member
     /// lookup has reported that the call has no applicable nominal member.
@@ -12,21 +17,39 @@ impl SourceTyper<'_> {
         context: ExpressionContext,
         tree_index: u32,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
-    ) -> Result<Option<(TreeId<Typed>, TypeId)>, TyperError> {
+    ) -> Result<ExtensionLookup, TyperError> {
+        let mut search = AdaptationSearch::default();
         for level in self.contextual_scopes(context, tree_index)? {
             let refs = self.contextual_scope_refs(level, tree_index, journal)?;
-            if let Some(method) =
-                self.extension_from_refs(refs, name, receiver, context, tree_index, journal)?
-            {
-                return Ok(Some(method));
+            if let Some((function, signature)) = self.extension_from_refs(
+                refs,
+                name,
+                receiver,
+                context,
+                tree_index,
+                &mut search,
+                journal,
+            )? {
+                return Ok(ExtensionLookup::Selected(function, signature));
             }
         }
-        let Some(refs) = self.adaptation_companion_refs(receiver, tree_index, journal)? else {
-            return Ok(None);
-        };
-        self.extension_from_refs(refs, name, receiver, context, tree_index, journal)
+        if let Some(refs) = self.adaptation_companion_refs(receiver, tree_index, journal)?
+            && let Some((function, signature)) = self.extension_from_refs(
+                refs,
+                name,
+                receiver,
+                context,
+                tree_index,
+                &mut search,
+                journal,
+            )?
+        {
+            return Ok(ExtensionLookup::Selected(function, signature));
+        }
+        Ok(ExtensionLookup::Missing(search.dependency_failure))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn extension_from_refs(
         &mut self,
         refs: Vec<ContextualRef>,
@@ -34,6 +57,7 @@ impl SourceTyper<'_> {
         receiver: TypeId,
         context: ExpressionContext,
         tree_index: u32,
+        search: &mut AdaptationSearch,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Option<(TreeId<Typed>, TypeId)>, TyperError> {
         let mut candidates = Vec::new();
@@ -44,9 +68,13 @@ impl SourceTyper<'_> {
             }
             let view =
                 self.contextual_reference_signature(evidence, context.owner, tree_index, journal)?;
-            let tycon = match self.store.types.try_get(view) {
+            let Some(open) = self.contextual_provider_head(evidence, view, tree_index)? else {
+                continue;
+            };
+            let result = open.result;
+            let tycon = match self.store.types.try_get(result) {
                 Some(Type::Applied { tycon, .. }) => *tycon,
-                _ => view,
+                _ => result,
             };
             let Some(Type::TypeRef {
                 target: TypeRefTarget::Symbol(class),
@@ -65,7 +93,7 @@ impl SourceTyper<'_> {
                 continue;
             }
             let members = self
-                .lookup_members_journaled(view, name, journal)
+                .lookup_members_journaled(result, name, journal)
                 .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
             for member in members {
                 if !self
@@ -84,14 +112,52 @@ impl SourceTyper<'_> {
                     continue;
                 }
                 let signature = self.member_type_on_journaled(&member, journal)?;
-                let Some(Type::Method(first)) = self.store.types.try_get(signature) else {
+                let Some(input) = self.extension_receiver(signature) else {
                     continue;
                 };
-                if first.kind != MethodKind::Plain || first.params.len() != 1 {
+                let Some(provider) = self.instantiate_receiver_provider(
+                    open.clone(),
+                    input,
+                    receiver,
+                    tree_index,
+                    journal,
+                )?
+                else {
+                    continue;
+                };
+                let (signature, input) = if provider.type_arguments.is_empty() {
+                    (signature, input)
+                } else {
+                    // Get the member as seen on the instantiated provider, including inherited members.
+                    let Some(instantiated) = self
+                        .lookup_members_journaled(provider.result, name, journal)
+                        .map_err(|e| TyperError::MemberLookup(Box::new(e)))?
+                        .into_iter()
+                        .find(|m| m.symbol == member.symbol)
+                    else {
+                        continue;
+                    };
+                    let signature = self.member_type_on_journaled(&instantiated, journal)?;
+                    let Some(input) = self.extension_receiver(signature) else {
+                        continue;
+                    };
+                    (signature, input)
+                };
+                if !self.contextual_conforms(receiver, input, tree_index, journal)? {
                     continue;
                 }
-                let expected_receiver = first.params[0].ty;
-                if !self.contextual_conforms(receiver, expected_receiver, tree_index, journal)? {
+                if let Some(cause) =
+                    search.dependency_error(self, &provider, context, tree_index)?
+                {
+                    search.dependency_failure.get_or_insert_with(|| {
+                        TyperError::ExtensionProviderDependency {
+                            source: self.source,
+                            tree_index,
+                            name,
+                            provider: evidence.symbol,
+                            cause: Box::new(cause),
+                        }
+                    });
                     continue;
                 }
                 if candidates
@@ -104,15 +170,7 @@ impl SourceTyper<'_> {
                         name,
                     });
                 }
-                candidates.push((
-                    Provider {
-                        reference: evidence,
-                        type_arguments: Vec::new(),
-                        callable: view,
-                        result: view,
-                    },
-                    Ok((member.symbol, signature)),
-                ));
+                candidates.push((provider, Ok((member.symbol, signature))));
             }
         }
         let Some((provider, (symbol, signature))) =
@@ -120,8 +178,7 @@ impl SourceTyper<'_> {
         else {
             return Ok(None);
         };
-        let qualifier =
-            self.contextual_reference_tree(provider.reference, context, tree_index, None, journal)?;
+        let qualifier = search.materialize(self, &provider, context, tree_index, journal)?;
         let ty = self.store.types.alloc(Type::TermRef {
             prefix: self.typed_arena.get(qualifier).ty,
             target: TermRefTarget::Symbol(symbol),
@@ -129,5 +186,15 @@ impl SourceTyper<'_> {
         let function = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
             .select(qualifier, name, false, ty, None);
         Ok(Some((function, signature)))
+    }
+
+    fn extension_receiver(&self, signature: TypeId) -> Option<TypeId> {
+        let Type::Method(method) = self.store.types.try_get(signature)? else {
+            return None;
+        };
+        let [param] = method.params.as_slice() else {
+            return None;
+        };
+        (method.kind == MethodKind::Plain).then_some(param.ty)
     }
 }

@@ -1,6 +1,7 @@
 //! Candidate discovery, filtering, and selection for callable overloads.
 
 use super::super::*;
+use crate::typer::contextual::ExtensionLookup;
 use dotty_core::types::MethodParam;
 use dotty_core::{Namespace, Symbol, SymbolLinks, TermName};
 
@@ -1188,7 +1189,7 @@ impl SourceTyper<'_> {
             )?;
             (reference, signature)
         } else {
-            let Some(selected) = self.contextual_extension(
+            let ExtensionLookup::Selected(function, signature) = self.contextual_extension(
                 selection.name,
                 receiver_widened_type,
                 context,
@@ -1198,7 +1199,7 @@ impl SourceTyper<'_> {
             else {
                 return Ok(None);
             };
-            selected
+            (function, signature)
         };
         let Some(Type::Method(receiver_clause)) = self.store.types.try_get(signature).cloned()
         else {
