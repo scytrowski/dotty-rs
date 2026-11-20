@@ -131,6 +131,7 @@ impl SourceTyper<'_> {
                     0,
                 )?;
                 let request = ApplicationRequest {
+                    following_using: None,
                     function_tree: source_tree,
                     argument_trees: std::slice::from_ref(&source_tree),
                     application_kind: ApplyKind::Regular,

@@ -14,6 +14,18 @@ def main():
     toolchain = runpy.run_path(str(ROOT / "tools/tasty-pickler-oracle/run.py"))["Toolchain"]()
     with tempfile.TemporaryDirectory() as out:
         for sources, status, *expected in [
+            (["ExtensionUsingOverloads.scala"], 0,
+             "this.ops[Int](tc).render(x)(3)(using c)", "this.ops[Int](tc).render(x)(3)(using d)"),
+            (["ExtensionUsingOverloads.scala", "ExtensionUsingOverloadsRejected.scala"], 1,
+             "def probeOne", "def probeBoth", "Ambiguous overload.", "both match arguments",
+             "def probeWrong", "this.ops[Int](tc).render()", "3 errors found"),
+            (["OverloadedExtensions.scala"], 0,
+             "this.ops[Int](tc).render(x)(3)(fmt)", "this.ops[Int](tc).render(x)(true)",
+             "extnext.Convertible.view.apply(x).render(3L)"),
+            (["OverloadedExtensions.scala", "OverloadedExtensionsRejected.scala"], 1,
+             "[E172]", "No given instance of type extnext.Format was found for parameter fmt",
+             "[E008]", "value render is not a member of extnext.Box[Int]",
+             "this.ops[Int](tc).render()", "2 errors found"),
             (["ConditionalExtensions.scala"], 0,
              "this.ops[Int](tc).render(x)(3)", "conditionalext.Parcel.fallback.render(x)(3)",
              "conditionalext.Converted.view.apply(x).render(3)",

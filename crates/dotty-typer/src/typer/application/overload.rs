@@ -1,7 +1,8 @@
 //! Candidate discovery, filtering, and selection for callable overloads.
 
 use super::super::*;
-use crate::typer::contextual::ExtensionLookup;
+use crate::typer::contextual::{ExtensionCall, ExtensionLookup};
+use crate::typer::expression::SelectedMemberRequest;
 use dotty_core::types::MethodParam;
 use dotty_core::{Namespace, Symbol, SymbolLinks, TermName};
 
@@ -522,6 +523,7 @@ impl SourceTyper<'_> {
             application_kind,
             context,
             tree_index: application_tree_index,
+            ..
         } = request;
         let Some(function_node) = self.arena.try_get(function_tree).cloned() else {
             return Err(TyperError::TreeOutsideArena {
@@ -743,11 +745,7 @@ impl SourceTyper<'_> {
                         if let Some(resolved) = self.resolve_local_extension_application(
                             selection,
                             qualifier,
-                            argument_trees,
-                            application_kind,
-                            context,
-                            function_tree,
-                            application_tree_index,
+                            request,
                             info_journal,
                             new_mappings,
                         )? {
@@ -812,11 +810,7 @@ impl SourceTyper<'_> {
                                         .resolve_local_extension_application(
                                             selection,
                                             qualifier,
-                                            argument_trees,
-                                            application_kind,
-                                            context,
-                                            function_tree,
-                                            application_tree_index,
+                                            request,
                                             info_journal,
                                             new_mappings,
                                         )?
@@ -1027,11 +1021,7 @@ impl SourceTyper<'_> {
                     && let Some(resolved) = self.resolve_local_extension_application(
                         *selection,
                         *qualifier,
-                        argument_trees,
-                        application_kind,
-                        context,
-                        function_tree,
-                        application_tree_index,
+                        request,
                         info_journal,
                         new_mappings,
                     )?
@@ -1123,19 +1113,22 @@ impl SourceTyper<'_> {
         }))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn resolve_local_extension_application(
         &mut self,
         selection: dotty_core::ast::Select<Untyped>,
         qualifier: TreeId<Typed>,
-        argument_trees: &[TreeId<Untyped>],
-        application_kind: ApplyKind,
-        context: ExpressionContext,
-        function_tree: TreeId<Untyped>,
-        application_tree_index: u32,
+        request: ApplicationRequest<'_>,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<Option<ResolvedApplicationFunction>, TyperError> {
+        let ApplicationRequest {
+            function_tree,
+            argument_trees,
+            application_kind,
+            context,
+            tree_index: application_tree_index,
+            following_using,
+        } = request;
         if application_kind != ApplyKind::Regular {
             return Ok(None);
         }
@@ -1161,6 +1154,7 @@ impl SourceTyper<'_> {
                     .flags
                     .contains(SymbolFlags::EXTENSION)
         });
+        let mut typed_arguments = None;
         let (typed_function, signature) = if let Some(symbol) = extensions.next() {
             if extensions.next().is_some() {
                 return Err(TyperError::OverloadedSelectionDeferred {
@@ -1189,17 +1183,53 @@ impl SourceTyper<'_> {
             )?;
             (reference, signature)
         } else {
-            let ExtensionLookup::Selected(function, signature) = self.contextual_extension(
+            match self.contextual_extension(
                 selection.name,
                 receiver_widened_type,
                 context,
-                application_tree_index,
+                function_tree.index(),
+                Some(ExtensionCall {
+                    following_using,
+                    arguments: argument_trees,
+                    typed_arguments: &mut typed_arguments,
+                    mappings: new_mappings,
+                }),
                 info_journal,
-            )?
-            else {
-                return Ok(None);
-            };
-            (function, signature)
+            )? {
+                ExtensionLookup::Selected(function, signature) => (function, signature),
+                ExtensionLookup::Missing(Some(error)) if let Some(arguments) = typed_arguments => {
+                    let request = SelectedMemberRequest {
+                        source_qualifier: Some(selection.qualifier),
+                        qualifier,
+                        tree_index: function_tree.index(),
+                        name: selection.name,
+                        backquoted: selection.backquoted,
+                        position: self.arena.get(function_tree).position,
+                        context,
+                    };
+                    let Some(typed) = self.select_member_after_conversion(
+                        request,
+                        receiver_widened_type,
+                        info_journal,
+                    )?
+                    else {
+                        return Err(error);
+                    };
+                    let callable = self.widen_expression_type_journaled(
+                        self.typed_arena.get(typed).ty,
+                        info_journal,
+                        0,
+                    )?;
+                    self.record_typed_child(function_tree, typed, new_mappings)?;
+                    return Ok(Some(ResolvedApplicationFunction {
+                        typed,
+                        callable,
+                        arguments,
+                        argument_trees: None,
+                    }));
+                }
+                ExtensionLookup::Missing(_) => return Ok(None),
+            }
         };
         let Some(Type::Method(receiver_clause)) = self.store.types.try_get(signature).cloned()
         else {
@@ -1240,22 +1270,12 @@ impl SourceTyper<'_> {
             own_type: receiver_own_type,
             widened_type: receiver_widened_type,
         };
-        let mut arguments = Vec::with_capacity(argument_trees.len());
-        for argument_tree in argument_trees {
-            let typed = self.type_value_expression_inner(
-                *argument_tree,
-                context,
-                info_journal,
-                new_mappings,
-            )?;
-            let own_type = self.typed_arena.get(typed).ty;
-            let widened_type = self.widen_expression_type_journaled(own_type, info_journal, 0)?;
-            arguments.push(TypedArgument {
-                typed,
-                own_type,
-                widened_type,
-            });
-        }
+        let arguments = match typed_arguments {
+            Some(arguments) => arguments,
+            None => {
+                self.type_extension_arguments(argument_trees, context, info_journal, new_mappings)?
+            }
+        };
         for (index, argument) in arguments.iter().enumerate() {
             let expected = method.params[index].ty;
             let actual =
@@ -1297,6 +1317,32 @@ impl SourceTyper<'_> {
             arguments,
             argument_trees: None,
         }))
+    }
+
+    pub(in crate::typer) fn type_extension_arguments(
+        &mut self,
+        argument_trees: &[TreeId<Untyped>],
+        context: ExpressionContext,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<Vec<TypedArgument>, TyperError> {
+        let mut arguments = Vec::with_capacity(argument_trees.len());
+        for argument_tree in argument_trees {
+            let typed = self.type_value_expression_inner(
+                *argument_tree,
+                context,
+                info_journal,
+                new_mappings,
+            )?;
+            let own_type = self.typed_arena.get(typed).ty;
+            let widened_type = self.widen_expression_type_journaled(own_type, info_journal, 0)?;
+            arguments.push(TypedArgument {
+                typed,
+                own_type,
+                widened_type,
+            });
+        }
+        Ok(arguments)
     }
 
     fn single_member_application_applicability(

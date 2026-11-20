@@ -56,6 +56,9 @@ pub fn typer_error_span_with<'a>(
         | TyperError::ExpectedExpressionTypeMismatch {
             source, tree_index, ..
         }
+        | TyperError::ExtensionOverload {
+            source, tree_index, ..
+        }
         | TyperError::ExtensionProviderDependency {
             source, tree_index, ..
         }

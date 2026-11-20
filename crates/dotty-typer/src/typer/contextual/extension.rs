@@ -7,6 +7,19 @@ pub(in crate::typer) enum ExtensionLookup {
     Missing(Option<TyperError>),
 }
 
+pub(in crate::typer) struct ExtensionCall<'a> {
+    pub arguments: &'a [TreeId<Untyped>],
+    pub following_using: Option<&'a [TreeId<Untyped>]>,
+    pub typed_arguments: &'a mut Option<Vec<TypedArgument>>,
+    pub mappings: &'a mut Vec<(SourceId, TreeId<Untyped>)>,
+}
+
+struct ExtensionAlternative {
+    provider: Provider,
+    symbol: SymbolId,
+    signature: TypeId,
+}
+
 impl SourceTyper<'_> {
     /// Select an extension on a contextual receiver after ordinary member
     /// lookup has reported that the call has no applicable nominal member.
@@ -16,6 +29,7 @@ impl SourceTyper<'_> {
         receiver: TypeId,
         context: ExpressionContext,
         tree_index: u32,
+        mut call: Option<ExtensionCall<'_>>,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<ExtensionLookup, TyperError> {
         let mut search = AdaptationSearch::default();
@@ -28,6 +42,7 @@ impl SourceTyper<'_> {
                 context,
                 tree_index,
                 &mut search,
+                call.as_mut(),
                 journal,
             )? {
                 return Ok(ExtensionLookup::Selected(function, signature));
@@ -41,6 +56,7 @@ impl SourceTyper<'_> {
                 context,
                 tree_index,
                 &mut search,
+                call.as_mut(),
                 journal,
             )?
         {
@@ -58,6 +74,7 @@ impl SourceTyper<'_> {
         context: ExpressionContext,
         tree_index: u32,
         search: &mut AdaptationSearch,
+        mut call: Option<&mut ExtensionCall<'_>>,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Option<(TreeId<Typed>, TypeId)>, TyperError> {
         let mut candidates = Vec::new();
@@ -95,6 +112,7 @@ impl SourceTyper<'_> {
             let members = self
                 .lookup_members_journaled(result, name, journal)
                 .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+            let mut alternatives = Vec::new();
             for member in members {
                 if !self
                     .store
@@ -160,17 +178,54 @@ impl SourceTyper<'_> {
                     });
                     continue;
                 }
-                if candidates
-                    .iter()
-                    .any(|(p, _): &(Provider, _)| p.reference == evidence)
-                {
+                alternatives.push(ExtensionAlternative {
+                    provider,
+                    symbol: member.symbol,
+                    signature,
+                });
+            }
+            if alternatives.len() > 1 {
+                let Some(call) = call.as_deref_mut() else {
                     return Err(TyperError::OverloadedSelectionDeferred {
                         source: self.source,
                         tree_index,
                         name,
                     });
-                }
-                candidates.push((provider, Ok((member.symbol, signature))));
+                };
+                let winner = match self.choose_extension_overload(
+                    &alternatives,
+                    call,
+                    context,
+                    tree_index,
+                    journal,
+                ) {
+                    Ok(symbol) => symbol,
+                    Err(
+                        cause @ (TyperError::OverloadApplicationNoApplicable {
+                            tree_index: site,
+                            ..
+                        }
+                        | TyperError::AmbiguousOverloadApplication {
+                            tree_index: site, ..
+                        }),
+                    ) if site == tree_index => {
+                        search
+                            .dependency_failure
+                            .get_or_insert(TyperError::ExtensionOverload {
+                                source: self.source,
+                                tree_index,
+                                name,
+                                provider: evidence.symbol,
+                                cause: Box::new(cause),
+                            });
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                alternatives.retain(|alt| alt.symbol == winner);
+            }
+            if let Some(alt) = alternatives.pop() {
+                candidates.push((alt.provider, Ok((alt.symbol, alt.signature))));
             }
         }
         let Some((provider, (symbol, signature))) =
@@ -186,6 +241,88 @@ impl SourceTyper<'_> {
         let function = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
             .select(qualifier, name, false, ty, None);
         Ok(Some((function, signature)))
+    }
+
+    fn choose_extension_overload(
+        &mut self,
+        alternatives: &[ExtensionAlternative],
+        call: &mut ExtensionCall<'_>,
+        context: ExpressionContext,
+        tree_index: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<SymbolId, TyperError> {
+        let arguments = match &mut *call.typed_arguments {
+            Some(typed) => typed.as_slice(),
+            slot @ None => slot
+                .insert(self.type_extension_arguments(
+                    call.arguments,
+                    context,
+                    journal,
+                    call.mappings,
+                )?)
+                .as_slice(),
+        };
+        let mut candidates = self.extension_overload_candidates(alternatives, tree_index)?;
+        let mut resolution = self.choose_overload_candidate(
+            &mut candidates,
+            arguments,
+            tree_index,
+            ApplyKind::Regular,
+        );
+        if let Err(TyperError::AmbiguousOverloadApplication {
+            candidates: tied, ..
+        }) = &resolution
+            && let Some(using) = call.following_using
+        {
+            // Only written arguments can distinguish otherwise identical ordinary clauses.
+            candidates.retain_mut(|candidate| {
+                let Type::Method(ordinary) = self.store.types.get(candidate.callable) else {
+                    return false;
+                };
+                candidate.callable = ordinary.result;
+                tied.contains(&candidate.symbol)
+                    && matches!(self.store.types.get(candidate.callable), Type::Method(_))
+            });
+            let explicit = self.type_extension_arguments(using, context, journal, call.mappings)?;
+            resolution = self.choose_overload_candidate(
+                &mut candidates,
+                &explicit,
+                tree_index,
+                ApplyKind::Using,
+            );
+        }
+        resolution.map(|candidate| candidate.symbol)
+    }
+
+    fn extension_overload_candidates(
+        &self,
+        alternatives: &[ExtensionAlternative],
+        tree_index: u32,
+    ) -> Result<Vec<ApplicationCandidate>, TyperError> {
+        let mut candidates = Vec::with_capacity(alternatives.len());
+        for alt in alternatives {
+            let Type::Method(receiver) = self.store.types.get(alt.signature) else {
+                return Err(TyperError::MalformedOverloadCandidate {
+                    symbol: alt.symbol,
+                    callable: alt.signature,
+                });
+            };
+            let callable = receiver.result;
+            if !matches!(self.store.types.get(callable), Type::Method(_)) {
+                return Err(TyperError::OverloadResolutionRequiresUnsupportedCandidate {
+                    source: self.source,
+                    tree_index,
+                    candidate: alt.symbol,
+                });
+            }
+            candidates.push(ApplicationCandidate {
+                symbol: alt.symbol,
+                callable,
+                member: None,
+                rejection: None,
+            });
+        }
+        Ok(candidates)
     }
 
     fn extension_receiver(&self, signature: TypeId) -> Option<TypeId> {

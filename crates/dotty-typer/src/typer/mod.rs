@@ -671,6 +671,17 @@ impl<'a> SourceTyper<'a> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
+        self.type_expression_with_following_using(tree, context, None, info_journal, new_mappings)
+    }
+
+    fn type_expression_with_following_using(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: ExpressionContext,
+        following_using: Option<&[TreeId<Untyped>]>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
         if let Some(typed) = self.typed_index.get(self.source, tree) {
             self.validate_value_expression(tree, typed)?;
             self.validate_cached_parent_argument_receiver_access(tree, typed)?;
@@ -687,7 +698,13 @@ impl<'a> SourceTyper<'a> {
         }
         let typed = match source_tree.kind {
             TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => self
-                .type_parenthesized_expression(parens.inner, context, info_journal, new_mappings),
+                .type_parenthesized_expression(
+                    parens.inner,
+                    context,
+                    following_using,
+                    info_journal,
+                    new_mappings,
+                ),
             TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => self.type_infix_expression(
                 tree,
                 infix,
@@ -806,7 +823,7 @@ impl<'a> SourceTyper<'a> {
             TreeKind::Apply(application) => self.type_application(
                 tree,
                 application,
-                source_tree.position,
+                following_using,
                 context,
                 info_journal,
                 new_mappings,

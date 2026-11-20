@@ -1432,6 +1432,40 @@ impl SourceTyper<'_> {
         )
     }
 
+    pub(in crate::typer) fn select_member_after_conversion(
+        &mut self,
+        request: SelectedMemberRequest,
+        receiver: TypeId,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Option<TreeId<Typed>>, TyperError> {
+        let Some(source) = request.source_qualifier else {
+            return Ok(None);
+        };
+        let Some(converted) = self.try_conversion(
+            source,
+            request.qualifier,
+            receiver,
+            crate::typer::contextual::ConversionUse::Member {
+                name: request.name,
+                site: request.tree_index,
+            },
+            request.context,
+            journal,
+        )?
+        else {
+            return Ok(None);
+        };
+        self.type_selected_member_on_qualifier(
+            SelectedMemberRequest {
+                source_qualifier: None,
+                qualifier: converted,
+                ..request
+            },
+            journal,
+        )
+        .map(Some)
+    }
+
     /// Selects a member from a qualifier already typed by the caller.
     pub(in crate::typer) fn type_selected_member_on_qualifier(
         &mut self,
@@ -1439,7 +1473,7 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TreeId<Typed>, TyperError> {
         let SelectedMemberRequest {
-            source_qualifier,
+            source_qualifier: _,
             tree_index,
             qualifier,
             name,
@@ -1555,6 +1589,7 @@ impl SourceTyper<'_> {
                         receiver,
                         context,
                         tree_index,
+                        None,
                         info_journal,
                     )? {
                         ExtensionLookup::Selected(extension, signature) => {
@@ -1576,27 +1611,10 @@ impl SourceTyper<'_> {
                     }
                 }
                 if !java_class_qualifier
-                    && let Some(source) = source_qualifier
-                    && let Some(converted) = self.try_conversion(
-                        source,
-                        qualifier,
-                        receiver,
-                        crate::typer::contextual::ConversionUse::Member {
-                            name,
-                            site: tree_index,
-                        },
-                        context,
-                        info_journal,
-                    )?
+                    && let Some(selected) =
+                        self.select_member_after_conversion(request, receiver, info_journal)?
                 {
-                    return self.type_selected_member_on_qualifier(
-                        SelectedMemberRequest {
-                            source_qualifier: None,
-                            qualifier: converted,
-                            ..request
-                        },
-                        info_journal,
-                    );
+                    return Ok(selected);
                 }
                 return Err(failure.unwrap_or(TyperError::MemberNotFound {
                     source: self.source,

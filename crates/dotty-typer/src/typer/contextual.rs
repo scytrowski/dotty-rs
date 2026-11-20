@@ -12,7 +12,7 @@ pub(super) use conversions::{
 };
 mod defaults;
 mod extension;
-pub(super) use extension::ExtensionLookup;
+pub(super) use extension::{ExtensionCall, ExtensionLookup};
 mod opaque;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,6 +138,7 @@ impl SourceTyper<'_> {
             return Ok(adapted);
         }
         let request = ApplicationRequest {
+            following_using: None,
             function_tree: source_tree,
             argument_trees: &[],
             application_kind: ApplyKind::Using,
