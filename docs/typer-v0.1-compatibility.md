@@ -2190,7 +2190,11 @@ individual member symbols, reports a closed path for cycles involving fields,
 and retries blocked fields after their dependencies complete. Completed fields
 retain their types across retries. A field error includes the class and field
 symbols and the original `TyperError`. The later `type_class_body` call
-produces the typed initializers used by the backend.
+produces the typed initializers used by the backend. Clients that resolve
+binary dependencies can pass the same mutable `SymbolResolver` to
+`dotty::type_class_body_with_resolver` for successive classes in that session.
+For example, the external client uses the JDK classpath resolver to check a
+string literal against a source method parameter.
 
 For a call with the wrong number of arguments, pass the original
 `TyperError::ApplicationArityMismatch` and its untyped AST to

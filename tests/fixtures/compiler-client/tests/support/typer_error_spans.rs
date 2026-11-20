@@ -6,9 +6,9 @@ use dotty::typer::TyperError;
 
 #[test]
 fn cross_file_diagnostic_tracks_an_unsaved_edit_in_utf16() {
-    use super::{name_units, parsing};
+    use super::{name_units, named_classes, parsing};
     use dotty::classloader::{ClasspathSymbolResolver, JmodClassPath, LoadingSession};
-    use dotty::core::{Packages, SemanticStore, SourceId, SourceText};
+    use dotty::core::{Packages, SemanticStore, SourceId, SourceText, SymbolResolver};
     use std::path::PathBuf;
 
     let a = SourceId::from_index(7);
@@ -17,7 +17,11 @@ fn cross_file_diagnostic_tracks_an_unsaved_edit_in_utf16() {
     let analyze = |buffer: &str| {
         let files = [
             (b, "B.scala", buffer),
-            (a, "A.scala", "class A { def take(n: Int): Int = n }"),
+            (
+                a,
+                "A.scala",
+                r#"class A { def take(n: Int): Int = n; def label(): Any = "A" }"#,
+            ),
         ];
         let mut store = SemanticStore::new();
         let defs = Definitions::bootstrap(&mut store);
@@ -30,39 +34,35 @@ fn cross_file_diagnostic_tracks_an_unsaved_edit_in_utf16() {
         );
         let mut headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
         let sources = SignatureSources::new(&units, &store);
-        let [caller, provider] = units.as_slice() else {
-            panic!("expected two sources")
-        };
-        dotty::type_class_body(
-            &provider.classes[0],
-            &provider.ast,
-            &provider.index,
-            &mut store,
-            defs,
-            &packages,
-            &mut headers.arena,
-        )
-        .unwrap();
-
         // Keep the loader's generic class metadata available during conformance checking.
         let jdk =
             PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME for the client tests"));
-        let resolver = ClasspathSymbolResolver::new(
+        let mut resolver = ClasspathSymbolResolver::new(
             JmodClassPath::new(jdk.join("jmods/java.base.jmod")).unwrap(),
             defs,
             LoadingSession::with_packages(packages),
         );
         let local_packages = Packages::new();
-        let mut typer = caller
-            .typer(&mut store, defs, &local_packages)
-            .with_resolver(Box::new(resolver));
         let mut diagnostics = Vec::new();
-        for method in caller.methods() {
-            let before = typer.store().checkpoint();
-            let Err(error) = typer.type_method_definition(method.tree) else {
-                continue;
+        for (unit, class) in named_classes(&units) {
+            let before = store.checkpoint();
+            let resolver_before = resolver.checkpoint();
+            let error = match dotty::type_class_body_with_resolver(
+                class,
+                &unit.ast,
+                &unit.index,
+                &mut store,
+                defs,
+                &local_packages,
+                &mut headers.arena,
+                &mut resolver,
+            ) {
+                Ok(_) => continue,
+                Err(dotty::ClassBodyError::Member { error, .. }) => error,
+                Err(other) => panic!("unexpected class error: {other:?}"),
             };
-            assert_eq!(typer.store().checkpoint(), before);
+            assert_eq!(store.checkpoint(), before);
+            assert_eq!(resolver.checkpoint(), resolver_before);
             let TyperError::ApplicationArgumentTypeMismatch {
                 source,
                 argument_index,
@@ -95,7 +95,6 @@ fn cross_file_diagnostic_tracks_an_unsaved_edit_in_utf16() {
                 message,
             ));
         }
-        assert!(typer.diagnostics().is_empty(), "{:?}", typer.diagnostics());
         diagnostics
     };
 
