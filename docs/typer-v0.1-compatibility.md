@@ -2218,6 +2218,13 @@ For a parameterless method, `provider.value(1)` reports
 `Expected 0 arguments, got 1` at the whole call in either phase.
 Other typer errors retain their display text.
 
+`ClassFieldSignatureError::diagnostic` produces the same report for a field
+completed through the class-wide field pass. For constructor and class header
+errors, pass the original `TyperError` directly to `TypingDiagnostic::from_typer`.
+For example, if `Base` expects an `Int`, checking
+`class Derived(start: Boolean) extends Base(start)` locates the argument
+`start` in the parent call in Derived.scala.
+
 For a direct method call such as `a.take(42)`, pass the original call tree to
 `TypedClassBody::selected_method` with its source arena, the typed arena and
 the store from the same session. The resulting symbol identifies the overload

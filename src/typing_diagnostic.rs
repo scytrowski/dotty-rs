@@ -21,7 +21,11 @@ impl TypingDiagnostic {
         }
     }
 
-    pub(crate) fn from_typer<'a>(
+    /// Reports a typer failure, including after a failed typing attempt has rolled back.
+    /// Supply the original untyped arena for the requested source ID. If the source
+    /// is unavailable or the error cannot be located by [`crate::typer_error_span_with`],
+    /// the message remains available with `location: None`.
+    pub fn from_typer<'a>(
         error: &TyperError,
         ast_for: impl FnOnce(SourceId) -> Option<&'a AstArena<Untyped>>,
     ) -> Self {
