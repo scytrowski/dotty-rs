@@ -49,7 +49,7 @@ pub use member_signature::{MemberSignatureError, try_complete_member_signature};
 
 mod class_body;
 pub use class_body::{
-    ClassBodyCheck, ClassBodyError, check_class_body, type_class_body,
+    ClassBodyCheck, ClassBodyDiagnostic, ClassBodyError, check_class_body, type_class_body,
     type_class_body_with_resolver,
 };
 

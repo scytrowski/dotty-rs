@@ -3,8 +3,9 @@
 use std::fmt;
 
 use crate::core::{
-    AstArena, Definitions, Diagnostic, NoResolver, Packages, SemanticStore, SourceId,
-    SourceSemanticIndex, SourceTypedIndex, SymbolId, SymbolResolver, Typed, Untyped,
+    AstArena, Definitions, Diagnostic, DiagnosticSeverity, NoResolver, Packages, SemanticStore,
+    SourceId, SourceSemanticIndex, SourceSpan, SourceTypedIndex, SymbolId, SymbolResolver, Typed,
+    Untyped,
 };
 use crate::jvm_class_plan::TypedClassBody;
 use crate::source_declarations::{ClassMember, SourceClass};
@@ -21,6 +22,47 @@ pub enum ClassBodyError {
         member: ClassMember,
         error: TyperError,
     },
+}
+
+/// A report derived from a class body failure, including failures without a known source site.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ClassBodyDiagnostic {
+    /// Severity for presentation to the user. Class body failures are errors.
+    pub severity: DiagnosticSeverity,
+    /// Owned text suitable for reporting after rollback.
+    pub message: String,
+    /// Source file and UTF-8 byte span when the error can be located.
+    pub location: Option<SourceSpan>,
+}
+
+impl ClassBodyError {
+    /// Formats this failure after typing, including after a member rollback.
+    /// Supply the original untyped arena for the requested source, or `None` if unavailable.
+    /// Location follows [`crate::typer_error_span_with`]. An invalid class has no source site.
+    pub fn diagnostic<'a>(
+        &self,
+        ast_for: impl FnOnce(SourceId) -> Option<&'a AstArena<Untyped>>,
+    ) -> ClassBodyDiagnostic {
+        let (message, location) = match self {
+            Self::InvalidClass(_) => (self.to_string(), None),
+            Self::Member { error, .. } => {
+                let message = match error {
+                    TyperError::ApplicationArgumentTypeMismatch {
+                        expected_description,
+                        actual_description,
+                        ..
+                    } => format!("Expected {expected_description}, found {actual_description}"),
+                    _ => error.to_string(),
+                };
+                (message, crate::typer_error_span_with(error, ast_for))
+            }
+        };
+        ClassBodyDiagnostic {
+            severity: DiagnosticSeverity::Error,
+            message,
+            location,
+        }
+    }
 }
 
 impl fmt::Display for ClassBodyError {
@@ -230,4 +272,87 @@ fn visit_class_body<E>(
     let (extended, body) = TypedClassBody::from_output(class, typer.into_typed_output());
     *arena = extended;
     Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{DiagnosticSeverity, SourceText, TextRange};
+    use crate::source_declarations::source_classes;
+
+    #[test]
+    fn argument_diagnostic_keeps_its_message_with_or_without_the_source_tree() {
+        let text = "class A { def only(n: Int): Int = n; def bad(): Int = only(false) }";
+        let source = SourceId::from_index(7);
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let parse = |source, store: &mut SemanticStore| {
+            crate::parser::parse_compilation_unit(
+                SourceText::new(text).unwrap(),
+                source,
+                crate::lexer::ContextualScanner::new(text).unwrap(),
+                &mut store.names,
+            )
+        };
+        let parsed = parse(source, &mut store);
+        let foreign = parse(SourceId::from_index(8), &mut store);
+        let index = crate::namer::name_compilation_unit(
+            &parsed.ast,
+            parsed.root,
+            source,
+            "A.scala",
+            &mut store,
+            &mut packages,
+        )
+        .unwrap();
+        let classes = source_classes(&parsed.ast, parsed.root, source, &index, &store).unwrap();
+        let class = &classes[0];
+        let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+        typer.complete_symbol(class.constructor).unwrap();
+        typer.complete_symbol(class.symbol).unwrap();
+        for method in class.methods() {
+            typer.complete_symbol(method.symbol).unwrap();
+        }
+        drop(typer);
+        let failure = type_class_body(
+            class,
+            &parsed.ast,
+            &index,
+            &mut store,
+            defs,
+            &packages,
+            &mut AstArena::new(),
+        )
+        .unwrap_err();
+        let start = text.find("false").unwrap() as u32;
+        for (ast, expected) in [
+            (
+                Some(&parsed.ast),
+                Some((source, TextRange::new(start, start + 5).unwrap())),
+            ),
+            (Some(&foreign.ast), None),
+            (None, None),
+        ] {
+            let diagnostic = failure.diagnostic(|id| {
+                assert_eq!(id, source);
+                ast
+            });
+            assert_eq!(diagnostic.message, "Expected Int, found Boolean");
+            assert_eq!(diagnostic.severity, DiagnosticSeverity::Error);
+            assert_eq!(
+                diagnostic.location.map(|p| (p.source(), p.span().range())),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_class_reports_its_error_without_looking_up_a_source_tree() {
+        let defs = Definitions::bootstrap(&mut SemanticStore::new());
+        let invalid = ClassBodyError::InvalidClass(defs.object_class);
+        let diagnostic = invalid.diagnostic(|_| panic!("invalid class has no source site"));
+        assert_eq!(diagnostic.message, invalid.to_string());
+        assert_eq!(diagnostic.location, None);
+    }
 }

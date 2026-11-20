@@ -2207,6 +2207,13 @@ clause warns at the argument even if another method fails. The arena retains
 the successful members' trees. The original `type_class_body` entry points
 stop at the first failure.
 
+Both entry points return failures reportable with `ClassBodyError::diagnostic`.
+Look up the original untyped AST by source ID. The report carries severity,
+a message and an optional `SourceSpan`. For an `Int` parameter, `only(false)`
+reports `Expected Int, found Boolean` at the five bytes of `false`. A missing
+AST or one belonging to another source leaves the location empty and preserves
+the message. Other member errors retain the typer's display text.
+
 For a direct method call such as `a.take(42)`, pass the original call tree to
 `TypedClassBody::selected_method` with its source arena, the typed arena and
 the store from the same session. The resulting symbol identifies the overload
