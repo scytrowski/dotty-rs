@@ -1135,7 +1135,18 @@ impl SourceTyper<'_> {
                     self.complete_symbol_inner(member, info_journal)?;
                 }
             }
-            match self.conforms(actual, expected_type) {
+            // Complete missing source class signatures before deciding whether the argument needs a conversion.
+            let mut relation = self.conforms(actual, expected_type);
+            if matches!(relation, Err(TypeRelationError::ClassInfoUnavailable {
+                symbol, state: crate::types::SymbolInfoState::Missing,
+            }) if self.is_current_source_symbol(symbol))
+            {
+                let mut seen = HashSet::new();
+                self.complete_relation_type(actual, info_journal, &mut seen, 0)?;
+                self.complete_relation_type(expected_type, info_journal, &mut seen, 0)?;
+                relation = self.conforms(actual, expected_type);
+            }
+            match relation {
                 Ok(true) => {}
                 Ok(false)
                     if is_constructor_application

@@ -14,6 +14,14 @@ def main():
     toolchain = runpy.run_path(str(ROOT / "tools/tasty-pickler-oracle/run.py"))["Toolchain"]()
     with tempfile.TemporaryDirectory() as out:
         for sources, status, *expected in [
+            (["TrailingImplicitConversions.scala"], 0,
+             "this.wrap[Int](x)(tc).show", "this.accept(this.wrap[Int](x)(tc))",
+             "trailingviews.Parcel.fallback(x).show", "this.accept(trailingviews.Parcel.fallback(x))"),
+            (["TrailingImplicitConversions.scala", "TrailingImplicitRejected.scala"], 1,
+             "value show is not a member of trailingviews.Box[Int]",
+             "Found: (x : trailingviews.Box[Int])", "Required: trailingviews.Wrapped[Int]",
+             "Required: ?{ show: ? }", "both parameter second and parameter first match type trailingviews.TC[Int]",
+             "4 errors found"),
             (["ConditionalMemberConversion.scala"], 0,
              "this.wrap[Int](tc).apply(x).show", "this.modern[Int](tc).apply(x).show",
              "this.inheritedAlternative(x).show",

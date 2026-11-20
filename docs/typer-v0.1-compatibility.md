@@ -115,6 +115,14 @@ a known expected type, including ordinary method arguments. For a unary
 `Wrapped[Int]` produces `wrap[Int](x)`. The typer infers type arguments from
 the receiver and can fill remaining arguments from the expected result. It
 checks the instantiated bounds, input, and result before selecting a method.
+A unary conversion can also take a final legacy implicit clause. For
+`implicit def wrap[A](x: Box[A])(implicit tc: TC[A]): Wrapped[A]`, both an
+argument expecting `Wrapped[Int]` and a selection of `x.show` use
+`wrap[Int](x)(tc)`. A missing witness permits a fallback conversion in the
+receiver companion. Equally eligible witnesses report a dependency ambiguity
+at the operand and prevent that companion fallback. The result and evidence
+types in this form must be independent of the value of the receiver, and the
+result must be independent of the witness value.
 With `import scala.language.implicitConversions`, this search still reaches a
 receiver companion when the classpath adapter cannot project the feature
 marker’s nested type. An imported user conversion with the same name remains

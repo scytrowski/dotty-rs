@@ -1572,7 +1572,7 @@ impl SourceTyper<'_> {
                         source,
                         qualifier,
                         receiver,
-                        super::conversion::ConversionUse::Member {
+                        crate::typer::contextual::ConversionUse::Member {
                             name,
                             site: tree_index,
                         },

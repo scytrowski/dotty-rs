@@ -7,7 +7,9 @@ mod dictionary;
 use dictionary::Dictionary;
 
 mod conversions;
-pub(super) use conversions::{ConversionGoal, ConversionTarget, MemberConversionGoal};
+pub(super) use conversions::{
+    ConversionGoal, ConversionOperand, ConversionTarget, ConversionUse, MemberConversionGoal,
+};
 mod defaults;
 mod extension;
 mod opaque;

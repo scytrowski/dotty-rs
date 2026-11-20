@@ -928,3 +928,148 @@ fn conditional_member_conversion_tries_the_companion_after_a_dependency_fails() 
         assert_eq!(typed_reference(&typer, fallback.qualifier), companion);
     }
 }
+
+const TRAILING_IMPLICIT: &str =
+    include_str!("../../../tests/fixtures/contextual-consumers/TrailingImplicitConversions.scala");
+
+#[test]
+fn trailing_implicit_conversion_applies_the_receiver_then_the_witness() {
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(TRAILING_IMPLICIT);
+    let wrap = method_symbol(&parsed, &store, &index, source, "wrap");
+    let resolver = super::contextual_binary::library_resolver(defs, &packages);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages)
+        .with_resolver(Box::new(resolver));
+    let fallback = method_symbol(&parsed, typer.store(), &index, source, "fallback");
+    for name in ["argument", "member", "fallbackArgument", "fallbackMember"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+            panic!()
+        };
+        let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+            panic!()
+        };
+        typer.type_method_definition(tree).unwrap();
+        let root = typer.typed_index.get(source, rhs).unwrap();
+        let ast = typer.typed_ast();
+        let adapted = match &ast.get(root).kind {
+            TreeKind::Select(show) if matches!(name, "member" | "fallbackMember") => show.qualifier,
+            TreeKind::Apply(accept) if matches!(name, "argument" | "fallbackArgument") => {
+                accept.args[0]
+            }
+            other => panic!("{other:?}"),
+        };
+        if name.starts_with("fallback") {
+            let TreeKind::Apply(call) = &ast.get(adapted).kind else {
+                panic!("companion conversion")
+            };
+            assert_eq!(typed_reference(&typer, call.function), fallback);
+            let [arg] = call.args[..] else {
+                panic!("single receiver")
+            };
+            assert_eq!(
+                Some(typed_reference(&typer, arg)),
+                index.symbol_at(source, def.value_param_clauses[0][0])
+            );
+            continue;
+        }
+        let TreeKind::Apply(evidence) = &ast.get(adapted).kind else {
+            panic!("evidence")
+        };
+        let TreeKind::Apply(receiver) = &ast.get(evidence.function).kind else {
+            panic!("receiver")
+        };
+        let TreeKind::TypeApply(poly) = &ast.get(receiver.function).kind else {
+            panic!("type application")
+        };
+        assert_eq!(typed_reference(&typer, poly.function), wrap);
+        assert_eq!(ast.get(poly.args[0]).ty, defs.int);
+        for (call, clause) in [(receiver, 0), (evidence, 1)] {
+            let [arg] = call.args[..] else {
+                panic!("one argument")
+            };
+            assert_eq!(
+                Some(typed_reference(&typer, arg)),
+                index.symbol_at(source, def.value_param_clauses[clause][0])
+            );
+        }
+    }
+}
+
+#[test]
+fn trailing_implicit_conversion_preserves_the_failure_site_and_conflicting_witnesses() {
+    let rejected =
+        include_str!("../../../tests/fixtures/contextual-consumers/TrailingImplicitRejected.scala");
+    let text = format!(
+        "{TRAILING_IMPLICIT}\n{}",
+        rejected.strip_prefix("package trailingviews").unwrap()
+    );
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(&text);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for name in [
+        "missingMember",
+        "missingArgument",
+        "ambiguousMember",
+        "ambiguousArgument",
+    ] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+            panic!()
+        };
+        let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+            panic!()
+        };
+        let operand = match &parsed.ast.get(rhs).kind {
+            TreeKind::Select(show) => show.qualifier,
+            TreeKind::Apply(call) => call.args[0],
+            other => panic!("{other:?}"),
+        };
+        let before = typer.store.checkpoint();
+        let err = typer.type_method_definition(tree).unwrap_err();
+        match (name, err) {
+            (
+                "missingMember",
+                TyperError::MemberNotFound {
+                    tree_index, name, ..
+                },
+            ) => {
+                assert_eq!(tree_index, rhs.index());
+                assert_eq!(typer.store.names.resolve(name.text()), "show");
+            }
+            (
+                "missingArgument",
+                TyperError::ApplicationArgumentTypeMismatch {
+                    tree_index,
+                    argument_index: 0,
+                    ..
+                },
+            ) => assert_eq!(tree_index, rhs.index()),
+            (_, err) if name.starts_with("ambiguous") => {
+                let err = if name == "ambiguousMember" {
+                    let TyperError::MemberConversionDependency { cause, .. } = err else {
+                        panic!("{err:?}")
+                    };
+                    *cause
+                } else {
+                    err
+                };
+                let TyperError::AmbiguousContextualArgument {
+                    tree_index,
+                    candidates,
+                    ..
+                } = err
+                else {
+                    panic!("{err:?}")
+                };
+                assert_eq!(tree_index, operand.index());
+                let expected: Vec<_> = def.value_param_clauses[1]
+                    .iter()
+                    .map(|&p| index.symbol_at(source, p).unwrap())
+                    .collect();
+                assert_eq!(candidates, expected);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(before, typer.store.checkpoint());
+        assert!(typer.typed_index.is_empty());
+    }
+}

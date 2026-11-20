@@ -4,16 +4,29 @@ use super::*;
 
 pub(in crate::typer) enum ConversionTarget {
     Instance(TreeId<Typed>),
-    Method {
-        function: TreeId<Typed>,
-        signature: TypeId,
-    },
+    Applied(TreeId<Typed>),
 }
+
+#[derive(Clone, Copy)]
+pub(in crate::typer) struct ConversionOperand {
+    pub(in crate::typer) source: TreeId<Untyped>,
+    pub(in crate::typer) tree: TreeId<Typed>,
+    pub(in crate::typer) ty: TypeId,
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::typer) enum ConversionUse {
+    Expected(TypeId),
+    Member { name: Name, site: u32 },
+}
+
+// A nested ambiguity participates in ranking until a strictly better conversion wins.
+type ConversionCandidate = (Provider, Result<TypeId, TyperError>);
 
 #[derive(Clone, Copy)]
 pub(in crate::typer) struct ConversionGoal {
     pub(in crate::typer) instance: Option<TypeId>,
-    pub(in crate::typer) actual: TypeId,
+    pub(in crate::typer) operand: ConversionOperand,
     pub(in crate::typer) expected: TypeId,
 }
 
@@ -35,7 +48,7 @@ impl SourceTyper<'_> {
         }
         let anchors: &[TypeId] = match &goal.instance {
             Some(instance) => std::slice::from_ref(instance),
-            None => &[goal.actual, goal.expected],
+            None => &[goal.operand.ty, goal.expected],
         };
         let mut refs = Vec::new();
         for &anchor in anchors {
@@ -89,27 +102,25 @@ impl SourceTyper<'_> {
             }
             let signature =
                 self.contextual_reference_signature(reference, context.owner, tree_index, journal)?;
-            if let Some((candidate, _)) = self.legacy_conversion_candidate(
+            if let Some(candidate) = self.legacy_conversion_candidate(
                 reference,
                 signature,
-                goal.actual,
-                Some(goal.expected),
-                tree_index,
+                goal.operand,
+                ConversionUse::Expected(goal.expected),
+                context,
                 journal,
             )? {
-                candidates.push((candidate, Ok(())));
+                candidates.push(candidate);
             }
         }
-        let Some((winner, ())) =
+        let Some((winner, _)) =
             self.choose_contextual_candidate(candidates, goal.expected, tree_index, journal)?
         else {
             return Ok(None);
         };
-        let function = self.provider_reference_tree(&winner, context, tree_index, journal)?;
-        Ok(Some(ConversionTarget::Method {
-            function,
-            signature: winner.callable,
-        }))
+        Ok(Some(ConversionTarget::Applied(
+            self.apply_legacy_conversion(&winner, goal.operand, context, journal)?,
+        )))
     }
 
     // Scala 3.9 declares this library val as languageFeature.implicitConversions,
@@ -204,11 +215,13 @@ impl SourceTyper<'_> {
         &mut self,
         reference: ContextualRef,
         signature: TypeId,
-        actual: TypeId,
-        expected: Option<TypeId>,
-        tree_index: u32,
+        operand: ConversionOperand,
+        purpose: ConversionUse,
+        context: ExpressionContext,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
-    ) -> Result<Option<(Provider, TypeId)>, TyperError> {
+    ) -> Result<Option<ConversionCandidate>, TyperError> {
+        let tree_index = operand.source.index();
+        let actual = operand.ty;
         let (method_type, arity) = match self.store.types.get(signature) {
             Type::Poly(poly) => (poly.result, poly.params.len()),
             _ => (signature, 0),
@@ -220,18 +233,16 @@ impl SourceTyper<'_> {
             return Ok(None);
         };
         let input = parameter.ty;
-        let output = method.result;
         if method.kind != MethodKind::Plain
             || parameter.erased
             || parameter.varargs
-            || matches!(
-                self.store.types.get(output),
-                Type::Poly(_) | Type::Method(_)
-            )
-            || self.type_contains_param_ref(output, method_type)?
+            || self.type_contains_param_ref(method.result, method_type)?
         {
             return Ok(None);
         }
+        let Some(output) = self.legacy_conversion_output(method.result)? else {
+            return Ok(None);
+        };
         let mut callable = method_type;
         let mut type_arguments = Vec::new();
         if arity > 0 {
@@ -247,7 +258,7 @@ impl SourceTyper<'_> {
                 return Ok(None);
             }
             if inferred.contains(&None)
-                && let Some(expected) = expected
+                && let ConversionUse::Expected(expected) = purpose
             {
                 // The expected type can be wider in a covariant position. Keep
                 // arguments fixed by the receiver and check result conformance below.
@@ -281,32 +292,113 @@ impl SourceTyper<'_> {
             return Ok(None);
         };
         let input = method.params[0].ty;
-        let output = method.result;
+        let tail = method.result;
+        let Some(output) = self.legacy_conversion_output(tail)? else {
+            return Ok(None);
+        };
         if !self.contextual_conforms(actual, input, tree_index, journal)? {
             return Ok(None);
         }
-        if let Some(expected) = expected
-            && !self.contextual_conforms(output, expected, tree_index, journal)?
-        {
+        let applicable = match purpose {
+            ConversionUse::Expected(expected) => {
+                self.contextual_conforms(output, expected, tree_index, journal)?
+            }
+            ConversionUse::Member { name, site } => {
+                self.conversion_result_has_member(output, name, context, site, journal)?
+            }
+        };
+        if !applicable {
             return Ok(None);
         }
         // Legacy conversion specificity compares the accepted inputs.
-        Ok(Some((
-            Provider {
-                reference,
-                type_arguments,
-                callable,
-                result: input,
-            },
-            output,
-        )))
+        let provider = Provider {
+            reference,
+            type_arguments,
+            callable,
+            result: input,
+        };
+        let mut viability = Ok(output);
+        if matches!(self.store.types.get(tail), Type::Method(_)) {
+            // Probe the actual call so defaults can replay its receiver and arguments.
+            match self.semantic_attempt(None, |typer, nested| {
+                typer.apply_legacy_conversion(&provider, operand, context, nested)
+            }) {
+                Ok(_) => {}
+                Err(
+                    TyperError::MissingContextualArgument { .. }
+                    | TyperError::DivergentContextualArgument { .. },
+                ) => return Ok(None),
+                Err(cause @ TyperError::AmbiguousContextualArgument { .. }) => {
+                    viability = Err(match purpose {
+                        ConversionUse::Expected(_) => cause,
+                        ConversionUse::Member { name, .. } => {
+                            TyperError::MemberConversionDependency {
+                                source: self.source,
+                                tree_index,
+                                name,
+                                provider: reference.symbol,
+                                cause: Box::new(cause),
+                            }
+                        }
+                    });
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(Some((provider, viability)))
+    }
+
+    fn legacy_conversion_output(&self, tail: TypeId) -> Result<Option<TypeId>, TyperError> {
+        let output = match self.store.types.get(tail) {
+            Type::Method(method)
+                if method.kind == MethodKind::Implicit
+                    && !self.type_contains_param_ref(method.result, tail)? =>
+            {
+                method.result
+            }
+            _ => tail,
+        };
+        Ok((!matches!(
+            self.store.types.get(output),
+            Type::Method(_) | Type::Poly(_)
+        ))
+        .then_some(output))
+    }
+
+    fn apply_legacy_conversion(
+        &mut self,
+        provider: &Provider,
+        operand: ConversionOperand,
+        context: ExpressionContext,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let function =
+            self.provider_reference_tree(provider, context, operand.source.index(), journal)?;
+        let Type::Method(method) = self.store.types.get(provider.callable) else {
+            return Err(TyperError::MemberTypeUnavailable {
+                symbol: provider.reference.symbol,
+            });
+        };
+        let tail = method.result;
+        let position = self.arena.get(operand.source).position;
+        let call = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply(
+            function,
+            vec![operand.tree],
+            tail,
+            position,
+        );
+        if matches!(self.store.types.get(tail), Type::Method(_)) {
+            self.apply_contextual_arguments(operand.source, call, context, journal)
+        } else {
+            Ok(call)
+        }
     }
 }
 
 #[derive(Clone, Copy)]
 pub(in crate::typer) struct MemberConversionGoal {
     pub(in crate::typer) class: Option<SymbolId>,
-    pub(in crate::typer) receiver: TypeId,
+    pub(in crate::typer) operand: ConversionOperand,
     pub(in crate::typer) name: Name,
 }
 
@@ -333,7 +425,7 @@ impl SourceTyper<'_> {
                 return Ok(Some(winner));
             }
         }
-        if let Some(refs) = self.adaptation_companion_refs(goal.receiver, site, journal)?
+        if let Some(refs) = self.adaptation_companion_refs(goal.operand.ty, site, journal)?
             && let Some(winner) =
                 self.member_conversion_from_refs(refs, goal, context, site, &mut search, journal)?
         {
@@ -366,7 +458,7 @@ impl SourceTyper<'_> {
                     reference,
                     view,
                     class,
-                    goal.receiver,
+                    goal.operand.ty,
                     site,
                     journal,
                 )? {
@@ -377,18 +469,20 @@ impl SourceTyper<'_> {
                 {
                     continue;
                 }
-                let Some(method) = self.legacy_conversion_candidate(
+                if let Some(candidate) = self.legacy_conversion_candidate(
                     reference,
                     view,
-                    goal.receiver,
-                    None,
-                    site,
+                    goal.operand,
+                    ConversionUse::Member {
+                        name: goal.name,
+                        site,
+                    },
+                    context,
                     journal,
-                )?
-                else {
-                    continue;
-                };
-                method
+                )? {
+                    candidates.push(candidate);
+                }
+                continue;
             };
             if !self.conversion_result_has_member(output, goal.name, context, site, journal)? {
                 continue;
@@ -426,13 +520,13 @@ impl SourceTyper<'_> {
             candidates.push((candidate, Ok(output)));
         }
         let winner = self
-            .choose_contextual_candidate(candidates, goal.receiver, site, journal)
+            .choose_contextual_candidate(candidates, goal.operand.ty, site, journal)
             .map_err(|err| match err {
                 TyperError::AmbiguousContextualArgument { candidates, .. } => {
                     TyperError::AmbiguousMemberConversion {
                         source: self.source,
                         tree_index: site,
-                        receiver: goal.receiver,
+                        receiver: goal.operand.ty,
                         name: goal.name,
                         candidates,
                     }
@@ -444,10 +538,12 @@ impl SourceTyper<'_> {
         };
         let target = if matches!(self.store.types.get(winner.callable), Type::Method(method) if method.kind == MethodKind::Plain)
         {
-            ConversionTarget::Method {
-                function: self.provider_reference_tree(&winner, context, site, journal)?,
-                signature: winner.callable,
-            }
+            ConversionTarget::Applied(self.apply_legacy_conversion(
+                &winner,
+                goal.operand,
+                context,
+                journal,
+            )?)
         } else {
             let tree = self.materialize_provider(
                 &winner,
