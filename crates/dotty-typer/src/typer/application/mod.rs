@@ -138,6 +138,7 @@ impl SourceTyper<'_> {
         let selected = self
             .type_selected_member_on_qualifier(
                 SelectedMemberRequest {
+                    source_qualifier: None,
                     tree_index,
                     qualifier,
                     name,

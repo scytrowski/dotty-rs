@@ -126,3 +126,108 @@ impl SourceTyper<'_> {
         }))
     }
 }
+
+#[derive(Clone, Copy)]
+pub(in crate::typer) struct MemberConversionGoal {
+    pub(in crate::typer) class: SymbolId,
+    pub(in crate::typer) receiver: TypeId,
+    pub(in crate::typer) name: Name,
+}
+
+impl SourceTyper<'_> {
+    pub(in crate::typer) fn member_conversion_target(
+        &mut self,
+        goal: MemberConversionGoal,
+        context: ExpressionContext,
+        site: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Option<(TreeId<Typed>, TypeId)>, TyperError> {
+        for level in self.contextual_scopes(context, site)? {
+            let refs = self.contextual_scope_refs(level, site, journal)?;
+            if let Some(winner) =
+                self.member_conversion_from_refs(refs, goal, context, site, journal)?
+            {
+                return Ok(Some(winner));
+            }
+        }
+        let Some(refs) = self.adaptation_companion_refs(goal.receiver, site, journal)? else {
+            return Ok(None);
+        };
+        self.member_conversion_from_refs(refs, goal, context, site, journal)
+    }
+
+    fn member_conversion_from_refs(
+        &mut self,
+        refs: Vec<ContextualRef>,
+        goal: MemberConversionGoal,
+        context: ExpressionContext,
+        site: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Option<(TreeId<Typed>, TypeId)>, TyperError> {
+        let mut candidates = Vec::new();
+        for reference in refs {
+            if self.initializing_local_symbols.contains(&reference.symbol) {
+                continue;
+            }
+            let view =
+                self.contextual_reference_signature(reference, context.owner, site, journal)?;
+            let Some(Type::Applied { tycon, args }) = self.store.types.try_get(view) else {
+                continue;
+            };
+            let [input, output] = args[..] else { continue };
+            if self.store.types.get(*tycon).reference_symbol() != Some(goal.class)
+                || !self.contextual_conforms(goal.receiver, input, site, journal)?
+            {
+                continue;
+            }
+            let members = self
+                .lookup_members_journaled(output, goal.name, journal)
+                .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+            for member in members {
+                if self.is_selected_member_accessible(
+                    member.symbol,
+                    member.declaring_class,
+                    context,
+                    site,
+                )? {
+                    candidates.push((
+                        Provider {
+                            reference,
+                            type_arguments: Vec::new(),
+                            callable: view,
+                            result: view,
+                        },
+                        None,
+                    ));
+                    break;
+                }
+            }
+        }
+        let winner = self
+            .choose_contextual_candidate(candidates, goal.receiver, site, journal)
+            .map_err(|err| match err {
+                TyperError::AmbiguousContextualArgument { candidates, .. } => {
+                    TyperError::AmbiguousMemberConversion {
+                        source: self.source,
+                        tree_index: site,
+                        receiver: goal.receiver,
+                        name: goal.name,
+                        candidates,
+                    }
+                }
+                other => other,
+            })?;
+        let Some(winner) = winner else {
+            return Ok(None);
+        };
+        let Some(Type::Applied { args, .. }) = self.store.types.try_get(winner.result) else {
+            return Err(TyperError::MemberTypeUnavailable {
+                symbol: winner.reference.symbol,
+            });
+        };
+        let output = args[1];
+        let evidence =
+            self.contextual_reference_tree(winner.reference, context, site, None, journal)?;
+        Ok(Some((evidence, output)))
+    }
+}

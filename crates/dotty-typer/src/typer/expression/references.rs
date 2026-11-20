@@ -6,7 +6,9 @@ use dotty_core::ast::*;
 use dotty_core::types::*;
 use dotty_core::*;
 
+#[derive(Clone, Copy)]
 pub(in crate::typer) struct SelectedMemberRequest {
+    pub(in crate::typer) source_qualifier: Option<TreeId<Untyped>>,
     pub(in crate::typer) tree_index: u32,
     pub(in crate::typer) qualifier: TreeId<Typed>,
     pub(in crate::typer) name: Name,
@@ -1289,6 +1291,7 @@ impl SourceTyper<'_> {
         }
         self.type_selected_member_on_qualifier(
             SelectedMemberRequest {
+                source_qualifier: Some(selection.qualifier),
                 tree_index: tree.index(),
                 qualifier,
                 name: selection.name,
@@ -1435,6 +1438,7 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TreeId<Typed>, TyperError> {
         let SelectedMemberRequest {
+            source_qualifier,
             tree_index,
             qualifier,
             name,
@@ -1560,6 +1564,29 @@ impl SourceTyper<'_> {
                             clause.result,
                             position,
                         ),
+                    );
+                }
+                if !java_class_qualifier
+                    && let Some(source) = source_qualifier
+                    && let Some(converted) = self.try_conversion(
+                        source,
+                        qualifier,
+                        receiver,
+                        super::conversion::ConversionUse::Member {
+                            name,
+                            site: tree_index,
+                        },
+                        context,
+                        info_journal,
+                    )?
+                {
+                    return self.type_selected_member_on_qualifier(
+                        SelectedMemberRequest {
+                            source_qualifier: None,
+                            qualifier: converted,
+                            ..request
+                        },
+                        info_journal,
                     );
                 }
                 return Err(TyperError::MemberNotFound {
