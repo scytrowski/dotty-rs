@@ -282,3 +282,46 @@ fn inferred_field_reports_one_call_error_and_clears_it_in_either_file_order() {
         client.shutdown();
     }
 }
+
+#[test]
+fn parent_argument_diagnostic_tracks_an_unsaved_type_edit_in_either_file_order() {
+    let initial = "class Derived(start: Boolean)";
+    let parent_clause = " extends Base(start)";
+    let base_text = "class Base(seed: Int)";
+    // The URI order controls analysis order, independently of notification timing.
+    for (base, derived) in [
+        ("file:///first/Base.scala", "file:///second/Derived.scala"),
+        ("file:///second/Base.scala", "file:///first/Derived.scala"),
+    ] {
+        let mut client = Client::start("utf-16", vec![base, derived]);
+        let mut docs = [(base, base_text), (derived, initial)];
+        docs.sort_by_key(|(uri, _)| *uri);
+        for (uri, text) in docs {
+            client.open(uri, text);
+        }
+        client.edit(
+            derived,
+            2,
+            range(0, initial.len(), initial.len()),
+            parent_clause,
+        );
+        let argument = initial.len() + parent_clause.find("start").unwrap();
+        client.diagnostics(
+            derived,
+            2,
+            json!([{
+                "range": range(0, argument, argument + "start".len()),
+                "severity": 1, "source": "dotty", "message": "Expected Int, found Boolean"
+            }]),
+        );
+        let annotation = initial.find("Boolean").unwrap();
+        client.edit(
+            derived,
+            3,
+            range(0, annotation, annotation + "Boolean".len()),
+            "Int",
+        );
+        client.diagnostics(derived, 3, json!([]));
+        client.shutdown();
+    }
+}

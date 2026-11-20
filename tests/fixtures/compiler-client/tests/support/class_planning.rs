@@ -1336,7 +1336,8 @@ fn field_scheduler_reports_the_bad_call_in_consumer_in_both_orders() {
         let super::SignatureError::Member(failure) = error else {
             panic!("unexpected signature error for answer: {error:?}");
         };
-        let diagnostic = failure.diagnostic(|id| sources.by_source.get(&id).map(|u| &u.ast));
+        let ast_for = |id| sources.by_source.get(&id).map(|u| &u.ast);
+        let diagnostic = failure.diagnostic(ast_for);
         assert_eq!(diagnostic.severity, dotty::core::DiagnosticSeverity::Error);
         let span = diagnostic.location.expect("source of the failed call");
         let (_, filename, text) = files
@@ -1382,13 +1383,17 @@ fn field_scheduler_reports_the_bad_call_in_consumer_in_both_orders() {
 
         // With the dependency complete, the class field pass encounters the same call.
         let retry = complete_signatures(&units, &mut store, defs, &packages).unwrap_err();
-        let super::SignatureError::Field(dotty::ClassFieldSignatureError::Field {
+        let super::SignatureError::Field(failure) = retry else {
+            panic!("unexpected error on retry: {retry:?}")
+        };
+        assert_eq!(failure.diagnostic(ast_for), diagnostic);
+        let dotty::ClassFieldSignatureError::Field {
             class: owner,
             field,
             error: field_error,
-        }) = retry
+        } = failure
         else {
-            panic!("unexpected error on retry: {retry:?}")
+            panic!("expected a field typing failure");
         };
         assert_eq!((owner, field), (class.symbol, answer.symbol));
         for error in [member_error, field_error] {
@@ -2010,8 +2015,9 @@ fn wrong_parent_argument_reports_the_same_error_in_both_file_orders() {
         let child = &units[child_index].classes[0];
         let parent = units[parent_index].classes[0].symbol;
         let mut blocked = Vec::new();
+        let sources = SignatureSources::new(&units, &store);
         let error = super::complete_headers(
-            &SignatureSources::new(&units, &store),
+            &sources,
             &mut store,
             defs,
             &packages,
@@ -2037,17 +2043,25 @@ fn wrong_parent_argument_reports_the_same_error_in_both_file_orders() {
         } if actual == defs.boolean && expected == defs.int),
             "{error:?}"
         );
-        let span = dotty::typer_error_span(&error, &units[child_index].ast).unwrap();
+        let diagnostic = dotty::TypingDiagnostic::from_typer(&error, |id| {
+            sources.by_source.get(&id).map(|u| &u.ast)
+        });
+        assert_eq!(diagnostic.message, "Expected Int, found Boolean");
+        assert_eq!(diagnostic.severity, dotty::core::DiagnosticSeverity::Error);
+        let span = diagnostic
+            .location
+            .expect("parent argument in Derived.scala");
         let start = derived.2.rfind("start").unwrap() as u32;
         assert_eq!(span.source(), derived.0);
         assert_eq!(
             span.span().range(),
             dotty::core::TextRange::new(start, start + 5).unwrap()
         );
-        assert_eq!(
-            dotty::typer_error_span(&error, &units[parent_index].ast),
-            None
-        );
+        for ast in [Some(&units[parent_index].ast), None] {
+            let unlocated = dotty::TypingDiagnostic::from_typer(&error, |_| ast);
+            assert_eq!(unlocated.location, None);
+            assert_eq!(unlocated.message, diagnostic.message);
+        }
         assert_eq!(
             store.symbols.info(child.symbol),
             &dotty::core::SymbolInfo::Missing

@@ -9,7 +9,7 @@ use dotty::core::{
 use dotty::jvm_class_plan::ClassHeaderBindings;
 use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty::source_declarations::{ClassMember, SourceClass, source_classes};
-use dotty::typer::{SignatureCompletion, SourceTyper};
+use dotty::typer::{SignatureCompletion, SourceTyper, TyperError};
 use dotty::{ClassBodyError, SourceDeclarationIndex, SourceFileCalls, TypingDiagnostic};
 
 #[derive(Clone)]
@@ -187,6 +187,10 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
     let mut unavailable = HashSet::new();
     let mut classes = Vec::new();
     let mut ranges = HashMap::new();
+    let ast_for = |id: SourceId| units.get(&(id.index() as usize)).map(|unit| &unit.ast);
+    let typer_problem = |file, error: &TyperError| {
+        typing_problem(file, TypingDiagnostic::from_typer(error, ast_for))
+    };
     for (&i, u) in &units {
         let mut typer = SourceTyper::new(&u.ast, u.source, &u.index, &mut store, defs, &packages);
         for c in &u.classes {
@@ -196,7 +200,8 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
                 Ok(_) => classes.push((i, c.symbol)),
                 Err(e) => {
                     unavailable.insert(c.symbol);
-                    results[i].error(range, e.to_string());
+                    let (file, problem) = typer_problem(i, &e);
+                    results[file].problems.push(problem);
                 }
             }
         }
@@ -216,14 +221,15 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
                 &mut bindings,
                 |id| declarations.get(id).is_some(),
             )
-            .map_err(|e| e.to_string())
         },
         |i, symbol, e| {
             unavailable.insert(symbol);
-            results[i].error(
-                ranges[&symbol],
-                e.unwrap_or_else(|| "Unresolved signature dependency".into()),
-            );
+            if let Some(error) = e {
+                let (file, problem) = typer_problem(i, &error);
+                results[file].problems.push(problem);
+            } else {
+                results[i].error(ranges[&symbol], "Unresolved signature dependency".into());
+            }
         },
     );
     let mut members = Vec::new();
@@ -244,7 +250,6 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
             }
         }
     }
-    let ast_for = |id: SourceId| units.get(&(id.index() as usize)).map(|unit| &unit.ast);
     let mut signature_problems = HashMap::new();
     complete(
         members,
@@ -331,6 +336,26 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_constructor_parameter_type_points_to_its_name() {
+        let uri = "file:///Broken.scala";
+        let text = "class Broken(start: Missing)";
+        let doc = Document {
+            version: 1,
+            text: Arc::new(DocumentText::new(text.into()).unwrap()),
+        };
+        let files = analyze(&[(uri.to_owned(), doc)].into());
+        let [problem] = files[uri].problems.as_slice() else {
+            panic!("expected one constructor diagnostic");
+        };
+        let range = problem.range.expect("position of the unknown type");
+        assert_eq!(
+            &text[range.start() as usize..range.end() as usize],
+            "Missing"
+        );
+        assert_eq!(problem.severity, DiagnosticSeverity::Error);
+    }
 
     #[test]
     fn repeated_signature_failure_preserves_an_independent_body_error() {
