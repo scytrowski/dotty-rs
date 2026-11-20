@@ -1155,6 +1155,14 @@ pub enum TyperError {
         expected: TypeId,
         candidates: Vec<SymbolId>,
     },
+    /// Multiple eligible conversions expose the requested term on their result.
+    AmbiguousMemberConversion {
+        source: SourceId,
+        tree_index: u32,
+        receiver: TypeId,
+        name: Name,
+        candidates: Vec<SymbolId>,
+    },
     /// A call requires contextual argument insertion or implicit search.
     UsingApplicationDeferred {
         source: SourceId,

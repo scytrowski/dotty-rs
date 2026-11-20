@@ -14,6 +14,14 @@ def main():
     toolchain = runpy.run_path(str(ROOT / "tools/tasty-pickler-oracle/run.py"))["Toolchain"]()
     with tempfile.TemporaryDirectory() as out:
         for sources, status, expected in [
+            (["MemberConversionScope.scala"], 0, "memberscope.From.render.apply(x).show"),
+            (["MemberConversionScope.scala"], 0, "chosen.apply(x).show"),
+            (["MemberConversions.scala"], 0, "Int = x.show"),
+            (["MemberConversions.scala"], 0, "Int = via.apply(x).show"),
+            (["MemberConversions.scala", "MemberConversionMissing.scala"], 1,
+             "value show is not a member of memberconversions.From"),
+            (["MemberConversions.scala", "MemberConversionAmbiguous.scala"], 1,
+             "both parameter second and parameter first provide an extension method `show`"),
             (["Conversions.scala"], 0, "this.accept(inner.apply(x))"),
             (["Conversions.scala", "ConversionsAmbiguous.scala"], 1, "implicit conversions cannot be applied because they are ambiguous"),
             (["LegacyConversions.scala"], 0, "this.old(x)"),

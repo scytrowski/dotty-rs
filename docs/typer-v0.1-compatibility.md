@@ -110,9 +110,17 @@ source marker trait. Anonymous templates with members or inherited
 implementation obligations remain deferred.
 
 Conversion insertion covers value adaptation to
-a known expected type. This includes ordinary method arguments. Searching for
-a conversion solely because a member is missing, and instantiating generic
-old-style conversion methods, remain outside that implementation.
+a known expected type. This includes ordinary method arguments. For a missing source selection
+such as `x.show`, the typer also considers contextual values of type
+`scala.Conversion[From, To]`. The receiver must conform to `From` and
+`To` must expose an accessible `show`. A direct member wins. Two equally
+eligible conversions produce an ambiguity at the selection, including when
+their output types differ. Search checks lexical scopes before the receiver’s
+companion. A monomorphic structural given can contribute its instantiated
+`Conversion` parent. An unrelated unary `apply` or a private member on a
+conversion’s result does not make that candidate eligible. Missing-member
+adaptation currently covers monomorphic conversion values. Generic old-style
+conversion methods remain deferred.
 
 The frontend accepts a wider range of typed trees than either producer can emit.
 In particular, the recursive dictionary tests inspect typed declarations and
