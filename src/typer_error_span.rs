@@ -7,6 +7,7 @@ enum ErrorSite {
     IfCondition,
     WhileCondition,
     ReturnValue,
+    AssignmentTarget { reported_lhs: Option<u32> },
     LocalInitializer,
     RecordedName(SourceSpan),
 }
@@ -17,6 +18,7 @@ enum ErrorSite {
 ///   explicit applications identify the offending argument.
 /// - Expected expression type mismatches identify the checked expression.
 ///   Local value type mismatches identify the initializer.
+/// - An immutable or non-assignable assignment target identifies the left-hand side.
 /// - A condition type mismatch points to the condition of the `if` or `while`.
 ///   A return type mismatch points to the returned expression, or the bare `return`.
 /// - Missing, ambiguous and wrong-kind names use the position carried by the
@@ -81,6 +83,25 @@ pub fn typer_error_span_with<'a>(
             tree_index,
             position.map_or(ErrorSite::Tree, ErrorSite::RecordedName),
         ),
+        TyperError::AssignmentTargetImmutable {
+            source, tree_index, ..
+        } => (
+            source,
+            tree_index,
+            ErrorSite::AssignmentTarget { reported_lhs: None },
+        ),
+        TyperError::AssignmentLhsNotAssignable {
+            source,
+            tree_index,
+            lhs_tree_index,
+            ..
+        } => (
+            source,
+            tree_index,
+            ErrorSite::AssignmentTarget {
+                reported_lhs: Some(lhs_tree_index),
+            },
+        ),
         TyperError::IfConditionTypeMismatch {
             source, tree_index, ..
         } => (source, tree_index, ErrorSite::IfCondition),
@@ -115,6 +136,11 @@ pub fn typer_error_span_with<'a>(
             .then_some(name);
         }
         (ErrorSite::Argument(index), TreeKind::Apply(call)) => *call.args.get(index)?,
+        (ErrorSite::AssignmentTarget { reported_lhs }, TreeKind::Assign(assign))
+            if reported_lhs.is_none_or(|index| index == assign.lhs.index()) =>
+        {
+            assign.lhs
+        }
         (ErrorSite::IfCondition, TreeKind::If(expr)) => expr.cond,
         (ErrorSite::WhileCondition, TreeKind::While(expr)) => expr.cond,
         (ErrorSite::ReturnValue, TreeKind::Return(expr)) => match expr.expr {
@@ -147,6 +173,34 @@ mod tests {
         .into_session(&mut store.names);
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         parsed.ast
+    }
+
+    #[test]
+    fn non_assignable_target_must_match_the_reported_left_hand_side() {
+        let source = SourceId::from_index(1);
+        let ast = parse_ast(
+            "class C { def f(n: Int): Unit = n = 2 }",
+            source,
+            &mut SemanticStore::new(),
+        );
+        let (id, assign) = ast
+            .iter()
+            .find_map(|(id, tree)| match &tree.kind {
+                TreeKind::Assign(assign) => Some((id, assign)),
+                _ => None,
+            })
+            .unwrap();
+        let error = |lhs_tree_index| TyperError::AssignmentLhsNotAssignable {
+            source,
+            tree_index: id.index(),
+            lhs_tree_index,
+            expression_kind: "Ident",
+        };
+        assert_eq!(
+            typer_error_span(&error(assign.lhs.index()), &ast),
+            ast.get(assign.lhs).position
+        );
+        assert_eq!(typer_error_span(&error(assign.rhs.index()), &ast), None);
     }
 
     #[test]

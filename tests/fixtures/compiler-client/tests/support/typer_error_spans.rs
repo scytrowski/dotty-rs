@@ -70,3 +70,34 @@ fn control_flow_errors_locate_conditions_and_return_values() {
         });
     }
 }
+
+#[test]
+fn assignment_errors_distinguish_the_target_from_the_value() {
+    check_body_error(
+        "class C { def f(): Unit = { val n = 1; «n» = 2 } }",
+        |error, _, _| {
+            assert!(
+                matches!(error, TyperError::AssignmentTargetImmutable { .. }),
+                "{error:?}"
+            );
+        },
+    );
+    check_body_error(
+        "class C { def f(): Unit = { var n: Int = 1; n = «false» } }",
+        |error, defs, _| {
+            assert!(
+                matches!(error, TyperError::ExpectedExpressionTypeMismatch { actual, expected, .. } if actual == defs.boolean && expected == defs.int),
+                "{error:?}"
+            );
+        },
+    );
+    check_body_error(
+        "class C { def n(): Int = 0; def f(): Unit = «n()» = 2 }",
+        |error, _, _| {
+            assert!(
+                matches!(error, TyperError::AssignmentLhsNotAssignable { .. }),
+                "{error:?}"
+            );
+        },
+    );
+}

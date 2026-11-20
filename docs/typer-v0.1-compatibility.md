@@ -2017,6 +2017,8 @@ the range. For `MemberNotFound` the reported tree supplies the range,
 including the qualifier in `obj.missing`. For an `if` or `while` condition
 type mismatch, the range covers the condition. A return type mismatch
 locates the returned expression or, for a bare `return`, the instruction itself.
+An immutable or non-assignable assignment target points to the left-hand side.
+An expected-type mismatch in the assigned value points to the right-hand expression.
 
 For `A.f(b: B) = b.g()`, the external client observes the symbol of `B.g`,
 completes it and retries `A.f`. A call to the same zero-argument method with
