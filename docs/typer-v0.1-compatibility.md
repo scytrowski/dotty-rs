@@ -2207,6 +2207,15 @@ clause warns at the argument even if another method fails. The arena retains
 the successful members' trees. The original `type_class_body` entry points
 stop at the first failure.
 
+For a direct method call such as `a.take(42)`, pass the original call tree to
+`TypedClassBody::selected_method` with its source arena, the typed arena and
+the store from the same session. The resulting symbol identifies the overload
+chosen by the typer. For a source method, `SourceDeclarationIndex::get` locates
+its file and class, and that file's `SourceSemanticIndex::definition_of` gives
+the declaration tree and hence its source range. The query returns `None` when
+the body has no binding for the call or the source callee has no direct typed
+counterpart, as in an inserted `apply` selection.
+
 For a call with the wrong number of arguments, pass the original
 `TyperError::ApplicationArityMismatch` and its untyped AST to
 `dotty::typer_error_span`. The returned `SourceSpan` covers the call

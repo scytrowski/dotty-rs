@@ -49,6 +49,45 @@ pub struct TypedClassBody {
 }
 
 impl TypedClassBody {
+    /// Returns the method chosen by the typer for a direct source call such as `a.take(42)`.
+    /// Pass a call node in its original parse and the typed arena and store from the same session.
+    /// The call and its function must map to the corresponding typed application and callee.
+    /// Returns `None` for unmapped or unpositioned calls, indirect or rewritten shapes
+    /// without that correspondence, and targets other than methods.
+    pub fn selected_method(
+        &self,
+        call: TreeId<Untyped>,
+        source_ast: &AstArena<Untyped>,
+        typed_ast: &AstArena<Typed>,
+        store: &SemanticStore,
+    ) -> Option<SymbolId> {
+        let node = source_ast.try_get(call)?;
+        let TreeKind::Apply(source_call) = &node.kind else {
+            return None;
+        };
+        let source = node.position?.source();
+        let typed = self.index.get(source, call)?;
+        let TreeKind::Apply(application) = &typed_ast.try_get(typed)?.kind else {
+            return None;
+        };
+        if self.index.get(source, source_call.function)? != application.function {
+            return None;
+        }
+        let callee = typed_ast.try_get(application.function)?;
+        if !matches!(callee.kind, TreeKind::Ident(_) | TreeKind::Select(_)) {
+            return None;
+        }
+        let Type::TermRef {
+            target: TermRefTarget::Symbol(method),
+            ..
+        } = store.types.try_get(callee.ty)?
+        else {
+            return None;
+        };
+        (store.symbols.contains(*method) && store.symbols.get(*method).kind == SymbolKind::Method)
+            .then_some(*method)
+    }
+
     /// Split the output of the typer used for this class's body. Pass the arena
     /// to the next typer and keep the body for [`JvmClassPlanner::plan_typed_class`].
     /// All declarations, outputs and the final arena must come from one session.

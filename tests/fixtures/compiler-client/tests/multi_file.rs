@@ -491,6 +491,114 @@ fn compile<const N: usize>(files: [(SourceId, &str, &str); N]) -> Vec<GeneratedC
 }
 
 #[test]
+fn selected_method_tracks_an_edited_overload_in_both_file_orders() {
+    use dotty::core::{SourceDefinition, TextRange};
+
+    const A: &str = "class A {
+  def take(n: Int): Int = n
+  def take(flag: Boolean): Int = 7
+}";
+    const BEFORE: &str = "class B { def read(a: A): Int = a.take(42) }";
+    let a = SourceId::from_index(7);
+    let b = SourceId::from_index(2);
+    let edited = BEFORE.replace("42", "false");
+    for reverse in [false, true] {
+        for (text, overload, declaration) in [
+            (BEFORE, 0, "def take(n: Int): Int = n"),
+            (edited.as_str(), 1, "def take(flag: Boolean): Int = 7"),
+        ] {
+            let mut files = [(a, "A.scala", A), (b, "B.scala", text)];
+            if reverse {
+                files.reverse();
+            }
+            let mut store = SemanticStore::new();
+            let defs = Definitions::bootstrap(&mut store);
+            let mut packages = Packages::new();
+            let units = name_units(
+                &files,
+                parsing::parse_files(&files, 2),
+                &mut store,
+                &mut packages,
+            );
+            let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
+            let sources = SignatureSources::new(&units, &store);
+            let (output, bodies) = type_bodies(&units, &mut store, defs, &packages, headers);
+            let caller = sources.by_source[&b];
+            let provider = sources.by_source[&a];
+            let read = caller.methods().next().unwrap();
+            let TreeKind::DefDef(def) = &caller.ast.get(read.tree).kind else {
+                panic!("expected B.read")
+            };
+            let call = def.rhs.unwrap();
+            let body = bodies.get(caller.classes[0].symbol).unwrap();
+            let method = body
+                .selected_method(call, &caller.ast, &output.arena, &store)
+                .unwrap();
+            let expected = provider.methods().nth(overload).unwrap();
+            assert_eq!(method, expected.symbol);
+
+            let location = sources.declarations.get(method).unwrap();
+            assert_eq!(
+                (location.source, location.class),
+                (a, provider.classes[0].symbol)
+            );
+            let target = sources.by_source[&location.source];
+            let Some(SourceDefinition::Canonical { source, tree }) =
+                target.index.definition_of(method)
+            else {
+                panic!("expected source method")
+            };
+            assert_eq!((source, tree), (a, expected.tree));
+            let span = target.ast.get(tree).position.unwrap();
+            assert_eq!(span.source(), a);
+            let start = A.find(declaration).unwrap() as u32;
+            assert_eq!(
+                span.span().range(),
+                TextRange::new(start, start + declaration.len() as u32).unwrap()
+            );
+
+            assert_eq!(
+                body.selected_method(read.tree, &caller.ast, &output.arena, &store),
+                None
+            );
+            let other_body = bodies.get(provider.classes[0].symbol).unwrap();
+            assert_eq!(
+                other_body.selected_method(call, &caller.ast, &output.arena, &store),
+                None
+            );
+        }
+    }
+}
+
+#[test]
+fn selected_method_distinguishes_a_direct_call_from_an_inserted_apply() {
+    let (mut store, defs, packages, unit) = class_planning::named(
+        "class Callable {
+           def apply(n: Int): Int = n
+           def direct(): Int = apply(42)
+           def indirect(c: Callable): Int = c(42)
+         }",
+    );
+    let units = std::slice::from_ref(&unit);
+    let headers = complete_signatures(units, &mut store, defs, &packages).unwrap();
+    let (output, bodies) = type_bodies(units, &mut store, defs, &packages, headers);
+    let body = bodies.get(unit.classes[0].symbol).unwrap();
+    let mut methods = unit.methods();
+    let apply = methods.next().unwrap().symbol;
+    for expected in [Some(apply), None] {
+        let TreeKind::DefDef(def) = &unit.ast.get(methods.next().unwrap().tree).kind else {
+            panic!("expected method")
+        };
+        let call = def.rhs.unwrap();
+        assert!(matches!(unit.ast.get(call).kind, TreeKind::Apply(_)));
+        assert_eq!(
+            body.selected_method(call, &unit.ast, &output.arena, &store),
+            expected
+        );
+    }
+}
+
+#[test]
 fn separate_sources_compile_in_either_order_and_execute_on_jdk21() {
     let a = (
         SourceId::from_index(0),
