@@ -1043,7 +1043,9 @@ fn wrong_second_method_argument_points_to_true_in_both_file_orders() {
         } if actual == defs.boolean && expected == defs.int),
             "{error:?}"
         );
-        let span = dotty::typer_error_span(&error, &consumer.ast).unwrap();
+        let span = SignatureSources::new(&units, &store)
+            .error_span(&error)
+            .unwrap();
         assert_eq!(span.source(), consumer.source);
         assert_eq!(
             dotty::core::SourceText::new(text)
@@ -1158,7 +1160,7 @@ fn field_scheduler_reports_the_bad_call_in_consumer_in_both_orders() {
             };
             assert_eq!((*source, *tree_index), (consumer.source, rhs.index()));
             assert_eq!(dotty::typer_error_span(&error, &provider.ast), None);
-            let span = dotty::typer_error_span(&error, &sources.by_source[source].ast).unwrap();
+            let span = sources.error_span(&error).unwrap();
             let (_, filename, text) = files
                 .iter()
                 .find(|(id, _, _)| *id == span.source())

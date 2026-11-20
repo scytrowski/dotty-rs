@@ -1,4 +1,4 @@
-use crate::core::{AstArena, SourceSpan, TreeKind, Untyped};
+use crate::core::{AstArena, SourceId, SourceSpan, TreeKind, Untyped};
 use crate::typer::TyperError;
 
 /// Locates a call rejected with [`TyperError::ApplicationArityMismatch`] or
@@ -10,6 +10,17 @@ use crate::typer::TyperError;
 /// An unavailable position, unsupported tree shape for the argument lookup,
 /// or unsupported error variant yields `None`.
 pub fn typer_error_span(error: &TyperError, ast: &AstArena<Untyped>) -> Option<SourceSpan> {
+    typer_error_span_with(error, |_| Some(ast))
+}
+
+/// Resolves the same source position as [`typer_error_span`] across a batch
+/// of source files. For a supported error, `ast_for` is called once with its
+/// source ID. Return the untyped AST from the original parse, or `None` if
+/// that source is unavailable. Unsupported errors do not trigger a lookup.
+pub fn typer_error_span_with<'a>(
+    error: &TyperError,
+    ast_for: impl FnOnce(SourceId) -> Option<&'a AstArena<Untyped>>,
+) -> Option<SourceSpan> {
     let (source, tree_index, argument_index) = match *error {
         TyperError::ApplicationArityMismatch {
             source, tree_index, ..
@@ -22,6 +33,7 @@ pub fn typer_error_span(error: &TyperError, ast: &AstArena<Untyped>) -> Option<S
         } => (source, tree_index, Some(argument_index)),
         _ => return None,
     };
+    let ast = ast_for(source)?;
     let (_, call) = ast.iter().nth(tree_index as usize)?;
     let call_span = call.position.filter(|span| span.source() == source)?;
     let Some(index) = argument_index else {
@@ -134,6 +146,23 @@ mod tests {
             None
         );
         assert_eq!(typer_error_span(&error(source, u32::MAX), &ast), None);
+        assert_eq!(
+            typer_error_span_with(&error(source, call.index()), |id| {
+                assert_eq!(id, source);
+                Some(&ast)
+            }),
+            Some(position)
+        );
+        assert_eq!(
+            typer_error_span_with(&error(source, call.index()), |_| None),
+            None
+        );
+        assert_eq!(
+            typer_error_span_with(&error(SourceId::from_index(8), call.index()), |_| Some(
+                &ast
+            )),
+            None
+        );
         let type_arguments = TyperError::ExplicitTypeApplicationArityMismatch {
             source,
             tree_index: call.index(),
@@ -141,5 +170,9 @@ mod tests {
             actual: 0,
         };
         assert_eq!(typer_error_span(&type_arguments, &ast), None);
+        assert_eq!(
+            typer_error_span_with(&type_arguments, |_| panic!("unexpected AST lookup")),
+            None
+        );
     }
 }

@@ -157,6 +157,12 @@ struct SignatureSources<'a> {
 }
 
 impl<'a> SignatureSources<'a> {
+    fn error_span(&self, error: &TyperError) -> Option<dotty::core::SourceSpan> {
+        dotty::typer_error_span_with(error, |source| {
+            self.by_source.get(&source).map(|unit| &unit.ast)
+        })
+    }
+
     fn new(units: &'a [NamedUnit], store: &SemanticStore) -> Self {
         Self {
             units,

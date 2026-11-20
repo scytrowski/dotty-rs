@@ -2006,6 +2006,8 @@ at the index carried by the error. For example, it locates `true` in
 A missing tree or position, a foreign source, an out-of-range argument, or
 an unsupported expression shape or error variant yields `None`. Use the
 AST from the same parse because tree slots and source IDs can be reused.
+A multi-file client can call `dotty::typer_error_span_with(error, ast_for)`
+to look up that AST by source ID. A missing file yields `None`.
 
 For `A.f(b: B) = b.g()`, the external client observes the symbol of `B.g`,
 completes it and retries `A.f`. A call to the same zero-argument method with

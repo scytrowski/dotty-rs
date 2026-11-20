@@ -77,4 +77,4 @@ pub use source_declaration_index::{
 };
 
 mod typer_error_span;
-pub use typer_error_span::typer_error_span;
+pub use typer_error_span::{typer_error_span, typer_error_span_with};
