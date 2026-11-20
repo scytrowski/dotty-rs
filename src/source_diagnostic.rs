@@ -1,5 +1,6 @@
 //! Presentation of source diagnostics for external compiler and editor clients.
 use crate::core::{AstArena, DiagnosticSeverity, SourceId, SourceSpan, Span, Untyped};
+use crate::namer::{NamerDiagnostic, NamerIssue, VisibilityAccess};
 use crate::parser::{DeclarationIssue, ParseDiagnostic, ParseIssue, ValueDefinitionKind};
 use crate::typer::TyperError;
 
@@ -35,6 +36,30 @@ impl SourceDiagnostic {
         };
         Self {
             code: Some(issue.code()),
+            severity: diagnostic.severity(),
+            message,
+            location: Some(SourceSpan::new(
+                diagnostic.source(),
+                Span::without_point(diagnostic.span()),
+            )),
+        }
+    }
+
+    /// Presents a confirmed naming issue after the naming transaction has rolled back.
+    pub fn from_namer(diagnostic: &NamerDiagnostic) -> Self {
+        let message = match diagnostic.issue() {
+            NamerIssue::InvalidVisibilityQualifier { access, qualifier } => {
+                let keyword = match access {
+                    VisibilityAccess::Private => "private",
+                    VisibilityAccess::Protected => "protected",
+                };
+                format!(
+                    "Invalid '{keyword}' qualifier '{qualifier}': expected an enclosing class, object or package"
+                )
+            }
+        };
+        Self {
+            code: Some(diagnostic.code()),
             severity: diagnostic.severity(),
             message,
             location: Some(SourceSpan::new(
@@ -140,6 +165,36 @@ mod tests {
             assert_eq!(report.message, message);
             assert_eq!(report.location, Some(span));
             assert_eq!(report.severity, DiagnosticSeverity::Error);
+        }
+    }
+
+    #[test]
+    fn naming_reports_preserve_visibility_kind_and_qualifier_location() {
+        let span = SourceSpan::new(
+            SourceId::from_index(9),
+            Span::without_point(TextRange::new(12, 19).unwrap()),
+        );
+        for (access, keyword) in [
+            (VisibilityAccess::Private, "private"),
+            (VisibilityAccess::Protected, "protected"),
+        ] {
+            let d = NamerDiagnostic::error(
+                span,
+                NamerIssue::InvalidVisibilityQualifier {
+                    access,
+                    qualifier: "Missing".to_owned(),
+                },
+            );
+            let report = SourceDiagnostic::from_namer(&d);
+            assert_eq!(report.code, Some("namer.visibility.invalid_qualifier"));
+            assert_eq!(
+                report.message,
+                format!(
+                    "Invalid '{keyword}' qualifier 'Missing': expected an enclosing class, object or package"
+                )
+            );
+            assert_eq!(report.severity, DiagnosticSeverity::Error);
+            assert_eq!(report.location, Some(span));
         }
     }
 }
