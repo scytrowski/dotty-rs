@@ -1,10 +1,12 @@
-//! Presentation of source typing failures from signature and body checking.
+//! Presentation of source diagnostics for external compiler and editor clients.
 use crate::core::{AstArena, DiagnosticSeverity, SourceId, SourceSpan, Untyped};
 use crate::typer::TyperError;
 
-/// A typing error reported to a compiler or editor client.
+/// A source diagnostic reported to a compiler or editor client.
 #[derive(Debug, PartialEq, Eq)]
-pub struct TypingDiagnostic {
+pub struct SourceDiagnostic {
+    /// Stable code supplied by the originating phase, when available.
+    pub code: Option<&'static str>,
     pub severity: DiagnosticSeverity,
     /// Owned text suitable for reporting after rollback.
     pub message: String,
@@ -12,9 +14,10 @@ pub struct TypingDiagnostic {
     pub location: Option<SourceSpan>,
 }
 
-impl TypingDiagnostic {
+impl SourceDiagnostic {
     pub(crate) fn error(message: String, location: Option<SourceSpan>) -> Self {
         Self {
+            code: None,
             severity: DiagnosticSeverity::Error,
             message,
             location,

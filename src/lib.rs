@@ -47,10 +47,12 @@ pub use class_field_signatures::{
 mod member_signature;
 pub use member_signature::{MemberSignatureError, try_complete_member_signature};
 
-mod typing_diagnostic;
-pub use typing_diagnostic::TypingDiagnostic;
+mod source_diagnostic;
+pub use source_diagnostic::SourceDiagnostic;
+/// Report returned by typer diagnostics.
+pub use source_diagnostic::SourceDiagnostic as TypingDiagnostic;
 /// Diagnostic returned by class body checking.
-pub use typing_diagnostic::TypingDiagnostic as ClassBodyDiagnostic;
+pub use source_diagnostic::SourceDiagnostic as ClassBodyDiagnostic;
 
 mod class_body;
 pub use class_body::{
