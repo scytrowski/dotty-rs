@@ -1608,7 +1608,8 @@ fn class_planner_rejects_template_initializer() {
         &parsed,
         &mut store,
         &mut Packages::new(),
-    );
+    )
+    .unwrap();
     let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
         panic!("expected package")
     };
