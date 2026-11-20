@@ -273,3 +273,54 @@ fn equally_nested_legacy_conversions_report_both_symbols_and_restore_the_store()
     assert_eq!(typer.store.checkpoint(), checkpoint);
     assert!(typer.typed_index.is_empty());
 }
+
+const MEMBER_CONVERSIONS: &str =
+    include_str!("../../../tests/fixtures/contextual-consumers/MemberConversions.scala");
+
+fn member_conversion_fixture(extra: &str) -> String {
+    format!(
+        "{MEMBER_CONVERSIONS}\n{}",
+        extra.strip_prefix("package memberconversions").unwrap()
+    )
+}
+
+#[test]
+fn member_conversion_keeps_direct_members_and_reports_the_original_missing_name() {
+    let text = member_conversion_fixture(include_str!(
+        "../../../tests/fixtures/contextual-consumers/MemberConversionMissing.scala"
+    ));
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(&text);
+    let own = class_symbol(&parsed, &store, &index, source, "Own");
+    let resolver = super::contextual_binary::library_resolver(defs, &packages);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages)
+        .with_resolver(Box::new(resolver));
+    let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, "direct");
+    let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+        panic!()
+    };
+    typer.type_method_definition(tree).unwrap();
+    let typed = typer.typed_index.get(source, rhs).unwrap();
+    let TreeKind::Select(select) = &typer.typed_arena.get(typed).kind else {
+        panic!("direct selection")
+    };
+    assert_eq!(
+        typer.store.symbols.owner(typed_reference(&typer, typed)),
+        Some(own)
+    );
+    assert_eq!(
+        typed_reference(&typer, select.qualifier),
+        method_parameter_symbol(&parsed, &index, source, method, 0)
+    );
+
+    let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, "absent");
+    let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+        panic!()
+    };
+    let before = typer.store.checkpoint();
+    assert!(
+        matches!(typer.type_method_definition(tree), Err(TyperError::MemberNotFound {tree_index,name,..})
+        if tree_index==rhs.index() && typer.store.names.resolve(name.text())=="show")
+    );
+    assert_eq!(typer.store.checkpoint(), before);
+    assert!(typer.typed_index.get(source, rhs).is_none());
+}
