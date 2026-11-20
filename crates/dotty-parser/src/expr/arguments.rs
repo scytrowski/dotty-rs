@@ -61,6 +61,10 @@ where
         mark: crate::Mark,
         function: TreeId<Untyped>,
     ) -> TreeId<Untyped> {
+        let name = self
+            .last_written_name
+            .take()
+            .filter(|(tree, _)| *tree == function);
         self.advance();
         let function = if matches!(self.ast.get(function).kind, TreeKind::New(_)) {
             self.constructor_select(function)
@@ -116,14 +120,18 @@ where
                 }
             }
         }
-        self.alloc_from(
+        let call = self.alloc_from(
             mark,
             TreeKind::Apply(Apply {
                 function,
                 args,
                 kind,
             }),
-        )
+        );
+        if let Some((_, range)) = name {
+            self.call_names.push((range, call));
+        }
+        call
     }
 
     fn current_is_using_marker(&mut self) -> bool {

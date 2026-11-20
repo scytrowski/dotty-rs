@@ -37,6 +37,18 @@ where
         self.parse_parens_or_tuple(mark)
     }
 
+    fn consume_expression_name(
+        &mut self,
+        mark: crate::Mark,
+        kind: TreeKind<Untyped>,
+    ) -> TreeId<Untyped> {
+        let range = self.current().span;
+        self.advance();
+        let tree = self.alloc_from(mark, kind);
+        self.last_written_name = Some((tree, range));
+        tree
+    }
+
     fn simple_expr_atom(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         if self.current_starts_braced_splice()
             || (self.expression_quote_depth > 0 && self.current_starts_simple_splice())
@@ -48,8 +60,7 @@ where
             let Ok(name) = self.intern_current_term_name() else {
                 return self.unexpected_expression();
             };
-            self.advance();
-            return self.alloc_from(
+            return self.consume_expression_name(
                 mark,
                 TreeKind::Ident(Ident {
                     name: *name.as_name(),
@@ -80,8 +91,7 @@ where
                 let Ok(name) = self.intern_current_term_name() else {
                     return self.unexpected_expression();
                 };
-                self.advance();
-                self.alloc_from(
+                self.consume_expression_name(
                     mark,
                     TreeKind::Ident(Ident {
                         name: *name.as_name(),
@@ -678,8 +688,7 @@ where
             ));
             return super_tree;
         };
-        self.advance();
-        self.alloc_from(
+        self.consume_expression_name(
             mark,
             TreeKind::Select(Select {
                 qualifier: super_tree,
@@ -843,8 +852,7 @@ where
                 if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Match) {
                     qualifier = self.parse_match_clause(qualifier);
                 } else if let Some((name, backquoted)) = self.current_selector_name() {
-                    self.advance();
-                    qualifier = self.alloc_from(
+                    qualifier = self.consume_expression_name(
                         mark,
                         TreeKind::Select(Select {
                             qualifier,

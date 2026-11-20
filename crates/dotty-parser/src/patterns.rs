@@ -48,13 +48,7 @@ where
             self.recover_until(crate::RecoverySet::Statement);
         }
 
-        let effective_features = *self.features();
-        ParseResult {
-            ast: self.ast,
-            root: pattern,
-            diagnostics: self.diagnostics,
-            effective_features,
-        }
+        self.finish_parse(pattern)
     }
 
     pub(crate) fn pattern(&mut self) -> TreeId<Untyped> {

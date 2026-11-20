@@ -1,8 +1,30 @@
 use dotty_core::ast::{Block, Ident, PackageDef};
-use dotty_core::{AstArena, SourceId, SourceText, TokenSource, TreeId, TreeKind, Untyped};
+use dotty_core::{
+    AstArena, SourceId, SourceText, TextRange, TokenSource, TreeId, TreeKind, Untyped,
+};
 
 use crate::statements::StatementSequenceBoundary;
 use crate::{Location, ParseDiagnostic, ParseIssue, ParseKind, Parser};
+
+/// Written callee tokens of parenthesized calls in one parse, ordered by byte offset.
+#[derive(Debug)]
+pub struct SourceCallNames {
+    source: SourceId,
+    entries: Vec<(TextRange, TreeId<Untyped>)>,
+}
+
+impl SourceCallNames {
+    /// File containing every token and call in this collection.
+    pub fn source(&self) -> SourceId {
+        self.source
+    }
+
+    /// Yields the half-open range of the name token and its enclosing application.
+    /// Backquoted names include both backticks.
+    pub fn iter(&self) -> impl Iterator<Item = (TextRange, TreeId<Untyped>)> + '_ {
+        self.entries.iter().copied()
+    }
+}
 
 /// Result of parsing one source compilation unit.
 #[derive(Debug)]
@@ -10,6 +32,8 @@ pub struct ParseResult {
     pub ast: AstArena<Untyped>,
     pub root: TreeId<Untyped>,
     pub diagnostics: Vec<ParseDiagnostic>,
+    /// Direct call names in this source arena.
+    pub call_names: SourceCallNames,
     /// Parser feature policy after processing this input.
     ///
     /// This records the effective policy, including changes made by
@@ -47,6 +71,22 @@ impl<'src, 'names, S> Parser<'src, 'names, S>
 where
     S: dotty_core::TokenSource,
 {
+    pub(crate) fn finish_parse(mut self, root: TreeId<Untyped>) -> ParseResult {
+        // Nested applications complete before the application containing them.
+        self.call_names
+            .sort_unstable_by_key(|(range, _)| range.start());
+        ParseResult {
+            effective_features: *self.features(),
+            ast: self.ast,
+            root,
+            diagnostics: self.diagnostics,
+            call_names: SourceCallNames {
+                source: self.source_id,
+                entries: self.call_names,
+            },
+        }
+    }
+
     /// Parses one standalone expression for parser tooling and differential
     /// tests. This is a fragment entry, not a second parser dialect.
     pub fn parse_expression_fragment(mut self) -> ParseResult {
@@ -77,13 +117,7 @@ where
         }
 
         self.report_escaping_placeholders();
-        let effective_features = *self.features();
-        ParseResult {
-            ast: self.ast,
-            root: expression,
-            diagnostics: self.diagnostics,
-            effective_features,
-        }
+        self.finish_parse(expression)
     }
 
     /// Parses the supported expression sequence into a synthetic block root.
@@ -96,18 +130,12 @@ where
             self.parse_statement_sequence(StatementSequenceBoundary::CompilationUnit);
 
         self.report_escaping_placeholders();
-        let effective_features = *self.features();
         let root = self.alloc(
             TreeKind::Block(Block { stats, expr }),
             Some(self.span_from(unit_mark)),
         );
 
-        ParseResult {
-            ast: self.ast,
-            root,
-            diagnostics: self.diagnostics,
-            effective_features,
-        }
+        self.finish_parse(root)
     }
 
     /// Parses one source compilation unit into its source-level package root.
@@ -119,7 +147,6 @@ where
         );
 
         self.report_escaping_placeholders();
-        let effective_features = *self.features();
         let root =
             if stats.len() == 1 && matches!(self.ast.get(stats[0]).kind, TreeKind::PackageDef(_)) {
                 stats[0]
@@ -141,12 +168,7 @@ where
                 )
             };
 
-        ParseResult {
-            ast: self.ast,
-            root,
-            diagnostics: self.diagnostics,
-            effective_features,
-        }
+        self.finish_parse(root)
     }
 }
 

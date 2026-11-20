@@ -26,6 +26,9 @@ where
     pub(crate) source_id: SourceId,
     pub(crate) names: &'names mut NameInterner,
     pub(crate) ast: AstArena<Untyped>,
+    pub(crate) call_names: Vec<(TextRange, TreeId<Untyped>)>,
+    // Matches a written name to the exact callee before consuming an argument list.
+    pub(crate) last_written_name: Option<(TreeId<Untyped>, TextRange)>,
     pub(crate) last_real_token_end: u32,
     pub(crate) last_real_token_kind: TokenKind,
     pub(crate) context: ParseContext,
@@ -111,6 +114,8 @@ where
             source_id,
             names,
             ast: AstArena::new(),
+            call_names: Vec::new(),
+            last_written_name: None,
             last_real_token_end,
             last_real_token_kind,
             context: ParseContext::default(),
