@@ -46,7 +46,7 @@ pub use typer::{
     ConstructorCandidate, ExpressionContext, ExpressionScopeId, FieldInitializerContextIssue,
     MAX_MEMBER_LOOKUP_DEPTH, MAX_SOURCE_FUNCTION_ARITY, MAX_TYPE_RELATION_DEPTH,
     MAX_TYPE_RELATION_VIEWS, MAX_UNION_RELATION_COMPARISONS, MemberCandidate, MemberLookupError,
-    PatternKind, SignatureCompletion, SourceFunctionFamily, SourceFunctionKind,
+    OverloadRejection, PatternKind, SignatureCompletion, SourceFunctionFamily, SourceFunctionKind,
     SourceFunctionPurity, SourceTyper, TypeArgumentBoundSide, TypeRelationError, TypedLocalBinding,
     TypedSourceOutput, TyperError,
 };

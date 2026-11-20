@@ -2023,7 +2023,9 @@ An explicit type argument count mismatch locates the whole type application
 (`f[Int, Boolean]`), and a bound violation locates the offending type argument.
 A call with no applicable overload or several equally applicable overloads
 locates the whole call. The original error retains the rejected candidates and
-their reasons, or the ambiguous candidates.
+their reasons, or the ambiguous candidates. Clients can match each rejected
+symbol's `dotty::typer::OverloadRejection` to report its expected and actual
+argument counts or the index and types of a nonconforming argument.
 
 For `A.f(b: B) = b.g()`, the external client observes the symbol of `B.g`,
 completes it and retries `A.f`. A call to the same zero-argument method with

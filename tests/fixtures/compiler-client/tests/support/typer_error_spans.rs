@@ -134,19 +134,34 @@ fn explicit_type_application_errors_locate_the_application_or_the_bound_argument
 
 #[test]
 fn overload_errors_locate_the_whole_call_and_keep_its_candidates() {
+    use dotty::typer::OverloadRejection;
+
     check_body_error(
-        "class C { def f(x: Int): Int = 1; def f(x: Boolean): Int = 2; def bad(x: Byte): Int = «f(x)» }",
-        |error, _, class| {
+        "class C { def f(x: Int): Int = 1; def f(x: Boolean, y: Int): Int = 2; def bad(x: Boolean): Int = «f(x)» }",
+        |error, defs, class| {
             let TyperError::OverloadApplicationNoApplicable { candidates, .. } = error else {
                 panic!("{error:?}")
             };
-            let declared: Vec<_> = class.methods().take(2).map(|m| m.symbol).collect();
-            assert_eq!(candidates.len(), declared.len());
-            for symbol in declared {
-                assert!(candidates.iter().any(|(id, _)| *id == symbol));
-            }
-            // The formal parameter types differ, so the rejection payloads must differ too.
-            assert_ne!(candidates[0].1, candidates[1].1);
+            assert_eq!(candidates.len(), 2);
+            let mut reasons = class.methods().take(2).map(|method| {
+                candidates
+                    .iter()
+                    .find(|(id, _)| *id == method.symbol)
+                    .expect("rejection for the declared overload")
+                    .1
+            });
+            assert!(
+                matches!(reasons.next(), Some(OverloadRejection::ArgumentNonConformance {
+                argument_index: 0, actual, expected,
+            }) if actual == defs.boolean && expected == defs.int)
+            );
+            assert!(matches!(
+                reasons.next(),
+                Some(OverloadRejection::WrongArity {
+                    expected: 2,
+                    actual: 1,
+                })
+            ));
         },
     );
     check_body_error(
