@@ -1,4 +1,4 @@
-//! Run with `cargo test --release -p dotty --test parser_scaling -- --ignored --nocapture`.
+//! Run with `cargo test --release -p dotty-rs --test parser_scaling -- --ignored --nocapture`.
 use std::fmt::Write;
 use std::time::{Duration, Instant};
 

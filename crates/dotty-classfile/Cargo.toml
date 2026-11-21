@@ -1,6 +1,16 @@
 [package]
 name = "dotty-classfile"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "JVM class-file codecs, symbolic bytecode and verification analysis"
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+include.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/dotty-classfile"
 
 [dependencies]

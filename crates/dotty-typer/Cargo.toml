@@ -1,16 +1,26 @@
 [package]
 name = "dotty-typer"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Incremental Scala 3 source signature completion and expression typing"
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+include.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/dotty-typer"
 
 [dependencies]
-dotty-core = { path = "../dotty-core" }
+dotty-core.workspace = true
 
 [dev-dependencies]
-dotty-classfile = { path = "../dotty-classfile" }
-dotty-classloader = { path = "../dotty-classloader" }
-dotty-namer = { path = "../dotty-namer" }
-dotty-lexer = { path = "../dotty-lexer" }
-dotty-parser = { path = "../dotty-parser" }
-dotty-tasty = { path = "../dotty-tasty" }
-dotty-tasty-unpickler = { path = "../dotty-tasty-unpickler" }
+dotty-classfile.workspace = true
+dotty-classloader.workspace = true
+dotty-namer.workspace = true
+dotty-lexer.workspace = true
+dotty-parser.workspace = true
+dotty-tasty.workspace = true
+dotty-tasty-unpickler.workspace = true

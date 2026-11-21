@@ -1,8 +1,20 @@
 [package]
+name = "dotty-rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Experimental Scala 3 compiler infrastructure in Rust"
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+include.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/dotty-rs"
+
+[lib]
 name = "dotty"
-version = "0.1.0"
-edition = "2024"
-publish = false
 
 [workspace]
 members = [
@@ -24,19 +36,46 @@ members = [
 ]
 resolver = "3"
 
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98.1"
+license = "Apache-2.0"
+repository = "https://github.com/scytrowski/dotty-rs"
+keywords = ["scala", "compiler"]
+categories = ["compilers"]
+publish = ["crates-io"]
+# Distribute library/tool sources and package documentation. Regression tests,
+# binary fixtures, corpus reports and oracle tooling stay in the repository.
+include = ["/src/**", "/README.md", "/LICENSE"]
+
+[workspace.dependencies]
+dotty-tasty = { version = "0.1.0", path = "crates/dotty-tasty" }
+dotty-classfile = { version = "0.1.0", path = "crates/dotty-classfile" }
+dotty-core = { version = "0.1.0", path = "crates/dotty-core" }
+dotty-classloader = { version = "0.1.0", path = "crates/dotty-classloader" }
+dotty-tasty-unpickler = { version = "0.1.0", path = "crates/dotty-tasty-unpickler" }
+dotty-parser = { version = "0.1.0", path = "crates/dotty-parser" }
+dotty-namer = { version = "0.1.0", path = "crates/dotty-namer" }
+dotty-typer = { version = "0.1.0", path = "crates/dotty-typer" }
+dotty-lexer = { version = "0.1.0", path = "crates/dotty-lexer" }
+dotty-jvm = { version = "0.1.0", path = "crates/dotty-jvm" }
+dotty-tasty-pickler = { version = "0.1.0", path = "crates/dotty-tasty-pickler" }
+dotty-jvm-tasty-contract = { version = "0.1.0", path = "crates/dotty-jvm-tasty-contract" }
+
 [profile.test]
 opt-level = 1
 
 [dependencies]
-dotty-tasty = { path = "crates/dotty-tasty" }
-dotty-classfile = { path = "crates/dotty-classfile" }
-dotty-core = { path = "crates/dotty-core" }
-dotty-classloader = { path = "crates/dotty-classloader" }
-dotty-tasty-unpickler = { path = "crates/dotty-tasty-unpickler" }
-dotty-parser = { path = "crates/dotty-parser" }
-dotty-namer = { path = "crates/dotty-namer" }
-dotty-typer = { path = "crates/dotty-typer" }
-dotty-lexer = { path = "crates/dotty-lexer" }
-dotty-jvm = { path = "crates/dotty-jvm" }
-dotty-tasty-pickler = { path = "crates/dotty-tasty-pickler" }
-dotty-jvm-tasty-contract = { path = "crates/dotty-jvm-tasty-contract" }
+dotty-tasty.workspace = true
+dotty-classfile.workspace = true
+dotty-core.workspace = true
+dotty-classloader.workspace = true
+dotty-tasty-unpickler.workspace = true
+dotty-parser.workspace = true
+dotty-namer.workspace = true
+dotty-typer.workspace = true
+dotty-lexer.workspace = true
+dotty-jvm.workspace = true
+dotty-tasty-pickler.workspace = true
+dotty-jvm-tasty-contract.workspace = true

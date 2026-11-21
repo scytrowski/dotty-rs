@@ -18,24 +18,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dotty"
-version = "0.1.0"
-dependencies = [
- "dotty-classfile",
- "dotty-classloader",
- "dotty-core",
- "dotty-jvm",
- "dotty-jvm-tasty-contract",
- "dotty-lexer",
- "dotty-namer",
- "dotty-parser",
- "dotty-tasty",
- "dotty-tasty-pickler",
- "dotty-tasty-unpickler",
- "dotty-typer",
-]
-
-[[package]]
 name = "dotty-classfile"
 version = "0.1.0"
 
@@ -120,6 +102,24 @@ dependencies = [
  "dotty-core",
  "dotty-lexer",
  "dotty-parser",
+]
+
+[[package]]
+name = "dotty-rs"
+version = "0.1.0"
+dependencies = [
+ "dotty-classfile",
+ "dotty-classloader",
+ "dotty-core",
+ "dotty-jvm",
+ "dotty-jvm-tasty-contract",
+ "dotty-lexer",
+ "dotty-namer",
+ "dotty-parser",
+ "dotty-tasty",
+ "dotty-tasty-pickler",
+ "dotty-tasty-unpickler",
+ "dotty-typer",
 ]
 
 [[package]]
