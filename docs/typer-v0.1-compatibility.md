@@ -140,7 +140,10 @@ A generic extension can take a final contextual witness. For
 `keep[B](b: B)(using Format[B]): B`, a call on `Box[Int]` with argument
 `2L` supplies `TC[Int]` to the provider and `Format[Long]` to the method.
 An explicit `(using chosen)` passes that exact witness even when two
-`Format[Long]` values are in scope.
+`Format[Long]` values are in scope. With an expected `Boolean`, `keep(2)` calls
+the concrete method without looking for a format. An expected `Int` can instead select the
+generic method and supply `Format[Int]`. A missing or ambiguous format on a
+selected generic method is reported at the call.
 
 For overloads declared in the same owner, a receiver strictly
 more specific than every other applicable receiver selects the method at the
