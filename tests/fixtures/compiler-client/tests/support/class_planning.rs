@@ -1602,14 +1602,8 @@ fn class_planner_rejects_template_initializer() {
         .pop()
         .unwrap()
         .into_session(&mut store.names);
-    let index = super::name_source(
-        source,
-        files[0].1,
-        &parsed,
-        &mut store,
-        &mut Packages::new(),
-    )
-    .unwrap();
+    let (parsed, index) =
+        super::name_source(source, files[0].1, parsed, &mut store, &mut Packages::new()).unwrap();
     let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
         panic!("expected package")
     };

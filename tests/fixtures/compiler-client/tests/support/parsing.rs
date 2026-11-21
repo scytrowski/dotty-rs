@@ -1,8 +1,7 @@
-use dotty::core::{SourceId, SourceText};
-use dotty::lexer::ContextualScanner;
-use dotty::parser::DetachedParse;
+use dotty::core::SourceId;
+use dotty::{DetachedSource, parse_source};
 
-pub fn parse_files(files: &[(SourceId, &str, &str)], workers: usize) -> Vec<DetachedParse> {
+pub fn parse_files(files: &[(SourceId, &str, &str)], workers: usize) -> Vec<DetachedSource> {
     let batch = files.len().div_ceil(workers).max(1);
     std::thread::scope(|scope| {
         let tasks: Vec<_> = files
@@ -11,20 +10,7 @@ pub fn parse_files(files: &[(SourceId, &str, &str)], workers: usize) -> Vec<Deta
                 scope.spawn(|| {
                     chunk
                         .iter()
-                        .map(|&(id, _, text)| {
-                            let scanner = ContextualScanner::new(text).unwrap();
-                            assert!(
-                                scanner.diagnostics().is_empty(),
-                                "{:?}",
-                                scanner.diagnostics()
-                            );
-                            DetachedParse::parse(
-                                SourceText::new(text).unwrap(),
-                                id,
-                                scanner,
-                                Default::default(),
-                            )
-                        })
+                        .map(|&(id, _, text)| parse_source(id, text, Default::default()).unwrap())
                         .collect::<Vec<_>>()
                 })
             })
