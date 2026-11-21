@@ -14,6 +14,12 @@ def main():
     toolchain = runpy.run_path(str(ROOT / "tools/tasty-pickler-oracle/run.py"))["Toolchain"]()
     with tempfile.TemporaryDirectory() as out:
         for sources, status, *expected in [
+            (["ExtensionReceiverSpecificity.scala"], 0,
+             "Int = this.ops[Int](tc).keep(x)[Int](2)", "Long = this.ops[Int](tc).keep(x)[Long](2L)",
+             "Any = this.ops[Int](tc).keep(x)[Int](2)", "Boolean = this.ops[Int](tc).keep(x)(2)",
+             "Any = this.reverse[Int](tc).keep(x)(2)", "Int = this.reverse[Int](tc).keep(x)[Int](2)"),
+            (["ExtensionReceiverSpecificity.scala", "ExtensionReceiverSpecificityRejected.scala"], 1,
+             "[E007]", "Found: (2 : Int)", "Required: Boolean", "Found: (2L : Long)", "Required: Int", "2 errors found"),
             (["GenericExtensionOverloads.scala"], 0,
              "this.ops[Int](tc).keep(x)[Long](2L)", "this.ops[Int](tc).keep(x)(2)",
              "this.ops[Int](tc).keep(x)[Int](2)",

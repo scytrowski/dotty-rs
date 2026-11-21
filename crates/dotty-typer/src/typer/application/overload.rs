@@ -1155,7 +1155,8 @@ impl SourceTyper<'_> {
                     .contains(SymbolFlags::EXTENSION)
         });
         let mut typed_arguments = None;
-        let (typed_function, signature) = if let Some(symbol) = extensions.next() {
+        let local_extension = extensions.next();
+        let (typed_function, signature) = if let Some(symbol) = local_extension {
             if extensions.next().is_some() {
                 return Err(TyperError::OverloadedSelectionDeferred {
                     source: self.source,
@@ -1242,12 +1243,18 @@ impl SourceTyper<'_> {
         let mut callable = receiver_clause.result;
         let mut type_arguments = Vec::new();
         if let Some(Type::Poly(poly)) = self.store.types.try_get(callable).cloned() {
-            let Some(arguments) = typed_arguments.as_deref() else {
-                return Ok(None);
-            };
-            if !self.is_unbounded_unary_extension(callable) {
+            if local_extension.is_some() || !self.is_unbounded_unary_extension(callable) {
                 return Ok(None);
             }
+            let arguments = match &mut typed_arguments {
+                Some(arguments) => arguments,
+                slot @ None => slot.insert(self.type_extension_arguments(
+                    argument_trees,
+                    context,
+                    info_journal,
+                    new_mappings,
+                )?),
+            };
             type_arguments = self.infer_poly_application_arguments(
                 PolyApplicationInference {
                     binder: callable,

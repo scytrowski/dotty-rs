@@ -1732,23 +1732,18 @@ fn generic_extension_overload_keeps_method_inference_separate_from_the_provider(
             let root = typer.typed_index.get(source, rhs).unwrap();
             let ast = typer.typed_ast();
             assert_eq!(ast.get(root).ty, result);
-            let TreeKind::Apply(call) = &ast.get(root).kind else {
-                panic!("ordinary application")
-            };
-            let after_receiver = if let Some(inferred) = inferred {
-                let TreeKind::TypeApply(method_types) = &ast.get(call.function).kind else {
-                    panic!("inferred method type argument")
-                };
-                let [b] = method_types.args[..] else { panic!() };
-                assert_eq!(ast.get(b).ty, inferred);
-                method_types.function
-            } else {
-                call.function
-            };
-            let TreeKind::Apply(receiver) = &ast.get(after_receiver).kind else {
-                panic!("extension receiver")
-            };
-            let target = typed_reference(&typer, receiver.function);
+            let target = assert_keep_call(
+                &typer,
+                root,
+                factory,
+                inferred,
+                index
+                    .symbol_at(source, def.value_param_clauses[0][0])
+                    .unwrap(),
+                index
+                    .symbol_at(source, def.value_param_clauses[1][0])
+                    .unwrap(),
+            );
             let Some(SourceDefinition::Canonical {
                 tree: declaration, ..
             }) = index.definition_of(target)
@@ -1763,28 +1758,6 @@ fn generic_extension_overload_keeps_method_inference_separate_from_the_provider(
                 "keep"
             );
             assert_eq!(keep.type_params.len(), usize::from(inferred.is_some()));
-            let TreeKind::Select(selected) = &ast.get(receiver.function).kind else {
-                panic!()
-            };
-            let TreeKind::Apply(provider) = &ast.get(selected.qualifier).kind else {
-                panic!()
-            };
-            let TreeKind::TypeApply(factory_types) = &ast.get(provider.function).kind else {
-                panic!()
-            };
-            assert_eq!(typed_reference(&typer, factory_types.function), factory);
-            let [a] = factory_types.args[..] else {
-                panic!()
-            };
-            assert_eq!(ast.get(a).ty, defs.int);
-            assert_eq!(
-                Some(typed_reference(&typer, provider.args[0])),
-                index.symbol_at(source, def.value_param_clauses[1][0])
-            );
-            assert_eq!(
-                Some(typed_reference(&typer, receiver.args[0])),
-                index.symbol_at(source, def.value_param_clauses[0][0])
-            );
         }
     }
 }
@@ -1837,4 +1810,160 @@ fn generic_extension_overload_rejects_wrong_arity_without_partial_trees() {
     assert_eq!(typer.store.checkpoint(), before);
     assert_eq!(typer.typed_arena.checkpoint(), trees);
     assert!(typer.typed_index.is_empty());
+}
+
+fn assert_keep_call(
+    typer: &SourceTyper<'_>,
+    root: TreeId<Typed>,
+    factory: SymbolId,
+    inferred: Option<TypeId>,
+    argument: SymbolId,
+    witness: SymbolId,
+) -> SymbolId {
+    let ast = typer.typed_ast();
+    let TreeKind::Apply(call) = &ast.get(root).kind else {
+        panic!("ordinary application")
+    };
+    let after_receiver = if let Some(inferred) = inferred {
+        let TreeKind::TypeApply(method_types) = &ast.get(call.function).kind else {
+            panic!("inferred method type argument")
+        };
+        let [b] = method_types.args[..] else { panic!() };
+        assert_eq!(ast.get(b).ty, inferred);
+        method_types.function
+    } else {
+        call.function
+    };
+    let TreeKind::Apply(receiver) = &ast.get(after_receiver).kind else {
+        panic!("extension receiver")
+    };
+    let target = typed_reference(typer, receiver.function);
+    let TreeKind::Select(selected) = &ast.get(receiver.function).kind else {
+        panic!()
+    };
+    let TreeKind::Apply(provider) = &ast.get(selected.qualifier).kind else {
+        panic!()
+    };
+    let TreeKind::TypeApply(factory_types) = &ast.get(provider.function).kind else {
+        panic!()
+    };
+    assert_eq!(typed_reference(typer, factory_types.function), factory);
+    let [a] = factory_types.args[..] else {
+        panic!()
+    };
+    assert_eq!(ast.get(a).ty, typer.definitions.int);
+    assert_eq!(typed_reference(typer, provider.args[0]), witness);
+    assert_eq!(typed_reference(typer, receiver.args[0]), argument);
+    target
+}
+
+const RECEIVER_SPECIFICITY: &str =
+    include_str!("../../../tests/fixtures/contextual-consumers/ExtensionReceiverSpecificity.scala");
+
+#[test]
+fn contextual_extension_receiver_specificity_precedes_the_written_argument_clause() {
+    let mut swapped: Vec<_> = RECEIVER_SPECIFICITY.lines().collect();
+    for name in ["trait Ops[A] {", "trait ReverseOps[A] {"] {
+        let start = swapped.iter().position(|&line| line == name).unwrap();
+        swapped.swap(start + 1, start + 2);
+    }
+    for text in [RECEIVER_SPECIFICITY, &swapped.join("\n")] {
+        let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+        let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+        for (name, factory_name, result, inferred) in [
+            ("probeSpecific", "ops", defs.int, Some(defs.int)),
+            ("probeGeneric", "ops", defs.long, Some(defs.long)),
+            ("probeWideResult", "ops", defs.int, Some(defs.int)),
+            ("probeBox", "ops", defs.boolean, None),
+            ("narrowConcrete", "reverse", defs.boolean, None),
+            ("baseGeneric", "reverse", defs.int, Some(defs.int)),
+        ] {
+            let factory = method_symbol(&parsed, typer.store(), &index, source, factory_name);
+            let (method, rhs) =
+                method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+            let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+                panic!()
+            };
+            let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+                panic!()
+            };
+            typer
+                .type_method_definition(tree)
+                .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+            let root = typer.typed_index.get(source, rhs).unwrap();
+            assert_eq!(typer.typed_ast().get(root).ty, result, "{name}");
+            let selected = assert_keep_call(
+                &typer,
+                root,
+                factory,
+                inferred,
+                index
+                    .symbol_at(source, def.value_param_clauses[0][0])
+                    .unwrap(),
+                index
+                    .symbol_at(source, def.value_param_clauses[1][0])
+                    .unwrap(),
+            );
+            let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(selected)
+            else {
+                panic!()
+            };
+            let TreeKind::DefDef(keep) = &parsed.ast.get(tree).kind else {
+                panic!()
+            };
+            assert_eq!(keep.type_params.len(), usize::from(inferred.is_some()));
+        }
+    }
+}
+
+#[test]
+fn contextual_extension_receiver_specificity_does_not_retry_a_wider_receiver() {
+    let rejected = include_str!(
+        "../../../tests/fixtures/contextual-consumers/ExtensionReceiverSpecificityRejected.scala"
+    );
+    let text = format!(
+        "{RECEIVER_SPECIFICITY}\n{}",
+        rejected.strip_prefix("package receivers").unwrap()
+    );
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(&text);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for name in ["wrongResult", "wrongArgument"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+            panic!()
+        };
+        let checkpoint = typer.store.checkpoint();
+        let trees = typer.typed_arena.checkpoint();
+        match (name, typer.type_method_definition(tree).unwrap_err()) {
+            (
+                "wrongResult",
+                TyperError::ExpectedExpressionTypeMismatch {
+                    tree_index,
+                    actual,
+                    expected,
+                    ..
+                },
+            ) => assert_eq!(
+                (tree_index, actual, expected),
+                (rhs.index(), defs.int, defs.boolean)
+            ),
+            (
+                "wrongArgument",
+                TyperError::ApplicationArgumentTypeMismatch {
+                    tree_index,
+                    argument_index: 0,
+                    actual,
+                    expected,
+                    ..
+                },
+            ) => assert_eq!(
+                (tree_index, actual, expected),
+                (rhs.index(), defs.long, defs.int)
+            ),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(typer.store.checkpoint(), checkpoint);
+        assert_eq!(typer.typed_arena.checkpoint(), trees);
+        assert!(typer.typed_index.is_empty());
+    }
 }
