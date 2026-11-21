@@ -1,130 +1,235 @@
 # dotty-rs
 
-An experimental implementation of Scala 3 compiler infrastructure in Rust.
+Experimental Scala 3 compiler infrastructure for Rust applications.
 
-`dotty-rs` develops a source frontend, shared semantic model, TASTy codecs and
-semantic adapters, classpath loading, and a bounded JVM backend. It is a set of
-compiler libraries and validation tools, not a complete Scala compiler or a
-drop-in replacement for `scalac`. There is no public source-compilation CLI.
-APIs and supported language subsets are still evolving.
+`dotty-rs` provides a source frontend, a shared semantic model, TASTy and JVM
+class-file codecs, classpath loading, and a bounded JVM backend. You can use
+these components independently or assemble a pipeline with the root Rust
+library, `dotty`. The caller owns the compiler state and controls the phases.
 
-## Current capabilities
+The project is under active development and preparing its first crates.io
+release. APIs and supported language subsets may change. It is not a complete
+Scala compiler or a drop-in replacement for `scalac`, and it has no public
+source-compilation CLI.
 
-- **Source frontend:** contextual lexing, a handwritten parser with recovery,
-  declaration naming, signature completion, and incremental expression typing.
-  The typer supports selected references, calls, construction, primitive
-  operations, blocks, local values and assignments, conditionals, and loops.
-  Unsupported or ambiguous semantics remain explicit errors.
-- **Shared semantics:** interned names, typed IDs, symbols, scopes, types,
-  phase-indexed trees, source-to-semantic and source-to-typed indexes, and a
-  target-independent symbol resolver contract.
-- **TASTy:** structural decoding/encoding, semantic unpickling into the shared
-  model, and a separate semantic pickler for a restricted source subset. The
-  pickler emits real typed bodies, selected primitive control flow, and bounded
-  private primitive class state. Scala-reader interoperability is tested for
-  specific fixtures; this is not general Scala ABI compatibility.
-- **JVM binaries and classpaths:** class-file decoding/encoding, symbolic bytecode
-  construction and verification analysis, directory/archive loading, and JDK
-  module metadata support.
-- **JVM backend:** validation and emission from already-typed compilation plans.
-  Supported cases include Int/Boolean operations, control flow, local and private
-  field state, planned-class references, construction, calls, and bounded
-  same-unit inheritance. Source integration tests also cover sibling reference
-  joins, nested construction, reference field initialization, and chained call
-  receivers; the bounded same-source
-  `Reader.read(counter) = counter.get()` cross-class call; and a linked
-  `CounterFactory.create` that constructs and returns the exact `Counter`
-  reference type. The paired JVM/TASTy adapter also checks complete Rust linked
-  batches for plain constructor-reference/private-field aliasing and for a
-  three-class `Counter` → `CounterOwner` graph built through
-  `CounterOwnerFactory.wrap`. Strict pinned Scala 3.9 gates consume Rust TASTy
-  for single-class, independent two-class, Reader, factory,
-  constructor-injection, and three-class reference-constructor cases. The
-  reference-constructor client uses the Rust-only six-artifact batch, proves
-  all three sidecars supply member lookup, and runs unchanged Rust classes on
-  JDK 21; a separate oracle rebuilds Rust TASTy with `-from-tasty`. These are
-  bounded features, not arbitrary Scala/JVM code generation.
+## Quick start
 
-The source-to-class-file pipeline is exercised in
-[`tests/jvm_source_compilation.rs`](tests/jvm_source_compilation.rs), with JVM
-verification and execution in CI. The opt-in root `dotty::jvm_tasty_artifacts`
-library module emits an owned, decoded-and-validated Counter `.class`/`.tasty`
-pair or a complete in-memory batch for the audited independent Counter/Gauge,
-linked Counter/Reader, constructor-injected Counter/CounterOwner, and
-Counter/CounterOwner/CounterOwnerFactory source shapes. Batch emission uses one
-frontend session, links each class to the exact UUID from its TASTy header, and
-returns nothing unless every artifact passes whole-batch validation. Test-only
-publication stages complete batches
-with handled-error cleanup. Strict pinned Scala 3.9.0 gates verify both
-single-class, independent two-class, and cross-class TASTy-dependent lookup;
-the gates compare artifact bytes across fresh sessions and execute unchanged
-Rust classes under `java -Xverify:all`. These bounded library and fixture
-paths are not a compiler driver/CLI or general Scala ABI support. See the
-[binary interoperability record](docs/jvm-tasty-binary-interop.md) and
-[independent multi-class audit](docs/jvm-tasty-multiclass.md) and
-[cross-class acceptance record](docs/jvm-tasty-cross-class.md) for exact
-versions, hashes, controls, and reproduction commands.
+Use a local checkout while the first release is being prepared. The examples
+below use the project's pinned Rust **1.98.1** toolchain and need no JDK or
+Scala installation.
 
-The constructor-injected `CounterOwner(counter)` batch is structurally checked
-for all four Rust-produced files and their source, JVM ABI, and TASTy links.
-Its strict JDK 21 runtime gate proves the original Rust `CounterOwner` stores
-and reads the exact injected `Counter` instance. The pinned Scala 3.9 consumer
-now resolves both classes from their Rust TASTy sidecars, compiles an
-independent typed constructor client, and runs the unchanged Rust classes. The
-strict #1759 release gate runs the Scala consumer on the emitted Rust batch,
-checks constructor-parameter TASTy addresses, and verifies alias-batch
-publication failures before promoting the four linked artifacts. See the
-[constructor-injection release record](docs/jvm-tasty-constructor-injection.md)
-for the pinned toolchain, outputs, and reproduction commands.
+```sh
+rustup toolchain install 1.98.1 --profile minimal
+git clone https://github.com/scytrowski/dotty-rs.git
+cargo +1.98.1 new --bin dotty-example
+cd dotty-example
+cargo +1.98.1 add --path ../dotty-rs --rename dotty
+```
 
-The separate `CounterOwnerFactory.wrap(counter)` fixture constructs an Owner
-that retains the exact input Counter. Its final strict gate checks six linked
-Rust artifacts, fresh-session byte equality, handled publication failures, a
-JDK 21 identity runtime, and the independent pinned Scala 3.9 consumer. See the
-[reference-constructor release record](docs/jvm-tasty-reference-constructor-calls.md)
-for the ABI, hashes, diagnostics, unsupported forms, and reproduction commands.
+The root Cargo package is `dotty-rs`; its Rust library and the dependency alias
+used here are `dotty`. You can also depend on individual component packages.
+
+### Parse Scala source
+
+Replace `src/main.rs` with:
+
+```rust
+use dotty::SourceDiagnostic;
+use dotty::core::{NameInterner, SourceId, SourceText};
+use dotty::lexer::ContextualScanner;
+use dotty::parser::parse_compilation_unit;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let text = "class Answer:\n  def value: Int = 42\n";
+    let scanner = ContextualScanner::new(text)?;
+    if !scanner.diagnostics().is_empty() {
+        return Err(format!("Lexer diagnostics: {:?}", scanner.diagnostics()).into());
+    }
+
+    let mut names = NameInterner::new();
+    let parsed = parse_compilation_unit(
+        SourceText::new(text)?,
+        SourceId::from_index(0),
+        scanner,
+        &mut names,
+    );
+    for diagnostic in &parsed.diagnostics {
+        let report = SourceDiagnostic::from_parser(diagnostic);
+        eprintln!("{}: {}", report.code.unwrap_or("parser"), report.message);
+    }
+    if !parsed.diagnostics.is_empty() {
+        return Err("Source contains parser diagnostics".into());
+    }
+
+    println!("Parsed Answer.scala");
+    Ok(())
+}
+```
+
+Run `cargo +1.98.1 run`. The result contains the untyped AST and its root.
+Parsing can recover and return an AST alongside diagnostics; inspect both
+lexer and parser diagnostics before proceeding. `SourceDiagnostic` exposes
+the parser's stable issue code and source location, using UTF-8 byte offsets.
+A successful parse does not establish that the source can be typed or emitted.
+
+### Name declarations and type a method
+
+Typing uses a bootstrapped semantic store and the index returned by naming.
+The following example checks the signature and body of `Answer.value`; it
+does not emit a class file.
+
+<details>
+<summary>Complete example: replace src/main.rs and run cargo +1.98.1 run</summary>
+
+```rust
+use dotty::core::{Definitions, Packages, SemanticStore, SourceId, SourceText};
+use dotty::lexer::ContextualScanner;
+use dotty::namer::name_compilation_unit;
+use dotty::parser::parse_compilation_unit;
+use dotty::source_declarations::source_classes;
+use dotty::typer::SourceTyper;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let text = "class Answer:\n  def value: Int = 42\n";
+    let source = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+
+    let scanner = ContextualScanner::new(text)?;
+    if !scanner.diagnostics().is_empty() {
+        return Err(format!("Lexer diagnostics: {:?}", scanner.diagnostics()).into());
+    }
+    let parsed = parse_compilation_unit(SourceText::new(text)?, source, scanner, &mut store.names);
+    if !parsed.diagnostics.is_empty() {
+        return Err(format!("Parser diagnostics: {:?}", parsed.diagnostics).into());
+    }
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Answer.scala",
+        &mut store,
+        &mut packages,
+    )?;
+    let classes = source_classes(&parsed.ast, parsed.root, source, &index, &store)?;
+    let class = classes.first().ok_or("Expected a source class")?;
+    let method = class.methods().next().ok_or("Expected a source method")?;
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    let typed_method = typer.type_method_definition(method.tree)?;
+    println!("Typed method: {typed_method:?}");
+    Ok(())
+}
+```
+
+</details>
+
+Keep trees, source indexes, names, symbols, and types in the same session.
+Allocate a distinct `SourceId` for each source in that session. Arena IDs do
+not identify their originating store; mixing IDs from separate sessions can
+violate compiler invariants. See the [core design](docs/dotty-core-design.md)
+and [typer contract](docs/typer-v0.1-compatibility.md).
+
+### Read a TASTy file
+
+Replace `src/main.rs` with this independent example:
+
+```rust
+use dotty::tasty::TastyFile;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::args().nth(1).ok_or("Pass a .tasty file path")?;
+    let bytes = std::fs::read(path)?;
+    let file = TastyFile::parse_and_validate_scala_3_9(&bytes)?;
+    let header = file.header();
+    println!(
+        "TASTy {}.{}.{}",
+        header.major_version, header.minor_version, header.experimental_version
+    );
+    Ok(())
+}
+```
+
+Run it against a checked-in fixture:
+
+```sh
+cargo +1.98.1 run -- \
+  ../dotty-rs/crates/dotty-tasty/tests/fixtures/simple_def/SimpleDef.tasty
+```
+
+This validates the file structure for the Scala 3.9.0 format target. Semantic
+unpickling is a separate operation. See the [TASTy API guide](docs/tasty-api.md)
+for raw, structured, encoding, and explicit compatible-version APIs.
+
+## Capabilities and limits
+
+| Area | Current scope |
+| --- | --- |
+| Source frontend | Contextual lexing, handwritten parsing with recovery, declaration naming, signature completion, and selected expression/method typing. Unsupported or ambiguous semantics produce diagnostics or typed errors. |
+| Shared semantics | Interned names, typed IDs, symbols, scopes, types, phase-indexed trees, source indexes, and a target-independent symbol resolver. |
+| TASTy | Structural decoding/encoding, semantic unpickling into the shared model, and semantic pickling of a bounded source subset, including typed bodies and selected class state. |
+| JVM binaries and classpaths | Class-file decoding/encoding, symbolic bytecode construction, verification analysis, directory/archive loading, and JDK module metadata. |
+| JVM backend | Emission from validated, already-typed plans: selected primitive operations, control flow, fields, construction, calls, references, and bounded same-unit inheritance. |
+
+The [source-to-JVM integration tests](tests/jvm_source_compilation.rs) assemble
+the frontend and backend in one session. The root `jvm_tasty_artifacts` module
+also emits validated in-memory `.class`/`.tasty` batches for specific audited
+source shapes. These paths do not provide a general compiler driver or
+general Scala ABI compatibility. The [JVM backend contract](docs/jvm-backend.md),
+[binary interoperability record](docs/jvm-tasty-binary-interop.md),
+[constructor-injection record](docs/jvm-tasty-constructor-injection.md), and
+[reference-constructor record](docs/jvm-tasty-reference-constructor-calls.md)
+describe the tested shapes, unsupported cases, and reproduction commands.
 
 Compatibility targets Scala **3.9.0**, pinned to source revision
 `777528f19a58e794c9954a42f433373472ec57f8`. The semantic pickler emits TASTy
-**28.9.0**; binary compatibility fixtures may record other compatible minor
-versions in their manifests. Current JVM backend output uses class-file major
-version **65** (Java 21). Historical corpus reports describe their recorded
-revisions and are not measurements of the current checkout.
+**28.9.0**; some binary fixture manifests record older compatible minor
+versions. The JVM backend emits class-file major version **65** (Java 21).
+Decoder and classpath support are separate compatibility surfaces. Historical
+corpus reports apply to their recorded revisions and scopes.
 
-## Workspace
+## Workspace libraries
 
-| Crate | Responsibility |
+| Crate / Rust library | Responsibility |
 | --- | --- |
-| `dotty-core` | Shared semantic model and frontend/backend contracts |
-| `dotty-lexer` | Scala source tokenization and contextual scanning |
-| `dotty-parser` | Source parsing over the shared `TokenSource` contract |
-| `dotty-namer` | Declaration entry and source semantic indexing |
-| `dotty-typer` | Source signature completion and expression typing |
-| `dotty-tasty` | Structural/lossless TASTy codec |
-| `dotty-tasty-unpickler` | TASTy-to-core semantic projection |
-| `dotty-tasty-pickler` | Validated core/source semantics to bounded TASTy output |
-| `dotty-classfile` | JVM class-file codec and bytecode builder |
-| `dotty-classloader` | Classpath discovery and binary loading |
-| `dotty-jvm` | Typed-semantic plans to JVM class files |
-| `dotty-jvm-tasty-contract` | Consistency validation between JVM and TASTy producer plans |
-| `dotty-rs` (root package; library `dotty`) | Selected public re-exports, bounded paired-plan/artifact coordination (including linked Counter/CounterOwner composition), and integration tests |
+| `dotty-rs` (Rust library `dotty`) | Selected re-exports, bounded pipeline helpers, paired-artifact coordination, and integration tests |
+| [`dotty-core`](crates/dotty-core/) | Shared semantic model and compiler contracts |
+| [`dotty-lexer`](crates/dotty-lexer/) | Scala source tokenization and contextual scanning |
+| [`dotty-parser`](crates/dotty-parser/) | Parsing over the shared `TokenSource` contract |
+| [`dotty-namer`](crates/dotty-namer/) | Declaration entry and source semantic indexing |
+| [`dotty-typer`](crates/dotty-typer/) | Source signature completion and expression typing |
+| [`dotty-tasty`](crates/dotty-tasty/) | Structural/lossless TASTy codec |
+| [`dotty-tasty-unpickler`](crates/dotty-tasty-unpickler/) | TASTy-to-core semantic projection |
+| [`dotty-tasty-pickler`](crates/dotty-tasty-pickler/) | Validated semantic plans to bounded TASTy output |
+| [`dotty-classfile`](crates/dotty-classfile/) | JVM class-file codec, bytecode builder, and verification analysis |
+| [`dotty-classloader`](crates/dotty-classloader/) | Classpath discovery and binary loading |
+| [`dotty-jvm`](crates/dotty-jvm/) | Typed-semantic plans to JVM class files |
+| [`dotty-jvm-tasty-contract`](crates/dotty-jvm-tasty-contract/) | Read-only consistency checks between JVM and TASTy plans |
 
-An external compiler can depend on the `dotty-rs` package (library name `dotty`)
-and assemble a source-to-JVM pipeline with
-`dotty::{core, lexer, parser, namer, typer, jvm}`. The caller owns
-the session stores, orders the phases and chooses where to write generated classes.
-For direct access to the semantic pickler, depend on `dotty-tasty-pickler`.
-Source frontend production dependencies remain independent of the JVM adapters. See the
-[frontend/platform boundaries](docs/frontend-platform-boundaries.md).
+The root library exposes `dotty::{core, lexer, parser, namer, typer, tasty,
+tasty_unpickler, classfile, classloader, jvm}`. Use `dotty-tasty-pickler`
+directly for semantic pickling. Frontend production dependencies remain
+independent of the JVM adapters; see the
+[dependency boundaries](docs/frontend-platform-boundaries.md).
+
+Generate local API documentation from the repository root with
+`cargo doc --workspace --no-deps --locked`. The root library's entry page is
+`target/doc/dotty/index.html`.
 
 ## Build and validate
 
-Use the Rust toolchain pinned in [`rust-toolchain.toml`](rust-toolchain.toml)
-(currently **1.98.1**, with rustfmt and Clippy), Cargo, and Python 3 for the
-boundary check. Run from the repository root:
+Use the toolchain pinned in [rust-toolchain.toml](rust-toolchain.toml), with
+rustfmt and Clippy, plus Python 3 for the dependency boundary check. From the
+repository root, run the Rust CI checks:
 
 ```sh
-cargo build --workspace --locked
 cargo fmt --all -- --check
 python3 tools/check-frontend-boundaries.py
 cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -133,90 +238,55 @@ cargo test --workspace --all-targets --locked
 git diff --check
 ```
 
-Ordinary Rust fixture tests use checked-in artifacts without rebuilding Scala.
-JDK-backed tests may skip their external verification when Java tools are
-unavailable. To require the JVM gate used by CI, install JDK 21 with `java`,
-`javac`, and `javap` on `PATH`, then run:
+Ordinary fixture tests use checked-in artifacts without rebuilding Scala.
+JDK-backed tests can skip external verification when Java tools are missing.
+To require that verification, put `java`, `javac`, and `javap` from **JDK
+21.0.13** on `PATH` (the patch version is checked by some acceptance tests),
+then run:
 
 ```sh
-DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test \
-  -p dotty-classfile --test classfile_jvm_encoder \
-  -p dotty-jvm --lib \
-  -p dotty-rs --test jvm_source_compilation \
-  --test jvm_stateful_class_contract \
-  --locked -- --nocapture
+DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test --workspace --all-targets --locked
 ```
 
-Scala oracle runs and corpus audits have additional pinned checkout, JDK, and
-cached dependency requirements. Follow the tool-specific instructions before
-regenerating fixtures or reports.
-
-With JDK 21 on `PATH`, run the standalone client test to exercise the public
-facade. Its Cargo workspace declares a single dependency on `dotty-rs`, aliased
-as `dotty`. The test compiles two Scala sources in both orders, compares the class
-files and runs a Java caller against the generated classes. The same client measures a full
-in-memory compilation with one and four workers. See the
-[dependent-source workload and phase timings](docs/compiler-client-timings.md).
+The [standalone compiler client](tests/fixtures/compiler-client/) and
+[editor client](tests/fixtures/lsp-client/README.md) demonstrate public-API
+integration in separate Cargo workspaces. Their checks run separately in
+[CI](.github/workflows/ci.yml); they are validation fixtures, not distributed
+compiler or language-server products. For the compiler client, with the same
+JDK on `PATH`, run:
 
 ```sh
 cargo test --manifest-path tests/fixtures/compiler-client/Cargo.toml --target-dir target --locked
 ```
 
-## Cargo packages
-
-The root package is named `dotty-rs`; its Rust library remains `dotty`.
-For an explicit dependency alias, use:
-
-```toml
-[dependencies]
-dotty = { package = "dotty-rs", version = "0.1.0" }
-```
-
-The 13 library packages share version 0.1.0, edition 2024, Apache-2.0 licensing,
-and a minimum supported Rust version of 1.98.1. Internal path dependencies also
-declare registry versions. Development tools and standalone client fixtures
-remain non-publishable.
-
-Published packages contain source code, their README, and the complete license.
-Integration tests, binary fixtures, compatibility reports and Scala oracle tools
-remain in the repository and are validated from the checkout. The root package
-also retains the three TASTy inspection/validation binaries in `src/bin`.
-
-To verify the complete publication set without uploading anything, run:
-
-```sh
-cargo package --workspace --exclude dotty-parser-smoke-dump \
-  --exclude dotty-parser-corpus-report --exclude tasty-pickler-oracle --locked
-```
-
-Cargo prepares the selected interdependent packages together, so their initial
-publication can be checked before any component exists in the registry.
-During local review, add `--allow-dirty` to inspect uncommitted manifest changes.
+Scala oracle and corpus runs also require their documented pinned Scala
+checkout and dependency caches. Follow the tool-specific instructions before
+regenerating artifacts or compatibility reports.
 
 ## Documentation and tools
 
-- [Contributor/agent instructions](AGENTS.md): scope, dependency boundaries,
-  invariants, and validation requirements.
-- [Core design](docs/dotty-core-design.md),
-  [parser design](docs/parser-design-3.9.0.md),
+Some design notes describe earlier development stages. Consult them alongside
+the current API documentation and focused regression tests.
+
+- **Frontend:** [parser design](docs/parser-design-3.9.0.md),
+  [parser compatibility](docs/parser-v0.1-compatibility.md),
   [namer compatibility](docs/namer-v0.1-compatibility.md), and
   [typer compatibility](docs/typer-v0.1-compatibility.md).
-- [TASTy format](docs/tasty-format-3.9.0.md),
+- **Binary formats and loading:** [TASTy format](docs/tasty-format-3.9.0.md),
   [semantic unpickler](docs/tasty-semantic-unpickler.md),
-  [semantic pickler design](docs/tasty-pickler-design.md), and
-  [class-state pickler contract](docs/tasty-pickler-class-state-contract.md).
-- [Classloader](docs/classloader.md),
+  [semantic pickler](docs/tasty-pickler-design.md),
   [class-file encoder](docs/classfile-encoder.md), and
-  [JVM backend](docs/jvm-backend.md),
-  [reference-constructor release record](docs/jvm-tasty-reference-constructor-calls.md).
-- [Lexer oracle](tools/scala-lexer-oracle/README.md),
-  [parser oracle](tools/scala-parser-oracle/README.md),
-  [parser/namer corpus tooling](tools/parser-corpus-report/README.md),
-  [typer classpath audit](docs/typer-classpath-corpus-audit-3.9.0.md), and
+  [classloader](docs/classloader.md).
+- **Interop evidence:** [multi-class audit](docs/jvm-tasty-multiclass.md),
+  [cross-class acceptance](docs/jvm-tasty-cross-class.md), and
   [pickler oracle](docs/tasty-pickler-oracle.md).
-- [CI workflows](.github/workflows): Rust checks, mandatory JVM execution, and
-  separate compatibility/oracle and full-corpus audit workflows.
+- **Compatibility tools:** [lexer oracle](tools/scala-lexer-oracle/README.md),
+  [parser oracle](tools/scala-parser-oracle/README.md), and
+  [parser/namer corpus tooling](tools/parser-corpus-report/README.md).
+- **Contributing:** [project instructions](AGENTS.md),
+  [testing strategy](docs/testing-strategy.md), and
+  [CI workflows](.github/workflows/).
 
 ## License
 
-See [LICENSE](LICENSE).
+Licensed under the [Apache License 2.0](LICENSE).
