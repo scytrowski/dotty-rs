@@ -2338,13 +2338,33 @@ fn generic_extension_witness_errors_identify_the_call_and_roll_back() {
     let rejected = include_str!(
         "../../../tests/fixtures/contextual-consumers/GenericExtensionUsingRejected.scala"
     );
-    let text = format!(
-        "{GENERIC_EXTENSION_USING}\n{}",
-        rejected.strip_prefix("package keepusing").unwrap()
+    assert_extension_witness_errors(GENERIC_EXTENSION_USING, rejected, 1);
+}
+
+#[test]
+fn generic_extension_keeps_both_written_witnesses() {
+    assert_generic_format_application(
+        MULTI_WITNESS,
+        "explicit",
+        &[2, 3],
+        ApplyKind::Using,
+        |defs| defs.long,
     );
+}
+
+#[test]
+fn generic_extension_reports_the_second_witness_and_rolls_back() {
+    let rejected =
+        include_str!("../../../tests/fixtures/contextual-consumers/MultiWitnessRejected.scala");
+    assert_extension_witness_errors(MULTI_WITNESS, rejected, 2);
+}
+
+fn assert_extension_witness_errors(fixture: &str, rejected: &str, first_ambiguous: usize) {
+    let (_, body) = rejected.split_once('\n').unwrap();
+    let text = format!("{fixture}\n{body}");
     let (parsed, mut store, packages, defs, index, source) = parse_and_name(&text);
     let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
-    for name in ["missing", "ambiguous", "missing"] {
+    for name in ["missing", "ambiguous", "missing", "ambiguous"] {
         let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
         let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
             panic!()
@@ -2376,7 +2396,7 @@ fn generic_extension_witness_errors_identify_the_call_and_roll_back() {
                 },
             ) => {
                 assert_eq!((at, tree_index), (source, rhs.index()));
-                let witnesses: Vec<_> = def.value_param_clauses[1][1..]
+                let witnesses: Vec<_> = def.value_param_clauses[1][first_ambiguous..]
                     .iter()
                     .map(|p| index.symbol_at(source, *p).unwrap())
                     .collect();
