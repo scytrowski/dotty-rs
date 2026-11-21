@@ -148,7 +148,16 @@ For two narrow methods taking `Int` and `Boolean` and a wider generic method,
 If two narrow methods also tie on the ordinary argument, a written `using`
 can distinguish their contextual formals. Omitting it leaves an ambiguity
 even with just one witness in scope. The ambiguity includes an applicable
-wider generic method. Other polymorphic parameter shapes remain deferred.
+wider generic method.
+
+For extension declarations in a trait and a nominal base trait, specificity
+compares both the receiver type and the declaring class. If the derived trait
+declares the narrow generic method, it wins at the receiver clause. If the base
+declares that method and the derived trait declares the wider concrete method,
+the priorities tie at the receiver: the ordinary argument selects the derived
+method for an `Int` and the inherited generic method for a `Long`. The selected
+method is adapted on the instantiated provider in both cases. Other polymorphic
+parameter shapes remain deferred.
 
 Conversion insertion covers value adaptation to
 a known expected type, including ordinary method arguments. For a unary

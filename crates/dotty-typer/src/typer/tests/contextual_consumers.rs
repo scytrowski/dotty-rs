@@ -1999,31 +1999,8 @@ fn tied_extension_receivers_use_all_applicable_receivers_for_the_next_clause() {
             ("narrowLong", defs.long, Some(defs.long), "value"),
             ("boxInt", defs.int, Some(defs.int), "value"),
         ] {
-            let (method, rhs) =
-                method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
-            let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
-                panic!()
-            };
-            let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
-                panic!()
-            };
-            typer
-                .type_method_definition(tree)
-                .unwrap_or_else(|err| panic!("{name}: {err:?}"));
-            let root = typer.typed_index.get(source, rhs).unwrap();
-            assert_eq!(typer.typed_ast().get(root).ty, result, "{name}");
-            let selected = assert_contextual_extension_call(
-                &typer,
-                root,
-                factory,
-                inferred,
-                index
-                    .symbol_at(source, def.value_param_clauses[0][0])
-                    .unwrap(),
-                index
-                    .symbol_at(source, def.value_param_clauses[1][0])
-                    .unwrap(),
-            );
+            let selected =
+                assert_extension_probe(&mut typer, &parsed, name, factory, result, inferred);
             let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(selected)
             else {
                 panic!()
@@ -2044,6 +2021,143 @@ fn tied_extension_receivers_use_all_applicable_receivers_for_the_next_clause() {
             );
         }
     }
+}
+
+fn assert_extension_probe(
+    typer: &mut SourceTyper<'_>,
+    parsed: &dotty_parser::ParseResult,
+    name: &str,
+    factory: SymbolId,
+    result: TypeId,
+    inferred: Option<TypeId>,
+) -> SymbolId {
+    let (method, rhs) =
+        method_definition_and_rhs(parsed, typer.store(), typer.index, typer.source, name);
+    let Some(SourceDefinition::Canonical { tree, .. }) = typer.index.definition_of(method) else {
+        panic!()
+    };
+    let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+        panic!()
+    };
+    typer
+        .type_method_definition(tree)
+        .unwrap_or_else(|err| panic!("{name}: {err:?}"));
+    let root = typer.typed_index.get(typer.source, rhs).unwrap();
+    assert_eq!(typer.typed_ast().get(root).ty, result, "{name}");
+    assert_contextual_extension_call(
+        typer,
+        root,
+        factory,
+        inferred,
+        typer
+            .index
+            .symbol_at(typer.source, def.value_param_clauses[0][0])
+            .unwrap(),
+        typer
+            .index
+            .symbol_at(typer.source, def.value_param_clauses[1][0])
+            .unwrap(),
+    )
+}
+
+#[test]
+fn inherited_extension_overloads_compare_receiver_and_declaring_owner() {
+    let text = include_str!(
+        "../../../tests/fixtures/contextual-consumers/InheritedExtensionOverloads.scala"
+    );
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for (name, provider, owner, result, inferred) in [
+        ("concreteInt", "concrete", "ConcreteOps", defs.boolean, None),
+        (
+            "inheritedLong",
+            "concrete",
+            "GenericBase",
+            defs.long,
+            Some(defs.long),
+        ),
+        (
+            "genericInt",
+            "generic",
+            "GenericOps",
+            defs.int,
+            Some(defs.int),
+        ),
+        (
+            "genericLong",
+            "generic",
+            "GenericOps",
+            defs.long,
+            Some(defs.long),
+        ),
+        (
+            "expectedBoolean",
+            "wide",
+            "ConcreteNarrowBase",
+            defs.boolean,
+            None,
+        ),
+        (
+            "expectedInt",
+            "wide",
+            "WideGenericOps",
+            defs.int,
+            Some(defs.int),
+        ),
+    ] {
+        let factory = method_symbol(&parsed, typer.store(), &index, source, provider);
+        let decl = class_symbol(&parsed, typer.store(), &index, source, owner);
+        let selected = assert_extension_probe(&mut typer, &parsed, name, factory, result, inferred);
+        assert_eq!(typer.store.symbols.owner(selected), Some(decl), "{name}");
+    }
+}
+
+#[test]
+fn inherited_extension_overload_reports_both_declarations_when_priorities_conflict() {
+    let base = include_str!(
+        "../../../tests/fixtures/contextual-consumers/InheritedExtensionOverloads.scala"
+    );
+    let rejected = include_str!(
+        "../../../tests/fixtures/contextual-consumers/InheritedExtensionOverloadsRejected.scala"
+    );
+    let text = format!("{base}\n{}", rejected.split_once('\n').unwrap().1);
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(&text);
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "ambiguous");
+    let factory = method_symbol(&parsed, &store, &index, source, "wide");
+    let owners = ["ConcreteNarrowBase", "WideGenericOps"]
+        .map(|n| class_symbol(&parsed, &store, &index, source, n));
+    let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+        panic!()
+    };
+    let TreeKind::Apply(call) = &parsed.ast.get(rhs).kind else {
+        panic!()
+    };
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let store_before = typer.store.checkpoint();
+    let trees_before = typer.typed_arena.checkpoint();
+    let error = typer.type_method_definition(tree).unwrap_err();
+    let TyperError::ExtensionOverload {
+        tree_index,
+        provider,
+        cause,
+        ..
+    } = error
+    else {
+        panic!("{error:?}")
+    };
+    assert_eq!((tree_index, provider), (call.function.index(), factory));
+    let TyperError::AmbiguousOverloadApplication { candidates, .. } = *cause else {
+        panic!("{cause:?}")
+    };
+    assert_eq!(candidates.len(), 2);
+    assert!(owners.into_iter().all(|owner| {
+        candidates
+            .iter()
+            .any(|c| typer.store.symbols.owner(*c) == Some(owner))
+    }));
+    assert_eq!(typer.store.checkpoint(), store_before);
+    assert_eq!(typer.typed_arena.checkpoint(), trees_before);
+    assert!(typer.typed_index.is_empty());
 }
 
 #[test]
