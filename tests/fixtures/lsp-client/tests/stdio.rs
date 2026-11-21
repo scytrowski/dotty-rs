@@ -370,3 +370,33 @@ fn parser_then_namer_diagnostics_track_unsaved_edits_in_both_encodings() {
         client.shutdown();
     }
 }
+
+#[test]
+fn lexer_and_parser_markers_clear_independently_after_unsaved_edits() {
+    let uri = "file:///fixture/Broken.scala";
+    for (encoding, literal, comment) in [("utf-8", 42, 46), ("utf-16", 40, 44)] {
+        let mut client = Client::start(encoding, vec![]);
+        let parser = json!({
+            "source":"dotty", "severity":1, "range": range(0, literal, literal + 1),
+            "code":"parser.declaration.expected_value_equals", "message":"Expected '=' before the initializer"
+        });
+        let unterminated = |start| {
+            json!({
+                "source":"dotty", "severity":1, "range": range(0, start, start + "/* open".len()),
+                "code":"lexer.unterminated_block_comment", "message":"Unterminated block comment"
+            })
+        };
+        client.open(uri, "/* 😀 */ class Broken { val hidden: Int 1 } /* open");
+        client.diagnostics(uri, 1, json!([parser, unterminated(comment)]));
+        let end = comment + "/* open".len();
+        client.edit(uri, 2, range(0, end, end), "*/");
+        client.diagnostics(uri, 2, json!([parser]));
+        client.edit(uri, 3, range(0, literal, literal), "= ");
+        client.diagnostics(uri, 3, json!([]));
+
+        // Reopen the trailing comment with otherwise valid syntax.
+        client.edit(uri, 4, range(0, end + 2, end + 4), "");
+        client.diagnostics(uri, 4, json!([unterminated(comment + 2)]));
+        client.shutdown();
+    }
+}

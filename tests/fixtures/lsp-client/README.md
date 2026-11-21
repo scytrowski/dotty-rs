@@ -34,9 +34,15 @@ It checks for one parser report at the literal. Inserting `=` exposes the
 naming report at `Missing`, and removing the qualifier clears the document.
 A subsequent edit puts two declarations on one line. Inserting a semicolon
 clears the resulting separator diagnostic.
-Both clients use `SourceDiagnostic::from_parser` and
-`SourceDiagnostic::from_namer`. The fixture publishes their stable codes in
-the LSP diagnostic's `code` field.
+Both clients use `dotty::parse_source` for lexical and parser diagnostics and
+`SourceDiagnostic::from_namer` for naming issues. The fixture publishes
+their stable codes in the LSP diagnostic's `code` field.
+
+A separate protocol test opens a field with a missing equals sign and a trailing
+unterminated comment. Closing the comment removes its marker while the parser
+marker stays on the literal. Inserting the equals sign clears the document.
+Reopening the comment produces a lexer diagnostic even when parsing is clean.
+The test checks the document version and exact UTF-8 and UTF-16 positions.
 
 For a quick interoperability check with Neovim 0.10+, run from this directory:
 
