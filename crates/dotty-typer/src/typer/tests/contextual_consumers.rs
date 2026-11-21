@@ -2247,13 +2247,9 @@ const MULTI_WITNESS: &str =
 
 #[test]
 fn generic_extension_supplies_both_instantiated_method_witnesses() {
-    assert_generic_format_application(
-        MULTI_WITNESS,
-        "automatic",
-        &[1, 2],
-        ApplyKind::Regular,
-        "Long",
-    );
+    for text in [MULTI_WITNESS, &reversed_extensions(MULTI_WITNESS)] {
+        assert_generic_format_application(text, "automatic", &[1, 2], ApplyKind::Regular, "Long");
+    }
 }
 
 fn assert_generic_format_application(
@@ -2361,26 +2357,48 @@ fn generic_extension_witness_errors_identify_the_call_and_roll_back() {
     let rejected = include_str!(
         "../../../tests/fixtures/contextual-consumers/GenericExtensionUsingRejected.scala"
     );
-    assert_extension_witness_errors(GENERIC_EXTENSION_USING, rejected, 1);
+    assert_extension_witness_errors(GENERIC_EXTENSION_USING, rejected, 1, "Format");
 }
 
 #[test]
 fn generic_extension_keeps_both_written_witnesses() {
-    assert_generic_format_application(MULTI_WITNESS, "explicit", &[2, 3], ApplyKind::Using, "Long");
+    for text in [MULTI_WITNESS, &reversed_extensions(MULTI_WITNESS)] {
+        assert_generic_format_application(text, "explicit", &[2, 3], ApplyKind::Using, "Long");
+    }
 }
 
 #[test]
 fn generic_extension_reports_the_second_witness_and_rolls_back() {
     let rejected =
         include_str!("../../../tests/fixtures/contextual-consumers/MultiWitnessRejected.scala");
-    assert_extension_witness_errors(MULTI_WITNESS, rejected, 2);
+    for text in [MULTI_WITNESS, &reversed_extensions(MULTI_WITNESS)] {
+        assert_extension_witness_errors(text, rejected, 2, "Trace");
+    }
 }
 
-fn assert_extension_witness_errors(fixture: &str, rejected: &str, first_ambiguous: usize) {
+fn assert_extension_witness_errors(
+    fixture: &str,
+    rejected: &str,
+    first_ambiguous: usize,
+    goal_class: &str,
+) {
     let (_, body) = rejected.split_once('\n').unwrap();
     let text = format!("{fixture}\n{body}");
     let (parsed, mut store, packages, defs, index, source) = parse_and_name(&text);
+    let goal = class_symbol(&parsed, &store, &index, source, goal_class);
     let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    // Inspect the instantiated type while its arena entries still exist.
+    typer.transaction_failure_error_observer = Some(std::rc::Rc::new(move |typer, error| {
+        if let TyperError::MissingContextualArgument { expected, .. }
+        | TyperError::AmbiguousContextualArgument { expected, .. } = error
+        {
+            let Type::Applied { tycon, args } = typer.store.types.get(*expected) else {
+                panic!("{error:?}")
+            };
+            assert_eq!(typer.store.types.get(*tycon).reference_symbol(), Some(goal));
+            assert_eq!(args.as_slice(), &[defs.long]);
+        }
+    }));
     for name in ["missing", "ambiguous", "missing", "ambiguous"] {
         let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
         let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
@@ -2469,7 +2487,7 @@ fn assert_outside_extension_bound(fixture: &str, name: &str) {
             side: TypeArgumentBoundSide::Upper,
             ..
         } if name == "outsideOnly" => {
-            assert_eq!(tree_index, rhs.index());
+            assert_eq!(tree_index, call.args[0].index());
         }
         TyperError::ExtensionOverload {
             tree_index,

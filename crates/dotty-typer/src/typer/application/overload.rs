@@ -1273,7 +1273,7 @@ impl SourceTyper<'_> {
                 type_arguments[0],
                 instantiated.bounds[0],
                 0,
-                application_tree_index,
+                argument_trees[0].index(),
                 info_journal,
             )?;
             callable = instantiated.result;
