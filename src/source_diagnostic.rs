@@ -153,9 +153,25 @@ mod tests {
     use super::*;
     use crate::core::{TextRange, TokenKind};
 
+    fn assert_lexer_report(text: &str, start: u32, end: u32, code: &str, message: &str) {
+        let id = SourceId::from_index(17);
+        let scanner = crate::lexer::ContextualScanner::new(text).unwrap();
+        let [diagnostic] = scanner.diagnostics() else {
+            panic!("expected one diagnostic for {text}")
+        };
+        let report = SourceDiagnostic::from_lexer(id, diagnostic);
+        assert_eq!(report.code, Some(code));
+        assert_eq!(report.message, message);
+        assert_eq!(report.severity, DiagnosticSeverity::Error);
+        let range = TextRange::new(start, end).unwrap();
+        assert_eq!(
+            report.location,
+            Some(SourceSpan::new(id, Span::without_point(range)))
+        );
+    }
+
     #[test]
     fn lexer_reports_preserve_the_issue_and_scanned_byte_range() {
-        let id = SourceId::from_index(17);
         for (text, start, end, code, message) in [
             (
                 "/* 😀",
@@ -221,20 +237,40 @@ mod tests {
                 "Invalid digit '2' for base 2",
             ),
         ] {
-            let scanner = crate::lexer::ContextualScanner::new(text).unwrap();
-            let [diagnostic] = scanner.diagnostics() else {
-                panic!("expected one diagnostic for {text}")
-            };
-            let report = SourceDiagnostic::from_lexer(id, diagnostic);
-            assert_eq!(report.code, Some(code));
-            assert_eq!(report.message, message);
-            assert_eq!(report.severity, DiagnosticSeverity::Error);
-            let range = TextRange::new(start, end).unwrap();
-            assert_eq!(
-                report.location,
-                Some(SourceSpan::new(id, Span::without_point(range)))
-            );
+            assert_lexer_report(text, start, end, code, message);
         }
+    }
+
+    #[test]
+    fn contextual_and_identifier_errors_describe_the_source() {
+        assert_lexer_report(
+            r#"s"$!""#,
+            1,
+            3,
+            "lexer.interpolation.invalid_splice",
+            "Expected an identifier or '{' after '$', found '!'",
+        );
+        assert_lexer_report(
+            "if ready then\n  first\n\tsecond",
+            22,
+            23,
+            "lexer.incompatible_indentation_prefixes",
+            "Inconsistent indentation: spaces and tabs give incompatible prefixes",
+        );
+        assert_lexer_report(
+            "\u{1a}",
+            0,
+            1,
+            "lexer.unsupported_source_character",
+            r"Unsupported source character '\u{1a}'",
+        );
+        assert_lexer_report(
+            "`_`",
+            0,
+            3,
+            "lexer.empty_or_underscore_backquoted_identifier",
+            "A backquoted identifier cannot be empty or contain only '_'",
+        );
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use crate::lexer::{
-    EscapeIssue, LexerIssue, LiteralIssue, NonIntegerLiteralKind, NumericComponent, NumericIssue,
+    EscapeIssue, InterpolationIssue, LexerIssue, LiteralIssue, NonIntegerLiteralKind,
+    NumericComponent, NumericIssue,
 };
 
 pub(super) fn message(issue: &LexerIssue) -> String {
@@ -8,7 +9,23 @@ pub(super) fn message(issue: &LexerIssue) -> String {
         LexerIssue::Literal(issue) => literal_message(issue),
         LexerIssue::Escape(issue) => escape_message(issue),
         LexerIssue::UnterminatedBlockComment => "Unterminated block comment".into(),
-        _ => format!("Lexer diagnostic ({})", issue.code()),
+        LexerIssue::Interpolation(issue) => interpolation_message(issue),
+        LexerIssue::UnsupportedSourceCharacter { character } => {
+            format!("Unsupported source character {character:?}")
+        }
+        LexerIssue::UnterminatedBackquotedIdentifier => {
+            "Expected a closing backquote for the identifier".into()
+        }
+        LexerIssue::EmptyOrUnderscoreBackquotedIdentifier => {
+            "A backquoted identifier cannot be empty or contain only '_'".into()
+        }
+        LexerIssue::NonScalarBackquotedIdentifier => {
+            "Unpaired Unicode surrogate in backquoted identifier".into()
+        }
+        LexerIssue::IncompatibleIndentationPrefixes => {
+            "Inconsistent indentation: spaces and tabs give incompatible prefixes".into()
+        }
+        LexerIssue::Xml(_) => format!("Lexer diagnostic ({})", issue.code()),
     }
 }
 
@@ -74,6 +91,29 @@ fn escape_message(issue: &EscapeIssue) -> String {
         }
         EscapeIssue::UnsupportedOctalEscape { digits } => {
             format!("Unsupported octal escape '\\{digits}'")
+        }
+    }
+}
+
+fn interpolation_message(issue: &InterpolationIssue) -> String {
+    match issue {
+        InterpolationIssue::UnterminatedExpression => {
+            "Expected '}' to close the interpolated expression".into()
+        }
+        InterpolationIssue::UnclosedString { multiline: false } => {
+            "Unterminated interpolated string".into()
+        }
+        InterpolationIssue::UnclosedString { multiline: true } => {
+            "Unterminated triple-quoted interpolated string".into()
+        }
+        InterpolationIssue::InvalidSplice {
+            following_character: Some(character),
+        } => format!("Expected an identifier or '{{' after '$', found {character:?}"),
+        InterpolationIssue::InvalidSplice {
+            following_character: None,
+        } => "Expected an identifier or '{' after '$' at end of input".into(),
+        InterpolationIssue::IdentifierExpectedAfterDollar => {
+            "Expected an identifier after '$'".into()
         }
     }
 }
