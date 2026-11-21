@@ -47,6 +47,9 @@ pub use class_field_signatures::{
 mod member_signature;
 pub use member_signature::{MemberSignatureError, try_complete_member_signature};
 
+mod source_parse;
+pub use source_parse::{DetachedSource, ParsedSource, parse_source};
+
 mod source_diagnostic;
 pub use source_diagnostic::SourceDiagnostic;
 /// Report returned by typer diagnostics.
