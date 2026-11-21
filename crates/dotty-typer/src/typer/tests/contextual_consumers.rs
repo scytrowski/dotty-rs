@@ -2217,22 +2217,48 @@ const GENERIC_EXTENSION_USING: &str =
 
 #[test]
 fn generic_extension_infers_its_trailing_format_after_the_ordinary_argument() {
-    assert_generic_format_application("automatic", 1, ApplyKind::Regular, |defs| defs.long);
+    assert_generic_format_application(
+        GENERIC_EXTENSION_USING,
+        "automatic",
+        &[1],
+        ApplyKind::Regular,
+        |defs| defs.long,
+    );
 }
 
 #[test]
 fn generic_extension_passes_the_written_witness_in_an_ambiguous_scope() {
-    assert_generic_format_application("explicit", 2, ApplyKind::Using, |defs| defs.long);
+    assert_generic_format_application(
+        GENERIC_EXTENSION_USING,
+        "explicit",
+        &[2],
+        ApplyKind::Using,
+        |defs| defs.long,
+    );
+}
+
+const MULTI_WITNESS: &str =
+    include_str!("../../../tests/fixtures/contextual-consumers/MultiWitnessExtensions.scala");
+
+#[test]
+fn generic_extension_supplies_both_instantiated_method_witnesses() {
+    assert_generic_format_application(
+        MULTI_WITNESS,
+        "automatic",
+        &[1, 2],
+        ApplyKind::Regular,
+        |defs| defs.long,
+    );
 }
 
 fn assert_generic_format_application(
+    text: &str,
     name: &str,
-    format_index: usize,
+    witnesses: &[usize],
     kind: ApplyKind,
     result: fn(&Definitions) -> TypeId,
 ) {
-    let (parsed, mut store, packages, defs, index, source) =
-        parse_and_name(GENERIC_EXTENSION_USING);
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
     let result = result(&defs);
     let factory = method_symbol(&parsed, &store, &index, source, "ops");
     let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, name);
@@ -2255,11 +2281,11 @@ fn assert_generic_format_application(
     let TreeKind::Apply(format) = &ast.get(root).kind else {
         panic!("format application")
     };
-    let [evidence] = format.args[..] else {
-        panic!("one witness")
-    };
+    assert_eq!(format.args.len(), witnesses.len());
     assert_eq!(format.kind, kind);
-    assert_eq!(typed_reference(&typer, evidence), param(1, format_index));
+    for (&arg, &index) in format.args.iter().zip(witnesses) {
+        assert_eq!(typed_reference(&typer, arg), param(1, index));
+    }
     let selected = assert_contextual_extension_call(
         &typer,
         format.function,
@@ -2298,7 +2324,13 @@ fn concrete_keep_needs_no_format() {
 
 #[test]
 fn expected_int_can_select_generic_keep_with_its_own_format() {
-    assert_generic_format_application("expectedInt", 1, ApplyKind::Regular, |defs| defs.int);
+    assert_generic_format_application(
+        GENERIC_EXTENSION_USING,
+        "expectedInt",
+        &[1],
+        ApplyKind::Regular,
+        |defs| defs.int,
+    );
 }
 
 #[test]

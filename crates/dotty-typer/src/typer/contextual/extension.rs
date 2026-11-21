@@ -591,13 +591,13 @@ impl SourceTyper<'_> {
         // instantiated with the method type arguments before witness search.
         let result = match types.get(method.result) {
             Type::Method(using) => {
-                let [witness] = using.params.as_slice() else {
-                    return false;
-                };
                 if using.kind != MethodKind::Contextual
-                    || witness.erased
-                    || witness.varargs
-                    || matches!(types.get(witness.ty), Type::ByName { .. })
+                    || using.params.is_empty()
+                    || using.params.iter().any(|witness| {
+                        witness.erased
+                            || witness.varargs
+                            || matches!(types.get(witness.ty), Type::ByName { .. })
+                    })
                 {
                     return false;
                 }
