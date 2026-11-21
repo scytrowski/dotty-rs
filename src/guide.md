@@ -9,7 +9,7 @@ general source compiler, compiler session/driver, or source-compilation CLI.
 
 | Task | Public API |
 | --- | --- |
-| Parse a source and collect lexer/parser reports | [`parse_source`], [`DetachedSource::into_session`], [`ParsedSource`] |
+| Parse a source and collect typed lexer/parser diagnostics | [`parse_source`], [`DetachedSource::bind`], [`ParsedSource`], [`SyntaxDiagnostic`] |
 | Control scanning and parsing separately | [`lexer::ContextualScanner`], [`parser::parse_compilation_unit`], [`parser::DetachedParse`] |
 | Enter source declarations | [`namer::name_compilation_unit_with_diagnostics`], [`namer::NamingOutcome`] |
 | Complete signatures and type expressions/methods | [`typer::SourceTyper`], [`try_complete_member_signature`], [`check_class_body`] |
@@ -41,7 +41,7 @@ let detached = parse_source(
     "class Answer { def value: Int = 42 }",
     ParserFeatures::default(),
 )?;
-let parsed = detached.into_session(&mut names);
+let parsed = detached.bind(&mut names);
 assert!(parsed.diagnostics.is_empty());
 // The original AST and package root are in parsed.syntax.
 # Ok::<(), Box<dyn std::error::Error>>(())
@@ -55,21 +55,36 @@ byte offset. Equal offsets keep lexer reports first. Checking only
 
 ```rust
 use dotty::core::{NameInterner, SourceId};
-use dotty::parse_source;
+use dotty::lexer::LexerIssue;
+use dotty::{SyntaxDiagnostic, parse_source};
 use dotty::parser::ParserFeatures;
 
+let mut names = NameInterner::new();
 let parsed = parse_source(
     SourceId::from_index(1),
     "class Broken {} /* unclosed comment",
     ParserFeatures::default(),
 )?
-.into_session(&mut NameInterner::new());
+.bind(&mut names);
 assert!(parsed.syntax.diagnostics.is_empty());
 assert_eq!(parsed.diagnostics.len(), 1);
-assert_eq!(parsed.diagnostics[0].code, Some("lexer.unterminated_block_comment"));
-assert_eq!(parsed.diagnostics[0].location.unwrap().source(), SourceId::from_index(1));
+let diagnostic = &parsed.diagnostics[0];
+assert!(matches!(
+    diagnostic,
+    SyntaxDiagnostic::Lexer { diagnostic, .. }
+        if matches!(diagnostic.issue(), LexerIssue::UnterminatedBlockComment)
+));
+assert_eq!(diagnostic.location().source(), SourceId::from_index(1));
+let report = diagnostic.render();
+assert_eq!(report.code, Some("lexer.unterminated_block_comment"));
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
+
+[`DetachedSource::bind`] returns `ParsedSource<SyntaxDiagnostic>` without
+formatting messages. Match the original lexer/parser payload for machine
+decisions and call [`SyntaxDiagnostic::render`] at the presentation boundary.
+For clients that only need formatted reports, [`DetachedSource::into_session`]
+binds and eagerly renders them as `ParsedSource<SourceDiagnostic>`.
 
 [`SourceDiagnostic`] carries an optional stable phase code, severity, owned
 message, and optional location. Codes can be absent for typer/adapter failures;
@@ -100,7 +115,7 @@ let parsed = parse_source(
     "class Answer { def value: Int = 42 }",
     ParserFeatures::default(),
 )?
-.into_session(&mut store.names);
+.bind(&mut store.names);
 if !parsed.diagnostics.is_empty() {
     return Err("handle syntax diagnostics before naming".into());
 }

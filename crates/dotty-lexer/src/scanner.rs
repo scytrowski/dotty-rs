@@ -93,6 +93,11 @@ impl ContextualScanner {
         &self.diagnostics
     }
 
+    /// Transfers the collected diagnostics to the caller, leaving the token stream in place.
+    pub fn take_diagnostics(&mut self) -> Vec<LexerDiagnostic> {
+        std::mem::take(&mut self.diagnostics)
+    }
+
     /// Returns all tokens produced by this scan.
     ///
     /// After parser feedback splits the buffer, the first call copies the full
@@ -6700,6 +6705,19 @@ case A => a"#,
             scanner.diagnostics()[0].span(),
             TextRange::new(13, 15).expect("valid range")
         );
+    }
+
+    #[test]
+    fn taking_diagnostics_preserves_tokens_and_cursor() {
+        let mut scanner = ContextualScanner::new("val n = 0x").unwrap();
+        scanner.next();
+        let tokens = scanner.tokens().to_vec();
+        let expected = scanner.diagnostics().to_vec();
+        assert_eq!(expected.len(), 1);
+        assert_eq!(scanner.take_diagnostics(), expected);
+        assert!(scanner.diagnostics().is_empty());
+        assert_eq!(scanner.tokens(), tokens);
+        assert_eq!(scanner.next(), tokens.get(1));
     }
 
     #[test]

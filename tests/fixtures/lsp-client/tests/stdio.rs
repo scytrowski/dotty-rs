@@ -400,3 +400,31 @@ fn lexer_and_parser_markers_clear_independently_after_unsaved_edits() {
         client.shutdown();
     }
 }
+
+#[test]
+fn numeric_edits_update_the_message_and_range_for_the_same_code() {
+    let uri = "file:///fixture/A.scala";
+    for (encoding, start) in [("utf-8", 40), ("utf-16", 38)] {
+        let mut client = Client::start(encoding, vec![]);
+        let marker = |len, message: &str| {
+            json!([{
+                "source": "dotty", "severity": 1, "range": range(1, start, start + len),
+                "code": "lexer.numeric.missing_digits", "message": message
+            }])
+        };
+        client.open(
+            uri,
+            "package demo\n/* 😀 */ class A { def value(): Int = 0x }",
+        );
+        client.diagnostics(
+            uri,
+            1,
+            marker(2, "Expected a base-16 digit after the prefix"),
+        );
+        client.edit(uri, 2, range(1, start, start + 2), "1e+");
+        client.diagnostics(uri, 2, marker(3, "Expected a digit in the exponent"));
+        client.edit(uri, 3, range(1, start, start + 3), "40");
+        client.diagnostics(uri, 3, json!([]));
+        client.shutdown();
+    }
+}
