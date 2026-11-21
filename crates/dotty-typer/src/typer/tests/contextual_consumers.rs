@@ -1545,15 +1545,28 @@ fn overloaded_extension_with_no_match_permits_a_companion_conversion() {
 const USING_OVERLOADS: &str =
     include_str!("../../../tests/fixtures/contextual-consumers/ExtensionUsingOverloads.scala");
 
+const GROUP_USING: &str =
+    include_str!("../../../tests/fixtures/contextual-consumers/ExtensionGroupUsing.scala");
+
 #[test]
 fn overloaded_extension_explicit_using_selects_the_method_and_preserves_both_witnesses() {
-    let mut swapped: Vec<_> = USING_OVERLOADS.lines().collect();
+    for fixture in [USING_OVERLOADS, GROUP_USING] {
+        assert_using_overload_selections(fixture);
+    }
+}
+
+fn assert_using_overload_selections(fixture: &str) {
+    let mut swapped: Vec<_> = fixture.lines().collect();
     let first = swapped
         .iter()
         .position(|line| line.contains("extension ("))
         .unwrap();
-    swapped.swap(first, first + 1);
-    for text in [USING_OVERLOADS, &swapped.join("\n")] {
+    let count = swapped[first..]
+        .iter()
+        .take_while(|line| line.contains("extension ("))
+        .count();
+    swapped[first..first + count].reverse();
+    for text in [fixture, &swapped.join("\n")] {
         let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
         let factory = method_symbol(&parsed, &store, &index, source, "ops");
         let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
@@ -1616,28 +1629,72 @@ fn overloaded_extension_explicit_using_selects_the_method_and_preserves_both_wit
 }
 
 #[test]
-fn overloaded_extension_requires_a_written_using_to_break_the_tie() {
-    let extra = include_str!(
-        "../../../tests/fixtures/contextual-consumers/ExtensionUsingOverloadsRejected.scala"
-    );
-    let text = format!(
-        "{USING_OVERLOADS}\n{}",
-        extra.strip_prefix("package sameargs").unwrap()
-    );
-    let (parsed, mut store, packages, defs, index, source) = parse_and_name(&text);
+fn grouped_using_overloads_can_select_the_wider_generic_method() {
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(GROUP_USING);
     let factory = method_symbol(&parsed, &store, &index, source, "ops");
-    let mut methods = parsed
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let (method, rhs) =
+        method_definition_and_rhs(&parsed, typer.store(), &index, source, "wideFallback");
+    let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+        panic!()
+    };
+    let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+        panic!()
+    };
+    typer.type_method_definition(tree).unwrap();
+    let root = typer.typed_index.get(source, rhs).unwrap();
+    assert_eq!(typer.typed_ast().get(root).ty, defs.long);
+    assert_contextual_extension_call(
+        &typer,
+        root,
+        factory,
+        Some(defs.long),
+        index
+            .symbol_at(source, def.value_param_clauses[0][0])
+            .unwrap(),
+        index
+            .symbol_at(source, def.value_param_clauses[1][0])
+            .unwrap(),
+    );
+}
+
+#[test]
+fn overloaded_extension_requires_a_written_using_to_break_the_tie() {
+    for (base, rejected) in [
+        (
+            USING_OVERLOADS,
+            include_str!(
+                "../../../tests/fixtures/contextual-consumers/ExtensionUsingOverloadsRejected.scala"
+            ),
+        ),
+        (
+            GROUP_USING,
+            include_str!(
+                "../../../tests/fixtures/contextual-consumers/ExtensionGroupUsingRejected.scala"
+            ),
+        ),
+    ] {
+        let (_, declarations) = rejected.split_once('\n').unwrap();
+        assert_using_overload_rejections(&format!("{base}\n{declarations}"));
+    }
+}
+
+fn assert_using_overload_rejections(text: &str) {
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let factory = method_symbol(&parsed, &store, &index, source, "ops");
+    let methods = parsed
         .ast
         .iter()
         .filter_map(|(id, node)| match &node.kind {
             TreeKind::DefDef(d) if store.names.resolve(d.name.as_name().text()) == "render" => {
-                index.symbol_at(source, id)
+                index
+                    .symbol_at(source, id)
+                    .map(|symbol| (symbol, !d.type_params.is_empty()))
             }
             _ => None,
         })
         .collect::<Vec<_>>();
-    methods.sort_by_key(|symbol| symbol.index());
-    assert_eq!(methods.len(), 2);
+
     let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
     for name in ["probeOne", "probeBoth", "probeWrong"] {
         let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
@@ -1690,7 +1747,13 @@ fn overloaded_extension_requires_a_written_using_to_break_the_tie() {
             other => panic!("{name}: {other:?}"),
         };
         reported.sort_by_key(|symbol| symbol.index());
-        assert_eq!(reported, methods);
+        let mut expected: Vec<_> = methods
+            .iter()
+            .filter(|(_, generic)| name != "probeWrong" || !generic)
+            .map(|(symbol, _)| *symbol)
+            .collect();
+        expected.sort_by_key(|symbol| symbol.index());
+        assert_eq!(reported, expected, "{name}");
         assert_eq!(typer.store.checkpoint(), before);
         assert_eq!(typer.typed_arena.checkpoint(), trees);
         assert!(typer.typed_index.is_empty());
@@ -1732,7 +1795,7 @@ fn generic_extension_overload_keeps_method_inference_separate_from_the_provider(
             let root = typer.typed_index.get(source, rhs).unwrap();
             let ast = typer.typed_ast();
             assert_eq!(ast.get(root).ty, result);
-            let target = assert_keep_call(
+            let target = assert_contextual_extension_call(
                 &typer,
                 root,
                 factory,
@@ -1812,7 +1875,7 @@ fn generic_extension_overload_rejects_wrong_arity_without_partial_trees() {
     assert!(typer.typed_index.is_empty());
 }
 
-fn assert_keep_call(
+fn assert_contextual_extension_call(
     typer: &SourceTyper<'_>,
     root: TreeId<Typed>,
     factory: SymbolId,
@@ -1892,7 +1955,7 @@ fn contextual_extension_receiver_specificity_precedes_the_written_argument_claus
                 .unwrap_or_else(|error| panic!("{name}: {error:?}"));
             let root = typer.typed_index.get(source, rhs).unwrap();
             assert_eq!(typer.typed_ast().get(root).ty, result, "{name}");
-            let selected = assert_keep_call(
+            let selected = assert_contextual_extension_call(
                 &typer,
                 root,
                 factory,
@@ -1949,7 +2012,7 @@ fn tied_extension_receivers_use_all_applicable_receivers_for_the_next_clause() {
                 .unwrap_or_else(|err| panic!("{name}: {err:?}"));
             let root = typer.typed_index.get(source, rhs).unwrap();
             assert_eq!(typer.typed_ast().get(root).ty, result, "{name}");
-            let selected = assert_keep_call(
+            let selected = assert_contextual_extension_call(
                 &typer,
                 root,
                 factory,

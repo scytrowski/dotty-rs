@@ -145,7 +145,10 @@ When two declarations in the same owner share the narrow receiver, resolution
 continues at the ordinary clause with all receiver-applicable declarations.
 For two narrow methods taking `Int` and `Boolean` and a wider generic method,
 `keep(2L)` selects the wider method with type argument `Long`.
-Other polymorphic parameter shapes remain deferred.
+If two narrow methods also tie on the ordinary argument, a written `using`
+can distinguish their contextual formals. Omitting it leaves an ambiguity
+even with just one witness in scope. The ambiguity includes an applicable
+wider generic method. Other polymorphic parameter shapes remain deferred.
 
 Conversion insertion covers value adaptation to
 a known expected type, including ordinary method arguments. For a unary

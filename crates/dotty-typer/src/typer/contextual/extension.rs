@@ -402,6 +402,43 @@ impl SourceTyper<'_> {
             {
                 Some((best, expected))
             }
+            Err(TyperError::AmbiguousOverloadApplication {
+                candidates: mut tied,
+                ..
+            }) => {
+                // A tie can be resolved by a later written using clause. Keep
+                // every applicable alternative for that clause and its diagnostic.
+                let mut generic: Vec<_> = candidates
+                    .iter()
+                    .copied()
+                    .filter(|c| matches!(self.store.types.get(c.callable), Type::Poly(_)))
+                    .collect();
+                self.instantiate_generic_overload_candidates(
+                    &mut generic,
+                    arguments,
+                    site,
+                    ApplyKind::Regular,
+                    false,
+                    journal,
+                )?;
+                for candidate in &mut generic {
+                    match self.choose_overload_candidate(
+                        std::slice::from_mut(candidate),
+                        arguments,
+                        site,
+                        ApplyKind::Regular,
+                    ) {
+                        Ok(applicable) => tied.push(applicable.symbol),
+                        Err(TyperError::OverloadApplicationNoApplicable { .. }) => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+                return Err(TyperError::AmbiguousOverloadApplication {
+                    source: self.source,
+                    tree_index: site,
+                    candidates: tied,
+                });
+            }
             Err(TyperError::OverloadApplicationNoApplicable { .. }) => None,
             other => return other,
         };
