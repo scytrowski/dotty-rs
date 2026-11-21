@@ -274,6 +274,24 @@ mod tests {
     }
 
     #[test]
+    fn xml_reports_keep_tag_names_and_empty_eof_spans() {
+        assert_lexer_report(
+            "<outer></inner>",
+            14,
+            15,
+            "lexer.xml.mismatched_closing_tag",
+            "Expected </outer>, found </inner>",
+        );
+        assert_lexer_report(
+            "<item enabled={flag",
+            19,
+            19,
+            "lexer.xml.attribute_expression_must_be_closed",
+            "Expected '}' to close the XML attribute expression",
+        );
+    }
+
+    #[test]
     fn parser_reports_preserve_the_phase_code_and_source_location() {
         let span = SourceSpan::new(
             SourceId::from_index(4),

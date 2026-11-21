@@ -1,6 +1,6 @@
 use crate::lexer::{
     EscapeIssue, InterpolationIssue, LexerIssue, LiteralIssue, NonIntegerLiteralKind,
-    NumericComponent, NumericIssue,
+    NumericComponent, NumericIssue, XmlIssue,
 };
 
 pub(super) fn message(issue: &LexerIssue) -> String {
@@ -25,7 +25,7 @@ pub(super) fn message(issue: &LexerIssue) -> String {
         LexerIssue::IncompatibleIndentationPrefixes => {
             "Inconsistent indentation: spaces and tabs give incompatible prefixes".into()
         }
-        LexerIssue::Xml(_) => format!("Lexer diagnostic ({})", issue.code()),
+        LexerIssue::Xml(issue) => xml_message(issue),
     }
 }
 
@@ -115,5 +115,50 @@ fn interpolation_message(issue: &InterpolationIssue) -> String {
         InterpolationIssue::IdentifierExpectedAfterDollar => {
             "Expected an identifier after '$'".into()
         }
+    }
+}
+
+fn xml_message(issue: &XmlIssue) -> String {
+    match issue {
+        XmlIssue::UnterminatedComment => "Expected '-->' to close the XML comment".into(),
+        XmlIssue::UnterminatedCdata => "Expected ']]>' to close the CDATA section".into(),
+        XmlIssue::AttributeExpressionMustBeClosed => {
+            "Expected '}' to close the XML attribute expression".into()
+        }
+        XmlIssue::UnterminatedExpression => {
+            "Expected '}' to close the embedded Scala expression in XML".into()
+        }
+        XmlIssue::AttributeNameMustBeFollowedByEquals => {
+            "Expected '=' after the XML attribute name".into()
+        }
+        XmlIssue::AttributeValueExpectedAfterEquals => {
+            "Expected an XML attribute value after '='".into()
+        }
+        XmlIssue::UnterminatedDeclaration => "Unterminated XML declaration".into(),
+        XmlIssue::UnterminatedTag => "Unterminated XML tag or element".into(),
+        XmlIssue::AttributeValueMustFollowEquals => {
+            "Expected '=' before the XML attribute value".into()
+        }
+        XmlIssue::AttributeNameExpected => "Expected an XML attribute name".into(),
+        XmlIssue::ClosingTagCannotContainAttributes => {
+            "An XML closing tag cannot have attributes".into()
+        }
+        XmlIssue::OpeningTagNameExpected => {
+            "Expected an element name in the XML opening tag".into()
+        }
+        XmlIssue::ClosingTagNameExpected => {
+            "Expected an element name in the XML closing tag".into()
+        }
+        XmlIssue::MismatchedClosingTag { expected, found } => {
+            format!("Expected </{expected}>, found </{found}>")
+        }
+        XmlIssue::ClosingTagWithoutOpeningTag { found: Some(name) } => {
+            format!("No matching opening tag for </{name}>")
+        }
+        XmlIssue::ClosingTagWithoutOpeningTag { found: None } => {
+            "XML closing tag has no matching opening tag".into()
+        }
+        XmlIssue::InvalidCommentDoubleHyphen => "An XML comment cannot contain '--'".into(),
+        XmlIssue::UnexpectedAttributeEquals => "Unexpected '=' in XML attribute list".into(),
     }
 }
