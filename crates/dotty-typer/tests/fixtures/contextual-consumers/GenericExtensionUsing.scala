@@ -9,4 +9,5 @@ trait Ops[A] {
 class Client {
   given ops[A](using tc: TC[A]): Ops[A] = ???
   def automatic(x: Box[Int])(using tc: TC[Int], f: Format[Long]): Long = x.keep(2L)
+  def explicit(x: Box[Int])(using tc: TC[Int], a: Format[Long], b: Format[Long]): Long = x.keep(2L)(using b)
 }

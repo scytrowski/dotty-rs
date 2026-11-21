@@ -42,7 +42,8 @@ def main():
         verified = 0
         for sources, status, *expected in [
             (["GenericExtensionUsing.scala"], 0,
-             "Long = this.ops[Int](tc).keep(x)[Long](2L)(f)"),
+             "Long = this.ops[Int](tc).keep(x)[Long](2L)(f)",
+             "Long = this.ops[Int](tc).keep(x)[Long](2L)(using b)"),
             ([groups], 0, *group_calls),
             ([reversed_declarations(groups, Path(out))], 0, *group_calls),
             ([using], 0, *using_calls),

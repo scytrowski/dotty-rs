@@ -134,7 +134,15 @@ unary method whose sole ordinary parameter has the type of its unbounded method
 type parameter. With `keep[B](b: B): B` and `keep(i: Int): Boolean`,
 `x.keep(2L)` becomes `ops[Int](tc).keep(x)[Long](2L)`. An `Int` argument
 selects the concrete method by default. An expected `Int` result selects
-`keep[Int](2)` instead. For overloads declared in the same owner, a receiver strictly
+`keep[Int](2)` instead.
+
+A generic extension can take a final contextual witness. For
+`keep[B](b: B)(using Format[B]): B`, a call on `Box[Int]` with argument
+`2L` supplies `TC[Int]` to the provider and `Format[Long]` to the method.
+An explicit `(using chosen)` passes that exact witness even when two
+`Format[Long]` values are in scope.
+
+For overloads declared in the same owner, a receiver strictly
 more specific than every other applicable receiver selects the method at the
 first clause. For `Narrow[A] extends Box[A]`, putting the generic `keep` on
 `Narrow[A]` and the concrete one on `Box[A]` makes `x.keep(2)` on a

@@ -2217,10 +2217,19 @@ const GENERIC_EXTENSION_USING: &str =
 
 #[test]
 fn generic_extension_infers_its_trailing_format_after_the_ordinary_argument() {
+    assert_generic_format_application("automatic", 1, ApplyKind::Regular);
+}
+
+#[test]
+fn generic_extension_passes_the_written_witness_in_an_ambiguous_scope() {
+    assert_generic_format_application("explicit", 2, ApplyKind::Using);
+}
+
+fn assert_generic_format_application(name: &str, format_index: usize, kind: ApplyKind) {
     let (parsed, mut store, packages, defs, index, source) =
         parse_and_name(GENERIC_EXTENSION_USING);
     let factory = method_symbol(&parsed, &store, &index, source, "ops");
-    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "automatic");
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, name);
     let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
         panic!()
     };
@@ -2243,8 +2252,8 @@ fn generic_extension_infers_its_trailing_format_after_the_ordinary_argument() {
     let [evidence] = format.args[..] else {
         panic!("one witness")
     };
-    assert_eq!(format.kind, ApplyKind::Regular);
-    assert_eq!(typed_reference(&typer, evidence), param(1, 1));
+    assert_eq!(format.kind, kind);
+    assert_eq!(typed_reference(&typer, evidence), param(1, format_index));
     let selected = assert_contextual_extension_call(
         &typer,
         format.function,
