@@ -5483,19 +5483,14 @@ fn diagnostic_aware_naming_names_clean_source_without_diagnostics() {
 
 #[test]
 fn diagnostic_aware_naming_rejects_confirmed_invalid_visibility_and_rolls_back() {
-    let source_text = "class Outer { private[Sibling] val hidden = 1 }\nclass Sibling";
+    let source_text =
+        "/* Sibling */ class Outer { private[Sibling] val hidden = 1 }\nclass Sibling";
     let (parsed, source, mut store) = parsed_source(source_text, 318);
-    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
-        panic!("parser should return a package root");
-    };
-    let TreeKind::TypeDef(outer) = &parsed.ast.get(package.stats[0]).kind else {
-        panic!("Outer should be a TypeDef");
-    };
-    let TreeKind::Template(template) = &parsed.ast.get(outer.rhs).kind else {
-        panic!("Outer should have a Template");
-    };
-    let declaration = template.body[0];
-    let expected_span = parsed.ast.get(declaration).position.unwrap();
+    let start = (source_text.find("[Sibling]").unwrap() + 1) as u32;
+    let expected_span = dotty_core::SourceSpan::new(
+        source,
+        dotty_core::Span::without_point(TextRange::new(start, start + 7).unwrap()),
+    );
     let checkpoint = store.checkpoint();
     let mut packages = Packages::new();
 
@@ -6077,18 +6072,13 @@ fn qualified_enum_case_fields_use_the_actual_companion_module_class() {
 
 #[test]
 fn diagnostic_aware_naming_rejects_an_unknown_enum_case_boundary() {
-    let (parsed, source, mut store) = parsed_source(
-        "enum Color { case Red(private[Missing] val value: Int) }",
-        320,
+    let text = "enum Color { case Red(protected[Missing] val value: Int) }";
+    let (parsed, source, mut store) = parsed_source(text, 320);
+    let start = text.find("Missing").unwrap() as u32;
+    let span = dotty_core::SourceSpan::new(
+        source,
+        dotty_core::Span::without_point(TextRange::new(start, start + 7).unwrap()),
     );
-    let span = parsed
-        .ast
-        .iter()
-        .find_map(|(_, node)| match &node.kind {
-            TreeKind::ValDef(def) if def.metadata.visibility.is_some() => node.position,
-            _ => None,
-        })
-        .unwrap();
     let before = store.checkpoint();
     let mut packages = Packages::new();
     let NamingOutcome::Rejected { diagnostics } = name_compilation_unit_with_diagnostics(
@@ -6108,7 +6098,7 @@ fn diagnostic_aware_naming_rejects_an_unknown_enum_case_boundary() {
         [NamerDiagnostic::error(
             span,
             NamerIssue::InvalidVisibilityQualifier {
-                access: VisibilityAccess::Private,
+                access: VisibilityAccess::Protected,
                 qualifier: "Missing".to_owned(),
             }
         )]

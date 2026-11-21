@@ -328,6 +328,8 @@ mod tests {
                 ast
             });
             assert_eq!(signature.diagnostic(|_| ast), diagnostic);
+            let _: &crate::SourceDiagnostic = &diagnostic;
+            assert_eq!(diagnostic.code, None);
             assert_eq!(diagnostic.message, message);
             assert_eq!(diagnostic.severity, DiagnosticSeverity::Error);
             assert_eq!(

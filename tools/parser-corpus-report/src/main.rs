@@ -3458,10 +3458,12 @@ mod tests {
         assert_eq!(diagnostic.source_id, 0);
         assert_eq!(
             diagnostic.span.start as usize,
-            source.find("private[Sibling]").unwrap()
+            source.find("[Sibling]").unwrap() + 1
         );
-        assert!(diagnostic.span.end as usize <= source.len());
-        assert!(diagnostic.span.end > diagnostic.span.start);
+        assert_eq!(
+            &source[diagnostic.span.start as usize..diagnostic.span.end as usize],
+            "Sibling"
+        );
         assert!(matches!(
             &diagnostic.issue,
             NamerDiagnosticIssueData::InvalidVisibilityQualifier { access, qualifier }

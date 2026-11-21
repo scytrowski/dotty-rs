@@ -22,6 +22,7 @@ impl DefinitionPrefix {
             start,
             metadata: Modifiers {
                 visibility: None,
+                visibility_qualifier_range: None,
                 modifiers: Vec::new(),
                 annotations: Vec::new(),
             },
@@ -171,18 +172,17 @@ where
     pub(crate) fn parse_visibility(&mut self, metadata: &mut Modifiers) {
         let visibility_span = self.current_span();
         let visibility_kind = self.current().kind;
-        let visibility = match self.current().kind {
-            TokenKind::Keyword(HardKeyword::Private) => {
-                dotty_core::ast::VisibilitySyntax::Private {
-                    qualifier: self.parse_access_qualifier(),
-                }
-            }
-            TokenKind::Keyword(HardKeyword::Protected) => {
-                dotty_core::ast::VisibilitySyntax::Protected {
-                    qualifier: self.parse_access_qualifier(),
-                }
-            }
+        let protected = match visibility_kind {
+            TokenKind::Keyword(HardKeyword::Private) => false,
+            TokenKind::Keyword(HardKeyword::Protected) => true,
             _ => return,
+        };
+        let token = self.parse_access_qualifier();
+        let qualifier = token.map(|(name, _)| name);
+        let visibility = if protected {
+            dotty_core::ast::VisibilitySyntax::Protected { qualifier }
+        } else {
+            dotty_core::ast::VisibilitySyntax::Private { qualifier }
         };
 
         if metadata.visibility.is_some() {
@@ -194,10 +194,11 @@ where
             );
         } else {
             metadata.visibility = Some(visibility);
+            metadata.visibility_qualifier_range = token.map(|(_, range)| range);
         }
     }
 
-    fn parse_access_qualifier(&mut self) -> Option<dotty_core::Name> {
+    fn parse_access_qualifier(&mut self) -> Option<(dotty_core::Name, dotty_core::TextRange)> {
         self.advance();
         if !self.accept(TokenKind::Punctuation(Punctuation::LeftBracket)) {
             return None;
@@ -208,7 +209,7 @@ where
         {
             self.intern_current_term_name()
                 .ok()
-                .map(|name| *name.as_name())
+                .map(|name| (*name.as_name(), self.current().span))
         } else {
             self.report_issue(ParseIssue::Modifier(
                 ModifierIssue::ExpectedVisibilityQualifier {
@@ -554,6 +555,10 @@ mod tests {
                 }
                 None => panic!("expected a visibility modifier"),
             };
+            assert_eq!(
+                prefix.metadata.visibility_qualifier_range,
+                Some(dotty_core::TextRange::new(name_start, name_end).unwrap())
+            );
             assert!(qualifier_name.is_term());
             assert_eq!(
                 parser.current().kind,
@@ -590,6 +595,7 @@ mod tests {
             prefix.metadata.visibility,
             Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: None })
         ));
+        assert!(prefix.metadata.visibility_qualifier_range.is_none());
         assert_eq!(parser.current().kind, TokenKind::Operator);
         assert_eq!(parser.diagnostics().len(), 2);
         assert_eq!(

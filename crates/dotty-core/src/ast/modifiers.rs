@@ -90,6 +90,8 @@ pub enum Modifier {
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Modifiers {
     pub visibility: Option<VisibilitySyntax>,
+    /// Byte range of the written qualifier token in the declaration's source.
+    pub visibility_qualifier_range: Option<crate::TextRange>,
     pub modifiers: Vec<Modifier>,
     pub annotations: Vec<TreeId<Untyped>>,
 }

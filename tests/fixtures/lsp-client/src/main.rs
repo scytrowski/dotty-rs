@@ -144,10 +144,14 @@ impl Workspace {
                         DiagnosticSeverity::Note => 3,
                     };
                     if let Some(range) = problem.range.and_then(|r| wire_range(&doc.text, r, enc)) {
-                        diagnostics.push(json!({
+                        let mut diagnostic = json!({
                             "range": range, "severity": severity,
                             "source": "dotty", "message": problem.message
-                        }));
+                        });
+                        if let Some(code) = problem.code {
+                            diagnostic["code"] = json!(code);
+                        }
+                        diagnostics.push(diagnostic);
                     } else {
                         // LSP document diagnostics require a range. Keep unlocated errors visible.
                         let params = json!({"type": severity, "message": format!("{uri}: {}", problem.message)});
@@ -313,6 +317,7 @@ mod tests {
         assert!(ws.changed("textDocument/didOpen", &open, enc));
         let file = FileResult {
             problems: vec![dotty_lsp::analysis::Problem {
+                code: None,
                 range: None,
                 message: "Expected Int, found Boolean".into(),
                 severity: DiagnosticSeverity::Error,
