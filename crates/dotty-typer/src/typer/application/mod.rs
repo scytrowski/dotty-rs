@@ -1202,10 +1202,10 @@ impl SourceTyper<'_> {
                 .and_then(|tree| self.arena.get(*tree).position)
                 .or(position)
         {
-            self.diagnostics.push(dotty_core::Diagnostic::new(
+            self.diagnostics.push(TyperDiagnostic::with_issue(
                 dotty_core::DiagnosticSeverity::Warning,
                 span.span().range(),
-                "Implicit parameters should be provided with a `using` clause.",
+                TyperWarning::ImplicitClauseWithoutUsing,
             ));
         }
         if method.kind != MethodKind::Plain {

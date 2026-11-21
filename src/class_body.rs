@@ -9,7 +9,7 @@ use crate::core::{
 };
 use crate::jvm_class_plan::TypedClassBody;
 use crate::source_declarations::{ClassMember, SourceClass};
-use crate::typer::{SourceTyper, TyperError};
+use crate::typer::{SourceTyper, TyperError, TyperWarning};
 
 /// Failure to type a named class or one of its declared members.
 #[derive(Debug)]
@@ -226,12 +226,17 @@ fn visit_class_body<E>(
         .next()
         .map(|first| collect_errors(first, &mut failures));
     if let Some(diagnostics) = diagnostics {
-        diagnostics.extend(
-            typer
-                .take_diagnostics()
-                .into_iter()
-                .map(|item| (source, item)),
-        );
+        diagnostics.extend(typer.take_diagnostics().into_iter().map(|item| {
+            let message = match item.issue() {
+                TyperWarning::ImplicitClauseWithoutUsing => {
+                    "Implicit parameters should be provided with a `using` clause."
+                }
+            };
+            (
+                source,
+                Diagnostic::new(item.severity(), item.span(), message),
+            )
+        }));
     }
     if let Some(errors) = errors {
         if let Some(bindings) = partial_bindings {
