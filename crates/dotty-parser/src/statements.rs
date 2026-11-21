@@ -212,6 +212,33 @@ where
         }
     }
 
+    /// A typed value declaration can return with its missing equals already
+    /// diagnosed at the first token of the initializer. Synchronize as usual,
+    /// but let that specific diagnostic explain the unexpected token.
+    pub(crate) fn recover_statement_separator(
+        &mut self,
+        diagnostics_start: usize,
+        separator: ParseIssue,
+    ) {
+        let current = self.current();
+        let missing_equals = crate::expr::can_start_expr(current.kind)
+            && self.diagnostics[diagnostics_start..]
+                .last()
+                .is_some_and(|diagnostic| {
+                    diagnostic.span() == current.span
+                        && diagnostic.issue()
+                            == &ParseIssue::Declaration(
+                                crate::DeclarationIssue::ExpectedValueEquals {
+                                    found: current.kind,
+                                },
+                            )
+                });
+        if !missing_equals {
+            self.report_issue(separator);
+        }
+        self.recover_until(RecoverySet::Statement);
+    }
+
     /// Parses statements up to a compilation-unit or block boundary.
     pub(crate) fn parse_statement_sequence(
         &mut self,
