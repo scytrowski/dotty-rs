@@ -1,9 +1,11 @@
 //! Presentation of source diagnostics for external compiler and editor clients.
 use crate::core::{AstArena, DiagnosticSeverity, SourceId, SourceSpan, Span, Untyped};
-use crate::lexer::{EscapeIssue, LexerDiagnostic, LexerIssue, NumericIssue};
+use crate::lexer::LexerDiagnostic;
 use crate::namer::{NamerDiagnostic, NamerIssue, VisibilityAccess};
 use crate::parser::{DeclarationIssue, ParseDiagnostic, ParseIssue, ValueDefinitionKind};
 use crate::typer::TyperError;
+
+mod lexer;
 
 /// A source diagnostic reported to a compiler or editor client.
 #[derive(Debug, PartialEq, Eq)]
@@ -30,20 +32,10 @@ impl SourceDiagnostic {
     /// Presents a raw lexer or contextual scanner diagnostic for the file it came from.
     pub fn from_lexer(source: SourceId, diagnostic: &LexerDiagnostic) -> Self {
         let issue = diagnostic.issue();
-        let message = match issue {
-            LexerIssue::UnterminatedBlockComment => "Unterminated block comment".to_owned(),
-            LexerIssue::Escape(EscapeIssue::InvalidEscapeCharacter { character }) => {
-                format!("Invalid escape character {character:?}")
-            }
-            LexerIssue::Numeric(NumericIssue::InvalidDigitForBase { digit, base }) => {
-                format!("Invalid digit {digit:?} for base {base}")
-            }
-            _ => format!("Lexer diagnostic ({})", issue.code()),
-        };
         Self {
             code: Some(issue.code()),
             severity: diagnostic.severity(),
-            message,
+            message: lexer::message(issue),
             location: Some(SourceSpan::new(
                 source,
                 Span::without_point(diagnostic.span()),
@@ -178,6 +170,48 @@ mod tests {
                 4,
                 "lexer.escape.invalid_escape_character",
                 "Invalid escape character 'q'",
+            ),
+            (
+                "1e2L",
+                0,
+                3,
+                "lexer.numeric.long_suffix_on_non_integer",
+                "A literal with an exponent cannot have an 'L' suffix",
+            ),
+            (
+                "'😀'",
+                0,
+                5,
+                "lexer.literal.character_outside_utf16_code_unit",
+                "Character '😀' does not fit in a single UTF-16 code unit",
+            ),
+            (
+                "\"\"\"abc",
+                0,
+                6,
+                "lexer.literal.unclosed_string",
+                "Unterminated triple-quoted string literal",
+            ),
+            (
+                r#""\123""#,
+                0,
+                5,
+                "lexer.escape.unsupported_octal_escape",
+                r"Unsupported octal escape '\123'",
+            ),
+            (
+                "1e+",
+                0,
+                3,
+                "lexer.numeric.missing_digits",
+                "Expected a digit in the exponent",
+            ),
+            (
+                "0x",
+                0,
+                2,
+                "lexer.numeric.missing_digits",
+                "Expected a base-16 digit after the prefix",
             ),
             (
                 "0b2",
