@@ -26,10 +26,12 @@ use dotty::jvm_class_plan::{
 };
 use dotty::jvm_method_plan::JvmMethodPlanner;
 use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
-use dotty::parser::{DetachedParse, ParseResult};
+use dotty::parser::ParseResult;
 use dotty::source_declarations::{Declaration, SourceClass, source_classes};
 use dotty::typer::{SignatureCompletion, SourceTyper, TyperError};
-use dotty::{SourceDeclarationIndex, SourceDiagnostic, SourceFileCalls};
+use dotty::{
+    DetachedSource, ParsedSource, SourceDeclarationIndex, SourceDiagnostic, SourceFileCalls,
+};
 
 struct NamedUnit {
     source: SourceId,
@@ -75,17 +77,14 @@ impl NamedUnit {
 fn name_source(
     id: SourceId,
     name: &str,
-    parsed: &ParseResult,
+    source: ParsedSource,
     store: &mut SemanticStore,
     packages: &mut Packages,
-) -> Result<SourceSemanticIndex, Vec<SourceDiagnostic>> {
-    if !parsed.diagnostics.is_empty() {
-        return Err(parsed
-            .diagnostics
-            .iter()
-            .map(SourceDiagnostic::from_parser)
-            .collect());
+) -> Result<(ParseResult, SourceSemanticIndex), Vec<SourceDiagnostic>> {
+    if !source.diagnostics.is_empty() {
+        return Err(source.diagnostics);
     }
+    let parsed = source.syntax;
     match name_compilation_unit_with_diagnostics(
         &parsed.ast,
         parsed.root,
@@ -99,7 +98,7 @@ fn name_source(
     {
         NamingOutcome::Named { index, diagnostics } => {
             assert!(diagnostics.is_empty(), "{diagnostics:?}");
-            Ok(*index)
+            Ok((parsed, *index))
         }
         NamingOutcome::Rejected { diagnostics } => Err(diagnostics
             .iter()
@@ -111,20 +110,20 @@ fn name_source(
 fn enter(
     id: SourceId,
     name: &str,
-    parsed: ParseResult,
+    parsed: ParsedSource,
     store: &mut SemanticStore,
     packages: &mut Packages,
-) -> NamedUnit {
-    let index = name_source(id, name, &parsed, store, packages).unwrap();
+) -> Result<NamedUnit, Vec<SourceDiagnostic>> {
+    let (parsed, index) = name_source(id, name, parsed, store, packages)?;
     let classes = source_classes(&parsed.ast, parsed.root, id, &index, store).unwrap();
     let calls = SourceFileCalls::new(parsed.call_names, &parsed.ast, &index, &classes).unwrap();
-    NamedUnit {
+    Ok(NamedUnit {
         source: id,
         ast: parsed.ast,
         calls,
         index,
         classes,
-    }
+    })
 }
 
 #[test]
@@ -160,7 +159,7 @@ fn source_diagnostics_follow_a_field_from_parsing_through_typing() {
         ),
     ] {
         let parsed = parse(text, &mut store);
-        let reports = name_source(source, file, &parsed, &mut store, &mut packages).unwrap_err();
+        let reports = name_source(source, file, parsed, &mut store, &mut packages).unwrap_err();
         let start = text.find(token).unwrap() as u32;
         let range = dotty::core::TextRange::new(start, start + token.len() as u32).unwrap();
         let location =
@@ -174,7 +173,7 @@ fn source_diagnostics_follow_a_field_from_parsing_through_typing() {
         assert_eq!(report.location, Some(location));
     }
     let parsed = parse(&fixed, &mut store);
-    let units = [enter(source, file, parsed, &mut store, &mut packages)];
+    let units = [enter(source, file, parsed, &mut store, &mut packages).unwrap()];
     let class = &units[0].classes[0];
     let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
     let (_, bodies) = type_bodies(&units, &mut store, defs, &packages, headers);
@@ -186,20 +185,92 @@ fn source_diagnostics_follow_a_field_from_parsing_through_typing() {
     bodies.get(class.symbol).unwrap();
 }
 
+fn name_units_with_diagnostics(
+    files: &[(SourceId, &str, &str)],
+    parsed: Vec<DetachedSource>,
+    store: &mut SemanticStore,
+    packages: &mut Packages,
+) -> (Vec<NamedUnit>, Vec<SourceDiagnostic>) {
+    let mut units = Vec::new();
+    let mut reports = Vec::new();
+    for (&(id, name, _), detached) in files.iter().zip(parsed) {
+        let parsed = detached.into_session(&mut store.names);
+        match enter(id, name, parsed, store, packages) {
+            Ok(unit) => units.push(unit),
+            Err(diagnostics) => reports.extend(diagnostics),
+        }
+    }
+    (units, reports)
+}
+
 fn name_units(
     files: &[(SourceId, &str, &str)],
-    parsed: Vec<DetachedParse>,
+    parsed: Vec<DetachedSource>,
     store: &mut SemanticStore,
     packages: &mut Packages,
 ) -> Vec<NamedUnit> {
-    files
-        .iter()
-        .zip(parsed)
-        .map(|(&(id, name, _), detached)| {
-            let parsed = detached.into_session(&mut store.names);
-            enter(id, name, parsed, store, packages)
-        })
-        .collect()
+    let (units, reports) = name_units_with_diagnostics(files, parsed, store, packages);
+    assert!(reports.is_empty(), "{reports:?}");
+    units
+}
+
+#[test]
+fn mixed_syntax_errors_leave_the_other_file_executable_in_either_order() {
+    let bad = (
+        SourceId::from_index(17),
+        "Broken.scala",
+        "class Broken { val hidden: Int 1 } /* open",
+    );
+    let good = (
+        SourceId::from_index(2),
+        "A.scala",
+        "package demo\nclass A { def value(): Int = 40 }",
+    );
+    for files in [[bad, good], [good, bad]] {
+        for workers in [1, 2] {
+            let mut store = SemanticStore::new();
+            let defs = Definitions::bootstrap(&mut store);
+            let mut packages = Packages::new();
+            let (units, reports) = name_units_with_diagnostics(
+                &files,
+                parsing::parse_files(&files, workers),
+                &mut store,
+                &mut packages,
+            );
+            assert_eq!(reports.len(), 2, "{reports:?}");
+            for (report, (code, site)) in reports.iter().zip([
+                ("parser.declaration.expected_value_equals", "1"),
+                ("lexer.unterminated_block_comment", "/* open"),
+            ]) {
+                assert_eq!(report.code, Some(code));
+                let span = report.location.unwrap();
+                assert_eq!(span.source(), bad.0);
+                assert_eq!(
+                    dotty::core::SourceText::new(bad.2)
+                        .unwrap()
+                        .slice(span.span().range())
+                        .unwrap(),
+                    site
+                );
+            }
+            let [unit] = units.as_slice() else {
+                panic!("expected the clean file")
+            };
+            assert_eq!(unit.source, good.0);
+            let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
+            let (output, bodies) = type_bodies(&units, &mut store, defs, &packages, headers);
+            let plan = JvmCompilationUnit {
+                classes: class_plans(&units, &bodies, &output, &store).unwrap(),
+                store: &store,
+                typed_ast: &output.arena,
+            };
+            let artifact = emit_class(&plan, unit.classes[0].symbol, &defs).unwrap();
+            assert_eq!(
+                run_java_client("mixed-syntax", "SurvivingClassClient", &[artifact]).trim(),
+                "40"
+            );
+        }
+    }
 }
 
 // Scheduling belongs to the consumer. The index identifies the owning source
