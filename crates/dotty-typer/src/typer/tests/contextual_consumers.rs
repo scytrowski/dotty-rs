@@ -2319,23 +2319,22 @@ fn assert_generic_format_application(
 
 #[test]
 fn concrete_keep_needs_no_format() {
-    assert_concrete_keep(GENERIC_EXTENSION_USING);
+    assert_concrete_extension(GENERIC_EXTENSION_USING, "concrete");
 }
 
 #[test]
 fn expected_result_selects_keep_before_resolving_either_witness() {
     for text in [MULTI_WITNESS, &reversed_extensions(MULTI_WITNESS)] {
-        assert_concrete_keep(text);
+        assert_concrete_extension(text, "concrete");
         assert_generic_format_application(text, "expectedInt", &[1, 2], ApplyKind::Regular, "Int");
     }
 }
 
-fn assert_concrete_keep(text: &str) {
+fn assert_concrete_extension(text: &str, name: &str) {
     let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
     let factory = method_symbol(&parsed, &store, &index, source, "ops");
     let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
-    let selected =
-        assert_extension_probe(&mut typer, &parsed, "concrete", factory, defs.boolean, None);
+    let selected = assert_extension_probe(&mut typer, &parsed, name, factory, defs.boolean, None);
     let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(selected) else {
         panic!()
     };
@@ -2439,7 +2438,7 @@ fn bounded_extension_checks_the_upper_bound_and_retains_the_argument_type() {
         for name in ["leaf", "overlap"] {
             assert_generic_format_application(text, name, &[1, 2], ApplyKind::Regular, "Leaf");
         }
-        assert_concrete_keep(text);
+        assert_concrete_extension(text, "concrete");
         assert_outside_extension_bound(text, "outside");
         assert_outside_extension_bound(text, "outsideOnly");
     }
@@ -2496,4 +2495,20 @@ fn assert_outside_extension_bound(fixture: &str, name: &str) {
     assert_eq!(typer.store.checkpoint(), before);
     assert_eq!(typer.typed_arena.checkpoint(), trees);
     assert!(typer.typed_index.is_empty());
+}
+
+#[test]
+fn nested_extension_infers_the_method_type_from_the_ordinary_box() {
+    for text in [BOUNDED_WITNESS, &reversed_extensions(BOUNDED_WITNESS)] {
+        for (name, kind) in [
+            ("nested", ApplyKind::Regular),
+            ("nestedExplicit", ApplyKind::Using),
+            ("nestedOverlap", ApplyKind::Regular),
+        ] {
+            assert_generic_format_application(text, name, &[1, 2], kind, "Leaf");
+        }
+        assert_concrete_extension(text, "nestedConcrete");
+        assert_concrete_extension(text, "nestedExact");
+        assert_outside_extension_bound(text, "nestedOutside");
+    }
 }

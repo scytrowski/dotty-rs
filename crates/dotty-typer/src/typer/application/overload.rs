@@ -1243,7 +1243,7 @@ impl SourceTyper<'_> {
         let mut callable = receiver_clause.result;
         let mut type_arguments = Vec::new();
         if let Some(Type::Poly(poly)) = self.store.types.try_get(callable).cloned() {
-            if local_extension.is_some() || !self.supports_unary_extension_inference(callable) {
+            if local_extension.is_some() || self.generic_extension_formal(callable).is_none() {
                 return Ok(None);
             }
             let arguments = match &mut typed_arguments {
