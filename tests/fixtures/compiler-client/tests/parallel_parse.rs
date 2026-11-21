@@ -42,7 +42,8 @@ object A:
         .iter()
         .zip(parsing::parse_files(&submitted, 3).into_iter().rev())
     {
-        let actual = detached.into_session(&mut session).syntax;
+        let bound = detached.bind(&mut session);
+        let actual = bound.syntax;
         let expected = parse_compilation_unit(
             SourceText::new(text).unwrap(),
             id,
@@ -54,7 +55,7 @@ object A:
         assert_eq!(actual.diagnostics, expected.diagnostics);
         assert_eq!(actual.effective_features, expected.effective_features);
         if id == files[2].0 {
-            let [diagnostic] = &actual.diagnostics[..] else {
+            let [dotty::SyntaxDiagnostic::Parser(diagnostic)] = &bound.diagnostics[..] else {
                 panic!("expected one operator error")
             };
             let ParseIssue::Expression(ExpressionIssue::MixedAssociativityOperators {
@@ -123,7 +124,7 @@ fn measure_parallel_parse() {
             let parsed = Instant::now();
             let results: Vec<_> = local
                 .into_iter()
-                .map(|unit| unit.into_session(&mut session))
+                .map(|unit| unit.bind(&mut session))
                 .collect();
             let bind = parsed.elapsed();
             assert!(

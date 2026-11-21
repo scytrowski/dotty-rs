@@ -10,7 +10,9 @@ use dotty::jvm_class_plan::ClassHeaderBindings;
 use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty::source_declarations::{ClassMember, SourceClass, source_classes};
 use dotty::typer::{SignatureCompletion, SourceTyper, TyperError};
-use dotty::{ClassBodyError, SourceDeclarationIndex, SourceDiagnostic, SourceFileCalls};
+use dotty::{
+    ClassBodyError, SourceDeclarationIndex, SourceDiagnostic, SourceFileCalls, SyntaxDiagnostic,
+};
 
 #[derive(Clone)]
 pub struct Document {
@@ -55,6 +57,7 @@ pub struct Link {
 
 #[derive(Default)]
 pub struct FileResult {
+    pub syntax_diagnostics: Vec<SyntaxDiagnostic>,
     pub problems: Vec<Problem>,
     pub links: Vec<Link>,
 }
@@ -89,11 +92,9 @@ fn name(
     let parsed = dotty::parse_source(source, text, Default::default())
         .map_err(|e| result.error(None, e.to_string()))
         .ok()?
-        .into_session(&mut store.names);
+        .bind(&mut store.names);
     if !parsed.diagnostics.is_empty() {
-        result
-            .problems
-            .extend(parsed.diagnostics.into_iter().map(Problem::from));
+        result.syntax_diagnostics = parsed.diagnostics;
         return None;
     }
     let parsed = parsed.syntax;
@@ -346,6 +347,36 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn syntax_issues_survive_analysis_until_publication() {
+        use dotty::lexer::{LexerIssue, NumericComponent, NumericIssue};
+        use dotty::parser::{DeclarationIssue, ParseIssue};
+
+        let uri = "file:///Broken.scala";
+        let doc = Document {
+            version: 1,
+            text: Arc::new(DocumentText::new("class Broken { val x: Int 1e+ }".into()).unwrap()),
+        };
+        let files = analyze(&[(uri.to_owned(), doc)].into());
+        let [
+            SyntaxDiagnostic::Lexer { diagnostic, .. },
+            SyntaxDiagnostic::Parser(parser),
+        ] = files[uri].syntax_diagnostics.as_slice()
+        else {
+            panic!("expected both phases")
+        };
+        assert!(matches!(
+            diagnostic.issue(),
+            LexerIssue::Numeric(NumericIssue::MissingDigits {
+                component: NumericComponent::Exponent
+            })
+        ));
+        assert!(matches!(
+            parser.issue(),
+            ParseIssue::Declaration(DeclarationIssue::ExpectedValueEquals { .. })
+        ));
+    }
 
     #[test]
     fn unknown_constructor_parameter_type_points_to_its_name() {

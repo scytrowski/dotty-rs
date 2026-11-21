@@ -1,9 +1,11 @@
 //! Presentation of source diagnostics for external compiler and editor clients.
 use crate::core::{AstArena, DiagnosticSeverity, SourceId, SourceSpan, Span, Untyped};
-use crate::lexer::{EscapeIssue, LexerDiagnostic, LexerIssue, NumericIssue};
+use crate::lexer::LexerDiagnostic;
 use crate::namer::{NamerDiagnostic, NamerIssue, VisibilityAccess};
 use crate::parser::{DeclarationIssue, ParseDiagnostic, ParseIssue, ValueDefinitionKind};
 use crate::typer::TyperError;
+
+mod lexer;
 
 /// A source diagnostic reported to a compiler or editor client.
 #[derive(Debug, PartialEq, Eq)]
@@ -30,20 +32,10 @@ impl SourceDiagnostic {
     /// Presents a raw lexer or contextual scanner diagnostic for the file it came from.
     pub fn from_lexer(source: SourceId, diagnostic: &LexerDiagnostic) -> Self {
         let issue = diagnostic.issue();
-        let message = match issue {
-            LexerIssue::UnterminatedBlockComment => "Unterminated block comment".to_owned(),
-            LexerIssue::Escape(EscapeIssue::InvalidEscapeCharacter { character }) => {
-                format!("Invalid escape character {character:?}")
-            }
-            LexerIssue::Numeric(NumericIssue::InvalidDigitForBase { digit, base }) => {
-                format!("Invalid digit {digit:?} for base {base}")
-            }
-            _ => format!("Lexer diagnostic ({})", issue.code()),
-        };
         Self {
             code: Some(issue.code()),
             severity: diagnostic.severity(),
-            message,
+            message: lexer::message(issue),
             location: Some(SourceSpan::new(
                 source,
                 Span::without_point(diagnostic.span()),
@@ -161,9 +153,25 @@ mod tests {
     use super::*;
     use crate::core::{TextRange, TokenKind};
 
+    fn assert_lexer_report(text: &str, start: u32, end: u32, code: &str, message: &str) {
+        let id = SourceId::from_index(17);
+        let scanner = crate::lexer::ContextualScanner::new(text).unwrap();
+        let [diagnostic] = scanner.diagnostics() else {
+            panic!("expected one diagnostic for {text}")
+        };
+        let report = SourceDiagnostic::from_lexer(id, diagnostic);
+        assert_eq!(report.code, Some(code));
+        assert_eq!(report.message, message);
+        assert_eq!(report.severity, DiagnosticSeverity::Error);
+        let range = TextRange::new(start, end).unwrap();
+        assert_eq!(
+            report.location,
+            Some(SourceSpan::new(id, Span::without_point(range)))
+        );
+    }
+
     #[test]
     fn lexer_reports_preserve_the_issue_and_scanned_byte_range() {
-        let id = SourceId::from_index(17);
         for (text, start, end, code, message) in [
             (
                 "/* 😀",
@@ -180,6 +188,48 @@ mod tests {
                 "Invalid escape character 'q'",
             ),
             (
+                "1e2L",
+                0,
+                3,
+                "lexer.numeric.long_suffix_on_non_integer",
+                "A literal with an exponent cannot have an 'L' suffix",
+            ),
+            (
+                "'😀'",
+                0,
+                5,
+                "lexer.literal.character_outside_utf16_code_unit",
+                "Character '😀' does not fit in a single UTF-16 code unit",
+            ),
+            (
+                "\"\"\"abc",
+                0,
+                6,
+                "lexer.literal.unclosed_string",
+                "Unterminated triple-quoted string literal",
+            ),
+            (
+                r#""\123""#,
+                0,
+                5,
+                "lexer.escape.unsupported_octal_escape",
+                r"Unsupported octal escape '\123'",
+            ),
+            (
+                "1e+",
+                0,
+                3,
+                "lexer.numeric.missing_digits",
+                "Expected a digit in the exponent",
+            ),
+            (
+                "0x",
+                0,
+                2,
+                "lexer.numeric.missing_digits",
+                "Expected a base-16 digit after the prefix",
+            ),
+            (
                 "0b2",
                 0,
                 2,
@@ -187,20 +237,58 @@ mod tests {
                 "Invalid digit '2' for base 2",
             ),
         ] {
-            let scanner = crate::lexer::ContextualScanner::new(text).unwrap();
-            let [diagnostic] = scanner.diagnostics() else {
-                panic!("expected one diagnostic for {text}")
-            };
-            let report = SourceDiagnostic::from_lexer(id, diagnostic);
-            assert_eq!(report.code, Some(code));
-            assert_eq!(report.message, message);
-            assert_eq!(report.severity, DiagnosticSeverity::Error);
-            let range = TextRange::new(start, end).unwrap();
-            assert_eq!(
-                report.location,
-                Some(SourceSpan::new(id, Span::without_point(range)))
-            );
+            assert_lexer_report(text, start, end, code, message);
         }
+    }
+
+    #[test]
+    fn contextual_and_identifier_errors_describe_the_source() {
+        assert_lexer_report(
+            r#"s"$!""#,
+            1,
+            3,
+            "lexer.interpolation.invalid_splice",
+            "Expected an identifier or '{' after '$', found '!'",
+        );
+        assert_lexer_report(
+            "if ready then\n  first\n\tsecond",
+            22,
+            23,
+            "lexer.incompatible_indentation_prefixes",
+            "Inconsistent indentation: spaces and tabs give incompatible prefixes",
+        );
+        assert_lexer_report(
+            "\u{1a}",
+            0,
+            1,
+            "lexer.unsupported_source_character",
+            r"Unsupported source character '\u{1a}'",
+        );
+        assert_lexer_report(
+            "`_`",
+            0,
+            3,
+            "lexer.empty_or_underscore_backquoted_identifier",
+            "A backquoted identifier cannot be empty or contain only '_'",
+        );
+    }
+
+    #[test]
+    fn xml_reports_keep_tag_names_and_empty_eof_spans() {
+        assert_lexer_report(
+            "<outer></inner>",
+            14,
+            15,
+            "lexer.xml.mismatched_closing_tag",
+            "Expected </outer>, found </inner>",
+        );
+        assert_lexer_report(
+            "<item enabled={flag",
+            19,
+            19,
+            "lexer.xml.attribute_expression_must_be_closed",
+            "Expected '}' to close the XML attribute expression",
+        );
     }
 
     #[test]
