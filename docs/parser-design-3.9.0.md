@@ -210,6 +210,19 @@ histograms and first-failure buckets by stable issue code. Its issue counts,
 source paths, and parser outcomes retain their existing meanings; historical
 schema versions are not rewritten.
 
+For a typed `val` or `var` such as `val hidden: Int 1`, the declaration
+reports `parser.declaration.expected_value_equals` at the start of the
+initializer. Template, block and top-level statement lists synchronize at
+the usual boundaries. They omit their separator diagnostic when the current
+statement already reported that missing equals at the same expression token.
+The recovered declaration retains its type and an absent RHS. A missing
+separator after a complete declaration still gets its own diagnostic. When
+the next token starts a declaration (including a modifier), parsing resumes
+at that declaration. This also applies to typed fields without an initializer.
+For `class Outer { val hidden: Int 1; val next = 2 }`, the Scala 3.9.0
+parser also retains both fields and marks the literal. Its message asks for
+a statement boundary, while the Rust diagnostic suggests the missing equals.
+
 Each diagnostic preserves a source ID, source span, severity, and its typed
 issue payload. `UnboundPlaceholderParameter` is reported when an expression
 placeholder reaches the end of a compilation unit or expression block without
