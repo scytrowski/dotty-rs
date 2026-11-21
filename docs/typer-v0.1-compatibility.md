@@ -141,8 +141,23 @@ first clause. For `Narrow[A] extends Box[A]`, putting the generic `keep` on
 `Narrow[Int]` call `keep[Int](2)`, even with an expected result of `Any`.
 On a statically typed `Box[Int]` it calls the concrete method. An incompatible
 argument or result on the selected overload does not reopen the wider receiver.
-Other polymorphic parameter shapes and mixed overloads with differing
-receivers but no unique most specific receiver remain deferred.
+When two declarations in the same owner share the narrow receiver, resolution
+continues at the ordinary clause with all receiver-applicable declarations.
+For two narrow methods taking `Int` and `Boolean` and a wider generic method,
+`keep(2L)` selects the wider method with type argument `Long`.
+If two narrow methods also tie on the ordinary argument, a written `using`
+can distinguish their contextual formals. Omitting it leaves an ambiguity
+even with just one witness in scope. The ambiguity includes an applicable
+wider generic method.
+
+For extension declarations in a trait and a nominal base trait, specificity
+compares both the receiver type and the declaring class. If the derived trait
+declares the narrow generic method, it wins at the receiver clause. If the base
+declares that method and the derived trait declares the wider concrete method,
+the priorities tie at the receiver: the ordinary argument selects the derived
+method for an `Int` and the inherited generic method for a `Long`. The selected
+method is adapted on the instantiated provider in both cases. Other polymorphic
+parameter shapes remain deferred.
 
 Conversion insertion covers value adaptation to
 a known expected type, including ordinary method arguments. For a unary

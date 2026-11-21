@@ -1,6 +1,7 @@
 //! Extension methods contributed by a contextual value.
 
 use super::*;
+use std::cmp::Ordering;
 
 pub(in crate::typer) enum ExtensionLookup {
     Selected(TreeId<Typed>, TypeId),
@@ -18,8 +19,33 @@ pub(in crate::typer) struct ExtensionCall<'a> {
 struct ExtensionAlternative {
     provider: Provider,
     receiver: TypeId,
+    declaring_class: SymbolId,
     symbol: SymbolId,
     signature: TypeId,
+}
+
+// Owner order is nominal even when two candidates infer different provider arguments.
+type ExtensionBases = HashMap<SymbolId, HashSet<SymbolId>>;
+
+fn unique_extension_winner<T>(
+    candidates: &[T],
+    mut wins: impl FnMut(&T, &T) -> Result<bool, TyperError>,
+) -> Result<Option<usize>, TyperError> {
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    let mut best = 0;
+    for (i, candidate) in candidates.iter().enumerate().skip(1) {
+        if wins(candidate, &candidates[best])? {
+            best = i;
+        }
+    }
+    for (i, candidate) in candidates.iter().enumerate() {
+        if i != best && !wins(&candidates[best], candidate)? {
+            return Ok(None);
+        }
+    }
+    Ok(Some(best))
 }
 
 impl SourceTyper<'_> {
@@ -112,7 +138,7 @@ impl SourceTyper<'_> {
                 continue;
             }
             let members = self
-                .lookup_members_journaled(result, name, journal)
+                .lookup_overload_members_journaled(result, name, journal)
                 .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
             let mut alternatives = Vec::new();
             for member in members {
@@ -150,7 +176,7 @@ impl SourceTyper<'_> {
                 } else {
                     // Get the member as seen on the instantiated provider, including inherited members.
                     let Some(instantiated) = self
-                        .lookup_members_journaled(provider.result, name, journal)
+                        .lookup_overload_members_journaled(provider.result, name, journal)
                         .map_err(|e| TyperError::MemberLookup(Box::new(e)))?
                         .into_iter()
                         .find(|m| m.symbol == member.symbol)
@@ -182,15 +208,17 @@ impl SourceTyper<'_> {
                 }
                 alternatives.push(ExtensionAlternative {
                     receiver: input,
+                    declaring_class: member.declaring_class,
                     provider,
                     symbol: member.symbol,
                     signature,
                 });
             }
+            let bases = self.extension_declaring_bases(&alternatives, journal)?;
             let selected = if alternatives.len() <= 1 {
                 alternatives.pop()
             } else if let Some(index) =
-                self.unique_extension_receiver(&alternatives, tree_index, journal)?
+                self.unique_extension_receiver(&alternatives, &bases, tree_index, journal)?
             {
                 Some(alternatives.swap_remove(index))
             } else {
@@ -203,6 +231,7 @@ impl SourceTyper<'_> {
                 };
                 let winner = match self.choose_extension_overload(
                     &alternatives,
+                    &bases,
                     call,
                     context,
                     tree_index,
@@ -252,43 +281,71 @@ impl SourceTyper<'_> {
         Ok(Some((function, signature)))
     }
 
-    /// Resolve the receiver clause before consulting a later argument clause.
-    /// Only a receiver strictly narrower than every rival settles the call here.
+    fn extension_declaring_bases(
+        &mut self,
+        alternatives: &[ExtensionAlternative],
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<ExtensionBases, TyperError> {
+        let mut bases = ExtensionBases::new();
+        if let Some((first, rest)) = alternatives.split_first()
+            && rest
+                .iter()
+                .any(|alt| alt.declaring_class != first.declaring_class)
+        {
+            for alt in alternatives {
+                if let std::collections::hash_map::Entry::Vacant(slot) =
+                    bases.entry(alt.declaring_class)
+                {
+                    let ancestors = self.contextual_ancestors(alt.declaring_class, journal)?;
+                    slot.insert(ancestors.into_iter().map(|(class, _)| class).collect());
+                }
+            }
+        }
+        Ok(bases)
+    }
+
+    fn extension_wins(
+        &self,
+        bases: &ExtensionBases,
+        left: SymbolId,
+        right: SymbolId,
+        types: Ordering,
+    ) -> bool {
+        let derives = |a, b| {
+            self.store
+                .symbols
+                .owner(a)
+                .and_then(|owner| bases.get(&owner))
+                .zip(self.store.symbols.owner(b))
+                .is_some_and(|(parents, owner)| parents.contains(&owner))
+        };
+        // An advantage in declaring owner cancels a disadvantage in type
+        // specificity. Only an unopposed advantage settles this clause.
+        match types {
+            Ordering::Greater => !derives(right, left),
+            Ordering::Equal => derives(left, right),
+            Ordering::Less => false,
+        }
+    }
+
     fn unique_extension_receiver(
         &mut self,
         alternatives: &[ExtensionAlternative],
+        bases: &ExtensionBases,
         site: u32,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Option<usize>, TyperError> {
-        let Some(first) = alternatives.first() else {
-            return Ok(None);
-        };
-        let owner = self.store.symbols.owner(first.symbol);
-        let mut best = 0;
-        for (i, alt) in alternatives.iter().enumerate().skip(1) {
-            // Inherited overloads from different owners also need owner ranking.
-            if self.store.symbols.owner(alt.symbol) != owner {
-                return Ok(None);
-            }
-            if self.contextual_conforms(alt.receiver, alternatives[best].receiver, site, journal)? {
-                best = i;
-            }
-        }
-        let receiver = alternatives[best].receiver;
-        for (i, alt) in alternatives.iter().enumerate() {
-            if i != best
-                && (!self.contextual_conforms(receiver, alt.receiver, site, journal)?
-                    || self.contextual_conforms(alt.receiver, receiver, site, journal)?)
-            {
-                return Ok(None);
-            }
-        }
-        Ok(Some(best))
+        unique_extension_winner(alternatives, |left, right| {
+            let forward = self.contextual_conforms(left.receiver, right.receiver, site, journal)?;
+            let reverse = self.contextual_conforms(right.receiver, left.receiver, site, journal)?;
+            Ok(self.extension_wins(bases, left.symbol, right.symbol, forward.cmp(&reverse)))
+        })
     }
 
     fn choose_extension_overload(
         &mut self,
         alternatives: &[ExtensionAlternative],
+        bases: &ExtensionBases,
         call: &mut ExtensionCall<'_>,
         context: ExpressionContext,
         tree_index: u32,
@@ -306,15 +363,17 @@ impl SourceTyper<'_> {
                 .as_slice(),
         };
         let mut candidates = self.extension_overload_candidates(alternatives, tree_index)?;
-        let mut resolution = if candidates
-            .iter()
-            .any(|c| matches!(self.store.types.get(c.callable), Type::Poly(_)))
+        let mut resolution = if !bases.is_empty()
+            || candidates
+                .iter()
+                .any(|c| matches!(self.store.types.get(c.callable), Type::Poly(_)))
         {
-            self.choose_mixed_extension_overload(
-                alternatives,
+            self.choose_extension_by_specificity(
                 &mut candidates,
+                bases,
                 arguments,
                 call.expected_result,
+                ApplyKind::Regular,
                 tree_index,
                 journal,
             )
@@ -341,113 +400,134 @@ impl SourceTyper<'_> {
                     && matches!(self.store.types.get(candidate.callable), Type::Method(_))
             });
             let explicit = self.type_extension_arguments(using, context, journal, call.mappings)?;
-            resolution = self.choose_overload_candidate(
+            resolution = self.choose_extension_by_specificity(
                 &mut candidates,
+                bases,
                 &explicit,
-                tree_index,
+                None,
                 ApplyKind::Using,
+                tree_index,
+                journal,
             );
         }
         resolution.map(|candidate| candidate.symbol)
     }
 
-    fn choose_mixed_extension_overload(
+    fn final_extension_result(&self, callable: TypeId) -> Option<TypeId> {
+        let Type::Method(method) = self.store.types.get(callable) else {
+            return None;
+        };
+        match self.store.types.get(method.result) {
+            Type::Method(_) | Type::Poly(_) => None,
+            _ => Some(method.result),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn choose_extension_by_specificity(
         &mut self,
-        alternatives: &[ExtensionAlternative],
         candidates: &mut [ApplicationCandidate],
+        bases: &ExtensionBases,
         arguments: &[TypedArgument],
         expected: Option<TypeId>,
+        kind: ApplyKind,
         site: u32,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<ApplicationCandidate, TyperError> {
-        // The ordinary clause can decide specificity only after the receivers tie.
-        if let Some((first, rest)) = alternatives.split_first() {
-            for alt in rest {
-                if !self.contextual_conforms(first.receiver, alt.receiver, site, journal)?
-                    || !self.contextual_conforms(alt.receiver, first.receiver, site, journal)?
-                {
-                    return Err(TyperError::OverloadResolutionRequiresUnsupportedCandidate {
-                        source: self.source,
-                        tree_index: site,
-                        candidate: alt.symbol,
-                    });
-                }
-            }
-        }
-
-        let mut concrete: Vec<_> = candidates
+        let generic: HashSet<_> = candidates
             .iter()
-            .copied()
-            .filter(|c| matches!(self.store.types.get(c.callable), Type::Method(_)))
+            .filter(|c| matches!(self.store.types.get(c.callable), Type::Poly(_)))
+            .map(|c| c.symbol)
             .collect();
-        // Rank concrete formals first. Inferring B = Int for [B](b: B) makes
-        // it applicable, but does not make its declaration as specific as (i: Int).
-        let ordinary =
-            self.choose_overload_candidate(&mut concrete, arguments, site, ApplyKind::Regular);
-        let retry = match ordinary {
-            Ok(best)
-                if let Some(expected) = expected
-                    && let Type::Method(method) = self.store.types.get(best.callable)
-                    && !matches!(
-                        self.store.types.get(method.result),
-                        Type::Method(_) | Type::Poly(_)
-                    )
-                    && !self.contextual_conforms(method.result, expected, site, journal)? =>
-            {
-                Some((best, expected))
-            }
-            Err(TyperError::OverloadApplicationNoApplicable { .. }) => None,
-            other => return other,
-        };
         self.instantiate_generic_overload_candidates(
-            candidates,
-            arguments,
-            site,
-            ApplyKind::Regular,
-            false,
-            journal,
+            candidates, arguments, site, kind, false, journal,
         )?;
-        let Some((preferred, expected)) = retry else {
-            return self.choose_overload_candidate(candidates, arguments, site, ApplyKind::Regular);
-        };
-
-        // Scala retries the other alternatives when the preferred result does
-        // not fit. Keep the original choice if no unique replacement fits.
-        let mut compatible = Vec::new();
-        for candidate in candidates.iter().copied() {
-            if candidate.symbol != preferred.symbol
-                && candidate.rejection.is_none()
-                && let Type::Method(method) = self.store.types.get(candidate.callable)
-                && !matches!(
-                    self.store.types.get(method.result),
-                    Type::Method(_) | Type::Poly(_)
-                )
-                && self.contextual_conforms(method.result, expected, site, journal)?
-            {
-                compatible.push(candidate);
-            }
-        }
-        concrete.retain(|c| compatible.iter().any(|alt| alt.symbol == c.symbol));
-        let mut retry =
-            self.choose_overload_candidate(&mut concrete, arguments, site, ApplyKind::Regular);
-        if matches!(
-            retry,
-            Err(TyperError::OverloadApplicationNoApplicable { .. })
-        ) {
-            retry = self.choose_overload_candidate(
-                &mut compatible,
+        let mut applicable = Vec::new();
+        let mut rejected = Vec::new();
+        for candidate in candidates {
+            match self.choose_overload_candidate(
+                std::slice::from_mut(candidate),
                 arguments,
                 site,
-                ApplyKind::Regular,
-            );
+                kind,
+            ) {
+                Ok(c) => applicable.push(c),
+                Err(TyperError::OverloadApplicationNoApplicable { candidates, .. }) => {
+                    rejected.extend(candidates)
+                }
+                Err(error) => return Err(error),
+            }
         }
-        match retry {
-            Err(
-                TyperError::OverloadApplicationNoApplicable { .. }
-                | TyperError::AmbiguousOverloadApplication { .. },
-            ) => Ok(preferred),
-            other => other,
+        if applicable.is_empty() {
+            return Err(TyperError::OverloadApplicationNoApplicable {
+                source: self.source,
+                tree_index: site,
+                candidates: rejected,
+            });
         }
+        let rank = |typer: &mut Self, alts: &[ApplicationCandidate]| {
+            unique_extension_winner(alts, |a, b| {
+                // An unbounded unary type parameter is less specific than a
+                // concrete formal, even if inference made their types identical.
+                let types = match generic
+                    .contains(&b.symbol)
+                    .cmp(&generic.contains(&a.symbol))
+                {
+                    Ordering::Equal => {
+                        match typer.choose_overload_candidate(&mut [*a, *b], arguments, site, kind)
+                        {
+                            Ok(best) if best.symbol == a.symbol => Ordering::Greater,
+                            Ok(_) => Ordering::Less,
+                            Err(TyperError::AmbiguousOverloadApplication { .. }) => Ordering::Equal,
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    order => order,
+                };
+                Ok(typer.extension_wins(bases, a.symbol, b.symbol, types))
+            })
+        };
+        if let [only] = applicable.as_slice() {
+            return Ok(*only);
+        }
+        let winner = rank(self, &applicable)?;
+        // The expected result can break a tie or replace an incompatible
+        // winner after this clause. Curried results still need their arguments.
+        if let Some(expected) = expected
+            && winner.map_or_else(
+                || {
+                    applicable
+                        .iter()
+                        .all(|c| self.final_extension_result(c.callable).is_some())
+                },
+                |i| {
+                    self.final_extension_result(applicable[i].callable)
+                        .is_some()
+                },
+            )
+        {
+            let mut compatible = Vec::new();
+            for (i, c) in applicable.iter().enumerate() {
+                if let Some(result) = self.final_extension_result(c.callable)
+                    && self.contextual_conforms(result, expected, site, journal)?
+                {
+                    if winner == Some(i) {
+                        return Ok(*c);
+                    }
+                    compatible.push(*c);
+                }
+            }
+            if let Some(index) = rank(self, &compatible)? {
+                return Ok(compatible[index]);
+            }
+        }
+        winner
+            .map(|i| applicable[i])
+            .ok_or_else(|| TyperError::AmbiguousOverloadApplication {
+                source: self.source,
+                tree_index: site,
+                candidates: applicable.iter().map(|c| c.symbol).collect(),
+            })
     }
 
     fn extension_overload_candidates(

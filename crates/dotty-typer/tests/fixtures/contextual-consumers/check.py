@@ -10,10 +10,50 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[4]
 
 
+def reversed_declarations(filename, directory):
+    lines = (HERE / filename).read_text().splitlines(keepends=True)
+    slots = [i for i, line in enumerate(lines) if line.lstrip().startswith("extension (")]
+    if len(slots) != 3 or slots != list(range(slots[0], slots[0] + 3)):
+        raise ValueError(f"{filename} must have three consecutive extension declarations")
+    lines[slots[0]:slots[-1] + 1] = reversed(lines[slots[0]:slots[-1] + 1])
+    path = directory / filename
+    path.write_text("".join(lines))
+    return str(path)
+
+
 def main():
     toolchain = runpy.run_path(str(ROOT / "tools/tasty-pickler-oracle/run.py"))["Toolchain"]()
     with tempfile.TemporaryDirectory() as out:
+        groups = "ExtensionReceiverGroups.scala"
+        using = "ExtensionGroupUsing.scala"
+        group_calls = (
+            "def narrowInt(x: groups.Narrow[Int])(using tc: groups.TC[Int]): Any = this.ops[Int](tc).keep(x)(2)",
+            "def narrowBool(x: groups.Narrow[Int])(using tc: groups.TC[Int]): Any = this.ops[Int](tc).keep(x)(true)",
+            "def narrowLong(x: groups.Narrow[Int])(using tc: groups.TC[Int]): Long = this.ops[Int](tc).keep(x)[Long](2L)",
+            "def boxInt(x: groups.Box[Int])(using tc: groups.TC[Int]): Any = this.ops[Int](tc).keep(x)[Int](2)",
+        )
+        format_params = "(x: groupusing.Narrow[Int])(using tc: groupusing.TC[Int], c: groupusing.Compact, d: groupusing.Detailed)"
+        using_calls = (
+            f"def compact{format_params}: Int = this.ops[Int](tc).render(x)(3)(using c)",
+            f"def parenthesized{format_params}: Int = this.ops[Int](tc).render(x)(3)(using c)",
+            f"def detailed{format_params}: Int = this.ops[Int](tc).render(x)(3)(using d)",
+            "Long = this.ops[Int](tc).render(x)[Long](2L)",
+        )
+        verified = 0
         for sources, status, *expected in [
+            ([groups], 0, *group_calls),
+            ([reversed_declarations(groups, Path(out))], 0, *group_calls),
+            ([using], 0, *using_calls),
+            ([reversed_declarations(using, Path(out))], 0, *using_calls),
+            ([using, "ExtensionGroupUsingRejected.scala"], 1, "[E008]", "def probeOne",
+             "def probeBoth", "Ambiguous overload.", "(x: groupusing.Box[Int])[B](value: B): B",
+             "all match arguments", "def probeWrong", "this.ops[Int](tc).render()", "3 errors found"),
+            (["InheritedExtensionOverloads.scala"], 0,
+             "Any = this.concrete[Int](tc).keep(x)(2)", "Any = this.concrete[Int](tc).keep(x)[Long](2L)",
+             "Any = this.generic[Int](tc).keep(x)[Int](2)", "Any = this.generic[Int](tc).keep(x)[Long](2L)",
+             "Boolean = this.wide[Int](tc).keep(x)(2)", "Int = this.wide[Int](tc).keep(x)[Int](2)"),
+            (["InheritedExtensionOverloads.scala", "InheritedExtensionOverloadsRejected.scala"], 1,
+             "[E008]", "def ambiguous", "Ambiguous overload.", "both match arguments", "1 error found"),
             (["ExtensionReceiverSpecificity.scala"], 0,
              "Int = this.ops[Int](tc).keep(x)[Int](2)", "Long = this.ops[Int](tc).keep(x)[Long](2L)",
              "Any = this.ops[Int](tc).keep(x)[Int](2)", "Boolean = this.ops[Int](tc).keep(x)(2)",
@@ -108,15 +148,20 @@ def main():
             (["Extractors.scala"], 0, "case contextualextractors.Allowed()(inner, mode)"),
             (["Extractors.scala", "ExtractorsAmbiguous.scala"], 1, "Ambiguous given instances"),
         ]:
-            result = subprocess.run(
-                [toolchain.java, "-cp", toolchain.classpath, "dotty.tools.dotc.Main",
-                 "-classpath", toolchain.classpath, "-color:never", "-Vprint:typer",
-                 "-d", out, *sources],
-                cwd=HERE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            )
+            with tempfile.TemporaryDirectory(dir=out) as classes:
+                result = subprocess.run(
+                    [toolchain.java, "-cp", toolchain.classpath, "dotty.tools.dotc.Main",
+                     "-classpath", toolchain.classpath, "-color:never", "-Vprint:typer",
+                     "-d", classes, *sources],
+                    cwd=HERE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                )
             output = " ".join(result.stdout.split())
-            if result.returncode != status or any(needle not in output for needle in expected):
-                raise SystemExit(f"{sources} disagrees with pinned Scala 3.9\n{result.stdout}")
+            missing = [needle for needle in expected if needle not in output]
+            if result.returncode != status or missing:
+                raise SystemExit(f"{sources}: expected exit {status}, got {result.returncode}; "
+                                 f"missing {missing}\n{result.stdout}")
+            verified += 1
+        print(f"{verified} contextual consumer compilations matched Scala 3.9.0")
 
 
 if __name__ == "__main__":
