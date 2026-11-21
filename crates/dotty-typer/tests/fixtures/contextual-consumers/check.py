@@ -41,6 +41,14 @@ def main():
         )
         verified = 0
         for sources, status, *expected in [
+            (["GenericExtensionUsing.scala"], 0,
+             "Long = this.ops[Int](tc).keep(x)[Long](2L)(f)",
+             "Long = this.ops[Int](tc).keep(x)[Long](2L)(using b)",
+             "Boolean = this.ops[Int](tc).keep(x)(2)", "Int = this.ops[Int](tc).keep(x)[Int](2)(f)"),
+            (["GenericExtensionUsing.scala", "GenericExtensionUsingRejected.scala"], 1,
+             "[E172]", "No given instance of type keepusing.Format[Long] was found for parameter f of method keep",
+             "both parameter b and parameter a match type keepusing.Format[Long] of parameter f of method keep",
+             "2 errors found"),
             ([groups], 0, *group_calls),
             ([reversed_declarations(groups, Path(out))], 0, *group_calls),
             ([using], 0, *using_calls),

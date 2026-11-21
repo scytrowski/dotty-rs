@@ -2211,3 +2211,149 @@ fn contextual_extension_receiver_specificity_does_not_retry_a_wider_receiver() {
         assert!(typer.typed_index.is_empty());
     }
 }
+
+const GENERIC_EXTENSION_USING: &str =
+    include_str!("../../../tests/fixtures/contextual-consumers/GenericExtensionUsing.scala");
+
+#[test]
+fn generic_extension_infers_its_trailing_format_after_the_ordinary_argument() {
+    assert_generic_format_application("automatic", 1, ApplyKind::Regular, |defs| defs.long);
+}
+
+#[test]
+fn generic_extension_passes_the_written_witness_in_an_ambiguous_scope() {
+    assert_generic_format_application("explicit", 2, ApplyKind::Using, |defs| defs.long);
+}
+
+fn assert_generic_format_application(
+    name: &str,
+    format_index: usize,
+    kind: ApplyKind,
+    result: fn(&Definitions) -> TypeId,
+) {
+    let (parsed, mut store, packages, defs, index, source) =
+        parse_and_name(GENERIC_EXTENSION_USING);
+    let result = result(&defs);
+    let factory = method_symbol(&parsed, &store, &index, source, "ops");
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, name);
+    let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+        panic!()
+    };
+    let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+        panic!()
+    };
+    let param = |clause: usize, n: usize| {
+        index
+            .symbol_at(source, def.value_param_clauses[clause][n])
+            .unwrap()
+    };
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    typer.type_method_definition(tree).unwrap();
+    let root = typer.typed_index.get(source, rhs).unwrap();
+    let ast = typer.typed_ast();
+    assert_eq!(ast.get(root).ty, result);
+    let TreeKind::Apply(format) = &ast.get(root).kind else {
+        panic!("format application")
+    };
+    let [evidence] = format.args[..] else {
+        panic!("one witness")
+    };
+    assert_eq!(format.kind, kind);
+    assert_eq!(typed_reference(&typer, evidence), param(1, format_index));
+    let selected = assert_contextual_extension_call(
+        &typer,
+        format.function,
+        factory,
+        Some(result),
+        param(0, 0),
+        param(1, 0),
+    );
+    let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(selected) else {
+        panic!()
+    };
+    let TreeKind::DefDef(keep) = &parsed.ast.get(tree).kind else {
+        panic!()
+    };
+    assert_eq!(keep.type_params.len(), 1);
+    assert_eq!(keep.value_param_clauses.len(), 2);
+}
+
+#[test]
+fn concrete_keep_needs_no_format() {
+    let (parsed, mut store, packages, defs, index, source) =
+        parse_and_name(GENERIC_EXTENSION_USING);
+    let factory = method_symbol(&parsed, &store, &index, source, "ops");
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let selected =
+        assert_extension_probe(&mut typer, &parsed, "concrete", factory, defs.boolean, None);
+    let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(selected) else {
+        panic!()
+    };
+    let TreeKind::DefDef(decl) = &parsed.ast.get(tree).kind else {
+        panic!()
+    };
+    assert!(decl.type_params.is_empty());
+    assert_eq!(decl.value_param_clauses.len(), 1);
+}
+
+#[test]
+fn expected_int_can_select_generic_keep_with_its_own_format() {
+    assert_generic_format_application("expectedInt", 1, ApplyKind::Regular, |defs| defs.int);
+}
+
+#[test]
+fn generic_extension_witness_errors_identify_the_call_and_roll_back() {
+    let rejected = include_str!(
+        "../../../tests/fixtures/contextual-consumers/GenericExtensionUsingRejected.scala"
+    );
+    let text = format!(
+        "{GENERIC_EXTENSION_USING}\n{}",
+        rejected.strip_prefix("package keepusing").unwrap()
+    );
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(&text);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for name in ["missing", "ambiguous", "missing"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+            panic!()
+        };
+        let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+            panic!()
+        };
+        let store = typer.store.checkpoint();
+        let trees = typer.typed_arena.checkpoint();
+        let error = typer.type_method_definition(tree).unwrap_err();
+        match (name, error) {
+            (
+                "missing",
+                TyperError::MissingContextualArgument {
+                    tree_index,
+                    source: at,
+                    ..
+                },
+            ) => {
+                assert_eq!((at, tree_index), (source, rhs.index()));
+            }
+            (
+                "ambiguous",
+                TyperError::AmbiguousContextualArgument {
+                    tree_index,
+                    source: at,
+                    candidates,
+                    ..
+                },
+            ) => {
+                assert_eq!((at, tree_index), (source, rhs.index()));
+                let witnesses: Vec<_> = def.value_param_clauses[1][1..]
+                    .iter()
+                    .map(|p| index.symbol_at(source, *p).unwrap())
+                    .collect();
+                assert_eq!(candidates, witnesses);
+            }
+            (_, other) => panic!("{name}: {other:?}"),
+        }
+        assert_eq!(typer.store.checkpoint(), store);
+        assert_eq!(typer.typed_arena.checkpoint(), trees);
+        assert!(typer.typed_index.is_empty());
+    }
+}

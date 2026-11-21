@@ -413,13 +413,26 @@ impl SourceTyper<'_> {
         resolution.map(|candidate| candidate.symbol)
     }
 
-    fn final_extension_result(&self, callable: TypeId) -> Option<TypeId> {
+    fn final_extension_result(
+        &self,
+        callable: TypeId,
+        generic: bool,
+    ) -> Result<Option<TypeId>, TyperError> {
         let Type::Method(method) = self.store.types.get(callable) else {
-            return None;
+            return Ok(None);
         };
         match self.store.types.get(method.result) {
-            Type::Method(_) | Type::Poly(_) => None,
-            _ => Some(method.result),
+            // The ordinary arguments have already determined B. Inspect the
+            // result without searching for Format[B] while comparing candidates.
+            Type::Method(using)
+                if generic
+                    && using.kind == MethodKind::Contextual
+                    && !self.type_contains_param_ref(using.result, method.result)? =>
+            {
+                Ok(Some(using.result))
+            }
+            Type::Method(_) | Type::Poly(_) => Ok(None),
+            _ => Ok(Some(method.result)),
         }
     }
 
@@ -491,34 +504,31 @@ impl SourceTyper<'_> {
             return Ok(*only);
         }
         let winner = rank(self, &applicable)?;
-        // The expected result can break a tie or replace an incompatible
-        // winner after this clause. Curried results still need their arguments.
-        if let Some(expected) = expected
-            && winner.map_or_else(
-                || {
-                    applicable
-                        .iter()
-                        .all(|c| self.final_extension_result(c.callable).is_some())
-                },
-                |i| {
-                    self.final_extension_result(applicable[i].callable)
-                        .is_some()
-                },
-            )
-        {
-            let mut compatible = Vec::new();
-            for (i, c) in applicable.iter().enumerate() {
-                if let Some(result) = self.final_extension_result(c.callable)
-                    && self.contextual_conforms(result, expected, site, journal)?
-                {
-                    if winner == Some(i) {
-                        return Ok(*c);
+        // The expected result can break a tie or replace an incompatible winner.
+        if let Some(expected) = expected {
+            let results: Vec<_> = applicable
+                .iter()
+                .map(|c| self.final_extension_result(c.callable, generic.contains(&c.symbol)))
+                .collect::<Result<_, _>>()?;
+            let can_compare = match winner {
+                Some(i) => results[i].is_some(),
+                None => results.iter().all(Option::is_some),
+            };
+            if can_compare {
+                let mut compatible = Vec::new();
+                for (i, (c, result)) in applicable.iter().zip(results).enumerate() {
+                    if let Some(result) = result
+                        && self.contextual_conforms(result, expected, site, journal)?
+                    {
+                        if winner == Some(i) {
+                            return Ok(*c);
+                        }
+                        compatible.push(*c);
                     }
-                    compatible.push(*c);
                 }
-            }
-            if let Some(index) = rank(self, &compatible)? {
-                return Ok(compatible[index]);
+                if let Some(index) = rank(self, &compatible)? {
+                    return Ok(compatible[index]);
+                }
             }
         }
         winner
@@ -577,13 +587,31 @@ impl SourceTyper<'_> {
         let [arg] = method.params.as_slice() else {
             return false;
         };
+        // Inference uses the ordinary argument. A final using clause is
+        // instantiated with the method type arguments before witness search.
+        let result = match types.get(method.result) {
+            Type::Method(using) => {
+                let [witness] = using.params.as_slice() else {
+                    return false;
+                };
+                if using.kind != MethodKind::Contextual
+                    || witness.erased
+                    || witness.varargs
+                    || matches!(types.get(witness.ty), Type::ByName { .. })
+                {
+                    return false;
+                }
+                using.result
+            }
+            _ => method.result,
+        };
         matches!(types.get(parameter.bounds), Type::Bounds { low, high }
             if *low == self.definitions.nothing_type && *high == self.definitions.any_type)
             && method.kind == MethodKind::Plain
             && !arg.erased
             && !arg.varargs
             && matches!(types.get(arg.ty), Type::ParamRef { binder, index: 0 } if *binder == callable)
-            && !matches!(types.get(method.result), Type::Method(_) | Type::Poly(_))
+            && !matches!(types.get(result), Type::Method(_) | Type::Poly(_))
     }
 
     fn extension_receiver(&self, signature: TypeId) -> Option<TypeId> {
