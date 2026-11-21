@@ -1601,7 +1601,7 @@ fn class_planner_rejects_template_initializer() {
     let parsed = parsing::parse_files(&files, 1)
         .pop()
         .unwrap()
-        .into_session(&mut store.names);
+        .bind(&mut store.names);
     let (parsed, index) =
         super::name_source(source, files[0].1, parsed, &mut store, &mut Packages::new()).unwrap();
     let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {

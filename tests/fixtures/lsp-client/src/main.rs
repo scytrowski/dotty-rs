@@ -1,6 +1,6 @@
 use crossbeam_channel::{Receiver, Sender, select, unbounded};
 use dotty::core::{DiagnosticSeverity, DocumentText, PositionEncoding, TextRange};
-use dotty_lsp::analysis::{Document, Documents, FileResult, analyze};
+use dotty_lsp::analysis::{Document, Documents, FileResult, Problem, analyze};
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, error::Error, sync::Arc, thread};
@@ -137,33 +137,49 @@ impl Workspace {
             for (uri, file) in files {
                 let doc = &self.docs[uri];
                 let mut diagnostics = Vec::new();
+                for diagnostic in &file.syntax_diagnostics {
+                    let problem = Problem::from(diagnostic.render());
+                    publish_problem(conn, uri, &doc.text, enc, &problem, &mut diagnostics)?;
+                }
                 for problem in &file.problems {
-                    let severity = match problem.severity {
-                        DiagnosticSeverity::Error => 1,
-                        DiagnosticSeverity::Warning => 2,
-                        DiagnosticSeverity::Note => 3,
-                    };
-                    if let Some(range) = problem.range.and_then(|r| wire_range(&doc.text, r, enc)) {
-                        let mut diagnostic = json!({
-                            "range": range, "severity": severity,
-                            "source": "dotty", "message": problem.message
-                        });
-                        if let Some(code) = problem.code {
-                            diagnostic["code"] = json!(code);
-                        }
-                        diagnostics.push(diagnostic);
-                    } else {
-                        // LSP document diagnostics require a range. Keep unlocated errors visible.
-                        let params = json!({"type": severity, "message": format!("{uri}: {}", problem.message)});
-                        conn.sender
-                            .send(Notification::new("window/logMessage".into(), params).into())?;
-                    }
+                    publish_problem(conn, uri, &doc.text, enc, problem, &mut diagnostics)?;
                 }
                 notify(conn, uri, Some(doc.version), diagnostics)?;
             }
         }
         Ok(())
     }
+}
+
+fn publish_problem(
+    conn: &Connection,
+    uri: &str,
+    text: &DocumentText,
+    enc: PositionEncoding,
+    problem: &Problem,
+    diagnostics: &mut Vec<Value>,
+) -> Result<(), Box<dyn Error>> {
+    let severity = match problem.severity {
+        DiagnosticSeverity::Error => 1,
+        DiagnosticSeverity::Warning => 2,
+        DiagnosticSeverity::Note => 3,
+    };
+    if let Some(range) = problem.range.and_then(|r| wire_range(text, r, enc)) {
+        let mut diagnostic = json!({
+            "range": range, "severity": severity,
+            "source": "dotty", "message": problem.message
+        });
+        if let Some(code) = problem.code {
+            diagnostic["code"] = json!(code);
+        }
+        diagnostics.push(diagnostic);
+    } else {
+        // LSP document diagnostics require a range. Keep unlocated errors visible.
+        let params = json!({"type": severity, "message": format!("{uri}: {}", problem.message)});
+        conn.sender
+            .send(Notification::new("window/logMessage".into(), params).into())?;
+    }
+    Ok(())
 }
 
 fn notify(
