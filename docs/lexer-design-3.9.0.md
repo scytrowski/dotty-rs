@@ -620,10 +620,11 @@ failures. XML state and raw-lexer forwarding use typed `XmlIssue` variants,
 including source tag names for mismatched or unmatched closing tags; contextual
 indentation errors are represented by `IncompatibleIndentationPrefixes`. All
 issues expose a stable, text-independent `code()` identifier for machine
-classification. The lexer does not render issues to messages: a future renderer
-will need to choose user-facing wording, localization, and how to present
-payload data such as characters, bases, and XML tag names. Diagnostic spans,
-order, severity, and recovery behavior are preserved.
+classification. The root `dotty` facade renders every lexer issue in English
+through `SourceDiagnostic::from_lexer`, preserving its code, severity and byte
+range. Messages use the structured payload, including numeric bases, escape
+characters and XML tag names. Clients that need different wording can consume
+the typed scanner diagnostics directly.
 The parser corpus and smoke tools inspect scanner diagnostics only as a count
 or presence flag, so this payload migration does not change their report schema
 or require baseline regeneration.

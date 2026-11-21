@@ -273,6 +273,46 @@ fn mixed_syntax_errors_leave_the_other_file_executable_in_either_order() {
     }
 }
 
+#[test]
+fn missing_digits_report_the_numeric_component_before_a_successful_recompile() {
+    let source = SourceId::from_index(7);
+    let file = "A.scala";
+    let prefix = "package demo\n/* 😀 */ class A { def value(): Int = ";
+    for (literal, message) in [
+        ("0x", "Expected a base-16 digit after the prefix"),
+        ("1e+", "Expected a digit in the exponent"),
+    ] {
+        let text = format!("{prefix}{literal} }}");
+        let files = [(source, file, text.as_str())];
+        let (units, reports) = name_units_with_diagnostics(
+            &files,
+            parsing::parse_files(&files, 1),
+            &mut SemanticStore::new(),
+            &mut Packages::new(),
+        );
+        assert!(units.is_empty());
+        let [report] = reports.as_slice() else {
+            panic!("{reports:?}")
+        };
+        assert_eq!(report.code, Some("lexer.numeric.missing_digits"));
+        assert_eq!(report.message, message);
+        assert_eq!(report.severity, dotty::core::DiagnosticSeverity::Error);
+        let span = report.location.unwrap();
+        assert_eq!(span.source(), source);
+        assert_eq!(span.span().range().start() as usize, prefix.len());
+        assert_eq!(
+            span.span().range().end() as usize,
+            prefix.len() + literal.len()
+        );
+    }
+    let repaired = format!("{prefix}40 }}");
+    let classes = compile([(source, file, repaired.as_str())]);
+    assert_eq!(
+        run_java_client("repaired-number", "SurvivingClassClient", &classes).trim(),
+        "40"
+    );
+}
+
 // Scheduling belongs to the consumer. The index identifies the owning source
 // even when different files reuse the same input tree slots.
 #[derive(Debug, Default)]
