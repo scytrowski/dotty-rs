@@ -187,7 +187,13 @@ impl SourceTyper<'_> {
                     signature,
                 });
             }
-            if alternatives.len() > 1 {
+            let selected = if alternatives.len() <= 1 {
+                alternatives.pop()
+            } else if let Some(index) =
+                self.unique_extension_receiver(&alternatives, tree_index, journal)?
+            {
+                Some(alternatives.swap_remove(index))
+            } else {
                 let Some(call) = call.as_deref_mut() else {
                     return Err(TyperError::OverloadedSelectionDeferred {
                         source: self.source,
@@ -225,9 +231,9 @@ impl SourceTyper<'_> {
                     }
                     Err(error) => return Err(error),
                 };
-                alternatives.retain(|alt| alt.symbol == winner);
-            }
-            if let Some(alt) = alternatives.pop() {
+                alternatives.into_iter().find(|alt| alt.symbol == winner)
+            };
+            if let Some(alt) = selected {
                 candidates.push((alt.provider, Ok((alt.symbol, alt.signature))));
             }
         }
@@ -244,6 +250,40 @@ impl SourceTyper<'_> {
         let function = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
             .select(qualifier, name, false, ty, None);
         Ok(Some((function, signature)))
+    }
+
+    /// Resolve the receiver clause before consulting a later argument clause.
+    /// Only a receiver strictly narrower than every rival settles the call here.
+    fn unique_extension_receiver(
+        &mut self,
+        alternatives: &[ExtensionAlternative],
+        site: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Option<usize>, TyperError> {
+        let Some(first) = alternatives.first() else {
+            return Ok(None);
+        };
+        let owner = self.store.symbols.owner(first.symbol);
+        let mut best = 0;
+        for (i, alt) in alternatives.iter().enumerate().skip(1) {
+            // Inherited overloads from different owners also need owner ranking.
+            if self.store.symbols.owner(alt.symbol) != owner {
+                return Ok(None);
+            }
+            if self.contextual_conforms(alt.receiver, alternatives[best].receiver, site, journal)? {
+                best = i;
+            }
+        }
+        let receiver = alternatives[best].receiver;
+        for (i, alt) in alternatives.iter().enumerate() {
+            if i != best
+                && (!self.contextual_conforms(receiver, alt.receiver, site, journal)?
+                    || self.contextual_conforms(alt.receiver, receiver, site, journal)?)
+            {
+                return Ok(None);
+            }
+        }
+        Ok(Some(best))
     }
 
     fn choose_extension_overload(
