@@ -623,8 +623,11 @@ issues expose a stable, text-independent `code()` identifier for machine
 classification. The root `dotty` facade renders every lexer issue in English
 through `SourceDiagnostic::from_lexer`, preserving its code, severity and byte
 range. Messages use the structured payload, including numeric bases, escape
-characters and XML tag names. Clients that need different wording can consume
-the typed scanner diagnostics directly.
+characters and XML tag names. Clients can call `dotty::parse_source` and bind the result
+with `DetachedSource::bind` to get owned `SyntaxDiagnostic::Lexer` and
+`SyntaxDiagnostic::Parser` values from the same scan. They can inspect the
+phase payload or call `render()` when presenting a report. Parser issues that
+carry interned names use the interner passed to `bind`.
 The parser corpus and smoke tools inspect scanner diagnostics only as a count
 or presence flag, so this payload migration does not change their report schema
 or require baseline regeneration.

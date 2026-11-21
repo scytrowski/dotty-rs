@@ -25,12 +25,15 @@ use dotty::jvm_class_plan::{
     ClassHeaderBindings, ClassPlanError, JvmClassPlanner, TypedClassBodies,
 };
 use dotty::jvm_method_plan::JvmMethodPlanner;
-use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
+use dotty::namer::{
+    NamerDiagnostic, NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics,
+};
 use dotty::parser::ParseResult;
 use dotty::source_declarations::{Declaration, SourceClass, source_classes};
 use dotty::typer::{SignatureCompletion, SourceTyper, TyperError};
 use dotty::{
     DetachedSource, ParsedSource, SourceDeclarationIndex, SourceDiagnostic, SourceFileCalls,
+    SyntaxDiagnostic,
 };
 
 struct NamedUnit {
@@ -74,15 +77,34 @@ impl NamedUnit {
     }
 }
 
+#[derive(Debug)]
+enum FrontendDiagnostic {
+    Syntax(SyntaxDiagnostic),
+    Naming(NamerDiagnostic),
+}
+
+impl FrontendDiagnostic {
+    fn render(&self) -> SourceDiagnostic {
+        match self {
+            Self::Syntax(diagnostic) => diagnostic.render(),
+            Self::Naming(diagnostic) => SourceDiagnostic::from_namer(diagnostic),
+        }
+    }
+}
+
 fn name_source(
     id: SourceId,
     name: &str,
-    source: ParsedSource,
+    source: ParsedSource<SyntaxDiagnostic>,
     store: &mut SemanticStore,
     packages: &mut Packages,
-) -> Result<(ParseResult, SourceSemanticIndex), Vec<SourceDiagnostic>> {
+) -> Result<(ParseResult, SourceSemanticIndex), Vec<FrontendDiagnostic>> {
     if !source.diagnostics.is_empty() {
-        return Err(source.diagnostics);
+        return Err(source
+            .diagnostics
+            .into_iter()
+            .map(FrontendDiagnostic::Syntax)
+            .collect());
     }
     let parsed = source.syntax;
     match name_compilation_unit_with_diagnostics(
@@ -101,8 +123,8 @@ fn name_source(
             Ok((parsed, *index))
         }
         NamingOutcome::Rejected { diagnostics } => Err(diagnostics
-            .iter()
-            .map(SourceDiagnostic::from_namer)
+            .into_iter()
+            .map(FrontendDiagnostic::Naming)
             .collect()),
     }
 }
@@ -110,10 +132,10 @@ fn name_source(
 fn enter(
     id: SourceId,
     name: &str,
-    parsed: ParsedSource,
+    parsed: ParsedSource<SyntaxDiagnostic>,
     store: &mut SemanticStore,
     packages: &mut Packages,
-) -> Result<NamedUnit, Vec<SourceDiagnostic>> {
+) -> Result<NamedUnit, Vec<FrontendDiagnostic>> {
     let (parsed, index) = name_source(id, name, parsed, store, packages)?;
     let classes = source_classes(&parsed.ast, parsed.root, id, &index, store).unwrap();
     let calls = SourceFileCalls::new(parsed.call_names, &parsed.ast, &index, &classes).unwrap();
@@ -139,7 +161,7 @@ fn source_diagnostics_follow_a_field_from_parsing_through_typing() {
         parsing::parse_files(&[(source, file, text)], 1)
             .pop()
             .unwrap()
-            .into_session(&mut store.names)
+            .bind(&mut store.names)
     };
     let mut store = SemanticStore::new();
     let defs = Definitions::bootstrap(&mut store);
@@ -167,6 +189,7 @@ fn source_diagnostics_follow_a_field_from_parsing_through_typing() {
         let [report] = reports.as_slice() else {
             panic!("expected one diagnostic: {reports:?}")
         };
+        let report = report.render();
         assert_eq!(report.code, Some(code));
         assert_eq!(report.message, message);
         assert_eq!(report.severity, dotty::core::DiagnosticSeverity::Error);
@@ -190,11 +213,11 @@ fn name_units_with_diagnostics(
     parsed: Vec<DetachedSource>,
     store: &mut SemanticStore,
     packages: &mut Packages,
-) -> (Vec<NamedUnit>, Vec<SourceDiagnostic>) {
+) -> (Vec<NamedUnit>, Vec<FrontendDiagnostic>) {
     let mut units = Vec::new();
     let mut reports = Vec::new();
     for (&(id, name, _), detached) in files.iter().zip(parsed) {
-        let parsed = detached.into_session(&mut store.names);
+        let parsed = detached.bind(&mut store.names);
         match enter(id, name, parsed, store, packages) {
             Ok(unit) => units.push(unit),
             Err(diagnostics) => reports.extend(diagnostics),
@@ -242,6 +265,7 @@ fn mixed_syntax_errors_leave_the_other_file_executable_in_either_order() {
                 ("parser.declaration.expected_value_equals", "1"),
                 ("lexer.unterminated_block_comment", "/* open"),
             ]) {
+                let report = report.render();
                 assert_eq!(report.code, Some(code));
                 let span = report.location.unwrap();
                 assert_eq!(span.source(), bad.0);
@@ -278,9 +302,18 @@ fn missing_digits_report_the_numeric_component_before_a_successful_recompile() {
     let source = SourceId::from_index(7);
     let file = "A.scala";
     let prefix = "package demo\n/* 😀 */ class A { def value(): Int = ";
-    for (literal, message) in [
-        ("0x", "Expected a base-16 digit after the prefix"),
-        ("1e+", "Expected a digit in the exponent"),
+    use dotty::lexer::{LexerIssue, NumericComponent, NumericIssue};
+    for (literal, component, message) in [
+        (
+            "0x",
+            NumericComponent::BasePrefix { base: 16 },
+            "Expected a base-16 digit after the prefix",
+        ),
+        (
+            "1e+",
+            NumericComponent::Exponent,
+            "Expected a digit in the exponent",
+        ),
     ] {
         let text = format!("{prefix}{literal} }}");
         let files = [(source, file, text.as_str())];
@@ -294,6 +327,14 @@ fn missing_digits_report_the_numeric_component_before_a_successful_recompile() {
         let [report] = reports.as_slice() else {
             panic!("{reports:?}")
         };
+        let FrontendDiagnostic::Syntax(SyntaxDiagnostic::Lexer { diagnostic, .. }) = report else {
+            panic!("expected a lexer issue: {report:?}");
+        };
+        assert_eq!(
+            diagnostic.issue(),
+            &LexerIssue::Numeric(NumericIssue::MissingDigits { component })
+        );
+        let report = report.render();
         assert_eq!(report.code, Some("lexer.numeric.missing_digits"));
         assert_eq!(report.message, message);
         assert_eq!(report.severity, dotty::core::DiagnosticSeverity::Error);
