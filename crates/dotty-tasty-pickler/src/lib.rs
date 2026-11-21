@@ -1,6 +1,6 @@
-//! Source semantic validation and type projection for Scala 3.9.0 TASTy.
+//! Semantic validation and bounded TASTy production for Scala 3.9.0.
 //!
-//! This increment validates a public, ordinary top-level class in one explicit
+//! The base [`ValidatedPicklePlan`] validates a public, ordinary top-level class in one explicit
 //! package, its default constructor and Int-result methods with literals,
 //! formal references, same-class parameterless references, or bounded
 //! same-class calls with one plain Int clause. Methods may have no value clause, one

@@ -10,6 +10,7 @@ use crate::typer::TyperError;
 pub struct SourceDiagnostic {
     /// Stable code supplied by the originating phase, when available.
     pub code: Option<&'static str>,
+    /// Severity assigned by the originating compiler phase.
     pub severity: DiagnosticSeverity,
     /// Owned text suitable for reporting after rollback.
     pub message: String,

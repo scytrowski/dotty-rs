@@ -213,7 +213,9 @@ pub enum ClassPlanError {
     DuplicateClassBody(SymbolId),
     /// The retained typer output belongs to a different class in this session.
     ForeignClassBody {
+        /// Canonical identity or typed root required by the original source binding.
         expected: SymbolId,
+        /// Identity or typed root supplied by the caller instead.
         actual: SymbolId,
     },
     /// A method could not be projected from the class's typer output.
@@ -224,45 +226,92 @@ pub enum ClassPlanError {
     UnsupportedTemplate(SymbolId),
     /// The class header has incomplete or inconsistent bindings for its parent application.
     InvalidParentApplication {
+        /// Class symbol submitted to this planning operation.
         class: SymbolId,
+        /// Source tree associated with the rejected declaration or binding.
         tree: TreeId<Untyped>,
     },
     /// The primary constructor has unsupported parameter clauses or formals.
     ConstructorParameters(SymbolId),
     /// A constructor parameter supplies an unsupported default value.
     DefaultConstructorParameter {
+        /// Class symbol submitted to this planning operation.
         class: SymbolId,
+        /// Source tree associated with the rejected declaration or binding.
         tree: TreeId<Untyped>,
     },
     /// The primary constructor is missing, restricted, generic or has a body.
     UnsupportedConstructor(SymbolId),
     /// This statement is outside the selected class planning subset.
     UnsupportedStatement {
+        /// Class symbol submitted to this planning operation.
         class: SymbolId,
+        /// Source tree associated with the rejected declaration or binding.
         tree: TreeId<Untyped>,
     },
     /// A field input has no matching class-body declaration.
-    UnexpectedField { class: SymbolId, field: SymbolId },
+    UnexpectedField {
+        /// Class symbol submitted to this planning operation.
+        class: SymbolId,
+        /// Field symbol submitted to this planning operation.
+        field: SymbolId,
+    },
     /// An initialized class-body field has no input.
-    MissingField { class: SymbolId, field: SymbolId },
+    MissingField {
+        /// Class symbol submitted to this planning operation.
+        class: SymbolId,
+        /// Field symbol submitted to this planning operation.
+        field: SymbolId,
+    },
     /// Two inputs refer to the same field.
-    DuplicateField { class: SymbolId, field: SymbolId },
+    DuplicateField {
+        /// Class symbol submitted to this planning operation.
+        class: SymbolId,
+        /// Field symbol submitted to this planning operation.
+        field: SymbolId,
+    },
     /// The source RHS has no usable binding in the supplied typer output.
-    InvalidFieldInitializer { field: SymbolId },
+    InvalidFieldInitializer {
+        /// Field symbol submitted to this planning operation.
+        field: SymbolId,
+    },
     /// The supplied typed root differs from the canonical binding for this RHS.
     FieldInitializerMismatch {
+        /// Field symbol submitted to this planning operation.
         field: SymbolId,
+        /// Canonical identity or typed root required by the original source binding.
         expected: TreeId<Typed>,
+        /// Identity or typed root supplied by the caller instead.
         actual: TreeId<Typed>,
     },
     /// A supplied plan has no corresponding concrete method in this class.
-    UnexpectedMethod { class: SymbolId, method: SymbolId },
+    UnexpectedMethod {
+        /// Class symbol submitted to this planning operation.
+        class: SymbolId,
+        /// Method symbol submitted to this planning operation.
+        method: SymbolId,
+    },
     /// A concrete source method has no supplied plan.
-    MissingMethod { class: SymbolId, method: SymbolId },
+    MissingMethod {
+        /// Class symbol submitted to this planning operation.
+        class: SymbolId,
+        /// Method symbol submitted to this planning operation.
+        method: SymbolId,
+    },
     /// More than one plan was supplied for the method.
-    DuplicateMethod { class: SymbolId, method: SymbolId },
+    DuplicateMethod {
+        /// Class symbol submitted to this planning operation.
+        class: SymbolId,
+        /// Method symbol submitted to this planning operation.
+        method: SymbolId,
+    },
     /// The supplied method plan has no body.
-    MissingMethodBody { class: SymbolId, method: SymbolId },
+    MissingMethodBody {
+        /// Class symbol submitted to this planning operation.
+        class: SymbolId,
+        /// Method symbol submitted to this planning operation.
+        method: SymbolId,
+    },
 }
 
 impl fmt::Display for ClassPlanError {

@@ -131,25 +131,40 @@ pub struct ValidatedCrossClassConstructorCallProof<'session> {
 /// Canonical source/typed roots for the one admitted local-receiver Unit call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LocalReceiverUnitCallReceipt {
+    /// Original source root for the application checked by this proof.
     pub source_apply: TreeId<Untyped>,
+    /// Exact mapped typed root for the application checked by this proof.
     pub typed_apply: TreeId<Typed>,
+    /// Original source root for the selected constructor or method callee.
     pub source_select: TreeId<Untyped>,
+    /// Exact mapped typed root for the selected constructor or method callee.
     pub typed_select: TreeId<Typed>,
+    /// Original source root for the explicit receiver expression.
     pub source_receiver: TreeId<Untyped>,
+    /// Exact mapped typed root for the explicit receiver expression.
     pub typed_receiver: TreeId<Typed>,
+    /// Original source root for the argument expression checked by this proof.
     pub source_argument: TreeId<Untyped>,
+    /// Exact mapped typed root for the argument expression checked by this proof.
     pub typed_argument: TreeId<Typed>,
+    /// Canonical local symbol used as the call receiver.
     pub receiver: SymbolId,
+    /// Canonical method symbol retained by this proof.
     pub method: SymbolId,
+    /// Original method formal supplied as the validated call argument.
     pub argument_formal: SymbolId,
+    /// Lexical scope owning the receiver local.
     pub receiver_scope: dotty_core::ScopeId,
+    /// Semantic type of the validated call argument.
     pub argument_type: TypeId,
+    /// Semantic result type validated for the represented expression.
     pub result_type: TypeId,
 }
 
 /// Exact source-order pair of authenticated local Counter.set calls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LocalReceiverUnitCallsReceipt {
+    /// Authenticated calls in their original source order.
     pub calls: [LocalReceiverUnitCallReceipt; 2],
 }
 
@@ -276,16 +291,25 @@ struct LocalValConstructorArgumentProof {
 /// the original local initializer and final local reference without changing
 /// producer acceptance or output.
 pub struct ImmutableLocalInitializationProofInput<'session> {
+    /// Source identity shared by parsing, naming, and typing.
     pub source_id: SourceId,
+    /// Canonical untyped definition of the method being validated.
     pub method_tree: TreeId<Untyped>,
+    /// Canonical symbol, name, and type stores borrowed from the same session.
     pub store: &'session SemanticStore,
+    /// Primitive definitions bootstrapped in the supplied semantic store.
     pub definitions: &'session Definitions,
+    /// Original untyped arena containing the source roots in this proof.
     pub source_ast: &'session AstArena<Untyped>,
+    /// Exact typed arena containing the mapped roots in this proof.
     pub typed_ast: &'session TypedAst,
+    /// Canonical declaration and scope bindings from naming this source.
     pub source_index: &'session SourceSemanticIndex,
+    /// Exact source-to-typed mappings produced in this session.
     pub source_typed_index: &'session SourceTypedIndex,
     /// Result of `typed_local_binding_at` from the original source Typer.
     pub local_binding: Option<TypedLocalBinding>,
+    /// Complete JVM planning unit borrowing the same semantic and typed stores.
     pub jvm_unit: &'session JvmCompilationUnit<'session>,
 }
 
@@ -293,16 +317,25 @@ pub struct ImmutableLocalInitializationProofInput<'session> {
 /// initializers in one original straight-line method Block.
 #[derive(Clone, Copy)]
 pub struct ImmutableLocalInitializerPairProofInput<'session> {
+    /// Source identity shared by parsing, naming, and typing.
     pub source_id: SourceId,
+    /// Canonical untyped definition of the method being validated.
     pub method_tree: TreeId<Untyped>,
+    /// Canonical symbol, name, and type stores borrowed from the same session.
     pub store: &'session SemanticStore,
+    /// Primitive definitions bootstrapped in the supplied semantic store.
     pub definitions: &'session Definitions,
+    /// Original untyped arena containing the source roots in this proof.
     pub source_ast: &'session AstArena<Untyped>,
+    /// Exact typed arena containing the mapped roots in this proof.
     pub typed_ast: &'session TypedAst,
+    /// Canonical declaration and scope bindings from naming this source.
     pub source_index: &'session SourceSemanticIndex,
+    /// Exact source-to-typed mappings produced in this session.
     pub source_typed_index: &'session SourceTypedIndex,
     /// Original Typer bindings for the first and second source ValDefs.
     pub local_bindings: [Option<TypedLocalBinding>; 2],
+    /// Complete JVM planning unit borrowing the same semantic and typed stores.
     pub jvm_unit: &'session JvmCompilationUnit<'session>,
 }
 
@@ -311,7 +344,9 @@ pub struct ImmutableLocalInitializerPairProofInput<'session> {
 /// from the same source Typer session as the pair bindings.
 #[derive(Clone, Copy)]
 pub struct ImmutableLocalReferenceAliasProofInput<'session> {
+    /// Complete same-session inputs for the two original local initializers.
     pub initializers: ImmutableLocalInitializerPairProofInput<'session>,
+    /// Typer-produced alias binding; absence is rejected by validation.
     pub alias_binding: Option<TypedLocalBinding>,
 }
 
@@ -406,148 +441,196 @@ pub struct ValidatedImmutableLocalReferenceAliasProof<'session> {
 }
 
 impl<'session> ValidatedImmutableLocalReferenceAliasProof<'session> {
+    /// Validated initializer evidence retained in original source order.
     pub const fn initializers(&self) -> &ValidatedImmutableLocalInitializerPairProof<'session> {
         &self.initializers
     }
+    /// Original source root for the local value or variable declaration.
     pub const fn source_declaration(&self) -> TreeId<Untyped> {
         self.source_declaration
     }
+    /// Exact mapped typed root for the local value or variable declaration.
     pub const fn typed_declaration(&self) -> TreeId<Typed> {
         self.typed_declaration
     }
+    /// Canonical symbol of the declaration represented by this view.
     pub const fn symbol(&self) -> SymbolId {
         self.symbol
     }
+    /// Canonical lexical scope containing the validated local declaration.
     pub const fn scope(&self) -> dotty_core::ScopeId {
         self.scope
     }
+    /// Original source root for the initializer expression of the retained local or field.
     pub const fn source_initializer(&self) -> TreeId<Untyped> {
         self.source_initializer
     }
+    /// Exact mapped typed root for the initializer expression of the retained local or field.
     pub const fn typed_initializer(&self) -> TreeId<Typed> {
         self.typed_initializer
     }
+    /// Original source root for the written type annotation of the retained declaration.
     pub const fn source_type_tree(&self) -> TreeId<Untyped> {
         self.source_type_tree
     }
+    /// Exact mapped typed root for the written type annotation of the retained declaration.
     pub const fn typed_type_tree(&self) -> TreeId<Typed> {
         self.typed_type_tree
     }
+    /// Original source root for the alias target reference.
     pub const fn source_target(&self) -> TreeId<Untyped> {
         self.source_target
     }
+    /// Exact mapped typed root for the alias target reference.
     pub const fn typed_target(&self) -> TreeId<Typed> {
         self.typed_target
     }
+    /// Canonical local symbol referenced by the alias initializer.
     pub const fn target(&self) -> SymbolId {
         self.target
     }
+    /// Semantic type of the validated local reference.
     pub const fn local_type(&self) -> TypeId {
         self.local_type
     }
 }
 
+/// Copyable view of one authenticated initializer, retaining exact source and typed roots.
+///
+/// The IDs belong to the original session. Copying this view does not keep its
+/// semantic stores or syntax/typed arenas alive.
 #[derive(Clone, Copy)]
 pub struct ImmutableLocalInitializerReceiptView {
     receipt: ImmutableLocalInitializerReceipt,
 }
 
 impl ImmutableLocalInitializerReceiptView {
+    /// Original source root for the local value or variable declaration.
     pub const fn source_declaration(self) -> TreeId<Untyped> {
         self.receipt.declaration.declaration
     }
+    /// Exact mapped typed root for the local value or variable declaration.
     pub const fn typed_declaration(self) -> TreeId<Typed> {
         self.receipt.declaration.typed_declaration
     }
+    /// Canonical symbol of the declaration represented by this view.
     pub const fn symbol(self) -> SymbolId {
         self.receipt.declaration.symbol
     }
+    /// Canonical lexical scope containing the validated local declaration.
     pub const fn scope(self) -> dotty_core::ScopeId {
         self.receipt.declaration.scope
     }
+    /// Semantic type of the validated local reference.
     pub const fn local_type(self) -> TypeId {
         self.receipt.declaration.local_type
     }
+    /// Original source root for the written type annotation of the retained declaration.
     pub const fn source_type_tree(self) -> TreeId<Untyped> {
         self.receipt.declaration.source_type_tree
     }
+    /// Exact mapped typed root for the written type annotation of the retained declaration.
     pub const fn typed_type_tree(self) -> TreeId<Typed> {
         self.receipt.declaration.typed_type_tree
     }
+    /// Original source root for the initializer expression of the retained local or field.
     pub const fn source_initializer(self) -> TreeId<Untyped> {
         self.receipt.declaration.initializer
     }
+    /// Exact mapped typed root for the initializer expression of the retained local or field.
     pub const fn typed_initializer(self) -> TreeId<Typed> {
         self.receipt.declaration.typed_initializer
     }
+    /// Original source root for the selected constructor or method callee.
     pub const fn source_select(self) -> TreeId<Untyped> {
         self.receipt.declaration.source_select
     }
+    /// Exact mapped typed root for the selected constructor or method callee.
     pub const fn typed_select(self) -> TreeId<Typed> {
         self.receipt.declaration.typed_select
     }
+    /// Original source root for the New receiver of the constructor application.
     pub const fn source_new(self) -> TreeId<Untyped> {
         self.receipt.declaration.source_new
     }
+    /// Exact mapped typed root for the New receiver of the constructor application.
     pub const fn typed_new(self) -> TreeId<Typed> {
         self.receipt.declaration.typed_new
     }
 
+    /// Original source root for the constructed class type tree.
     pub const fn source_new_type_tree(self) -> TreeId<Untyped> {
         self.receipt.declaration.source_new_type_tree
     }
 
+    /// Exact mapped typed root for the constructed class type tree.
     pub const fn typed_new_type_tree(self) -> TreeId<Typed> {
         self.receipt.declaration.typed_new_type_tree
     }
+    /// Original source root for the argument expression checked by this proof.
     pub const fn source_argument(self) -> TreeId<Untyped> {
         self.receipt.declaration.source_argument
     }
+    /// Exact mapped typed root for the argument expression checked by this proof.
     pub const fn typed_argument(self) -> TreeId<Typed> {
         self.receipt.declaration.typed_argument
     }
+    /// Canonical constructor symbol selected by this proof.
     pub const fn constructor(self) -> SymbolId {
         self.receipt.declaration.constructor
     }
+    /// Original method formal supplying the initializer construction argument.
     pub const fn seed_formal(self) -> SymbolId {
         self.receipt.seed_formal
     }
+    /// Semantic type of the original initializer seed formal.
     pub const fn seed_formal_type(self) -> TypeId {
         self.receipt.seed_formal_type
     }
+    /// Semantic result type of the local initializer expression.
     pub const fn initializer_result_type(self) -> TypeId {
         self.receipt.initializer_result_type
     }
+    /// Canonical constructor parameter receiving the validated argument.
     pub const fn constructor_formal(self) -> SymbolId {
         self.receipt.constructor_formal
     }
+    /// Semantic type of the receiving constructor parameter.
     pub const fn constructor_formal_type(self) -> TypeId {
         self.receipt.constructor_formal_type
     }
 }
 
 impl<'session> ValidatedImmutableLocalInitializerPairProof<'session> {
+    /// Source identity shared by parsing, naming, and typing.
     pub const fn source_id(&self) -> SourceId {
         self.source_id
     }
+    /// Canonical method symbol retained by this proof.
     pub const fn method(&self) -> SymbolId {
         self.method
     }
+    /// Canonical Counter class shared by the validated reference types.
     pub const fn counter(&self) -> SymbolId {
         self.counter
     }
+    /// Original source root for the enclosing method-body block.
     pub const fn source_block(&self) -> TreeId<Untyped> {
         self.source_block
     }
+    /// Exact mapped typed root for the enclosing method-body block.
     pub const fn typed_block(&self) -> TreeId<Typed> {
         self.typed_block
     }
+    /// Original source root for the final expression of the method-body block.
     pub const fn source_final_expression(&self) -> TreeId<Untyped> {
         self.source_final_expression
     }
+    /// Exact mapped typed root for the final expression of the method-body block.
     pub const fn typed_final_expression(&self) -> TreeId<Typed> {
         self.typed_final_expression
     }
+    /// Validated initializer evidence retained in original source order.
     pub const fn initializers(&self) -> [ImmutableLocalInitializerReceiptView; 2] {
         [
             ImmutableLocalInitializerReceiptView {
@@ -979,90 +1062,119 @@ fn validate_immutable_local_declaration_core(
 }
 
 impl ValidatedImmutableLocalInitializationProof<'_> {
+    /// Source identity shared by parsing, naming, and typing.
     pub const fn source_id(&self) -> SourceId {
         self.source_id
     }
+    /// Canonical method symbol retained by this proof.
     pub const fn method(&self) -> SymbolId {
         self.method
     }
+    /// Canonical local symbol whose initialization or use was validated.
     pub const fn local(&self) -> SymbolId {
         self.local
     }
+    /// Canonical lexical scope containing the validated local declaration.
     pub const fn scope(&self) -> dotty_core::ScopeId {
         self.scope
     }
+    /// Canonical constructor symbol selected by this proof.
     pub const fn constructor(&self) -> SymbolId {
         self.constructor
     }
+    /// Original source root for the enclosing method-body block.
     pub const fn source_block(&self) -> TreeId<Untyped> {
         self.source_block
     }
+    /// Original source root for the local value or variable declaration.
     pub const fn source_declaration(&self) -> TreeId<Untyped> {
         self.source_declaration
     }
+    /// Original source root for the written type annotation of the retained declaration.
     pub const fn source_type_tree(&self) -> TreeId<Untyped> {
         self.source_type_tree
     }
+    /// Original source root for the initializer expression of the retained local or field.
     pub const fn source_initializer(&self) -> TreeId<Untyped> {
         self.source_initializer
     }
+    /// Original source root for the initializer's selected constructor or method callee.
     pub const fn source_initializer_select(&self) -> TreeId<Untyped> {
         self.source_initializer_select
     }
+    /// Original source root for the initializer's New receiver of the constructor application.
     pub const fn source_initializer_new(&self) -> TreeId<Untyped> {
         self.source_initializer_new
     }
+    /// Original source root for the original formal reference supplying the initializer argument.
     pub const fn source_seed_argument(&self) -> TreeId<Untyped> {
         self.source_seed_argument
     }
+    /// Original source root for the final expression of the method-body block.
     pub const fn source_final_expression(&self) -> TreeId<Untyped> {
         self.source_final_expression
     }
+    /// Original source root for the reference to the retained local binding.
     pub const fn source_use(&self) -> TreeId<Untyped> {
         self.source_use
     }
+    /// Exact mapped typed root for the enclosing method-body block.
     pub const fn typed_block(&self) -> TreeId<Typed> {
         self.typed_block
     }
+    /// Exact mapped typed root for the local value or variable declaration.
     pub const fn typed_declaration(&self) -> TreeId<Typed> {
         self.typed_declaration
     }
+    /// Exact mapped typed root for the written type annotation of the retained declaration.
     pub const fn typed_type_tree(&self) -> TreeId<Typed> {
         self.typed_type_tree
     }
+    /// Exact mapped typed root for the initializer expression of the retained local or field.
     pub const fn typed_initializer(&self) -> TreeId<Typed> {
         self.typed_initializer
     }
+    /// Exact mapped typed root for the initializer's selected constructor or method callee.
     pub const fn typed_initializer_select(&self) -> TreeId<Typed> {
         self.typed_initializer_select
     }
+    /// Exact mapped typed root for the initializer's New receiver of the constructor application.
     pub const fn typed_initializer_new(&self) -> TreeId<Typed> {
         self.typed_initializer_new
     }
+    /// Exact mapped typed root for the original formal reference supplying the initializer argument.
     pub const fn typed_seed_argument(&self) -> TreeId<Typed> {
         self.typed_seed_argument
     }
+    /// Exact mapped typed root for the final expression of the method-body block.
     pub const fn typed_final_expression(&self) -> TreeId<Typed> {
         self.typed_final_expression
     }
+    /// Exact mapped typed root for the reference to the retained local binding.
     pub const fn typed_use(&self) -> TreeId<Typed> {
         self.typed_use
     }
+    /// Semantic type of the validated local reference.
     pub const fn local_type(&self) -> TypeId {
         self.local_type
     }
+    /// Semantic result type of the local initializer expression.
     pub const fn initializer_result_type(&self) -> TypeId {
         self.initializer_result_type
     }
+    /// Original method formal supplying the initializer construction argument.
     pub const fn seed_formal(&self) -> SymbolId {
         self.seed_formal
     }
+    /// Semantic type of the original initializer seed formal.
     pub const fn seed_formal_type(&self) -> TypeId {
         self.seed_formal_type
     }
+    /// Canonical constructor parameter receiving the validated argument.
     pub const fn constructor_formal(&self) -> SymbolId {
         self.constructor_formal
     }
+    /// Semantic type of the receiving constructor parameter.
     pub const fn constructor_formal_type(&self) -> TypeId {
         self.constructor_formal_type
     }
@@ -1077,6 +1189,7 @@ pub struct ConstructorArgumentProof {
 }
 
 impl ConstructorArgumentProof {
+    /// Classifies the authenticated constructor-argument shape.
     pub const fn kind(self) -> ConstructorArgumentProofKind {
         match self.shape {
             ConstructorArgumentProofShape::Formal(_) => ConstructorArgumentProofKind::Formal,
@@ -1113,6 +1226,7 @@ impl ConstructorArgumentProof {
         }
     }
 
+    /// Same-instance planned-call evidence, or None for another argument shape.
     pub const fn planned_call(self) -> Option<PlannedCallProof> {
         match self.shape {
             ConstructorArgumentProofShape::PlannedCall(proof) => Some(proof),
@@ -1120,6 +1234,7 @@ impl ConstructorArgumentProof {
         }
     }
 
+    /// Immutable local-argument evidence, or None for another argument shape.
     pub const fn local_val(self) -> Option<LocalValConstructorArgumentProofView> {
         match self.shape {
             ConstructorArgumentProofShape::LocalVal(proof) => {
@@ -1129,6 +1244,7 @@ impl ConstructorArgumentProof {
         }
     }
 
+    /// Original formal-argument evidence, or None for another argument shape.
     pub const fn formal(self) -> Option<FormalConstructorArgumentProofView> {
         match self.shape {
             ConstructorArgumentProofShape::Formal(proof) => {
@@ -1193,24 +1309,31 @@ pub struct NestedConstructorArgumentPairProofView {
 }
 
 impl NestedConstructorArgumentPairProofView {
+    /// Original source roots for the original method parameter declarations in source order.
     pub const fn source_method_formals(self) -> [TreeId<Untyped>; 2] {
         self.proof.source_method_formals
     }
+    /// Canonical original method formals in declared parameter order.
     pub const fn method_formals(self) -> [SymbolId; 2] {
         self.proof.method_formals
     }
+    /// Semantic types of the original method formals in declaration order.
     pub const fn method_formal_types(self) -> [TypeId; 2] {
         self.proof.method_formal_types
     }
+    /// Original source roots for the receiving constructor parameter declarations in source order.
     pub const fn source_constructor_formals(self) -> [TreeId<Untyped>; 2] {
         self.proof.source_constructor_formals
     }
+    /// Receiving constructor formals in declared parameter order.
     pub const fn constructor_formals(self) -> [SymbolId; 2] {
         self.proof.constructor_formals
     }
+    /// Semantic types of receiving constructor formals in declaration order.
     pub const fn constructor_formal_types(self) -> [TypeId; 2] {
         self.proof.constructor_formal_types
     }
+    /// Authenticated constructor arguments in source argument order.
     pub const fn arguments(self) -> [NestedConstructorArgumentProof; 2] {
         self.arguments
     }
@@ -1223,12 +1346,15 @@ pub struct OrderedConstructorArgumentProofView {
 }
 
 impl OrderedConstructorArgumentProofView {
+    /// Original source root for the argument expression checked by this proof.
     pub const fn source_argument(self) -> TreeId<Untyped> {
         self.proof.source_argument
     }
+    /// Exact mapped typed root for the argument expression checked by this proof.
     pub const fn typed_argument(self) -> TreeId<Typed> {
         self.proof.typed_argument
     }
+    /// Original formal-argument evidence, or None for another argument shape.
     pub const fn formal(self) -> Option<FormalConstructorArgumentProofView> {
         match self.proof.origin {
             OrderedConstructorArgumentOrigin::Formal(proof) => {
@@ -1244,6 +1370,7 @@ impl OrderedConstructorArgumentProofView {
             OrderedConstructorArgumentOrigin::LocalVal(_) => None,
         }
     }
+    /// Nested constructor-call evidence, or None for another argument shape.
     pub const fn nested_new(self) -> Option<NestedConstructorArgumentProof> {
         match self.proof.origin {
             OrderedConstructorArgumentOrigin::NestedNew(proof) => Some(proof),
@@ -1251,6 +1378,7 @@ impl OrderedConstructorArgumentProofView {
             OrderedConstructorArgumentOrigin::LocalVal(_) => None,
         }
     }
+    /// Immutable local-argument evidence, or None for another argument shape.
     pub const fn local_val(self) -> Option<ImmutableLocalArgumentProofView> {
         match self.proof.origin {
             OrderedConstructorArgumentOrigin::LocalVal(proof) => {
@@ -1261,87 +1389,117 @@ impl OrderedConstructorArgumentProofView {
     }
 }
 
+/// Copyable evidence that a constructor argument uses the authenticated initialized local.
+///
+/// The IDs belong to the original session. Copying this view does not keep its
+/// semantic stores or syntax/typed arenas alive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ImmutableLocalArgumentProofView {
     proof: ImmutableLocalArgumentProof,
 }
 
 impl ImmutableLocalArgumentProofView {
+    /// Original source root for the enclosing method-body block.
     pub const fn source_block(self) -> TreeId<Untyped> {
         self.proof.source_block
     }
+    /// Original source root for the local value or variable declaration.
     pub const fn source_declaration(self) -> TreeId<Untyped> {
         self.proof.source_declaration
     }
+    /// Original source root for the initializer expression of the retained local or field.
     pub const fn source_initializer(self) -> TreeId<Untyped> {
         self.proof.source_initializer
     }
+    /// Original source root for the reference to the retained local binding.
     pub const fn source_use(self) -> TreeId<Untyped> {
         self.proof.source_use
     }
+    /// Exact mapped typed root for the enclosing method-body block.
     pub const fn typed_block(self) -> TreeId<Typed> {
         self.proof.typed_block
     }
+    /// Exact mapped typed root for the local value or variable declaration.
     pub const fn typed_declaration(self) -> TreeId<Typed> {
         self.proof.typed_declaration
     }
+    /// Exact mapped typed root for the initializer expression of the retained local or field.
     pub const fn typed_initializer(self) -> TreeId<Typed> {
         self.proof.typed_initializer
     }
+    /// Exact mapped typed root for the reference to the retained local binding.
     pub const fn typed_use(self) -> TreeId<Typed> {
         self.proof.typed_use
     }
+    /// Canonical symbol of the declaration represented by this view.
     pub const fn symbol(self) -> SymbolId {
         self.proof.symbol
     }
+    /// Canonical lexical scope containing the validated local declaration.
     pub const fn scope(self) -> dotty_core::ScopeId {
         self.proof.scope
     }
+    /// Canonical constructor symbol selected by this proof.
     pub const fn constructor(self) -> SymbolId {
         self.proof.constructor
     }
+    /// Semantic type of the validated local reference.
     pub const fn local_type(self) -> TypeId {
         self.proof.local_type
     }
+    /// Semantic result type validated for the represented expression.
     pub const fn result_type(self) -> TypeId {
         self.proof.result_type
     }
+    /// Original method formal supplying the initializer construction argument.
     pub const fn seed_formal(self) -> SymbolId {
         self.proof.seed_formal
     }
+    /// Semantic type of the original initializer seed formal.
     pub const fn seed_formal_type(self) -> TypeId {
         self.proof.seed_formal_type
     }
+    /// Canonical constructor parameter receiving the validated argument.
     pub const fn constructor_formal(self) -> SymbolId {
         self.proof.constructor_formal
     }
+    /// Semantic type of the receiving constructor parameter.
     pub const fn constructor_formal_type(self) -> TypeId {
         self.proof.constructor_formal_type
     }
+    /// Original source root for the initializer's selected constructor or method callee.
     pub const fn source_initializer_select(self) -> TreeId<Untyped> {
         self.proof.source_initializer_select
     }
+    /// Original source root for the initializer's New receiver of the constructor application.
     pub const fn source_initializer_new(self) -> TreeId<Untyped> {
         self.proof.source_initializer_new
     }
+    /// Original source root for the original formal reference supplying the initializer argument.
     pub const fn source_seed_argument(self) -> TreeId<Untyped> {
         self.proof.source_seed_argument
     }
+    /// Exact mapped typed root for the initializer's selected constructor or method callee.
     pub const fn typed_initializer_select(self) -> TreeId<Typed> {
         self.proof.typed_initializer_select
     }
+    /// Exact mapped typed root for the initializer's New receiver of the constructor application.
     pub const fn typed_initializer_new(self) -> TreeId<Typed> {
         self.proof.typed_initializer_new
     }
+    /// Exact mapped typed root for the original formal reference supplying the initializer argument.
     pub const fn typed_seed_argument(self) -> TreeId<Typed> {
         self.proof.typed_seed_argument
     }
+    /// Original source root for the written type annotation of the retained declaration.
     pub const fn source_type_tree(self) -> TreeId<Untyped> {
         self.proof.source_type_tree
     }
+    /// Exact mapped typed root for the written type annotation of the retained declaration.
     pub const fn typed_type_tree(self) -> TreeId<Typed> {
         self.proof.typed_type_tree
     }
+    /// Semantic result type of the local initializer expression.
     pub const fn initializer_result_type(self) -> TypeId {
         self.proof.initializer_result_type
     }
@@ -1355,24 +1513,31 @@ pub struct OrderedConstructorArgumentPairProofView {
 }
 
 impl OrderedConstructorArgumentPairProofView {
+    /// Original source roots for the original method parameter declarations in source order.
     pub const fn source_method_formals(self) -> [TreeId<Untyped>; 2] {
         self.proof.source_method_formals
     }
+    /// Canonical original method formals in declared parameter order.
     pub const fn method_formals(self) -> [SymbolId; 2] {
         self.proof.method_formals
     }
+    /// Semantic types of the original method formals in declaration order.
     pub const fn method_formal_types(self) -> [TypeId; 2] {
         self.proof.method_formal_types
     }
+    /// Original source roots for the receiving constructor parameter declarations in source order.
     pub const fn source_constructor_formals(self) -> [TreeId<Untyped>; 2] {
         self.proof.source_constructor_formals
     }
+    /// Receiving constructor formals in declared parameter order.
     pub const fn constructor_formals(self) -> [SymbolId; 2] {
         self.proof.constructor_formals
     }
+    /// Semantic types of receiving constructor formals in declaration order.
     pub const fn constructor_formal_types(self) -> [TypeId; 2] {
         self.proof.constructor_formal_types
     }
+    /// Authenticated constructor arguments in source argument order.
     pub const fn arguments(self) -> [OrderedConstructorArgumentProofView; 2] {
         [
             OrderedConstructorArgumentProofView {
@@ -1407,42 +1572,55 @@ pub struct LocalValConstructorArgumentProofView {
 }
 
 impl LocalValConstructorArgumentProofView {
+    /// Original source root for the enclosing method-body block.
     pub const fn source_block(self) -> TreeId<Untyped> {
         self.proof.source_block
     }
+    /// Original source root for the local value or variable declaration.
     pub const fn source_declaration(self) -> TreeId<Untyped> {
         self.proof.source_declaration
     }
+    /// Original source root for the initializer expression of the retained local or field.
     pub const fn source_initializer(self) -> TreeId<Untyped> {
         self.proof.source_initializer
     }
+    /// Original source root for the reference to the retained local binding.
     pub const fn source_use(self) -> TreeId<Untyped> {
         self.proof.source_use
     }
+    /// Exact mapped typed root for the enclosing method-body block.
     pub const fn typed_block(self) -> TreeId<Typed> {
         self.proof.typed_block
     }
+    /// Exact mapped typed root for the local value or variable declaration.
     pub const fn typed_declaration(self) -> TreeId<Typed> {
         self.proof.typed_declaration
     }
+    /// Exact mapped typed root for the initializer expression of the retained local or field.
     pub const fn typed_initializer(self) -> TreeId<Typed> {
         self.proof.typed_initializer
     }
+    /// Exact mapped typed root for the reference to the retained local binding.
     pub const fn typed_use(self) -> TreeId<Typed> {
         self.proof.typed_use
     }
+    /// Canonical symbol of the declaration represented by this view.
     pub const fn symbol(self) -> SymbolId {
         self.proof.symbol
     }
+    /// Canonical lexical scope containing the validated local declaration.
     pub const fn scope(self) -> dotty_core::ScopeId {
         self.proof.scope
     }
+    /// Semantic type of the validated local reference.
     pub const fn local_type(self) -> TypeId {
         self.proof.local_type
     }
+    /// Semantic result type validated for the represented expression.
     pub const fn result_type(self) -> TypeId {
         self.proof.result_type
     }
+    /// Authenticated planned helper call used as the local initializer.
     pub const fn initializer_call(self) -> PlannedCallProof {
         self.proof.initializer_call
     }
@@ -1459,15 +1637,19 @@ pub struct FormalConstructorArgumentProofView {
 }
 
 impl FormalConstructorArgumentProofView {
+    /// Original source root for the argument expression checked by this proof.
     pub const fn source_argument(self) -> TreeId<Untyped> {
         self.source_argument
     }
+    /// Exact mapped typed root for the argument expression checked by this proof.
     pub const fn typed_argument(self) -> TreeId<Typed> {
         self.typed_argument
     }
+    /// Canonical original formal symbol represented by this argument proof.
     pub const fn formal(self) -> SymbolId {
         self.formal
     }
+    /// Semantic type of the authenticated original formal.
     pub const fn formal_type(self) -> TypeId {
         self.formal_type
     }
@@ -1504,42 +1686,55 @@ pub struct NestedConstructorArgumentProof {
 }
 
 impl NestedConstructorArgumentProof {
+    /// Original source root for the argument expression at the outer constructor call.
     pub const fn source_outer_argument(self) -> TreeId<Untyped> {
         self.source_outer_argument
     }
+    /// Exact mapped typed root for the argument expression at the outer constructor call.
     pub const fn typed_outer_argument(self) -> TreeId<Typed> {
         self.typed_outer_argument
     }
+    /// Original source root for the application checked by this proof.
     pub const fn source_apply(self) -> TreeId<Untyped> {
         self.source_apply
     }
+    /// Exact mapped typed root for the application checked by this proof.
     pub const fn typed_apply(self) -> TreeId<Typed> {
         self.typed_apply
     }
+    /// Original source root for the selected constructor or method callee.
     pub const fn source_select(self) -> TreeId<Untyped> {
         self.source_select
     }
+    /// Original source root for the New receiver of the constructor application.
     pub const fn source_new(self) -> TreeId<Untyped> {
         self.source_new
     }
+    /// Original source root for the argument expression checked by this proof.
     pub const fn source_argument(self) -> TreeId<Untyped> {
         self.source_argument
     }
+    /// Exact mapped typed root for the selected constructor or method callee.
     pub const fn typed_select(self) -> TreeId<Typed> {
         self.typed_select
     }
+    /// Exact mapped typed root for the New receiver of the constructor application.
     pub const fn typed_new(self) -> TreeId<Typed> {
         self.typed_new
     }
+    /// Exact mapped typed root for the argument expression checked by this proof.
     pub const fn typed_argument(self) -> TreeId<Typed> {
         self.typed_argument
     }
+    /// Canonical class symbol associated with this plan or failure.
     pub const fn class(self) -> SymbolId {
         self.class
     }
+    /// Canonical constructor symbol selected by this proof.
     pub const fn constructor(self) -> SymbolId {
         self.constructor
     }
+    /// Canonical original formal symbol represented by this argument proof.
     pub const fn formal(self) -> SymbolId {
         self.formal
     }
@@ -1547,6 +1742,7 @@ impl NestedConstructorArgumentProof {
     pub const fn argument_formal(self) -> SymbolId {
         self.argument_formal
     }
+    /// Semantic type of the authenticated original formal.
     pub const fn formal_type(self) -> TypeId {
         self.formal_type
     }
@@ -1554,6 +1750,7 @@ impl NestedConstructorArgumentProof {
     pub const fn argument_formal_type(self) -> TypeId {
         self.argument_formal_type
     }
+    /// Semantic result type validated for the represented expression.
     pub const fn result_type(self) -> TypeId {
         self.result_type
     }
@@ -1611,54 +1808,71 @@ enum SourceArgumentShape {
 }
 
 impl PlannedCallProof {
+    /// Original source root for the application checked by this proof.
     pub const fn source_apply(self) -> TreeId<Untyped> {
         self.source_apply
     }
+    /// Original source root for the callee expression of the planned call.
     pub const fn source_function(self) -> TreeId<Untyped> {
         self.source_function
     }
+    /// Original source root for the argument expression checked by this proof.
     pub const fn source_argument(self) -> TreeId<Untyped> {
         self.source_argument
     }
+    /// Original source root for the explicit receiver expression; absent for an implicit receiver.
     pub const fn source_receiver(self) -> Option<TreeId<Untyped>> {
         self.source_receiver
     }
+    /// Source definition of the same-instance helper method.
     pub const fn helper_source_tree(self) -> TreeId<Untyped> {
         self.helper_source_tree
     }
+    /// Source body of the same-instance helper method.
     pub const fn helper_source_rhs(self) -> TreeId<Untyped> {
         self.helper_source_rhs
     }
+    /// Exact mapped typed root for the application checked by this proof.
     pub const fn typed_apply(self) -> TreeId<Typed> {
         self.typed_apply
     }
+    /// Exact mapped typed root for the callee expression of the planned call.
     pub const fn typed_function(self) -> TreeId<Typed> {
         self.typed_function
     }
+    /// Exact mapped typed root for the argument expression checked by this proof.
     pub const fn typed_argument(self) -> TreeId<Typed> {
         self.typed_argument
     }
+    /// Exact mapped typed root for the explicit receiver expression; absent for an implicit receiver.
     pub const fn typed_receiver(self) -> Option<TreeId<Typed>> {
         self.typed_receiver
     }
+    /// Exact typed body of the same-instance helper method.
     pub const fn helper_typed_rhs(self) -> TreeId<Typed> {
         self.helper_typed_rhs
     }
+    /// Canonical owning class of the validated method.
     pub const fn owner(self) -> SymbolId {
         self.owner
     }
+    /// Canonical method symbol retained by this proof.
     pub const fn method(self) -> SymbolId {
         self.method
     }
+    /// Canonical original formal symbol represented by this argument proof.
     pub const fn formal(self) -> SymbolId {
         self.formal
     }
+    /// Canonical formal of the same-instance helper receiving the original argument.
     pub const fn helper_formal(self) -> SymbolId {
         self.helper_formal
     }
+    /// Semantic type of the authenticated original formal.
     pub const fn formal_type(self) -> TypeId {
         self.formal_type
     }
+    /// Semantic result type validated for the represented expression.
     pub const fn result_type(self) -> TypeId {
         self.result_type
     }

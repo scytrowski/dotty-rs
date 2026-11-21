@@ -4,9 +4,14 @@
 //! deliberately does not depend on the concrete lexer implementation, so
 //! parser tests can use an in-memory [`dotty_core::TokenSource`].
 //!
-//! The handwritten recursive-descent parser is implemented incrementally.
-//! Its public compilation-unit entry point exists, while grammar coverage is
-//! intentionally incomplete.
+//! [`parse_compilation_unit`] returns an untyped arena, package root, and
+//! structured parser diagnostics, including recovered trees for malformed or
+//! unsupported syntax. Handle lexer diagnostics at the token-source boundary
+//! as well. Parsing does not establish semantic or backend support.
+//!
+//! [`DetachedParse`] supports worker-local parsing followed by binding names
+//! into a shared session interner. Bind files in a stable input order for
+//! deterministic name IDs. Grammar coverage remains an incremental subset.
 
 mod case_clauses;
 mod class_definitions;

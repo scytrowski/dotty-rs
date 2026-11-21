@@ -8,16 +8,20 @@ use crate::source_declarations::{ClassMember, SourceClass};
 /// The declaring source, enclosing class and kind of an indexed symbol.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SourceDeclaration {
+    /// Identity of the original source file in this session.
     pub source: SourceId,
     /// A class declaration refers to itself here.
     pub class: SymbolId,
+    /// Classifies the authenticated constructor-argument shape.
     pub kind: SymbolKind,
 }
 
 /// A named class view contains an inconsistent or repeated symbol.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SourceDeclarationIndexError {
+    /// The symbol has no supported canonical source declaration.
     InvalidDeclaration(SymbolId),
+    /// The symbol already has an entry in this source declaration index.
     DuplicateDeclaration(SymbolId),
 }
 

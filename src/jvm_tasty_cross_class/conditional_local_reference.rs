@@ -9,7 +9,9 @@ use super::*;
 /// locals; `selected_binding` is the original third ValDef binding.
 #[derive(Clone, Copy)]
 pub struct ImmutableLocalConditionalReferenceSelectionProofInput<'session> {
+    /// Complete same-session inputs for the two original local initializers.
     pub initializers: ImmutableLocalInitializerPairProofInput<'session>,
+    /// Typer-produced selected-local binding; absence is rejected by validation.
     pub selected_binding: Option<TypedLocalBinding>,
 }
 
@@ -58,9 +60,11 @@ pub struct ValidatedImmutableLocalConditionalReferenceSelectionProof<'session> {
 }
 
 impl ValidatedImmutableLocalConditionalReferenceSelectionProof<'_> {
+    /// Validated evidence for the two original local initializers.
     pub const fn initializer_pair(&self) -> &ValidatedImmutableLocalInitializerPairProof<'_> {
         &self.initializer_pair
     }
+    /// Validated conditional-selection binding for the semantic TASTy pickler.
     pub fn binding(&self) -> dotty_tasty_pickler::ConditionalLocalReferenceSelectionBinding {
         dotty_tasty_pickler::ConditionalLocalReferenceSelectionBinding {
             source_id: self.source_id,
@@ -83,99 +87,131 @@ impl ValidatedImmutableLocalConditionalReferenceSelectionProof<'_> {
             local_type: self.local_type,
         }
     }
+    /// Source identity shared by parsing, naming, and typing.
     pub const fn source_id(&self) -> SourceId {
         self.source_id
     }
+    /// Canonical owning class of the validated method.
     pub const fn owner(&self) -> SymbolId {
         self.owner
     }
+    /// Canonical method symbol retained by this proof.
     pub const fn method(&self) -> SymbolId {
         self.method
     }
+    /// Canonical lexical scope containing the validated local declaration.
     pub const fn scope(&self) -> dotty_core::ScopeId {
         self.scope
     }
+    /// Original source root for the enclosing method-body block.
     pub const fn source_block(&self) -> TreeId<Untyped> {
         self.source_block
     }
+    /// Exact mapped typed root for the enclosing method-body block.
     pub const fn typed_block(&self) -> TreeId<Typed> {
         self.typed_block
     }
+    /// Original source roots for the retained local declarations in source order.
     pub const fn source_declarations(&self) -> [TreeId<Untyped>; 3] {
         self.source_declarations
     }
+    /// Exact mapped typed roots for the retained local declarations in source order.
     pub const fn typed_declarations(&self) -> [TreeId<Typed>; 3] {
         self.typed_declarations
     }
+    /// Original source roots for the retained local initializer roots in source order.
     pub const fn source_initializers(&self) -> [TreeId<Untyped>; 3] {
         self.source_initializers
     }
+    /// Exact mapped typed roots for the retained local initializer roots in source order.
     pub const fn typed_initializers(&self) -> [TreeId<Typed>; 3] {
         self.typed_initializers
     }
+    /// Original source root for the conditional expression selecting or reassigning the reference.
     pub const fn source_if(&self) -> TreeId<Untyped> {
         self.source_if
     }
+    /// Exact mapped typed root for the conditional expression selecting or reassigning the reference.
     pub const fn typed_if(&self) -> TreeId<Typed> {
         self.typed_if
     }
+    /// Original source root for the Boolean condition of the reference selection.
     pub const fn source_condition(&self) -> TreeId<Untyped> {
         self.source_condition
     }
+    /// Exact mapped typed root for the Boolean condition of the reference selection.
     pub const fn typed_condition(&self) -> TreeId<Typed> {
         self.typed_condition
     }
+    /// Original source roots for the then and else branch roots, in that order.
     pub const fn source_arms(&self) -> [TreeId<Untyped>; 2] {
         self.source_arms
     }
+    /// Exact mapped typed roots for the then and else branch roots, in that order.
     pub const fn typed_arms(&self) -> [TreeId<Typed>; 2] {
         self.typed_arms
     }
+    /// Canonical Boolean method formal used as the selection condition.
     pub const fn condition_formal(&self) -> SymbolId {
         self.condition_formal
     }
+    /// Original local symbols selected by the then and else arms, respectively.
     pub const fn targets(&self) -> [SymbolId; 2] {
         self.targets
     }
+    /// Canonical selected local whose uses are authenticated by this proof.
     pub const fn selected(&self) -> SymbolId {
         self.selected
     }
+    /// Semantic type of the validated local reference.
     pub const fn local_type(&self) -> TypeId {
         self.local_type
     }
+    /// Semantic type of the conditional reference-selection result.
     pub const fn if_result_type(&self) -> TypeId {
         self.if_result_type
     }
+    /// Original source root for the validated Counter.set application.
     pub const fn source_setter(&self) -> TreeId<Untyped> {
         self.source_setter
     }
+    /// Exact mapped typed root for the validated Counter.set application.
     pub const fn typed_setter(&self) -> TreeId<Typed> {
         self.typed_setter
     }
+    /// Original source root for the selected local reference receiving the Counter.set call.
     pub const fn source_setter_receiver(&self) -> TreeId<Untyped> {
         self.source_setter_receiver
     }
+    /// Exact mapped typed root for the selected local reference receiving the Counter.set call.
     pub const fn typed_setter_receiver(&self) -> TreeId<Typed> {
         self.typed_setter_receiver
     }
+    /// Original source root for the argument of the validated Counter.set call.
     pub const fn source_setter_argument(&self) -> TreeId<Untyped> {
         self.source_setter_argument
     }
+    /// Exact mapped typed root for the argument of the validated Counter.set call.
     pub const fn typed_setter_argument(&self) -> TreeId<Typed> {
         self.typed_setter_argument
     }
+    /// Canonical Counter.set method invoked through the selected reference.
     pub const fn setter_method(&self) -> SymbolId {
         self.setter_method
     }
+    /// Original source root for the final Pair constructor application.
     pub const fn source_pair_result(&self) -> TreeId<Untyped> {
         self.source_pair_result
     }
+    /// Exact mapped typed root for the final Pair constructor application.
     pub const fn typed_pair_result(&self) -> TreeId<Typed> {
         self.typed_pair_result
     }
+    /// Original source roots for the arguments of the final Pair construction in source order.
     pub const fn source_pair_arguments(&self) -> [TreeId<Untyped>; 2] {
         self.source_pair_arguments
     }
+    /// Exact mapped typed roots for the arguments of the final Pair construction in source order.
     pub const fn typed_pair_arguments(&self) -> [TreeId<Typed>; 2] {
         self.typed_pair_arguments
     }

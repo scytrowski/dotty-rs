@@ -138,8 +138,11 @@ pub enum PairedBatchArtifactError {
     Contract(JvmTastyContractError),
     /// One class failed before a complete batch could be returned.
     ClassArtifact {
+        /// Zero-based class index in the ordered planning batch.
         class_index: usize,
+        /// Class symbol submitted to this planning operation.
         class: SymbolId,
+        /// Underlying typed failure reported by the delegated compiler phase.
         error: Box<PairedArtifactError>,
     },
 }

@@ -1,8 +1,7 @@
-//! Public facade for the Dotty compiler libraries.
-//!
-//! The [`tasty`] module exposes the structural Scala 3.9.0 TASTy codec. It
-//! deliberately does not resolve Scala symbols or load JVM class files;
-//! those concerns belong to higher-level compiler components.
+#![doc = include_str!("guide.md")]
+// Apply this to the library, whose public items are consumer APIs, rather than
+// imposing API documentation on the package's integration-test harnesses.
+#![deny(missing_docs)]
 
 /// Scala 3 TASTy encoding and structural APIs.
 pub use dotty_tasty::tasty;

@@ -88,48 +88,63 @@ pub struct ConstructorReferenceAliasSession<'session> {
 }
 
 impl ValidatedConstructorReferenceAlias<'_> {
+    /// Source identity shared by parsing, naming, and typing.
     pub const fn source_id(&self) -> SourceId {
         self.source_id
     }
+    /// Canonical Counter class in the paired source batch.
     pub const fn counter_class(&self) -> SymbolId {
         self.counter_class
     }
+    /// Canonical owner class retaining the injected Counter reference.
     pub const fn owner_class(&self) -> SymbolId {
         self.owner_class
     }
+    /// Canonical constructor symbol selected by this proof.
     pub const fn constructor(&self) -> SymbolId {
         self.constructor
     }
+    /// Source template parameter whose constructor binding is authenticated.
     pub const fn template_parameter(&self) -> SymbolId {
         self.template_parameter
     }
+    /// Constructor-owned parameter corresponding to the source template parameter.
     pub const fn constructor_parameter(&self) -> SymbolId {
         self.constructor_parameter
     }
+    /// Canonical field symbol associated with this plan or failure.
     pub const fn field(&self) -> SymbolId {
         self.field
     }
+    /// Canonical owner method reading through the retained Counter field.
     pub const fn read_method(&self) -> SymbolId {
         self.read_method
     }
+    /// Canonical Counter.get method selected by the owner read.
     pub const fn counter_get(&self) -> SymbolId {
         self.counter_get
     }
+    /// Original source root for the initializer expression of the retained local or field.
     pub const fn source_initializer(&self) -> TreeId<Untyped> {
         self.source_initializer
     }
+    /// Exact mapped typed root for the initializer expression of the retained local or field.
     pub const fn typed_initializer(&self) -> TreeId<Typed> {
         self.typed_initializer
     }
+    /// Original source root for the owner read through the retained reference field.
     pub const fn source_read(&self) -> TreeId<Untyped> {
         self.source_read
     }
+    /// Exact mapped typed root for the owner read through the retained reference field.
     pub const fn typed_read(&self) -> TreeId<Typed> {
         self.typed_read
     }
+    /// Erased JVM descriptor of the authenticated constructor.
     pub fn constructor_descriptor(&self) -> &str {
         &self.constructor_descriptor
     }
+    /// Erased JVM descriptor of the retained reference field.
     pub fn field_descriptor(&self) -> &str {
         &self.field_descriptor
     }

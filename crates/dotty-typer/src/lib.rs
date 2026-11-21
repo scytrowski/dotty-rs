@@ -1,4 +1,4 @@
-//! Source declaration signature completion.
+//! Source signature completion and bounded expression/method typing.
 //!
 //! The typer consumes a parsed and named untyped source tree. It does not
 //! parse source, allocate declaration symbols, or load classpath entries.
@@ -15,6 +15,10 @@
 //! [`SourceTyper::type_expression_expected`] checks
 //! the widened expression type against a semantic expected type while keeping
 //! the expression node's own type unchanged.
+//! [`SourceTyper::type_method_definition`] types a canonical named member
+//! definition, including its signature, parameter declarations, and body.
+//! Failed typing transactions roll back semantic changes and typed roots;
+//! callers retain one-session source/typed bindings for backend planning.
 //! Type arguments are projected in the expression's lexical context and
 //! represented by typed `TypeTree` nodes carrying their semantic `TypeId`;
 //! each source type-argument root maps to that node in `SourceTypedIndex`,

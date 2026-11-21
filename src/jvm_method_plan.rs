@@ -18,20 +18,27 @@ pub enum MethodPlanError {
     MissingBody(SymbolId),
     /// The typed definition points at a different body than the mapped source RHS.
     BodyMismatch {
+        /// Method symbol submitted to this planning operation.
         method: SymbolId,
+        /// Canonical identity or typed root required by the original source binding.
         expected: TreeId<Typed>,
+        /// Identity or typed root supplied by the caller instead.
         actual: TreeId<Typed>,
     },
     /// The mapped body is absent from the typed arena or belongs to another source.
     InvalidBody {
+        /// Method symbol submitted to this planning operation.
         method: SymbolId,
+        /// Supplied typed body root that failed validation.
         body: TreeId<Typed>,
     },
     /// The source and typed definitions have different value parameter clause shapes.
     ParameterClauses(SymbolId),
     /// A formal has no matching typed declaration or canonical parameter symbol.
     Parameter {
+        /// Method symbol submitted to this planning operation.
         method: SymbolId,
+        /// Source tree associated with the rejected declaration or binding.
         tree: TreeId<Untyped>,
     },
     /// A local binding refers to an invalid symbol or typed declaration.
