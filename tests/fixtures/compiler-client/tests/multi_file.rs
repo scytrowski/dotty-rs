@@ -145,24 +145,19 @@ fn source_diagnostics_follow_a_field_from_parsing_through_typing() {
     let mut store = SemanticStore::new();
     let defs = Definitions::bootstrap(&mut store);
     let mut packages = Packages::new();
-    let parser_reports: &[(&str, &str)] = &[
+    for (text, token, code, message) in [
         (
+            broken,
+            "1",
             "parser.declaration.expected_value_equals",
             "Expected '=' before the initializer",
         ),
-        // Recovery also requests a member separator at the same token.
         (
-            "parser.template.expected_member_separator",
-            "Parser diagnostic (parser.template.expected_member_separator)",
+            parsed_ok.as_str(),
+            "Missing",
+            "namer.visibility.invalid_qualifier",
+            "Invalid 'private' qualifier 'Missing': expected an enclosing class, object or package",
         ),
-    ];
-    let naming_reports: &[(&str, &str)] = &[(
-        "namer.visibility.invalid_qualifier",
-        "Invalid 'private' qualifier 'Missing': expected an enclosing class, object or package",
-    )];
-    for (text, token, expected) in [
-        (broken, "1", parser_reports),
-        (parsed_ok.as_str(), "Missing", naming_reports),
     ] {
         let parsed = parse(text, &mut store);
         let reports = name_source(source, file, &parsed, &mut store, &mut packages).unwrap_err();
@@ -170,13 +165,13 @@ fn source_diagnostics_follow_a_field_from_parsing_through_typing() {
         let range = dotty::core::TextRange::new(start, start + token.len() as u32).unwrap();
         let location =
             dotty::core::SourceSpan::new(source, dotty::core::Span::without_point(range));
-        assert_eq!(reports.len(), expected.len(), "{reports:?}");
-        for (report, &(code, message)) in reports.iter().zip(expected) {
-            assert_eq!(report.code, Some(code));
-            assert_eq!(report.message, message);
-            assert_eq!(report.severity, dotty::core::DiagnosticSeverity::Error);
-            assert_eq!(report.location, Some(location));
-        }
+        let [report] = reports.as_slice() else {
+            panic!("expected one diagnostic: {reports:?}")
+        };
+        assert_eq!(report.code, Some(code));
+        assert_eq!(report.message, message);
+        assert_eq!(report.severity, dotty::core::DiagnosticSeverity::Error);
+        assert_eq!(report.location, Some(location));
     }
     let parsed = parse(&fixed, &mut store);
     let units = [enter(source, file, parsed, &mut store, &mut packages)];
