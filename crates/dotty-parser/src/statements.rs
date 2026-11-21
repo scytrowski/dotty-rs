@@ -5,7 +5,7 @@ use dotty_core::{
 
 use crate::modifiers::DefinitionPrefix;
 use crate::{
-    LayoutIssue, Location, ParseIssue, Parser, RecoverySet, StatementIssue,
+    DeclarationIssue, LayoutIssue, Location, ParseIssue, Parser, RecoverySet, StatementIssue,
     StatementSequenceContext,
 };
 
@@ -212,6 +212,33 @@ where
         }
     }
 
+    /// A typed value declaration can return with its missing equals already
+    /// diagnosed at the first token of the initializer. Synchronize as usual,
+    /// but let that specific diagnostic explain the unexpected token.
+    pub(crate) fn recover_statement_separator(
+        &mut self,
+        diagnostics_start: usize,
+        separator: ParseIssue,
+    ) {
+        let current = self.current();
+        let expected_equals = ParseIssue::Declaration(DeclarationIssue::ExpectedValueEquals {
+            found: current.kind,
+        });
+        let missing_equals = crate::expr::can_start_expr(current.kind)
+            && self.diagnostics[diagnostics_start..]
+                .last()
+                .is_some_and(|d| d.span() == current.span && d.issue() == &expected_equals);
+        if !missing_equals {
+            self.report_issue(separator);
+            // The statement loop has already checked progress. A recognizable
+            // declaration can be parsed on its next iteration.
+            if self.starts_definition_statement() {
+                return;
+            }
+        }
+        self.recover_until(RecoverySet::Statement);
+    }
+
     /// Parses statements up to a compilation-unit or block boundary.
     pub(crate) fn parse_statement_sequence(
         &mut self,
@@ -273,6 +300,7 @@ where
                 | StatementSequenceBoundary::FeedbackRegionBlock { .. }
                 | StatementSequenceBoundary::LayoutRegionBlock { .. } => Location::InBlock,
             };
+            let diagnostics_start = self.diagnostics.len();
             statements.push(self.parse_statement(location));
 
             if !self.cursor.progressed_since(checkpoint) {
@@ -318,13 +346,13 @@ where
                 } else {
                     StatementSequenceContext::Block
                 };
-                self.report_issue(ParseIssue::Layout(
-                    LayoutIssue::ExpectedStatementSeparator {
+                self.recover_statement_separator(
+                    diagnostics_start,
+                    ParseIssue::Layout(LayoutIssue::ExpectedStatementSeparator {
                         context,
                         found: self.current().kind,
-                    },
-                ));
-                self.recover_until(RecoverySet::Statement);
+                    }),
+                );
                 self.consume_sequence_separators(boundary);
             }
 
@@ -427,6 +455,7 @@ where
             let initial_package = boundary == StatementSequenceBoundary::CompilationUnit
                 && statements.is_empty()
                 && self.current().kind == TokenKind::Keyword(HardKeyword::Package);
+            let diagnostics_start = self.diagnostics.len();
             let statement = if initial_package {
                 self.parse_package_definition(location, true)
             } else {
@@ -464,10 +493,12 @@ where
                 self.last_advance_consumed_statement_separator = false;
             } else if !self.sequence_ended(boundary) && self.current().kind != TokenKind::EndMarker
             {
-                self.report_issue(ParseIssue::Layout(LayoutIssue::ExpectedTopLevelSeparator {
-                    found: self.current().kind,
-                }));
-                self.recover_until(RecoverySet::Statement);
+                self.recover_statement_separator(
+                    diagnostics_start,
+                    ParseIssue::Layout(LayoutIssue::ExpectedTopLevelSeparator {
+                        found: self.current().kind,
+                    }),
+                );
                 self.consume_sequence_separators(boundary);
             }
 

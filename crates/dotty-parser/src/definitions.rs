@@ -335,7 +335,12 @@ where
                 Some(rhs)
             }
         } else {
-            if has_explicit_type && !is_definition_boundary(self.current().kind) {
+            // A typed declaration can end without an initializer. If another
+            // declaration starts here, its enclosing list owns the missing separator.
+            if has_explicit_type
+                && !is_definition_boundary(self.current().kind)
+                && !self.starts_definition_statement()
+            {
                 self.report_issue(ParseIssue::Declaration(
                     DeclarationIssue::ExpectedValueEquals {
                         found: self.current().kind,

@@ -343,10 +343,6 @@ fn parser_then_namer_diagnostics_track_unsaved_edits_in_both_encodings() {
                     "source": "dotty", "severity": 1, "range": range(1, literal, literal + 1),
                     "code": "parser.declaration.expected_value_equals",
                     "message": "Expected '=' before the initializer"
-                }, {
-                    "source": "dotty", "severity": 1, "range": range(1, literal, literal + 1),
-                    "code": "parser.template.expected_member_separator",
-                    "message": "Parser diagnostic (parser.template.expected_member_separator)"
                 }
             ]),
         );
@@ -358,6 +354,19 @@ fn parser_then_namer_diagnostics_track_unsaved_edits_in_both_encodings() {
         }]));
         client.edit(uri, 3, range(1, qualifier - 1, qualifier + 8), "");
         client.diagnostics(uri, 3, json!([]));
+        // A separate, complete declaration on the same line still needs a separator.
+        client.edit(uri, 4, range(2, 0, 0), "  val next = 2 val tail = 3\n");
+        client.diagnostics(
+            uri,
+            4,
+            json!([{
+                "source": "dotty", "severity": 1, "range": range(2, 15, 18),
+                "code": "parser.template.expected_member_separator",
+                "message": "Parser diagnostic (parser.template.expected_member_separator)"
+            }]),
+        );
+        client.edit(uri, 5, range(2, 15, 15), "; ");
+        client.diagnostics(uri, 5, json!([]));
         client.shutdown();
     }
 }

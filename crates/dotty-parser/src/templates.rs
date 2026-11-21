@@ -9,7 +9,7 @@
 use dotty_core::ast::{Modifier, Modifiers, ValDef};
 use dotty_core::{HardKeyword, Name, Punctuation, TermName, TokenKind, TreeId, TreeKind, Untyped};
 
-use crate::{Location, ParseIssue, Parser, RecoverySet, TemplateIssue};
+use crate::{Location, ParseIssue, Parser, TemplateIssue};
 
 /// Delimiters accepted by the template-body parser.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -264,6 +264,7 @@ where
             let allow_secondary_constructor = self.context.secondary_constructor_allowed
                 && (self.current().kind == TokenKind::Keyword(HardKeyword::Def)
                     || self.starts_definition_prefix());
+            let diagnostics_start = self.diagnostics.len();
             let statement = self
                 .with_secondary_constructor_allowed(allow_secondary_constructor, |parser| {
                     parser.parse_statement(Location::InBlock)
@@ -330,12 +331,12 @@ where
                 // next statement/member, including inside a braced template
                 // where the outer body itself has no layout delimiter.
             } else if !self.template_body_ended(closing) {
-                self.report_issue(ParseIssue::Template(
-                    TemplateIssue::ExpectedMemberSeparator {
+                self.recover_statement_separator(
+                    diagnostics_start,
+                    ParseIssue::Template(TemplateIssue::ExpectedMemberSeparator {
                         found: self.current().kind,
-                    },
-                ));
-                self.recover_until(RecoverySet::Statement);
+                    }),
+                );
                 self.consume_template_separators(closing);
             }
         }
@@ -1072,6 +1073,59 @@ mod tests {
             "{:?}",
             parser.diagnostics()
         );
+    }
+
+    #[test]
+    fn missing_value_equals_reports_the_literal_and_recovers_the_next_member() {
+        let source = "{ val hidden: Int 1; val next = 2 }";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+                token(TokenKind::Keyword(HardKeyword::Val), 2, 5),
+                token(TokenKind::Identifier, 6, 12),
+                token(TokenKind::ColonFollow, 12, 13),
+                token(TokenKind::Identifier, 14, 17),
+                token(TokenKind::IntegerLiteral, 18, 19),
+                token(TokenKind::Punctuation(Punctuation::Semicolon), 19, 20),
+                token(TokenKind::Keyword(HardKeyword::Val), 21, 24),
+                token(TokenKind::Identifier, 25, 29),
+                token(TokenKind::Operator, 30, 31),
+                token(TokenKind::IntegerLiteral, 32, 33),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 34, 35),
+                token(TokenKind::Eof, 35, 35),
+            ],
+            &mut names,
+        );
+        let body = parser.parse_template_body(TemplateBody::Braced);
+        let [diagnostic] = parser.diagnostics() else {
+            panic!(
+                "expected only the missing equals diagnostic: {:?}",
+                parser.diagnostics()
+            );
+        };
+        assert_eq!(
+            diagnostic.issue(),
+            &ParseIssue::Declaration(crate::DeclarationIssue::ExpectedValueEquals {
+                found: TokenKind::IntegerLiteral
+            })
+        );
+        assert_eq!(diagnostic.span(), TextRange::new(18, 19).unwrap());
+        let [hidden, next] = body.members[..] else {
+            panic!("expected two fields")
+        };
+        let TreeKind::ValDef(hidden) = &parser.ast().get(hidden).kind else {
+            panic!("expected hidden")
+        };
+        assert_eq!(parser.names.resolve(hidden.name.as_name().text()), "hidden");
+        assert!(hidden.rhs.is_none());
+        let TreeKind::ValDef(next) = &parser.ast().get(next).kind else {
+            panic!("expected next")
+        };
+        assert_eq!(parser.names.resolve(next.name.as_name().text()), "next");
+        assert!(next.rhs.is_some());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]
