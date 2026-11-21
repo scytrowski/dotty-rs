@@ -2227,7 +2227,7 @@ fn generic_extension_infers_its_trailing_format_after_the_ordinary_argument() {
         "automatic",
         &[1],
         ApplyKind::Regular,
-        |defs| defs.long,
+        "Long",
     );
 }
 
@@ -2238,7 +2238,7 @@ fn generic_extension_passes_the_written_witness_in_an_ambiguous_scope() {
         "explicit",
         &[2],
         ApplyKind::Using,
-        |defs| defs.long,
+        "Long",
     );
 }
 
@@ -2252,7 +2252,7 @@ fn generic_extension_supplies_both_instantiated_method_witnesses() {
         "automatic",
         &[1, 2],
         ApplyKind::Regular,
-        |defs| defs.long,
+        "Long",
     );
 }
 
@@ -2261,10 +2261,10 @@ fn assert_generic_format_application(
     name: &str,
     witnesses: &[usize],
     kind: ApplyKind,
-    result: fn(&Definitions) -> TypeId,
+    expected: &str,
 ) {
     let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
-    let result = result(&defs);
+
     let factory = method_symbol(&parsed, &store, &index, source, "ops");
     let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, name);
     let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
@@ -2282,7 +2282,15 @@ fn assert_generic_format_application(
     typer.type_method_definition(tree).unwrap();
     let root = typer.typed_index.get(source, rhs).unwrap();
     let ast = typer.typed_ast();
-    assert_eq!(ast.get(root).ty, result);
+    let result = ast.get(root).ty;
+    match expected {
+        "Int" => assert_eq!(result, defs.int),
+        "Long" => assert_eq!(result, defs.long),
+        name => assert_eq!(
+            typer.store.types.get(result).reference_symbol(),
+            Some(class_symbol(&parsed, typer.store(), &index, source, name))
+        ),
+    }
     let TreeKind::Apply(format) = &ast.get(root).kind else {
         panic!("format application")
     };
@@ -2318,13 +2326,7 @@ fn concrete_keep_needs_no_format() {
 fn expected_result_selects_keep_before_resolving_either_witness() {
     for text in [MULTI_WITNESS, &reversed_extensions(MULTI_WITNESS)] {
         assert_concrete_keep(text);
-        assert_generic_format_application(
-            text,
-            "expectedInt",
-            &[1, 2],
-            ApplyKind::Regular,
-            |defs| defs.int,
-        );
+        assert_generic_format_application(text, "expectedInt", &[1, 2], ApplyKind::Regular, "Int");
     }
 }
 
@@ -2351,7 +2353,7 @@ fn expected_int_can_select_generic_keep_with_its_own_format() {
         "expectedInt",
         &[1],
         ApplyKind::Regular,
-        |defs| defs.int,
+        "Int",
     );
 }
 
@@ -2365,13 +2367,7 @@ fn generic_extension_witness_errors_identify_the_call_and_roll_back() {
 
 #[test]
 fn generic_extension_keeps_both_written_witnesses() {
-    assert_generic_format_application(
-        MULTI_WITNESS,
-        "explicit",
-        &[2, 3],
-        ApplyKind::Using,
-        |defs| defs.long,
-    );
+    assert_generic_format_application(MULTI_WITNESS, "explicit", &[2, 3], ApplyKind::Using, "Long");
 }
 
 #[test]
@@ -2430,4 +2426,74 @@ fn assert_extension_witness_errors(fixture: &str, rejected: &str, first_ambiguou
         assert_eq!(typer.typed_arena.checkpoint(), trees);
         assert!(typer.typed_index.is_empty());
     }
+}
+
+const BOUNDED_WITNESS: &str =
+    include_str!("../../../tests/fixtures/contextual-consumers/BoundedWitnessExtensions.scala");
+const BOUNDED_REJECTED: &str =
+    include_str!("../../../tests/fixtures/contextual-consumers/BoundedWitnessRejected.scala");
+
+#[test]
+fn bounded_extension_checks_the_upper_bound_and_retains_the_argument_type() {
+    for text in [BOUNDED_WITNESS, &reversed_extensions(BOUNDED_WITNESS)] {
+        for name in ["leaf", "overlap"] {
+            assert_generic_format_application(text, name, &[1, 2], ApplyKind::Regular, "Leaf");
+        }
+        assert_concrete_keep(text);
+        assert_outside_extension_bound(text, "outside");
+        assert_outside_extension_bound(text, "outsideOnly");
+    }
+}
+
+fn assert_outside_extension_bound(fixture: &str, name: &str) {
+    let text = format!(
+        "{fixture}\n{}",
+        BOUNDED_REJECTED.split_once('\n').unwrap().1
+    );
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(&text);
+    let factory = method_symbol(&parsed, &store, &index, source, "ops");
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, name);
+    let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+        panic!()
+    };
+    let TreeKind::Apply(call) = &parsed.ast.get(rhs).kind else {
+        panic!()
+    };
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let before = typer.store.checkpoint();
+    let trees = typer.typed_arena.checkpoint();
+    let error = typer.type_method_definition(tree).unwrap_err();
+    match error {
+        TyperError::ExplicitTypeArgumentBoundViolation {
+            tree_index,
+            parameter_index: 0,
+            side: TypeArgumentBoundSide::Upper,
+            ..
+        } if name == "outsideOnly" => {
+            assert_eq!(tree_index, rhs.index());
+        }
+        TyperError::ExtensionOverload {
+            tree_index,
+            provider,
+            cause,
+            ..
+        } if name != "outsideOnly" => {
+            assert_eq!((tree_index, provider), (call.function.index(), factory));
+            let TyperError::OverloadApplicationNoApplicable { candidates, .. } = *cause else {
+                panic!("{cause:?}")
+            };
+            assert_eq!(candidates.len(), 2);
+            assert!(candidates.iter().any(|(_, r)| matches!(
+                r,
+                OverloadRejection::TypeArgumentBoundViolation {
+                    parameter_index: 0,
+                    side: TypeArgumentBoundSide::Upper
+                }
+            )));
+        }
+        other => panic!("{name}: {other:?}"),
+    }
+    assert_eq!(typer.store.checkpoint(), before);
+    assert_eq!(typer.typed_arena.checkpoint(), trees);
+    assert!(typer.typed_index.is_empty());
 }

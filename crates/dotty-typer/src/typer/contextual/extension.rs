@@ -447,11 +447,20 @@ impl SourceTyper<'_> {
         site: u32,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<ApplicationCandidate, TyperError> {
-        let generic: HashSet<_> = candidates
-            .iter()
-            .filter(|c| matches!(self.store.types.get(c.callable), Type::Poly(_)))
-            .map(|c| c.symbol)
-            .collect();
+        // Compare the declared domain of B; instantiating both methods at the
+        // call's argument would lose the distinction between Base and Any.
+        let mut generic = HashMap::new();
+        for c in candidates.iter() {
+            if let Type::Poly(poly) = self.store.types.get(c.callable) {
+                let Type::Bounds { high, .. } = self.store.types.get(poly.params[0].bounds) else {
+                    return Err(TyperError::MalformedOverloadCandidate {
+                        symbol: c.symbol,
+                        callable: c.callable,
+                    });
+                };
+                generic.insert(c.symbol, *high);
+            }
+        }
         self.instantiate_generic_overload_candidates(
             candidates, arguments, site, kind, false, journal,
         )?;
@@ -478,24 +487,44 @@ impl SourceTyper<'_> {
                 candidates: rejected,
             });
         }
-        let rank = |typer: &mut Self, alts: &[ApplicationCandidate]| {
+        let rank = |typer: &mut Self,
+                    alts: &[ApplicationCandidate],
+                    journal: &mut Vec<(SymbolId, SymbolInfo)>| {
             unique_extension_winner(alts, |a, b| {
-                // An unbounded unary type parameter is less specific than a
-                // concrete formal, even if inference made their types identical.
-                let types = match generic
-                    .contains(&b.symbol)
-                    .cmp(&generic.contains(&a.symbol))
-                {
-                    Ordering::Equal => {
-                        match typer.choose_overload_candidate(&mut [*a, *b], arguments, site, kind)
-                        {
-                            Ok(best) if best.symbol == a.symbol => Ordering::Greater,
-                            Ok(_) => Ordering::Less,
-                            Err(TyperError::AmbiguousOverloadApplication { .. }) => Ordering::Equal,
-                            Err(error) => return Err(error),
+                let types = if generic.contains_key(&a.symbol) || generic.contains_key(&b.symbol) {
+                    let domain = |c: &ApplicationCandidate| {
+                        if let Some(bound) = generic.get(&c.symbol) {
+                            return Ok(*bound);
                         }
+                        if let Type::Method(m) = typer.store.types.get(c.callable)
+                            && let [p] = m.params.as_slice()
+                        {
+                            return Ok(p.ty);
+                        }
+                        Err(TyperError::OverloadResolutionRequiresUnsupportedCandidate {
+                            source: typer.source,
+                            tree_index: site,
+                            candidate: c.symbol,
+                        })
+                    };
+                    let left = domain(a)?;
+                    let right = domain(b)?;
+                    let mut includes = |from, to| {
+                        if to == typer.definitions.any_type || from == typer.definitions.any_type {
+                            return Ok(to == typer.definitions.any_type);
+                        }
+                        typer.contextual_conforms(from, to, site, journal)
+                    };
+                    let forward = includes(left, right)?;
+                    let reverse = includes(right, left)?;
+                    forward.cmp(&reverse)
+                } else {
+                    match typer.choose_overload_candidate(&mut [*a, *b], arguments, site, kind) {
+                        Ok(best) if best.symbol == a.symbol => Ordering::Greater,
+                        Ok(_) => Ordering::Less,
+                        Err(TyperError::AmbiguousOverloadApplication { .. }) => Ordering::Equal,
+                        Err(error) => return Err(error),
                     }
-                    order => order,
                 };
                 Ok(typer.extension_wins(bases, a.symbol, b.symbol, types))
             })
@@ -503,12 +532,12 @@ impl SourceTyper<'_> {
         if let [only] = applicable.as_slice() {
             return Ok(*only);
         }
-        let winner = rank(self, &applicable)?;
+        let winner = rank(self, &applicable, journal)?;
         // The expected result can break a tie or replace an incompatible winner.
         if let Some(expected) = expected {
             let results: Vec<_> = applicable
                 .iter()
-                .map(|c| self.final_extension_result(c.callable, generic.contains(&c.symbol)))
+                .map(|c| self.final_extension_result(c.callable, generic.contains_key(&c.symbol)))
                 .collect::<Result<_, _>>()?;
             let can_compare = match winner {
                 Some(i) => results[i].is_some(),
@@ -526,7 +555,7 @@ impl SourceTyper<'_> {
                         compatible.push(*c);
                     }
                 }
-                if let Some(index) = rank(self, &compatible)? {
+                if let Some(index) = rank(self, &compatible, journal)? {
                     return Ok(compatible[index]);
                 }
             }
@@ -555,7 +584,7 @@ impl SourceTyper<'_> {
             };
             let callable = receiver.result;
             if !matches!(self.store.types.get(callable), Type::Method(_))
-                && !self.is_unbounded_unary_extension(callable)
+                && !self.supports_unary_extension_inference(callable)
             {
                 return Err(TyperError::OverloadResolutionRequiresUnsupportedCandidate {
                     source: self.source,
@@ -573,7 +602,7 @@ impl SourceTyper<'_> {
         Ok(candidates)
     }
 
-    pub(in crate::typer) fn is_unbounded_unary_extension(&self, callable: TypeId) -> bool {
+    pub(in crate::typer) fn supports_unary_extension_inference(&self, callable: TypeId) -> bool {
         let types = &self.store.types;
         let Type::Poly(poly) = types.get(callable) else {
             return false;
@@ -606,7 +635,7 @@ impl SourceTyper<'_> {
             _ => method.result,
         };
         matches!(types.get(parameter.bounds), Type::Bounds { low, high }
-            if *low == self.definitions.nothing_type && *high == self.definitions.any_type)
+            if *low == self.definitions.nothing_type && (*high == self.definitions.any_type || matches!(types.get(*high), Type::TypeRef { target: TypeRefTarget::Symbol(s), .. } if matches!(self.store.symbols.get(*s).kind, SymbolKind::Class | SymbolKind::Trait))))
             && method.kind == MethodKind::Plain
             && !arg.erased
             && !arg.varargs
