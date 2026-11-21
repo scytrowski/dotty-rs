@@ -1555,7 +1555,7 @@ fn overloaded_extension_explicit_using_selects_the_method_and_preserves_both_wit
     }
 }
 
-fn assert_using_overload_selections(fixture: &str) {
+fn reversed_extensions(fixture: &str) -> String {
     let mut swapped: Vec<_> = fixture.lines().collect();
     let first = swapped
         .iter()
@@ -1566,7 +1566,12 @@ fn assert_using_overload_selections(fixture: &str) {
         .take_while(|line| line.contains("extension ("))
         .count();
     swapped[first..first + count].reverse();
-    for text in [fixture, &swapped.join("\n")] {
+    assert!(count >= 2);
+    swapped.join("\n")
+}
+
+fn assert_using_overload_selections(fixture: &str) {
+    for text in [fixture, &reversed_extensions(fixture)] {
         let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
         let factory = method_symbol(&parsed, &store, &index, source, "ops");
         let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
@@ -2306,8 +2311,25 @@ fn assert_generic_format_application(
 
 #[test]
 fn concrete_keep_needs_no_format() {
-    let (parsed, mut store, packages, defs, index, source) =
-        parse_and_name(GENERIC_EXTENSION_USING);
+    assert_concrete_keep(GENERIC_EXTENSION_USING);
+}
+
+#[test]
+fn expected_result_selects_keep_before_resolving_either_witness() {
+    for text in [MULTI_WITNESS, &reversed_extensions(MULTI_WITNESS)] {
+        assert_concrete_keep(text);
+        assert_generic_format_application(
+            text,
+            "expectedInt",
+            &[1, 2],
+            ApplyKind::Regular,
+            |defs| defs.int,
+        );
+    }
+}
+
+fn assert_concrete_keep(text: &str) {
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
     let factory = method_symbol(&parsed, &store, &index, source, "ops");
     let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
     let selected =
