@@ -199,7 +199,7 @@ fn migration_warning_survives_a_sibling_error_and_tracks_source_edits() {
             assert_eq!(*source, unit.source);
             assert_eq!(diagnostic.severity(), DiagnosticSeverity::Warning);
             assert_eq!(
-                diagnostic.message(),
+                dotty::SourceDiagnostic::from_typer_warning(*source, diagnostic).message,
                 "Implicit parameters should be provided with a `using` clause."
             );
             let start = (text.find("f(1)").unwrap() + 2) as u32;

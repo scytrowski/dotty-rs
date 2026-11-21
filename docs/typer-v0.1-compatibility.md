@@ -2290,7 +2290,10 @@ The returned `ClassBodyCheck.body` holds the complete `TypedClassBody` on
 success or the ordered member errors on failure. On either outcome,
 `ClassBodyCheck.diagnostics` pairs each committed typer diagnostic with its
 `SourceId`. For example, a successful positional call to a legacy implicit
-clause warns at the argument even if another method fails. The arena retains
+clause yields `TyperWarning::ImplicitClauseWithoutUsing` at the argument
+even if another method fails. Clients can inspect the typed payload or render
+it with `SourceDiagnostic::from_typer_warning`. Its stable code is
+`typer.implicit_clause_without_using`. The arena retains
 the successful members' trees. The original `type_class_body` entry points
 stop at the first failure.
 

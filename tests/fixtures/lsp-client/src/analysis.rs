@@ -295,12 +295,9 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
                 c, &u.ast, &u.index, &mut store, defs, &packages, &mut arena, NoResolver,
             );
             for (source, d) in &check.diagnostics {
-                results[source.index() as usize].problems.push(Problem {
-                    code: None,
-                    range: Some(d.span()),
-                    message: d.message().to_owned(),
-                    severity: d.severity(),
-                });
+                results[source.index() as usize]
+                    .problems
+                    .push(SourceDiagnostic::from_typer_warning(*source, d).into());
             }
             if let Err(errors) = &check.body {
                 for error in errors {

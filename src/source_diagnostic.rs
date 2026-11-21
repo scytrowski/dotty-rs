@@ -3,7 +3,7 @@ use crate::core::{AstArena, DiagnosticSeverity, SourceId, SourceSpan, Span, Unty
 use crate::lexer::LexerDiagnostic;
 use crate::namer::{NamerDiagnostic, NamerIssue, VisibilityAccess};
 use crate::parser::{DeclarationIssue, ParseDiagnostic, ParseIssue, ValueDefinitionKind};
-use crate::typer::TyperError;
+use crate::typer::{TyperDiagnostic, TyperError, TyperWarning};
 
 mod lexer;
 
@@ -81,6 +81,24 @@ impl SourceDiagnostic {
             message,
             location: Some(SourceSpan::new(
                 diagnostic.source(),
+                Span::without_point(diagnostic.span()),
+            )),
+        }
+    }
+
+    /// Presents a committed typer warning from the supplied source file.
+    pub fn from_typer_warning(source: SourceId, diagnostic: &TyperDiagnostic) -> Self {
+        let message = match diagnostic.issue() {
+            TyperWarning::ImplicitClauseWithoutUsing => {
+                "Implicit parameters should be provided with a `using` clause."
+            }
+        };
+        Self {
+            code: Some(diagnostic.issue().code()),
+            severity: diagnostic.severity(),
+            message: message.into(),
+            location: Some(SourceSpan::new(
+                source,
                 Span::without_point(diagnostic.span()),
             )),
         }
@@ -164,6 +182,28 @@ mod tests {
         assert_eq!(report.message, message);
         assert_eq!(report.severity, DiagnosticSeverity::Error);
         let range = TextRange::new(start, end).unwrap();
+        assert_eq!(
+            report.location,
+            Some(SourceSpan::new(id, Span::without_point(range)))
+        );
+    }
+
+    #[test]
+    fn typer_warning_report_preserves_code_severity_and_source_range() {
+        let id = SourceId::from_index(9);
+        let range = TextRange::new(17, 18).unwrap();
+        let warning = TyperDiagnostic::with_issue(
+            DiagnosticSeverity::Warning,
+            range,
+            TyperWarning::ImplicitClauseWithoutUsing,
+        );
+        let report = SourceDiagnostic::from_typer_warning(id, &warning);
+        assert_eq!(report.code, Some("typer.implicit_clause_without_using"));
+        assert_eq!(
+            report.message,
+            "Implicit parameters should be provided with a `using` clause."
+        );
+        assert_eq!(report.severity, DiagnosticSeverity::Warning);
         assert_eq!(
             report.location,
             Some(SourceSpan::new(id, Span::without_point(range)))
