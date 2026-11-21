@@ -12,7 +12,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 name = "compiler-client"
 version = "0.0.0"
 dependencies = [
- "dotty",
+ "dotty-rs",
 ]
 
 [[package]]
@@ -22,24 +22,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "01a7799fd6b852db0e61728dde9a204c423b44d689dbd432522543614b490e78"
 dependencies = [
  "cfg-if",
-]
-
-[[package]]
-name = "dotty"
-version = "0.1.0"
-dependencies = [
- "dotty-classfile",
- "dotty-classloader",
- "dotty-core",
- "dotty-jvm",
- "dotty-jvm-tasty-contract",
- "dotty-lexer",
- "dotty-namer",
- "dotty-parser",
- "dotty-tasty",
- "dotty-tasty-pickler",
- "dotty-tasty-unpickler",
- "dotty-typer",
 ]
 
 [[package]]
@@ -104,6 +86,24 @@ name = "dotty-parser"
 version = "0.1.0"
 dependencies = [
  "dotty-core",
+]
+
+[[package]]
+name = "dotty-rs"
+version = "0.1.0"
+dependencies = [
+ "dotty-classfile",
+ "dotty-classloader",
+ "dotty-core",
+ "dotty-jvm",
+ "dotty-jvm-tasty-contract",
+ "dotty-lexer",
+ "dotty-namer",
+ "dotty-parser",
+ "dotty-tasty",
+ "dotty-tasty-pickler",
+ "dotty-tasty-unpickler",
+ "dotty-typer",
 ]
 
 [[package]]

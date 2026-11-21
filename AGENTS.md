@@ -74,8 +74,8 @@ one-way dependency boundaries:
 - `dotty-jvm` validates already-typed compilation plans and lowers supported
   semantics to class files. Its production dependencies are `dotty-core` and
   `dotty-classfile`; it must not assemble or rerun the source frontend.
-- the root `dotty` crate exposes selected compiler libraries and hosts
-  cross-component integration tests. It exposes the source frontend and JVM
+- the root `dotty-rs` package (library `dotty`) exposes selected compiler libraries
+  and hosts cross-component integration tests. It exposes the source frontend and JVM
   backend as modules. The semantic pickler is also available as a separate crate.
 - `tools/` contains compatibility, corpus, oracle, and diagnostic tooling. It
   is part of the validation infrastructure, not production compiler logic.
@@ -284,7 +284,7 @@ on `PATH` and reproduce it locally with:
 DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test \
   -p dotty-classfile --test classfile_jvm_encoder \
   -p dotty-jvm --lib \
-  -p dotty --test jvm_source_compilation \
+  -p dotty-rs --test jvm_source_compilation \
   --test jvm_stateful_class_contract \
   --locked -- --nocapture
 ```

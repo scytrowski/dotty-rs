@@ -106,10 +106,12 @@ revisions and are not measurements of the current checkout.
 | `dotty-classfile` | JVM class-file codec and bytecode builder |
 | `dotty-classloader` | Classpath discovery and binary loading |
 | `dotty-jvm` | Typed-semantic plans to JVM class files |
-| `dotty` (root) | Selected public re-exports, bounded paired-plan/artifact coordination (including linked Counter/CounterOwner composition), and integration tests |
+| `dotty-jvm-tasty-contract` | Consistency validation between JVM and TASTy producer plans |
+| `dotty-rs` (root package; library `dotty`) | Selected public re-exports, bounded paired-plan/artifact coordination (including linked Counter/CounterOwner composition), and integration tests |
 
-An external compiler can depend on `dotty` alone and assemble a source-to-JVM
-pipeline with `dotty::{core, lexer, parser, namer, typer, jvm}`. The caller owns
+An external compiler can depend on the `dotty-rs` package (library name `dotty`)
+and assemble a source-to-JVM pipeline with
+`dotty::{core, lexer, parser, namer, typer, jvm}`. The caller owns
 the session stores, orders the phases and chooses where to write generated classes.
 For direct access to the semantic pickler, depend on `dotty-tasty-pickler`.
 Source frontend production dependencies remain independent of the JVM adapters. See the
@@ -140,7 +142,7 @@ unavailable. To require the JVM gate used by CI, install JDK 21 with `java`,
 DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test \
   -p dotty-classfile --test classfile_jvm_encoder \
   -p dotty-jvm --lib \
-  -p dotty --test jvm_source_compilation \
+  -p dotty-rs --test jvm_source_compilation \
   --test jvm_stateful_class_contract \
   --locked -- --nocapture
 ```
@@ -150,15 +152,46 @@ cached dependency requirements. Follow the tool-specific instructions before
 regenerating fixtures or reports.
 
 With JDK 21 on `PATH`, run the standalone client test to exercise the public
-facade. Its Cargo workspace declares a single dependency on `dotty`. The test
-compiles two Scala sources in both orders, compares the class files and runs a
-Java caller against the generated classes. The same client measures a full
+facade. Its Cargo workspace declares a single dependency on `dotty-rs`, aliased
+as `dotty`. The test compiles two Scala sources in both orders, compares the class
+files and runs a Java caller against the generated classes. The same client measures a full
 in-memory compilation with one and four workers. See the
 [dependent-source workload and phase timings](docs/compiler-client-timings.md).
 
 ```sh
 cargo test --manifest-path tests/fixtures/compiler-client/Cargo.toml --target-dir target --locked
 ```
+
+## Cargo packages
+
+The root package is named `dotty-rs`; its Rust library remains `dotty`.
+For an explicit dependency alias, use:
+
+```toml
+[dependencies]
+dotty = { package = "dotty-rs", version = "0.1.0" }
+```
+
+The 13 library packages share version 0.1.0, edition 2024, Apache-2.0 licensing,
+and a minimum supported Rust version of 1.98.1. Internal path dependencies also
+declare registry versions. Development tools and standalone client fixtures
+remain non-publishable.
+
+Published packages contain source code, their README, and the complete license.
+Integration tests, binary fixtures, compatibility reports and Scala oracle tools
+remain in the repository and are validated from the checkout. The root package
+also retains the three TASTy inspection/validation binaries in `src/bin`.
+
+To verify the complete publication set without uploading anything, run:
+
+```sh
+cargo package --workspace --exclude dotty-parser-smoke-dump \
+  --exclude dotty-parser-corpus-report --exclude tasty-pickler-oracle --locked
+```
+
+Cargo prepares the selected interdependent packages together, so their initial
+publication can be checked before any component exists in the registry.
+During local review, add `--allow-dirty` to inspect uncommitted manifest changes.
 
 ## Documentation and tools
 

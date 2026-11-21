@@ -1,14 +1,24 @@
 [package]
 name = "dotty-tasty-unpickler"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Semantic projection of Scala 3 TASTy into the dotty-core model"
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+include.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/dotty-tasty-unpickler"
 
 [features]
 corpus = []
 
 [dependencies]
-dotty-tasty = { path = "../dotty-tasty" }
-dotty-core = { path = "../dotty-core" }
+dotty-tasty.workspace = true
+dotty-core.workspace = true
 
 [[test]]
 name = "symbol_annotation_corpus"
