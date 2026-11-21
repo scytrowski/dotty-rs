@@ -577,13 +577,31 @@ impl SourceTyper<'_> {
         let [arg] = method.params.as_slice() else {
             return false;
         };
+        // Inference uses the ordinary argument. A final using clause is
+        // instantiated with the method type arguments before witness search.
+        let result = match types.get(method.result) {
+            Type::Method(using) => {
+                let [witness] = using.params.as_slice() else {
+                    return false;
+                };
+                if using.kind != MethodKind::Contextual
+                    || witness.erased
+                    || witness.varargs
+                    || matches!(types.get(witness.ty), Type::ByName { .. })
+                {
+                    return false;
+                }
+                using.result
+            }
+            _ => method.result,
+        };
         matches!(types.get(parameter.bounds), Type::Bounds { low, high }
             if *low == self.definitions.nothing_type && *high == self.definitions.any_type)
             && method.kind == MethodKind::Plain
             && !arg.erased
             && !arg.varargs
             && matches!(types.get(arg.ty), Type::ParamRef { binder, index: 0 } if *binder == callable)
-            && !matches!(types.get(method.result), Type::Method(_) | Type::Poly(_))
+            && !matches!(types.get(result), Type::Method(_) | Type::Poly(_))
     }
 
     fn extension_receiver(&self, signature: TypeId) -> Option<TypeId> {

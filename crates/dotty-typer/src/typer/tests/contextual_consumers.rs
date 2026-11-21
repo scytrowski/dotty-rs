@@ -2211,3 +2211,54 @@ fn contextual_extension_receiver_specificity_does_not_retry_a_wider_receiver() {
         assert!(typer.typed_index.is_empty());
     }
 }
+
+const GENERIC_EXTENSION_USING: &str =
+    include_str!("../../../tests/fixtures/contextual-consumers/GenericExtensionUsing.scala");
+
+#[test]
+fn generic_extension_infers_its_trailing_format_after_the_ordinary_argument() {
+    let (parsed, mut store, packages, defs, index, source) =
+        parse_and_name(GENERIC_EXTENSION_USING);
+    let factory = method_symbol(&parsed, &store, &index, source, "ops");
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "automatic");
+    let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+        panic!()
+    };
+    let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+        panic!()
+    };
+    let param = |clause: usize, n: usize| {
+        index
+            .symbol_at(source, def.value_param_clauses[clause][n])
+            .unwrap()
+    };
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    typer.type_method_definition(tree).unwrap();
+    let root = typer.typed_index.get(source, rhs).unwrap();
+    let ast = typer.typed_ast();
+    assert_eq!(ast.get(root).ty, defs.long);
+    let TreeKind::Apply(format) = &ast.get(root).kind else {
+        panic!("format application")
+    };
+    let [evidence] = format.args[..] else {
+        panic!("one witness")
+    };
+    assert_eq!(format.kind, ApplyKind::Regular);
+    assert_eq!(typed_reference(&typer, evidence), param(1, 1));
+    let selected = assert_contextual_extension_call(
+        &typer,
+        format.function,
+        factory,
+        Some(defs.long),
+        param(0, 0),
+        param(1, 0),
+    );
+    let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(selected) else {
+        panic!()
+    };
+    let TreeKind::DefDef(keep) = &parsed.ast.get(tree).kind else {
+        panic!()
+    };
+    assert_eq!(keep.type_params.len(), 1);
+    assert_eq!(keep.value_param_clauses.len(), 2);
+}
