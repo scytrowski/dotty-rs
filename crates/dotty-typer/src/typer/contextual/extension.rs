@@ -360,8 +360,14 @@ impl SourceTyper<'_> {
         site: u32,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<ApplicationCandidate, TyperError> {
-        // The ordinary clause can decide specificity only after the receivers tie.
-        if let Some((first, rest)) = alternatives.split_first() {
+        // With no unique winner at the receiver clause, Scala applies the next
+        // clause to all receiver-applicable declarations, including wider ones.
+        // Ranking different declaring owners requires a separate comparison.
+        if let Some((first, rest)) = alternatives.split_first()
+            && rest.iter().any(|alt| {
+                self.store.symbols.owner(alt.symbol) != self.store.symbols.owner(first.symbol)
+            })
+        {
             for alt in rest {
                 if !self.contextual_conforms(first.receiver, alt.receiver, site, journal)?
                     || !self.contextual_conforms(alt.receiver, first.receiver, site, journal)?

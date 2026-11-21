@@ -1917,6 +1917,73 @@ fn contextual_extension_receiver_specificity_precedes_the_written_argument_claus
 }
 
 #[test]
+fn tied_extension_receivers_use_all_applicable_receivers_for_the_next_clause() {
+    let original =
+        include_str!("../../../tests/fixtures/contextual-consumers/ExtensionReceiverGroups.scala");
+    let mut reversed: Vec<_> = original.lines().collect();
+    let first = reversed
+        .iter()
+        .position(|line| line.contains("extension ("))
+        .unwrap();
+    reversed[first..first + 3].reverse();
+    for text in [original, &reversed.join("\n")] {
+        let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+        let factory = method_symbol(&parsed, &store, &index, source, "ops");
+        let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+        for (name, result, inferred, formal) in [
+            ("narrowInt", defs.int, None, "i"),
+            ("narrowBool", defs.boolean, None, "b"),
+            ("narrowLong", defs.long, Some(defs.long), "value"),
+            ("boxInt", defs.int, Some(defs.int), "value"),
+        ] {
+            let (method, rhs) =
+                method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+            let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+                panic!()
+            };
+            let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+                panic!()
+            };
+            typer
+                .type_method_definition(tree)
+                .unwrap_or_else(|err| panic!("{name}: {err:?}"));
+            let root = typer.typed_index.get(source, rhs).unwrap();
+            assert_eq!(typer.typed_ast().get(root).ty, result, "{name}");
+            let selected = assert_keep_call(
+                &typer,
+                root,
+                factory,
+                inferred,
+                index
+                    .symbol_at(source, def.value_param_clauses[0][0])
+                    .unwrap(),
+                index
+                    .symbol_at(source, def.value_param_clauses[1][0])
+                    .unwrap(),
+            );
+            let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(selected)
+            else {
+                panic!()
+            };
+            let TreeKind::DefDef(decl) = &parsed.ast.get(tree).kind else {
+                panic!()
+            };
+            let param = index
+                .symbol_at(source, decl.value_param_clauses[0][0])
+                .unwrap();
+            assert_eq!(
+                typer
+                    .store
+                    .names
+                    .resolve(typer.store.symbols.get(param).name.text()),
+                formal,
+                "{name}"
+            );
+        }
+    }
+}
+
+#[test]
 fn contextual_extension_receiver_specificity_does_not_retry_a_wider_receiver() {
     let rejected = include_str!(
         "../../../tests/fixtures/contextual-consumers/ExtensionReceiverSpecificityRejected.scala"
