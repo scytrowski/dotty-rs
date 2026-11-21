@@ -1,10 +1,11 @@
 [package]
 name = "dotty-parser-smoke-dump"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 publish = false
 
 [dependencies]
-dotty-core = { path = "../../crates/dotty-core" }
-dotty-lexer = { path = "../../crates/dotty-lexer" }
-dotty-parser = { path = "../../crates/dotty-parser" }
+dotty-core.workspace = true
+dotty-lexer.workspace = true
+dotty-parser.workspace = true

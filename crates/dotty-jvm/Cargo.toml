@@ -1,8 +1,18 @@
 [package]
 name = "dotty-jvm"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Bounded JVM class-file emission from validated typed compilation plans"
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+include.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/dotty-jvm"
 
 [dependencies]
-dotty-core = { path = "../dotty-core" }
-dotty-classfile = { path = "../dotty-classfile" }
+dotty-core.workspace = true
+dotty-classfile.workspace = true

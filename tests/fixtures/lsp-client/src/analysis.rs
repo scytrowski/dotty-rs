@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use dotty::core::{
     AstArena, Definitions, DiagnosticSeverity, DocumentText, NoResolver, Packages, SemanticStore,
-    SourceId, SourceSemanticIndex, SourceText, SymbolId, TextRange, Typed, Untyped,
+    SourceId, SourceSemanticIndex, SymbolId, TextRange, Typed, Untyped,
 };
 use dotty::jvm_class_plan::ClassHeaderBindings;
 use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
@@ -86,21 +86,17 @@ fn name(
     packages: &mut Packages,
     result: &mut FileResult,
 ) -> Option<Unit> {
-    let parsed = dotty::parser::parse_compilation_unit(
-        SourceText::new(text).ok()?,
-        source,
-        dotty::lexer::ContextualScanner::new(text).ok()?,
-        &mut store.names,
-    );
+    let parsed = dotty::parse_source(source, text, Default::default())
+        .map_err(|e| result.error(None, e.to_string()))
+        .ok()?
+        .into_session(&mut store.names);
     if !parsed.diagnostics.is_empty() {
-        result.problems.extend(
-            parsed
-                .diagnostics
-                .iter()
-                .map(|d| SourceDiagnostic::from_parser(d).into()),
-        );
+        result
+            .problems
+            .extend(parsed.diagnostics.into_iter().map(Problem::from));
         return None;
     }
+    let parsed = parsed.syntax;
     let named = name_compilation_unit_with_diagnostics(
         &parsed.ast,
         parsed.root,

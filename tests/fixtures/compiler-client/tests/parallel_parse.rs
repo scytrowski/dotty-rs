@@ -42,7 +42,7 @@ object A:
         .iter()
         .zip(parsing::parse_files(&submitted, 3).into_iter().rev())
     {
-        let actual = detached.into_session(&mut session);
+        let actual = detached.into_session(&mut session).syntax;
         let expected = parse_compilation_unit(
             SourceText::new(text).unwrap(),
             id,

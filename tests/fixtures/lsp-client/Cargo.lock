@@ -33,24 +33,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
-name = "dotty"
-version = "0.1.0"
-dependencies = [
- "dotty-classfile",
- "dotty-classloader",
- "dotty-core",
- "dotty-jvm",
- "dotty-jvm-tasty-contract",
- "dotty-lexer",
- "dotty-namer",
- "dotty-parser",
- "dotty-tasty",
- "dotty-tasty-pickler",
- "dotty-tasty-unpickler",
- "dotty-typer",
-]
-
-[[package]]
 name = "dotty-classfile"
 version = "0.1.0"
 
@@ -105,7 +87,7 @@ name = "dotty-lsp"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
- "dotty",
+ "dotty-rs",
  "lsp-server",
  "serde_json",
 ]
@@ -122,6 +104,24 @@ name = "dotty-parser"
 version = "0.1.0"
 dependencies = [
  "dotty-core",
+]
+
+[[package]]
+name = "dotty-rs"
+version = "0.1.0"
+dependencies = [
+ "dotty-classfile",
+ "dotty-classloader",
+ "dotty-core",
+ "dotty-jvm",
+ "dotty-jvm-tasty-contract",
+ "dotty-lexer",
+ "dotty-namer",
+ "dotty-parser",
+ "dotty-tasty",
+ "dotty-tasty-pickler",
+ "dotty-tasty-unpickler",
+ "dotty-typer",
 ]
 
 [[package]]

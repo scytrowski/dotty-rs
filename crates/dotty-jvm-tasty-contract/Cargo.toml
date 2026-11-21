@@ -1,12 +1,21 @@
 [package]
 name = "dotty-jvm-tasty-contract"
-version = "0.1.0"
-edition = "2024"
-publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Consistency validation for paired JVM class-file and Scala 3 TASTy plans"
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+include.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/dotty-jvm-tasty-contract"
 
 [dependencies]
-dotty-core = { path = "../dotty-core" }
-dotty-classfile = { path = "../dotty-classfile" }
-dotty-jvm = { path = "../dotty-jvm" }
-dotty-tasty-pickler = { path = "../dotty-tasty-pickler" }
-dotty-tasty = { path = "../dotty-tasty" }
+dotty-core.workspace = true
+dotty-classfile.workspace = true
+dotty-jvm.workspace = true
+dotty-tasty-pickler.workspace = true
+dotty-tasty.workspace = true

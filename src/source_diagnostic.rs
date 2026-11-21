@@ -1,5 +1,6 @@
 //! Presentation of source diagnostics for external compiler and editor clients.
 use crate::core::{AstArena, DiagnosticSeverity, SourceId, SourceSpan, Span, Untyped};
+use crate::lexer::{EscapeIssue, LexerDiagnostic, LexerIssue, NumericIssue};
 use crate::namer::{NamerDiagnostic, NamerIssue, VisibilityAccess};
 use crate::parser::{DeclarationIssue, ParseDiagnostic, ParseIssue, ValueDefinitionKind};
 use crate::typer::TyperError;
@@ -23,6 +24,30 @@ impl SourceDiagnostic {
             severity: DiagnosticSeverity::Error,
             message,
             location,
+        }
+    }
+
+    /// Presents a raw lexer or contextual scanner diagnostic for the file it came from.
+    pub fn from_lexer(source: SourceId, diagnostic: &LexerDiagnostic) -> Self {
+        let issue = diagnostic.issue();
+        let message = match issue {
+            LexerIssue::UnterminatedBlockComment => "Unterminated block comment".to_owned(),
+            LexerIssue::Escape(EscapeIssue::InvalidEscapeCharacter { character }) => {
+                format!("Invalid escape character {character:?}")
+            }
+            LexerIssue::Numeric(NumericIssue::InvalidDigitForBase { digit, base }) => {
+                format!("Invalid digit {digit:?} for base {base}")
+            }
+            _ => format!("Lexer diagnostic ({})", issue.code()),
+        };
+        Self {
+            code: Some(issue.code()),
+            severity: diagnostic.severity(),
+            message,
+            location: Some(SourceSpan::new(
+                source,
+                Span::without_point(diagnostic.span()),
+            )),
         }
     }
 
@@ -135,6 +160,48 @@ fn declaration_message(issue: &DeclarationIssue) -> &'static str {
 mod tests {
     use super::*;
     use crate::core::{TextRange, TokenKind};
+
+    #[test]
+    fn lexer_reports_preserve_the_issue_and_scanned_byte_range() {
+        let id = SourceId::from_index(17);
+        for (text, start, end, code, message) in [
+            (
+                "/* 😀",
+                0,
+                7,
+                "lexer.unterminated_block_comment",
+                "Unterminated block comment",
+            ),
+            (
+                r#"`a\q`"#,
+                2,
+                4,
+                "lexer.escape.invalid_escape_character",
+                "Invalid escape character 'q'",
+            ),
+            (
+                "0b2",
+                0,
+                2,
+                "lexer.numeric.invalid_digit_for_base",
+                "Invalid digit '2' for base 2",
+            ),
+        ] {
+            let scanner = crate::lexer::ContextualScanner::new(text).unwrap();
+            let [diagnostic] = scanner.diagnostics() else {
+                panic!("expected one diagnostic for {text}")
+            };
+            let report = SourceDiagnostic::from_lexer(id, diagnostic);
+            assert_eq!(report.code, Some(code));
+            assert_eq!(report.message, message);
+            assert_eq!(report.severity, DiagnosticSeverity::Error);
+            let range = TextRange::new(start, end).unwrap();
+            assert_eq!(
+                report.location,
+                Some(SourceSpan::new(id, Span::without_point(range)))
+            );
+        }
+    }
 
     #[test]
     fn parser_reports_preserve_the_phase_code_and_source_location() {

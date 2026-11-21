@@ -1,13 +1,23 @@
 [package]
 name = "dotty-classloader"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Classpath, archive and JDK metadata loading for Scala 3 compiler infrastructure"
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+include.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/dotty-classloader"
 
 [dependencies]
-dotty-tasty = { path = "../dotty-tasty" }
-dotty-tasty-unpickler = { path = "../dotty-tasty-unpickler" }
-dotty-classfile = { path = "../dotty-classfile" }
-dotty-core = { path = "../dotty-core" }
+dotty-tasty.workspace = true
+dotty-tasty-unpickler.workspace = true
+dotty-classfile.workspace = true
+dotty-core.workspace = true
 crc32fast = "1.5.2"
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
 unicode-ident = "1.0.24"
