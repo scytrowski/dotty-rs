@@ -4,12 +4,12 @@ use std::sync::Arc;
 
 use dotty::core::{
     AstArena, Definitions, DiagnosticSeverity, DocumentText, NoResolver, Packages, SemanticStore,
-    SourceId, SourceSemanticIndex, SymbolId, TextRange, Typed, Untyped,
+    SourceId, SourceSemanticIndex, SourceSpan, SymbolId, TextRange, Typed, Untyped,
 };
 use dotty::jvm_class_plan::ClassHeaderBindings;
 use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty::source_declarations::{ClassMember, SourceClass, source_classes};
-use dotty::typer::{SignatureCompletion, SourceTyper, TyperError};
+use dotty::typer::{SignatureCompletion, SourceTyper, TyperDiagnostic, TyperError};
 use dotty::{
     ClassBodyError, SourceDeclarationIndex, SourceDiagnostic, SourceFileCalls, SyntaxDiagnostic,
 };
@@ -23,21 +23,17 @@ pub struct Document {
 pub type Documents = BTreeMap<String, Document>;
 
 #[derive(PartialEq, Eq)]
-pub struct Problem {
-    pub code: Option<&'static str>,
-    pub range: Option<TextRange>,
-    pub message: String,
-    pub severity: DiagnosticSeverity,
+pub enum Problem {
+    Reported(SourceDiagnostic),
+    TyperWarning {
+        source: SourceId,
+        diagnostic: TyperDiagnostic,
+    },
 }
 
 impl From<SourceDiagnostic> for Problem {
     fn from(diagnostic: SourceDiagnostic) -> Self {
-        Self {
-            code: diagnostic.code,
-            range: diagnostic.location.map(|span| span.span().range()),
-            severity: diagnostic.severity,
-            message: diagnostic.message,
-        }
+        Self::Reported(diagnostic)
     }
 }
 
@@ -63,13 +59,13 @@ pub struct FileResult {
 }
 
 impl FileResult {
-    fn error(&mut self, range: Option<TextRange>, message: String) {
-        self.problems.push(Problem {
+    fn error(&mut self, location: Option<SourceSpan>, message: String) {
+        self.problems.push(Problem::Reported(SourceDiagnostic {
             code: None,
-            range,
+            location,
             message,
             severity: DiagnosticSeverity::Error,
-        });
+        }));
     }
 }
 
@@ -204,7 +200,7 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
     for (&i, u) in &units {
         let mut typer = SourceTyper::new(&u.ast, u.source, &u.index, &mut store, defs, &packages);
         for c in &u.classes {
-            let range = u.ast.get(c.tree).position.map(|p| p.span().range());
+            let range = u.ast.get(c.tree).position;
             ranges.insert(c.symbol, range);
             match typer.complete_symbol(c.constructor) {
                 Ok(_) => classes.push((i, c.symbol)),
@@ -252,10 +248,7 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
                 let d = match member {
                     ClassMember::Field(d) | ClassMember::Method(d) => d,
                 };
-                ranges.insert(
-                    d.symbol,
-                    u.ast.get(d.tree).position.map(|p| p.span().range()),
-                );
+                ranges.insert(d.symbol, u.ast.get(d.tree).position);
                 members.push((i, d.symbol));
             }
         }
@@ -291,13 +284,13 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
             if unavailable.contains(&c.symbol) {
                 continue;
             }
-            let check = dotty::check_class_body(
+            let mut check = dotty::check_class_body(
                 c, &u.ast, &u.index, &mut store, defs, &packages, &mut arena, NoResolver,
             );
-            for (source, d) in &check.diagnostics {
+            for (source, diagnostic) in check.diagnostics.drain(..) {
                 results[source.index() as usize]
                     .problems
-                    .push(SourceDiagnostic::from_typer_warning(*source, d).into());
+                    .push(Problem::TyperWarning { source, diagnostic });
             }
             if let Err(errors) = &check.body {
                 for error in errors {
@@ -346,6 +339,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn analysis_retains_the_committed_warning_payload() {
+        let uri = "file:///C.scala";
+        let text = "class C { def f(implicit x: Int): Int = x; def use(): Int = f(1) }";
+        let doc = Document {
+            version: 1,
+            text: Arc::new(DocumentText::new(text.into()).unwrap()),
+        };
+        let files = analyze(&[(uri.into(), doc)].into());
+        let [Problem::TyperWarning { source, diagnostic }] = files[uri].problems.as_slice() else {
+            panic!("expected one typed warning");
+        };
+        assert_eq!(*source, SourceId::from_index(0));
+        assert_eq!(
+            diagnostic.issue(),
+            &dotty::typer::TyperWarning::ImplicitClauseWithoutUsing
+        );
+    }
+
+    #[test]
     fn syntax_issues_survive_analysis_until_publication() {
         use dotty::lexer::{LexerIssue, NumericComponent, NumericIssue};
         use dotty::parser::{DeclarationIssue, ParseIssue};
@@ -384,10 +396,14 @@ mod tests {
             text: Arc::new(DocumentText::new(text.into()).unwrap()),
         };
         let files = analyze(&[(uri.to_owned(), doc)].into());
-        let [problem] = files[uri].problems.as_slice() else {
+        let [Problem::Reported(problem)] = files[uri].problems.as_slice() else {
             panic!("expected one constructor diagnostic");
         };
-        let range = problem.range.expect("position of the unknown type");
+        let range = problem
+            .location
+            .expect("position of the unknown type")
+            .span()
+            .range();
         assert_eq!(
             &text[range.start() as usize..range.end() as usize],
             "Missing"
@@ -407,7 +423,10 @@ mod tests {
         let problems = &files[uri].problems;
         assert_eq!(problems.len(), 2);
         for (problem, call) in problems.iter().zip(["value(1)", "value(2)"]) {
-            let range = problem.range.unwrap();
+            let Problem::Reported(problem) = problem else {
+                panic!("expected an error")
+            };
+            let range = problem.location.unwrap().span().range();
             assert_eq!(&text[range.start() as usize..range.end() as usize], call);
             assert_eq!(problem.message, "Expected 0 arguments, got 1");
         }
@@ -432,8 +451,10 @@ mod tests {
         let files = analyze(&docs);
         let caller = &files["file:///B.scala"];
         assert_eq!(caller.problems.len(), 1);
-        let d = &caller.problems[0];
-        let range = d.range.expect("argument position");
+        let Problem::Reported(d) = &caller.problems[0] else {
+            panic!("expected a type error")
+        };
+        let range = d.location.expect("argument position").span().range();
         assert_eq!(&b[range.start() as usize..range.end() as usize], "x");
         assert_eq!(caller.links.len(), 1);
         let l = &caller.links[0];
