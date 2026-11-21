@@ -29,7 +29,7 @@ use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_
 use dotty::parser::{DetachedParse, ParseResult};
 use dotty::source_declarations::{Declaration, SourceClass, source_classes};
 use dotty::typer::{SignatureCompletion, SourceTyper, TyperError};
-use dotty::{SourceDeclarationIndex, SourceFileCalls};
+use dotty::{SourceDeclarationIndex, SourceDiagnostic, SourceFileCalls};
 
 struct NamedUnit {
     source: SourceId,
@@ -78,9 +78,15 @@ fn name_source(
     parsed: &ParseResult,
     store: &mut SemanticStore,
     packages: &mut Packages,
-) -> SourceSemanticIndex {
-    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-    let NamingOutcome::Named { index, diagnostics } = name_compilation_unit_with_diagnostics(
+) -> Result<SourceSemanticIndex, Vec<SourceDiagnostic>> {
+    if !parsed.diagnostics.is_empty() {
+        return Err(parsed
+            .diagnostics
+            .iter()
+            .map(SourceDiagnostic::from_parser)
+            .collect());
+    }
+    match name_compilation_unit_with_diagnostics(
         &parsed.ast,
         parsed.root,
         id,
@@ -89,12 +95,17 @@ fn name_source(
         store,
         packages,
     )
-    .unwrap() else {
-        panic!("fixture rejected during naming")
-    };
-    assert!(diagnostics.is_empty(), "{diagnostics:?}");
-
-    *index
+    .unwrap()
+    {
+        NamingOutcome::Named { index, diagnostics } => {
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            Ok(*index)
+        }
+        NamingOutcome::Rejected { diagnostics } => Err(diagnostics
+            .iter()
+            .map(SourceDiagnostic::from_namer)
+            .collect()),
+    }
 }
 
 fn enter(
@@ -104,7 +115,7 @@ fn enter(
     store: &mut SemanticStore,
     packages: &mut Packages,
 ) -> NamedUnit {
-    let index = name_source(id, name, &parsed, store, packages);
+    let index = name_source(id, name, &parsed, store, packages).unwrap();
     let classes = source_classes(&parsed.ast, parsed.root, id, &index, store).unwrap();
     let calls = SourceFileCalls::new(parsed.call_names, &parsed.ast, &index, &classes).unwrap();
     NamedUnit {
@@ -114,6 +125,70 @@ fn enter(
         index,
         classes,
     }
+}
+
+#[test]
+fn source_diagnostics_follow_a_field_from_parsing_through_typing() {
+    let source = SourceId::from_index(47);
+    let file = "Outer.scala";
+    let broken = "class Outer {
+  /* 😀 */ private[Missing] val hidden: Int 1
+}";
+    let parsed_ok = broken.replace("Int 1", "Int = 1");
+    let fixed = parsed_ok.replace("[Missing]", "");
+    let parse = |text: &str, store: &mut SemanticStore| {
+        parsing::parse_files(&[(source, file, text)], 1)
+            .pop()
+            .unwrap()
+            .into_session(&mut store.names)
+    };
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let parser_reports: &[(&str, &str)] = &[
+        (
+            "parser.declaration.expected_value_equals",
+            "Expected '=' before the initializer",
+        ),
+        // Recovery also requests a member separator at the same token.
+        (
+            "parser.template.expected_member_separator",
+            "Parser diagnostic (parser.template.expected_member_separator)",
+        ),
+    ];
+    let naming_reports: &[(&str, &str)] = &[(
+        "namer.visibility.invalid_qualifier",
+        "Invalid 'private' qualifier 'Missing': expected an enclosing class, object or package",
+    )];
+    for (text, token, expected) in [
+        (broken, "1", parser_reports),
+        (parsed_ok.as_str(), "Missing", naming_reports),
+    ] {
+        let parsed = parse(text, &mut store);
+        let reports = name_source(source, file, &parsed, &mut store, &mut packages).unwrap_err();
+        let start = text.find(token).unwrap() as u32;
+        let range = dotty::core::TextRange::new(start, start + token.len() as u32).unwrap();
+        let location =
+            dotty::core::SourceSpan::new(source, dotty::core::Span::without_point(range));
+        assert_eq!(reports.len(), expected.len(), "{reports:?}");
+        for (report, &(code, message)) in reports.iter().zip(expected) {
+            assert_eq!(report.code, Some(code));
+            assert_eq!(report.message, message);
+            assert_eq!(report.severity, dotty::core::DiagnosticSeverity::Error);
+            assert_eq!(report.location, Some(location));
+        }
+    }
+    let parsed = parse(&fixed, &mut store);
+    let units = [enter(source, file, parsed, &mut store, &mut packages)];
+    let class = &units[0].classes[0];
+    let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
+    let (_, bodies) = type_bodies(&units, &mut store, defs, &packages, headers);
+    let field = class.fields().next().unwrap();
+    assert_eq!(
+        store.symbols.info(field.symbol),
+        &SymbolInfo::Complete(defs.int)
+    );
+    bodies.get(class.symbol).unwrap();
 }
 
 fn name_units(

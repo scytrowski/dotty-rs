@@ -325,3 +325,39 @@ fn parent_argument_diagnostic_tracks_an_unsaved_type_edit_in_either_file_order()
         client.shutdown();
     }
 }
+
+#[test]
+fn parser_then_namer_diagnostics_track_unsaved_edits_in_both_encodings() {
+    let uri = "file:///fixture/Outer.scala";
+    for (encoding, literal, qualifier) in [("utf-8", 46, 21), ("utf-16", 44, 19)] {
+        let mut client = Client::start(encoding, vec![]);
+        client.open(
+            uri,
+            "class Outer {\n  /* 😀 */ private[Missing] val hidden: Int 1\n}",
+        );
+        client.diagnostics(
+            uri,
+            1,
+            json!([
+                {
+                    "source": "dotty", "severity": 1, "range": range(1, literal, literal + 1),
+                    "code": "parser.declaration.expected_value_equals",
+                    "message": "Expected '=' before the initializer"
+                }, {
+                    "source": "dotty", "severity": 1, "range": range(1, literal, literal + 1),
+                    "code": "parser.template.expected_member_separator",
+                    "message": "Parser diagnostic (parser.template.expected_member_separator)"
+                }
+            ]),
+        );
+        client.edit(uri, 2, range(1, literal, literal), "= ");
+        client.diagnostics(uri, 2, json!([{
+            "source": "dotty", "severity": 1, "range": range(1, qualifier, qualifier + 7),
+            "code": "namer.visibility.invalid_qualifier",
+            "message": "Invalid 'private' qualifier 'Missing': expected an enclosing class, object or package"
+        }]));
+        client.edit(uri, 3, range(1, qualifier - 1, qualifier + 8), "");
+        client.diagnostics(uri, 3, json!([]));
+        client.shutdown();
+    }
+}

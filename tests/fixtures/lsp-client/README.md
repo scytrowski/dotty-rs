@@ -29,6 +29,13 @@ parent argument clears after an unsaved edit to the constructor parameter type.
 When no source range is available, it sends the message to the editor log
 and leaves the document free of a marker for that error.
 
+The field-declaration scenario opens `private[Missing] val hidden: Int 1`.
+It checks both parser reports at the literal, inserts the missing equals sign
+and checks the naming report at `Missing`. Removing the qualifier clears the
+document. Both clients use `SourceDiagnostic::from_parser` and
+`SourceDiagnostic::from_namer`. The fixture publishes their stable codes in
+the LSP diagnostic's `code` field.
+
 For a quick interoperability check with Neovim 0.10+, run from this directory:
 
 ```sh

@@ -4038,7 +4038,7 @@ impl Namer<'_> {
     fn source_visibility_for_owner(
         &mut self,
         tree: TreeId<Untyped>,
-        visibility: &Option<VisibilitySyntax>,
+        metadata: &Modifiers,
         owner: Option<SymbolId>,
     ) -> Result<Visibility, NamerError> {
         let supported_this_qualifier = |qualifier: Option<dotty_core::Name>| {
@@ -4048,7 +4048,7 @@ impl Namer<'_> {
             .package_private_boundary
             .filter(|(wrapper, _)| Some(*wrapper) == owner)
             .map_or(owner, |(_, package)| Some(package));
-        match visibility {
+        match &metadata.visibility {
             None => Ok(Visibility::Public),
             Some(VisibilitySyntax::Private { qualifier: None }) => Ok(owner
                 .filter(|owner| self.store.symbols.get(*owner).kind == SymbolKind::Package)
@@ -4065,13 +4065,29 @@ impl Namer<'_> {
             }) => self
                 .resolve_visibility_boundary(owner, *qualifier)
                 .map(Visibility::PrivateWithin)
-                .ok_or_else(|| self.invalid_visibility_qualifier(tree, *qualifier, false, owner)),
+                .ok_or_else(|| {
+                    self.invalid_visibility_qualifier(
+                        tree,
+                        *qualifier,
+                        false,
+                        owner,
+                        metadata.visibility_qualifier_range,
+                    )
+                }),
             Some(VisibilitySyntax::Protected {
                 qualifier: Some(qualifier),
             }) => self
                 .resolve_visibility_boundary(owner, *qualifier)
                 .map(Visibility::ProtectedWithin)
-                .ok_or_else(|| self.invalid_visibility_qualifier(tree, *qualifier, true, owner)),
+                .ok_or_else(|| {
+                    self.invalid_visibility_qualifier(
+                        tree,
+                        *qualifier,
+                        true,
+                        owner,
+                        metadata.visibility_qualifier_range,
+                    )
+                }),
         }
     }
 
@@ -4081,6 +4097,7 @@ impl Namer<'_> {
         qualifier: dotty_core::Name,
         protected: bool,
         owner: Option<SymbolId>,
+        qualifier_range: Option<dotty_core::TextRange>,
     ) -> NamerError {
         if self.source_diagnostics_allowed
             && self.visibility_owner_chain_is_known(owner)
@@ -4090,6 +4107,16 @@ impl Namer<'_> {
                 .position
                 .filter(|span| span.source() == self.source)
         {
+            let declaration = span.span().range();
+            let span = qualifier_range
+                .filter(|r| {
+                    !r.is_empty()
+                        && declaration.start() <= r.start()
+                        && r.end() <= declaration.end()
+                })
+                .map_or(span, |r| {
+                    SourceSpan::new(self.source, dotty_core::Span::without_point(r))
+                });
             self.source_diagnostic = Some(NamerDiagnostic::error(
                 span,
                 NamerIssue::InvalidVisibilityQualifier {
@@ -4167,11 +4194,7 @@ impl Namer<'_> {
     ) -> Result<SourceModifierMapping, NamerError> {
         Ok(SourceModifierMapping {
             flags: Self::source_flags(&metadata.modifiers),
-            visibility: self.source_visibility_for_owner(
-                tree,
-                &metadata.visibility,
-                Some(owner),
-            )?,
+            visibility: self.source_visibility_for_owner(tree, metadata, Some(owner))?,
         })
     }
 
