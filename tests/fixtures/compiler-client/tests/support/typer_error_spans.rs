@@ -1,6 +1,6 @@
 //! Source ranges observed by a compiler client reporting class body errors.
 use super::{SignatureSources, class_planning::named, complete_signatures};
-use dotty::core::{Definitions, DiagnosticSeverity, TextRange};
+use dotty::core::{Definitions, DiagnosticSeverity, SymbolKind, TextRange};
 use dotty::source_declarations::SourceClass;
 use dotty::typer::TyperError;
 
@@ -75,40 +75,36 @@ fn cross_file_diagnostics_track_two_unsaved_edits_in_utf16() {
                 assert_eq!(resolver.checkpoint(), resolver_before);
             }
             for failure in errors {
-                let diagnostic = failure
-                    .diagnostic(|source| sources.by_source.get(&source).map(|unit| &unit.ast));
-                let dotty::ClassBodyError::Member {
-                    class: owner,
-                    member,
-                    error,
-                } = failure
-                else {
-                    panic!("unexpected class error: {failure:?}");
-                };
-                assert_eq!(owner, class.symbol);
+                let call = failure
+                    .into_call_diagnostic(|source| {
+                        sources.by_source.get(&source).map(|unit| &unit.ast)
+                    })
+                    .unwrap();
+                let member = call.member().unwrap();
+                let declaration = sources.declarations.member(member).unwrap();
+                assert_eq!(declaration.class, class.symbol);
+                assert_eq!(declaration.kind, SymbolKind::Method);
+                let diagnostic = call.render();
                 let TyperError::ApplicationArgumentTypeMismatch {
                     source,
                     argument_index,
                     expected,
                     ..
-                } = error
+                } = call.error()
                 else {
-                    panic!("expected a mismatched argument, got {error:?}");
+                    panic!("expected a mismatched argument, got {call:?}");
                 };
-                assert_eq!((source, argument_index, expected), (b, 0, defs.int));
+                assert_eq!((*source, *argument_index, *expected), (b, 0, defs.int));
                 assert_eq!(diagnostic.severity, DiagnosticSeverity::Error);
                 let span = diagnostic.location.expect("argument position");
                 let &(_, name, text) = files.iter().find(|file| file.0 == span.source()).unwrap();
                 let source = SourceText::new(text).unwrap();
                 let range = span.span().range();
                 let spelling = source.slice(range).unwrap().to_owned();
-                let member_name = match member {
-                    dotty::source_declarations::ClassMember::Method(m) => store
-                        .names
-                        .resolve(store.symbols.get(m.symbol).name.text())
-                        .to_owned(),
-                    _ => panic!("expected method error"),
-                };
+                let member_name = store
+                    .names
+                    .resolve(store.symbols.get(member).name.text())
+                    .to_owned();
                 let lines = source.line_index().unwrap();
                 let position = |offset| {
                     (

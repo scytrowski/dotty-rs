@@ -1283,45 +1283,130 @@ fn cross_file_signature_completes_the_dependency_then_retries_the_original_metho
 }
 
 #[test]
-fn cross_file_bad_call_reports_arity_at_the_call_after_dependency_completion() {
-    let mut store = SemanticStore::new();
-    let defs = Definitions::bootstrap(&mut store);
-    let mut packages = Packages::new();
-    let units = signature_pair(
-        "class A { def f(b: B) = b.g(1) }",
-        &mut store,
-        &mut packages,
+fn cross_file_call_failures_survive_retries_and_leave_the_provider_executable() {
+    let provider = (
+        SourceId::from_index(2),
+        "A.scala",
+        "package demo\nclass A { def value() = 40; def take(n: Int) = n }",
     );
-    let caller = &units[0];
-    let f = caller.method_symbol();
-    let g = units[1].method_symbol();
-    let TreeKind::DefDef(definition) = &caller.ast.get(caller.methods().next().unwrap().tree).kind
-    else {
-        panic!("expected method")
-    };
-    let call = definition.rhs.unwrap();
-    let mut dependencies = Vec::new();
-    let err = complete_methods_in_order(
-        &units,
-        [f],
-        &mut store,
-        defs,
-        &packages,
-        |method, outcome| {
-            if let SignatureCompletion::BlockedOn(dependency) = outcome {
-                dependencies.push((method, dependency));
+    let caller = (
+        SourceId::from_index(7),
+        "B.scala",
+        "package demo\nclass B { def f(a: A) = a.value(1); def h(a: A) = a.take(false) }",
+    );
+    for files in [[caller, provider], [provider, caller]] {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let units = name_units(
+            &files,
+            parsing::parse_files(&files, 2),
+            &mut store,
+            &mut packages,
+        );
+        let sources = SignatureSources::new(&units, &store);
+        let lookup = |source| sources.by_source.get(&source).map(|u| &u.ast);
+        let mut headers =
+            complete_headers(&sources, &mut store, defs, &packages, &mut |_, _| {}).unwrap();
+        let mut blocked = Vec::new();
+        let mut reports = Vec::new();
+        for unit in &units {
+            for member in unit.method_symbols() {
+                let result = complete_member_path(
+                    &[member],
+                    &sources,
+                    &mut store,
+                    defs,
+                    &packages,
+                    &mut |owner, outcome| {
+                        if let SignatureCompletion::BlockedOn(dependency) = outcome {
+                            blocked.push((owner, dependency));
+                        }
+                    },
+                );
+                if unit.source == provider.0 {
+                    result.unwrap();
+                    continue;
+                }
+                let SignatureError::Member(error) = result.unwrap_err() else {
+                    panic!("expected a member failure")
+                };
+                let report = error.into_call_diagnostic(lookup).unwrap();
+                assert_eq!(report.member(), Some(member));
+                assert_eq!(report.source(), caller.0);
+                assert!(matches!(store.symbols.info(member), SymbolInfo::Missing));
+                reports.push(report);
             }
-        },
-    )
-    .unwrap_err();
-    assert_eq!(dependencies, [(f, g)]);
-    assert!(
-        matches!(err, SignatureError::Member(dotty::MemberSignatureError::Typing { member, declaration, error: TyperError::ApplicationArityMismatch { source, tree_index, expected: 0, actual: 1 } })
-        if member == f && declaration.class == caller.classes[0].symbol && source == caller.source && tree_index == call.index()),
-        "{err:?}"
-    );
-    assert!(matches!(store.symbols.info(f), SymbolInfo::Missing));
-    assert!(matches!(store.symbols.info(g), SymbolInfo::Complete(_)));
+        }
+        let bad = sources.by_source[&caller.0];
+        let good = sources.by_source[&provider.0];
+        let expected: Vec<_> = if files[0].0 == caller.0 {
+            bad.method_symbols().zip(good.method_symbols()).collect()
+        } else {
+            vec![]
+        };
+        assert_eq!(blocked, expected);
+
+        let check = dotty::check_class_body(
+            &bad.classes[0],
+            &bad.ast,
+            &bad.index,
+            &mut store,
+            defs,
+            &packages,
+            &mut headers.arena,
+            dotty::core::NoResolver,
+        );
+        let retries = check.body.unwrap_err();
+        assert_eq!((reports.len(), retries.len()), (2, 2));
+        assert!(matches!(
+            reports[0].error(),
+            TyperError::ApplicationArityMismatch {
+                expected: 0,
+                actual: 1,
+                ..
+            }
+        ));
+        assert!(
+            matches!(reports[1].error(), TyperError::ApplicationArgumentTypeMismatch { argument_index:0, expected, actual,.. } if *expected == defs.int && *actual == defs.boolean)
+        );
+        for ((original, retry), (site, code)) in reports.iter().zip(retries).zip([
+            ("a.value(1)", "typer.application_arity_mismatch"),
+            ("false", "typer.application_argument_type_mismatch"),
+        ]) {
+            let retry = retry.into_call_diagnostic(lookup).unwrap();
+            assert_eq!(
+                retry.identity(&defs),
+                Some(original.identity(&defs).unwrap())
+            );
+            assert_eq!(retry.render(), original.render());
+            assert_eq!(original.code(), code);
+            let offset = caller.2.find(site).unwrap() as u32;
+            let span = original.location().unwrap();
+            assert_eq!(span.source(), caller.0);
+            assert_eq!(
+                span.span().range(),
+                dotty::core::TextRange::new(offset, offset + site.len() as u32).unwrap()
+            );
+        }
+        let (output, bodies) = type_bodies(
+            std::slice::from_ref(good),
+            &mut store,
+            defs,
+            &packages,
+            headers,
+        );
+        let plan = JvmCompilationUnit {
+            classes: class_plans(std::slice::from_ref(good), &bodies, &output, &store).unwrap(),
+            store: &store,
+            typed_ast: &output.arena,
+        };
+        let artifact = emit_class(&plan, good.classes[0].symbol, &defs).unwrap();
+        assert_eq!(
+            run_java_client("call-failures", "SurvivingClassClient", &[artifact]).trim(),
+            "40"
+        );
+    }
 }
 
 #[test]
