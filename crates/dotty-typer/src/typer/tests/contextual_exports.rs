@@ -141,6 +141,34 @@ fn client_result(
     })
 }
 
+fn rejected_call(
+    typer: &mut SourceTyper<'_>,
+    parsed: &dotty_parser::ParseResult,
+    name: &str,
+) -> TyperError {
+    let (_, rhs) =
+        method_definition_and_rhs(parsed, typer.store(), typer.index, typer.source, name);
+    let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+        panic!("client block")
+    };
+    let error = client_result(typer, parsed, name).unwrap_err();
+    let (source, tree_index) = match &error {
+        TyperError::MissingContextualArgument {
+            source, tree_index, ..
+        }
+        | TyperError::AmbiguousContextualArgument {
+            source, tree_index, ..
+        } => (*source, *tree_index),
+        _ => panic!("{name}: {error:?}"),
+    };
+    assert_eq!(
+        (source, tree_index),
+        (typer.source, block.expr.index()),
+        "{name}"
+    );
+    error
+}
+
 fn evidence(typer: &SourceTyper<'_>, root: TreeId<Typed>) -> TreeId<Typed> {
     let TreeKind::Apply(call) = &typer.typed_ast().get(root).kind else {
         panic!("contextual call")
@@ -184,6 +212,11 @@ const ERRORS: &str =
 fn given_wildcard_preserves_visibility_and_reports_both_competing_members() {
     let (parsed, mut store, packages, defs, index, source) = unit(CLIENT);
     let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let direct = client_result(&mut typer, &parsed, "direct").unwrap();
+    assert_eq!(
+        reference(&typer, evidence(&typer, direct)),
+        val_symbol(&parsed, typer.store(), &index, source, "ints").0
+    );
     let call = client_result(&mut typer, &parsed, "wildcard").unwrap();
     let selected = reference(&typer, evidence(&typer, call));
     assert_eq!(
@@ -198,11 +231,11 @@ fn given_wildcard_preserves_visibility_and_reports_both_competing_members() {
     let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
     let before = typer.store.checkpoint();
     assert!(matches!(
-        client_result(&mut typer, &parsed, "hidden"),
-        Err(TyperError::MissingContextualArgument { .. })
+        rejected_call(&mut typer, &parsed, "hidden"),
+        TyperError::MissingContextualArgument { .. }
     ));
     for _ in 0..2 {
-        let error = client_result(&mut typer, &parsed, "ambiguous").unwrap_err();
+        let error = rejected_call(&mut typer, &parsed, "ambiguous");
         let TyperError::AmbiguousContextualArgument {
             candidate_names, ..
         } = error
@@ -256,8 +289,8 @@ fn typed_given_selector_and_star_preserve_the_exported_evidence_kind() {
     for method in ["excluded", "star"] {
         assert!(
             matches!(
-                client_result(&mut typer, &parsed, method),
-                Err(TyperError::MissingContextualArgument { .. })
+                rejected_call(&mut typer, &parsed, method),
+                TyperError::MissingContextualArgument { .. }
             ),
             "{method}"
         );
@@ -330,13 +363,23 @@ fn conditional_export_requires_an_unambiguous_dependency_at_the_call_site() {
     let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
     let checkpoint = typer.store.checkpoint();
     assert!(matches!(
-        client_result(&mut typer, &parsed, "missingDependency"),
-        Err(TyperError::MissingContextualArgument { .. })
+        rejected_call(&mut typer, &parsed, "missingDependency"),
+        TyperError::MissingContextualArgument { .. }
     ));
-    let error = client_result(&mut typer, &parsed, "ambiguousDependency").unwrap_err();
-    assert!(
-        matches!(error,TyperError::AmbiguousContextualArgument{ref candidates,..} if candidates.len()==2),
-        "{error:?}"
-    );
+    let error = rejected_call(&mut typer, &parsed, "ambiguousDependency");
+    let TyperError::AmbiguousContextualArgument { candidates, .. } = error else {
+        panic!("{error:?}")
+    };
+    let mut names: Vec<_> = candidates
+        .iter()
+        .map(|&id| {
+            typer
+                .store
+                .names
+                .resolve(typer.store.symbols.get(id).name.text())
+        })
+        .collect();
+    names.sort();
+    assert_eq!(names, ["a", "b"]);
     assert_eq!(typer.store.checkpoint(), checkpoint);
 }
