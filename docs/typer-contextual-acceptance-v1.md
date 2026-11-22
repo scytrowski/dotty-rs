@@ -89,7 +89,9 @@ consumer fixtures with the pinned compiler, including extension overload groups
 in both declaration orders, explicit `using` and inherited overloads. The
 contextual argument fixtures check binary defaults by rebuilding the library,
 comparing its TASTy bytes, and compiling separate positive and negative clients.
-Rust tests check the identity and evaluation order of the typed operands. These
+The multiclause clients cover partial and full omission, an intervening empty
+clause, a final witness search, and legacy implicit defaults with curried
+getters. Rust tests check the identity and evaluation order of the typed operands. These
 controls are reported separately from the eleven v1 observations.
 
 Use JDK 21, a checkout of the revision above and the cached artifacts specified

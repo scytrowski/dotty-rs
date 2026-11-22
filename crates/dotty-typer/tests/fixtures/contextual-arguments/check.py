@@ -23,6 +23,7 @@ def main():
             ("Evidence.scala", "evidence", ("Box.tasty", "TC.tasty")),
             ("Defaults.scala", "defaults", ("Reader.tasty",)),
             ("PairReader.scala", "defaults", ("PairReader.tasty",)),
+            ("ClauseReader.scala", "defaults", ("ClauseReader.tasty",)),
             ("Structural.scala", "structural", ("Box.tasty", "TC.tasty", "Builders.tasty", "Builders$boxes.class")),
         ):
             toolchain.compiler(["-sourceroot", ".", "-d", output, source], cwd=HERE)
@@ -170,6 +171,31 @@ def main():
             f"{ambiguous} seed of method choose", f"{ambiguous} n of method legacy",
             "this.reader().legacy(1, 2)(\n        /* ambiguous:",
             "r.legacy(1, 2)(\n        /* ambiguous:",
+        ), classpath)
+        check_typer_output(toolchain, client_output, "ClauseClient.scala", 0, (
+            "r.fold(n)(3)(7, r.fold$default$4(n)(3))",
+            "r.fold(n)(3)(7, 8)",
+            "r.fold(n)(3)(r.fold$default$3(n)(3), r.fold$default$4(n)(3))",
+            "val $1$: defaults.ClauseReader = this.reader()\n"
+            "        val seed$1: Int = this.seed()\n"
+            "        val x$1: Int = this.next()\n"
+            "        $1$.fold(using seed$1)(x$1)($1$.fold$default$3(seed$1)(x$1),\n"
+            "          $1$.fold$default$4(seed$1)(x$1))",
+            "r.finish(n)(3)()(r.finish$default$3(n)(3)())(flag)",
+            "val $2$: defaults.ClauseReader = this.reader()\n"
+            "        val x$2: Int = this.next()\n"
+            "        val y$1: Int = this.next()\n"
+            "        $2$.legacy(x$2)(y$1)(using $2$.legacy$default$3(x$2)(y$1))",
+            "r.legacy(1)(2)(n)", "r.legacy(1)(2)(using b)",
+        ), classpath)
+        check_typer_output(toolchain, client_output, "ClauseErrors.scala", 1, (
+            "[E172]", "5 errors found",
+            "No given instance of type Int was found for parameter seed of method fold",
+            f"{ambiguous} seed of method fold",
+            "both parameter b and parameter a match type Boolean of parameter flag of method finish",
+            f"{ambiguous} n of method legacy",
+            "r.finish(n)(3)()(r.finish$default$3(n)(3)())(\n        /* ambiguous:",
+            "$1$.finish(n)(x$1)()($1$.finish$default$3(n)(x$1)())\n      }(\n        /* ambiguous:",
         ), classpath)
         check_typer_output(toolchain, client_output, "BinaryDefaultsAmbiguous.scala", 1, (
             "[E172]", "Ambiguous given instances", "of parameter n of method offset",
