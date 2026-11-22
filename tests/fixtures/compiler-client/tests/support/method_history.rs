@@ -4,6 +4,7 @@ use super::super::{
     compile_with_signatures, inputs, name_units, parsing,
 };
 use super::{Graph, sources};
+use crate::FixtureMethods;
 use crate::{complete_methods_in_order, complete_signatures_in_order};
 use dotty::core::{Definitions, Packages, SemanticStore, SymbolInfo, Type};
 use dotty::jvm::GeneratedClass;

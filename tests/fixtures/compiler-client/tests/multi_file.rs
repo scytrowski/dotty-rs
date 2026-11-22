@@ -15,8 +15,8 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use dotty::core::{
-    AstArena, Definitions, Packages, SemanticStore, SourceId, SourceSemanticIndex, SymbolId,
-    SymbolInfo, SymbolKind, TreeKind, Typed, Untyped,
+    AstArena, Definitions, Packages, SemanticStore, SourceId, SymbolId, SymbolInfo, SymbolKind,
+    TreeKind, Typed,
 };
 use dotty::jvm::{
     GeneratedClass, JvmClassPlan, JvmCompilationUnit, PreparedJvmEmission, emit_class,
@@ -25,28 +25,27 @@ use dotty::jvm_class_plan::{
     ClassHeaderBindings, ClassPlanError, JvmClassPlanner, TypedClassBodies,
 };
 use dotty::jvm_method_plan::JvmMethodPlanner;
-use dotty::namer::{
-    NamerDiagnostic, NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics,
-};
-use dotty::parser::ParseResult;
-use dotty::source_declarations::{Declaration, SourceClass, source_classes};
+use dotty::namer::{NamerDiagnostic, NamerError};
+use dotty::source_declarations::{Declaration, DeclarationError, SourceClass};
 use dotty::typer::{SignatureCompletion, SourceTyper, TyperError};
-use dotty::{
-    DetachedSource, ParsedSource, SourceDeclarationIndex, SourceDiagnostic, SourceFileCalls,
-    SyntaxDiagnostic,
-};
+use dotty::{DetachedSource, SourceDeclarationIndex, SourceDiagnostic, SyntaxDiagnostic};
+use dotty::{NameSourceError, NamedClassSource as NamedUnit};
 
-struct NamedUnit {
-    source: SourceId,
-    ast: AstArena<Untyped>,
-    calls: SourceFileCalls,
-    index: SourceSemanticIndex,
-    classes: Vec<SourceClass>,
+trait FixtureMethods {
+    fn methods(&self) -> impl Iterator<Item = Declaration> + '_;
+    fn method_symbol(&self) -> SymbolId;
+    fn method_symbols(&self) -> impl Iterator<Item = SymbolId> + '_;
+    fn typer<'a>(
+        &'a self,
+        store: &'a mut SemanticStore,
+        definitions: Definitions,
+        packages: &'a Packages,
+    ) -> SourceTyper<'a>;
 }
 
-impl NamedUnit {
+impl FixtureMethods for NamedUnit {
     fn methods(&self) -> impl Iterator<Item = Declaration> + '_ {
-        self.classes.iter().flat_map(SourceClass::methods)
+        self.classes().iter().flat_map(SourceClass::methods)
     }
 
     fn method_symbol(&self) -> SymbolId {
@@ -67,9 +66,9 @@ impl NamedUnit {
         packages: &'a Packages,
     ) -> SourceTyper<'a> {
         SourceTyper::new(
-            &self.ast,
-            self.source,
-            &self.index,
+            self.ast(),
+            self.source(),
+            self.index(),
             store,
             definitions,
             packages,
@@ -81,6 +80,8 @@ impl NamedUnit {
 enum FrontendDiagnostic {
     Syntax(SyntaxDiagnostic),
     Naming(NamerDiagnostic),
+    Structural(NamerError),
+    Declaration(DeclarationError, Option<dotty::core::SourceSpan>),
 }
 
 impl FrontendDiagnostic {
@@ -88,64 +89,20 @@ impl FrontendDiagnostic {
         match self {
             Self::Syntax(diagnostic) => diagnostic.render(),
             Self::Naming(diagnostic) => SourceDiagnostic::from_namer(diagnostic),
+            Self::Structural(error) => SourceDiagnostic {
+                code: None,
+                severity: dotty::core::DiagnosticSeverity::Error,
+                message: error.to_string(),
+                location: None,
+            },
+            Self::Declaration(error, location) => SourceDiagnostic {
+                code: None,
+                severity: dotty::core::DiagnosticSeverity::Error,
+                message: error.to_string(),
+                location: *location,
+            },
         }
     }
-}
-
-fn name_source(
-    id: SourceId,
-    name: &str,
-    source: ParsedSource<SyntaxDiagnostic>,
-    store: &mut SemanticStore,
-    packages: &mut Packages,
-) -> Result<(ParseResult, SourceSemanticIndex), Vec<FrontendDiagnostic>> {
-    if !source.diagnostics.is_empty() {
-        return Err(source
-            .diagnostics
-            .into_iter()
-            .map(FrontendDiagnostic::Syntax)
-            .collect());
-    }
-    let parsed = source.syntax;
-    match name_compilation_unit_with_diagnostics(
-        &parsed.ast,
-        parsed.root,
-        id,
-        name,
-        SourceParseStatus::Clean,
-        store,
-        packages,
-    )
-    .unwrap()
-    {
-        NamingOutcome::Named { index, diagnostics } => {
-            assert!(diagnostics.is_empty(), "{diagnostics:?}");
-            Ok((parsed, *index))
-        }
-        NamingOutcome::Rejected { diagnostics } => Err(diagnostics
-            .into_iter()
-            .map(FrontendDiagnostic::Naming)
-            .collect()),
-    }
-}
-
-fn enter(
-    id: SourceId,
-    name: &str,
-    parsed: ParsedSource<SyntaxDiagnostic>,
-    store: &mut SemanticStore,
-    packages: &mut Packages,
-) -> Result<NamedUnit, Vec<FrontendDiagnostic>> {
-    let (parsed, index) = name_source(id, name, parsed, store, packages)?;
-    let classes = source_classes(&parsed.ast, parsed.root, id, &index, store).unwrap();
-    let calls = SourceFileCalls::new(parsed.call_names, &parsed.ast, &index, &classes).unwrap();
-    Ok(NamedUnit {
-        source: id,
-        ast: parsed.ast,
-        calls,
-        index,
-        classes,
-    })
 }
 
 #[test]
@@ -157,12 +114,6 @@ fn source_diagnostics_follow_a_field_from_parsing_through_typing() {
 }";
     let parsed_ok = broken.replace("Int 1", "Int = 1");
     let fixed = parsed_ok.replace("[Missing]", "");
-    let parse = |text: &str, store: &mut SemanticStore| {
-        parsing::parse_files(&[(source, file, text)], 1)
-            .pop()
-            .unwrap()
-            .bind(&mut store.names)
-    };
     let mut store = SemanticStore::new();
     let defs = Definitions::bootstrap(&mut store);
     let mut packages = Packages::new();
@@ -180,8 +131,14 @@ fn source_diagnostics_follow_a_field_from_parsing_through_typing() {
             "Invalid 'private' qualifier 'Missing': expected an enclosing class, object or package",
         ),
     ] {
-        let parsed = parse(text, &mut store);
-        let reports = name_source(source, file, parsed, &mut store, &mut packages).unwrap_err();
+        let files = [(source, file, text)];
+        let (units, reports) = name_units_with_diagnostics(
+            &files,
+            parsing::parse_files(&files, 1),
+            &mut store,
+            &mut packages,
+        );
+        assert!(units.is_empty());
         let start = text.find(token).unwrap() as u32;
         let range = dotty::core::TextRange::new(start, start + token.len() as u32).unwrap();
         let location =
@@ -195,9 +152,14 @@ fn source_diagnostics_follow_a_field_from_parsing_through_typing() {
         assert_eq!(report.severity, dotty::core::DiagnosticSeverity::Error);
         assert_eq!(report.location, Some(location));
     }
-    let parsed = parse(&fixed, &mut store);
-    let units = [enter(source, file, parsed, &mut store, &mut packages).unwrap()];
-    let class = &units[0].classes[0];
+    let files = [(source, file, fixed.as_str())];
+    let units = name_units(
+        &files,
+        parsing::parse_files(&files, 1),
+        &mut store,
+        &mut packages,
+    );
+    let class = &units[0].classes()[0];
     let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
     let (_, bodies) = type_bodies(&units, &mut store, defs, &packages, headers);
     let field = class.fields().next().unwrap();
@@ -216,11 +178,36 @@ fn name_units_with_diagnostics(
 ) -> (Vec<NamedUnit>, Vec<FrontendDiagnostic>) {
     let mut units = Vec::new();
     let mut reports = Vec::new();
-    for (&(id, name, _), detached) in files.iter().zip(parsed) {
-        let parsed = detached.bind(&mut store.names);
-        match enter(id, name, parsed, store, packages) {
-            Ok(unit) => units.push(unit),
-            Err(diagnostics) => reports.extend(diagnostics),
+    for (&(_, name, _), detached) in files.iter().zip(parsed) {
+        match detached.bind(&mut store.names).name(name, store, packages) {
+            Ok(named) => {
+                reports.extend(
+                    named
+                        .diagnostics()
+                        .iter()
+                        .cloned()
+                        .map(FrontendDiagnostic::Naming),
+                );
+                match named.into_classes(store) {
+                    Ok(unit) => units.push(unit),
+                    Err(failure) => reports.push(FrontendDiagnostic::Declaration(
+                        failure.error,
+                        failure.error.location(&failure.named.syntax().ast),
+                    )),
+                }
+            }
+            Err(NameSourceError::Syntax(recovered)) => reports.extend(
+                recovered
+                    .diagnostics
+                    .into_iter()
+                    .map(FrontendDiagnostic::Syntax),
+            ),
+            Err(NameSourceError::Rejected(issues)) => {
+                reports.extend(issues.into_iter().map(FrontendDiagnostic::Naming))
+            }
+            Err(NameSourceError::Namer { error, .. }) => {
+                reports.push(FrontendDiagnostic::Structural(error))
+            }
         }
     }
     (units, reports)
@@ -280,7 +267,7 @@ fn mixed_syntax_errors_leave_the_other_file_executable_in_either_order() {
             let [unit] = units.as_slice() else {
                 panic!("expected the clean file")
             };
-            assert_eq!(unit.source, good.0);
+            assert_eq!(unit.source(), good.0);
             let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
             let (output, bodies) = type_bodies(&units, &mut store, defs, &packages, headers);
             let plan = JvmCompilationUnit {
@@ -288,7 +275,7 @@ fn mixed_syntax_errors_leave_the_other_file_executable_in_either_order() {
                 store: &store,
                 typed_ast: &output.arena,
             };
-            let artifact = emit_class(&plan, unit.classes[0].symbol, &defs).unwrap();
+            let artifact = emit_class(&plan, unit.classes()[0].symbol, &defs).unwrap();
             assert_eq!(
                 run_java_client("mixed-syntax", "SurvivingClassClient", &[artifact]).trim(),
                 "40"
@@ -385,17 +372,17 @@ struct SignatureSources<'a> {
 impl<'a> SignatureSources<'a> {
     fn error_span(&self, error: &TyperError) -> Option<dotty::core::SourceSpan> {
         dotty::typer_error_span_with(error, |source| {
-            self.by_source.get(&source).map(|unit| &unit.ast)
+            self.by_source.get(&source).map(|unit| unit.ast())
         })
     }
 
     fn new(units: &'a [NamedUnit], store: &SemanticStore) -> Self {
         Self {
             units,
-            by_source: units.iter().map(|unit| (unit.source, unit)).collect(),
+            by_source: units.iter().map(|unit| (unit.source(), unit)).collect(),
             declarations: SourceDeclarationIndex::from_classes(
                 store,
-                units.iter().flat_map(|unit| &unit.classes),
+                units.iter().flat_map(|unit| unit.classes()),
             )
             .expect("valid named class views"),
         }
@@ -441,7 +428,7 @@ fn complete_headers(
     // Parent applications need the declaring file's constructor signature.
     for unit in sources.units {
         let mut typer = unit.typer(store, definitions, packages);
-        for class in &unit.classes {
+        for class in unit.classes() {
             typer.complete_symbol(class.constructor)?;
         }
     }
@@ -459,8 +446,8 @@ fn complete_headers(
                 let unit = sources.by_source[&header.source];
                 let completion = dotty::try_complete_class_header(
                     symbol,
-                    &unit.ast,
-                    &unit.index,
+                    unit.ast(),
+                    unit.index(),
                     store,
                     definitions,
                     packages,
@@ -523,8 +510,8 @@ fn complete_methods_in_order(
         while let dotty::ClassFieldSignatureCompletion::BlockedOn { field, dependency } =
             dotty::try_complete_class_field_signatures(
                 class.symbol,
-                &unit.ast,
-                &unit.index,
+                unit.ast(),
+                unit.index(),
                 store,
                 definitions,
                 packages,
@@ -579,8 +566,8 @@ fn complete_member_path(
             let completion = dotty::try_complete_member_signature(
                 symbol,
                 &sources.declarations,
-                &unit.ast,
-                &unit.index,
+                unit.ast(),
+                unit.index(),
                 store,
                 definitions,
                 packages,
@@ -622,7 +609,7 @@ fn named_classes(
 ) -> impl DoubleEndedIterator<Item = (&NamedUnit, &SourceClass)> {
     units
         .iter()
-        .flat_map(|unit| unit.classes.iter().map(move |class| (unit, class)))
+        .flat_map(|unit| unit.classes().iter().map(move |class| (unit, class)))
 }
 
 fn type_bodies(
@@ -636,8 +623,8 @@ fn type_bodies(
     for (unit, class) in named_classes(units) {
         let body = dotty::type_class_body(
             class,
-            &unit.ast,
-            &unit.index,
+            unit.ast(),
+            unit.index(),
             store,
             definitions,
             packages,
@@ -659,7 +646,7 @@ fn class_plans(
     let mut classes = Vec::new();
     for (unit, class) in named_classes(units) {
         let body = typed_classes.get(class.symbol)?;
-        let planner = JvmClassPlanner::new(store, &unit.ast, &unit.index)
+        let planner = JvmClassPlanner::new(store, unit.ast(), unit.index())
             .with_header_bindings(&output.arena, &output.bindings);
         classes.push(planner.plan_typed_class(class, &output.arena, body)?);
     }
@@ -729,16 +716,16 @@ fn assert_overload_target(
     let location = sources.declarations.get(method).unwrap();
     assert_eq!(
         (location.source, location.class),
-        (provider.source, provider.classes[0].symbol)
+        (provider.source(), provider.classes()[0].symbol)
     );
     let target = sources.by_source[&location.source];
-    let Some(SourceDefinition::Canonical { source, tree }) = target.index.definition_of(method)
+    let Some(SourceDefinition::Canonical { source, tree }) = target.index().definition_of(method)
     else {
         panic!("expected source method")
     };
-    assert_eq!((source, tree), (provider.source, expected.tree));
-    let span = target.ast.get(tree).position.unwrap();
-    assert_eq!(span.source(), provider.source);
+    assert_eq!((source, tree), (provider.source(), expected.tree));
+    let span = target.ast().get(tree).position.unwrap();
+    assert_eq!(span.source(), provider.source());
     let start = OVERLOADS.find(declaration).unwrap() as u32;
     assert_eq!(
         span.span().range(),
@@ -775,9 +762,9 @@ fn selected_method_tracks_an_edited_overload_in_both_file_orders() {
             let (output, bodies) = type_bodies(&units, &mut store, defs, &packages, headers);
             let caller = sources.by_source[&b];
             let provider = sources.by_source[&a];
-            let calls = &caller.calls;
+            let calls = caller.navigation().unwrap();
             let method_at = |offset| {
-                calls.selected_method_at(offset, &caller.ast, &bodies, &output.arena, &store)
+                calls.selected_method_at(offset, caller.ast(), &bodies, &output.arena, &store)
             };
             let name_start = text.find("take(").unwrap() as u32;
             let method = method_at(name_start).unwrap();
@@ -793,29 +780,29 @@ fn selected_method_tracks_an_edited_overload_in_both_file_orders() {
             let expected = provider.methods().nth(overload).unwrap();
             assert_overload_target(&sources, method, provider, expected, declaration);
 
-            let body = bodies.get(caller.classes[0].symbol).unwrap();
+            let body = bodies.get(caller.classes()[0].symbol).unwrap();
             let read = caller.methods().next().unwrap();
-            let TreeKind::DefDef(def) = &caller.ast.get(read.tree).kind else {
+            let TreeKind::DefDef(def) = &caller.ast().get(read.tree).kind else {
                 panic!("expected B.read")
             };
             let call = def.rhs.unwrap();
             assert_eq!(
-                body.selected_method(read.tree, &caller.ast, &output.arena, &store),
+                body.selected_method(read.tree, caller.ast(), &output.arena, &store),
                 None
             );
-            let other_body = bodies.get(provider.classes[0].symbol).unwrap();
+            let other_body = bodies.get(provider.classes()[0].symbol).unwrap();
             assert_eq!(
                 other_body.selected_method_at(
                     name_start,
-                    caller.calls.call_names(),
-                    &caller.ast,
+                    caller.navigation().unwrap().call_names(),
+                    caller.ast(),
                     &output.arena,
                     &store
                 ),
                 None
             );
             assert_eq!(
-                other_body.selected_method(call, &caller.ast, &output.arena, &store),
+                other_body.selected_method(call, caller.ast(), &output.arena, &store),
                 None
             );
         }
@@ -847,11 +834,11 @@ fn checked_calls_survive_a_failing_sibling_in_both_file_orders() {
             let mut headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
             let sources = SignatureSources::new(&units, &store);
             let caller = sources.by_source[&b];
-            let class = &caller.classes[0];
+            let class = &caller.classes()[0];
             let check = dotty::check_class_body(
                 class,
-                &caller.ast,
-                &caller.index,
+                caller.ast(),
+                caller.index(),
                 &mut store,
                 defs,
                 &packages,
@@ -859,9 +846,9 @@ fn checked_calls_survive_a_failing_sibling_in_both_file_orders() {
                 dotty::core::NoResolver,
             );
             let at = |offset| {
-                caller.calls.checked_method_at(
+                caller.navigation().unwrap().checked_method_at(
                     offset,
-                    &caller.ast,
+                    caller.ast(),
                     &headers.arena,
                     &store,
                     |owner| (owner == class.symbol).then_some(&check),
@@ -881,14 +868,20 @@ fn checked_calls_survive_a_failing_sibling_in_both_file_orders() {
                 (!broken).then_some(method)
             );
             let target = caller
-                .calls
+                .navigation()
+                .unwrap()
                 .definition_at(
                     text.find("take").unwrap() as u32,
-                    &caller.ast,
+                    caller.ast(),
                     &headers.arena,
                     &store,
                     |owner| (owner == class.symbol).then_some(&check),
-                    |id| sources.by_source.get(&id).map(|unit| &unit.calls),
+                    |id| {
+                        sources
+                            .by_source
+                            .get(&id)
+                            .map(|unit| unit.navigation().unwrap())
+                    },
                 )
                 .unwrap();
             assert_eq!(target.source, a);
@@ -910,7 +903,7 @@ fn checked_calls_survive_a_failing_sibling_in_both_file_orders() {
                     )
                 );
             } else {
-                JvmClassPlanner::new(&store, &caller.ast, &caller.index)
+                JvmClassPlanner::new(&store, caller.ast(), caller.index())
                     .with_header_bindings(&headers.arena, &headers.bindings)
                     .plan_typed_class(class, &headers.arena, &check.body.unwrap())
                     .unwrap();
@@ -943,7 +936,7 @@ class Second { def read(a: A): Int = a.take(false) }";
         let sources = SignatureSources::new(&units, &store);
         let caller = sources.by_source[&b];
         let provider = sources.by_source[&a];
-        let calls = &caller.calls;
+        let calls = caller.navigation().unwrap();
         let offsets = [
             B.find("take(42)").unwrap() as u32,
             B.find("take(false)").unwrap() as u32,
@@ -953,11 +946,11 @@ class Second { def read(a: A): Int = a.take(false) }";
             provider.methods().nth(1).unwrap(),
         ];
         let mut bodies = TypedClassBodies::default();
-        for (n, class) in caller.classes.iter().enumerate() {
+        for (n, class) in caller.classes().iter().enumerate() {
             let body = dotty::type_class_body(
                 class,
-                &caller.ast,
-                &caller.index,
+                caller.ast(),
+                caller.index(),
                 &mut store,
                 defs,
                 &packages,
@@ -968,7 +961,7 @@ class Second { def read(a: A): Int = a.take(false) }";
             assert_eq!(
                 offsets.map(|offset| calls.selected_method_at(
                     offset,
-                    &caller.ast,
+                    caller.ast(),
                     &bodies,
                     &headers.arena,
                     &store
@@ -984,7 +977,7 @@ class Second { def read(a: A): Int = a.take(false) }";
             "def take(flag: Boolean): Int = 7",
         ]) {
             let method = calls
-                .selected_method_at(offset, &caller.ast, &bodies, &headers.arena, &store)
+                .selected_method_at(offset, caller.ast(), &bodies, &headers.arena, &store)
                 .unwrap();
             assert_overload_target(&sources, method, provider, expected, declaration);
         }
@@ -1002,26 +995,29 @@ fn selected_method_distinguishes_a_direct_call_from_an_inserted_apply() {
     let units = std::slice::from_ref(&unit);
     let headers = complete_signatures(units, &mut store, defs, &packages).unwrap();
     let (output, bodies) = type_bodies(units, &mut store, defs, &packages, headers);
-    let body = bodies.get(unit.classes[0].symbol).unwrap();
+    let body = bodies.get(unit.classes()[0].symbol).unwrap();
     let mut methods = unit.methods();
     let apply = methods.next().unwrap().symbol;
     for (spelling, expected) in [("apply(42)", Some(apply)), ("c(42)", None)] {
-        let TreeKind::DefDef(def) = &unit.ast.get(methods.next().unwrap().tree).kind else {
+        let TreeKind::DefDef(def) = &unit.ast().get(methods.next().unwrap().tree).kind else {
             panic!("expected method")
         };
         let call = def.rhs.unwrap();
-        assert!(matches!(unit.ast.get(call).kind, TreeKind::Apply(_)));
+        assert!(matches!(unit.ast().get(call).kind, TreeKind::Apply(_)));
         assert_eq!(
-            body.selected_method(call, &unit.ast, &output.arena, &store),
+            body.selected_method(call, unit.ast(), &output.arena, &store),
             expected
         );
         let offset = text.find(spelling).unwrap() as u32;
-        assert_eq!(unit.calls.call_names().call_at(offset), Some(call));
+        assert_eq!(
+            unit.navigation().unwrap().call_names().call_at(offset),
+            Some(call)
+        );
         assert_eq!(
             body.selected_method_at(
                 offset,
-                unit.calls.call_names(),
-                &unit.ast,
+                unit.navigation().unwrap().call_names(),
+                unit.ast(),
                 &output.arena,
                 &store
             ),
@@ -1110,7 +1106,7 @@ fn method_plan_rejects_another_methods_body_in_the_same_source() {
     let first_root = typer.type_method_definition(first.tree).unwrap();
     typer.type_method_definition(second.tree).unwrap();
     let mut output = typer.into_typed_output();
-    let planner = JvmMethodPlanner::new(&store, &unit.ast, &unit.index, &output);
+    let planner = JvmMethodPlanner::new(&store, unit.ast(), unit.index(), &output);
     let first_plan = planner.plan(first.symbol).unwrap();
     let second_plan = planner.plan(second.symbol).unwrap();
     assert_eq!(first_plan.locals.len(), 1);
@@ -1131,7 +1127,7 @@ fn method_plan_rejects_another_methods_body_in_the_same_source() {
     };
     definition.rhs = second_plan.body;
     assert_eq!(
-        JvmMethodPlanner::new(&store, &unit.ast, &unit.index, &output).plan(first.symbol),
+        JvmMethodPlanner::new(&store, unit.ast(), unit.index(), &output).plan(first.symbol),
         Err(MethodPlanError::BodyMismatch {
             method: first.symbol,
             expected: first_plan.body.unwrap(),
@@ -1301,7 +1297,7 @@ fn cross_file_call_failures_survive_retries_and_leave_the_provider_executable() 
             &mut packages,
         );
         let sources = SignatureSources::new(&units, &store);
-        let lookup = |source| sources.by_source.get(&source).map(|u| &u.ast);
+        let lookup = |source| sources.by_source.get(&source).map(|u| u.ast());
         let mut headers =
             complete_headers(&sources, &mut store, defs, &packages, &mut |_, _| {}).unwrap();
         let mut blocked = Vec::new();
@@ -1321,7 +1317,7 @@ fn cross_file_call_failures_survive_retries_and_leave_the_provider_executable() 
                         }
                     },
                 );
-                if unit.source == provider.0 {
+                if unit.source() == provider.0 {
                     result.unwrap();
                     continue;
                 }
@@ -1345,9 +1341,9 @@ fn cross_file_call_failures_survive_retries_and_leave_the_provider_executable() 
         assert_eq!(blocked, expected);
 
         let check = dotty::check_class_body(
-            &bad.classes[0],
-            &bad.ast,
-            &bad.index,
+            &bad.classes()[0],
+            bad.ast(),
+            bad.index(),
             &mut store,
             defs,
             &packages,
@@ -1398,7 +1394,7 @@ fn cross_file_call_failures_survive_retries_and_leave_the_provider_executable() 
             store: &store,
             typed_ast: &output.arena,
         };
-        let artifact = emit_class(&plan, good.classes[0].symbol, &defs).unwrap();
+        let artifact = emit_class(&plan, good.classes()[0].symbol, &defs).unwrap();
         assert_eq!(
             run_java_client("call-failures", "SurvivingClassClient", &[artifact]).trim(),
             "40"

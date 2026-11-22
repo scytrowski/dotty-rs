@@ -45,7 +45,10 @@ A subsequent edit puts two declarations on one line. Inserting a semicolon
 clears the resulting separator diagnostic.
 Both clients bind the result of `dotty::parse_source` with `DetachedSource::bind`
 to obtain owned `SyntaxDiagnostic::Lexer` and `SyntaxDiagnostic::Parser` values.
-The server renders these during publication and uses
+It names clean files through `ParsedSource::name` and uses `NamedClassSource::navigation`
+for direct-call lookup. The stdio test continues navigating between two clean
+files while a third moves through parser rejection, namer rejection and repair.
+The server renders syntax diagnostics during publication and uses
 `SourceDiagnostic::from_namer` for naming issues. The fixture publishes
 their stable codes in the LSP diagnostic's `code` field.
 

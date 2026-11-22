@@ -11,7 +11,8 @@ general source compiler, compiler session/driver, or source-compilation CLI.
 | --- | --- |
 | Parse a source and collect typed lexer/parser diagnostics | [`parse_source`], [`DetachedSource::bind`], [`ParsedSource`], [`SyntaxDiagnostic`] |
 | Control scanning and parsing separately | [`lexer::ContextualScanner`], [`parser::parse_compilation_unit`], [`parser::DetachedParse`] |
-| Enter source declarations | [`namer::name_compilation_unit_with_diagnostics`], [`namer::NamingOutcome`] |
+| Name a bound file and inspect its declarations | [`ParsedSource::name`], [`NamedSource`], [`NamedSource::into_classes`] |
+| Prepare direct-call navigation for an ordinary class file | [`NamedClassSource::navigation`], [`SourceFileCalls::definition_at`] |
 | Complete signatures and type expressions/methods | [`typer::SourceTyper`], [`try_complete_member_signature`], [`check_class_body`] |
 | Plan source methods and classes for the JVM | [`jvm_method_plan`], [`jvm_class_plan`], [`jvm`] |
 | Read or write structural TASTy | [`tasty::TastyFile`], [`tasty::TastyFileBuilder`] |
@@ -100,10 +101,8 @@ sibling method and retains its rejected argument for later reporting.
 
 ```rust
 use dotty::core::{Definitions, Packages, SemanticStore, SourceId, TreeKind};
-use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty::parse_source;
 use dotty::parser::ParserFeatures;
-use dotty::source_declarations::source_classes;
 use dotty::typer::{SourceTyper, TyperError, TyperWarning};
 use dotty::{CallDiagnostic, SourceDiagnostic};
 
@@ -112,34 +111,17 @@ let mut store = SemanticStore::new();
 let definitions = Definitions::bootstrap(&mut store);
 let mut packages = Packages::new();
 let text = "class Answer { def f(implicit n: Int): Int = n; def value: Int = f(42); def bad: Int = f(false) }";
-let parsed = parse_source(source, text, ParserFeatures::default())?
-.bind(&mut store.names);
-if !parsed.diagnostics.is_empty() {
-    return Err("handle syntax diagnostics before naming".into());
-}
-let syntax = parsed.syntax;
-let index = match name_compilation_unit_with_diagnostics(
-    &syntax.ast,
-    syntax.root,
-    source,
-    "Answer.scala",
-    SourceParseStatus::Clean,
-    &mut store,
-    &mut packages,
-)? {
-    NamingOutcome::Named { index, .. } => index,
-    NamingOutcome::Rejected { diagnostics } => {
-        return Err(format!("naming rejected the source: {diagnostics:?}").into());
-    }
-};
-let classes = source_classes(&syntax.ast, syntax.root, source, &index, &store)?;
-let class = classes.first().ok_or("expected a supported source class")?;
+let named = parse_source(source, text, ParserFeatures::default())?
+    .bind(&mut store.names)
+    .name("Answer.scala", &mut store, &mut packages)?;
+let file = named.into_classes(&store)?;
+let class = file.classes().first().ok_or("expected a supported source class")?;
 let mut methods = class.methods();
 let f = methods.next().ok_or("expected f")?;
 let value = methods.next().ok_or("expected value")?;
 let bad = methods.next().ok_or("expected bad")?;
 let mut typer = SourceTyper::new(
-    &syntax.ast, source, &index, &mut store, definitions, &packages,
+    file.ast(), file.source(), file.index(), &mut store, definitions, &packages,
 );
 typer.complete_symbol(f.symbol)?;
 let typed_method = typer.type_method_definition(value.tree)?;
@@ -151,7 +133,7 @@ assert_eq!(report.code, Some("typer.implicit_clause_without_using"));
 
 let failure = typer.type_method_definition(bad.tree).expect_err("Boolean passed to f");
 let call = CallDiagnostic::from_typer(failure, Some(bad.symbol), |id| {
-    (id == source).then_some(&syntax.ast)
+    (id == source).then_some(file.ast())
 })?;
 assert!(matches!(call.error(), TyperError::ApplicationArgumentTypeMismatch {
     argument_index: 0, ..
@@ -164,6 +146,19 @@ assert_eq!(report.code, Some("typer.application_argument_type_mismatch"));
 assert_eq!(report.message, "Expected Int, found Boolean");
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
+
+[`ParsedSource::name`] takes the bound parse by value and uses its original source ID.
+On a syntax rejection, [`NameSourceError::Syntax`] returns the recovered tree and all
+lexer/parser diagnostics. A rejected naming transaction rolls back symbols, scope
+insertions and packages. The earlier `bind` operation has already interned names.
+
+A successful [`NamedSource`] owns its syntax and index for this analysis.
+[`NamedSource::into_classes`] reads the existing semantic store. If a file contains
+a `trait`, the ordinary-class projection returns [`ClassProjectionError`] with the
+original named file and the rejected tree. To locate the declaration, call
+[`source_declarations::DeclarationError::location`] with that file's AST. For files
+in the supported subset, [`NamedClassSource::navigation`] builds the call index
+once on demand. Edits produce a new parse and a new analysis with its own IDs.
 
 [`MemberSignatureError::into_call_diagnostic`] and
 [`ClassBodyError::into_call_diagnostic`] supply the enclosing member automatically.
@@ -209,25 +204,23 @@ let files = [
 # for (i, (filename, text)) in files.into_iter().enumerate() {
 #     let source = SourceId::from_index(i as u32);
 #     let parsed = dotty::parse_source(source, text, Default::default())?.bind(&mut store.names);
-#     assert!(parsed.diagnostics.is_empty());
-#     let syntax = parsed.syntax;
-#     let index = dotty::namer::name_compilation_unit(&syntax.ast, syntax.root, source, filename, &mut store, &mut packages)?;
-#     let mut classes = dotty::source_declarations::source_classes(&syntax.ast, syntax.root, source, &index, &store)?;
-#     units.push((source, syntax.ast, index, classes.pop().ok_or("expected a class")?));
+#     let file = parsed.name(filename, &mut store, &mut packages)?.into_classes(&store)?;
+#     units.push(file);
 # }
-# for (source, ast, index, class) in &units {
-#     SourceTyper::new(ast, *source, index, &mut store, defs, &packages).complete_symbol(class.constructor)?;
+# for file in &units {
+#     SourceTyper::new(file.ast(), file.source(), file.index(), &mut store, defs, &packages)
+#         .complete_symbol(file.classes()[0].constructor)?;
 # }
 # let mut arena = AstArena::new();
 # let mut bindings = ClassHeaderBindings::default();
 // Each index selects the declaring file of one class in the batch.
 let mut attempt = |file: usize| {
-    let (_, ast, index, class) = &units[file];
-    try_complete_class_header(class.symbol, ast, index, &mut store, defs, &packages,
-        &mut arena, &mut bindings, |dep| units.iter().any(|u| u.3.symbol == dep))
+    let unit = &units[file];
+    try_complete_class_header(unit.classes()[0].symbol, unit.ast(), unit.index(), &mut store,
+        defs, &packages, &mut arena, &mut bindings, |dep| units.iter().any(|u| u.classes()[0].symbol == dep))
 };
 let mut headers = SignatureDependencies::new(SignaturePhase::Headers);
-let [leaf, base, a, b] = [0, 1, 2, 3].map(|i| units[i].3.symbol);
+let [leaf, base, a, b] = [0, 1, 2, 3].map(|i| units[i].classes()[0].symbol);
 
 let outcome = attempt(0)?;
 assert_eq!(outcome, SignatureCompletion::BlockedOn(base));

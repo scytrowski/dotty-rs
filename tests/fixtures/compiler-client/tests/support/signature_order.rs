@@ -1,4 +1,5 @@
 //! Scheduling experiments in the external client, using one source method per file.
+use crate::FixtureMethods;
 use std::collections::{HashMap, HashSet};
 
 use super::super::{NamedUnit, SignatureCompletion, complete_signatures_in_order};
@@ -61,7 +62,7 @@ fn ready_widths(
             .unwrap();
     }
     let declarations =
-        dotty::SourceDeclarationIndex::from_classes(store, units.iter().flat_map(|u| &u.classes))
+        dotty::SourceDeclarationIndex::from_classes(store, units.iter().flat_map(|u| u.classes()))
             .unwrap();
     let mut edges = HashMap::new();
     let mut remaining: HashSet<_> = units.iter().map(NamedUnit::method_symbol).collect();
@@ -73,8 +74,8 @@ fn ready_widths(
             match dotty::try_complete_member_signature(
                 method,
                 &declarations,
-                &unit.ast,
-                &unit.index,
+                unit.ast(),
+                unit.index(),
                 store,
                 defs,
                 packages,
@@ -172,9 +173,10 @@ fn check_counts(groups: usize, layout: Layout) {
                 panic!("expected method signature")
             };
             assert_eq!(
-                signature.result, defs.int,
+                signature.result,
+                defs.int,
                 "inferred result for {:?}",
-                unit.source
+                unit.source()
             );
         }
         eprintln!(

@@ -103,6 +103,15 @@ pub enum DeclarationError {
     },
 }
 
+impl DeclarationError {
+    /// Position of the rejected declaration in the original untyped arena.
+    /// Returns `None` for a missing tree or an absent or foreign source position.
+    pub fn location(&self, ast: &AstArena<Untyped>) -> Option<crate::core::SourceSpan> {
+        let (Self::Unsupported { source, tree } | Self::InvalidBinding { source, tree }) = *self;
+        ast.try_get(tree)?.position.filter(|p| p.source() == source)
+    }
+}
+
 impl fmt::Display for DeclarationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "cannot read source declarations: {self:?}")

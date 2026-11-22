@@ -53,8 +53,8 @@ fn cross_file_diagnostics_track_two_unsaved_edits_in_utf16() {
             let resolver_before = resolver.checkpoint();
             let report = dotty::check_class_body(
                 class,
-                &unit.ast,
-                &unit.index,
+                unit.ast(),
+                unit.index(),
                 &mut store,
                 defs,
                 &local_packages,
@@ -77,7 +77,7 @@ fn cross_file_diagnostics_track_two_unsaved_edits_in_utf16() {
             for failure in errors {
                 let call = failure
                     .into_call_diagnostic(|source| {
-                        sources.by_source.get(&source).map(|unit| &unit.ast)
+                        sources.by_source.get(&source).map(|unit| unit.ast())
                     })
                     .unwrap();
                 let member = call.member().unwrap();
@@ -122,12 +122,12 @@ fn cross_file_diagnostics_track_two_unsaved_edits_in_utf16() {
                 ));
             }
         }
-        let b_class = units[0].classes[0].symbol;
-        assert!(bodies.get(units[1].classes[0].symbol).is_ok());
+        let b_class = units[0].classes()[0].symbol;
+        assert!(bodies.get(units[1].classes()[0].symbol).is_ok());
         if diagnostics.is_empty() {
             let b = &units[0];
-            let class = &b.classes[0];
-            let plan = JvmClassPlanner::new(&store, &b.ast, &b.index)
+            let class = &b.classes()[0];
+            let plan = JvmClassPlanner::new(&store, b.ast(), b.index())
                 .with_header_bindings(&headers.arena, &headers.bindings)
                 .plan_typed_class(class, &headers.arena, bodies.get(b_class).unwrap())
                 .unwrap();
@@ -179,9 +179,9 @@ fn migration_warning_survives_a_sibling_error_and_tracks_source_edits() {
         let mut headers =
             complete_signatures(std::slice::from_ref(&unit), &mut store, defs, &packages).unwrap();
         let report = dotty::check_class_body(
-            &unit.classes[0],
-            &unit.ast,
-            &unit.index,
+            &unit.classes()[0],
+            unit.ast(),
+            unit.index(),
             &mut store,
             defs,
             &packages,
@@ -200,7 +200,7 @@ fn migration_warning_survives_a_sibling_error_and_tracks_source_edits() {
             let [(source, diagnostic)] = report.diagnostics.as_slice() else {
                 panic!("expected one warning: {:?}", report.diagnostics)
             };
-            assert_eq!(*source, unit.source);
+            assert_eq!(*source, unit.source());
             assert_eq!(diagnostic.severity(), DiagnosticSeverity::Warning);
             assert_eq!(
                 diagnostic.issue().code(),
@@ -220,10 +220,10 @@ fn migration_warning_survives_a_sibling_error_and_tracks_source_edits() {
             assert!(
                 matches!(error, TyperError::ApplicationArgumentTypeMismatch { actual, expected, .. } if *actual == defs.boolean && *expected == defs.int)
             );
-            let diagnostic = failure.diagnostic(|id| (id == unit.source).then_some(&unit.ast));
+            let diagnostic = failure.diagnostic(|id| (id == unit.source()).then_some(unit.ast()));
             assert_eq!(diagnostic.message, "Expected Int, found Boolean");
             let span = diagnostic.location.expect("argument position");
-            assert_eq!(span.source(), unit.source);
+            assert_eq!(span.source(), unit.source());
             let start = text.find("false").unwrap() as u32;
             assert_eq!(
                 span.span().range(),
@@ -258,11 +258,11 @@ fn check_body_error(marked: &str, check: impl FnOnce(TyperError, Definitions, &S
     let (mut store, defs, packages, unit) = named(&text);
     let units = std::slice::from_ref(&unit);
     complete_signatures(units, &mut store, defs, &packages).unwrap();
-    let class = unit.classes.last().unwrap();
+    let class = unit.classes().last().unwrap();
     let result = dotty::type_class_body(
         class,
-        &unit.ast,
-        &unit.index,
+        unit.ast(),
+        unit.index(),
         &mut store,
         defs,
         &packages,
@@ -274,7 +274,7 @@ fn check_body_error(marked: &str, check: impl FnOnce(TyperError, Definitions, &S
     let span = SignatureSources::new(units, &store)
         .error_span(&error)
         .unwrap_or_else(|| panic!("missing span for {error:?}"));
-    assert_eq!(span.source(), unit.source);
+    assert_eq!(span.source(), unit.source());
     assert_eq!(
         span.span().range(),
         TextRange::new(before.len() as u32, (before.len() + selected.len()) as u32).unwrap(),

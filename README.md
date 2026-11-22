@@ -82,11 +82,8 @@ does not emit a class file.
 <summary>Complete example: replace src/main.rs and run cargo +1.98.1 run</summary>
 
 ```rust
-use dotty::core::{Definitions, Packages, SemanticStore, SourceId, SourceText};
-use dotty::lexer::ContextualScanner;
-use dotty::namer::name_compilation_unit;
-use dotty::parser::parse_compilation_unit;
-use dotty::source_declarations::source_classes;
+use dotty::core::{Definitions, Packages, SemanticStore, SourceId};
+use dotty::parse_source;
 use dotty::typer::SourceTyper;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -96,32 +93,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let definitions = Definitions::bootstrap(&mut store);
     let mut packages = Packages::new();
 
-    let scanner = ContextualScanner::new(text)?;
-    if !scanner.diagnostics().is_empty() {
-        return Err(format!("Lexer diagnostics: {:?}", scanner.diagnostics()).into());
-    }
-    let parsed = parse_compilation_unit(SourceText::new(text)?, source, scanner, &mut store.names);
-    if !parsed.diagnostics.is_empty() {
-        return Err(format!("Parser diagnostics: {:?}", parsed.diagnostics).into());
-    }
-    let index = name_compilation_unit(
-        &parsed.ast,
-        parsed.root,
-        source,
-        "Answer.scala",
-        &mut store,
-        &mut packages,
-    )?;
-    let classes = source_classes(&parsed.ast, parsed.root, source, &index, &store)?;
-    let class = classes.first().ok_or("Expected a source class")?;
+    let named = parse_source(source, text, Default::default())?
+        .bind(&mut store.names)
+        .name("Answer.scala", &mut store, &mut packages)?;
+    let file = named.into_classes(&store)?;
+    let class = file.classes().first().ok_or("Expected a source class")?;
     let method = class.methods().next().ok_or("Expected a source method")?;
     let mut typer = SourceTyper::new(
-        &parsed.ast,
-        source,
-        &index,
-        &mut store,
-        definitions,
-        &packages,
+        file.ast(), file.source(), file.index(), &mut store, definitions, &packages,
     );
     let typed_method = typer.type_method_definition(method.tree)?;
     println!("Typed method: {typed_method:?}");
