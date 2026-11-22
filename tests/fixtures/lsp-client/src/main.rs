@@ -146,6 +146,24 @@ impl Workspace {
                     let report = match problem {
                         Problem::Reported(report) => report,
                         Problem::Call(call) => &call.render(),
+                        Problem::Cycle { cycle, location } => &SourceDiagnostic {
+                            code: Some(cycle.code()),
+                            location: *location,
+                            severity: DiagnosticSeverity::Error,
+                            message: match cycle.phase() {
+                                dotty::SignaturePhase::Headers => "Cyclic class header dependency",
+                                dotty::SignaturePhase::Members => {
+                                    "Cyclic member signature dependency"
+                                }
+                            }
+                            .into(),
+                        },
+                        Problem::Pending { name, location, .. } => &SourceDiagnostic {
+                            code: None,
+                            location: *location,
+                            severity: DiagnosticSeverity::Error,
+                            message: format!("Waiting for the signature of '{name}'"),
+                        },
                         Problem::TyperWarning { source, diagnostic } => {
                             &SourceDiagnostic::from_typer_warning(*source, diagnostic)
                         }

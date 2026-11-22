@@ -1,5 +1,5 @@
 //! Fresh semantic session for one set of open document versions.
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use dotty::core::{
@@ -11,7 +11,8 @@ use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_
 use dotty::source_declarations::{ClassMember, SourceClass, source_classes};
 use dotty::typer::{SignatureCompletion, SourceTyper, TyperDiagnostic, TyperError};
 use dotty::{
-    CallDiagnostic, SourceDeclarationIndex, SourceDiagnostic, SourceFileCalls, SyntaxDiagnostic,
+    CallDiagnostic, ClassBodyError, SignatureBlockage, SignatureCycle, SignatureDependencies,
+    SignaturePhase, SourceDeclarationIndex, SourceDiagnostic, SourceFileCalls, SyntaxDiagnostic,
 };
 
 #[derive(Clone)]
@@ -24,6 +25,15 @@ pub type Documents = BTreeMap<String, Document>;
 
 pub enum Problem {
     Call(CallDiagnostic),
+    Cycle {
+        cycle: Arc<SignatureCycle>,
+        location: Option<SourceSpan>,
+    },
+    Pending {
+        provider: SymbolId,
+        name: String,
+        location: Option<SourceSpan>,
+    },
     Reported(SourceDiagnostic),
     TyperWarning {
         source: SourceId,
@@ -143,28 +153,63 @@ fn name(
     })
 }
 
-// Each pass removes all completed or rejected entries. A pass with no progress ends cycles.
-// Report None for a dependency still blocked after a full pass.
+// Seed every eligible declaration once. Subsequent attempts come from completed providers.
 fn complete<E>(
-    mut pending: Vec<(usize, SymbolId)>,
+    dependencies: &mut SignatureDependencies,
+    roots: &[(usize, SymbolId)],
     mut attempt: impl FnMut(usize, SymbolId) -> Result<SignatureCompletion, E>,
-    mut report: impl FnMut(usize, SymbolId, Option<E>),
+    mut report: impl FnMut(usize, SymbolId, E),
 ) {
-    while !pending.is_empty() {
-        let before = pending.len();
-        pending.retain(|&(file, symbol)| match attempt(file, symbol) {
-            Ok(SignatureCompletion::Complete(_)) => false,
-            Ok(SignatureCompletion::BlockedOn(_)) => true,
+    let files: HashMap<_, _> = roots.iter().map(|&(file, symbol)| (symbol, file)).collect();
+    let mut ready: VecDeque<_> = roots.iter().copied().collect();
+    while let Some((file, symbol)) = ready.pop_front() {
+        match attempt(file, symbol) {
+            Ok(outcome) => {
+                for waiter in dependencies.record(symbol, outcome) {
+                    ready.push_back((files[&waiter], waiter));
+                }
+            }
             Err(error) => {
-                report(file, symbol, Some(error));
-                false
+                dependencies.record_failure(symbol);
+                report(file, symbol, error);
             }
-        });
-        if pending.len() == before {
-            for (file, symbol) in pending {
-                report(file, symbol, None);
+        }
+    }
+}
+
+// Report one marker at each participant. A downstream waiter already has a provider report.
+fn report_blockages(
+    dependencies: &SignatureDependencies,
+    roots: &[(usize, SymbolId)],
+    declarations: &SourceDeclarationIndex,
+    store: &SemanticStore,
+    results: &mut [FileResult],
+) {
+    for (symbol, cause) in dependencies.blockages(roots.iter().map(|&(_, s)| s)) {
+        match cause {
+            SignatureBlockage::CycleMember(cycle) if cycle.path()[0] == symbol => {
+                for (member, location) in cycle.declarations(store) {
+                    let file = declarations.get(member).unwrap().source.index() as usize;
+                    results[file].problems.push(Problem::Cycle {
+                        cycle: cycle.clone(),
+                        location,
+                    });
+                }
             }
-            break;
+            SignatureBlockage::Pending(provider) => {
+                let file = declarations.get(symbol).unwrap().source.index() as usize;
+                results[file].problems.push(Problem::Pending {
+                    provider,
+                    name: store
+                        .names
+                        .resolve(store.symbols.get(provider).name.text())
+                        .to_owned(),
+                    location: store.symbols.get(symbol).position,
+                });
+            }
+            SignatureBlockage::CycleMember(_)
+            | SignatureBlockage::DependsOnCycle(_)
+            | SignatureBlockage::Failed(_) => {}
         }
     }
 }
@@ -203,7 +248,7 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
     let mut bindings = ClassHeaderBindings::default();
     let mut unavailable = HashSet::new();
     let mut classes = Vec::new();
-    let mut ranges = HashMap::new();
+    let mut headers = SignatureDependencies::new(SignaturePhase::Headers);
     let ast_for = |id: SourceId| units.get(&(id.index() as usize)).map(|unit| &unit.ast);
     let typer_problem = |file, error: TyperError| {
         call_problem(
@@ -215,11 +260,10 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
     for (&i, u) in &units {
         let mut typer = SourceTyper::new(&u.ast, u.source, &u.index, &mut store, defs, &packages);
         for c in &u.classes {
-            let range = u.ast.get(c.tree).position;
-            ranges.insert(c.symbol, range);
             match typer.complete_symbol(c.constructor) {
                 Ok(_) => classes.push((i, c.symbol)),
                 Err(e) => {
+                    headers.record_failure(c.symbol);
                     unavailable.insert(c.symbol);
                     let (file, problem) = typer_problem(i, e);
                     results[file].problems.push(problem);
@@ -228,7 +272,8 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
         }
     }
     complete(
-        classes,
+        &mut headers,
+        &classes,
         |i, symbol| {
             let u = &units[&i];
             dotty::try_complete_class_header(
@@ -243,16 +288,19 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
                 |id| declarations.get(id).is_some(),
             )
         },
-        |i, symbol, e| {
+        |i, symbol, error| {
             unavailable.insert(symbol);
-            if let Some(error) = e {
-                let (file, problem) = typer_problem(i, error);
-                results[file].problems.push(problem);
-            } else {
-                results[i].error(ranges[&symbol], "Unresolved signature dependency".into());
-            }
+            let (file, problem) = typer_problem(i, error);
+            results[file].problems.push(problem);
         },
     );
+    unavailable.extend(
+        classes
+            .iter()
+            .map(|&(_, s)| s)
+            .filter(|&s| headers.waiting_on(s).is_some()),
+    );
+    report_blockages(&headers, &classes, &declarations, &store, &mut results);
     let mut members = Vec::new();
     for (&i, u) in &units {
         for c in &u.classes {
@@ -263,14 +311,15 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
                 let d = match member {
                     ClassMember::Field(d) | ClassMember::Method(d) => d,
                 };
-                ranges.insert(d.symbol, u.ast.get(d.tree).position);
                 members.push((i, d.symbol));
             }
         }
     }
     let mut signature_calls = HashSet::new();
+    let mut signatures = SignatureDependencies::new(SignaturePhase::Members);
     complete(
-        members,
+        &mut signatures,
+        &members,
         |i, s| {
             let u = &units[&i];
             dotty::try_complete_member_signature(
@@ -283,22 +332,19 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
                 &packages,
             )
         },
-        |i, symbol, error| {
-            if let Some(error) = error {
-                let (file, problem) = call_problem(i, error.into_call_diagnostic(ast_for), |e| {
-                    e.diagnostic(ast_for)
-                });
-                if let Problem::Call(call) = &problem
-                    && let Some(key) = call.identity(&defs)
-                {
-                    signature_calls.insert(key);
-                }
-                results[file].problems.push(problem);
-            } else {
-                results[i].error(ranges[&symbol], "Unresolved signature dependency".into());
+        |i, _, error| {
+            let (file, problem) = call_problem(i, error.into_call_diagnostic(ast_for), |e| {
+                e.diagnostic(ast_for)
+            });
+            if let Problem::Call(call) = &problem
+                && let Some(key) = call.identity(&defs)
+            {
+                signature_calls.insert(key);
             }
+            results[file].problems.push(problem);
         },
     );
+    report_blockages(&signatures, &members, &declarations, &store, &mut results);
     let mut checks = HashMap::new();
     for (&i, u) in &units {
         for c in &u.classes {
@@ -315,6 +361,14 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
             }
             if let Err(errors) = &mut check.body {
                 for error in errors.drain(..) {
+                    if let ClassBodyError::Member {
+                        member: ClassMember::Method(d) | ClassMember::Field(d),
+                        ..
+                    } = &error
+                        && signatures.waiting_on(d.symbol).is_some()
+                    {
+                        continue;
+                    }
                     let (file, problem) =
                         call_problem(i, error.into_call_diagnostic(ast_for), |e| {
                             e.diagnostic(ast_for)
@@ -357,6 +411,53 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn downstream_fields_share_the_provider_cause_while_siblings_are_checked() {
+        let consumer = "class Consumer(p: Provider) { val answer = p.seed; def value(): Int = 1; def bad(): Int = value(1) }";
+        let downstream = "class Leaf(c: Consumer) { val copy = c.answer }";
+        let check = |provider: &str| {
+            let docs = [
+                ("Consumer.scala", consumer),
+                ("Provider.scala", provider),
+                ("Leaf.scala", downstream),
+            ]
+            .into_iter()
+            .map(|(uri, text)| {
+                (
+                    uri.to_owned(),
+                    Document {
+                        version: 1,
+                        text: Arc::new(DocumentText::new(text.into()).unwrap()),
+                    },
+                )
+            })
+            .collect();
+            analyze(&docs)
+        };
+        let cycle = check("class Provider(c: Consumer) { val seed = c.answer }");
+        assert!(cycle["Leaf.scala"].problems.is_empty());
+        let [Problem::Cycle { cycle: a, .. }, Problem::Call(independent)] =
+            cycle["Consumer.scala"].problems.as_slice()
+        else {
+            panic!("expected one participant and one independent call")
+        };
+        let [Problem::Cycle { cycle: b, .. }] = cycle["Provider.scala"].problems.as_slice() else {
+            panic!("expected the other participant")
+        };
+        assert!(Arc::ptr_eq(a, b));
+        assert_eq!(a.code(), "signature.member_cycle");
+        assert_eq!(independent.code(), "typer.application_arity_mismatch");
+
+        let failed = check("class Provider { def value(): Int = 1; val seed = value(1) }");
+        assert!(failed["Leaf.scala"].problems.is_empty());
+        for file in ["Consumer.scala", "Provider.scala"] {
+            let [Problem::Call(call)] = failed[file].problems.as_slice() else {
+                panic!("expected only the original call in {file}")
+            };
+            assert_eq!(call.code(), "typer.application_arity_mismatch");
+        }
+    }
 
     #[test]
     fn analysis_retains_the_committed_warning_payload() {

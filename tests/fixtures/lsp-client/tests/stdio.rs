@@ -488,3 +488,45 @@ fn identical_call_errors_clear_independently_across_edits_and_encodings() {
         client.shutdown();
     }
 }
+
+#[test]
+fn repairing_a_cross_file_header_cycle_clears_only_its_participants() {
+    let prefix = "/* 😀 */ ";
+    let a = "class A(x: Int)";
+    let b = "class B(x: Int)";
+    let parent_a = " extends A(x)";
+    let parent_b = " extends B(x)";
+    let sibling = "class Other { def value(): Int = 7; def bad(): Int = value(1) }";
+    for (encoding, start) in [
+        ("utf-8", prefix.len()),
+        ("utf-16", prefix.encode_utf16().count()),
+    ] {
+        let mut client = Client::start(encoding, vec![]);
+        let bad = sibling.find("value(1)").unwrap();
+        let independent = json!({
+            "range": range(1, bad, bad + "value(1)".len()), "severity":1, "source":"dotty",
+            "code":"typer.application_arity_mismatch", "message":"Expected 0 arguments, got 1"
+        });
+        let cycle = |end| {
+            json!({
+                "range":range(0, start, end), "severity":1,"source":"dotty",
+                "code":"signature.header_cycle","message":"Cyclic class header dependency"
+            })
+        };
+        client.open(A, &format!("{prefix}{a}\n{sibling}"));
+        client.diagnostics(A, 1, json!([independent]));
+        client.open(B, &format!("{prefix}{b}{parent_a}"));
+        client.diagnostics(A, 1, json!([independent]));
+        client.diagnostics(B, 1, json!([]));
+
+        let end = start + a.len();
+        client.edit(A, 2, range(0, end, end), parent_b);
+        client.diagnostics(A, 2, json!([cycle(end + parent_b.len()), independent]));
+        client.diagnostics(B, 1, json!([cycle(start + b.len() + parent_a.len())]));
+        let end = start + b.len();
+        client.edit(B, 2, range(0, end, end + parent_a.len()), "");
+        client.diagnostics(A, 2, json!([independent]));
+        client.diagnostics(B, 2, json!([]));
+        client.shutdown();
+    }
+}
