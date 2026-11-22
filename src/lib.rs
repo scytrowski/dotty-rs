@@ -51,6 +51,9 @@ pub use signature_dependencies::{
 mod member_signature;
 pub use member_signature::{MemberSignatureError, try_complete_member_signature};
 
+mod named_class_batch;
+pub use named_class_batch::{NamedClassBatch, NamedClassBatchError};
+
 mod named_source;
 pub use named_source::{ClassProjectionError, NameSourceError, NamedClassSource, NamedSource};
 
