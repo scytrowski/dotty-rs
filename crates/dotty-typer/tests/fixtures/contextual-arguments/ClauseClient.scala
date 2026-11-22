@@ -9,3 +9,4 @@ class ClauseClient:
   def seed(): Int = 2
   def next(): Int = 1
   def effects(): Int = reader().fold(using seed())(next())()
+  def empty(r: ClauseReader)(using n: Int, flag: Boolean): Int = r.finish(3)()()

@@ -177,3 +177,81 @@ fn both_defaults_share_the_applied_receiver_written_seed_and_argument() {
         assert_eq!(reference(typer, ordinary.args[0]), x);
     });
 }
+
+#[test]
+fn empty_clause_is_replayed_before_the_last_contextual_search() {
+    with_client("empty", |typer, root, params| {
+        let ast = typer.typed_ast();
+        let flag = application(ast, root);
+        assert_eq!(reference(typer, flag.args[0]), params[2]);
+        let ordinary = application(ast, flag.function);
+        let [getter] = ordinary.args.as_slice() else {
+            panic!("defaulted value")
+        };
+        assert_getter(typer, ordinary.function, *getter, 2);
+        let empty = application(ast, ordinary.function);
+        assert!(empty.args.is_empty());
+        let x = application(ast, empty.function);
+        assert_int(ast, x.args[0], 3);
+        let seed = application(ast, x.function);
+        assert_eq!(reference(typer, seed.args[0]), params[1]);
+    });
+}
+
+const ERRORS: &str =
+    include_str!("../../../../tests/fixtures/contextual-arguments/ClauseErrors.scala");
+
+#[test]
+fn missing_and_ambiguous_searches_report_their_own_clause_and_rollback() {
+    for (name, early, missing) in [
+        ("missing", true, true),
+        ("ambiguous", true, false),
+        ("late", false, false),
+        ("lateEffects", false, false),
+    ] {
+        let (parsed, mut store, packages, defs, index, source) = parse_and_name(ERRORS);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, name);
+        let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+            panic!()
+        };
+        let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+            panic!()
+        };
+        let mut site = rhs;
+        if early {
+            while let TreeKind::Apply(call) = &parsed.ast.get(site).kind {
+                site = call.function;
+            }
+        }
+        let candidates = def
+            .value_param_clauses
+            .last()
+            .unwrap()
+            .iter()
+            .map(|&p| index.symbol_at(source, p).unwrap())
+            .collect::<Vec<_>>();
+        let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages)
+            .with_resolver(Box::new(contextual_fixture_resolver(defs, &packages)));
+        let before = typer.store.checkpoint();
+        let trees = typer.typed_arena.checkpoint();
+        for _ in 0..2 {
+            let err = typer.type_method_definition(tree).unwrap_err();
+            let tree_index = match err {
+                TyperError::MissingContextualArgument { tree_index, .. } if missing => tree_index,
+                TyperError::AmbiguousContextualArgument {
+                    tree_index,
+                    candidates: found,
+                    ..
+                } if !missing => {
+                    assert_eq!(found, candidates);
+                    tree_index
+                }
+                other => panic!("{name}: {other:?}"),
+            };
+            assert_eq!(tree_index, site.index(), "{name}");
+            assert_eq!(typer.store.checkpoint(), before);
+            assert_eq!(typer.typed_arena.checkpoint(), trees);
+            assert!(typer.typed_index.is_empty());
+        }
+    }
+}
