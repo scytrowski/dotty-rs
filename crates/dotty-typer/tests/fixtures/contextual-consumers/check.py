@@ -13,8 +13,8 @@ ROOT = HERE.parents[4]
 def reversed_declarations(filename, directory):
     lines = (HERE / filename).read_text().splitlines(keepends=True)
     slots = [i for i, line in enumerate(lines) if line.lstrip().startswith("extension (")]
-    if len(slots) != 3 or slots != list(range(slots[0], slots[0] + 3)):
-        raise ValueError(f"{filename} must have three consecutive extension declarations")
+    if len(slots) < 2 or slots != list(range(slots[0], slots[-1] + 1)):
+        raise ValueError(f"{filename} must have a contiguous group of overloaded extensions")
     lines[slots[0]:slots[-1] + 1] = reversed(lines[slots[0]:slots[-1] + 1])
     path = directory / filename
     path.write_text("".join(lines))
@@ -39,8 +39,41 @@ def main():
             f"def detailed{format_params}: Int = this.ops[Int](tc).render(x)(3)(using d)",
             "Long = this.ops[Int](tc).render(x)[Long](2L)",
         )
+        witness_cases = []
+        for fixture, rejected, calls, errors in [
+            ("MultiWitnessExtensions.scala", "MultiWitnessRejected.scala", (
+                "Long = this.ops[Int](tc).keep(x)[Long](2L)(f, t)",
+                "Long = this.ops[Int](tc).keep(x)[Long](2L)(using b, t)",
+                "Boolean = this.ops[Int](tc).keep(x)(2)",
+                "Int = this.ops[Int](tc).keep(x)[Int](2)(f, t)",
+            ), (
+                "[E172]", "def missing(", "def ambiguous(",
+                "No given instance of type multiwitness.Trace[Long] was found for parameter t",
+                "both parameter b and parameter a match type multiwitness.Trace[Long] of parameter t",
+                "2 errors found",
+            )),
+            ("BoundedWitnessExtensions.scala", "BoundedWitnessRejected.scala", (
+                "this.ops[Int](tc).keep(x)[boundedwitness.Leaf](b)(f, t)",
+                "Boolean = this.ops[Int](tc).keep(x)(2)",
+                "this.ops[Int](tc).wide(x)[boundedwitness.Leaf](b)(f, t)",
+                "this.ops[Int](tc).take(x)[boundedwitness.Leaf](b)(f, t)",
+                "this.ops[Int](tc).take(x)[boundedwitness.Leaf](b)(using f, t)",
+                "Boolean = this.ops[Int](tc).take(x)(2)",
+                "this.ops[Int](tc).takeWide(x)[boundedwitness.Leaf](b)(f, t)",
+                "Any = this.ops[Int](tc).exact(x)(b)",
+            ), (
+                "[E008]", "this.ops[Int](tc).keep()", "this.ops[Int](tc).take()",
+                "[E007]", "Found: (b : boundedwitness.Other)",
+                "Required: boundedwitness.Base & boundedwitness.Other", "3 errors found",
+            )),
+        ]:
+            for ordered in [fixture, reversed_declarations(fixture, Path(out))]:
+                witness_cases.append(([ordered], 0, *calls))
+                witness_cases.append(([ordered, rejected], 1, *errors))
+
         verified = 0
         for sources, status, *expected in [
+            *witness_cases,
             (["GenericExtensionUsing.scala"], 0,
              "Long = this.ops[Int](tc).keep(x)[Long](2L)(f)",
              "Long = this.ops[Int](tc).keep(x)[Long](2L)(using b)",

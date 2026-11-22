@@ -24,6 +24,18 @@ struct ExtensionAlternative {
     signature: TypeId,
 }
 
+// The ordinary formal before the call's argument fixes B.
+#[derive(Clone, Copy)]
+pub(in crate::typer) enum ExtensionFormal {
+    Plain(TypeId),
+    Invariant {
+        formal: TypeId,
+        binder: TypeId,
+        parameter: TypeId,
+        upper: TypeId,
+    },
+}
+
 // Owner order is nominal even when two candidates infer different provider arguments.
 type ExtensionBases = HashMap<SymbolId, HashSet<SymbolId>>;
 
@@ -447,10 +459,12 @@ impl SourceTyper<'_> {
         site: u32,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<ApplicationCandidate, TyperError> {
-        let generic: HashSet<_> = candidates
+        let generic: HashMap<_, _> = candidates
             .iter()
-            .filter(|c| matches!(self.store.types.get(c.callable), Type::Poly(_)))
-            .map(|c| c.symbol)
+            .filter_map(|c| {
+                self.generic_extension_formal(c.callable)
+                    .map(|formal| (c.symbol, formal))
+            })
             .collect();
         self.instantiate_generic_overload_candidates(
             candidates, arguments, site, kind, false, journal,
@@ -458,6 +472,29 @@ impl SourceTyper<'_> {
         let mut applicable = Vec::new();
         let mut rejected = Vec::new();
         for candidate in candidates {
+            // A failed structural inference can leave a poly candidate. Rule it
+            // out only when the argument has no matching view of the formal.
+            if candidate.rejection.is_none()
+                && matches!(self.store.types.get(candidate.callable), Type::Poly(_))
+                && let Some(ExtensionFormal::Invariant { formal, .. }) =
+                    generic.get(&candidate.symbol)
+                && let [argument] = arguments
+                && let Type::Applied { tycon, .. } = self.store.types.get(*formal)
+                && let Some(class) = self.store.types.get(*tycon).reference_symbol()
+            {
+                let actual = argument.widened_type;
+                self.complete_relation_type(actual, journal, &mut HashSet::new(), 0)?;
+                if self
+                    .nominal_views_as(actual, class)
+                    .is_ok_and(|views| views.is_empty())
+                {
+                    candidate.rejection = Some(OverloadRejection::ArgumentNonConformance {
+                        argument_index: 0,
+                        actual: argument.widened_type,
+                        expected: *formal,
+                    });
+                }
+            }
             match self.choose_overload_candidate(
                 std::slice::from_mut(candidate),
                 arguments,
@@ -478,24 +515,38 @@ impl SourceTyper<'_> {
                 candidates: rejected,
             });
         }
-        let rank = |typer: &mut Self, alts: &[ApplicationCandidate]| {
+        let rank = |typer: &mut Self,
+                    alts: &[ApplicationCandidate],
+                    journal: &mut Vec<(SymbolId, SymbolInfo)>| {
             unique_extension_winner(alts, |a, b| {
-                // An unbounded unary type parameter is less specific than a
-                // concrete formal, even if inference made their types identical.
-                let types = match generic
-                    .contains(&b.symbol)
-                    .cmp(&generic.contains(&a.symbol))
-                {
-                    Ordering::Equal => {
-                        match typer.choose_overload_candidate(&mut [*a, *b], arguments, site, kind)
-                        {
-                            Ok(best) if best.symbol == a.symbol => Ordering::Greater,
-                            Ok(_) => Ordering::Less,
-                            Err(TyperError::AmbiguousOverloadApplication { .. }) => Ordering::Equal,
-                            Err(error) => return Err(error),
+                let types = if generic.contains_key(&a.symbol) || generic.contains_key(&b.symbol) {
+                    let domain = |c: &ApplicationCandidate| {
+                        if let Some(formal) = generic.get(&c.symbol) {
+                            return Ok(*formal);
                         }
+                        if let Type::Method(m) = typer.store.types.get(c.callable)
+                            && let [p] = m.params.as_slice()
+                        {
+                            return Ok(ExtensionFormal::Plain(p.ty));
+                        }
+                        Err(TyperError::OverloadResolutionRequiresUnsupportedCandidate {
+                            source: typer.source,
+                            tree_index: site,
+                            candidate: c.symbol,
+                        })
+                    };
+                    let left = domain(a)?;
+                    let right = domain(b)?;
+                    let forward = typer.extension_formal_conforms(left, right, site, journal)?;
+                    let reverse = typer.extension_formal_conforms(right, left, site, journal)?;
+                    forward.cmp(&reverse)
+                } else {
+                    match typer.choose_overload_candidate(&mut [*a, *b], arguments, site, kind) {
+                        Ok(best) if best.symbol == a.symbol => Ordering::Greater,
+                        Ok(_) => Ordering::Less,
+                        Err(TyperError::AmbiguousOverloadApplication { .. }) => Ordering::Equal,
+                        Err(error) => return Err(error),
                     }
-                    order => order,
                 };
                 Ok(typer.extension_wins(bases, a.symbol, b.symbol, types))
             })
@@ -503,12 +554,12 @@ impl SourceTyper<'_> {
         if let [only] = applicable.as_slice() {
             return Ok(*only);
         }
-        let winner = rank(self, &applicable)?;
+        let winner = rank(self, &applicable, journal)?;
         // The expected result can break a tie or replace an incompatible winner.
         if let Some(expected) = expected {
             let results: Vec<_> = applicable
                 .iter()
-                .map(|c| self.final_extension_result(c.callable, generic.contains(&c.symbol)))
+                .map(|c| self.final_extension_result(c.callable, generic.contains_key(&c.symbol)))
                 .collect::<Result<_, _>>()?;
             let can_compare = match winner {
                 Some(i) => results[i].is_some(),
@@ -526,7 +577,7 @@ impl SourceTyper<'_> {
                         compatible.push(*c);
                     }
                 }
-                if let Some(index) = rank(self, &compatible)? {
+                if let Some(index) = rank(self, &compatible, journal)? {
                     return Ok(compatible[index]);
                 }
             }
@@ -555,7 +606,7 @@ impl SourceTyper<'_> {
             };
             let callable = receiver.result;
             if !matches!(self.store.types.get(callable), Type::Method(_))
-                && !self.is_unbounded_unary_extension(callable)
+                && self.generic_extension_formal(callable).is_none()
             {
                 return Err(TyperError::OverloadResolutionRequiresUnsupportedCandidate {
                     source: self.source,
@@ -573,45 +624,138 @@ impl SourceTyper<'_> {
         Ok(candidates)
     }
 
-    pub(in crate::typer) fn is_unbounded_unary_extension(&self, callable: TypeId) -> bool {
+    fn extension_formal_conforms(
+        &mut self,
+        from: ExtensionFormal,
+        to: ExtensionFormal,
+        site: u32,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<bool, TyperError> {
+        let source = match from {
+            ExtensionFormal::Plain(ty) => ty,
+            ExtensionFormal::Invariant { formal, .. } => formal,
+        };
+        let (left, right) = match to {
+            ExtensionFormal::Plain(ty) => (source, ty),
+            ExtensionFormal::Invariant {
+                formal,
+                binder,
+                upper,
+                ..
+            } => {
+                if source == self.definitions.any_type {
+                    return Ok(false);
+                }
+                let mut inferred = [None];
+                if !self.infer_contextual_receiver(
+                    binder,
+                    formal,
+                    source,
+                    &mut inferred,
+                    site,
+                    journal,
+                )? {
+                    return Ok(false);
+                }
+                let Some(mut argument) = inferred[0] else {
+                    return Ok(false);
+                };
+                // For Box[B1] versus Box[B2], every admissible B1 must fit B2.
+                if let ExtensionFormal::Invariant {
+                    parameter, upper, ..
+                } = from
+                    && argument == parameter
+                {
+                    argument = upper;
+                }
+                (argument, upper)
+            }
+        };
+        if right == self.definitions.any_type || left == self.definitions.any_type {
+            return Ok(right == self.definitions.any_type);
+        }
+        self.contextual_conforms(left, right, site, journal)
+    }
+
+    pub(in crate::typer) fn generic_extension_formal(
+        &self,
+        callable: TypeId,
+    ) -> Option<ExtensionFormal> {
         let types = &self.store.types;
         let Type::Poly(poly) = types.get(callable) else {
-            return false;
+            return None;
         };
         let [parameter] = poly.params.as_slice() else {
-            return false;
+            return None;
         };
+        let Type::Bounds { low, high } = *types.get(parameter.bounds) else {
+            return None;
+        };
+        let nominal_upper = types.get(high).reference_symbol().is_some_and(|s| {
+            matches!(
+                self.store.symbols.get(s).kind,
+                SymbolKind::Class | SymbolKind::Trait
+            )
+        });
+        if low != self.definitions.nothing_type
+            || (high != self.definitions.any_type && !nominal_upper)
+        {
+            return None;
+        }
         let Type::Method(method) = types.get(poly.result) else {
-            return false;
+            return None;
         };
         let [arg] = method.params.as_slice() else {
-            return false;
+            return None;
         };
-        // Inference uses the ordinary argument. A final using clause is
-        // instantiated with the method type arguments before witness search.
+        if method.kind != MethodKind::Plain || arg.erased || arg.varargs {
+            return None;
+        }
         let result = match types.get(method.result) {
             Type::Method(using) => {
-                let [witness] = using.params.as_slice() else {
-                    return false;
-                };
                 if using.kind != MethodKind::Contextual
-                    || witness.erased
-                    || witness.varargs
-                    || matches!(types.get(witness.ty), Type::ByName { .. })
+                    || using.params.is_empty()
+                    || using.params.iter().any(|witness| {
+                        witness.erased
+                            || witness.varargs
+                            || matches!(types.get(witness.ty), Type::ByName { .. })
+                    })
                 {
-                    return false;
+                    return None;
                 }
                 using.result
             }
             _ => method.result,
         };
-        matches!(types.get(parameter.bounds), Type::Bounds { low, high }
-            if *low == self.definitions.nothing_type && *high == self.definitions.any_type)
-            && method.kind == MethodKind::Plain
-            && !arg.erased
-            && !arg.varargs
-            && matches!(types.get(arg.ty), Type::ParamRef { binder, index: 0 } if *binder == callable)
-            && !matches!(types.get(result), Type::Method(_) | Type::Poly(_))
+        if matches!(types.get(result), Type::Method(_) | Type::Poly(_)) {
+            return None;
+        }
+        let is_parameter = |ty| matches!(types.get(ty), Type::ParamRef { binder, index: 0 } if *binder == callable);
+        if is_parameter(arg.ty) {
+            return Some(ExtensionFormal::Plain(high));
+        }
+        let Type::Applied { tycon, args } = types.get(arg.ty) else {
+            return None;
+        };
+        let [parameter] = args.as_slice() else {
+            return None;
+        };
+        if !is_parameter(*parameter) {
+            return None;
+        }
+        let class = types.get(*tycon).reference_symbol()?;
+        let params = self.source_class_type_parameter_metadata(class).ok()?;
+        let [param] = params.as_slice() else {
+            return None;
+        };
+        (param.variance == Some(dotty_core::Variance::Invariant)).then_some(
+            ExtensionFormal::Invariant {
+                formal: arg.ty,
+                binder: callable,
+                parameter: *parameter,
+                upper: high,
+            },
+        )
     }
 
     fn extension_receiver(&self, signature: TypeId) -> Option<TypeId> {

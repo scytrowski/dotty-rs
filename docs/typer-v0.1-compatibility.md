@@ -153,6 +153,20 @@ the concrete method without looking for a format. An expected `Int` can instead 
 generic method and supply `Format[Int]`. A missing or ambiguous format on a
 selected generic method is reported at the call.
 
+A single final `using` clause can contain multiple strict witnesses. For
+`keep[B](b: B)(using Format[B], Trace[B]): B`, the method receives both
+witnesses in declaration order. A failed search for the second witness reports
+the missing or ambiguous goal at the call and rolls back the partial application.
+
+The ordinary argument can use a nominal upper bound, as in `B <: Base`,
+and can have the shape `Box[B]` for a source class with one invariant
+parameter. With receiver `Box[Int]` and ordinary argument `Box[Leaf]`,
+where `Leaf extends Base`, the application is
+`ops[Int](tc).take(x)[Leaf](b)(f, t)`. The generic formal wins over an
+alternative taking `Any`; a concrete `Box[Leaf]` formal wins over the generic
+one. A `Box[Other]` outside the bound is rejected even when the caller has
+both witnesses for `Other`.
+
 For overloads declared in the same owner, a receiver strictly
 more specific than every other applicable receiver selects the method at the
 first clause. For `Narrow[A] extends Box[A]`, putting the generic `keep` on

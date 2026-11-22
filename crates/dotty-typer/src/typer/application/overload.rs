@@ -1243,7 +1243,7 @@ impl SourceTyper<'_> {
         let mut callable = receiver_clause.result;
         let mut type_arguments = Vec::new();
         if let Some(Type::Poly(poly)) = self.store.types.try_get(callable).cloned() {
-            if local_extension.is_some() || !self.is_unbounded_unary_extension(callable) {
+            if local_extension.is_some() || self.generic_extension_formal(callable).is_none() {
                 return Ok(None);
             }
             let arguments = match &mut typed_arguments {
@@ -1266,9 +1266,17 @@ impl SourceTyper<'_> {
                 },
                 info_journal,
             )?;
-            callable = dotty_core::types::instantiate_poly(self.store, callable, &type_arguments)
-                .map_err(TyperError::PolyInstantiation)?
-                .result;
+            let instantiated =
+                dotty_core::types::instantiate_poly(self.store, callable, &type_arguments)
+                    .map_err(TyperError::PolyInstantiation)?;
+            self.check_explicit_type_argument_bounds(
+                type_arguments[0],
+                instantiated.bounds[0],
+                0,
+                argument_trees[0].index(),
+                info_journal,
+            )?;
+            callable = instantiated.result;
         }
         let Some(Type::Method(method)) = self.store.types.try_get(callable).cloned() else {
             return Ok(None);
