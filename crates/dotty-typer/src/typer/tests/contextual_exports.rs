@@ -227,3 +227,39 @@ fn given_wildcard_preserves_visibility_and_reports_both_competing_members() {
         assert_eq!(typer.store.checkpoint(), before);
     }
 }
+
+#[test]
+fn typed_given_selector_and_star_preserve_the_exported_evidence_kind() {
+    let (parsed, mut store, packages, defs, index, source) = unit(CLIENT);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for (method, decl, flag) in [
+        ("bounded", "ints", SymbolFlags::GIVEN),
+        ("legacy", "old", SymbolFlags::IMPLICIT),
+    ] {
+        let call = client_result(&mut typer, &parsed, method).unwrap();
+        let selected = reference(&typer, evidence(&typer, call));
+        assert_eq!(
+            typer.store.symbols.get(selected).flags & (SymbolFlags::IMPLICIT | SymbolFlags::GIVEN),
+            flag
+        );
+        assert_eq!(
+            typer
+                .store
+                .types
+                .get(typer.store.export_target(selected).unwrap())
+                .reference_symbol(),
+            Some(val_symbol(&parsed, typer.store(), &index, source, decl).0)
+        );
+    }
+    let (parsed, mut store, packages, defs, index, source) = unit(ERRORS);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    for method in ["excluded", "star"] {
+        assert!(
+            matches!(
+                client_result(&mut typer, &parsed, method),
+                Err(TyperError::MissingContextualArgument { .. })
+            ),
+            "{method}"
+        );
+    }
+}

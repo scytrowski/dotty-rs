@@ -6,3 +6,5 @@ class Client:
   def renamed: TC[Int] = { import Alias.given; need[Int] }
   def aliasSelection: TC[Int] = Alias.selected
   def wildcard: TC[Boolean] = { import All.given; need[Boolean] }
+  def bounded: TC[Int] = { import Only.given; need[Int] }
+  def legacy: TC[Int] = { import Old.*; need[Int] }

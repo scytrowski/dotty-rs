@@ -38,15 +38,17 @@ impl SourceTyper<'_> {
             }
             let module = self.source_module_class_of_object(object)?;
             let members = self.synthetic_module_scope(module)?;
+            let prefix =
+                self.term_reference_type(object, None, owner, site.tree.index(), journal)?;
             for target in self.contextual_symbols(members) {
                 let entry = self.store.symbols.get(target);
                 if entry.visibility != Visibility::Public
                     || entry.flags.contains(SymbolFlags::EXPORTED)
-                    || !entry.flags.contains(SymbolFlags::GIVEN)
                     || entry.kind != SymbolKind::Field
                 {
                     continue;
                 }
+                let contextual_flags = entry.flags & (SymbolFlags::GIVEN | SymbolFlags::IMPLICIT);
                 let name = entry.name;
                 let named = export
                     .selectors
@@ -67,21 +69,39 @@ impl SourceTyper<'_> {
                     } else {
                         name
                     }
-                } else if export.selectors.iter().any(|selector| {
-                    !selector.imported_backquoted
-                        && self
-                            .store
-                            .names
-                            .resolve(selector.imported.text())
-                            .is_empty()
-                        && selector.bound.is_none()
-                }) {
-                    name
                 } else {
-                    continue;
+                    let evidence = ContextualRef {
+                        symbol: target,
+                        receiver: Some(ContextualReceiver::Path(prefix)),
+                    };
+                    let mut selected = false;
+                    for selector in &export.selectors {
+                        if selector.imported_backquoted {
+                            continue;
+                        }
+                        selected = match self.store.names.resolve(selector.imported.text()) {
+                            "*" => contextual_flags.contains(SymbolFlags::IMPLICIT),
+                            "" => match selector.bound {
+                                None => true,
+                                Some(bound) => self.contextual_selector_matches(
+                                    evidence,
+                                    bound,
+                                    site.context,
+                                    site.tree.index(),
+                                    journal,
+                                )?,
+                            },
+                            _ => false,
+                        };
+                        if selected {
+                            break;
+                        }
+                    }
+                    if !selected {
+                        continue;
+                    }
+                    name
                 };
-                let prefix =
-                    self.term_reference_type(object, None, owner, site.tree.index(), journal)?;
                 let result = self.term_reference_type(
                     target,
                     Some(prefix),
@@ -93,7 +113,7 @@ impl SourceTyper<'_> {
                     name,
                     owner: Some(owner),
                     kind: SymbolKind::Method,
-                    flags: SymbolFlags::EXPORTED | SymbolFlags::FINAL | SymbolFlags::GIVEN,
+                    flags: SymbolFlags::EXPORTED | SymbolFlags::FINAL | contextual_flags,
                     visibility: Visibility::Public,
                     info: SymbolInfo::Complete(result),
                     origin: SymbolOrigin::Synthetic,
