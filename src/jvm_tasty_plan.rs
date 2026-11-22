@@ -22,15 +22,16 @@ use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_d
 use dotty_parser::parse_compilation_unit;
 use dotty_tasty_pickler::{
     ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan,
-    ConditionalLocalReferenceSelectionBinding, DirectFormalConstructorCallPairBinding,
-    FormalLocalConstructorCallArgumentBinding, FormalLocalConstructorCallArgumentOrigin,
-    FormalLocalConstructorCallPairBinding, LocalCounterInitializerBinding,
-    LocalReceiverUnitCallBinding, LocalReferenceAliasBinding, LocalValueBinding,
-    MutableCounterLocalInitializerBinding, MutableCounterReferenceAssignmentBinding,
-    NestedConstructorCallBinding, NestedConstructorCallPairBinding,
-    OrderedConstructorCallArgumentBinding, OrderedConstructorCallArgumentOrigin,
-    OrderedConstructorCallArgumentPairBinding, PickleError, PlannedCallBinding,
-    PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings, ValidatedClassStatePlan,
+    ConditionalLocalReferenceSelectionBinding, ConditionalMutableReferenceAssignmentBinding,
+    DirectFormalConstructorCallPairBinding, FormalLocalConstructorCallArgumentBinding,
+    FormalLocalConstructorCallArgumentOrigin, FormalLocalConstructorCallPairBinding,
+    LocalCounterInitializerBinding, LocalReceiverUnitCallBinding, LocalReferenceAliasBinding,
+    LocalValueBinding, MutableCounterLocalInitializerBinding,
+    MutableCounterReferenceAssignmentBinding, NestedConstructorCallBinding,
+    NestedConstructorCallPairBinding, OrderedConstructorCallArgumentBinding,
+    OrderedConstructorCallArgumentOrigin, OrderedConstructorCallArgumentPairBinding, PickleError,
+    PlannedCallBinding, PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings,
+    ValidatedClassStatePlan,
 };
 use dotty_typer::{SourceTyper, TyperError};
 
@@ -245,6 +246,11 @@ struct BatchSourceTypedBindings<'a> {
         SymbolId,
         ConditionalLocalReferenceSelectionBinding,
     )>,
+    conditional_mutable_reference_assignments: Vec<(
+        SourceId,
+        SymbolId,
+        ConditionalMutableReferenceAssignmentBinding,
+    )>,
     local_receiver_unit_calls: Vec<(SourceId, SymbolId, LocalReceiverUnitCallBinding)>,
     local_receiver_unit_call_pairs: Vec<(SourceId, SymbolId, [LocalReceiverUnitCallBinding; 2])>,
     formal_local_constructor_call_pairs:
@@ -428,6 +434,18 @@ impl SourceTypedBindings for BatchSourceTypedBindings<'_> {
                 (*proof_source == source && *proof_method == method).then_some(*binding)
             },
         )
+    }
+
+    fn conditional_mutable_reference_assignment(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<ConditionalMutableReferenceAssignmentBinding> {
+        self.conditional_mutable_reference_assignments
+            .iter()
+            .find_map(|(proof_source, proof_method, binding)| {
+                (*proof_source == source && *proof_method == method).then_some(*binding)
+            })
     }
 
     fn local_receiver_unit_call_pair(
@@ -1330,7 +1348,13 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                                             Some(TreeKind::ValDef(_))
                                         )
                                     })
-                                    && (block.stats[3..].iter().all(|stat| {
+                                    && ((matches!(
+                                        parsed.ast.try_get(block.stats[3]).map(|node| &node.kind),
+                                        Some(TreeKind::If(_))
+                                    ) && matches!(
+                                        parsed.ast.try_get(block.stats[4]).map(|node| &node.kind),
+                                        Some(TreeKind::Apply(_))
+                                    )) || block.stats[3..].iter().all(|stat| {
                                         matches!(
                                             parsed.ast.try_get(*stat).map(|node| &node.kind),
                                             Some(TreeKind::Apply(_))
@@ -1376,7 +1400,29 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                                             typer.store().symbols.get(binding.symbol()).flags
                                                 == dotty_core::SymbolFlags::MUTABLE
                                         });
+                                let conditional_mutable_assignment = block.stats.len() == 5
+                                    && block.stats[..3].iter().all(|stat| {
+                                        matches!(
+                                            parsed.ast.try_get(*stat).map(|node| &node.kind),
+                                            Some(TreeKind::ValDef(_))
+                                        )
+                                    })
+                                    && matches!(
+                                        parsed.ast.try_get(block.stats[3]).map(|node| &node.kind),
+                                        Some(TreeKind::If(_))
+                                    )
+                                    && matches!(
+                                        parsed.ast.try_get(block.stats[4]).map(|node| &node.kind),
+                                        Some(TreeKind::Apply(_))
+                                    )
+                                    && typer
+                                        .typed_local_binding_at(source_id, block.stats[2])
+                                        .is_some_and(|binding| {
+                                            typer.store().symbols.get(binding.symbol()).flags
+                                                == dotty_core::SymbolFlags::MUTABLE
+                                        });
                                 let local_count = if mutable_rebinding
+                                    || conditional_mutable_assignment
                                     || (block.stats.len() == 4
                                         && block.stats[..3].iter().all(|stat| {
                                             matches!(
@@ -1426,7 +1472,8 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                                                     .get(binding.symbol())
                                                     .flags;
                                                 flags.is_empty()
-                                                    || (mutable_rebinding
+                                                    || ((mutable_rebinding
+                                                        || conditional_mutable_assignment)
                                                         && local_index == 2
                                                         && flags
                                                             == dotty_core::SymbolFlags::MUTABLE)
@@ -1682,6 +1729,14 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
         phase: "cross-class constructor-call identity proof",
         reason: format!("{error:?}"),
     })?;
+    let conditional_mutable_reference_assignments = constructor_call_proofs
+        .iter()
+        .filter_map(|proof| {
+            proof
+                .conditional_mutable_reference_assignment()
+                .map(|receipt| (proof.source_id(), proof.method(), receipt.binding()))
+        })
+        .collect();
     let planned_classes = drafts
         .iter()
         .map(|draft| draft.source.class)
@@ -1916,6 +1971,33 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                         selection.scope,
                     ));
                 }
+                if let Some(assignment) = proof.conditional_mutable_reference_assignment() {
+                    let binding = assignment.binding();
+                    let source_declaration = parsed
+                        .ast
+                        .try_get(binding.source_block)
+                        .and_then(|tree| match &tree.kind {
+                            TreeKind::Block(block) => block.stats.get(2).copied(),
+                            _ => None,
+                        });
+                    let typed_declaration = typer
+                        .typed_ast()
+                        .try_get(binding.typed_block)
+                        .and_then(|tree| match &tree.kind {
+                            TreeKind::Block(block) => block.stats.get(2).copied(),
+                            _ => None,
+                        });
+                    if let (Some(source_declaration), Some(typed_declaration)) =
+                        (source_declaration, typed_declaration)
+                    {
+                        locals.push((
+                            source_declaration,
+                            binding.local,
+                            typed_declaration,
+                            binding.scope,
+                        ));
+                    }
+                }
                 if let Some(mutable) = proof.mutable_local_reference_reassignment() {
                     let declarations = mutable.source_declarations();
                     let typed_declarations = mutable.typed_declarations();
@@ -2052,6 +2134,7 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
             })
             .collect(),
         conditional_local_reference_selections,
+        conditional_mutable_reference_assignments,
         local_receiver_unit_calls: constructor_call_proofs
             .iter()
             .filter_map(|proof| {
@@ -2305,4 +2388,191 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
         source_id,
         constructor_call_proofs: &constructor_call_proofs,
     }))
+}
+
+#[cfg(test)]
+mod conditional_mutable_assignment_tests {
+    use super::with_paired_jvm_tasty_batch_plan;
+    use dotty_classfile::attribute::Attribute;
+    use dotty_classfile::classfile::{ClassFile, Reader, TastyLinkId};
+    use dotty_core::SourceId;
+    use dotty_jvm::emit_class_with_tasty_link;
+    use dotty_jvm_tasty_contract::{
+        JvmTastyBatchArtifacts, JvmTastyClassFileArtifact, JvmTastySidecarArtifact,
+        validate_jvm_tasty_batch, validate_jvm_tasty_batch_artifacts,
+    };
+    use dotty_tasty::tasty::TastyFile;
+
+    const SOURCE: &str = include_str!(
+        "../tests/fixtures/jvm_tasty_conditional_mutable_reference_assignment/ConditionalMutableReferenceAssignment.scala"
+    );
+
+    #[test]
+    fn frozen_source_reaches_paired_validation_with_its_borrowed_assignment_proof() {
+        let source_id = SourceId::from_index(23510);
+        let mut found = false;
+        let result = with_paired_jvm_tasty_batch_plan(
+            SOURCE,
+            "ConditionalMutableReferenceAssignment.scala",
+            source_id,
+            |plan| {
+                assert_eq!(plan.jvm_unit.classes.len(), 3);
+                let proof = plan
+                    .constructor_call_proofs
+                    .iter()
+                    .find(|proof| proof.conditional_mutable_reference_assignment().is_some())
+                    .expect("the paired proof retains the conditional assignment receipt");
+                found = true;
+                assert_eq!(proof.method_descriptor(), "(IIZI)Lexample/Pair;");
+                let assignment = proof
+                    .conditional_mutable_reference_assignment()
+                    .unwrap()
+                    .binding();
+                let factory_plan = plan
+                    .classes
+                    .iter()
+                    .find(|class| class.class == proof.caller_class())
+                    .expect("PairFactory has a paired class plan");
+                let typed_bindings = factory_plan.tasty_plan.plan().typed_bindings;
+                assert!(
+                    typed_bindings
+                        .formal_local_constructor_call_pair(source_id, proof.method())
+                        .is_some()
+                );
+                assert_eq!(
+                    typed_bindings
+                        .local_value_bindings(source_id, proof.method())
+                        .len(),
+                    3
+                );
+                let layout = plan
+                    .jvm_unit
+                    .local_layout(
+                        proof.caller_class(),
+                        proof.method(),
+                        factory_plan.tasty_plan.plan().definitions,
+                    )
+                    .expect("the selected local has a canonical JVM layout");
+                let selected_slot = layout
+                    .local(assignment.local)
+                    .expect("the selected symbol, not its spelling, identifies the slot");
+                assert!(selected_slot.is_mutable());
+                let typed_ast = factory_plan.tasty_plan.plan().typed_ast;
+                let selected_declaration = match &typed_ast.get(assignment.typed_block).kind {
+                    dotty_core::ast::TreeKind::Block(block) => block.stats[2],
+                    _ => panic!("the proved typed body remains its original Block"),
+                };
+                assert_eq!(selected_slot.declaration(), selected_declaration);
+
+                let tasty_plans = plan
+                    .classes
+                    .iter()
+                    .map(|class| class.tasty_plan)
+                    .collect::<Vec<_>>();
+                let validated = validate_jvm_tasty_batch(plan.jvm_unit, &tasty_plans)
+                    .expect("the original source/JVM/TASTy plans satisfy the paired contract");
+                assert_eq!(validated.classes().len(), 3);
+                let canonical_artifacts = || {
+                    let entries = plan
+                        .classes
+                        .iter()
+                        .map(|class| {
+                            let pickled = class
+                                .tasty_plan
+                                .pickle()
+                                .expect("the original complete TASTy plan pickles");
+                            let tasty = TastyFile::parse_and_validate_scala_3_9(pickled.bytes())
+                                .expect("the original TASTy output decodes");
+                            let classfile = emit_class_with_tasty_link(
+                                plan.jvm_unit,
+                                class.class,
+                                class.tasty_plan.plan().definitions,
+                                TastyLinkId::from_bytes(tasty.header().uuid),
+                            )
+                            .expect("the exact source class emits from the canonical JVM plan");
+                            (
+                                JvmTastyClassFileArtifact {
+                                    classfile_path: class.classfile_path.clone(),
+                                    classfile_bytes: classfile.into_bytes(),
+                                },
+                                JvmTastySidecarArtifact {
+                                    tasty_path: class.tasty_path.clone(),
+                                    tasty_bytes: pickled.bytes().to_vec(),
+                                },
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let (classfiles, sidecars) = entries.into_iter().unzip();
+                    JvmTastyBatchArtifacts {
+                        classfiles,
+                        sidecars,
+                    }
+                };
+                let valid_artifacts = canonical_artifacts();
+                validate_jvm_tasty_batch_artifacts(&validated, valid_artifacts.clone())
+                    .expect("complete canonical output satisfies the structural artifact contract");
+
+                let factory = valid_artifacts
+                    .classfiles
+                    .iter()
+                    .find(|artifact| artifact.classfile_path == "example/PairFactory.class")
+                    .expect("complete output has PairFactory.class");
+                let mut reader = Reader::new(&factory.classfile_bytes);
+                let decoded = ClassFile::decode(&mut reader).expect("canonical class decodes");
+                let create = decoded
+                    .methods
+                    .iter()
+                    .find(|method| {
+                        decoded.constant_pool.utf8(method.name_index).ok() == Some("create")
+                    })
+                    .expect("PairFactory.create is emitted");
+                let [Attribute::Code(code)] = create.attributes.as_slice() else {
+                    panic!("PairFactory.create has one Code attribute");
+                };
+                let code_start =
+                    code.code.as_ptr() as usize - factory.classfile_bytes.as_ptr() as usize;
+                let initializer = [0x19, 0x05, 0x3a, 0x07];
+                let initializer_offsets = code
+                    .code
+                    .windows(initializer.len())
+                    .enumerate()
+                    .filter_map(|(offset, bytes)| (bytes == initializer).then_some(offset))
+                    .collect::<Vec<_>>();
+                let [initializer_offset, _else_store_offset] = initializer_offsets.as_slice()
+                else {
+                    panic!(
+                        "selected initializer and ELSE assignment use canonical slots: {initializer_offsets:?}"
+                    );
+                };
+                for (name, offset, replacement) in [
+                    ("missing selected initializer", 0, 0x00),
+                    ("wrong selected initializer source", 1, 0x06),
+                    ("wrong selected initializer target", 3, 0x06),
+                ] {
+                    let mut corrupted = valid_artifacts.clone();
+                    let factory = corrupted
+                        .classfiles
+                        .iter_mut()
+                        .find(|artifact| artifact.classfile_path == "example/PairFactory.class")
+                        .unwrap();
+                    factory.classfile_bytes[code_start + initializer_offset + offset] = replacement;
+                    let error = validate_jvm_tasty_batch_artifacts(&validated, corrupted)
+                        .expect_err("selected-local initializer corruption rejects the batch");
+                    assert!(
+                        matches!(
+                            error,
+                            dotty_jvm_tasty_contract::JvmTastyContractError::BatchArtifact {
+                                class_index: 2,
+                                phase: "cross-class invocation",
+                                ..
+                            }
+                        ),
+                        "{name} rejects at the structural output contract: {error:?}"
+                    );
+                }
+            },
+        );
+        result.expect("the exact source passes structural paired validation");
+        assert!(found, "paired validation retains the proof receipt");
+    }
 }

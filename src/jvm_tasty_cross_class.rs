@@ -121,6 +121,8 @@ pub struct ValidatedCrossClassConstructorCallProof<'session> {
     conditional_local_reference_selection: Option<ConditionalLocalReferenceSelectionBinding>,
     mutable_local_reference_reassignment:
         Option<ValidatedMutableLocalReferenceReassignmentProof<'session>>,
+    conditional_mutable_reference_assignment:
+        Option<ValidatedConditionalMutableReferenceAssignmentProof<'session>>,
     formal_type: TypeId,
     constructor_formal_type: TypeId,
     result_type: TypeId,
@@ -1988,6 +1990,12 @@ impl ValidatedCrossClassConstructorCallProof<'_> {
     ) -> Option<&ValidatedMutableLocalReferenceReassignmentProof<'_>> {
         self.mutable_local_reference_reassignment.as_ref()
     }
+
+    pub const fn conditional_mutable_reference_assignment(
+        &self,
+    ) -> Option<&ValidatedConditionalMutableReferenceAssignmentProof<'_>> {
+        self.conditional_mutable_reference_assignment.as_ref()
+    }
     /// Canonical semantic type of the method formal and constructor argument.
     pub const fn formal_type(&self) -> TypeId {
         self.formal_type
@@ -2360,6 +2368,12 @@ fn validate_two_argument_constructor_call_candidate<'session>(
 
     let is_mutable_reassignment_candidate = method_def.value_param_clauses[0].len() == 3;
     let is_conditional_candidate = method_def.value_param_clauses[0].len() == 4;
+    let is_conditional_mutable_assignment_candidate = is_conditional_candidate
+        && matches!(source_ast.try_get(source_rhs).map(|node| &node.kind), Some(TreeKind::Block(block))
+            if block.stats.len() == 5
+                && block.stats[..3].iter().all(|stat| matches!(source_ast.try_get(*stat).map(|node| &node.kind), Some(TreeKind::ValDef(_))))
+                && matches!(source_ast.try_get(block.stats[3]).map(|node| &node.kind), Some(TreeKind::If(_)))
+                && matches!(source_ast.try_get(block.stats[4]).map(|node| &node.kind), Some(TreeKind::Apply(_))));
     let mutable_reassignment_proof = if is_mutable_reassignment_candidate {
         let typer = typer.ok_or_else(|| {
             typed_error("mutable factory requires the original Typer binding resolver")
@@ -2416,7 +2430,9 @@ fn validate_two_argument_constructor_call_candidate<'session>(
         method_def.value_param_clauses[0][1],
     ];
     let all_method_formal_trees = &method_def.value_param_clauses[0];
-    let conditional_selection_proof = if is_conditional_candidate {
+    let conditional_selection_proof = if is_conditional_candidate
+        && !is_conditional_mutable_assignment_candidate
+    {
         let typer = typer.ok_or_else(|| {
             typed_error("conditional factory requires the original Typer binding resolver")
         })?;
@@ -2464,6 +2480,37 @@ fn validate_two_argument_constructor_call_candidate<'session>(
                 },
             )?,
         )
+    } else {
+        None
+    };
+    let conditional_mutable_assignment_proof = if is_conditional_mutable_assignment_candidate {
+        let typer = typer.ok_or_else(|| {
+            typed_error("conditional mutable factory requires the original Typer binding resolver")
+        })?;
+        let Some(TreeKind::Block(block)) = source_ast.try_get(source_rhs).map(|node| &node.kind)
+        else {
+            return Err(source_error(
+                "conditional mutable factory body must be its original Block",
+            ));
+        };
+        Some(validate_conditional_mutable_reference_assignment_proof(
+            ConditionalMutableReferenceAssignmentProofInput {
+                source_id,
+                method_tree,
+                store,
+                definitions,
+                source_ast,
+                typed_ast,
+                source_index,
+                source_typed_index,
+                original_bindings: [
+                    typer.typed_local_binding_at(source_id, block.stats[0]),
+                    typer.typed_local_binding_at(source_id, block.stats[1]),
+                ],
+                selected_binding: typer.typed_local_binding_at(source_id, block.stats[2]),
+                jvm_unit,
+            },
+        )?)
     } else {
         None
     };
@@ -2641,6 +2688,26 @@ fn validate_two_argument_constructor_call_candidate<'session>(
             }
             Some(TreeKind::Block(block))
                 if is_conditional_candidate
+                    && block.stats.len() == 5
+                    && block.stats[..3].iter().all(|stat| {
+                        matches!(
+                            source_ast.try_get(*stat).map(|node| &node.kind),
+                            Some(TreeKind::ValDef(_))
+                        )
+                    })
+                    && matches!(
+                        source_ast.try_get(block.stats[3]).map(|node| &node.kind),
+                        Some(TreeKind::If(_))
+                    )
+                    && matches!(
+                        source_ast.try_get(block.stats[4]).map(|node| &node.kind),
+                        Some(TreeKind::Apply(_))
+                    ) =>
+            {
+                (block.expr, Some(block))
+            }
+            Some(TreeKind::Block(block))
+                if is_conditional_candidate
                     && block.stats.len() == 4
                     && block.stats[..3].iter().all(|stat| {
                         matches!(
@@ -2705,6 +2772,7 @@ fn validate_two_argument_constructor_call_candidate<'session>(
         source_block.filter(|block| matches!(block.stats.len(), 2..=5))
     {
         if mutable_reassignment_proof.is_none()
+            && conditional_mutable_assignment_proof.is_none()
             && block.stats.iter().any(|declaration| {
                 !matches!(
                     source_ast.try_get(*declaration).map(|node| &node.kind),
@@ -2746,7 +2814,100 @@ fn validate_two_argument_constructor_call_candidate<'session>(
             ],
             jvm_unit,
         };
-        if let Some(proof) = conditional_selection_proof.as_ref() {
+        if let Some(proof) = conditional_mutable_assignment_proof.as_ref() {
+            let binding = proof.binding();
+            let source_setter = *block
+                .stats
+                .get(4)
+                .ok_or_else(|| source_error("conditional mutable setter source tree is missing"))?;
+            let typed_setter = source_typed_index
+                .get(source_id, source_setter)
+                .ok_or_else(|| typed_error("conditional mutable setter has no typed mapping"))?;
+            let TreeKind::Apply(source_apply) = &source_ast
+                .try_get(source_setter)
+                .ok_or_else(|| source_error("conditional mutable setter is stale"))?
+                .kind
+            else {
+                return Err(source_error(
+                    "conditional mutable setter must remain an Apply",
+                ));
+            };
+            let TreeKind::Apply(typed_apply) = &typed_ast
+                .try_get(typed_setter)
+                .ok_or_else(|| typed_error("conditional mutable typed setter is stale"))?
+                .kind
+            else {
+                return Err(typed_error(
+                    "conditional mutable typed setter must remain an Apply",
+                ));
+            };
+            let typed_argument = *typed_apply
+                .args
+                .first()
+                .ok_or_else(|| typed_error("conditional mutable setter argument is missing"))?;
+            let argument_formal = match store.types.try_get(
+                typed_ast
+                    .try_get(typed_argument)
+                    .ok_or_else(|| typed_error("conditional mutable setter argument is stale"))?
+                    .ty,
+            ) {
+                Some(Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                }) => *symbol,
+                _ => {
+                    return Err(typed_error(
+                        "conditional mutable setter argument must be a formal",
+                    ));
+                }
+            };
+            local_receiver_unit_call = Some(LocalReceiverUnitCallReceipt {
+                source_apply: source_setter,
+                typed_apply: typed_setter,
+                source_select: source_apply.function,
+                typed_select: typed_apply.function,
+                source_receiver: match source_ast
+                    .try_get(source_apply.function)
+                    .map(|tree| &tree.kind)
+                {
+                    Some(TreeKind::Select(select)) => select.qualifier,
+                    _ => {
+                        return Err(source_error(
+                            "conditional mutable setter must select a receiver",
+                        ));
+                    }
+                },
+                typed_receiver: match typed_ast
+                    .try_get(typed_apply.function)
+                    .map(|tree| &tree.kind)
+                {
+                    Some(TreeKind::Select(select)) => select.qualifier,
+                    _ => {
+                        return Err(typed_error(
+                            "conditional mutable setter must select a receiver",
+                        ));
+                    }
+                },
+                source_argument: source_apply.args[0],
+                typed_argument,
+                receiver: binding.local,
+                method: match typed_ast
+                    .try_get(typed_apply.function)
+                    .and_then(|tree| store.types.try_get(tree.ty))
+                {
+                    Some(Type::TermRef {
+                        target: TermRefTarget::Symbol(symbol),
+                        ..
+                    }) => *symbol,
+                    _ => return Err(typed_error("conditional mutable setter method is stale")),
+                },
+                argument_formal,
+                receiver_scope: binding.scope,
+                argument_type: typed_ast.get(typed_argument).ty,
+                result_type: typed_ast.get(typed_setter).ty,
+            });
+            Some(validate_conditional_mutable_assignment_local_initializer_pair_proof(input)?)
+        } else if let Some(proof) = conditional_selection_proof.as_ref() {
             let binding = proof.binding();
             let source_setter = source_ast
                 .try_get(proof.source_setter())
@@ -4433,6 +4594,7 @@ fn validate_two_argument_constructor_call_candidate<'session>(
         local_reference_alias,
         conditional_local_reference_selection,
         mutable_local_reference_reassignment: mutable_reassignment_proof,
+        conditional_mutable_reference_assignment: conditional_mutable_assignment_proof,
         formal_type: method_formal_types[0],
         constructor_formal_type,
         result_type,
@@ -5654,7 +5816,7 @@ pub fn validate_immutable_local_initializer_pair_proof<'session>(
     ValidatedImmutableLocalInitializerPairProof<'session>,
     CrossClassConstructorCallProofError,
 > {
-    validate_immutable_local_initializer_pair_proof_inner(input, 0, false, false, None)
+    validate_immutable_local_initializer_pair_proof_inner(input, 0, false, false, None, false)
 }
 
 fn validate_mutable_rebinding_local_initializer_pair_proof<'session>(
@@ -5670,7 +5832,17 @@ fn validate_mutable_rebinding_local_initializer_pair_proof<'session>(
         false,
         true,
         Some(selected_local),
+        false,
     )
+}
+
+fn validate_conditional_mutable_assignment_local_initializer_pair_proof<'session>(
+    input: ImmutableLocalInitializerPairProofInput<'session>,
+) -> Result<
+    ValidatedImmutableLocalInitializerPairProof<'session>,
+    CrossClassConstructorCallProofError,
+> {
+    validate_immutable_local_initializer_pair_proof_inner(input, 0, false, false, None, true)
 }
 
 /// Authenticate the supported immutable direct-reference alias of the first
@@ -5686,6 +5858,7 @@ pub fn validate_immutable_local_reference_alias_proof<'session>(
         true,
         false,
         None,
+        false,
     )?;
     validate_immutable_local_reference_alias_from_pair(pair, input.alias_binding)
 }
@@ -5697,6 +5870,7 @@ fn validate_immutable_local_initializer_pair_proof_inner<'session>(
     alias_prefix: bool,
     mutable_rebinding: bool,
     mutable_selected_local: Option<SymbolId>,
+    conditional_mutable_assignment: bool,
 ) -> Result<
     ValidatedImmutableLocalInitializerPairProof<'session>,
     CrossClassConstructorCallProofError,
@@ -5753,7 +5927,14 @@ fn validate_immutable_local_initializer_pair_proof_inner<'session>(
     }
     if !method_def.type_params.is_empty()
         || method_def.value_param_clauses.len() != 1
-        || method_def.value_param_clauses[0].len() != if mutable_rebinding { 3 } else { 2 }
+        || method_def.value_param_clauses[0].len()
+            != if mutable_rebinding {
+                3
+            } else if conditional_mutable_assignment {
+                4
+            } else {
+                2
+            }
     {
         return Err(source_error(
             "factory method must have exactly two ordinary Int formals",
@@ -5789,18 +5970,39 @@ fn validate_immutable_local_initializer_pair_proof_inner<'session>(
         ));
     };
     if signature.kind != dotty_core::MethodKind::Plain
-        || signature.params.len() != if mutable_rebinding { 3 } else { 2 }
-        || signature
-            .params
-            .iter()
-            .any(|param| param.ty != definitions.int)
+        || signature.params.len()
+            != if mutable_rebinding {
+                3
+            } else if conditional_mutable_assignment {
+                4
+            } else {
+                2
+            }
+        || if conditional_mutable_assignment {
+            signature
+                .params
+                .iter()
+                .map(|param| param.ty)
+                .collect::<Vec<_>>()
+                != [
+                    definitions.int,
+                    definitions.int,
+                    definitions.boolean,
+                    definitions.int,
+                ]
+        } else {
+            signature
+                .params
+                .iter()
+                .any(|param| param.ty != definitions.int)
+        }
     {
         return Err(semantic_error(
             "factory signature must preserve its two canonical Int formals",
         ));
     }
     let mut formals = Vec::with_capacity(2);
-    for source_formal in &method_def.value_param_clauses[0] {
+    for (formal_index, source_formal) in method_def.value_param_clauses[0].iter().enumerate() {
         let TreeKind::ValDef(formal_def) = &source_ast
             .try_get(*source_formal)
             .ok_or_else(|| source_error("factory formal tree is stale"))?
@@ -5831,7 +6033,12 @@ fn validate_immutable_local_initializer_pair_proof_inner<'session>(
                 "factory formal is not owned by the canonical method",
             ));
         }
-        if !matches!(store.symbols.get(formal).info, SymbolInfo::Complete(ty) if ty == definitions.int)
+        let expected_formal_type = if conditional_mutable_assignment && formal_index == 2 {
+            definitions.boolean
+        } else {
+            definitions.int
+        };
+        if !matches!(store.symbols.get(formal).info, SymbolInfo::Complete(ty) if ty == expected_formal_type)
         {
             return Err(semantic_error(
                 "factory formals must retain the canonical Int type",
@@ -5872,7 +6079,23 @@ fn validate_immutable_local_initializer_pair_proof_inner<'session>(
             source_ast.try_get(block.stats[4]).map(|node| &node.kind),
             Some(TreeKind::Apply(_))
         );
-    if block.stats.len() != expected_stats && !mutable_stats {
+    let conditional_mutable_stats = conditional_mutable_assignment
+        && block.stats.len() == 5
+        && block.stats[..3].iter().all(|stat| {
+            matches!(
+                source_ast.try_get(*stat).map(|node| &node.kind),
+                Some(TreeKind::ValDef(_))
+            )
+        })
+        && matches!(
+            source_ast.try_get(block.stats[3]).map(|node| &node.kind),
+            Some(TreeKind::If(_))
+        )
+        && matches!(
+            source_ast.try_get(block.stats[4]).map(|node| &node.kind),
+            Some(TreeKind::Apply(_))
+        );
+    if block.stats.len() != expected_stats && !mutable_stats && !conditional_mutable_stats {
         return Err(source_error(match counter_set_call_count {
             0 if !alias_prefix => "factory Block must contain exactly two local ValDefs",
             1 => "factory Block must contain exactly two local ValDefs and one Counter.set call",
@@ -5896,6 +6119,7 @@ fn validate_immutable_local_initializer_pair_proof_inner<'session>(
         ));
     }
     if !mutable_rebinding
+        && !conditional_mutable_assignment
         && block.stats[2 + usize::from(alias_prefix)..]
             .iter()
             .any(|stat| {
@@ -5939,7 +6163,8 @@ fn validate_immutable_local_initializer_pair_proof_inner<'session>(
     };
     if typed_block_tree.stats.get(..2) != Some(typed_declarations.as_slice())
         || (typed_block_tree.stats.len() != expected_stats
-            && !(mutable_rebinding && typed_block_tree.stats.len() == 5))
+            && !((mutable_rebinding || conditional_mutable_assignment)
+                && typed_block_tree.stats.len() == 5))
         || typed_block_tree.expr != typed_final_expression
     {
         return Err(typed_error(
@@ -6311,7 +6536,9 @@ fn validate_immutable_local_initializer_pair_proof_inner<'session>(
     let scope = store.scopes.get(first_core.scope);
     let scope_entries = scope.entered_symbols().collect::<Vec<_>>();
     if scope.owner != Some(method)
-        || scope_entries.len() != 2 + usize::from(alias_prefix) + usize::from(mutable_rebinding)
+        || scope_entries.len()
+            != 2 + usize::from(alias_prefix)
+                + usize::from(mutable_rebinding || conditional_mutable_assignment)
         || !scope_entries.contains(&local_symbols[0])
         || !scope_entries.contains(&local_symbols[1])
         || (mutable_rebinding
@@ -9322,6 +9549,7 @@ fn validate_constructor_call_candidate<'session>(
         local_reference_alias: None,
         conditional_local_reference_selection: None,
         mutable_local_reference_reassignment: None,
+        conditional_mutable_reference_assignment: None,
         formal_type,
         constructor_formal_type,
         result_type,
