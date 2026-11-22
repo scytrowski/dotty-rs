@@ -1,9 +1,13 @@
 # TASTy semantic unpickler
 
 Status: semantic entry, type decoding and symbol completion are implemented
-for the supported shapes described below. The compatibility audit in §8 is the
-current completion gate; it measures Scala library and compiler TASTy under
-multiple completion orders and records external-resolution and deferred cases.
+for the supported shapes described below. The compatibility audit in §8 records
+Scala library and compiler TASTy under multiple completion orders, including
+external-resolution and deferred cases at the measured revisions. Its counts
+are evidence for those runs rather than release-wide support percentages.
+For runnable entry-point usage, see the
+[unpickler guide](../crates/dotty-tasty-unpickler/src/guide.md) and the
+[documentation map](README.md).
 
 | Feature area | Current capability | Boundary |
 |---|---|---|
@@ -2328,8 +2332,12 @@ With `NoResolver`, the type-corpus first pass reports 90,292 external nodes in
 the library and 231,390 unresolved member plus 155,306 unresolved package
 requests in the compiler corpus (the type-completion survey also records
 missing local/type-lambda symbol references separately). These are not guessed
-or counted as decoder errors: they are inputs for the classloader's future
-`SymbolResolver` integration. The per-tag survey has zero missing symbols that
+or counted as decoder errors: they describe external-resolution obligations
+under that survey's `NoResolver` setup. The classloader now supplies a bounded
+`SymbolResolver` adapter as described in the
+[shared-session contract](classloader-semantic-tasty-session-contract.md);
+its existence does not turn those historical survey outcomes into successes.
+The per-tag survey has zero missing symbols that
 are neither locals nor type-lambda parameters in the library/compiler
 classification. The 1,314 library signed references and unsupported prefixes
 are reported separately by the survey; signed overload selection is deferred
@@ -3079,11 +3087,14 @@ compiler. Unexpected errors: 0.
 | `ERRORtype` | error type | Best-Effort TASTy only, not regular TASTy |
 | 166, 168, 184-189 | unassigned | reserved |
 
-No unsigned regular-TASTy semantic `Type` form is left unsupported. This is not
-full TASTy support: signed overload selection, typed trees, symbol completion
-(infos, `ClassInfo`, parents, self types, symbol annotations) and classpath
-resolution are separate milestones (5, 6, 7), and most real nodes still fail
-only because they name symbols outside the entered state.
+This type-decoding audit found no unsupported unsigned regular-TASTy semantic
+`Type` form within its measured scope. It did not establish full TASTy support:
+many real nodes named symbols outside the entered state. Symbol completion
+(infos, `ClassInfo`, parents, self types and symbol annotations) and bounded
+classpath resolution were developed separately and are described in the
+completion sections and shared-session contract. Typed-tree rehydration remains
+outside this semantic projection; neither completion nor resolution implies
+general signed-overload or Scala language support.
 
 #### Owner-space references after 4c1 (library / compiler)
 

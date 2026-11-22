@@ -1,10 +1,18 @@
 # Typer v0.1 source-to-TASTy semantic gate
 
-This document records the supported boundary for the first source signature
-Typer milestone. The parity tests compare structurally normalized semantic
-snapshots from the source parser/namer/Typer and the TASTy unpickler. They do
-not compare arena IDs, scope IDs, TASTy addresses, source positions, or
-allocation order.
+This document records the source typer's supported contracts and accumulated
+compatibility evidence. The implementation completes signatures and types
+selected expressions, definitions, patterns, local scopes and contextual
+applications; it has grown beyond the original signature milestone. Each
+section describes its bounded subset and explicit unsupported cases.
+
+The parity tests compare structurally normalized semantic snapshots from the
+source parser/namer/typer and the TASTy unpickler. They do not compare arena IDs,
+scope IDs, TASTy addresses, source positions, or allocation order. Historical
+corpus tables and blocker counts apply to their recorded revisions and cohorts,
+not to all source accepted by the current release branch. Start with the
+[typer guide](../crates/dotty-typer/src/guide.md) for runnable library usage and
+the [documentation map](README.md) for validation and evidence boundaries.
 
 ## Contextual arguments in Scala 3.9
 
@@ -230,7 +238,7 @@ python3 crates/dotty-typer/tests/fixtures/contextual-consumers/check.py
 Run the deterministic parity suite with:
 
 ```text
-cargo test -p dotty-typer --test semantic_parity
+cargo test -p dotty-typer --test semantic_parity --locked
 ```
 
 The checked-in semantic `.tasty` fixtures are real compiler output from Scala
@@ -239,7 +247,7 @@ The checked-in semantic `.tasty` fixtures are real compiler output from Scala
 and `generate.sh` documents how to regenerate them using the Scala 3.9.0
 compiler artifacts. The Scala compiler source checkout used by this repository
 is pinned to revision
-`777528f19a58e794c9954a2f433373472ec57f8` (branch `3.9.0`); the fixture
+`777528f19a58e794c9954a42f433373472ec57f8` (`3.9.0` tag); the fixture
 compiler version is pinned to the exact Maven artifact version `3.9.0`.
 
 The suite currently compares plain and generic classes, traits, class
@@ -2031,7 +2039,7 @@ No local method fully typed in the full corpus run, and external member
 materialization remains zero. The refreshed pre-field-inference audit ranks
 `MissingDeclaredType` (34 in 15 files) first and recommends the immutable
 inferred `Class` field slice scoped in
-[#825](typer-classpath-corpus-audit-3.9.0.md#recommended-next-sprint). That
+[#825](typer-classpath-corpus-audit-3.9.0.md#historical-825-recommendation-pre-856). That
 slice is implemented in #856; the audit counts remain the baseline taken
 before field inference was added.
 
@@ -2221,7 +2229,7 @@ Scala 3.9.0 corpus runs, current blocker ranking, #1180 reconciliation, and a
 single evidence-based next-sprint recommendation. Its final closeout evidence
 maps the eight required rollback/atomicity cases to the focused production and
 `AuditResolver` regressions and records the successful workspace CI run. See
-[`the #1342 audit checkpoint`](typer-classpath-corpus-audit-post-compiler-modules-3.9.0.md#final-closeout-evidence).
+[`the #1342 audit checkpoint`](typer-classpath-corpus-audit-post-compiler-modules-3.9.0.md#1342-closeout-status).
 
 ### #1417 final TASTy-parent audit gate
 

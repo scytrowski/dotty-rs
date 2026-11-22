@@ -65,8 +65,8 @@ comparison at `9042c15be3ad708d80f0ad5d637055f1ac6160b6`:
 
 The exact full-typed root identities, source tree numbers, and result shapes
 from this fresh baseline are frozen in
-[`required-main.tsv`](required-main.tsv) and
-[`required-analysis.tsv`](required-analysis.tsv). These typed-only lists do
+[`required-main.tsv`](typer-lexical-closure-acceptance-recovery-3.9.0/required-main.tsv) and
+[`required-analysis.tsv`](typer-lexical-closure-acceptance-recovery-3.9.0/required-analysis.tsv). These typed-only lists do
 not alter either cohort manifest or count blocked roots as required successes.
 The main list contains `Function1.andThen#tree=111` and
 `Function1.compose#tree=86`; compose is separately reported and does not
@@ -93,7 +93,7 @@ passes. It retained all 16 main and all 15 analysis typed roots, changed no
 blocked root, and introduced no newly typed root. That is zero
 accepted-method regressions and no denominator changes. The complete row
 outcomes, including owner, source `path#tree`, first blocker, result shape, and
-before/after tree IDs, are in [`stdlib-cohorts.tsv`](stdlib-cohorts.tsv).
+before/after tree IDs, are in [`stdlib-cohorts.tsv`](typer-lexical-closure-acceptance-recovery-3.9.0/stdlib-cohorts.tsv).
 Final report SHA-256 values equal their corresponding fresh-baseline values:
 
 | Cohort | Baseline → final | Pass 1 / pass 2 report SHA-256 |
@@ -101,10 +101,10 @@ Final report SHA-256 values equal their corresponding fresh-baseline values:
 | Main (25 roots) | 16/25 → 16/25 | `0d96b3b42c3967b6d975ffadee57ea9b157458742f0f8782c73c9156969e4ce4` |
 | Analysis (25 roots) | 15/25 → 15/25 | `93952a0614a125eba72543a12c2fd121ddfeaaab89d0f77c2d231ae7c2acf36a` |
 
-The six rows in [`positive-roots.tsv`](positive-roots.tsv) give each exact
+The six rows in [`positive-roots.tsv`](typer-lexical-closure-acceptance-recovery-3.9.0/positive-roots.tsv) give each exact
 root, complete result shape, capture identity list, mapping outcome, and a
 SHA-256 receipt for each independent session. The nine rows in
-[`negative-rollback.tsv`](negative-rollback.tsv) preserve each frozen Scala
+[`negative-rollback.tsv`](typer-lexical-closure-acceptance-recovery-3.9.0/negative-rollback.tsv) preserve each frozen Scala
 classification, Rust diagnostic, rollback projection, retry/follow-up, and
 test group. Raw compiler logs remain in the local worktree and are not
 committed.

@@ -4,7 +4,8 @@ This document began as the readiness audit for
 [#1189](https://github.com/scytrowski/dotty-rs/issues/1189), auditing repository
 revision `3882dbb50` and Scala
 3.9.0 revision `777528f19a58e794c9954a42f433373472ec57f8`, targeting TASTy
-**28.9.0**. The proposed first complete output is:
+**28.9.0**. Its first complete output, now implemented and independently
+checked, is:
 
 ```scala
 package example
@@ -16,15 +17,27 @@ The source frontend has sufficient canonical declaration identities and can
 produce this method's real typed RHS. It does **not** currently expose a complete
 typed package/class/template root. Use a pickler-local input plan over those
 identities and body roots; do not add a shared `TypedCompilationUnit` or make
-Typer depend on a serializer. Full compiler interoperability remains the
-[#1195](https://github.com/scytrowski/dotty-rs/issues/1195) gate.
+Typer depend on a serializer. The
+[independent interoperability gate](tasty-pickler-interoperability.md) records
+Scala consumption and execution of actual Rust-produced output for the
+supported shapes; it does not establish a complete Scala producer.
 
 The additive `ClassStatePicklePlan` now validates source-ordered private
 primitive fields, exact typed initializer bindings, and the bounded primary
 constructor input contract described in the
-[class-state contract](tasty-pickler-class-state-contract.md). It is a
-read-only planning API only; the existing `PicklePlan` serializer still emits
-the previously supported forms.
+[class-state contract](tasty-pickler-class-state-contract.md). Its validated
+receipt now emits the supported primitive class-state subset through
+`ValidatedClassStatePlan::pickle`. Read-only proofs for same-batch reference
+fields and explicitly incomplete fragments do not authorize their serialization
+as complete artifacts. The separate `PicklePlan` serializer covers its own
+method-only subset.
+
+For runnable API usage, start with the
+[pickler guide](../crates/dotty-tasty-pickler/src/guide.md). Sections 3 and the
+downstream merge-gate list in section 9 preserve the original readiness audit
+and implementation sequence; later sections record completed increments. Use
+the current API, focused tests and linked contracts to distinguish a complete
+`PickledTasty` result from a `DeclarationSkeleton` or validation-only proof.
 
 ## 1. Ownership and dependency boundary
 
@@ -100,7 +113,7 @@ need not have been typed by that operation.
 
 | Gap with concrete location | Required boundary decision / downstream work |
 | --- | --- |
-| `Tree<Typed>` has no declaration symbol field (`ast/tree.rs`); `SourceTypedIndex` is in Typer and has no compilation-unit completion/provenance guarantee. | Integration must bind source declaration and RHS IDs to canonical symbols/typed roots. A checked adapter supplies this evidence through a core-only port; reject a missing binding. No name matching. |
+| `Tree<Typed>` has no declaration symbol field (`ast/tree.rs`); `SourceTypedIndex` lives in `dotty-core` and is populated by the typer, but has no compilation-unit completion/provenance guarantee. | Integration must bind source declaration and RHS IDs to canonical symbols/typed roots. A checked adapter supplies this evidence through a core-only port; reject a missing binding. No name matching. |
 | `SourceTyper::type_expression_inner` (`typer/mod.rs`) handles expressions/local forms and rejects other forms as `UnsupportedExpression`; it does not build a package/class/template tree. `TypedAstBuilder` (`ast/typed.rs`) has expression/type-tree constructors, not a unit builder. | Build declaration wire structure from the explicit plan + completed semantics; consume actual typed RHS nodes. Local typed `DefDef` support is not a whole-unit API. |
 | `Typed::{DefMetadata,TemplateMetadata} = ()` (`ast/phase.rs`). | Read flags, visibility and annotations from `Symbol`. Require an explicit supported set. Reject unsupported annotations/visibility/flags; absence of syntax is not evidence of public/unannotated semantics. |
 | Bootstrapped `Int`, `Unit`, `Object` are `Builtin`, `owner: None`, `info: Missing` (`definitions.rs`, `bootstrap`, `builtin_symbol`). `declare_special_aliases` only installs `&`/`|` package owners. | Use exact `Definitions` identities for a bounded external-name mapping (`scala.Int`, `scala.Unit`, `java.lang.Object`). Do not turn every ownerless or same-named symbol into a builtin. Do not require external builtins to have source `ClassInfo`. |
@@ -571,8 +584,10 @@ Use `NameTableBuilder`, `EncodedSection` and `TastyFileBuilder`; section order i
 header is magic + 28.9.0 + an honest fixed adapter tooling version + deterministic
 UUID. A content-derived UUID can follow the pinned Scala name/AST and remaining
 section PJW-hash rule; do not use timestamps, random IDs or absolute paths. The
-UUID is a wire identifier, not semantic identity. Any future classfile linkage
-must use this file's actual UUID, never an unrelated fixture class's attribute.
+UUID is a wire identifier, not semantic identity. Class-file linkage must use
+this file's actual UUID, never an unrelated fixture class's attribute. The
+[`dotty-jvm-tasty-contract` guide](../crates/dotty-jvm-tasty-contract/src/guide.md)
+describes the implemented link checks and their separate semantic obligations.
 
 Normalize only documented source-path/tooling/UUID noise when comparing to Scala.
 Two Rust runs with equal semantic input, source name and configuration must emit
@@ -617,6 +632,10 @@ Scala compiler/library/scala-library/tasty-core/interfaces **3.9.0**, scala-asm
 `SCALA39_CLASSPATH` below is the colon-separated list of those JARs;
 `SCALA39_ROOT` is the checkout at the audited hash and `JAVA_HOME` a recorded JDK.
 The audit used cached Maven artifacts and Temurin 21.0.8, with no downloads.
+The shell sketch below retains that original layout control. For current
+reproduction with hash and version checks, use the maintained
+[oracle](tasty-pickler-oracle.md) and
+[Rust-produced interoperability runner](tasty-pickler-interoperability.md).
 
 ```sh
 test "$(git -C "$SCALA39_ROOT" rev-parse HEAD)" = \
@@ -627,7 +646,7 @@ mkdir -p oracle candidate/example compiled
 "$JAVA_HOME/bin/java" -cp "$SCALA39_CLASSPATH" dotty.tools.dotc.Main \
   -classpath "$SCALA39_CLASSPATH" -Yprint-tasty -d oracle Answer.scala
 # Audit layout control only: copy solely oracle/example/Answer.tasty into candidate.
-# Final #1195 substitutes actual Rust-produced bytes at this path.
+# The separate Rust producer gate supplies actual Rust-produced bytes here.
 "$JAVA_HOME/bin/java" -cp "$SCALA39_CLASSPATH" dotty.tools.dotc.Main \
   -classpath "$SCALA39_CLASSPATH" -from-tasty -d compiled \
   candidate/example/Answer.tasty
@@ -649,7 +668,12 @@ in the observed minimal case. A JAR case must preserve the same package paths;
 it is supported by upstream but was not exercised in this audit. Full classfile
 linkage and other backends remain outside this adapter.
 
-### Downstream work and merge gates
+### Original downstream work and merge gates (historical)
+
+This list preserves the sequencing and acceptance criteria from the readiness
+audit. The crate, complete producer and independent consumer checks now exist;
+these are not outstanding release tasks. Later sections and the linked
+interoperability report describe the implemented subsets.
 
 1. **[#1190 — oracle/fixtures](https://github.com/scytrowski/dotty-rs/issues/1190),
    independent of this audit:** check in small Scala sources, generated TASTy and

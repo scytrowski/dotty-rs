@@ -1,5 +1,12 @@
 # TASTy Decoder Testing Strategy
 
+This document covers the structural TASTy codec's regression and fixture
+requirements. The [documentation map](README.md#validation-and-interoperability)
+lists the complete current workspace checks, doctests and mandatory JDK gate.
+The source frontend, semantic pickler/unpickler and JVM backend have separate
+focused contracts and independent consumer checks; decoder coverage does not
+establish their compatibility.
+
 Every decoder increment must add tests for the complete surface implemented by
 that increment before it is committed.
 
@@ -46,8 +53,10 @@ Round-trip tests state which equivalence they establish:
   every original corpus file with the projection after structured re-encoding.
 
 These guarantees are intentionally distinct. A relocated structured encoding
-may change offsets and AST addresses while remaining structurally and
-semantically equivalent.
+may change offsets and AST addresses while preserving the structured
+representation. Corpus-specific semantic-lite comparisons are additional
+evidence within their recorded scope, not a general proof that every edited
+or newly constructed file is accepted by Scala.
 
 ## Baseline corpora
 
@@ -67,7 +76,7 @@ expanded beyond the initial proof of concept.
 
 The shared test support resolves selection and expectation paths from the
 manifest. Semantic-lite JSON is loaded through the same support module for
-future corpora, rather than defining a separate schema loader in each library
+additional corpora, rather than defining a separate schema loader in each library
 test. Baseline regeneration is performed with
 `tools/tasty-baseline/generate.sh`, which validates `artifact_sha256` before
 calling the Scala oracle and replaces the expectation only after successful
@@ -83,7 +92,7 @@ implementation classes bootstrapped with an older compatible TASTy minor
 version; such a corpus must record that observed format explicitly instead of
 assuming it from the artifact name.
 
-Future semantic expectations belong beside the materialized corpus and must
+New semantic expectations belong beside the materialized corpus and must
 record the Scala/compiler version and expectation-schema version. They should
 compare stable structural or semantic facts, not absolute AST offsets, unless
 the offset itself is the behavior under test.
@@ -96,8 +105,16 @@ targets, and nested node fields where the public model exposes them. Keep
 compiler-generated details such as absolute offsets out of these assertions
 unless the offset itself is the behavior under test.
 
-The full suite is the required pre-commit check:
+While iterating on the structural codec, run its tests first:
 
 ```text
-cargo test --all-targets
+cargo test -p dotty-tasty --all-targets --locked
+cargo test -p dotty-tasty --doc --all-features --locked
 ```
+
+Before completing a change, run the full
+[workspace validation](README.md#validation-and-interoperability).
+`cargo test --all-targets` alone selects the root package here and excludes
+doctests. Ordinary fixture tests use checked-in data and require no Scala
+rebuild; explicitly requested oracle runs require their documented pinned
+checkout and external tools.

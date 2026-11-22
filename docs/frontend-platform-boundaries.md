@@ -16,19 +16,28 @@ frontend crates.
 
 | Crate | Production/build dependencies | Dev dependencies |
 | --- | --- | --- |
-| `dotty-core` | — | — |
-| `dotty-lexer` | `dotty-core`, `unicode-ident` | — |
-| `dotty-parser` | `dotty-core` | — |
+| `dotty-core` | `unicode-general-category` | — |
+| `dotty-lexer` | `dotty-core` | — |
+| `dotty-parser` | `dotty-core` | `dotty-lexer` |
 | `dotty-namer` | `dotty-core` | `dotty-parser`, `dotty-lexer` |
 | `dotty-typer` | `dotty-core` | `dotty-classfile`, `dotty-classloader`, `dotty-namer`, `dotty-lexer`, `dotty-parser`, `dotty-tasty`, `dotty-tasty-unpickler` |
 | `dotty-tasty` | — | `serde`, `serde_json` |
 | `dotty-classfile` | — | — |
 | `dotty-tasty-unpickler` | `dotty-tasty`, `dotty-core` | — |
-| `dotty-classloader` | `dotty-tasty`, `dotty-classfile`, `dotty-core` | `dotty-tasty-unpickler` |
+| `dotty-classloader` | `dotty-tasty`, `dotty-classfile`, `dotty-core`, `dotty-tasty-unpickler`, `crc32fast`, `flate2`, `unicode-ident` | — |
 | `dotty-jvm` | `dotty-core`, `dotty-classfile` | — |
-| `dotty` (root facade) | `dotty-tasty`, `dotty-classfile`, `dotty-core`, `dotty-classloader`, `dotty-tasty-unpickler`, `dotty-parser`, `dotty-namer`, `dotty-typer` | `dotty-lexer`, `dotty-jvm` |
+| `dotty-tasty-pickler` | `dotty-core`, `dotty-tasty` | `dotty-lexer`, `dotty-namer`, `dotty-parser`, `dotty-typer` |
+| `dotty-jvm-tasty-contract` | `dotty-classfile`, `dotty-core`, `dotty-jvm`, `dotty-tasty`, `dotty-tasty-pickler` | — |
+| `dotty-rs` (library `dotty`) | `dotty-tasty`, `dotty-classfile`, `dotty-core`, `dotty-classloader`, `dotty-tasty-unpickler`, `dotty-parser`, `dotty-namer`, `dotty-typer`, `dotty-lexer`, `dotty-jvm`, `dotty-tasty-pickler`, `dotty-jvm-tasty-contract` | — |
 | `dotty-parser-smoke-dump` | `dotty-core`, `dotty-lexer`, `dotty-parser` | — |
 | `dotty-parser-corpus-report` | `dotty-core`, `dotty-lexer`, `dotty-parser`, `dotty-namer`, `serde`, `serde_json` | — |
+| `tasty-pickler-oracle` | `dotty-tasty`, `serde_json` | — |
+
+The three tool packages are private (`publish = false`). The table lists all
+direct normal and dev dependencies reported by `cargo metadata --no-deps
+--format-version 1 --locked`; the workspace has no build dependencies. The
+parser's concrete lexer dependency is used by its runnable documentation
+example and does not enter the parser's production closure.
 
 The permitted direction is source inputs through `dotty-lexer` and
 `dotty-parser` into shared `dotty-core` contracts; `dotty-namer` and

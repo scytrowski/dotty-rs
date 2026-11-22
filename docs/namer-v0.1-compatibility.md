@@ -6,6 +6,14 @@ named and whether the resulting source semantic index satisfies its structural
 invariants. It does not claim that the namer performs typing, overload
 resolution, or compiler desugaring.
 
+The corpus counts and deferred-feature table are the recorded v0.1 naming
+audit, not current workspace-wide support percentages. Later sections describe
+additional naming contracts. The frontend now also types selected expressions,
+enters supported local definitions, synthesizes bounded case-class APIs and
+handles contextual evidence; those capabilities must not be inferred from this
+earlier naming-only gate. See the [namer guide](../crates/dotty-namer/src/guide.md),
+[typer contract](typer-v0.1-compatibility.md) and [documentation map](README.md).
+
 The source semantic index lives in `dotty-core`, because both the namer and
 typer consume the same contract. The namer populates that index.
 
@@ -27,7 +35,7 @@ the Rust lexer, parser, or namer measurement.
 
 ## Results
 
-The latest measurement is at dotty-rs revision `5edd6ee` and Scala revision
+The recorded naming measurement is at dotty-rs revision `5edd6ee` and Scala revision
 `777528f`. The parser produced ASTs for all 1,236 files: 1,127 had no
 recoverable diagnostics and 109 had diagnostics. There were zero hard parser
 failures, process failures, panics, or hangs. The namer ran on all files and
@@ -147,11 +155,12 @@ where Namer returned a typed error. No typed export forwarders were
 synthesized: that work belongs to a later typed phase. The report measures
 syntax, semantic handoff, parser recovery, and forwarder synthesis separately.
 
-## Remaining feature classification
+## Feature classification at the recorded naming audit
 
-Counts below describe the current corpus inventory. “Deferred” counts
+Counts below describe that audit's corpus inventory. “Deferred” counts
 occurrences in units where naming succeeded; parser-blocked syntax and failed
-Namer runs remain separate.
+Namer runs remain separate. These labels classify the naming gate at that
+revision; they do not say that later typer increments still lack these features.
 
 | Feature | Occurrences / files | Deferred after successful naming | Classification |
 | --- | ---: | ---: | --- |
@@ -183,7 +192,8 @@ source unit and package. Repeated clauses of that package in the unit share
 its declaration scope. Each wrapped declaration keeps its original lexical
 context, including the imports visible at that point.
 
-The current source semantic index is suitable for the first source typer
-milestone, with the deferred local-scope, annotation, synthetic-member, and
-forwarder work above kept explicit. This is a readiness statement about the
-Namer-to-typer contract, not a claim of complete Scala 3.9 source support.
+This audit established the source semantic index as input for the first source
+typer milestone, with the deferred work above kept explicit at that revision.
+The implemented typer now consumes and extends the shared contracts; its
+[compatibility document](typer-v0.1-compatibility.md) records subsequent supported
+increments. Neither gate claims complete Scala 3.9 source support.

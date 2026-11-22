@@ -1,6 +1,8 @@
 # Scala 3.9.0 Lexer and Scanner Design
 
-Status: working design document for the Rust frontend.
+Status: implemented lexer/scanner contracts with an incremental development
+record in section 10. That plan includes historical tool versions and is not
+the current release checklist.
 
 This document records the architecture, compatibility decisions, incremental
 implementation plan, and testing strategy for the Scala 3.9.0 source lexer.
@@ -9,7 +11,12 @@ details that are not obvious from the language specification. The parser and
 AST are downstream consumers of this lexer contract; their grammar remains
 outside this lexer design's implementation scope.
 
-The compatibility target is the Scala 3.9.0 compiler at the `3.9.0` tag. When
+For runnable library usage, see the [lexer guide](../crates/dotty-lexer/src/guide.md).
+The [documentation map](README.md) separates current contracts from historical
+measurements and lists the current CI commands.
+
+The compatibility target is the Scala 3.9.0 compiler at revision
+`777528f19a58e794c9954a42f433373472ec57f8` (`3.9.0` tag). When
 the language specification and the compiler disagree, observable behavior of
 that compiler is authoritative.
 
@@ -147,16 +154,18 @@ types, UTF-8 source ranges, bounded state machines, and lossless raw data.
 The lexer lives in a dedicated workspace crate, separate from the existing
 `dotty-tasty` implementation crate. Shared frontend contracts live in
 `dotty-core`, alongside the compiler's semantic model. The current crate
-layout is:
+subset relevant to this boundary is:
 
 ```text
 crates/
-├── dotty-core
-└── dotty-lexer
+├── dotty-core       (source/token contracts and shared AST)
+├── dotty-lexer      (raw lexer and contextual scanner)
+└── dotty-parser     (consumes dotty-core::TokenSource)
 ```
 
-The root `dotty` crate will later act as the public facade. Parser and AST
-crates are intentionally not part of the current implementation scope.
+The root package `dotty-rs` exposes the library `dotty`, including these
+components. The AST lives in `dotty-core`; parser grammar is owned by
+`dotty-parser`. See the [complete dependency graph](frontend-platform-boundaries.md).
 
 The module layout for the current lexer work is:
 
@@ -450,7 +459,11 @@ The following require direct Scala 3.9.0 oracle tests rather than assumptions:
 
 ## 10. Incremental implementation plan
 
-Each increment must land with focused tests before the next increment starts.
+This section retains the original sequence of increments and their acceptance
+criteria. It explains how the lexer was developed; tool paths and versions in
+the plan describe that development environment. Use the
+[current validation commands](README.md#validation-and-interoperability) for
+release checks. Each new behavior still requires focused regression coverage.
 
 ### Increment 0 — Oracle and compatibility harness
 
@@ -458,7 +471,7 @@ Prepare a small Scala helper that scans a source string with the Scala 3.9.0
 compiler and emits machine-readable token records. Record token kind, raw text,
 UTF-16 offsets, synthetic status, and diagnostics where available.
 
-The pinned local environment is:
+The local environment recorded for the original oracle increment was:
 
 ```text
 Scala compiler: 3.9.0
@@ -709,9 +722,11 @@ progress, reach EOF or a recoverable terminal state, and never panic.
 5. Scanner events are handled idempotently where the parser can repeat them.
 6. Source tokens are not silently lost.
 
-## 13. Definition of done for the core lexer
+## 13. Original milestone acceptance criteria (historical)
 
-The core lexer milestone is complete when:
+The original core lexer milestone used the following criteria, including the
+oracle environment selected for that work. They do not replace the current
+[workspace and documentation checks](README.md#validation-and-interoperability):
 
 - source ranges and line tracking are correct for UTF-8 and CRLF;
 - raw tokens and trivia form a lossless stream;

@@ -7,6 +7,11 @@ parallel `Rc<ClassSymbol>` model of its own. §9 lists what each milestone
 covers and its current status; §3 and §4.4 list the real, currently-open
 gaps (mostly on the `.tasty` side) rather than unimplemented milestones.
 
+For runnable library usage, start with the
+[classpath guide](../crates/dotty-classloader/src/guide.md). The
+[documentation map](README.md) distinguishes current contracts from
+revision-specific compatibility and performance reports.
+
 Normative sources:
 - JVM Specification SE 26, Chapter 4 — [The `class` File Format](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-4.html) (already the basis of `docs/classfile-format-jdk25.md`)
 - JVM Specification SE 26, Chapter 5 — [Loading, Linking, and Initializing](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-5.html)
@@ -24,8 +29,9 @@ policy as `docs/classfile-format-jdk25.md`.
 Goal: a compiler-frontend class loader — locate classpath entries, decode
 `.class` files via `dotty-classfile` and `.tasty` files via `dotty-tasty`,
 construct semantic class symbols in `dotty-core`'s `SemanticStore`, and
-resolve references between them, for `dotty-rs`'s eventual semantic
-analysis / backend.
+resolve references between them for semantic analysis. The source typer can
+consume a caller-provided classpath resolver through `dotty-core::SymbolResolver`;
+the JVM backend consumes already-typed plans and does not perform classpath IO.
 
 Non-goal: this is not `java.lang.ClassLoader` and not a JVM runtime.
 Explicitly out of scope: bytecode execution, bytecode verification
@@ -65,7 +71,7 @@ symbol creation (dotty-core::SemanticStore)        <- this crate
     |
 lazy symbol resolution                             <- this crate
     |
-dotty-rs semantic model                            <- future crate(s), consumes SemanticStore directly
+dotty-typer / caller's semantic analysis           <- consumes the shared model via core contracts
 ```
 
 `dotty-classfile` already covers descriptor parsing (JVMS §4.3.2/4.3.3),
