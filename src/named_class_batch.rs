@@ -1,8 +1,11 @@
 //! Ordered access to the named class sources in a caller-selected batch.
 use std::{collections::HashMap, fmt};
 
+use crate::core::{AstArena, Definitions, Packages, SymbolKind, Typed};
 use crate::core::{SemanticStore, SourceId, SymbolId};
+use crate::jvm_class_plan::ClassHeaderBindings;
 use crate::source_declarations::SourceClass;
+use crate::typer::{SignatureCompletion, TyperError};
 use crate::{
     NamedClassSource, SourceDeclaration, SourceDeclarationIndex, SourceDeclarationIndexError,
 };
@@ -99,6 +102,47 @@ impl<'a> NamedClassBatch<'a> {
         Some((self.file(declaration.source)?, declaration))
     }
 
+    /// Attempts one header using the declaring file and the classes in this batch
+    /// as eligible dependencies. Prepare constructor signatures first. Reuse the
+    /// same session store, typed arena and bindings on every attempt, including
+    /// retries after a returned dependency completes.
+    ///
+    /// An unknown symbol yields `UnknownSymbol`; a known symbol outside the batch
+    /// yields `SourceProvenanceMissing`. Typing failures retain their original
+    /// source and leave prior bindings intact. See [`crate::try_complete_class_header`].
+    pub fn try_complete_class_header(
+        &self,
+        class: SymbolId,
+        store: &mut SemanticStore,
+        definitions: Definitions,
+        packages: &Packages,
+        arena: &mut AstArena<Typed>,
+        bindings: &mut ClassHeaderBindings,
+    ) -> Result<SignatureCompletion, TyperError> {
+        let Some((file, _)) = self.declaration(class) else {
+            return Err(if store.symbols.contains(class) {
+                TyperError::SourceProvenanceMissing { symbol: class }
+            } else {
+                TyperError::UnknownSymbol { symbol: class }
+            });
+        };
+        crate::try_complete_class_header(
+            class,
+            file.ast(),
+            file.index(),
+            store,
+            definitions,
+            packages,
+            arena,
+            bindings,
+            |dep| {
+                self.declarations
+                    .get(dep)
+                    .is_some_and(|d| d.kind == SymbolKind::Class)
+            },
+        )
+    }
+
     /// Finds the original named file by its session source ID, including empty files.
     pub fn file(&self, source: SourceId) -> Option<&'a NamedClassSource> {
         self.by_source.get(&source).copied()
@@ -184,5 +228,71 @@ mod tests {
             );
         }
         assert!(batch.declaration(omitted.classes()[0].symbol).is_none());
+    }
+    fn prepare_constructors(
+        batch: &NamedClassBatch<'_>,
+        store: &mut SemanticStore,
+        defs: Definitions,
+        packages: &Packages,
+    ) {
+        for (file, class) in batch.classes() {
+            crate::typer::SourceTyper::new(
+                file.ast(),
+                file.source(),
+                file.index(),
+                store,
+                defs,
+                packages,
+            )
+            .complete_symbol(class.constructor)
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn header_dependencies_route_to_the_parent_and_errors_to_the_child() {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let base = named(42, "class Base(seed: Int)", &mut store, &mut packages);
+        let mid = named(
+            7,
+            "class Mid(start: Int) extends Base(start)",
+            &mut store,
+            &mut packages,
+        );
+        let text = "class Leaf(start: Boolean) extends Mid(start)";
+        let leaf = named(21, text, &mut store, &mut packages);
+        let batch = NamedClassBatch::new([&leaf, &mid, &base], &store).unwrap();
+        prepare_constructors(&batch, &mut store, defs, &packages);
+        let [a, b, c] = [&leaf, &mid, &base].map(|f| f.classes()[0].symbol);
+        let mut arena = AstArena::new();
+        let mut bindings = ClassHeaderBindings::default();
+        let mut attempt = |id| {
+            batch.try_complete_class_header(
+                id,
+                &mut store,
+                defs,
+                &packages,
+                &mut arena,
+                &mut bindings,
+            )
+        };
+        assert_eq!(attempt(a).unwrap(), SignatureCompletion::BlockedOn(b));
+        assert_eq!(attempt(b).unwrap(), SignatureCompletion::BlockedOn(c));
+        for id in [c, b] {
+            assert!(matches!(attempt(id), Ok(SignatureCompletion::Complete(_))));
+        }
+        let error = attempt(a).unwrap_err();
+        assert!(
+            matches!(error, TyperError::ApplicationArgumentTypeMismatch { argument_index: 0, actual, expected, .. } if actual == defs.boolean && expected == defs.int)
+        );
+        let span =
+            crate::typer_error_span_with(&error, |id| batch.file(id).map(NamedClassSource::ast))
+                .unwrap();
+        assert_eq!(span.source(), leaf.source());
+        let range = span.span().range();
+        assert_eq!(range.start() as usize, text.rfind("start").unwrap());
+        assert_eq!(range.len(), 5);
     }
 }
