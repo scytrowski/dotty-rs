@@ -8,15 +8,13 @@ mod pipeline_timing;
 #[path = "support/typer_error_spans.rs"]
 mod typer_error_spans;
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
 use dotty::core::{
-    AstArena, Definitions, Packages, SemanticStore, SourceId, SymbolId, SymbolInfo, SymbolKind,
-    TreeKind, Typed,
+    AstArena, Definitions, Packages, SemanticStore, SourceId, SymbolId, SymbolInfo, TreeKind, Typed,
 };
 use dotty::jvm::{
     GeneratedClass, JvmClassPlan, JvmCompilationUnit, PreparedJvmEmission, emit_class,
@@ -28,7 +26,7 @@ use dotty::jvm_method_plan::JvmMethodPlanner;
 use dotty::namer::{NamerDiagnostic, NamerError};
 use dotty::source_declarations::{Declaration, DeclarationError, SourceClass};
 use dotty::typer::{SignatureCompletion, SourceTyper, TyperError};
-use dotty::{DetachedSource, SourceDeclarationIndex, SourceDiagnostic, SyntaxDiagnostic};
+use dotty::{DetachedSource, NamedClassBatch, SourceDiagnostic, SyntaxDiagnostic};
 use dotty::{NameSourceError, NamedClassSource as NamedUnit};
 
 trait FixtureMethods {
@@ -363,32 +361,6 @@ impl From<TyperError> for SignatureError {
     }
 }
 
-struct SignatureSources<'a> {
-    units: &'a [NamedUnit],
-    by_source: HashMap<SourceId, &'a NamedUnit>,
-    declarations: SourceDeclarationIndex,
-}
-
-impl<'a> SignatureSources<'a> {
-    fn error_span(&self, error: &TyperError) -> Option<dotty::core::SourceSpan> {
-        dotty::typer_error_span_with(error, |source| {
-            self.by_source.get(&source).map(|unit| unit.ast())
-        })
-    }
-
-    fn new(units: &'a [NamedUnit], store: &SemanticStore) -> Self {
-        Self {
-            units,
-            by_source: units.iter().map(|unit| (unit.source(), unit)).collect(),
-            declarations: SourceDeclarationIndex::from_classes(
-                store,
-                units.iter().flat_map(|unit| unit.classes()),
-            )
-            .expect("valid named class views"),
-        }
-    }
-}
-
 // Follow the provider immediately. The facade supplies the exact symbols to retry.
 fn follow_signature(
     root: SymbolId,
@@ -419,21 +391,21 @@ fn follow_signature(
 }
 
 fn complete_headers(
-    sources: &SignatureSources,
+    sources: &NamedClassBatch,
     store: &mut SemanticStore,
     definitions: Definitions,
     packages: &Packages,
     observe: &mut impl FnMut(SymbolId, SignatureCompletion),
 ) -> Result<TypedHeaders, SignatureError> {
     // Parent applications need the declaring file's constructor signature.
-    for unit in sources.units {
+    for unit in sources.files() {
         let mut typer = unit.typer(store, definitions, packages);
         for class in unit.classes() {
             typer.complete_symbol(class.constructor)?;
         }
     }
     let mut headers = TypedHeaders::default();
-    for (_, root) in named_classes(sources.units) {
+    for (_, root) in sources.classes() {
         if matches!(store.symbols.info(root.symbol), SymbolInfo::Complete(_)) {
             continue;
         }
@@ -442,23 +414,13 @@ fn complete_headers(
             dotty::SignaturePhase::Headers,
             None,
             |symbol| {
-                let header = sources.declarations.get(symbol).expect("indexed class");
-                let unit = sources.by_source[&header.source];
-                let completion = dotty::try_complete_class_header(
+                let completion = sources.try_complete_class_header(
                     symbol,
-                    unit.ast(),
-                    unit.index(),
                     store,
                     definitions,
                     packages,
                     &mut headers.arena,
                     &mut headers.bindings,
-                    |dep| {
-                        sources
-                            .declarations
-                            .get(dep)
-                            .is_some_and(|d| d.kind == SymbolKind::Class)
-                    },
                 )?;
                 observe(symbol, completion);
                 Ok(completion)
@@ -503,10 +465,10 @@ fn complete_methods_in_order(
     packages: &Packages,
     mut observe: impl FnMut(SymbolId, SignatureCompletion),
 ) -> Result<TypedHeaders, SignatureError> {
-    let sources = SignatureSources::new(units, store);
+    let sources = NamedClassBatch::new(units, store).unwrap();
     let headers = complete_headers(&sources, store, definitions, packages, &mut observe)?;
 
-    for (unit, class) in named_classes(units) {
+    for (unit, class) in sources.classes() {
         while let dotty::ClassFieldSignatureCompletion::BlockedOn { field, dependency } =
             dotty::try_complete_class_field_signatures(
                 class.symbol,
@@ -515,7 +477,7 @@ fn complete_methods_in_order(
                 store,
                 definitions,
                 packages,
-                |dep| sources.declarations.member(dep).is_some(),
+                |dep| sources.declarations().member(dep).is_some(),
             )
             .map_err(SignatureError::Field)?
         {
@@ -550,7 +512,7 @@ fn complete_methods_in_order(
 fn complete_member_path(
     root: SymbolId,
     first_dependency: Option<SymbolId>,
-    sources: &SignatureSources,
+    sources: &NamedClassBatch,
     store: &mut SemanticStore,
     definitions: Definitions,
     packages: &Packages,
@@ -561,18 +523,9 @@ fn complete_member_path(
         dotty::SignaturePhase::Members,
         first_dependency,
         |symbol| {
-            let member = sources.declarations.get(symbol).expect("indexed member");
-            let unit = sources.by_source[&member.source];
-            let completion = dotty::try_complete_member_signature(
-                symbol,
-                &sources.declarations,
-                unit.ast(),
-                unit.index(),
-                store,
-                definitions,
-                packages,
-            )
-            .map_err(SignatureError::Member)?;
+            let completion = sources
+                .try_complete_member_signature(symbol, store, definitions, packages)
+                .map_err(SignatureError::Member)?;
             observe(symbol, completion);
             Ok(completion)
         },
@@ -704,7 +657,7 @@ const OVERLOADS: &str = "class A {
 }";
 
 fn assert_overload_target(
-    sources: &SignatureSources<'_>,
+    sources: &NamedClassBatch<'_>,
     method: SymbolId,
     provider: &NamedUnit,
     expected: Declaration,
@@ -713,12 +666,11 @@ fn assert_overload_target(
     use dotty::core::{SourceDefinition, TextRange};
 
     assert_eq!(method, expected.symbol);
-    let location = sources.declarations.get(method).unwrap();
+    let (target, location) = sources.declaration(method).unwrap();
     assert_eq!(
         (location.source, location.class),
         (provider.source(), provider.classes()[0].symbol)
     );
-    let target = sources.by_source[&location.source];
     let Some(SourceDefinition::Canonical { source, tree }) = target.index().definition_of(method)
     else {
         panic!("expected source method")
@@ -758,10 +710,10 @@ fn selected_method_tracks_an_edited_overload_in_both_file_orders() {
                 &mut packages,
             );
             let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
-            let sources = SignatureSources::new(&units, &store);
+            let sources = NamedClassBatch::new(&units, &store).unwrap();
             let (output, bodies) = type_bodies(&units, &mut store, defs, &packages, headers);
-            let caller = sources.by_source[&b];
-            let provider = sources.by_source[&a];
+            let caller = sources.file(b).unwrap();
+            let provider = sources.file(a).unwrap();
             let calls = caller.navigation().unwrap();
             let method_at = |offset| {
                 calls.selected_method_at(offset, caller.ast(), &bodies, &output.arena, &store)
@@ -832,8 +784,8 @@ fn checked_calls_survive_a_failing_sibling_in_both_file_orders() {
                 &mut packages,
             );
             let mut headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
-            let sources = SignatureSources::new(&units, &store);
-            let caller = sources.by_source[&b];
+            let sources = NamedClassBatch::new(&units, &store).unwrap();
+            let caller = sources.file(b).unwrap();
             let class = &caller.classes()[0];
             let check = dotty::check_class_body(
                 class,
@@ -854,7 +806,7 @@ fn checked_calls_survive_a_failing_sibling_in_both_file_orders() {
                     |owner| (owner == class.symbol).then_some(&check),
                 )
             };
-            let provider = sources.by_source[&a];
+            let provider = sources.file(a).unwrap();
             let method = at(text.find("take").unwrap() as u32).unwrap();
             assert_overload_target(
                 &sources,
@@ -876,12 +828,7 @@ fn checked_calls_survive_a_failing_sibling_in_both_file_orders() {
                     &headers.arena,
                     &store,
                     |owner| (owner == class.symbol).then_some(&check),
-                    |id| {
-                        sources
-                            .by_source
-                            .get(&id)
-                            .map(|unit| unit.navigation().unwrap())
-                    },
+                    |id| sources.file(id).map(|unit| unit.navigation().unwrap()),
                 )
                 .unwrap();
             assert_eq!(target.source, a);
@@ -933,9 +880,9 @@ class Second { def read(a: A): Int = a.take(false) }";
             &mut packages,
         );
         let mut headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
-        let sources = SignatureSources::new(&units, &store);
-        let caller = sources.by_source[&b];
-        let provider = sources.by_source[&a];
+        let sources = NamedClassBatch::new(&units, &store).unwrap();
+        let caller = sources.file(b).unwrap();
+        let provider = sources.file(a).unwrap();
         let calls = caller.navigation().unwrap();
         let offsets = [
             B.find("take(42)").unwrap() as u32,
@@ -1296,8 +1243,8 @@ fn cross_file_call_failures_survive_retries_and_leave_the_provider_executable() 
             &mut store,
             &mut packages,
         );
-        let sources = SignatureSources::new(&units, &store);
-        let lookup = |source| sources.by_source.get(&source).map(|u| u.ast());
+        let sources = NamedClassBatch::new(&units, &store).unwrap();
+        let lookup = |source| sources.file(source).map(|u| u.ast());
         let mut headers =
             complete_headers(&sources, &mut store, defs, &packages, &mut |_, _| {}).unwrap();
         let mut blocked = Vec::new();
@@ -1331,8 +1278,8 @@ fn cross_file_call_failures_survive_retries_and_leave_the_provider_executable() 
                 reports.push(report);
             }
         }
-        let bad = sources.by_source[&caller.0];
-        let good = sources.by_source[&provider.0];
+        let bad = sources.file(caller.0).unwrap();
+        let good = sources.file(provider.0).unwrap();
         let expected: Vec<_> = if files[0].0 == caller.0 {
             bad.method_symbols().zip(good.method_symbols()).collect()
         } else {

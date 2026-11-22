@@ -1,5 +1,5 @@
 //! Source ranges observed by a compiler client reporting class body errors.
-use super::{SignatureSources, class_planning::named, complete_signatures};
+use super::{NamedClassBatch, class_planning::named, complete_signatures};
 use dotty::core::{Definitions, DiagnosticSeverity, SymbolKind, TextRange};
 use dotty::source_declarations::SourceClass;
 use dotty::typer::TyperError;
@@ -36,7 +36,7 @@ fn cross_file_diagnostics_track_two_unsaved_edits_in_utf16() {
             &mut packages,
         );
         let mut headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
-        let sources = SignatureSources::new(&units, &store);
+        let sources = NamedClassBatch::new(&units, &store).unwrap();
         // Keep the loader's generic class metadata available during conformance checking.
         let jdk =
             PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME for the client tests"));
@@ -76,12 +76,10 @@ fn cross_file_diagnostics_track_two_unsaved_edits_in_utf16() {
             }
             for failure in errors {
                 let call = failure
-                    .into_call_diagnostic(|source| {
-                        sources.by_source.get(&source).map(|unit| unit.ast())
-                    })
+                    .into_call_diagnostic(|source| sources.file(source).map(|unit| unit.ast()))
                     .unwrap();
                 let member = call.member().unwrap();
-                let declaration = sources.declarations.member(member).unwrap();
+                let declaration = sources.declarations().member(member).unwrap();
                 assert_eq!(declaration.class, class.symbol);
                 assert_eq!(declaration.kind, SymbolKind::Method);
                 let diagnostic = call.render();
@@ -271,8 +269,8 @@ fn check_body_error(marked: &str, check: impl FnOnce(TyperError, Definitions, &S
     let Err(dotty::ClassBodyError::Member { error, .. }) = result else {
         panic!("expected a member typing error, got {result:?}");
     };
-    let span = SignatureSources::new(units, &store)
-        .error_span(&error)
+    let sources = NamedClassBatch::new(units, &store).unwrap();
+    let span = dotty::typer_error_span_with(&error, |id| sources.file(id).map(|u| u.ast()))
         .unwrap_or_else(|| panic!("missing span for {error:?}"));
     assert_eq!(span.source(), unit.source());
     assert_eq!(
