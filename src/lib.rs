@@ -50,7 +50,7 @@ mod source_parse;
 pub use source_parse::{DetachedSource, ParsedSource, SyntaxDiagnostic, parse_source};
 
 mod call_diagnostic;
-pub use call_diagnostic::CallDiagnostic;
+pub use call_diagnostic::{CallDiagnostic, CallErrorIdentity};
 
 mod source_diagnostic;
 pub use source_diagnostic::SourceDiagnostic;
