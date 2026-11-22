@@ -356,12 +356,11 @@ impl SourceTyper<'_> {
             .typed_arena
             .try_get(qualifier)
             .is_some_and(|tree| matches!(tree.kind, TreeKind::Apply(_)))
-            && self.is_direct_current_source_class_result(qualifier_type)
+            && self.is_direct_scala_class_result(qualifier_type)
         {
-            // A direct method application returning a top-level class from
-            // this source batch has a stable, exact class type. This permits
-            // call chains such as `holder.value().get()` without treating a
-            // mutable field reference like `holder.current.get()` as stable.
+            // A value-producing call with an exact top-level Scala class can
+            // be a member receiver. Its tree still represents an evaluation,
+            // and is not a stable path for dependent type selections.
             Ok(())
         } else if self.is_source_parameterless_method_value(qualifier, qualifier_type) {
             // A source `def value: T` is a value-producing member, even though
@@ -524,7 +523,7 @@ impl SourceTyper<'_> {
             && declaration.flags.contains(SymbolFlags::MUTABLE)
     }
 
-    fn is_direct_current_source_class_result(&self, qualifier_type: TypeId) -> bool {
+    fn is_direct_scala_class_result(&self, qualifier_type: TypeId) -> bool {
         let Some(Type::TypeRef {
             target: TypeRefTarget::Symbol(symbol),
             ..
@@ -532,11 +531,13 @@ impl SourceTyper<'_> {
         else {
             return false;
         };
-        if !self.is_current_source_symbol(*symbol) {
+        if !self.store.symbols.contains(*symbol) {
             return false;
         }
         let declaration = self.store.symbols.get(*symbol);
         declaration.kind == SymbolKind::Class
+            && (self.is_current_source_symbol(*symbol)
+                || matches!(declaration.origin, SymbolOrigin::Tasty(_)))
             && declaration
                 .owner
                 .is_some_and(|owner| self.store.symbols.get(owner).kind == SymbolKind::Package)

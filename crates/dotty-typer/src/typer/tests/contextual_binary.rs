@@ -798,3 +798,51 @@ fn binary_pick_default_reuses_the_receiver_and_both_arguments_in_source_order() 
     assert_eq!(store.symbols.owner(target), Some(owner));
     assert_eq!(symbol.owner, Some(owner));
 }
+
+const APPLIED_PAIR_CLIENT: &str =
+    include_str!("../../../tests/fixtures/contextual-arguments/AppliedPairClient.scala");
+
+#[test]
+fn explicit_binary_call_selects_pick_on_the_applied_reader() {
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(APPLIED_PAIR_CLIENT);
+    let reader = method_symbol(&parsed, &store, &index, source, "reader");
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "direct");
+    let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+        panic!()
+    };
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages)
+        .with_resolver(Box::new(contextual_fixture_resolver(defs, &packages)));
+    typer.type_method_definition(tree).unwrap();
+    let ast = typer.typed_ast();
+    let root = typer.typed_index.get(source, rhs).unwrap();
+    let TreeKind::Apply(using) = &ast.get(root).kind else {
+        panic!("explicit using")
+    };
+    assert_eq!(using.kind, ApplyKind::Using);
+    assert_eq!(
+        typer.store.types.get(ast.get(root).ty).reference_symbol(),
+        typer.store.types.get(defs.int).reference_symbol()
+    );
+    let TreeKind::Apply(ordinary) = &ast.get(using.function).kind else {
+        panic!("ordinary clause")
+    };
+    let TreeKind::Select(pick) = &ast.get(ordinary.function).kind else {
+        panic!("pick selection")
+    };
+    let reference = |tree| {
+        typer
+            .store
+            .types
+            .get(ast.get(tree).ty)
+            .reference_symbol()
+            .unwrap()
+    };
+    let member = typer.store.symbols.get(reference(ordinary.function));
+    assert_eq!(typer.store.names.resolve(member.name.text()), "pick");
+    assert!(matches!(member.origin, SymbolOrigin::Tasty(_)));
+    let TreeKind::Apply(receiver) = &ast.get(pick.qualifier).kind else {
+        panic!("reader()")
+    };
+    assert!(receiver.args.is_empty());
+    assert_eq!(reference(receiver.function), reader);
+}
