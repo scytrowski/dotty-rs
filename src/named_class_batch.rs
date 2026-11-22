@@ -7,7 +7,8 @@ use crate::jvm_class_plan::ClassHeaderBindings;
 use crate::source_declarations::SourceClass;
 use crate::typer::{SignatureCompletion, TyperError};
 use crate::{
-    NamedClassSource, SourceDeclaration, SourceDeclarationIndex, SourceDeclarationIndexError,
+    MemberSignatureError, NamedClassSource, SourceDeclaration, SourceDeclarationIndex,
+    SourceDeclarationIndexError,
 };
 
 /// Failure to assemble a batch from named files.
@@ -140,6 +141,32 @@ impl<'a> NamedClassBatch<'a> {
                     .get(dep)
                     .is_some_and(|d| d.kind == SymbolKind::Class)
             },
+        )
+    }
+
+    /// Attempts one field or method signature after header completion. The
+    /// batch supplies its declaring AST and naming index. A dependency in the
+    /// batch may return `BlockedOn`; missing external member types retain the
+    /// typer error. The caller chooses when to retry. An unknown or ineligible
+    /// root yields [`MemberSignatureError::InvalidMember`] before typing.
+    pub fn try_complete_member_signature(
+        &self,
+        member: SymbolId,
+        store: &mut SemanticStore,
+        definitions: Definitions,
+        packages: &Packages,
+    ) -> Result<SignatureCompletion, MemberSignatureError> {
+        let (file, _) = self
+            .declaration(member)
+            .ok_or(MemberSignatureError::InvalidMember(member))?;
+        crate::try_complete_member_signature(
+            member,
+            &self.declarations,
+            file.ast(),
+            file.index(),
+            store,
+            definitions,
+            packages,
         )
     }
 
@@ -294,5 +321,92 @@ mod tests {
         let range = span.span().range();
         assert_eq!(range.start() as usize, text.rfind("start").unwrap());
         assert_eq!(range.len(), 5);
+    }
+    #[test]
+    fn member_attempts_preserve_dependencies_external_failures_and_bad_calls() {
+        use crate::core::{SymbolInfo, Type};
+        for reverse in [false, true] {
+            let mut store = SemanticStore::new();
+            let defs = Definitions::bootstrap(&mut store);
+            let mut packages = Packages::new();
+            let consumer = named(
+                42,
+                "class Consumer(p: Provider) { val answer = p.value(); val bad = p.value(1) }",
+                &mut store,
+                &mut packages,
+            );
+            let provider = named(
+                7,
+                "class Provider(val s: Seeds) { def value() = s.seed }",
+                &mut store,
+                &mut packages,
+            );
+            let seeds = named(
+                3,
+                "class Seeds { val seed = 40 }",
+                &mut store,
+                &mut packages,
+            );
+            let mut files = [&consumer, &provider, &seeds];
+            if reverse {
+                files.reverse();
+            }
+            let batch = NamedClassBatch::new(files, &store).unwrap();
+            prepare_constructors(&batch, &mut store, defs, &packages);
+            let mut arena = AstArena::new();
+            let mut bindings = ClassHeaderBindings::default();
+            for (_, class) in batch.classes() {
+                assert!(matches!(
+                    batch.try_complete_class_header(
+                        class.symbol,
+                        &mut store,
+                        defs,
+                        &packages,
+                        &mut arena,
+                        &mut bindings
+                    ),
+                    Ok(SignatureCompletion::Complete(_))
+                ));
+            }
+            let mut fields = consumer.classes()[0].fields();
+            let answer = fields.next().unwrap().symbol;
+            let bad = fields.next().unwrap().symbol;
+            let value = provider.classes()[0].methods().next().unwrap().symbol;
+            let seed = seeds.classes()[0].fields().next().unwrap().symbol;
+            let partial = NamedClassBatch::new([&provider], &store).unwrap();
+            let checkpoint = store.checkpoint();
+            assert!(
+                matches!(partial.try_complete_member_signature(value,&mut store,defs,&packages),
+                Err(MemberSignatureError::Typing { member, error: TyperError::MemberTypeUnavailable { symbol }, .. }) if member == value && symbol == seed)
+            );
+            assert!(
+                matches!(partial.try_complete_member_signature(seed,&mut store,defs,&packages),
+                Err(MemberSignatureError::InvalidMember(s)) if s == seed)
+            );
+            assert_eq!(store.checkpoint(), checkpoint);
+            let mut attempt =
+                |s| batch.try_complete_member_signature(s, &mut store, defs, &packages);
+            assert_eq!(
+                attempt(answer).unwrap(),
+                SignatureCompletion::BlockedOn(value)
+            );
+            assert_eq!(
+                attempt(value).unwrap(),
+                SignatureCompletion::BlockedOn(seed)
+            );
+            for s in [seed, value, answer] {
+                assert!(matches!(attempt(s), Ok(SignatureCompletion::Complete(_))));
+            }
+            assert!(
+                matches!(attempt(bad), Err(MemberSignatureError::Typing { member, declaration, error: TyperError::ApplicationArityMismatch { expected: 0, actual: 1, .. } }) if member == bad && declaration.source == consumer.source())
+            );
+            for s in [seed, answer] {
+                assert_eq!(store.symbols.info(s), &SymbolInfo::Complete(defs.int));
+            }
+            let SymbolInfo::Complete(ty) = *store.symbols.info(value) else {
+                panic!("missing method signature")
+            };
+            assert!(matches!(store.types.get(ty),Type::Method(m) if m.result == defs.int));
+        }
     }
 }
