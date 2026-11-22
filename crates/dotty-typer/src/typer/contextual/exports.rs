@@ -38,25 +38,22 @@ impl SourceTyper<'_> {
             }
             let module = self.source_module_class_of_object(object)?;
             let members = self.synthetic_module_scope(module)?;
-            for selector in &export.selectors {
-                if selector.bound.is_some() {
+            for target in self.contextual_symbols(members) {
+                let entry = self.store.symbols.get(target);
+                if entry.visibility != Visibility::Public
+                    || entry.flags.contains(SymbolFlags::EXPORTED)
+                    || !entry.flags.contains(SymbolFlags::GIVEN)
+                    || entry.kind != SymbolKind::Field
+                {
                     continue;
                 }
-                let targets = self
-                    .store
-                    .scopes
-                    .get(members)
-                    .lookup_all(&selector.imported)
-                    .to_vec();
-                for target in targets {
-                    let entry = self.store.symbols.get(target);
-                    if entry.visibility != Visibility::Public
-                        || !entry.flags.contains(SymbolFlags::GIVEN)
-                        || entry.kind != SymbolKind::Field
-                    {
-                        continue;
-                    }
-                    let name = if let Some(rename) = selector.renamed {
+                let name = entry.name;
+                let named = export
+                    .selectors
+                    .iter()
+                    .find(|selector| selector.imported == name);
+                let name = if let Some(selector) = named {
+                    if let Some(rename) = selector.renamed {
                         let TreeKind::Ident(ident) = &self.arena.get(rename).kind else {
                             return Err(TyperError::MalformedSourceImport {
                                 source: self.source,
@@ -68,38 +65,50 @@ impl SourceTyper<'_> {
                         }
                         ident.name
                     } else {
-                        entry.name
-                    };
-                    let prefix =
-                        self.term_reference_type(object, None, owner, site.tree.index(), journal)?;
-                    let result = self.term_reference_type(
-                        target,
-                        Some(prefix),
-                        owner,
-                        site.tree.index(),
-                        journal,
-                    )?;
-                    let decl = dotty_core::Symbol {
+                        name
+                    }
+                } else if export.selectors.iter().any(|selector| {
+                    !selector.imported_backquoted
+                        && self
+                            .store
+                            .names
+                            .resolve(selector.imported.text())
+                            .is_empty()
+                        && selector.bound.is_none()
+                }) {
+                    name
+                } else {
+                    continue;
+                };
+                let prefix =
+                    self.term_reference_type(object, None, owner, site.tree.index(), journal)?;
+                let result = self.term_reference_type(
+                    target,
+                    Some(prefix),
+                    owner,
+                    site.tree.index(),
+                    journal,
+                )?;
+                let decl = dotty_core::Symbol {
+                    name,
+                    owner: Some(owner),
+                    kind: SymbolKind::Method,
+                    flags: SymbolFlags::EXPORTED | SymbolFlags::FINAL | SymbolFlags::GIVEN,
+                    visibility: Visibility::Public,
+                    info: SymbolInfo::Complete(result),
+                    origin: SymbolOrigin::Synthetic,
+                    position,
+                    annotations: vec![],
+                    links: Default::default(),
+                };
+                self.store
+                    .enter_export_forwarder(scope, decl, result)
+                    .ok_or(TyperError::AmbiguousTermReference {
+                        source: self.source,
+                        tree_index: site.tree.index(),
                         name,
-                        owner: Some(owner),
-                        kind: SymbolKind::Method,
-                        flags: SymbolFlags::EXPORTED | SymbolFlags::FINAL | SymbolFlags::GIVEN,
-                        visibility: Visibility::Public,
-                        info: SymbolInfo::Complete(result),
-                        origin: SymbolOrigin::Synthetic,
                         position,
-                        annotations: vec![],
-                        links: Default::default(),
-                    };
-                    self.store
-                        .enter_export_forwarder(scope, decl, result)
-                        .ok_or(TyperError::AmbiguousTermReference {
-                            source: self.source,
-                            tree_index: site.tree.index(),
-                            name,
-                            position,
-                        })?;
-                }
+                    })?;
             }
         }
         Ok(())

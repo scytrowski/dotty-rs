@@ -145,7 +145,7 @@ fn ambiguous_file_givens_roll_back_lazy_owner_completion() {
             .type_method_definition(definition_tree(&index, method))
             .unwrap_err();
         assert!(
-            matches!(&error, TyperError::AmbiguousContextualArgument { source: at, tree_index, expected, candidates: actual }
+            matches!(&error, TyperError::AmbiguousContextualArgument { source: at, tree_index, expected, candidates: actual, .. }
             if *at == source && *tree_index == rhs.index() && *expected == defs.int && actual == &candidates),
             "{error:?}"
         );
@@ -1747,6 +1747,7 @@ fn legacy_default_preserves_ambiguity_and_rolls_back_the_failed_call() {
             tree_index,
             expected,
             candidates,
+            ..
         } = error
         else {
             panic!("expected ambiguous legacy default: {error:?}")
@@ -3232,6 +3233,7 @@ fn envelope_calls_diagnose_each_context_argument_at_the_call_site() {
                             tree_index,
                             expected,
                             candidates,
+                            ..
                         } if ambiguous => {
                             assert_eq!(
                                 *candidates,

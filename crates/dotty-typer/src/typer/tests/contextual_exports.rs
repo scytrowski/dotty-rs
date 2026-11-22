@@ -100,7 +100,14 @@ fn failed_export_use_removes_its_entry_from_the_existing_module_scope() {
     let scope = parsed
         .ast
         .iter()
-        .find_map(|(tree, _)| index.export_site_at(source, tree))
+        .filter_map(|(tree, _)| index.export_site_at(source, tree))
+        .find(|site| {
+            store
+                .names
+                .resolve(store.symbols.get(site.owner).name.text())
+                .trim_end_matches('$')
+                == "Named"
+        })
         .and_then(|site| index.scope_of(site.owner))
         .unwrap();
     let name = *dotty_core::TermName::new(store.names.intern("ints")).as_name();
@@ -168,4 +175,55 @@ fn renamed_export_is_the_same_member_for_direct_selection_and_given_search() {
     let scope = index.scope_of(owner).unwrap();
     let original = *dotty_core::TermName::new(typer.store.names.intern("ints")).as_name();
     assert!(typer.store.scopes.get(scope).lookup(&original).is_none());
+}
+
+const ERRORS: &str =
+    include_str!("../../../tests/fixtures/contextual-arguments/ExportErrors.scala");
+
+#[test]
+fn given_wildcard_preserves_visibility_and_reports_both_competing_members() {
+    let (parsed, mut store, packages, defs, index, source) = unit(CLIENT);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let call = client_result(&mut typer, &parsed, "wildcard").unwrap();
+    let selected = reference(&typer, evidence(&typer, call));
+    assert_eq!(
+        typer
+            .store
+            .types
+            .get(typer.store.export_target(selected).unwrap())
+            .reference_symbol(),
+        Some(val_symbol(&parsed, typer.store(), &index, source, "flags").0)
+    );
+    let (parsed, mut store, packages, defs, index, source) = unit(ERRORS);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let before = typer.store.checkpoint();
+    assert!(matches!(
+        client_result(&mut typer, &parsed, "hidden"),
+        Err(TyperError::MissingContextualArgument { .. })
+    ));
+    for _ in 0..2 {
+        let error = client_result(&mut typer, &parsed, "ambiguous").unwrap_err();
+        let TyperError::AmbiguousContextualArgument {
+            candidate_names, ..
+        } = error
+        else {
+            panic!("{error:?}")
+        };
+        let mut names: Vec<_> = candidate_names
+            .iter()
+            .map(|(owner, name)| {
+                (
+                    typer
+                        .store
+                        .names
+                        .resolve(owner.unwrap().text())
+                        .trim_end_matches('$'),
+                    typer.store.names.resolve(name.text()),
+                )
+            })
+            .collect();
+        names.sort();
+        assert_eq!(names, [("All", "ints"), ("Other", "another")]);
+        assert_eq!(typer.store.checkpoint(), before);
+    }
 }

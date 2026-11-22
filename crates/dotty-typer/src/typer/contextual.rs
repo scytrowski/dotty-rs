@@ -1897,6 +1897,16 @@ impl SourceTyper<'_> {
                 source: self.source,
                 tree_index,
                 expected,
+                candidate_names: maxima
+                    .iter()
+                    .map(|&i| {
+                        let entry = self.store.symbols.get(candidates[i].0.reference.symbol);
+                        (
+                            entry.owner.map(|owner| self.store.symbols.get(owner).name),
+                            entry.name,
+                        )
+                    })
+                    .collect(),
                 candidates: maxima
                     .iter()
                     .map(|&i| candidates[i].0.reference.symbol)
