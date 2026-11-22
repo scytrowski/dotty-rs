@@ -104,7 +104,8 @@ use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_
 use dotty::parse_source;
 use dotty::parser::ParserFeatures;
 use dotty::source_declarations::source_classes;
-use dotty::typer::SourceTyper;
+use dotty::typer::{SourceTyper, TyperWarning};
+use dotty::SourceDiagnostic;
 
 let source = SourceId::from_index(0);
 let mut store = SemanticStore::new();
@@ -112,7 +113,7 @@ let definitions = Definitions::bootstrap(&mut store);
 let mut packages = Packages::new();
 let parsed = parse_source(
     source,
-    "class Answer { def value: Int = 42 }",
+    "class Answer { def f(implicit n: Int): Int = n; def value: Int = f(42) }",
     ParserFeatures::default(),
 )?
 .bind(&mut store.names);
@@ -136,12 +137,19 @@ let index = match name_compilation_unit_with_diagnostics(
 };
 let classes = source_classes(&syntax.ast, syntax.root, source, &index, &store)?;
 let class = classes.first().ok_or("expected a supported source class")?;
-let method = class.methods().next().ok_or("expected a concrete method")?;
+let mut methods = class.methods();
+let f = methods.next().ok_or("expected f")?;
+let value = methods.next().ok_or("expected value")?;
 let mut typer = SourceTyper::new(
     &syntax.ast, source, &index, &mut store, definitions, &packages,
 );
-let typed_method = typer.type_method_definition(method.tree)?;
+typer.complete_symbol(f.symbol)?;
+let typed_method = typer.type_method_definition(value.tree)?;
 assert!(matches!(typer.typed_ast().get(typed_method).kind, TreeKind::DefDef(_)));
+let [warning] = typer.diagnostics() else { return Err("expected one warning".into()) };
+assert_eq!(warning.issue(), &TyperWarning::ImplicitClauseWithoutUsing);
+let report = SourceDiagnostic::from_typer_warning(source, warning);
+assert_eq!(report.code, Some("typer.implicit_clause_without_using"));
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
