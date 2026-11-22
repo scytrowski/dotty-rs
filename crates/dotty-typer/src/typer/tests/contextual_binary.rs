@@ -1103,3 +1103,5 @@ fn ambiguous_binary_legacy_evidence_prevents_the_default_on_both_receivers() {
         assert_binary_ambiguity(text, name);
     }
 }
+
+mod multiclause;
