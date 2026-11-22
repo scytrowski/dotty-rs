@@ -12,12 +12,19 @@ use std::rc::Rc;
 /// Broad machine-readable class-loading failure category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClassLoadCategory {
+    /// The requested artifact or class could not be found.
     Missing,
+    /// An artifact violates its binary or metadata format contract.
     MalformedArtifact,
+    /// The artifact uses a valid but unsupported feature or version.
     UnsupportedFeatureOrVersion,
+    /// A referenced symbol or dependency could not be resolved.
     ResolutionOrDependency,
+    /// Filesystem, archive, or external environment failure.
     IoOrEnvironment,
+    /// Compiler-owned identity or loading-state invariant failed.
     InternalInvariant,
+    /// The retained payload is insufficient to choose a more precise category.
     Conditional,
 }
 
@@ -63,12 +70,19 @@ pub enum ClassLoadError {
     /// The class file's own `this_class` name did not match the name it
     /// was requested under (JVMS §5.3.5).
     NameMismatch {
+        /// Binary class identity requested by the caller.
         requested: BinaryName,
+        /// Observed binary class identity.
         actual: BinaryName,
     },
     /// A name in the canonical package scope is occupied by a symbol that
     /// cannot safely represent the requested external class identity.
-    IdentityConflict { name: BinaryName, reason: String },
+    IdentityConflict {
+        /// Binary class identity being resolved by this loading operation.
+        name: BinaryName,
+        /// Detailed reason for rejecting this input or dependency.
+        reason: String,
+    },
     /// The bytes found for this class did not decode as a valid
     /// `.tasty` file, or no `TypeDef` in it matched the requested name —
     /// including a `.tasty` supertype reference that could not be
@@ -84,8 +98,11 @@ pub enum ClassLoadError {
     /// superclass, an interface, or — since `docs/classloader.md` §9's
     /// Milestone 6 — a member's declared type) failed.
     DependencyFailure {
+        /// Binary class name owning the requested member.
         owner: BinaryName,
+        /// Binary dependency whose loading or resolution failed.
         dependency: BinaryName,
+        /// Underlying classpath, decoding, or dependency failure.
         source: Rc<ClassLoadError>,
     },
     /// A class, field, or method's `Signature` attribute referenced a
@@ -260,28 +277,37 @@ impl ClassLoadError {
 /// selected have no fabricated origin or format.
 #[derive(Debug, Clone)]
 pub struct ClassLoadFailure {
+    /// Underlying typed failure; inspect it for the more specific cause.
     pub error: ClassLoadError,
+    /// Provenance of this declaration, artifact, or argument binding.
     pub origin: Option<crate::class_path::ClassOrigin>,
+    /// Class-file or TASTy artifact format, when known.
     pub format: Option<crate::class_path::ClassFormat>,
 }
 
 impl ClassLoadFailure {
+    /// Returns the stable diagnostic code of the outer class-loading failure.
     pub fn code(&self) -> &'static str {
         self.error.code()
     }
 
+    /// Returns the machine-readable category of the outer failure, retaining dependency wrappers.
     pub fn category(&self) -> ClassLoadCategory {
         self.error.category()
     }
 
+    /// Borrows the deepest retained class-loading error after following dependency wrappers.
     pub fn root_cause(&self) -> &ClassLoadError {
         self.error.root_cause()
     }
 
+    /// Returns the stable code of the deepest retained cause.
     pub fn root_cause_code(&self) -> &'static str {
         self.error.root_cause_code()
     }
 
+    /// Returns the category of the deepest retained cause; conditional categories retain their
+    /// original uncertainty.
     pub fn root_cause_category(&self) -> ClassLoadCategory {
         self.error.root_cause_category()
     }

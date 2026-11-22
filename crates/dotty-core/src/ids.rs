@@ -86,9 +86,9 @@ opaque_id!(
 );
 
 opaque_id!(
-    /// Identifies a deferred symbol completion. Opaque in the foundation PR —
-    /// no completer engine exists yet; a future namer/typer mints these and
-    /// resolves them to a `SymbolInfo::Complete`.
+    /// Identifies deferred symbol completion state owned by a compiler phase.
+    /// The core model does not run a completer or expose raw-ID construction;
+    /// a phase interpreting `SymbolInfo::Deferred` owns the completion policy.
     CompletionId
 );
 

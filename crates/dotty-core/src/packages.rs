@@ -36,7 +36,9 @@ use crate::symbols::{
 /// A package entered into the store: its symbol and declaration scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnteredPackage {
+    /// Declaration identity involved in the operation, relative to the caller’s symbol table.
     pub symbol: SymbolId,
+    /// Lookup-scope identity in the canonical session scope arena.
     pub scope: ScopeId,
 }
 
@@ -55,6 +57,8 @@ pub struct Packages {
 }
 
 impl Packages {
+    /// Creates an empty package registry. Enter packages using the same semantic store throughout
+    /// its lifetime.
     pub fn new() -> Self {
         Self::default()
     }
@@ -97,6 +101,7 @@ impl Packages {
         self.order.len() - usize::from(!self.order.is_empty())
     }
 
+    /// Returns whether no named packages have been entered; the root package is excluded.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

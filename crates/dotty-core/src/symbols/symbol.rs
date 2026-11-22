@@ -33,17 +33,26 @@ pub struct SymbolLinks {
 /// found by name lookup.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Symbol {
+    /// Interned text identity and term/type namespace of the declaration or reference.
     pub name: Name,
+    /// Semantic owner of the declaration; ownership is distinct from lookup scope.
     pub owner: Option<SymbolId>,
+    /// Stable declaration category, independent of flags and visibility.
     pub kind: SymbolKind,
+    /// Orthogonal declaration properties, independent of symbol kind and visibility.
     pub flags: SymbolFlags,
     /// Who can refer to this symbol — see [`Visibility`]'s docs for why this
     /// is not folded into `flags` as a `PRIVATE`/`PROTECTED` bit pair.
     pub visibility: Visibility,
+    /// Current completion state; a completed entry holds this declaration’s semantic signature.
     pub info: SymbolInfo,
+    /// Source, binary, builtin, or synthetic provenance of this declaration.
     pub origin: SymbolOrigin,
+    /// Semantic annotation identities in this store’s annotation arena.
     pub annotations: Vec<AnnotationId>,
+    /// Optional source location; absent for nodes without source provenance.
     pub position: Option<SourceSpan>,
+    /// Related semantic identities, such as companions and module-class links.
     pub links: SymbolLinks,
 }
 

@@ -27,14 +27,23 @@ pub(crate) fn synthetic_term_param_name(names: &mut NameInterner, index: usize) 
 /// contextual meaning.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KnownNames {
+    /// Interned `as` contextual keyword name in this parser session.
     pub as_: TermName,
+    /// Interned `derives` contextual keyword name in this parser session.
     pub derives: TermName,
+    /// Interned `extension` contextual keyword name in this parser session.
     pub extension: TermName,
+    /// Interned `infix` contextual keyword name in this parser session.
     pub infix: TermName,
+    /// Interned `inline` contextual keyword name in this parser session.
     pub inline: TermName,
+    /// Interned `opaque` contextual keyword name in this parser session.
     pub opaque: TermName,
+    /// Interned `open` contextual keyword name in this parser session.
     pub open: TermName,
+    /// Interned `transparent` contextual keyword name in this parser session.
     pub transparent: TermName,
+    /// Interned `using` contextual keyword name in this parser session.
     pub using: TermName,
     /// Contextual name used by template `uses` clauses.
     pub uses: TermName,

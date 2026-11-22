@@ -16,3 +16,6 @@ documentation = "https://docs.rs/dotty-jvm"
 [dependencies]
 dotty-core.workspace = true
 dotty-classfile.workspace = true
+
+[lints]
+workspace = true

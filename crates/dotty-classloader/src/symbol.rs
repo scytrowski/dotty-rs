@@ -23,7 +23,9 @@ use dotty_core::SymbolId;
 /// about).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClassRef {
+    /// Symbolic binary class name awaiting resolution.
     Unresolved(BinaryName),
+    /// Canonical class declaration identity in the current semantic session.
     Resolved(SymbolId),
 }
 
@@ -49,17 +51,29 @@ pub enum ClassRef {
 /// feature landed.
 #[derive(Debug, Clone)]
 pub struct ClassfileMetadata {
+    /// JVM binary name identifying the class.
     pub binary_name: BinaryName,
+    /// Raw or typed JVM access flags; interpretation depends on the enclosing item.
     pub access_flags: ClassAccessFlags,
+    /// Declared fields in class-file order.
     pub fields: Vec<FieldSymbol>,
+    /// Declared methods in source or class-file order.
     pub methods: Vec<MethodSymbol>,
+    /// Optional generic signature or semantic callable signature.
     pub signature: Option<ClassSignature>,
+    /// Optional JVM nest host used for private-access semantics.
     pub nest_host: Option<ClassRef>,
+    /// Classes recorded as members of this JVM nest.
     pub nest_members: Vec<ClassRef>,
+    /// Direct subclasses permitted by a sealed class file.
     pub permitted_subclasses: Vec<ClassRef>,
+    /// Nested-class table entries in class-file order.
     pub inner_classes: Vec<InnerClassEntry>,
+    /// Enclosing method metadata for a local or anonymous class.
     pub enclosing_method: Option<EnclosingMethodRef>,
+    /// Ordered record components, absent for non-record classes.
     pub record_components: Option<Vec<RecordComponentSymbol>>,
+    /// Annotations attached to this item, preserving their recorded order.
     pub annotations: Vec<SemanticAnnotation>,
 }
 

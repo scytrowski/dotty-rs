@@ -65,66 +65,126 @@ const MAX_DEPTH: usize = 512;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TypeRebindError {
     /// `source` is not a [`Type::TypeLambda`].
-    NotATypeLambda { source: TypeId },
+    NotATypeLambda {
+        /// Source type from which the enclosing conversion or relation starts.
+        source: TypeId,
+    },
     /// The supplied binder is not a method, or the argument count differs.
-    InvalidMethodApplication { source: TypeId },
+    InvalidMethodApplication {
+        /// Source type from which the enclosing conversion or relation starts.
+        source: TypeId,
+    },
     /// A referenced method argument does not denote a stable path.
-    MissingMethodArgumentPath { binder: TypeId, index: u32 },
+    MissingMethodArgumentPath {
+        /// Enclosing type binder whose parameters are referenced.
+        binder: TypeId,
+        /// Zero-based parameter position within the identified type binder.
+        index: u32,
+    },
     /// `source` is not a [`Type::Poly`].
-    NotAPoly { source: TypeId },
+    NotAPoly {
+        /// Source type from which the enclosing conversion or relation starts.
+        source: TypeId,
+    },
     /// Explicit type arguments do not match the polymorphic binder's arity.
     PolyArityMismatch {
+        /// Source type from which the enclosing conversion or relation starts.
         source: TypeId,
+        /// Required argument or parameter count.
         expected: usize,
+        /// Observed argument or parameter count.
         actual: usize,
     },
     /// The Poly has more parameters than a `ParamRef` index can represent.
-    PolyArityExceedsIndex { source: TypeId, actual: usize },
+    PolyArityExceedsIndex {
+        /// Source type from which the enclosing conversion or relation starts.
+        source: TypeId,
+        /// Observed argument or parameter count.
+        actual: usize,
+    },
     /// A parameter reference to the instantiated binder has an invalid index.
     InvalidPolyParamRef {
+        /// Enclosing type binder whose parameters are referenced.
         binder: TypeId,
+        /// Zero-based parameter position within the identified type binder.
         index: u32,
+        /// Number of arguments, parameters, or components in the inspected shape.
         arity: usize,
     },
     /// Explicit type arguments do not match a type lambda's arity.
     TypeLambdaArityMismatch {
+        /// Source type from which the enclosing conversion or relation starts.
         source: TypeId,
+        /// Required argument or parameter count.
         expected: usize,
+        /// Observed argument or parameter count.
         actual: usize,
     },
     /// The type lambda has more parameters than a `ParamRef` index can represent.
-    TypeLambdaArityExceedsIndex { source: TypeId, actual: usize },
+    TypeLambdaArityExceedsIndex {
+        /// Source type from which the enclosing conversion or relation starts.
+        source: TypeId,
+        /// Observed argument or parameter count.
+        actual: usize,
+    },
     /// A parameter reference to the instantiated type lambda has an invalid index.
     InvalidTypeLambdaParamRef {
+        /// Enclosing type binder whose parameters are referenced.
         binder: TypeId,
+        /// Zero-based parameter position within the identified type binder.
         index: u32,
+        /// Number of arguments, parameters, or components in the inspected shape.
         arity: usize,
     },
     /// A referenced type id is outside the store's type arena.
-    InvalidType { id: TypeId },
+    InvalidType {
+        /// Identity of this source, type, or annotation in its owning session table.
+        id: TypeId,
+    },
     /// An annotation id is outside the store's annotation arena.
-    InvalidAnnotation { id: AnnotationId },
+    InvalidAnnotation {
+        /// Identity of this source, type, or annotation in its owning session table.
+        id: AnnotationId,
+    },
     /// `declared_variances` has `actual` entries, but the lambda has
     /// `expected` parameters. Nothing is truncated or padded.
     VarianceArityMismatch {
+        /// Source type from which the enclosing conversion or relation starts.
         source: TypeId,
+        /// Required argument or parameter count.
         expected: usize,
+        /// Observed argument or parameter count.
         actual: usize,
     },
     /// The graph reaches a slot that was reserved and not filled yet: a
     /// binder still under construction, referenced by id rather than through
     /// a `ParamRef`.
-    UnfilledType { id: TypeId },
+    UnfilledType {
+        /// Identity of this source, type, or annotation in its owning session table.
+        id: TypeId,
+    },
     /// The graph reaches `id` again through itself without a binder between,
     /// which no well-formed type does.
-    CyclicType { id: TypeId },
+    CyclicType {
+        /// Identity of this source, type, or annotation in its owning session table.
+        id: TypeId,
+    },
     /// The graph nests deeper than the rebinder allows.
-    TooDeep { id: TypeId },
+    TooDeep {
+        /// Identity of this source, type, or annotation in its owning session table.
+        id: TypeId,
+    },
     /// A parameter symbol was given twice to an abstraction: a reference to it
     /// could only name one of the two positions.
-    DuplicateParameterSymbol { symbol: SymbolId },
+    DuplicateParameterSymbol {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+    },
     /// A symbol was given more than one replacement in a substitution.
-    DuplicateSubstitutionSymbol { symbol: SymbolId },
+    DuplicateSubstitutionSymbol {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+    },
 }
 
 impl fmt::Display for TypeRebindError {
@@ -882,10 +942,15 @@ fn references_this_type(
 /// `MethodParam` will say.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MethodParamSpec {
+    /// Declaration identity involved in the operation, relative to the caller’s symbol table.
     pub symbol: SymbolId,
+    /// Interned name in the term namespace; resolve its text through the session interner.
     pub name: TermName,
+    /// Semantic type identity in the same session type arena.
     pub ty: TypeId,
+    /// Whether this parameter is erased from runtime argument passing.
     pub erased: bool,
+    /// Whether this method uses JVM variable-arity calling metadata.
     pub varargs: bool,
 }
 
@@ -893,9 +958,13 @@ pub struct MethodParamSpec {
 /// [`poly_type_from_symbols`] / [`type_lambda_from_symbols`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TypeParamSpec {
+    /// Declaration identity involved in the operation, relative to the caller’s symbol table.
     pub symbol: SymbolId,
+    /// Interned name in the type namespace; resolve its text through the session interner.
     pub name: TypeName,
+    /// Lower and upper bound representation for this parameter.
     pub bounds: TypeId,
+    /// Explicit source variance, absent when no variance marker was written.
     pub declared_variance: Option<Variance>,
 }
 

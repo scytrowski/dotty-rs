@@ -663,11 +663,17 @@ pub struct ClassLoader<'store, E> {
 /// is populated only when the same TASTy proves a real class companion.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModuleIdentity {
+    /// Module value identity in the canonical session symbol table.
     pub object: SymbolId,
+    /// Module-class identity, distinct from the module value.
     pub module_class: SymbolId,
+    /// Companion class identity, when one was found.
     pub companion_class: Option<SymbolId>,
+    /// Binary name of the module value companion.
     pub object_name: BinaryName,
+    /// Binary name of the module class.
     pub module_class_name: BinaryName,
+    /// Source visibility by nested type name.
     pub nested_type_visibilities: HashMap<String, Visibility>,
 }
 
@@ -718,11 +724,13 @@ pub struct ClassLoadProfile {
     pub resource_bytes: usize,
     /// Time spent decoding class-file payloads; nested class loads are counted separately.
     pub classfile_decode_ns: u128,
+    /// Number of class-file decoding requests recorded by this profile.
     pub classfile_decode_calls: usize,
     /// Class-file decoder time after subtracting any explicitly timed child lookup.
     pub classfile_decode_exclusive_ns: u128,
     /// Time spent decoding TASTy payloads; nested class loads are counted separately.
     pub tasty_decode_ns: u128,
+    /// Number of TASTy decoding requests recorded by this profile.
     pub tasty_decode_calls: usize,
     /// TASTy decoder time after subtracting resource accesses measured in its callbacks.
     pub tasty_decode_exclusive_ns: u128,
@@ -762,9 +770,13 @@ pub enum ClassLoadDependencyReason {
 /// An aggregated directed edge in one profiled class-load request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClassLoadDependencyEdge {
+    /// Semantic owner of the declaration; ownership is distinct from lookup scope.
     pub owner: String,
+    /// Binary dependency whose loading or resolution failed.
     pub dependency: String,
+    /// Detailed reason for rejecting this input or dependency.
     pub reason: ClassLoadDependencyReason,
+    /// Number of load requests that observed this dependency edge.
     pub requests: usize,
 }
 

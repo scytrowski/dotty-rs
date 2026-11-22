@@ -28,6 +28,9 @@
 //! also supports one primary-constructor clause of plain Int parameters,
 //! retaining the class-template and constructor-owned parameter identities.
 
+#![deny(missing_docs)]
+#![doc = include_str!("guide.md")]
+
 mod artifact_name;
 mod class_state_output;
 mod error;

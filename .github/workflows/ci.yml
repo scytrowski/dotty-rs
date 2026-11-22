@@ -63,7 +63,7 @@ jobs:
       - name: Build documentation
         env:
           RUSTDOCFLAGS: "-D warnings"
-        run: cargo doc --workspace --no-deps --locked
+        run: cargo doc --workspace --no-deps --all-features --locked
 
       - name: Run tests
         env:
@@ -75,7 +75,7 @@ jobs:
       - name: Test API documentation examples
         env:
           RUSTDOCFLAGS: "-D warnings"
-        run: cargo test --workspace --doc --locked
+        run: cargo test --workspace --doc --all-features --locked
 
       - name: Check diff
         run: git diff --check

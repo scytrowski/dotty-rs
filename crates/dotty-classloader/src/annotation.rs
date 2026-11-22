@@ -27,7 +27,9 @@ use crate::symbol::ClassRef;
 /// model needs to distinguish.
 #[derive(Debug, Clone)]
 pub struct SemanticAnnotation {
+    /// Class or type identity of the annotation.
     pub annotation_type: ClassRef,
+    /// Elements in their original source or annotation order.
     pub elements: Vec<(String, AnnotationValue)>,
 }
 
@@ -42,20 +44,35 @@ pub struct SemanticAnnotation {
 /// stay as their raw decoded descriptor strings.
 #[derive(Debug, Clone)]
 pub enum AnnotationValue {
+    /// Annotation signed 8-bit integer value.
     Byte(i32),
+    /// Annotation UTF-16 code-unit character value.
     Char(i32),
+    /// Annotation double-precision floating-point value.
     Double(f64),
+    /// Annotation single-precision floating-point value.
     Float(f32),
+    /// Annotation signed 32-bit integer value.
     Int(i32),
+    /// Annotation signed 64-bit integer value.
     Long(i64),
+    /// Annotation signed 16-bit integer value.
     Short(i32),
+    /// Annotation Boolean value.
     Boolean(bool),
+    /// Decoded string annotation value.
     String(String),
+    /// Enumeration constant identified by its type and constant name.
     Enum {
+        /// JVM descriptor of the annotation type or class literal.
         type_descriptor: String,
+        /// Name of the selected enumeration constant.
         const_name: String,
     },
+    /// Class literal represented by its JVM descriptor.
     Class(String),
+    /// Nested annotation value.
     Annotation(Box<SemanticAnnotation>),
+    /// Ordered array of annotation element values.
     Array(Vec<AnnotationValue>),
 }

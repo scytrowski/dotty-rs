@@ -33,9 +33,13 @@ mod sealed {
 /// does not by itself imply an associated-type projection like
 /// `P::TypeInfo: Debug` — these supertrait bounds are what closes that gap.
 pub trait AstPhase: sealed::Sealed {
+    /// Per-tree type payload: unit for Untyped, a canonical TypeId for Typed.
     type TypeInfo: Clone + Debug + PartialEq;
+    /// Phase-specific node payload; typed trees cannot contain untyped-only syntax.
     type ExtraNode: Clone + Debug + PartialEq;
+    /// Phase-specific source declaration metadata.
     type DefMetadata: Clone + Debug + PartialEq + Eq;
+    /// Phase-specific source template metadata, such as derives and uses clauses.
     type TemplateMetadata: Clone + Debug + PartialEq + Eq;
 }
 

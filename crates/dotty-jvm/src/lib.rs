@@ -8,6 +8,9 @@
 //! identities from names, or mutate the caller's stores. See
 //! `docs/jvm-backend.md` for its supported subset and boundary assumptions.
 
+#![deny(missing_docs)]
+#![doc = include_str!("guide.md")]
+
 use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
@@ -88,7 +91,9 @@ pub const JVM_MAX_PARAMETER_SLOTS: usize = 255;
 /// store-only projectors remain narrower.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JvmType {
+    /// Scala Int lowered as a JVM int value.
     Int,
+    /// Scala Boolean lowered using the JVM int-like verifier category.
     Boolean,
     /// A category-one JVM `float` value.
     Float,
@@ -103,6 +108,7 @@ pub enum JvmType {
 /// Operand category for the JVM values currently represented here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JvmValueCategory {
+    /// JVM verifier category shared by supported int and Boolean values.
     IntLike,
     /// A JVM category-one `float` value, distinct from int-like values.
     Float,
@@ -117,7 +123,9 @@ pub enum JvmValueCategory {
 /// A JVM method result. `Void` is only valid as a result, never a parameter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JvmReturnType {
+    /// Method returns the specified supported JVM value type.
     Value(JvmType),
+    /// Method returns no JVM value, corresponding to supported Unit results.
     Void,
 }
 
@@ -709,91 +717,152 @@ impl GeneratedClass {
 /// Why a class symbol is outside the supported top-level class subset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnsupportedJvmClassKind {
+    /// This validation path rejects the abstract declaration marker.
     Abstract,
+    /// This validation path rejects the generic class requiring unsupported type parameters.
     Generic,
+    /// This validation path rejects the enum declaration marker.
     Enum,
+    /// This validation path rejects the synthetic declaration marker.
     Synthetic,
+    /// This validation path rejects the case declaration marker.
     Case,
+    /// This validation path rejects the sealed declaration marker.
     Sealed,
 }
 
 /// Why a canonical class parent cannot be accepted in the bounded unit graph.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JvmSuperclassIssue {
+    /// The class lacks the single supported direct superclass.
     MissingOrMultipleParents,
+    /// The parent type is not a canonical class reference in this session.
     NonCanonicalParentType,
+    /// The parent symbol is not an accepted superclass declaration kind.
     WrongParentKind,
+    /// The class names itself as its superclass.
     SelfParent,
+    /// The source superclass is absent from the complete compilation plan.
     ParentNotPlanned,
+    /// The superclass has a shape outside this backend's supported subset.
     ParentUnsupportedShape,
+    /// The selected superclass forbids extension.
     ParentIsFinal,
+    /// The selected superclass is not publicly accessible.
     ParentNotPublic,
+    /// The superclass has an unsupported explicit self type.
     ParentHasSelfType,
+    /// The planned superclass graph contains a cycle.
     InheritanceCycle,
+    /// The superclass chain exceeds the configured traversal bound.
     InheritanceTooDeep,
+    /// The hierarchy cannot reach the required canonical Object root.
     MissingObjectRoot,
+    /// The required superclass constructor is absent or inaccessible.
     ParentConstructorUnavailable,
 }
 
 /// A symbol flag with no conservative mapping in this JVM metadata subset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnsupportedJvmSymbolFlag {
+    /// This validation path rejects the abstract declaration marker.
     Abstract,
+    /// This validation path rejects the sealed declaration marker.
     Sealed,
+    /// This validation path rejects the case declaration marker.
     Case,
+    /// This validation path rejects the implicit declaration marker.
     Implicit,
+    /// This validation path rejects the given declaration marker.
     Given,
+    /// This validation path rejects the lazy declaration marker.
     Lazy,
+    /// This validation path rejects the mutable symbol flag.
     Mutable,
+    /// This validation path rejects the inline declaration marker.
     Inline,
+    /// This validation path rejects the transparent declaration marker.
     Transparent,
+    /// This validation path rejects the opaque declaration marker.
     Opaque,
+    /// This validation path rejects the extension declaration marker.
     Extension,
+    /// This validation path rejects the static declaration marker.
     Static,
+    /// This validation path rejects the synthetic declaration marker.
     Synthetic,
+    /// This validation path rejects the Java-defined symbol flag.
     JavaDefined,
+    /// This validation path rejects the erased declaration marker.
     Erased,
+    /// This validation path rejects the override declaration marker.
     Override,
+    /// This validation path rejects the enum declaration marker.
     Enum,
+    /// This validation path rejects the export-generated symbol flag.
     Exported,
 }
 
 /// The name component that failed the bounded Scala/JVM identifier check.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JvmNameKind {
+    /// One source package segment being encoded as a JVM name.
     PackageSegment,
+    /// Class name being encoded as a JVM internal name.
     Class,
+    /// Field name being encoded for class-file metadata.
     Field,
+    /// Method name being encoded for class-file metadata.
     Method,
 }
 
 /// Why a class's semantic class information cannot establish a simple class.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InvalidJvmClassInfoKind {
+    /// The class signature is missing or its type slot is unfilled.
     MissingOrUnfilled,
+    /// Class signature completion recorded an error.
     Error,
+    /// The completed signature is not a class-info type.
     NotClassInfo,
+    /// The class-info payload identifies a different class.
     WrongClassSymbol,
+    /// The class declaration scope is absent from this session.
     MissingDeclarationScope,
+    /// The declaration scope belongs to another owner.
     WrongDeclarationScopeOwner,
+    /// A class member fails the canonical declaration contract.
     InvalidDeclaration,
 }
 
 /// Why accessor call-site metadata no longer agrees with its source field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JvmAccessorCallMetadataIssue {
+    /// More than one accessor metadata entry claims the same field.
     DuplicateField,
+    /// The accessor or field belongs to a different class.
     OwnerMismatch,
+    /// The receiver class has no planned metadata.
     ReceiverClassMissing,
+    /// No effective getter is recorded for this field.
     EffectiveGetterMissing,
+    /// The effective getter differs from the selected accessor.
     EffectiveGetterMismatch,
+    /// No effective setter is recorded for this field.
     EffectiveSetterMissing,
+    /// The effective setter differs from the selected accessor.
     EffectiveSetterMismatch,
+    /// The required canonical source-to-typed binding is absent.
     BindingMissing,
+    /// The body proof identifies a different backing field.
     BodyFieldProofMismatch,
+    /// The field and accessor value types disagree.
     ValueTypeMismatch,
+    /// Backing-field flags disagree with the accessor contract.
     BackingFieldFlagsMismatch,
+    /// The getter signature does not match the field type.
     GetterSignatureMismatch,
+    /// The setter signature does not accept the field type and return Unit.
     SetterSignatureMismatch,
 }
 
@@ -878,749 +947,1263 @@ impl JvmMethodPlan {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum JvmCodegenError {
     /// The contextual getter, its copied formals or its body disagree with the source plan.
-    InvalidContextualDefaultGetter { method: SymbolId },
+    InvalidContextualDefaultGetter {
+        /// Method declaration identity being inspected in the supplied session.
+        method: SymbolId,
+    },
     /// A planned constant local given disagrees with its source or typed declaration.
-    InvalidLiteralGiven { symbol: SymbolId },
+    InvalidLiteralGiven {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+    },
     /// A primary constructor plan or its source evidence is inconsistent.
     InvalidPrimaryConstructor {
+        /// Constructor declaration identity being inspected in the supplied session.
         constructor: SymbolId,
+        /// Specific structural or semantic reason for the enclosing rejection.
         issue: JvmConstructorIssue,
     },
     /// A constructor application has a supported shape but mismatched class identities.
     JvmConstructorCallClassMismatch {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Required declaration identity in the caller’s symbol table.
         expected: SymbolId,
+        /// Observed declaration identity in the caller’s symbol table. None records a missing
+        /// binding or owner.
         found: Option<SymbolId>,
     },
     /// The selected constructor belongs to a different class than the typed `new` target.
     JvmConstructorCallWrongOwner {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Constructor declaration identity being inspected in the supplied session.
         constructor: SymbolId,
+        /// Required declaration identity in the caller’s symbol table.
         expected: SymbolId,
+        /// Observed declaration identity in the caller’s symbol table. None records a missing
+        /// binding or owner.
         actual: Option<SymbolId>,
     },
     /// The selected canonical constructor is not present in approved constructor metadata.
     JvmConstructorCallNotApproved {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Constructor declaration identity being inspected in the supplied session.
         constructor: SymbolId,
+        /// Class declaration identity being inspected in the supplied session.
         class: SymbolId,
     },
     /// Constructor access is not available from the caller class in this subset.
     InaccessibleJvmConstructor {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Constructor declaration identity being inspected in the supplied session.
         constructor: SymbolId,
+        /// Enclosing class of the call site.
         caller_class: SymbolId,
+        /// Class owning the member being checked.
         owner_class: SymbolId,
     },
     /// The call does not supply the exact constructor descriptor arity.
     JvmConstructorCallArityMismatch {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Constructor declaration identity being inspected in the supplied session.
         constructor: SymbolId,
+        /// Required argument or parameter count.
         expected: usize,
+        /// Observed argument or parameter count.
         found: usize,
     },
     /// One argument's completed primitive type differs from its constructor slot.
     JvmConstructorCallArgumentTypeMismatch {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Exact typed argument tree involved in the failed check.
         argument: TreeId<Typed>,
+        /// Required JVM value or control-flow representation.
         expected: JvmType,
+        /// Observed JVM value or control-flow representation. None means no representation was
+        /// available.
         found: Option<JvmType>,
     },
     /// The typed application result does not identify the allocated class.
     JvmConstructorCallResultTypeMismatch {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Required declaration identity in the caller’s symbol table.
         expected: SymbolId,
+        /// Observed declaration identity in the caller’s symbol table. None records a missing
+        /// binding or owner.
         found: Option<SymbolId>,
     },
     /// A constructor argument is outside the supported branch-free primitive subset.
     UnsupportedJvmConstructorArgument {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Exact typed argument tree involved in the failed check.
         argument: TreeId<Typed>,
     },
     /// Constructor application lowering was requested without a planned unit.
     JvmConstructorCallContextUnavailable {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
     },
     /// A method containing an allocation also requires branch-aware verifier frames.
     JvmObjectCreationInUnsupportedControlFlow {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
     },
     /// The selected constructor is not a proven plain no-argument or planned primary call.
     UnsupportedJvmConstructorCall {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Structural or semantic category of the item.
         kind: JvmConstructorCallShapeError,
     },
     /// The class ID is outside the supplied symbol table.
-    UnknownClass { class: SymbolId },
+    UnknownClass {
+        /// Class declaration identity being inspected in the supplied session.
+        class: SymbolId,
+    },
     /// The method ID is outside the supplied symbol table.
-    UnknownMethod { method: SymbolId },
+    UnknownMethod {
+        /// Method declaration identity being inspected in the supplied session.
+        method: SymbolId,
+    },
     /// A method was requested from a class plan that does not contain it.
-    MethodNotInJvmPlanForBody { class: SymbolId, method: SymbolId },
+    MethodNotInJvmPlanForBody {
+        /// Class declaration identity being inspected in the supplied session.
+        class: SymbolId,
+        /// Method declaration identity being inspected in the supplied session.
+        method: SymbolId,
+    },
     /// The field ID is outside the supplied symbol table.
-    UnknownField { field: SymbolId },
+    UnknownField {
+        /// Field declaration identity being inspected in the supplied session.
+        field: SymbolId,
+    },
     /// A public-body field plan lacks matching immutable source evidence.
-    InvalidPublicBodyFieldSourceProof { field: SymbolId },
+    InvalidPublicBodyFieldSourceProof {
+        /// Field declaration identity being inspected in the supplied session.
+        field: SymbolId,
+    },
     /// Public-body field plans do not retain source template order.
-    OutOfOrderPublicBodyFieldPlan { class: SymbolId, field: SymbolId },
+    OutOfOrderPublicBodyFieldPlan {
+        /// Class declaration identity being inspected in the supplied session.
+        class: SymbolId,
+        /// Field declaration identity being inspected in the supplied session.
+        field: SymbolId,
+    },
     /// Field plans do not retain initializer source order across visibility forms.
-    OutOfOrderFieldPlan { class: SymbolId, field: SymbolId },
+    OutOfOrderFieldPlan {
+        /// Class declaration identity being inspected in the supplied session.
+        class: SymbolId,
+        /// Field declaration identity being inspected in the supplied session.
+        field: SymbolId,
+    },
     /// A planned field initializer has no source position for order validation.
-    FieldInitializerSourcePositionUnavailable { field: SymbolId },
+    FieldInitializerSourcePositionUnavailable {
+        /// Field declaration identity being inspected in the supplied session.
+        field: SymbolId,
+    },
     /// Planned field initializers come from different source files.
-    FieldInitializersFromDifferentSources { class: SymbolId, field: SymbolId },
+    FieldInitializersFromDifferentSources {
+        /// Class declaration identity being inspected in the supplied session.
+        class: SymbolId,
+        /// Field declaration identity being inspected in the supplied session.
+        field: SymbolId,
+    },
     /// The parameter ID is outside the supplied symbol table.
-    UnknownParameter { parameter: SymbolId },
+    UnknownParameter {
+        /// Parameter identity in the canonical session symbol table.
+        parameter: SymbolId,
+    },
     /// A local symbol ID is outside the supplied symbol table.
-    UnknownLocalSymbol { method: SymbolId, symbol: SymbolId },
+    UnknownLocalSymbol {
+        /// Method declaration identity being inspected in the supplied session.
+        method: SymbolId,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+    },
     /// A symbol has a kind that is not supported for its plan role.
     UnsupportedSymbolKind {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Required declaration role in this compilation plan.
         expected: SymbolRole,
+        /// Observed declaration kind, independent of flags or visibility.
         found: SymbolKind,
     },
     /// A method or parameter is owned by a symbol other than the planned one.
     WrongOwner {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Required declaration identity in the caller’s symbol table.
         expected: SymbolId,
+        /// Observed declaration identity in the caller’s symbol table. None records a missing
+        /// binding or owner.
         actual: Option<SymbolId>,
     },
     /// The same canonical method appears more than once in the unit.
-    DuplicateMethodPlan { method: SymbolId },
+    DuplicateMethodPlan {
+        /// Method declaration identity being inspected in the supplied session.
+        method: SymbolId,
+    },
     /// The same canonical field appears more than once in a class plan.
-    DuplicateFieldPlan { field: SymbolId },
+    DuplicateFieldPlan {
+        /// Field declaration identity being inspected in the supplied session.
+        field: SymbolId,
+    },
     /// The same canonical class appears more than once in the unit.
-    DuplicateClassPlan { class: SymbolId },
+    DuplicateClassPlan {
+        /// Class declaration identity being inspected in the supplied session.
+        class: SymbolId,
+    },
     /// The same parameter identity appears more than once in a method plan.
     DuplicateParameter {
+        /// Parameter identity in the canonical session symbol table.
         parameter: SymbolId,
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
     },
     /// The same typed declaration is bound more than once in the unit.
     DuplicateLocalDeclaration {
+        /// Declaration identity or syntax node involved in this check.
         declaration: TreeId<Typed>,
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
     },
     /// The same canonical local symbol is bound more than once in the unit.
-    DuplicateLocalSymbol { symbol: SymbolId, method: SymbolId },
+    DuplicateLocalSymbol {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+        /// Method declaration identity being inspected in the supplied session.
+        method: SymbolId,
+    },
     /// A local binding names a typed node outside the supplied arena.
     UnknownLocalDeclaration {
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
+        /// Declaration identity or syntax node involved in this check.
         declaration: TreeId<Typed>,
     },
     /// A local binding's typed node is not an ordinary `ValDef`.
     InvalidLocalDeclaration {
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
+        /// Declaration identity or syntax node involved in this check.
         declaration: TreeId<Typed>,
     },
     /// A local declaration is not reachable from its planned method body.
     LocalDeclarationOutsideMethod {
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
+        /// Declaration identity or syntax node involved in this check.
         declaration: TreeId<Typed>,
     },
     /// A method parameter was incorrectly supplied as a local declaration.
-    LocalIsMethodParameter { method: SymbolId, symbol: SymbolId },
+    LocalIsMethodParameter {
+        /// Method declaration identity being inspected in the supplied session.
+        method: SymbolId,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+    },
     /// The local binding order is not deterministic by typed declaration ID.
-    UnorderedLocalBindings { method: SymbolId },
+    UnorderedLocalBindings {
+        /// Method declaration identity being inspected in the supplied session.
+        method: SymbolId,
+    },
     /// The typed declaration and canonical local symbol disagree on type.
     LocalTypeMismatch {
+        /// Declaration identity or syntax node involved in this check.
         declaration: TreeId<Typed>,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Type of the declaration being checked.
         declaration_type: TypeId,
+        /// Semantic type recorded for the canonical symbol.
         symbol_type: TypeId,
     },
     /// Frontend mutability evidence disagrees with canonical symbol flags.
     LocalMutabilityMismatch {
+        /// Declaration identity or syntax node involved in this check.
         declaration: TreeId<Typed>,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Mutability recorded in the previously validated metadata.
         recorded_mutable: bool,
+        /// Whether the symbol carries the mutable flag.
         symbol_mutable: bool,
     },
     /// A local declaration has a modifier outside ordinary `val`/`var`.
     UnsupportedLocalFlag {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Unsupported flag that caused the rejection.
         flag: UnsupportedJvmLocalFlag,
     },
     /// A planned local `ValDef` has no initializer expression.
     MissingLocalInitializer {
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
+        /// Declaration identity or syntax node involved in this check.
         declaration: TreeId<Typed>,
     },
     /// A typed local declaration has no canonical binding in the plan.
     LocalDeclarationNotInPlan {
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
+        /// Declaration identity or syntax node involved in this check.
         declaration: TreeId<Typed>,
     },
     /// A local initializer does not produce its declared primitive value.
     LocalInitializerFlowMismatch {
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
+        /// Declaration identity or syntax node involved in this check.
         declaration: TreeId<Typed>,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Required JVM value or control-flow representation.
         expected: JvmType,
+        /// Observed JVM value or control-flow representation.
         found: JvmExpressionFlow,
     },
     /// A typed assignment does not have the canonical Unit result type.
-    AssignmentResultTypeMismatch { tree: TreeId<Typed>, ty: TypeId },
+    AssignmentResultTypeMismatch {
+        /// Typed tree identity in its original session arena.
+        tree: TreeId<Typed>,
+        /// Semantic type identity in the same session type arena.
+        ty: TypeId,
+    },
     /// The assignment target is not an identifier for an owned planned local.
     InvalidAssignmentTarget {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Assignment target tree.
         lhs: TreeId<Typed>,
     },
     /// The assignment target is an ordinary local that is not mutable.
     ImmutableLocalAssignment {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
     },
     /// The assignment target has not been initialized on every reachable path.
     UninitializedLocalAssignment {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
     },
     /// The right hand side does not produce the target's primitive value type.
     AssignmentValueFlowMismatch {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Required JVM value or control-flow representation.
         expected: JvmType,
+        /// Observed JVM value or control-flow representation.
         found: JvmExpressionFlow,
     },
     /// The assignment target is an immutable current-instance field.
     ImmutableFieldAssignment {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Field declaration identity being inspected in the supplied session.
         field: SymbolId,
     },
     /// Semantic mutability and validated JVM field metadata disagree.
     JvmFieldMutabilityMismatch {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Field declaration identity being inspected in the supplied session.
         field: SymbolId,
+        /// Whether the symbol carries the mutable flag.
         symbol_mutable: bool,
+        /// Whether the source metadata records a mutable declaration.
         metadata_mutable: bool,
     },
     /// An initializer reads its local before the corresponding store.
     UninitializedLocalRead {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
     },
     /// A local identifier is not backed by the current method's validated layout.
     MissingLocalBinding {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
     },
     /// A typed local identifier targets a symbol that is not an owned local.
     InvalidLocalReference {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
     },
     /// A local identifier's completed semantic type disagrees with its allocated slot.
     LocalReferenceTypeMismatch {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Required JVM value or control-flow representation.
         expected: JvmType,
+        /// Observed JVM value or control-flow representation. None means no representation was
+        /// available.
         found: Option<JvmType>,
     },
     /// A method plan does not name a typed body root.
-    MissingTypedBody { method: SymbolId },
+    MissingTypedBody {
+        /// Method declaration identity being inspected in the supplied session.
+        method: SymbolId,
+    },
     /// A planned typed initializer is outside the supplied arena.
     UnknownFieldInitializer {
+        /// Field declaration identity being inspected in the supplied session.
         field: SymbolId,
+        /// Typed initializer root in the canonical session arena.
         initializer: TreeId<Typed>,
     },
     /// A field identifier is not present in the selected class field plan.
     FieldNotInJvmPlan {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Class declaration identity being inspected in the supplied session.
         class: SymbolId,
+        /// Field declaration identity being inspected in the supplied session.
         field: SymbolId,
     },
     /// A field read was attempted without a validated class and method plan.
     JvmFieldReadContextUnavailable {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
     },
     /// A typed field read has a missing target symbol.
     UnknownJvmFieldReference {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Field declaration identity being inspected in the supplied session.
         field: SymbolId,
     },
     /// A field selection does not use the current class's unqualified `this`.
     UnsupportedJvmFieldReceiver {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Field declaration identity being inspected in the supplied session.
         field: SymbolId,
     },
     /// Validated constructor-accessor ABI metadata disagrees with the source field.
     InvalidJvmAccessorCallMetadata {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Field declaration identity being inspected in the supplied session.
         field: SymbolId,
+        /// Semantic owner of the declaration; ownership is distinct from lookup scope.
         owner: SymbolId,
+        /// Specific structural or semantic reason for the enclosing rejection.
         issue: JvmAccessorCallMetadataIssue,
     },
     /// A field read is outside the currently modeled CFG stack flow.
     JvmFieldReadInUnsupportedControlFlow {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
+        /// Field declaration identity being inspected in the supplied session.
         field: SymbolId,
     },
     /// A field write is outside the currently modeled CFG stack flow.
     JvmFieldWriteInUnsupportedControlFlow {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
+        /// Field declaration identity being inspected in the supplied session.
         field: SymbolId,
     },
     /// A field write was attempted without a validated class and method plan.
     JvmFieldWriteContextUnavailable {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
     },
     /// The typed field reference prefix does not name the current instance.
     InvalidJvmFieldReferencePrefix {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Field declaration identity being inspected in the supplied session.
         field: SymbolId,
+        /// Class declaration identity being inspected in the supplied session.
         class: SymbolId,
     },
     /// A field initializer's `TermRef` points outside the semantic symbol table.
     UnknownFieldInitializerSymbol {
+        /// Field declaration identity being inspected in the supplied session.
         field: SymbolId,
+        /// Typed initializer root in the canonical session arena.
         initializer: TreeId<Typed>,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
     },
     /// The declared field has no typed initializer.
-    MissingFieldInitializer { field: SymbolId },
+    MissingFieldInitializer {
+        /// Field declaration identity being inspected in the supplied session.
+        field: SymbolId,
+    },
     /// The canonical class declaration scope does not contain this field.
-    FieldNotInClassScope { class: SymbolId, field: SymbolId },
+    FieldNotInClassScope {
+        /// Class declaration identity being inspected in the supplied session.
+        class: SymbolId,
+        /// Field declaration identity being inspected in the supplied session.
+        field: SymbolId,
+    },
     /// The canonical field type and its typed initializer disagree.
     FieldInitializerTypeMismatch {
+        /// Field declaration identity being inspected in the supplied session.
         field: SymbolId,
+        /// Typed initializer root in the canonical session arena.
         initializer: TreeId<Typed>,
+        /// Required JVM value or control-flow representation.
         expected: JvmType,
+        /// Observed JVM value or control-flow representation. None means no representation was
+        /// available.
         found: Option<JvmType>,
     },
     /// A reference field initializer is outside the exact parameter-copy or bounded direct-new forms.
     UnsupportedJvmReferenceFieldInitializer {
+        /// Field declaration identity being inspected in the supplied session.
         field: SymbolId,
+        /// Typed initializer root in the canonical session arena.
         initializer: TreeId<Typed>,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: Option<SymbolId>,
     },
     /// Constructor initializer lowering requires a validated primary constructor plan.
-    ConstructorInitializerContextUnavailable { class: SymbolId },
+    ConstructorInitializerContextUnavailable {
+        /// Class declaration identity being inspected in the supplied session.
+        class: SymbolId,
+    },
     /// The checked accessor metadata no longer matches its exact constructor
     /// formal layout while building executable constructor stores.
     InvalidJvmAccessorInitializer {
+        /// Class declaration identity being inspected in the supplied session.
         class: SymbolId,
+        /// Field declaration identity being inspected in the supplied session.
         field: SymbolId,
+        /// Parameter identity in the canonical session symbol table.
         parameter: SymbolId,
+        /// Specific structural or semantic reason for the enclosing rejection.
         issue: JvmAccessorInitializerIssue,
     },
     /// A field initializer reads a field before its source-ordered store.
     FieldInitializerReadsUninitializedField {
+        /// Field declaration identity being inspected in the supplied session.
         field: SymbolId,
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Field referenced by the initializer or accessor body.
         referenced_field: SymbolId,
     },
     /// A typed initializer tree is outside the supported literal/reference/intrinsic subset.
     UnsupportedConstructorFieldInitializer {
+        /// Field declaration identity being inspected in the supplied session.
         field: SymbolId,
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Syntax-node category encountered at the failure site.
         node: &'static str,
     },
     /// The source field modifier has no supported JVM field mapping.
     UnsupportedJvmFieldFlag {
+        /// Field declaration identity being inspected in the supplied session.
         field: SymbolId,
+        /// Unsupported flag that caused the rejection.
         flag: UnsupportedJvmFieldFlag,
     },
     /// Source visibility has the same canonical visibility but another ABI form.
     UnsupportedJvmFieldSourceVisibility {
+        /// Field declaration identity being inspected in the supplied session.
         field: SymbolId,
+        /// Source or semantic visibility of the declaration.
         visibility: JvmFieldSourceVisibility,
     },
     /// Two distinct planned fields have the same class-file field name.
     DuplicateJvmFieldName {
+        /// Class declaration identity being inspected in the supplied session.
         class: SymbolId,
+        /// Field declaration identity being inspected in the supplied session.
         field: SymbolId,
+        /// Previously selected declaration with the conflicting identity.
         previous: SymbolId,
+        /// Recorded name spelling used by the enclosing declaration or validation rule.
         name: String,
     },
     /// Actual class-file field emission is outside this metadata-only increment.
-    FieldEmissionUnsupported { class: SymbolId, field: SymbolId },
+    FieldEmissionUnsupported {
+        /// Class declaration identity being inspected in the supplied session.
+        class: SymbolId,
+        /// Field declaration identity being inspected in the supplied session.
+        field: SymbolId,
+    },
     /// Field metadata needs a typed AST to verify its planned RHS root.
-    FieldTypedAstRequired { class: SymbolId },
+    FieldTypedAstRequired {
+        /// Class declaration identity being inspected in the supplied session.
+        class: SymbolId,
+    },
     /// A method body's typed root does not belong to the supplied arena.
     UnknownBodyRoot {
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
     },
     /// A context-function result has unsupported captures or inconsistent declaration links.
     InvalidContextFunctionResult {
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
     },
     /// A typed tree refers to a missing, reserved, or sentinel type.
     InvalidTreeType {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Semantic type identity in the same session type arena.
         ty: TypeId,
+        /// Detailed reason for rejecting this input or dependency.
         reason: InvalidTypeReason,
     },
     /// A semantic symbol has no completed semantic type.
-    MissingSemanticInfo { symbol: SymbolId },
+    MissingSemanticInfo {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+    },
     /// A symbol's completed semantic type is missing, reserved, or a sentinel.
     InvalidSemanticType {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Semantic type identity in the same session type arena.
         ty: TypeId,
+        /// Detailed reason for rejecting this input or dependency.
         reason: InvalidTypeReason,
     },
     /// A symbol carries `SymbolInfo::Error` and therefore has no usable type.
-    ErrorSemanticInfo { symbol: SymbolId },
+    ErrorSemanticInfo {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+    },
     /// A semantic node is outside a future emission subset.
     ///
     /// Validation does not currently choose an emission subset, so this is
     /// reserved for the code-generation stage that follows this contract.
     UnsupportedSemanticNode {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Syntax-node category encountered at the failure site.
         node: &'static str,
     },
     /// A typed expression uses a missing, sentinel, or error type.
     InvalidExpressionType {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Semantic type identity in the same session type arena.
         ty: TypeId,
+        /// Detailed reason for rejecting this input or dependency.
         reason: InvalidTypeReason,
     },
     /// A reference type is outside the bounded, planned-class subset.
     UnsupportedJvmReferenceType {
+        /// Semantic type identity in the same session type arena.
         ty: TypeId,
+        /// Structural or semantic category of the item.
         kind: UnsupportedJvmReferenceTypeKind,
     },
     /// A requested reference projection names a missing or sentinel type slot.
     InvalidReferenceType {
+        /// Semantic type identity in the same session type arena.
         ty: TypeId,
+        /// Detailed reason for rejecting this input or dependency.
         reason: InvalidTypeReason,
     },
     /// A reference target is not one of this compilation unit's class plans.
-    ReferenceClassNotInJvmPlan { class: SymbolId },
+    ReferenceClassNotInJvmPlan {
+        /// Class declaration identity being inspected in the supplied session.
+        class: SymbolId,
+    },
     /// Two reference values identify different canonical classes.
-    ReferenceTypeMismatch { expected: SymbolId, found: SymbolId },
+    ReferenceTypeMismatch {
+        /// Required declaration identity in the caller’s symbol table.
+        expected: SymbolId,
+        /// Observed declaration identity in the caller’s symbol table.
+        found: SymbolId,
+    },
     /// A source union cannot be represented by the supplied checked expected class.
     UnsupportedSiblingUnionProjection {
+        /// Source-level semantic type before JVM lowering.
         source_type: TypeId,
+        /// Type required by the enclosing conformance check.
         expected_type: TypeId,
     },
     /// A reference-local operation is outside the supported straight-line subset.
-    ReferenceLocalInstructionUnsupported { tree: TreeId<Typed> },
+    ReferenceLocalInstructionUnsupported {
+        /// Typed tree identity in its original session arena.
+        tree: TreeId<Typed>,
+    },
     /// Reserved for compatibility; validated mutable planned-class locals
     /// support initialized reads and straight-line assignments.
-    UnsupportedMutableReferenceLocal { symbol: SymbolId },
+    UnsupportedMutableReferenceLocal {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+    },
     /// Reference local operations require reference-aware CFG analysis.
     ReferenceLocalInUnsupportedControlFlow {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
     },
     /// Reference method descriptors are deliberately outside this subset.
-    ReferenceMethodDescriptorUnsupported { symbol: SymbolId, ty: JvmType },
+    ReferenceMethodDescriptorUnsupported {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+        /// Value type recorded by the enclosing validation rule.
+        ty: JvmType,
+    },
     /// Legacy error retained for callers that construct an unsupported descriptor directly.
-    ReferenceMethodReturnUnsupported { method: SymbolId, ty: JvmType },
+    ReferenceMethodReturnUnsupported {
+        /// Method declaration identity being inspected in the supplied session.
+        method: SymbolId,
+        /// Value type recorded by the enclosing validation rule.
+        ty: JvmType,
+    },
     /// The typed node is not yet part of the expression-lowering subset.
     UnsupportedTypedExpression {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Syntax-node category encountered at the failure site.
         node: &'static str,
     },
     /// A typed block's declared type disagrees with the final expression flow.
     BlockResultTypeMismatch {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Explicitly declared type used by the check.
         declared: TypeId,
+        /// Observed JVM value or control-flow representation.
         found: JvmExpressionFlow,
     },
     /// A supported integer/boolean literal disagrees with its typed type.
     LiteralTypeMismatch {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// JVM value type produced by the inspected expression.
         value: JvmType,
+        /// JVM value type obtained from the typed tree, when available.
         typed: Option<JvmType>,
     },
     /// A typed identifier is not a symbol reference to one of this method's parameters.
     InvalidParameterReference {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: Option<SymbolId>,
     },
     /// A method-parameter `TermRef` carries a prefix other than canonical `NoPrefix`.
     InvalidParameterReferencePrefix {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Parameter identity in the canonical session symbol table.
         parameter: SymbolId,
+        /// Semantic prefix through which the member is selected.
         prefix: TypeId,
     },
     /// A reference parameter needs a validated compilation-unit class plan.
     ReferenceParameterRequiresPlan {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Parameter identity in the canonical session symbol table.
         parameter: SymbolId,
+        /// Class declaration identity being inspected in the supplied session.
         class: SymbolId,
     },
     /// A typed `this` does not identify the current planned instance class.
     InvalidCurrentThisReference {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Required declaration identity in the caller’s symbol table.
         expected: SymbolId,
+        /// Observed declaration identity in the caller’s symbol table. None records a missing
+        /// binding or owner.
         found: Option<SymbolId>,
     },
     /// A qualified `this` value is outside the current expression subset.
-    QualifiedThisValueUnsupported { tree: TreeId<Typed> },
+    QualifiedThisValueUnsupported {
+        /// Typed tree identity in its original session arena.
+        tree: TreeId<Typed>,
+    },
     /// A reference value was requested without validated current-class metadata.
     JvmReferenceValueContextUnavailable {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
     },
     /// Apply lowering was requested without a validated compilation-unit context.
     JvmCallContextUnavailable {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
     },
     /// A typed call that claims a canonical Int intrinsic has inconsistent semantics.
     IntIntrinsicResolution {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Underlying typed failure; inspect it for the more specific cause.
         error: JvmIntIntrinsicError,
     },
     /// A resolved Int operand did not lower to one JVM Int value.
     IntIntrinsicOperandFlowMismatch {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Operand of the prefix or postfix operator.
         operand: TreeId<Typed>,
+        /// Index into the enclosing table or parameter list, using that structure’s indexing
+        /// convention.
         index: usize,
+        /// Observed JVM value or control-flow representation.
         found: JvmExpressionFlow,
     },
     /// A typed tree that claims a canonical Boolean intrinsic has inconsistent semantics.
     BooleanIntrinsicResolution {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Underlying typed failure; inspect it for the more specific cause.
         error: JvmBooleanIntrinsicError,
     },
     /// A resolved Boolean operand did not lower to one JVM Boolean value.
     BooleanIntrinsicOperandFlowMismatch {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Operand of the prefix or postfix operator.
         operand: TreeId<Typed>,
+        /// Index into the enclosing table or parameter list, using that structure’s indexing
+        /// convention.
         index: usize,
+        /// Observed JVM value or control-flow representation.
         found: JvmExpressionFlow,
     },
     /// A typed application that selects canonical AnyRef identity has inconsistent semantics.
     ReferenceIdentityResolution {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Underlying typed failure; inspect it for the more specific cause.
         error: JvmReferenceIdentityError,
     },
     /// A reference identity operand did not lower to a planned reference or canonical Null.
     ReferenceIdentityOperandFlowMismatch {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Operand of the prefix or postfix operator.
         operand: TreeId<Typed>,
+        /// Index into the enclosing table or parameter list, using that structure’s indexing
+        /// convention.
         index: usize,
+        /// Observed JVM value or control-flow representation.
         found: JvmExpressionFlow,
     },
     /// A virtual call occurs in a control-flow branch whose verifier frames
     /// cannot represent its temporary reference receiver.
     JvmCallInUnsupportedControlFlow {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
     },
     /// A typed call's argument count disagrees with the selected JVM descriptor.
     JvmCallArityMismatch {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
+        /// Required argument or parameter count.
         expected: usize,
+        /// Observed argument or parameter count.
         found: usize,
     },
     /// A lowered argument does not provide the target parameter's primitive value.
     JvmCallArgumentMismatch {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Exact typed argument tree involved in the failed check.
         argument: TreeId<Typed>,
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
+        /// Index into the enclosing table or parameter list, using that structure’s indexing
+        /// convention.
         index: usize,
+        /// Required JVM value or control-flow representation.
         expected: JvmType,
+        /// Observed JVM value or control-flow representation.
         found: JvmExpressionFlow,
     },
     /// Legacy error retained for API compatibility; planned virtual calls now validate references.
     ReferenceCallArgumentUnsupported {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
+        /// Index into the enclosing table or parameter list, using that structure’s indexing
+        /// convention.
         index: usize,
+        /// Canonical class symbol whose builtin type is being checked.
         ty: SymbolId,
     },
     /// A typed parameter reference has a different primitive type from its local metadata.
     ParameterReferenceTypeMismatch {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Parameter identity in the canonical session symbol table.
         parameter: SymbolId,
+        /// Required JVM value or control-flow representation.
         expected: JvmType,
+        /// Observed JVM value or control-flow representation. None means no representation was
+        /// available.
         found: Option<JvmType>,
     },
     /// An instruction could not be appended to the method's code builder.
     CodeBuilder {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Underlying typed failure; inspect it for the more specific cause.
         error: dotty_classfile::bytecode::CodeBuilderError,
     },
     /// A conditional expression does not have a Boolean condition.
     InvalidIfCondition {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Observed JVM value or control-flow representation. None means no representation was
+        /// available.
         found: Option<JvmType>,
     },
     /// A while condition does not produce a Boolean value on normal flow.
     InvalidWhileCondition {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Observed JVM value or control-flow representation. None means no representation was
+        /// available.
         found: Option<JvmType>,
     },
     /// A typed while node does not carry the canonical Unit result type.
-    WhileResultTypeMismatch { tree: TreeId<Typed>, ty: TypeId },
+    WhileResultTypeMismatch {
+        /// Typed tree identity in its original session arena.
+        tree: TreeId<Typed>,
+        /// Semantic type identity in the same session type arena.
+        ty: TypeId,
+    },
     /// A reachable conditional branch does not match the other branch's value type.
     IfBranchTypeMismatch {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Typed branch root involved in control-flow validation.
         branch: TreeId<Typed>,
+        /// Required JVM value or control-flow representation.
         expected: JvmType,
+        /// Observed JVM value or control-flow representation. None means no representation was
+        /// available.
         found: Option<JvmType>,
     },
     /// An If expression's declared type disagrees with its reachable branch values.
     IfResultTypeMismatch {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Required JVM value or control-flow representation. None means no representation was
+        /// available.
         expected: Option<JvmType>,
+        /// Observed JVM value or control-flow representation. None means no representation was
+        /// available.
         found: Option<JvmType>,
     },
     /// A typed `Nothing` branch is not backed by supported explicit return flow.
-    UnsupportedBottomFlow { tree: TreeId<Typed> },
+    UnsupportedBottomFlow {
+        /// Typed tree identity in its original session arena.
+        tree: TreeId<Typed>,
+    },
     /// A Return with an explicit target is outside the current local-return subset.
     UnsupportedReturnTarget {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Return target or starting point of the enclosing relation.
         from: TreeId<Typed>,
     },
     /// A return value does not match the method's primitive JVM result.
     ReturnValueTypeMismatch {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Required JVM value or control-flow representation.
         expected: JvmReturnType,
+        /// Observed JVM value or control-flow representation. None means no representation was
+        /// available.
         found: Option<JvmType>,
     },
     /// A method body value does not match its descriptor's return type.
     MethodBodyTypeMismatch {
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Required JVM value or control-flow representation.
         expected: JvmReturnType,
+        /// Observed JVM value or control-flow representation. None means no representation was
+        /// available.
         found: Option<JvmType>,
     },
     /// A normally completing no-value expression is incompatible with a
     /// value-returning method body.
     MethodBodyFlowMismatch {
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Required JVM value or control-flow representation.
         expected: JvmReturnType,
+        /// Observed JVM value or control-flow representation.
         found: JvmExpressionFlow,
     },
     /// A no-value `Unit` flow was attached to a typed tree with a different
     /// semantic type.
-    UnitFlowTypeMismatch { tree: TreeId<Typed>, ty: TypeId },
+    UnitFlowTypeMismatch {
+        /// Typed tree identity in its original session arena.
+        tree: TreeId<Typed>,
+        /// Semantic type identity in the same session type arena.
+        ty: TypeId,
+    },
     /// Recursive typed-tree lowering exceeded its fixed depth budget.
     ExpressionDepthExceeded {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Optional source location; absent for nodes without source provenance.
         position: Option<dotty_core::source::SourceSpan>,
+        /// Configured upper bound that the operation exceeded.
         limit: usize,
     },
     /// Lowering expanded too many typed-tree occurrences in one call.
-    ExpressionNodeBudgetExceeded { tree: TreeId<Typed>, limit: usize },
+    ExpressionNodeBudgetExceeded {
+        /// Typed tree identity in its original session arena.
+        tree: TreeId<Typed>,
+        /// Configured upper bound that the operation exceeded.
+        limit: usize,
+    },
     /// A method has an unsupported single-clause or monomorphism shape.
     UnsupportedMethodShape {
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
+        /// Semantic type identity in the same session type arena.
         ty: TypeId,
+        /// Structural or semantic category of the item.
         kind: UnsupportedMethodShapeKind,
     },
     /// A supported primitive parameter's symbol type disagrees with its
     /// corresponding entry in the method's ordered `MethodType`.
     ParameterTypeMismatch {
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
+        /// Parameter identity in the canonical session symbol table.
         parameter: SymbolId,
+        /// Explicitly declared type used by the check.
         declared: TypeId,
+        /// Type stored as the declaration signature.
         symbol_info: TypeId,
     },
     /// Scala `Unit` cannot appear in a JVM parameter list.
     UnitParameter {
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
+        /// Parameter identity in the canonical session symbol table.
         parameter: SymbolId,
+        /// Semantic type identity in the same session type arena.
         ty: TypeId,
     },
     /// An unsupported semantic type was used for a method value or result.
     UnsupportedJvmType {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Semantic type identity in the same session type arena.
         ty: TypeId,
+        /// Structural or semantic category of the item.
         kind: UnsupportedJvmTypeKind,
     },
     /// A method descriptor exceeds the JVMS 255 parameter-slot limit.
-    TooManyParameterSlots { method: SymbolId, slots: usize },
+    TooManyParameterSlots {
+        /// Method declaration identity being inspected in the supplied session.
+        method: SymbolId,
+        /// JVM local or stack slots required by the operation.
+        slots: usize,
+    },
     /// A local symbol is not present in the method's validated local layout.
-    UnknownLocalSlot { method: SymbolId, symbol: SymbolId },
+    UnknownLocalSlot {
+        /// Method declaration identity being inspected in the supplied session.
+        method: SymbolId,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+    },
     /// The method's local variables exceed the u16 `max_locals` count.
-    TooManyLocalSlots { method: SymbolId },
+    TooManyLocalSlots {
+        /// Method declaration identity being inspected in the supplied session.
+        method: SymbolId,
+    },
     /// Supplied method metadata or bindings do not match this validated unit.
-    LocalLayoutInputMismatch { method: SymbolId },
+    LocalLayoutInputMismatch {
+        /// Method declaration identity being inspected in the supplied session.
+        method: SymbolId,
+    },
     /// A parameter modifier is not represented by this primitive-only slice.
     UnsupportedMethodParameter {
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
+        /// Index into the enclosing table or parameter list, using that structure’s indexing
+        /// convention.
         index: usize,
+        /// Structural or semantic category of the item.
         kind: UnsupportedMethodParameterKind,
     },
     /// An internally generated descriptor unexpectedly failed the classfile
     /// crate's parser.
     InvalidGeneratedDescriptor {
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
+        /// Underlying typed failure; inspect it for the more specific cause.
         error: dotty_classfile::descriptor::DescriptorError,
     },
     /// A supplied builtin type identity is malformed for this semantic store.
     InvalidBuiltinDefinition {
+        /// Compiler-known builtin whose canonical identity is required.
         builtin: PrimitiveBuiltin,
+        /// Semantic type identity in the same session type arena.
         ty: TypeId,
     },
     /// A canonical primitive `TypeRef` has a prefix other than the exact
     /// shared `NoPrefix` type required by the supported descriptor slice.
     InvalidPrimitiveTypePrefix {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Semantic type identity in the same session type arena.
         ty: TypeId,
+        /// Semantic prefix through which the member is selected.
         prefix: TypeId,
+        /// Compiler-known builtin whose canonical identity is required.
         builtin: PrimitiveBuiltin,
     },
     /// The symbol owner is not part of the supported package-only class path.
     UnsupportedOwnerKind {
+        /// Class declaration identity being inspected in the supplied session.
         class: SymbolId,
+        /// Semantic owner of the declaration; ownership is distinct from lookup scope.
         owner: SymbolId,
+        /// Observed declaration kind, independent of flags or visibility.
         found: SymbolKind,
     },
     /// A declared owner identity is not in the supplied semantic store.
-    UnknownOwner { class: SymbolId, owner: SymbolId },
+    UnknownOwner {
+        /// Class declaration identity being inspected in the supplied session.
+        class: SymbolId,
+        /// Semantic owner of the declaration; ownership is distinct from lookup scope.
+        owner: SymbolId,
+    },
     /// The package owner chain is cyclic or has no valid unnamed root.
-    InvalidPackageOwnerChain { class: SymbolId, owner: SymbolId },
+    InvalidPackageOwnerChain {
+        /// Class declaration identity being inspected in the supplied session.
+        class: SymbolId,
+        /// Semantic owner of the declaration; ownership is distinct from lookup scope.
+        owner: SymbolId,
+    },
     /// A class name or package segment is not a supported simple identifier.
     InvalidJvmName {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Structural or semantic category of the item.
         kind: JvmNameKind,
+        /// Interned original spelling or decoded textual payload.
         text: String,
     },
     /// The class form is outside the ordinary, concrete, non-generic subset.
     UnsupportedJvmClass {
+        /// Class declaration identity being inspected in the supplied session.
         class: SymbolId,
+        /// Structural or semantic category of the item.
         kind: UnsupportedJvmClassKind,
     },
     /// A class or method has visibility other than public.
     UnsupportedJvmVisibility {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Source or semantic visibility of the declaration.
         visibility: dotty_core::symbols::Visibility,
     },
     /// A symbol flag has no mapping in the bounded JVM metadata subset.
     UnsupportedJvmSymbolFlag {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Unsupported flag that caused the rejection.
         flag: UnsupportedJvmSymbolFlag,
     },
     /// Completed class info is malformed or cannot establish a simple class.
     InvalidJvmClassInfo {
+        /// Class declaration identity being inspected in the supplied session.
         class: SymbolId,
+        /// Semantic type recorded for the inspected node or declaration.
         ty: Option<TypeId>,
+        /// Structural or semantic category of the item.
         kind: InvalidJvmClassInfoKind,
     },
     /// A class declaration scope contains a symbol ID outside the symbol table.
-    InvalidClassDeclaration { class: SymbolId, symbol: SymbolId },
+    InvalidClassDeclaration {
+        /// Class declaration identity being inspected in the supplied session.
+        class: SymbolId,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+    },
     /// Two methods on one class project to the same JVM name and descriptor.
     DuplicateJvmMethodIdentity {
+        /// Class declaration identity being inspected in the supplied session.
         class: SymbolId,
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
+        /// Previously selected declaration with the conflicting identity.
         previous: SymbolId,
+        /// Recorded name spelling used by the enclosing declaration or validation rule.
         name: String,
+        /// Erased JVM descriptor used for member identity or validation.
         descriptor: String,
     },
     /// A generated accessor name and descriptor collide with an emitted or
     /// generated method. `previous` is its method symbol or source field ID.
     DuplicateJvmAccessorMethodIdentity {
+        /// Class declaration identity being inspected in the supplied session.
         class: SymbolId,
+        /// Field declaration identity being inspected in the supplied session.
         field: SymbolId,
+        /// Previously selected declaration with the conflicting identity.
         previous: SymbolId,
+        /// Recorded name spelling used by the enclosing declaration or validation rule.
         name: String,
+        /// Erased JVM descriptor used for member identity or validation.
         descriptor: String,
     },
     /// A declared method and an inherited accessor, or a declared accessor
@@ -1628,116 +2211,196 @@ pub enum JvmCodegenError {
     /// The descriptor is absent only for a conservative same-name check
     /// against an unplanned source method.
     InheritedJvmAccessorCollision {
+        /// Class declaration identity being inspected in the supplied session.
         class: SymbolId,
+        /// Structural or semantic category of the item.
         kind: JvmAccessorCollisionKind,
+        /// Provenance of this declaration, artifact, or argument binding.
         origin: JvmBinaryMethodOrigin,
+        /// Parent type or declaration involved in this relationship.
         parent: SymbolId,
+        /// Provenance of the inherited method being checked.
         parent_origin: JvmBinaryMethodOrigin,
+        /// Recorded name spelling used by the enclosing declaration or validation rule.
         name: String,
+        /// Erased JVM descriptor used for member identity or validation.
         descriptor: Option<String>,
         /// Inherited descriptor when checking a result-only mismatch.
         parent_descriptor: Option<String>,
     },
     /// A descendant cannot add new generated accessor storage above inherited
     /// accessors in the currently supported emission subset.
-    UnsupportedJvmAccessorInheritance { class: SymbolId, parent: SymbolId },
+    UnsupportedJvmAccessorInheritance {
+        /// Class declaration identity being inspected in the supplied session.
+        class: SymbolId,
+        /// Parent type or declaration involved in this relationship.
+        parent: SymbolId,
+    },
     /// Two class symbols in one compilation unit project to the same internal name.
     DuplicateJvmClassIdentity {
+        /// Class declaration identity being inspected in the supplied session.
         class: SymbolId,
+        /// Previously selected declaration with the conflicting identity.
         previous: SymbolId,
+        /// JVM internal class name using slash-separated package segments.
         internal_name: String,
     },
     /// The selected class symbol has no corresponding class plan in the unit.
-    MissingClassPlan { class: SymbolId },
+    MissingClassPlan {
+        /// Class declaration identity being inspected in the supplied session.
+        class: SymbolId,
+    },
     /// The caller method is not part of the supplied current-class plan.
-    CallerMethodNotInJvmPlan { class: SymbolId, method: SymbolId },
+    CallerMethodNotInJvmPlan {
+        /// Class declaration identity being inspected in the supplied session.
+        class: SymbolId,
+        /// Method declaration identity being inspected in the supplied session.
+        method: SymbolId,
+    },
     /// A canonical method reference is not selected for JVM emission.
     MethodNotInJvmPlan {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Class declaration identity being inspected in the supplied session.
         class: SymbolId,
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
     },
     /// A typed call site or its function expression has an unsupported shape.
     UnsupportedJvmCallShape {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Structural or semantic category of the item.
         kind: UnsupportedJvmCallShapeKind,
     },
     /// The function tree does not carry a canonical method-symbol reference.
-    UnresolvedJvmCallTarget { tree: TreeId<Typed> },
+    UnresolvedJvmCallTarget {
+        /// Typed tree identity in its original session arena.
+        tree: TreeId<Typed>,
+    },
     /// The typed call result disagrees with the selected method descriptor.
     JvmCallResultTypeMismatch {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
+        /// Required JVM value or control-flow representation.
         expected: JvmReturnType,
+        /// Observed JVM value or control-flow representation. None means no representation was
+        /// available.
         found: Option<JvmReturnType>,
     },
     /// Lowering the selected receiver did not produce the exact planned class value.
     JvmCallReceiverFlowMismatch {
+        /// Typed tree identity in its original session arena.
         tree: TreeId<Typed>,
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
+        /// Required declaration identity in the caller’s symbol table.
         expected: SymbolId,
+        /// Observed JVM value or control-flow representation.
         found: JvmExpressionFlow,
     },
     /// The class plan cannot prove that synthesizing the minimal constructor is safe.
-    UnsupportedConstructor { class: SymbolId },
+    UnsupportedConstructor {
+        /// Class declaration identity being inspected in the supplied session.
+        class: SymbolId,
+    },
     /// The class's parent list is not exactly its canonical `Object` type.
     UnsupportedJvmSuperclass {
+        /// Class declaration identity being inspected in the supplied session.
         class: SymbolId,
+        /// Parent type or declaration involved in this relationship.
         parent: Option<TypeId>,
     },
     /// A source class parent is not proven by the bounded canonical unit graph.
     InvalidJvmSuperclass {
+        /// Class declaration identity being inspected in the supplied session.
         class: SymbolId,
+        /// Parent type or declaration involved in this relationship.
         parent: Option<SymbolId>,
+        /// Specific structural or semantic reason for the enclosing rejection.
         issue: JvmSuperclassIssue,
     },
     /// A planned child method collides with a non-private final method
     /// declared by its validated direct parent. The descriptor is absent
     /// when the parent's method is unplanned and the backend rejects by name.
     FinalJvmMethodOverride {
+        /// Class declaration identity being inspected in the supplied session.
         class: SymbolId,
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
+        /// Parent type or declaration involved in this relationship.
         parent: SymbolId,
+        /// Overridden or inherited method identity, when available.
         parent_method: SymbolId,
+        /// Recorded name spelling used by the enclosing declaration or validation rule.
         name: String,
+        /// Erased JVM descriptor used for member identity or validation.
         descriptor: Option<String>,
     },
     /// The source declares an override that is absent, incompatible, or
     /// outside the bounded planned-class contract.
     InvalidJvmOverride {
+        /// Class declaration identity being inspected in the supplied session.
         class: SymbolId,
+        /// Method declaration identity being inspected in the supplied session.
         method: SymbolId,
+        /// Parent type or declaration involved in this relationship.
         parent: SymbolId,
+        /// Overridden or inherited method identity, when available.
         parent_method: Option<SymbolId>,
+        /// Specific structural or semantic reason for the enclosing rejection.
         issue: JvmOverrideIssue,
     },
     /// The class declares a self type outside this emission subset.
-    UnsupportedJvmSelfType { class: SymbolId, self_type: TypeId },
+    UnsupportedJvmSelfType {
+        /// Class declaration identity being inspected in the supplied session.
+        class: SymbolId,
+        /// Explicit self type, when present.
+        self_type: TypeId,
+    },
     /// A declared field, initializer, nested type, or other member is outside
     /// the single-class emission subset.
     UnsupportedJvmClassMember {
+        /// Class declaration identity being inspected in the supplied session.
         class: SymbolId,
+        /// Member identity or name involved in this check.
         member: SymbolId,
+        /// Stable declaration category, independent of flags and visibility.
         kind: SymbolKind,
     },
     /// A selected method is owned by the class but absent from its declaration scope.
-    MethodNotInClassDeclarations { class: SymbolId, method: SymbolId },
+    MethodNotInClassDeclarations {
+        /// Class declaration identity being inspected in the supplied session.
+        class: SymbolId,
+        /// Method declaration identity being inspected in the supplied session.
+        method: SymbolId,
+    },
     /// ClassFileBuilder rejected staged output; `method` is present when the
     /// failing operation was associated with a selected semantic method.
     ClassFileBuild {
+        /// Class declaration identity being inspected in the supplied session.
         class: SymbolId,
+        /// Method identity in the canonical session symbol table.
         method: Option<SymbolId>,
+        /// Underlying typed failure; inspect it for the more specific cause.
         error: dotty_classfile::class_file_builder::ClassFileBuildError,
     },
     /// The fixed synthesized constructor could not be built symbolically.
     ConstructorCodeBuilder {
+        /// Class declaration identity being inspected in the supplied session.
         class: SymbolId,
+        /// Underlying typed failure; inspect it for the more specific cause.
         error: dotty_classfile::bytecode::CodeBuilderError,
     },
     /// A generated constructor accessor getter could not be built symbolically.
     AccessorMethodCodeBuilder {
+        /// Class declaration identity being inspected in the supplied session.
         class: SymbolId,
+        /// Field declaration identity being inspected in the supplied session.
         field: SymbolId,
+        /// Underlying typed failure; inspect it for the more specific cause.
         error: dotty_classfile::bytecode::CodeBuilderError,
     },
 }
@@ -1777,78 +2440,126 @@ pub enum JvmOverrideIssue {
 /// Unsupported typed constructor application shape or metadata relation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JvmConstructorCallShapeError {
+    /// The constructor expression is not a value application.
     NotApplication,
+    /// The constructor uses unsupported explicit type arguments.
     TypeApplication,
+    /// The constructor uses an unsupported explicit contextual argument clause.
     UsingApplication,
+    /// The application callee is not a constructor member selection.
     FunctionNotSelect,
+    /// The selected constructor is not qualified by a new expression.
     QualifierNotNew,
+    /// The new expression does not name the canonical planned class.
     TypeTreeNotCanonicalClass,
+    /// The selected constructor differs from the class's canonical constructor.
     ConstructorReferenceNotCanonical,
+    /// The selected constructor is absent from its owner's declaration scope.
     ConstructorNotInClassScope,
+    /// The constructor initialization plan is outside the supported call subset.
     UnsupportedInitializationPlan,
+    /// The retained evidence for implicit no-argument construction is inconsistent.
     InvalidImplicitNoArgProof,
+    /// A constructor argument has an unsupported JVM type.
     UnsupportedArgumentType,
 }
 
 /// Semantic role required by a compilation plan.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SymbolRole {
+    /// Class declaration being validated.
     Class,
+    /// Constructor declaration being validated.
     Constructor,
+    /// Field declaration being validated.
     Field,
+    /// Method declaration being validated.
     Method,
+    /// Formal parameter declaration being validated.
     Parameter,
+    /// Local binding being validated.
     Local,
 }
 
 /// Unsupported semantic modifier for an ordinary JVM local binding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnsupportedJvmLocalFlag {
+    /// This validation path rejects the lazy declaration marker.
     Lazy,
+    /// This validation path rejects the given declaration marker.
     Given,
+    /// This validation path rejects the implicit declaration marker.
     Implicit,
+    /// This validation path rejects the erased declaration marker.
     Erased,
+    /// This validation path rejects the inline declaration marker.
     Inline,
 }
 
 /// Unsupported source modifier on a planned JVM field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnsupportedJvmFieldFlag {
+    /// This validation path rejects the abstract declaration marker.
     Abstract,
+    /// This validation path rejects the sealed declaration marker.
     Sealed,
+    /// This validation path rejects the case declaration marker.
     Case,
+    /// This validation path rejects the implicit declaration marker.
     Implicit,
+    /// This validation path rejects the given declaration marker.
     Given,
+    /// This validation path rejects the lazy declaration marker.
     Lazy,
+    /// This validation path rejects the inline declaration marker.
     Inline,
+    /// This validation path rejects the transparent declaration marker.
     Transparent,
+    /// This validation path rejects the opaque declaration marker.
     Opaque,
+    /// This validation path rejects the extension declaration marker.
     Extension,
+    /// This validation path rejects the static declaration marker.
     Static,
+    /// This validation path rejects the synthetic declaration marker.
     Synthetic,
+    /// This validation path rejects the Java-defined symbol flag.
     JavaDefined,
+    /// This validation path rejects the erased declaration marker.
     Erased,
+    /// This validation path rejects the override declaration marker.
     Override,
+    /// This validation path rejects the enum declaration marker.
     Enum,
+    /// This validation path rejects the export-generated symbol flag.
     Exported,
 }
 
 /// Why a typed semantic slot cannot be consumed as an actual type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InvalidTypeReason {
+    /// The type slot is absent or has not been filled.
     MissingOrUnfilled,
+    /// The type is the absence-of-type sentinel.
     NoType,
+    /// The type records a previous typing failure.
     Error,
+    /// A no-prefix sentinel appears where a value type is required.
     NoPrefix,
 }
 
 /// Unsupported method-type shape for this descriptor projection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnsupportedMethodShapeKind {
+    /// The method has unsupported polymorphic type parameters.
     Polymorphic,
+    /// The method has unsupported additional curried clauses.
     NestedCurriedClause,
+    /// The method clause is implicit or contextual on this lowering path.
     NonPlainClause,
+    /// The method type and canonical parameter list have different lengths.
     ParameterCountMismatch,
+    /// The declaration's signature is not a method type.
     NotMethodType,
 }
 
@@ -1892,47 +2603,79 @@ pub enum UnsupportedJvmCallShapeKind {
 /// Unsupported semantic type form in this descriptor projection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnsupportedJvmTypeKind {
+    /// Type aliases are not lowered by this validation path.
     Alias,
+    /// The type depends on an unsupported type parameter.
     TypeParameter,
+    /// The type is an unreduced or unsupported match type.
     MatchType,
+    /// Structural refinements are outside this lowering subset.
     RefinedType,
+    /// The union type is outside this lowering subset.
     Union,
+    /// The intersection type is outside this lowering subset.
     Intersection,
+    /// A Scala module value type is outside this lowering subset.
     ScalaObject,
+    /// This reference-class type is not accepted by this validation path.
     ReferenceClass,
+    /// A name-designed type reference lacks a supported canonical class identity.
     NamedReference,
+    /// A term reference is not accepted as a lowered value type here.
     TermReference,
+    /// A nested method type appears where a value type is required.
     NestedMethod,
+    /// Array lowering is outside this validation path's supported subset.
     Array,
+    /// By-name parameter lowering is unsupported here.
     ByName,
+    /// Repeated-parameter lowering is unsupported here.
     Repeated,
+    /// Type bounds appear where a concrete lowered type is required.
     Bounds,
+    /// The singleton constant is outside the supported primitive subset.
     NonPrimitiveConstant,
+    /// A semantic type outside the explicitly supported categories was encountered.
     Other,
 }
 
 /// Why a semantic type cannot be represented as a planned class reference.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnsupportedJvmReferenceTypeKind {
+    /// The reference is not a canonical symbol-designed type reference.
     NotCanonicalTypeRef,
+    /// The reference prefix is outside the supported package shape.
     UnsupportedPrefix,
+    /// The referenced declaration is not an accepted class kind.
     UnsupportedSymbolKind,
+    /// This validation path requires a planned source class rather than an external class.
     ExternalClass,
+    /// A module class is outside this reference-type subset.
     ObjectClass,
+    /// Anonymous class references are unsupported by this validation path.
     AnonymousClass,
+    /// Generic class references require unsupported type substitution.
     GenericClass,
+    /// The class cannot be established as deriving from canonical Object.
     NotObjectDerived,
+    /// The class metadata fails the supported reference-type contract.
     UnsupportedClassMetadata,
 }
 
 /// Primitive definition identity being read from [`Definitions`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrimitiveBuiltin {
+    /// The session’s Scala Int builtin identity.
     Int,
+    /// The session’s Scala Boolean builtin identity.
     Boolean,
+    /// The session’s Scala Float builtin identity.
     Float,
+    /// The session’s Scala Long builtin identity.
     Long,
+    /// The session’s Scala Double builtin identity.
     Double,
+    /// The session’s Scala Unit builtin identity.
     Unit,
 }
 
@@ -1941,7 +2684,9 @@ pub enum PrimitiveBuiltin {
 pub enum UnsupportedMethodParameterKind {
     /// The supplied ordered parameter is not the formal of this contextual clause.
     ClauseBinding,
+    /// Erased parameters require unsupported runtime argument adaptation.
     Erased,
+    /// Repeated or variable-arity parameters are outside this lowering subset.
     Varargs,
 }
 

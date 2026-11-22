@@ -34,47 +34,100 @@ pub enum MemberLookupError {
     /// Receiver normalization stopped at a typed limit/error.
     TypeNormalization(TypeNormalizeError),
     /// The receiver does not designate a class, trait, or module class.
-    ReceiverNotClassLike { ty: TypeId },
+    ReceiverNotClassLike {
+        /// Semantic type identity in the same session type arena.
+        ty: TypeId,
+    },
     /// The receiver's type shape is not supported by nominal member lookup.
-    UnsupportedReceiverType { ty: TypeId },
+    UnsupportedReceiverType {
+        /// Semantic type identity in the same session type arena.
+        ty: TypeId,
+    },
     /// A parent type does not designate a class-like declaration.
-    MalformedParentType { ty: TypeId },
+    MalformedParentType {
+        /// Semantic type identity in the same session type arena.
+        ty: TypeId,
+    },
     /// A referenced class symbol does not exist in the semantic store.
-    UnknownClassSymbol { symbol: SymbolId },
+    UnknownClassSymbol {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+    },
     /// The class has not been completed (or its completion is in progress).
     ClassInfoUnavailable {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Completion state observed when a completed signature was required.
         state: SymbolInfoState,
     },
     /// A completed class symbol points to a type outside the type arena.
-    InvalidClassInfoType { symbol: SymbolId, info: TypeId },
+    InvalidClassInfoType {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+        /// Recorded signature or completion state of the canonical declaration.
+        info: TypeId,
+    },
     /// A completed class symbol does not point to `Type::ClassInfo`.
-    ClassInfoNotClassInfo { symbol: SymbolId, info: TypeId },
+    ClassInfoNotClassInfo {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+        /// Recorded signature or completion state of the canonical declaration.
+        info: TypeId,
+    },
     /// The recorded class identity inside `ClassInfo` does not match its owner.
     MalformedClassInfoIdentity {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Class identity actually recorded in the class-info type.
         recorded_class: SymbolId,
     },
     /// The class declaration scope does not exist in this semantic store.
-    InvalidDeclarationScope { symbol: SymbolId, scope: ScopeId },
+    InvalidDeclarationScope {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+        /// Lookup-scope identity in the canonical session scope arena.
+        scope: ScopeId,
+    },
     /// A declaration scope contains a symbol ID absent from the store.
     UnknownMemberSymbol {
+        /// Class that originally declares the selected member.
         declaring_class: SymbolId,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
     },
     /// Source completion for a current-unit class failed before lookup.
-    SourceClassCompletion { symbol: SymbolId, error: TyperError },
+    SourceClassCompletion {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+        /// Underlying typed failure; inspect it for the more specific cause.
+        error: TyperError,
+    },
     /// The resolver failed to complete an external identity soundly.
     ExternalClassCompletion {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Underlying typed failure; inspect it for the more specific cause.
         error: ResolutionError,
     },
     /// Source completion for a current-unit receiver alias failed before lookup.
-    SourceAliasCompletion { symbol: SymbolId, error: TyperError },
+    SourceAliasCompletion {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+        /// Underlying typed failure; inspect it for the more specific cause.
+        error: TyperError,
+    },
     /// A source class's declared parent view could not be instantiated.
-    ParentTypeAdaptation { symbol: SymbolId, error: TyperError },
+    ParentTypeAdaptation {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+        /// Underlying typed failure; inspect it for the more specific cause.
+        error: TyperError,
+    },
     /// A parent path revisits a class already on that path.
-    InheritanceCycle { symbol: SymbolId },
+    InheritanceCycle {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+    },
     /// The parent graph exceeds [`MAX_MEMBER_LOOKUP_DEPTH`].
     TooDeep,
 }

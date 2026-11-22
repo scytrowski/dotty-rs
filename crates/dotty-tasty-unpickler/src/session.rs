@@ -31,7 +31,9 @@ pub struct TastySession {
 /// store, so the session fails closed instead of guessing which one is valid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TastySessionError {
+    /// The loading session already has a different authoritative package mapping.
     ConflictingPackageAuthorities,
+    /// A resolver has already been attached to this loading session.
     ResolverAlreadyAttached,
 }
 
@@ -103,6 +105,8 @@ impl<T: 'static> std::error::Error for ResolverAttachmentFailure<T> {
 }
 
 impl TastySession {
+    /// Creates a loading session without package authority or an attached resolver. Reuse it with
+    /// the same semantic store when loading related TASTy units.
     pub fn new() -> Self {
         Self::default()
     }

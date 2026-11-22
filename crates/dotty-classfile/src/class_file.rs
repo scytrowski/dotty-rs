@@ -19,9 +19,15 @@ use std::fmt;
 pub const CLASS_MAGIC: [u8; 4] = [0xCA, 0xFE, 0xBA, 0xBE];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Failure while decoding the class-file magic or version header.
 pub enum ClassFileHeaderError {
+    /// The class-file header is truncated or cannot be read.
     Read(ReadError),
-    InvalidMagic { actual: [u8; 4] },
+    /// The input does not begin with the class-file magic bytes.
+    InvalidMagic {
+        /// Four magic bytes actually read from the input.
+        actual: [u8; 4],
+    },
 }
 
 impl fmt::Display for ClassFileHeaderError {
@@ -65,7 +71,9 @@ pub const PREVIEW_MINOR_VERSION: u16 = 0xFFFF;
 /// The `minor_version`/`major_version` pair of a class file (JVMS §4.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClassFileVersion {
+    /// Class-file major version number.
     pub major: u16,
+    /// Class-file minor version number.
     pub minor: u16,
 }
 
@@ -122,23 +130,36 @@ impl fmt::Display for ClassFileVersion {
 /// The full `ClassFile` structure (JVMS §4.1).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassFile<'a> {
+    /// Decoded class-file version.
     pub version: ClassFileVersion,
+    /// Constant pool referenced by this class and its members.
     pub constant_pool: ConstantPool,
+    /// Raw or typed JVM access flags; interpretation depends on the enclosing item.
     pub access_flags: ClassAccessFlags,
+    /// Constant-pool class entry identifying this class.
     pub this_class: ConstantPoolIndex,
     /// `None` only for `java.lang.Object`.
     pub super_class: Option<ConstantPoolIndex>,
+    /// Constant-pool class entries naming direct interfaces, in file order.
     pub interfaces: Vec<ConstantPoolIndex>,
+    /// Declared fields in class-file order.
     pub fields: Vec<FieldInfo<'a>>,
+    /// Declared methods in source or class-file order.
     pub methods: Vec<MethodInfo<'a>>,
+    /// Attributes in their original class-file order, including opaque payloads.
     pub attributes: Vec<Attribute<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Failure while decoding class-file structure; semantic JVM verification is a separate operation.
 pub enum ClassFileError {
+    /// A bounded class-file read failed.
     Read(ReadError),
+    /// The class-file header is malformed.
     Header(ClassFileHeaderError),
+    /// The constant pool failed decoding or structural validation.
     ConstantPool(ConstantPoolError),
+    /// An attribute payload failed decoding or structural validation.
     Attribute(AttributeError),
 }
 
@@ -148,23 +169,83 @@ pub enum ClassFileError {
 /// module descriptor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModuleDescriptorError {
+    /// The class does not declare the module-descriptor flag.
     NotModuleDescriptor,
+    /// A module-descriptor reference fails constant-pool resolution.
     ConstantPool(PoolRefError),
-    UnsupportedVersion { major: u16, minor: u16 },
-    InvalidAccessFlags { flags: u16 },
-    WrongThisClass { name: String },
+    /// The class-file version cannot contain the requested module metadata.
+    UnsupportedVersion {
+        /// Class-file major version number.
+        major: u16,
+        /// Class-file minor version number.
+        minor: u16,
+    },
+    /// The module descriptor has prohibited class access flags.
+    InvalidAccessFlags {
+        /// Recorded flags on the declaration being inspected.
+        flags: u16,
+    },
+    /// The descriptor's class identity is not module-info.
+    WrongThisClass {
+        /// Recorded name spelling used by the enclosing declaration or validation rule.
+        name: String,
+    },
+    /// A module descriptor declares a prohibited superclass.
     HasSuperclass,
-    HasInterfaces { count: usize },
-    HasFields { count: usize },
-    HasMethods { count: usize },
+    /// A module descriptor declares prohibited interfaces.
+    HasInterfaces {
+        /// Number of entries encountered by the rejected operation.
+        count: usize,
+    },
+    /// A module descriptor declares prohibited fields.
+    HasFields {
+        /// Number of entries encountered by the rejected operation.
+        count: usize,
+    },
+    /// A module descriptor declares prohibited methods.
+    HasMethods {
+        /// Number of entries encountered by the rejected operation.
+        count: usize,
+    },
+    /// The descriptor has no required Module attribute.
     MissingModuleAttribute,
-    DuplicateAttribute { name: &'static str },
-    OpaqueKnownModuleAttribute { name: String },
-    DisallowedAttribute { name: String },
-    InvalidModuleName { name: String },
-    InvalidPackageName { name: String },
-    InvalidDirective { reason: &'static str },
-    DuplicateDirective { table: &'static str, name: String },
+    /// An attribute required to be unique appears more than once.
+    DuplicateAttribute {
+        /// Recorded name spelling used by the enclosing declaration or validation rule.
+        name: &'static str,
+    },
+    /// A recognized module attribute remains opaque and cannot be validated.
+    OpaqueKnownModuleAttribute {
+        /// Recorded name spelling used by the enclosing declaration or validation rule.
+        name: String,
+    },
+    /// The descriptor contains an attribute prohibited in this context.
+    DisallowedAttribute {
+        /// Recorded name spelling used by the enclosing declaration or validation rule.
+        name: String,
+    },
+    /// A referenced module name does not satisfy the encoding contract.
+    InvalidModuleName {
+        /// Recorded name spelling used by the enclosing declaration or validation rule.
+        name: String,
+    },
+    /// A referenced package name does not satisfy the encoding contract.
+    InvalidPackageName {
+        /// Recorded name spelling used by the enclosing declaration or validation rule.
+        name: String,
+    },
+    /// A module directive violates its required structural contract.
+    InvalidDirective {
+        /// Detailed reason for rejecting this input or dependency.
+        reason: &'static str,
+    },
+    /// A module directive repeats an entry required to be unique.
+    DuplicateDirective {
+        /// Name of the bounded table being validated.
+        table: &'static str,
+        /// Recorded name spelling used by the enclosing declaration or validation rule.
+        name: String,
+    },
 }
 
 impl fmt::Display for ModuleDescriptorError {

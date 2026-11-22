@@ -75,7 +75,9 @@ pub struct MemberRequest {
     /// is also the type whose members are searched, and the resolver decides
     /// which prefixes it understands and answers `Ok(None)` for the rest.
     pub prefix: TypeId,
+    /// Interned text identity and term/type namespace of the declaration or reference.
     pub name: Name,
+    /// Scrutinee expression or member selector for this construct.
     pub selector: MemberSelector,
     /// Where the declaration is searched.
     pub space: MemberSpace,
@@ -86,9 +88,15 @@ pub struct MemberRequest {
 #[non_exhaustive]
 pub enum ResolutionError {
     /// The request names one member but the resolver found several.
-    Ambiguous { candidates: usize },
+    Ambiguous {
+        /// Number of matching candidates found by lookup.
+        candidates: usize,
+    },
     /// The state the resolver reads is inconsistent.
-    Malformed { reason: String },
+    Malformed {
+        /// Detailed reason for rejecting this input or dependency.
+        reason: String,
+    },
 }
 
 /// Opaque resolver-local transaction mark paired with a store checkpoint.

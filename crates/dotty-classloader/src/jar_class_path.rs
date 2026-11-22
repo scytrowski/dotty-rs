@@ -70,6 +70,9 @@ struct JarResourceProfileCounters {
 }
 
 impl JarClassPath {
+    /// Opens and indexes a JAR archive for the requested Java release. Multi-release entries are
+    /// considered only when declared by the manifest. Returns ClassPathError for I/O, archive, or
+    /// manifest-resource decoding failures.
     pub fn new(path: impl Into<PathBuf>, release_version: u16) -> Result<Self, ClassPathError> {
         let path = path.into();
         let bytes = std::fs::read(&path)?;

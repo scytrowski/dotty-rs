@@ -11,7 +11,9 @@ use crate::{
 /// Whole-file budget in addition to projection and wire depth/size budgets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PickleLimits {
+    /// Limits applied while projecting semantic data.
     pub projection: ProjectionLimits,
+    /// Maximum encoded artifact size in bytes.
     pub max_file_bytes: usize,
 }
 
@@ -36,12 +38,17 @@ pub struct PickledTasty {
 }
 
 impl PickledTasty {
+    /// Borrows the complete encoded TASTy file for the supported producer subset. This does not
+    /// write or publish the artifact.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+    /// Borrows the source identity and normalized path recorded by the producer.
     pub fn source(&self) -> &SourceMetadata {
         &self.source
     }
+    /// Returns the encoded relative sidecar path. Callers choose the output directory and perform
+    /// any filesystem writes.
     pub fn intended_tasty_path(&self) -> &str {
         &self.intended_tasty_path
     }

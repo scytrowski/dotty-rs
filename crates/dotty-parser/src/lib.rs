@@ -13,6 +13,9 @@
 //! into a shared session interner. Bind files in a stable input order for
 //! deterministic name IDs. Grammar coverage remains an incremental subset.
 
+#![deny(missing_docs)]
+#![doc = include_str!("guide.md")]
+
 mod case_clauses;
 mod class_definitions;
 mod compilation_unit;

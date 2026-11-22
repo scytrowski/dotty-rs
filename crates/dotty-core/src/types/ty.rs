@@ -13,6 +13,7 @@ use crate::types::method::{MethodType, PolyType, TypeLambda};
 /// reported separately (`dotty-core` does not depend on a diagnostics crate).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ErrorType {
+    /// Interned diagnostic message associated with the error type.
     pub message: NameId,
 }
 
@@ -31,8 +32,11 @@ pub struct ErrorType {
 /// is rebuilt as written, and reduction is not this model's concern.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MatchType {
+    /// Semantic bound in the canonical type arena.
     pub bound: TypeId,
+    /// Type of the match scrutinee.
     pub scrutinee: TypeId,
+    /// Case clauses in matching order.
     pub cases: Vec<TypeId>,
 }
 
@@ -51,14 +55,18 @@ pub struct MatchType {
 /// The two are different targets even when the symbol's text is the name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TypeRefTarget {
+    /// Reference to a canonical declaration symbol.
     Symbol(SymbolId),
+    /// Name-designed reference to a structural member without a declaration symbol.
     Name(TypeName),
 }
 
 /// What a [`Type::TermRef`] designates. See [`TypeRefTarget`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TermRefTarget {
+    /// Reference to a canonical declaration symbol.
     Symbol(SymbolId),
+    /// Name-designed reference to a structural member without a declaration symbol.
     Name(TermName),
 }
 
@@ -91,16 +99,25 @@ impl TermRefTarget {
 /// `docs/dotty-core-design.md` §8, `[BLOCKER 1]`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Type {
+    /// Sentinel representing absence of a semantic type.
     NoType,
+    /// Error type preserving a reported typing failure.
     Error(ErrorType),
+    /// Prefix sentinel for an unqualified semantic reference.
     NoPrefix,
 
+    /// Stable term reference with a prefix and symbol or name designator.
     TermRef {
+        /// Semantic prefix through which the member is selected.
         prefix: TypeId,
+        /// Resolved declaration identity or structural member name designated by the reference.
         target: TermRefTarget,
     },
+    /// Type reference with a prefix and symbol or name designator.
     TypeRef {
+        /// Semantic prefix through which the member is selected.
         prefix: TypeId,
+        /// Resolved declaration identity or structural member name designated by the reference.
         target: TypeRefTarget,
     },
 
@@ -109,22 +126,32 @@ pub enum Type {
     /// `TYPEREFpkg` and `TERMREFpkg` (see [`crate::packages`]), so `this` of a
     /// package names that one symbol.
     ThisType {
+        /// Canonical class-like or package identity designated by this this type.
         class: SymbolId,
     },
+    /// Superclass selection paired with its current-instance type.
     SuperType {
+        /// Singleton this type used by the enclosing relationship.
         this_type: TypeId,
+        /// Type selected by the qualified super reference.
         super_type: TypeId,
     },
 
+    /// Singleton type of a literal constant.
     Constant(Constant),
 
+    /// Type constructor applied to ordered type arguments.
     Applied {
+        /// Type constructor to which the type arguments are applied.
         tycon: TypeId,
+        /// Semantic type arguments in constructor application order.
         args: Vec<TypeId>,
     },
     /// Genuine lower/upper bounds (`>: low <: high`).
     Bounds {
+        /// Lower semantic bound in the same type arena.
         low: TypeId,
+        /// Upper semantic bound in the same type arena.
         high: TypeId,
     },
     /// The info of a type alias or opaque-free alias member (`= alias`).
@@ -133,69 +160,103 @@ pub enum Type {
     /// distinction survives: this is not `Bounds { low: alias, high: alias }`.
     /// It is unrelated to `SymbolKind::TypeAlias`, which classifies a symbol.
     AliasingBounds {
+        /// Semantic alias target, distinct from an ordinary lower/upper bound pair.
         alias: TypeId,
     },
+    /// By-name parameter or result wrapper.
     ByName {
+        /// Underlying result type evaluated on demand for this by-name wrapper.
         result: TypeId,
     },
     /// A flexible type (`FlexibleType(hi)` in Dotty), the explicit-nulls type
     /// of a Java-defined member: its members are those of `underlying`, but
     /// the wrapper is part of the type and is never stripped by the model.
     Flexible {
+        /// Underlying type before wrapping or normalization.
         underlying: TypeId,
     },
 
+    /// Intersection of two semantic types.
     And {
+        /// Left operand of the enclosing relation or syntax node.
         left: TypeId,
+        /// Right operand of the enclosing relation or syntax node.
         right: TypeId,
     },
+    /// Union of two semantic types.
     Or {
+        /// Left operand of the enclosing relation or syntax node.
         left: TypeId,
+        /// Right operand of the enclosing relation or syntax node.
         right: TypeId,
     },
 
+    /// Parent type extended with one named structural member.
     Refined {
+        /// Parent type or declaration involved in this relationship.
         parent: TypeId,
+        /// Interned text identity and term/type namespace of the declaration or reference.
         name: Name,
+        /// Recorded signature or completion state of the canonical declaration.
         info: TypeId,
     },
 
     /// `parent` may itself contain `RecThis { binder }` values where
     /// `binder` is the `TypeId` this very value is stored under.
     Recursive {
+        /// Parent type or declaration involved in this relationship.
         parent: TypeId,
     },
+    /// Self reference to a recursive type binder.
     RecThis {
+        /// Enclosing type binder whose parameters are referenced.
         binder: TypeId,
     },
 
+    /// Method clause with parameters and a result type.
     Method(MethodType),
+    /// Polymorphic method binder and its result type.
     Poly(PolyType),
+    /// Type constructor binder and its result type.
     TypeLambda(TypeLambda),
 
     /// `binder` is the `TypeId` of the enclosing `Method`/`Poly`/`TypeLambda`
     /// value itself.
     ParamRef {
+        /// Enclosing type binder whose parameters are referenced.
         binder: TypeId,
+        /// Index into the enclosing table or parameter list, using that structure’s indexing
+        /// convention.
         index: u32,
     },
 
+    /// Match type with bound, scrutinee, and ordered cases.
     Match(MatchType),
+    /// One pattern and result pair within a match type.
     MatchCase {
+        /// Pattern tested or bound by this construct.
         pattern: TypeId,
+        /// Underlying result type evaluated on demand for this by-name wrapper.
         result: TypeId,
     },
 
+    /// Underlying type with a semantic annotation.
     Annotated {
+        /// Underlying type before wrapping or normalization.
         underlying: TypeId,
+        /// Annotation tree or identity attached to the annotated item.
         annotation: AnnotationId,
     },
 
+    /// Wildcard type constrained by bounds.
     Wildcard {
+        /// Lower and upper bound representation for this parameter.
         bounds: TypeId,
     },
 
+    /// Platform-neutral semantic representation of a Java array element type.
     JavaArray {
+        /// Element type of the repeated or array value.
         element: TypeId,
     },
 
@@ -208,9 +269,11 @@ pub enum Type {
     /// defers references to this symbol. The marker does not claim a particular
     /// library `Seq` class identity.
     Repeated {
+        /// Element type of the repeated or array value.
         element: TypeId,
     },
 
+    /// Class identity, parent types, declarations, and optional self type.
     ClassInfo(ClassInfo),
 }
 

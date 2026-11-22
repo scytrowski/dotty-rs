@@ -34,6 +34,9 @@ pub struct FieldSymbol {
 }
 
 impl FieldSymbol {
+    /// Constructs owned binary metadata from already-decoded inputs. This does not resolve
+    /// references or allocate a canonical declaration; any supplied semantic identities must
+    /// belong to the caller's loading session.
     pub fn new(
         name: String,
         symbol: SymbolId,
@@ -52,6 +55,7 @@ impl FieldSymbol {
         }
     }
 
+    /// Borrows the binary member name exactly as recorded by the loader.
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -62,18 +66,22 @@ impl FieldSymbol {
         self.symbol
     }
 
+    /// Returns the class-file access flags for this member.
     pub fn flags(&self) -> FieldAccessFlags {
         self.flags
     }
 
+    /// Borrows the erased field descriptor type.
     pub fn field_type(&self) -> &FieldType {
         &self.field_type
     }
 
+    /// Borrows the optional parsed generic signature, independently of the erased descriptor.
     pub fn signature(&self) -> Option<&FieldSignature> {
         self.signature.as_ref()
     }
 
+    /// Borrows the semantic annotations retained on this member.
     pub fn annotations(&self) -> &[SemanticAnnotation] {
         &self.annotations
     }

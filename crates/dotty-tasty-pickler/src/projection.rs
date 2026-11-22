@@ -18,12 +18,19 @@ mod primitive_operator;
 /// ceilings of 256 for stack safety.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProjectionLimits {
+    /// Maximum recursive type depth accepted by validation.
     pub max_type_depth: usize,
+    /// Maximum owner-chain depth accepted by validation.
     pub max_owner_depth: usize,
+    /// Maximum recursive expression depth accepted by validation.
     pub max_expression_depth: usize,
+    /// Maximum number of items processed by the bounded operation.
     pub max_items: usize,
+    /// Maximum number of names permitted in the output name table.
     pub max_names: usize,
+    /// Maximum byte length accepted for a name.
     pub max_name_bytes: usize,
+    /// Limits applied by the structural AST builder.
     pub wire: AstBuildLimits,
 }
 
@@ -53,18 +60,22 @@ enum NameKey {
 /// Owned wire result only; no semantic records are copied and no file is assembled.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectedFragment {
+    /// Owned TASTy name table whose references are used by the projected AST.
     pub names: NameTable,
+    /// Owned syntax arena or structural AST produced by the operation.
     pub ast: BuiltAst,
 }
 
 /// Projection of only a method's formal and result signature roots.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectedMethodSignature {
+    /// Projected structural fragment retained for encoding.
     pub fragment: ProjectedFragment,
     /// Address of the first formal, retained for the one-formal projection API.
     pub parameter_address: u32,
     /// Addresses of all projected formals in source/signature order.
     pub parameter_addresses: Vec<u32>,
+    /// Byte address in the TASTy AST section for this node or reference.
     pub result_address: u32,
 }
 
@@ -2648,8 +2659,9 @@ impl<'a> EncodingContext<'a> {
             c.intern(NameKey::SignedEmpty(original, result))
         })
     }
-    /// Resolves addresses and returns only owned names/type fragments. The next
-    /// increment owns definition grammar, sections and full-file validation.
+    /// Resolves symbolic addresses and returns owned name and AST fragments.
+    /// This does not assemble sections or establish full-file completeness;
+    /// use a validated plan’s pickle method for complete supported output.
     pub fn finish(&self, roots: &[AstLabel]) -> Result<ProjectedFragment, PickleError> {
         if self.failed {
             return Err(PickleError::ProjectionAborted);

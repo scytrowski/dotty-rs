@@ -18,13 +18,47 @@ pub enum JvmReferenceIdentityOperator {
 /// Why a typed application claiming a canonical `AnyRef.eq/ne` is malformed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum JvmReferenceIdentityError {
-    MissingTree { tree: TreeId<Typed> },
-    InvalidTreeType { tree: TreeId<Typed>, ty: TypeId },
-    UnsupportedFunctionShape { tree: TreeId<Typed> },
-    InvalidBuiltinRegistry { tree: TreeId<Typed> },
-    WrongApplyKind { tree: TreeId<Typed> },
-    WrongArity { tree: TreeId<Typed>, found: usize },
-    WrongResultType { tree: TreeId<Typed>, found: TypeId },
+    /// A referenced tree is absent from the supplied typed arena.
+    MissingTree {
+        /// Typed tree identity in its original session arena.
+        tree: TreeId<Typed>,
+    },
+    /// A tree has a missing, unfilled, or sentinel semantic type.
+    InvalidTreeType {
+        /// Typed tree identity in its original session arena.
+        tree: TreeId<Typed>,
+        /// Semantic type identity in the same session type arena.
+        ty: TypeId,
+    },
+    /// The callee is not a supported canonical member selection.
+    UnsupportedFunctionShape {
+        /// Typed tree identity in its original session arena.
+        tree: TreeId<Typed>,
+    },
+    /// Canonical reference-identity members no longer match their registry.
+    InvalidBuiltinRegistry {
+        /// Typed tree identity in its original session arena.
+        tree: TreeId<Typed>,
+    },
+    /// The identity operation uses a contextual rather than ordinary application.
+    WrongApplyKind {
+        /// Typed tree identity in its original session arena.
+        tree: TreeId<Typed>,
+    },
+    /// The application has the wrong number of operands.
+    WrongArity {
+        /// Typed tree identity in its original session arena.
+        tree: TreeId<Typed>,
+        /// Observed argument or parameter count.
+        found: usize,
+    },
+    /// The application result differs from the intrinsic's required result type.
+    WrongResultType {
+        /// Typed tree identity in its original session arena.
+        tree: TreeId<Typed>,
+        /// Observed semantic type identity in the caller’s type arena.
+        found: TypeId,
+    },
 }
 
 /// Resolve only a Typer-selected canonical `AnyRef.eq` or `AnyRef.ne` call.

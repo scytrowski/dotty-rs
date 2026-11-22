@@ -71,43 +71,81 @@ pub enum RefinedTypeTreeReason {
 /// Structural reason a type or type tree could not be projected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeReason {
+    /// The encoded match type lacks the required bound, scrutinee, or cases.
     MatchTypeShape,
+    /// A decoded child does not match its required semantic role.
     ChildShapeMismatch,
+    /// An owner-space reference uses an unsupported name designator.
     OwnerSpaceNameDesignator,
+    /// The refinement does not have its required parent and member payload.
     RefinedTypeShape,
+    /// The reference target does not have the required declaration shape.
     InvalidReferenceTargetShape,
+    /// Binder children do not agree with the encoded parameter structure.
     BinderChildMismatch,
+    /// A binder requiring parameters has none.
     EmptyBinder,
+    /// A parameter has an invalid variance encoding.
     InvalidVarianceMarker,
+    /// Trailing annotation data does not match the expected structure.
     AnnotationTailShape,
+    /// The annotation edge of an annotated type is not a node reference.
     AnnotationOfAnnotatedTypeIsNotNode,
+    /// The annotation payload is not a structured AST node.
     AnnotationPayloadIsNotNode,
+    /// An annotated type lacks its required underlying type or annotation.
     AnnotatedTypeShape,
+    /// An identifier type tree has the wrong number of children.
     IdentifierTypeTreeArity,
+    /// An annotation application has no callee.
     AnnotationApplyFunctionMissing,
+    /// Annotation application children disagree with the encoded argument count.
     AnnotationApplyArityMismatch,
+    /// An annotation type application has no type constructor.
     AnnotationTypeApplyFunctionMissing,
+    /// Annotation type application children disagree with the encoded type argument count.
     AnnotationTypeApplyArityMismatch,
+    /// An annotation member selection has an invalid qualifier shape.
     AnnotationSelectionShape,
+    /// An annotation new expression does not have one class child.
     AnnotationNewClassArity,
+    /// A named argument does not have exactly one value child.
     NamedArgumentArity,
+    /// An annotation literal does not encode a supported constant.
     AnnotationLiteralNotConstant,
+    /// A recursive type has the wrong number of body children.
     RecursiveTypeArity,
+    /// Parent-tree projection exceeded its traversal depth bound.
     ParentTreeDepthLimit,
+    /// Type-tree projection exceeded its traversal depth bound.
     TypeTreeDepthLimit,
+    /// A type-lambda tree does not have the required parameters and body.
     LambdaTreeShape,
+    /// A lambda parameter has an unsupported declaration kind.
     LambdaParameterKind,
+    /// A refined type tree has an invalid parent child.
     RefinedTreeUnexpectedParent,
+    /// An identifier term path has the wrong number of type children.
     IdentifierTermTypeArity,
+    /// A term selection does not have exactly one qualifier child.
     TermSelectionQualifierArity,
+    /// A qualified this tree has the wrong number of qualifier children.
     QualifiedThisQualifierArity,
+    /// The qualifier of this is not an accepted enclosing-class reference.
     QualifiedThisQualifierKind,
+    /// An explicit type tree has the wrong number of type children.
     ExplicitTypeTreeArity,
+    /// A by-name type tree does not have exactly one result child.
     ByNameTypeTreeArity,
+    /// An applied type tree has no type-constructor child.
     AppliedTypeConstructorMissing,
+    /// A bounds type tree has an invalid number of bound children.
     BoundsTypeTreeArity,
+    /// A type selection does not have exactly one qualifier child.
     TypeSelectionQualifierArity,
+    /// A singleton type tree does not have exactly one reference child.
     SingletonTreeReferenceArity,
+    /// An annotated type tree lacks its required type or annotation child.
     AnnotatedTypeTreeShape,
 }
 
@@ -143,87 +181,155 @@ pub enum UnpickleError {
     Ast(AstError),
     /// A second symbol was entered for a definition address that already has
     /// one, which would break the address-identity invariant.
-    DuplicateDefinition { address: u32 },
+    DuplicateDefinition {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+    },
     /// A second declaration scope was entered for a symbol that already owns
     /// one.
-    DuplicateScope { symbol: SymbolId },
+    DuplicateScope {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+    },
     /// A class-like symbol was discovered with a companion that conflicts
     /// with a link already published on either endpoint.
     ConflictingCompanion {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Previously recorded value retained by the failed operation.
         existing: SymbolId,
+        /// Declaration considered by lookup or overload resolution.
         candidate: SymbolId,
     },
     /// A name reference does not resolve to a name-table entry, or resolves
     /// through an unreasonably deep (possibly cyclic) chain of entries.
-    InvalidNameReference { reference: u32 },
+    InvalidNameReference {
+        /// Zero-based TASTy name-table reference that could not be interpreted.
+        reference: u32,
+    },
     /// A name-table entry with a tag this unpickler does not interpret.
-    UnsupportedName { reference: u32 },
+    UnsupportedName {
+        /// Zero-based TASTy name-table reference that could not be interpreted.
+        reference: u32,
+    },
     /// The qualifier of a `private[X]` / `protected[X]` modifier has a tree
     /// shape this unpickler does not read. `tag` is the qualifier node's tag.
     /// Package names and references to enclosing definitions are supported.
-    UnsupportedQualifier { tag: u8 },
+    UnsupportedQualifier {
+        /// Wire-format tag identifying the decoded entry or node kind.
+        tag: u8,
+    },
     /// A reference points at an address that is not the start of a visible AST
     /// node (out of range, or inside another node's payload), or at one that
     /// has no entered symbol. `from` is the referring definition.
-    InvalidReferenceTarget { from: u32, to: u32 },
+    InvalidReferenceTarget {
+        /// AST-section address of the referring definition or node.
+        from: u32,
+        /// Target AST-section address of the rejected reference.
+        to: u32,
+    },
     /// The qualifier of a `private[Q]` / `protected[Q]` modifier at
     /// `definition` is not a package, class, trait or object that encloses
     /// the qualified definition (or is the definition itself).
-    InvalidQualifier { definition: u32 },
+    InvalidQualifier {
+        /// AST-section address of the declaration node.
+        definition: u32,
+    },
     /// A `PACKAGE` node whose path is neither a direct package reference
     /// (`TERMREFpkg`) nor a `SHAREDtype` link to one, which are the only forms
     /// this unpickler reads.
-    UnsupportedPackagePath { address: u32 },
+    UnsupportedPackagePath {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+    },
     /// No definition node exists at an address the tree walk expected one.
-    MissingDefinition { address: u32 },
+    MissingDefinition {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+    },
     /// A second `TypeId` was recorded for a type-node address that already
     /// has one, which would break the address-identity invariant.
-    DuplicateType { address: u32 },
+    DuplicateType {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+    },
     /// The type tree at `address` is a form the projection does not build a
     /// type for yet (Milestone 5a). Distinct from `UnsupportedType`, which is
     /// about type *wire nodes*; the tree is never guessed from its syntax.
-    UnsupportedTypeTree { address: u32, tag: u8 },
+    UnsupportedTypeTree {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+        /// Wire-format tag identifying the decoded entry or node kind.
+        tag: u8,
+    },
     /// The term tree at `address` is a form the term-`tpe` projection does not
     /// build a type for (Milestone 5b): a `SELECTtpt` qualifier or
     /// `SINGLETONtpt` reference that is not a path.
-    UnsupportedTermTree { address: u32, tag: u8 },
+    UnsupportedTermTree {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+        /// Wire-format tag identifying the decoded entry or node kind.
+        tag: u8,
+    },
     /// The class `symbol` entered for the definition at `address` has no
     /// declaration scope in this unit's index, so no `ClassInfo` can name it
     /// (Milestone 5d1). Pass 1 allocates one for every template.
-    MissingClassScope { address: u32, symbol: SymbolId },
+    MissingClassScope {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+    },
     /// The template parent at `address` (tag `tag`) is a wrapper form
     /// `type_of_parent` does not read (Milestone 5d1).
-    UnsupportedParentTree { address: u32, tag: u8 },
+    UnsupportedParentTree {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+        /// Wire-format tag identifying the decoded entry or node kind.
+        tag: u8,
+    },
     /// The template parent at `address` has the right wrapper but not the
     /// shape it requires (Milestone 5d1).
     MalformedParentTree {
+        /// Byte address in the TASTy AST section for this node or reference.
         address: u32,
+        /// Detailed reason for rejecting this input or dependency.
         reason: ParentTreeReason,
     },
     /// The self definition at `address` does not have the shape
     /// `SELFDEF name type_tree` (Milestone 5d1).
     InvalidSelfTypeTree {
+        /// Byte address in the TASTy AST section for this node or reference.
         address: u32,
+        /// Detailed reason for rejecting this input or dependency.
         reason: SelfTypeTreeReason,
     },
     /// The definition at `address` has a header that does not agree with its
     /// nodes (a parameter clause sequence that cannot be aligned with the
     /// parameter nodes, or a missing result type).
     MalformedDefinition {
+        /// Byte address in the TASTy AST section for this node or reference.
         address: u32,
+        /// Detailed reason for rejecting this input or dependency.
         reason: DefinitionReason,
     },
     /// The method whose parameter is at `address` has a parameter modifier
     /// (`INLINE`, `TRACKED`, `INTO`: `tag`) whose upstream adaptation
     /// (`MethodType.fromSymbols`) `dotty-core` cannot represent. The method is
     /// not completed rather than completed with it dropped.
-    UnsupportedMethodParameterSemantics { address: u32, tag: u8 },
+    UnsupportedMethodParameterSemantics {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+        /// Wire-format tag identifying the decoded entry or node kind.
+        tag: u8,
+    },
     /// The constructor at `address` has no entered owner, or its owner is
     /// not `Class`, `Trait` or `ModuleClass` (Milestone 5d2a). `owner` is the
     /// entered owner, if any.
     ConstructorOwnerNotClassLike {
+        /// Byte address in the TASTy AST section for this node or reference.
         address: u32,
+        /// Semantic owner of the declaration; ownership is distinct from lookup scope.
         owner: Option<SymbolId>,
     },
     /// The constructor at `address`'s owner already holds
@@ -233,152 +339,276 @@ pub enum UnpickleError {
     /// completion, but a completed owner's info is a real invariant, checked
     /// rather than trusted (Milestone 5d2a).
     MalformedOwnerClassInfo {
+        /// Byte address in the TASTy AST section for this node or reference.
         address: u32,
+        /// Semantic owner of the declaration; ownership is distinct from lookup scope.
         owner: SymbolId,
+        /// Recorded signature or completion state of the canonical declaration.
         info: TypeId,
     },
     /// The `LAMBDAtpt` at `address` was reached from two different owners
     /// (through a `SHAREDterm`), and its type parameters are owned once: it
     /// is not projected rather than given a second owner.
-    SharedLambdaOwnerConflict { address: u32 },
+    SharedLambdaOwnerConflict {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+    },
     /// The `REFINEDtpt` at `address` was reached from two different owners
     /// (through a `SHAREDterm`); its synthetic refinement class has one fixed
     /// owner, the same policy `SharedLambdaOwnerConflict` follows (Milestone
     /// 5d2b).
-    SharedRefinementOwnerConflict { address: u32 },
+    SharedRefinementOwnerConflict {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+    },
     /// An immediate statement of the `REFINEDtpt` at `address` is not a
     /// `TYPEDEF`, `VALDEF` or `DEFDEF` (Milestone 5d2b): an unsupported
     /// refinement stat, never silently dropped.
-    UnsupportedRefinementStat { address: u32, tag: u8 },
+    UnsupportedRefinementStat {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+        /// Wire-format tag identifying the decoded entry or node kind.
+        tag: u8,
+    },
     /// Projecting the `REFINEDtpt` at `address` found no synthetic refinement
     /// class entered for it: pass 1 either did not run or did not reach this
     /// address (Milestone 5d2b).
-    MissingRefinementClass { address: u32 },
+    MissingRefinementClass {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+    },
     /// The symbol entered at the `REFINEDtpt` address `address` exists but is
     /// not the synthetic refinement class pass 1 makes there (wrong kind or
     /// name), or its `SymbolInfo` is not the complete, parent-less
     /// `ClassInfo` pass 1 publishes for it (Milestone 5d2b).
-    InvalidRefinementClass { address: u32, symbol: SymbolId },
+    InvalidRefinementClass {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+    },
     /// The synthetic refinement class at `address` has no declaration scope
     /// recorded for it, which pass 1 always allocates (Milestone 5d2b).
-    MissingRefinementScope { address: u32, symbol: SymbolId },
+    MissingRefinementScope {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+    },
     /// The `REFINEDtpt` at `address` has a shape structured decoding does not
     /// agree with (its indexed children disagree with its wire shape), or a
     /// member's projected `Refined.info` reason `reason` describes (Milestone
     /// 5d2b).
     MalformedRefinedTypeTree {
+        /// Byte address in the TASTy AST section for this node or reference.
         address: u32,
+        /// Detailed reason for rejecting this input or dependency.
         reason: RefinedTypeTreeReason,
     },
     /// Two immediate stats of the `REFINEDtpt` at `address` declare the same
     /// `name` in the same namespace: Dotty rejects an overloaded refinement
     /// member, so the second declaration is refused rather than shadowing or
     /// stacking with the first (Milestone 5d2b).
-    UnsupportedRefinementOverload { address: u32, name: String },
+    UnsupportedRefinementOverload {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+        /// Recorded name spelling used by the enclosing declaration or validation rule.
+        name: String,
+    },
     /// Closing a `REFINEDtpt`'s projected chain over its synthetic class's
     /// `ThisType` (`close_over_this`) failed at `address`.
     CloseOverThis {
+        /// Byte address in the TASTy AST section for this node or reference.
         address: u32,
+        /// Underlying typed failure; inspect it for the more specific cause.
         error: dotty_core::TypeRebindError,
     },
     /// Abstracting the parameter symbols of the binder written at `address`
     /// into `ParamRef`s failed.
     ParameterAbstraction {
+        /// Byte address in the TASTy AST section for this node or reference.
         address: u32,
+        /// Underlying typed failure; inspect it for the more specific cause.
         error: dotty_core::TypeRebindError,
     },
     /// The qualifier of the selection at `address` is an unstable singleton (a
     /// method, a mutable member, a constructor), which Dotty would widen
     /// (`widenIfUnstable`). The model has no widening, so the selection is
     /// refused rather than made on the unstable singleton.
-    UnstableSelectQualifier { address: u32, qualifier: TypeId },
+    UnstableSelectQualifier {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+        /// Semantic type of the qualifier through which lookup is performed.
+        qualifier: TypeId,
+    },
     /// The `SINGLETONtpt` at `address` refers to a term whose type is not a
     /// stable singleton: `ty` is what the reference denotes.
-    InvalidSingletonTypeTree { address: u32, ty: TypeId },
+    InvalidSingletonTypeTree {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+        /// Semantic type identity in the same session type arena.
+        ty: TypeId,
+    },
     /// No symbol was entered for the definition address given to completion.
-    MissingEnteredSymbol { address: u32 },
+    MissingEnteredSymbol {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+    },
     /// The symbol at `address` is of a kind whose completion is a later
     /// milestone (methods, constructors, classes, traits, modules).
-    UnsupportedSymbolCompletion { address: u32, kind: SymbolKind },
+    UnsupportedSymbolCompletion {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+        /// Stable declaration category, independent of flags and visibility.
+        kind: SymbolKind,
+    },
     /// The symbol at `address` is of a kind pass 1 never indexes an
     /// `ANNOTATION` tail for (a package, entered through `enter_package`
     /// rather than `enter_symbol`): `complete_symbol_annotations` and
     /// `complete_symbols_annotations` are for `TYPEDEF`/`VALDEF`/`DEFDEF`/
     /// `TYPEPARAM`/`PARAM` addresses only.
-    UnsupportedAnnotationCompletion { address: u32, kind: SymbolKind },
+    UnsupportedAnnotationCompletion {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+        /// Stable declaration category, independent of flags and visibility.
+        kind: SymbolKind,
+    },
     /// The defining owner of an opaque alias is not a class-like symbol.
     OpaqueAliasOwnerNotClassLike {
+        /// Byte address in the TASTy AST section for this node or reference.
         address: u32,
+        /// Semantic owner of the declaration; ownership is distinct from lookup scope.
         owner: SymbolId,
+        /// Stable declaration category, independent of flags and visibility.
         kind: SymbolKind,
     },
     /// The opaque alias owner is missing from this unit and has no completed
     /// class info in the shared semantic store.
-    OpaqueAliasOwnerNotEntered { address: u32, owner: SymbolId },
+    OpaqueAliasOwnerNotEntered {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+        /// Semantic owner of the declaration; ownership is distinct from lookup scope.
+        owner: SymbolId,
+    },
     /// An opaque alias would add a second same-named refinement to its owner.
-    OpaqueAliasCycle { address: u32 },
+    OpaqueAliasCycle {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+    },
     /// The symbol at `address` already holds `SymbolInfo::Deferred`, which
     /// this milestone has no way to force.
-    SymbolCompletionDeferred { address: u32 },
+    SymbolCompletionDeferred {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+    },
     /// The symbol at `address` already holds `SymbolInfo::Error`.
-    SymbolInfoError { address: u32 },
+    SymbolInfoError {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+    },
     /// A type parameter or type definition whose right-hand side cannot be
     /// bounds: `ty` is its projected type.
-    InvalidCompletedBounds { address: u32, ty: TypeId },
+    InvalidCompletedBounds {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+        /// Semantic type identity in the same session type arena.
+        ty: TypeId,
+    },
     /// The type node at `address` has a tag the type pass does not decode
     /// yet (a later increment) or that is not a type at all. The node is
     /// never lowered to a placeholder type.
-    UnsupportedType { tag: u8, address: u32 },
+    UnsupportedType {
+        /// Wire-format tag identifying the decoded entry or node kind.
+        tag: u8,
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+    },
     /// The type node at `from` refers to the definition at `to`, which is a
     /// visible AST node but has no symbol entered by pass 1 (for example a
     /// local definition, or a definition in another unit).
-    MissingReferencedSymbol { from: u32, to: u32 },
+    MissingReferencedSymbol {
+        /// AST-section address of the referring definition or node.
+        from: u32,
+        /// Target AST-section address of the rejected reference.
+        to: u32,
+    },
     /// The type node at `from` refers to the definition at `to`, which has an
     /// entered symbol of the wrong kind: a `TYPEREF*` must name a type-namespace
     /// symbol, a `TERMREF*` a term-namespace one, and `THIS` a class.
-    InvalidReferenceKind { from: u32, to: u32 },
+    InvalidReferenceKind {
+        /// AST-section address of the referring definition or node.
+        from: u32,
+        /// Target AST-section address of the rejected reference.
+        to: u32,
+    },
     /// The `TYPEREFpkg` / `TERMREFpkg` node at `address` names a package
     /// that has not been entered into the package registry. Resolving
     /// packages outside the entered units belongs to the future resolver.
-    UnresolvedPackage { address: u32, package: String },
+    UnresolvedPackage {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+        /// Package identity or path associated with this declaration.
+        package: String,
+    },
     /// The name-based reference at `address` is well formed and its prefix is
     /// understood, but neither the entered state nor the resolver holds a
     /// member `name` of `namespace` in it. This is not evidence the member
     /// does not exist.
     UnresolvedMember {
+        /// Byte address in the TASTy AST section for this node or reference.
         address: u32,
+        /// Semantic prefix through which the member is selected.
         prefix: TypeId,
         /// The explicit declaration space of a `TYPEREFin` / `TERMREFin`,
         /// where the member was searched instead of in `prefix`.
         space: Option<TypeId>,
+        /// Recorded name spelling used by the enclosing declaration or validation rule.
         name: String,
+        /// Term or type namespace required for this reference.
         namespace: Namespace,
     },
     /// The prefix holds `candidates` symbols under the requested name and
     /// namespace (overloads), and the reference does not say which. Never
     /// resolved by taking the first.
     AmbiguousMember {
+        /// Byte address in the TASTy AST section for this node or reference.
         address: u32,
+        /// Semantic prefix through which the member is selected.
         prefix: TypeId,
         /// As in [`Self::UnresolvedMember`].
         space: Option<TypeId>,
+        /// Recorded name spelling used by the enclosing declaration or validation rule.
         name: String,
+        /// Number of matching candidates found by lookup.
         candidates: usize,
     },
     /// The term reference at `address` carries a signature (`SIGNED` /
     /// `TARGETSIGNED`), and selecting a member by signature is not
     /// implemented. The signature is neither stripped nor ignored.
-    UnsupportedSignedReference { address: u32, name: String },
+    UnsupportedSignedReference {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+        /// Recorded name spelling used by the enclosing declaration or validation rule.
+        name: String,
+    },
     /// The compound type node at `address` has a shape the semantic model
     /// cannot express: its indexed children disagree with its wire shape.
-    MalformedType { address: u32, reason: TypeReason },
+    MalformedType {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+        /// Detailed reason for rejecting this input or dependency.
+        reason: TypeReason,
+    },
     /// The `ANNOTATEDtype` at `address` carries a full annotation tree, whose
     /// root node at `annotation_address` has tag `tag`. The annotated type is
     /// understood; the tree is not, and is never dropped to fit the compact
     /// form.
     UnsupportedAnnotationTree {
+        /// Byte address in the TASTy AST section for this node or reference.
         address: u32,
+        /// Byte address in the TASTy AST section for this node or reference.
         annotation_address: u32,
+        /// Wire-format tag identifying the decoded entry or node kind.
         tag: u8,
     },
     /// The `ANNOTATEDtype` at `address` has a compact annotation whose type,
@@ -386,7 +616,9 @@ pub enum UnpickleError {
     /// is all Dotty's `CompactAnnotation` accepts (a `SHAREDtype` payload can
     /// reach any type, or a binder still being decoded).
     InvalidCompactAnnotationType {
+        /// Byte address in the TASTy AST section for this node or reference.
         address: u32,
+        /// Canonical semantic annotation type in the current type arena.
         annotation_type: TypeId,
     },
     /// The full annotation at `annotation_address` inside the `ANNOTATEDtype`
@@ -394,84 +626,144 @@ pub enum UnpickleError {
     /// (`tag` names it): a spine node that is not `APPLY`, `TYPEAPPLY`, the
     /// constructor `SELECTin` or `NEW`, or a class tree that is not a type.
     UnsupportedAnnotationConstructor {
+        /// Byte address in the TASTy AST section for this node or reference.
         address: u32,
+        /// Byte address in the TASTy AST section for this node or reference.
         annotation_address: u32,
+        /// Wire-format tag identifying the decoded entry or node kind.
         tag: u8,
     },
     /// An argument of the annotation on the `ANNOTATEDtype` at `address` is
     /// a form the annotation value model does not hold (only literals and class
     /// literals are). It is never dropped or evaluated.
     UnsupportedAnnotationArgument {
+        /// Byte address in the TASTy AST section for this node or reference.
         address: u32,
+        /// Byte address in the TASTy AST section for this node or reference.
         argument_address: u32,
+        /// Wire-format tag identifying the decoded entry or node kind.
         tag: u8,
     },
     /// The type of the full annotation on the `ANNOTATEDtype` at `address`,
     /// `annotation_type`, is neither a `TypeRef` nor an `Applied` type.
     InvalidAnnotationType {
+        /// Byte address in the TASTy AST section for this node or reference.
         address: u32,
+        /// Canonical semantic annotation type in the current type arena.
         annotation_type: TypeId,
     },
     /// The `TYPEBOUNDS` node at `address` carries variance markers for the
     /// lambda `target`, which is still being decoded, so it cannot be rebound
     /// yet. (A marker on a bound that is not a lambda is left alone, as
     /// Dotty's `readVariances` does.)
-    BoundsVarianceTargetPending { address: u32, target: TypeId },
+    BoundsVarianceTargetPending {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+        /// Target type required by the enclosing conversion or relation.
+        target: TypeId,
+    },
     /// The `TYPEBOUNDS` node at `address` carries `actual` variance markers,
     /// but the lambda `lambda` it applies to has `expected` parameters.
     BoundsVarianceArityMismatch {
+        /// Byte address in the TASTy AST section for this node or reference.
         address: u32,
+        /// Type-lambda binder associated with the parameter reference.
         lambda: TypeId,
+        /// Required argument or parameter count.
         expected: usize,
+        /// Observed argument or parameter count.
         actual: usize,
     },
     /// Rebinding the lambda under the `TYPEBOUNDS` at `address` failed.
     RebindFailed {
+        /// Byte address in the TASTy AST section for this node or reference.
         address: u32,
+        /// Underlying typed failure; inspect it for the more specific cause.
         error: TypeRebindError,
     },
     /// The `METHODtype` at `address` ends with a modifier, `tag`, that a method
     /// type does not use (only `IMPLICIT` and `GIVEN` do).
-    InvalidMethodModifier { address: u32, tag: u8 },
+    InvalidMethodModifier {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+        /// Wire-format tag identifying the decoded entry or node kind.
+        tag: u8,
+    },
     /// The `PARAMtype` at `from` names `binder`, which is not the start of a
     /// visible AST node.
-    InvalidBinderReference { from: u32, binder: u32 },
+    InvalidBinderReference {
+        /// AST-section address of the referring definition or node.
+        from: u32,
+        /// AST-section address of the type binder referenced by this parameter.
+        binder: u32,
+    },
     /// The `PARAMtype` at `from` names a node whose type, `binder`, is not a
     /// binder (a `TypeLambda`, `Poly` or `Method`).
-    InvalidBinderKind { from: u32, binder: TypeId },
+    InvalidBinderKind {
+        /// AST-section address of the referring definition or node.
+        from: u32,
+        /// Enclosing type binder whose parameters are referenced.
+        binder: TypeId,
+    },
     /// The `PARAMtype` at `address` names parameter `index` of `binder`, which
     /// has only `arity` parameters.
     InvalidParameterIndex {
+        /// Byte address in the TASTy AST section for this node or reference.
         address: u32,
+        /// Enclosing type binder whose parameters are referenced.
         binder: TypeId,
+        /// Index into the enclosing table or parameter list, using that structure’s indexing
+        /// convention.
         index: u32,
+        /// Number of arguments, parameters, or components in the inspected shape.
         arity: usize,
     },
     /// Parameter `index` of `binder` has an info, `bounds`, that is not a
     /// bounds type (`Bounds` or `AliasingBounds`).
     InvalidTypeParameterBounds {
+        /// Enclosing type binder whose parameters are referenced.
         binder: TypeId,
+        /// Index into the enclosing table or parameter list, using that structure’s indexing
+        /// convention.
         index: u32,
+        /// Lower and upper bound representation for this parameter.
         bounds: TypeId,
     },
     /// The prefix of the name-based reference at `address` is a form whose
     /// members cannot be looked up here, and the resolver did not know it
     /// either.
-    UnsupportedResolutionPrefix { address: u32, prefix: TypeId },
+    UnsupportedResolutionPrefix {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+        /// Semantic prefix through which the member is selected.
+        prefix: TypeId,
+    },
     /// The declaration space (the owner) of the `TYPEREFin` / `TERMREFin` at
     /// `address` has no declaration-scope semantics here, or is a binder still
     /// being decoded, and the resolver did not know it either. Distinct from
     /// [`Self::UnsupportedResolutionPrefix`]: the prefix is how the reference
     /// is viewed, the space is where its declaration is.
-    UnsupportedResolutionSpace { address: u32, space: TypeId },
+    UnsupportedResolutionSpace {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+        /// Type describing the pattern space being inspected.
+        space: TypeId,
+    },
     /// The prefix of the `TYPEREFin` at `address` is not a legal prefix (an
     /// unstable singleton), which Dotty wraps in a `QualSkolemType`. The
     /// semantic model has none, so the reference is not decoded.
-    IllegalTypePrefix { address: u32, prefix: TypeId },
+    IllegalTypePrefix {
+        /// Byte address in the TASTy AST section for this node or reference.
+        address: u32,
+        /// Semantic prefix through which the member is selected.
+        prefix: TypeId,
+    },
     /// The resolver failed on the reference at `address`, or answered with a
     /// symbol that cannot be the one requested.
     ResolverFailure {
+        /// Byte address in the TASTy AST section for this node or reference.
         address: u32,
+        /// Underlying typed failure; inspect it for the more specific cause.
         error: ResolutionError,
     },
 }

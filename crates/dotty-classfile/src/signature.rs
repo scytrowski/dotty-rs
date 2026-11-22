@@ -15,16 +15,55 @@ pub const DEFAULT_MAX_SIGNATURE_DEPTH: usize = 128;
 const IDENTIFIER_STOPS: &[u8] = b".;[/<>:";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Grammar or nesting-limit failure in a JVM generic signature.
 pub enum SignatureError {
-    UnexpectedEnd { offset: usize },
-    UnknownLeadChar { offset: usize, found: char },
-    EmptyIdentifier { offset: usize },
-    MissingSemicolon { offset: usize },
-    MissingColon { offset: usize },
-    MissingOpenParen { offset: usize },
-    MissingCloseParen { offset: usize },
-    TooDeeplyNested { offset: usize },
-    TrailingCharacters { offset: usize },
+    /// The signature ends before its required grammar form is complete.
+    UnexpectedEnd {
+        /// Byte offset at which the input or cursor check failed.
+        offset: usize,
+    },
+    /// A signature component begins with an unrecognized character.
+    UnknownLeadChar {
+        /// Byte offset at which the input or cursor check failed.
+        offset: usize,
+        /// Value encountered at the point where the enclosing rule failed.
+        found: char,
+    },
+    /// A signature identifier contains no characters.
+    EmptyIdentifier {
+        /// Byte offset at which the input or cursor check failed.
+        offset: usize,
+    },
+    /// A reference type signature lacks its closing semicolon.
+    MissingSemicolon {
+        /// Byte offset at which the input or cursor check failed.
+        offset: usize,
+    },
+    /// A type parameter bound lacks the required colon separator.
+    MissingColon {
+        /// Byte offset at which the input or cursor check failed.
+        offset: usize,
+    },
+    /// A method signature lacks its opening parenthesis.
+    MissingOpenParen {
+        /// Byte offset at which the input or cursor check failed.
+        offset: usize,
+    },
+    /// A method signature lacks its closing parenthesis.
+    MissingCloseParen {
+        /// Byte offset at which the input or cursor check failed.
+        offset: usize,
+    },
+    /// The signature exceeds the configured nesting bound.
+    TooDeeplyNested {
+        /// Byte offset at which the input or cursor check failed.
+        offset: usize,
+    },
+    /// Characters remain after a complete signature.
+    TrailingCharacters {
+        /// Byte offset at which the input or cursor check failed.
+        offset: usize,
+    },
 }
 
 impl fmt::Display for SignatureError {
@@ -287,15 +326,20 @@ fn parse_type_parameter(
 /// A `JavaTypeSignature` (JVMS §4.7.9.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeSignature {
+    /// Class, type-variable, or array signature.
     Reference(ReferenceTypeSignature),
+    /// Primitive JVM field type signature.
     Base(FieldType),
 }
 
 /// A `ReferenceTypeSignature` (JVMS §4.7.9.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReferenceTypeSignature {
+    /// Class type signature, including nested segments and type arguments.
     Class(ClassTypeSignature),
+    /// Reference to a named generic type parameter.
     TypeVariable(String),
+    /// Array whose component is a type signature.
     Array(Box<TypeSignature>),
 }
 
@@ -303,8 +347,11 @@ pub enum ReferenceTypeSignature {
 /// SimpleClassTypeSignature ClassTypeSignatureSuffix* ;`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassTypeSignature {
+    /// Package-name segments preceding the outermost class, in encoded order.
     pub package: Vec<String>,
+    /// Unqualified class name.
     pub simple_name: String,
+    /// Type arguments of the outermost class segment.
     pub type_arguments: Vec<TypeArgument>,
     /// The `.` -qualified inner-class suffixes (`ClassTypeSignatureSuffix*`).
     pub suffix: Vec<SimpleClassTypeSignature>,
@@ -313,25 +360,33 @@ pub struct ClassTypeSignature {
 /// A `SimpleClassTypeSignature` (JVMS §4.7.9.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimpleClassTypeSignature {
+    /// Recorded name spelling used by the enclosing declaration or validation rule.
     pub name: String,
+    /// Type arguments in application order.
     pub type_arguments: Vec<TypeArgument>,
 }
 
 /// A `TypeArgument` (JVMS §4.7.9.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeArgument {
+    /// Invariant type argument with an exact reference type.
     Exact(ReferenceTypeSignature),
+    /// Covariant wildcard with an upper reference-type bound.
     Extends(ReferenceTypeSignature),
+    /// Contravariant wildcard with a lower reference-type bound.
     Super(ReferenceTypeSignature),
+    /// Unbounded wildcard argument.
     Wildcard,
 }
 
 /// A `TypeParameter` (JVMS §4.7.9.1): `Identifier ClassBound InterfaceBound*`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeParameter {
+    /// Recorded name spelling used by the enclosing declaration or validation rule.
     pub name: String,
     /// The `ClassBound`; `None` means the bound is implicitly `Object`.
     pub class_bound: Option<ReferenceTypeSignature>,
+    /// Additional interface bounds in signature order.
     pub interface_bounds: Vec<ReferenceTypeSignature>,
 }
 
@@ -339,8 +394,11 @@ pub struct TypeParameter {
 /// on a class or interface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassSignature {
+    /// Type parameter declarations in source or signature order.
     pub type_parameters: Vec<TypeParameter>,
+    /// Direct superclass recorded by the class signature or relationship.
     pub superclass: ClassTypeSignature,
+    /// Direct interface signatures in declaration order.
     pub superinterfaces: Vec<ClassTypeSignature>,
 }
 
@@ -370,10 +428,13 @@ impl ClassSignature {
 /// on a method or constructor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodSignature {
+    /// Type parameter declarations in source or signature order.
     pub type_parameters: Vec<TypeParameter>,
+    /// Parameter types or declarations in signature order.
     pub parameters: Vec<TypeSignature>,
-    /// The `Result`; `None` means `void`.
+    /// Generic result type; None represents JVM void.
     pub result: Option<TypeSignature>,
+    /// Declared exception signatures in signature order.
     pub throws: Vec<ThrowsSignature>,
 }
 
@@ -440,7 +501,9 @@ impl MethodSignature {
 /// A `ThrowsSignature` (JVMS §4.7.9.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ThrowsSignature {
+    /// Declared exception identified by a class signature.
     Class(ClassTypeSignature),
+    /// Declared exception identified by a type parameter name.
     TypeVariable(String),
 }
 

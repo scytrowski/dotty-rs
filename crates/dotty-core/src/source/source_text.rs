@@ -16,11 +16,35 @@ pub struct SourceText<'source> {
 /// Failure while accessing source text by byte range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceTextError {
-    TextTooLong { byte_len: usize },
-    RangeOutOfBounds { range: TextRange, byte_len: u32 },
-    NotUtf8Boundary { offset: u32 },
-    OffsetOutOfBounds { offset: u32, byte_len: u32 },
-    LineLayoutMismatch { byte_len: u32 },
+    /// The UTF-8 buffer cannot be addressed using 32-bit source offsets.
+    TextTooLong {
+        /// Length of the source buffer in UTF-8 bytes.
+        byte_len: usize,
+    },
+    /// The requested byte range extends beyond the source buffer.
+    RangeOutOfBounds {
+        /// Source byte range involved in the check.
+        range: TextRange,
+        /// Length of the source buffer in UTF-8 bytes.
+        byte_len: u32,
+    },
+    /// The requested byte offset splits a UTF-8 encoded scalar.
+    NotUtf8Boundary {
+        /// Byte offset at which the input or cursor check failed.
+        offset: u32,
+    },
+    /// The requested byte offset exceeds the source buffer length.
+    OffsetOutOfBounds {
+        /// Byte offset at which the input or cursor check failed.
+        offset: u32,
+        /// Length of the source buffer in UTF-8 bytes.
+        byte_len: u32,
+    },
+    /// The supplied line index does not describe this source buffer.
+    LineLayoutMismatch {
+        /// Length of the source buffer in UTF-8 bytes.
+        byte_len: u32,
+    },
 }
 
 impl fmt::Display for SourceTextError {

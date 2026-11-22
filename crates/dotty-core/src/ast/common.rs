@@ -21,7 +21,9 @@ use std::ops::Range;
 /// `name`, preserving whether the source used backquotes around it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Ident {
+    /// Namespace-aware name referenced by this identifier.
     pub name: Name,
+    /// Whether the source spelling was enclosed in backquotes.
     pub backquoted: bool,
 }
 
@@ -33,8 +35,11 @@ pub struct Ident {
 pub struct Select<P: AstPhase> {
     /// True for a source type projection (`T#Member`).
     pub is_type_projection: bool,
+    /// Qualifier of the selected member or reference.
     pub qualifier: TreeId<P>,
+    /// Namespace-aware name selected from the qualifier.
     pub name: Name,
+    /// Whether the source spelling was enclosed in backquotes.
     pub backquoted: bool,
 }
 
@@ -43,6 +48,7 @@ pub struct Select<P: AstPhase> {
 /// semantic type independent of the enclosing class.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct This {
+    /// Optional enclosing class name qualifying this reference.
     pub qual: Option<Name>,
 }
 
@@ -50,92 +56,121 @@ pub struct This {
 /// qualifier, a bare name for the same reason as [`This::qual`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Super<P: AstPhase> {
+    /// Current-instance tree qualifying the superclass reference.
     pub qual: TreeId<P>,
+    /// Optional trait name qualifying a super reference.
     pub mix: Option<Name>,
 }
 
 /// A literal constant.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Literal {
+    /// Compile-time constant represented by this literal.
     pub value: Constant,
 }
 
 /// The kind of an [`Apply`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApplyKind {
+    /// Ordinary value argument application, such as `f(x)`.
     Regular,
+    /// Explicit contextual argument application, such as `f(using x)`.
     Using,
 }
 
 /// `function(args)`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Apply<P: AstPhase> {
+    /// Callee expression in the same phase arena.
     pub function: TreeId<P>,
+    /// Value argument trees in application order; contextual status is recorded separately by
+    /// kind.
     pub args: Vec<TreeId<P>>,
+    /// Whether the argument list is ordinary or explicitly contextual.
     pub kind: ApplyKind,
 }
 
 /// `function[args]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypeApply<P: AstPhase> {
+    /// Polymorphic callee or type constructor to which the explicit arguments apply.
     pub function: TreeId<P>,
+    /// Explicit type-argument syntax in source order.
     pub args: Vec<TreeId<P>>,
 }
 
 /// `new tpt`, without a constructor call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct New<P: AstPhase> {
+    /// Type syntax of the instance being constructed; constructor invocation is a separate
+    /// application.
     pub tpt: TreeId<P>,
 }
 
 /// `expr: tpt`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TypedExpr<P: AstPhase> {
+    /// Expression receiving the explicit type ascription.
     pub expr: TreeId<P>,
+    /// Explicit ascribed type syntax.
     pub tpt: TreeId<P>,
 }
 
 /// `name = arg`, in a parameter list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NamedArg<P: AstPhase> {
+    /// Parameter name targeted by this named argument.
     pub name: Name,
+    /// Argument expression supplied for this named argument.
     pub arg: TreeId<P>,
 }
 
 /// `lhs = rhs`, outside a parameter list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Assign<P: AstPhase> {
+    /// Assignment target tree.
     pub lhs: TreeId<P>,
+    /// Value expression assigned to the target.
     pub rhs: TreeId<P>,
 }
 
 /// `{ stats; expr }`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Block<P: AstPhase> {
+    /// Statements in evaluation order preceding the block result.
     pub stats: Vec<TreeId<P>>,
+    /// Final result expression evaluated after all statements.
     pub expr: TreeId<P>,
 }
 
 /// `if cond then then_branch else else_branch`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct If<P: AstPhase> {
+    /// Condition expression controlling this construct.
     pub cond: TreeId<P>,
+    /// Expression evaluated when the condition is true.
     pub then_branch: TreeId<P>,
+    /// Expression evaluated when the condition is false.
     pub else_branch: TreeId<P>,
 }
 
 /// `selector match { cases }`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Match<P: AstPhase> {
+    /// Scrutinee expression matched against the ordered cases.
     pub selector: TreeId<P>,
+    /// Case clauses in matching order.
     pub cases: Vec<TreeId<P>>,
 }
 
 /// `case pattern if guard => body`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CaseDef<P: AstPhase> {
+    /// Pattern tested or bound by this construct.
     pub pattern: TreeId<P>,
+    /// Optional case guard evaluated before the case body.
     pub guard: Option<TreeId<P>>,
+    /// Expression evaluated after this case pattern and guard succeed.
     pub body: TreeId<P>,
 }
 
@@ -143,22 +178,29 @@ pub struct CaseDef<P: AstPhase> {
 /// from (absent means "the immediately enclosing method").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Return<P: AstPhase> {
+    /// Expression evaluated or described by this node.
     pub expr: Option<TreeId<P>>,
+    /// Return target or starting point of the enclosing relation.
     pub from: Option<TreeId<P>>,
 }
 
 /// `while (cond) { body }`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct While<P: AstPhase> {
+    /// Condition expression controlling this construct.
     pub cond: TreeId<P>,
+    /// Body tree or ordered body statements belonging to this node.
     pub body: TreeId<P>,
 }
 
 /// `try expr catch cases finally finalizer`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Try<P: AstPhase> {
+    /// Expression evaluated or described by this node.
     pub expr: TreeId<P>,
+    /// Case clauses in matching order.
     pub cases: Vec<TreeId<P>>,
+    /// Optional finally expression evaluated after the protected body.
     pub finalizer: Option<TreeId<P>>,
 }
 
@@ -167,8 +209,11 @@ pub struct Try<P: AstPhase> {
 /// function type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Closure<P: AstPhase> {
+    /// Captured environment trees in closure argument order.
     pub env: Vec<TreeId<P>>,
+    /// Method-reference tree implementing the closure.
     pub method: TreeId<P>,
+    /// Optional target function-type syntax supplied for this closure.
     pub tpt: Option<TreeId<P>>,
     /// Source-generated implementation and its ordered parameters, when available.
     pub implementation: Option<ClosureImplementation<P>>,
@@ -186,9 +231,14 @@ pub struct ClosureImplementation<P: AstPhase> {
 /// `mods val name: tpt = rhs`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValDef<P: AstPhase> {
+    /// Interned name in the term namespace; resolve its text through the session interner.
     pub name: TermName,
+    /// Declared type syntax, which can itself contain a parser-recovery placeholder.
     pub tpt: TreeId<P>,
+    /// Right-hand-side tree, absent for a declaration without a definition.
     pub rhs: Option<TreeId<P>>,
+    /// Definition metadata for the current phase: source modifiers before typing, unit after
+    /// typing.
     pub metadata: P::DefMetadata,
 }
 
@@ -198,22 +248,31 @@ pub struct ValDef<P: AstPhase> {
 /// type and term clauses (including empty clauses).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DefParamClauseOrder {
+    /// Range into DefDef::type_params for this source type-parameter clause.
     TypeParams(Range<usize>),
+    /// Zero-based index into DefDef::value_param_clauses for this source value clause.
     ValueParams(usize),
 }
 
 /// `mods def name[type_params](value_param_clauses): tpt = rhs`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DefDef<P: AstPhase> {
+    /// Interned name in the term namespace; resolve its text through the session interner.
     pub name: TermName,
+    /// Type parameter declarations in source or signature order.
     pub type_params: Vec<TreeId<P>>,
+    /// Value parameter clauses in source order.
     pub value_param_clauses: Vec<Vec<TreeId<P>>>,
     /// Source clause order when it cannot be reconstructed from the legacy
     /// type-first fields. `None` means one leading type clause, followed by
     /// all value clauses.
     pub source_param_clause_order: Option<Vec<DefParamClauseOrder>>,
+    /// Declared method result type syntax.
     pub tpt: TreeId<P>,
+    /// Right-hand-side tree, absent for a declaration without a definition.
     pub rhs: Option<TreeId<P>>,
+    /// Definition metadata for the current phase: source modifiers before typing, unit after
+    /// typing.
     pub metadata: P::DefMetadata,
 }
 
@@ -221,8 +280,12 @@ pub struct DefDef<P: AstPhase> {
 /// body, a type-bounds/alias tree otherwise).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypeDef<P: AstPhase> {
+    /// Interned name in the type namespace; resolve its text through the session interner.
     pub name: TypeName,
+    /// Class template, alias target, or bounds tree defining this type declaration.
     pub rhs: TreeId<P>,
+    /// Definition metadata for the current phase: source modifiers before typing, unit after
+    /// typing.
     pub metadata: P::DefMetadata,
     /// Declared variance when this `TypeDef` is used as a type parameter.
     ///
@@ -240,17 +303,24 @@ pub struct TypeDef<P: AstPhase> {
 /// parent and is consumed before a typed template is built.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Template<P: AstPhase> {
+    /// Constructor declaration tree in the same phase arena.
     pub constructor: TreeId<P>,
+    /// Parent type or constructor syntax in original source order.
     pub parents: Vec<TreeId<P>>,
+    /// Optional self declaration in the template.
     pub self_val: Option<TreeId<P>>,
+    /// Template members and statements in original source order.
     pub body: Vec<TreeId<P>>,
+    /// Source derives/uses metadata before typing; unit after typing.
     pub metadata: P::TemplateMetadata,
 }
 
 /// `package name { stats }`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PackageDef<P: AstPhase> {
+    /// Name or package-path syntax in the same phase arena.
     pub name: TreeId<P>,
+    /// Package declarations, imports, and statements in original source order.
     pub stats: Vec<TreeId<P>>,
 }
 
@@ -260,23 +330,31 @@ pub struct PackageDef<P: AstPhase> {
 /// own semantic type is never meaningful.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ImportSelector<P: AstPhase> {
+    /// Name selected by this import selector.
     pub imported: Name,
+    /// Whether the imported name was written in backquotes.
     pub imported_backquoted: bool,
+    /// Optional import rename target.
     pub renamed: Option<TreeId<P>>,
+    /// Optional type bound used by a typed given selector.
     pub bound: Option<TreeId<P>>,
 }
 
 /// `import expr.{selectors}`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Import<P: AstPhase> {
+    /// Qualifier from which the named members are imported or exported.
     pub expr: TreeId<P>,
+    /// Import selectors or selected names in source order.
     pub selectors: Vec<ImportSelector<P>>,
 }
 
 /// `export expr.{selectors}`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Export<P: AstPhase> {
+    /// Qualifier from which the named members are imported or exported.
     pub expr: TreeId<P>,
+    /// Import selectors or selected names in source order.
     pub selectors: Vec<ImportSelector<P>>,
 }
 
@@ -288,56 +366,72 @@ pub struct TypeTree;
 /// `ref.type`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SingletonTypeTree<P: AstPhase> {
+    /// Stable term path designated by the singleton type.
     pub reference: TreeId<P>,
 }
 
 /// `tpt { refinements }`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RefinedTypeTree<P: AstPhase> {
+    /// Parent type syntax extended by the refinement declarations.
     pub tpt: TreeId<P>,
+    /// Refinement declarations in source order.
     pub refinements: Vec<TreeId<P>>,
 }
 
 /// `tpt[args]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppliedTypeTree<P: AstPhase> {
+    /// Type constructor syntax to which the arguments apply.
     pub tpt: TreeId<P>,
+    /// Type-argument syntax in application order.
     pub args: Vec<TreeId<P>>,
 }
 
 /// `[type_params] =>> body`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LambdaTypeTree<P: AstPhase> {
+    /// Type parameter declarations in source or signature order.
     pub type_params: Vec<TreeId<P>>,
+    /// Result type syntax within the type-parameter binder.
     pub body: TreeId<P>,
 }
 
 /// `[bound] selector match { cases }`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MatchTypeTree<P: AstPhase> {
+    /// Optional declared upper bound of the match type.
     pub bound: Option<TreeId<P>>,
+    /// Type syntax used as the match-type scrutinee.
     pub selector: TreeId<P>,
+    /// Type case clauses in source matching order.
     pub cases: Vec<TreeId<P>>,
 }
 
 /// `=> result`, a by-name parameter type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ByNameTypeTree<P: AstPhase> {
+    /// Result type syntax of the by-name type.
     pub result: TreeId<P>,
 }
 
 /// `>: low <: high`, optionally `= alias` for a bounded opaque type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TypeBoundsTree<P: AstPhase> {
+    /// Optional explicit lower type-bound syntax.
     pub low: Option<TreeId<P>>,
+    /// Optional explicit upper type-bound syntax.
     pub high: Option<TreeId<P>>,
+    /// Optional alias target syntax, retained distinctly from ordinary bounds.
     pub alias: Option<TreeId<P>>,
 }
 
 /// `name @ body`, a pattern binding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Bind<P: AstPhase> {
+    /// Interned text identity and term/type namespace of the declaration or reference.
     pub name: Name,
+    /// Nested pattern whose successful match introduces this binding.
     pub body: TreeId<P>,
     /// Marks Scala's `given T` pattern form, which Dotty represents as a
     /// wildcard bind carrying the `Given` modifier.
@@ -347,6 +441,7 @@ pub struct Bind<P: AstPhase> {
 /// `alt_1 | ... | alt_n`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Alternative<P: AstPhase> {
+    /// Alternative patterns in source order.
     pub alternatives: Vec<TreeId<P>>,
 }
 
@@ -354,44 +449,58 @@ pub struct Alternative<P: AstPhase> {
 /// the match selector.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnApply<P: AstPhase> {
+    /// Extractor function tree selected for this pattern.
     pub function: TreeId<P>,
+    /// Implicit argument trees associated with this extractor application.
     pub implicits: Vec<TreeId<P>>,
+    /// Patterns in their original source order.
     pub patterns: Vec<TreeId<P>>,
 }
 
 /// `expr: @annotation` (an annotated expression or type).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Annotated<P: AstPhase> {
+    /// Expression or type tree carrying the annotation.
     pub expr: TreeId<P>,
+    /// Annotation syntax tree attached to the expression or type.
     pub annotation: TreeId<P>,
 }
 
 /// `'{ body }` or `'[ body ]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Quote<P: AstPhase> {
+    /// Body tree or ordered body statements belonging to this node.
     pub body: TreeId<P>,
+    /// Quoted type tags in source order.
     pub tags: Vec<TreeId<P>>,
 }
 
 /// `${ expr }`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Splice<P: AstPhase> {
+    /// Expression evaluated or described by this node.
     pub expr: TreeId<P>,
 }
 
 /// `'{ bindings; body }` or `'[ bindings; body ]` in a pattern.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuotePattern<P: AstPhase> {
+    /// Pattern bindings in source order.
     pub bindings: Vec<TreeId<P>>,
+    /// Pattern tree inside the quote.
     pub body: TreeId<P>,
+    /// Tree providing the contextual Quotes value.
     pub quotes: TreeId<P>,
 }
 
 /// `${ body }`, `$ident`, or `$ident(args*)` in a quote pattern.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SplicePattern<P: AstPhase> {
+    /// Body of the splice pattern.
     pub body: TreeId<P>,
+    /// Type arguments in application order.
     pub type_args: Vec<TreeId<P>>,
+    /// Term argument trees in splice application order.
     pub args: Vec<TreeId<P>>,
 }
 
@@ -405,7 +514,9 @@ pub struct SplicePattern<P: AstPhase> {
 /// `docs/dotty-core-design.md` §7.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Inlined<P: AstPhase> {
+    /// Pattern bindings in source order.
     pub bindings: Vec<TreeId<P>>,
+    /// Expanded tree retained by the inlined node.
     pub expansion: TreeId<P>,
 }
 

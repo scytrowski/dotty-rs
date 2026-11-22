@@ -20,9 +20,13 @@ use crate::ids::{CompletionId, TypeId};
 /// A symbol's type/info, possibly not computed yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SymbolInfo {
+    /// No signature or deferred completion has been recorded.
     Missing,
+    /// Signature completion is represented by a deferred completer.
     Deferred(CompletionId),
+    /// Signature completion succeeded and recorded a semantic type.
     Complete(TypeId),
+    /// Signature completion failed and recorded an error type.
     Error,
 }
 

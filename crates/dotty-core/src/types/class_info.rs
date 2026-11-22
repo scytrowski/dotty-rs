@@ -9,10 +9,15 @@ use crate::ids::{ScopeId, SymbolId, TypeId};
 /// `docs/dotty-core-design.md` §9, `[BLOCKER 2]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClassInfo {
+    /// Semantic prefix under which the class is viewed.
     pub prefix: TypeId,
+    /// Canonical class, trait, or module-class identity described by this signature.
     pub class: SymbolId,
+    /// Semantic parent types in their recorded declaration order.
     pub parents: Vec<TypeId>,
+    /// Lookup scope containing the class declarations.
     pub declarations: ScopeId,
+    /// Explicit self type, when present.
     pub self_type: Option<TypeId>,
 }
 

@@ -6,7 +6,9 @@ use std::collections::HashSet;
 /// The first source tree which cannot contribute an invented name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnsupportedGivenNameTree {
+    /// Source tree identity in its original session arena.
     pub tree: TreeId<Untyped>,
+    /// Stable diagnostic label for the unsupported syntax or type shape.
     pub kind: &'static str,
 }
 

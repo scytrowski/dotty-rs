@@ -11,10 +11,15 @@ use crate::ids::{ClassfileOriginId, SourceId, TastyOriginId, checked_index};
 /// `docs/dotty-core-design.md` §9, `[MINOR 1]`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SymbolOrigin {
+    /// Declaration originating in the identified source buffer.
     Source(SourceId),
+    /// Declaration loaded from a registered class-file origin.
     Classfile(ClassfileOriginId),
+    /// Declaration loaded from a registered TASTy origin.
     Tasty(TastyOriginId),
+    /// Declaration introduced by compiler synthesis.
     Synthetic,
+    /// Compiler-known declaration bootstrapped for this session.
     Builtin,
 }
 
@@ -40,16 +45,27 @@ pub struct OriginTable {
 }
 
 impl OriginTable {
+    /// Creates an empty registry of binary origins for one semantic session.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Allocates the next class-file origin identity in this registry.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the next identity exceeds the 32-bit ID space.
     pub fn register_classfile(&mut self) -> ClassfileOriginId {
         let id = ClassfileOriginId::new(checked_index(self.classfile_count as usize));
         self.classfile_count += 1;
         id
     }
 
+    /// Allocates the next TASTy origin identity in this registry.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the next identity exceeds the 32-bit ID space.
     pub fn register_tasty(&mut self) -> TastyOriginId {
         let id = TastyOriginId::new(checked_index(self.tasty_count as usize));
         self.tasty_count += 1;

@@ -24,3 +24,6 @@ dotty-core.workspace = true
 name = "symbol_annotation_corpus"
 path = "tests/symbol_annotation_corpus.rs"
 required-features = ["corpus"]
+
+[lints]
+workspace = true

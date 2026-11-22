@@ -7,6 +7,9 @@
 //! checks semantic identities, source-to-typed roots, names, and the bounded
 //! erased ABI; it does not encode, publish, or claim Scala-consumable artifacts.
 
+#![deny(missing_docs)]
+#![doc = include_str!("guide.md")]
+
 use std::error::Error;
 use std::fmt;
 
@@ -40,80 +43,147 @@ pub enum JvmTastyContractError {
     /// The TASTy plan was valid when created, but its projection failed.
     TastyPlan(PickleError),
     /// The TASTy class is not present exactly once in the JVM unit.
-    JvmClassMissing { class: SymbolId },
+    JvmClassMissing {
+        /// Class declaration identity being inspected in the supplied session.
+        class: SymbolId,
+    },
     /// A JVM class identity does not match the canonical source declaration.
-    ClassIdentityMismatch { expected: SymbolId, found: SymbolId },
+    ClassIdentityMismatch {
+        /// Required declaration identity in the caller’s symbol table.
+        expected: SymbolId,
+        /// Observed declaration identity in the caller’s symbol table.
+        found: SymbolId,
+    },
     /// Scala's encoded `.tasty` path and the JVM internal name disagree.
     ClassPathMismatch {
+        /// Encoded relative path of the TASTy sidecar.
         tasty_path: String,
+        /// JVM internal class name using slash-separated package segments.
         internal_name: String,
     },
     /// Constructor identity, formals, or descriptor differs between plans.
     ConstructorMismatch {
+        /// Constructor declaration identity being inspected in the supplied session.
         constructor: SymbolId,
+        /// Required textual value used by this validation rule.
         expected: String,
+        /// Observed textual value used by this validation rule.
         actual: String,
     },
     /// A declared source member is absent from a producer plan.
     MemberMissing {
+        /// Canonical member identity whose producer evidence is being compared.
         member: SymbolId,
+        /// Producer side missing the member, identified by the validator’s phase label.
         side: &'static str,
     },
     /// Producer member order or source identity differs.
     MemberOrderMismatch {
+        /// Required declaration identities in their recorded order.
         expected: Vec<SymbolId>,
+        /// Observed declaration identities in their recorded order.
         actual: Vec<SymbolId>,
     },
     /// A member's canonical owner or source origin is wrong.
-    MemberProvenanceMismatch { member: SymbolId, source: SourceId },
+    MemberProvenanceMismatch {
+        /// Canonical member identity whose producer evidence is being compared.
+        member: SymbolId,
+        /// Source buffer identity in the current compilation session.
+        source: SourceId,
+    },
     /// The producer plans disagree on the exact typed RHS root of a source RHS.
     TypedRootMismatch {
+        /// Canonical member identity whose producer evidence is being compared.
         member: SymbolId,
+        /// Exact source tree root in the canonical session arena.
         source_tree: TreeId<Untyped>,
+        /// Exact typed root required by the original source binding.
         expected: Option<TreeId<Typed>>,
+        /// Typed root actually recorded for the source binding; absent when no binding exists.
         actual: Option<TreeId<Typed>>,
     },
     /// JVM descriptor does not match the supported source-level type projection.
     DescriptorMismatch {
+        /// Canonical member identity whose producer evidence is being compared.
         member: SymbolId,
+        /// Required JVM descriptor used by this validation rule.
         expected: String,
+        /// Observed JVM descriptor used by this validation rule.
         actual: String,
     },
     /// The class-state field is not the exact private mutable primitive field audited here.
-    FieldShapeMismatch { field: SymbolId },
+    FieldShapeMismatch {
+        /// Field declaration identity being inspected in the supplied session.
+        field: SymbolId,
+    },
     /// The ABI contains an unsupported source type or method shape.
-    UnsupportedSourceShape { symbol: SymbolId },
+    UnsupportedSourceShape {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+    },
     /// Two methods occupy the same JVM `(name, descriptor)` slot.
-    DuplicateJvmMethod { name: String, descriptor: String },
+    DuplicateJvmMethod {
+        /// Recorded name spelling used by the enclosing declaration or validation rule.
+        name: String,
+        /// Erased JVM descriptor used for member identity or validation.
+        descriptor: String,
+    },
     /// Classfile is missing the class-level `TASTY` link.
-    MissingTastyLink { internal_name: String },
+    MissingTastyLink {
+        /// JVM internal class name using slash-separated package segments.
+        internal_name: String,
+    },
     /// Classfile link UUID differs from the validated Scala 3.9 TASTy header.
     StaleTastyLink {
+        /// JVM internal class name using slash-separated package segments.
         internal_name: String,
+        /// UUID recorded in the class-file TASTY link.
         classfile_uuid: TastyLinkId,
+        /// UUID decoded from the TASTy header.
         tasty_uuid: TastyLinkId,
     },
     /// The classfile's opt-in TASTY link could not be read or validated.
-    InvalidTastyLink { error: TastyLinkError },
+    InvalidTastyLink {
+        /// Underlying typed failure; inspect it for the more specific cause.
+        error: TastyLinkError,
+    },
     /// The classfile's `this_class` did not resolve to a class name.
-    InvalidClassName { error: PoolRefError },
+    InvalidClassName {
+        /// Underlying typed failure; inspect it for the more specific cause.
+        error: PoolRefError,
+    },
     /// The sidecar is not a valid pinned Scala 3.9 TASTy file.
-    InvalidTastyFile { error: TastyFileError },
+    InvalidTastyFile {
+        /// Underlying typed failure; inspect it for the more specific cause.
+        error: TastyFileError,
+    },
     /// The plans do not describe the complete ordered JVM compilation unit.
     BatchShape(&'static str),
     /// One class failed while validating the complete batch.
     BatchClass {
+        /// Zero-based class position in the validated batch.
         class_index: usize,
+        /// Class declaration identity being inspected in the supplied session.
         class: SymbolId,
+        /// Underlying typed failure; inspect it for the more specific cause.
         error: Box<JvmTastyContractError>,
     },
     /// A batch artifact entry set has a duplicate, missing, or unexpected path.
-    BatchArtifactPaths { reason: &'static str, path: String },
+    BatchArtifactPaths {
+        /// Detailed reason for rejecting this input or dependency.
+        reason: &'static str,
+        /// Artifact-relative path involved in validation.
+        path: String,
+    },
     /// One emitted class/sidecar pair failed byte-level batch validation.
     BatchArtifact {
+        /// Zero-based class position in the validated batch.
         class_index: usize,
+        /// Class declaration identity being inspected in the supplied session.
         class: SymbolId,
+        /// Validation phase that rejected this artifact.
         phase: &'static str,
+        /// Detailed reason for rejecting this input or dependency.
         reason: String,
     },
 }

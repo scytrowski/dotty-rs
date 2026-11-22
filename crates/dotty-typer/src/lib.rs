@@ -39,6 +39,9 @@
 //! Import contexts are position-aware; a declaration sees only imports
 //! preceding it in its source context chain.
 
+#![deny(missing_docs)]
+#![doc = include_str!("guide.md")]
+
 mod source_type_index;
 mod source_typed_index;
 mod typer;

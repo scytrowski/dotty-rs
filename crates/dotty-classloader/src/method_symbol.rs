@@ -41,6 +41,9 @@ pub struct MethodSymbol {
 }
 
 impl MethodSymbol {
+    /// Constructs owned binary metadata from already-decoded inputs. This does not resolve
+    /// references or allocate a canonical declaration; any supplied semantic identities must
+    /// belong to the caller's loading session.
     pub fn new(
         name: String,
         symbol: Option<SymbolId>,
@@ -59,6 +62,7 @@ impl MethodSymbol {
         }
     }
 
+    /// Borrows the binary member name exactly as recorded by the loader.
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -71,18 +75,22 @@ impl MethodSymbol {
         self.symbol
     }
 
+    /// Returns the class-file access flags for this member.
     pub fn flags(&self) -> MethodAccessFlags {
         self.flags
     }
 
+    /// Borrows the erased JVM method descriptor, including parameters and result.
     pub fn descriptor(&self) -> &MethodDescriptor {
         &self.descriptor
     }
 
+    /// Borrows the optional parsed generic signature, independently of the erased descriptor.
     pub fn signature(&self) -> Option<&MethodSignature> {
         self.signature.as_ref()
     }
 
+    /// Borrows the semantic annotations retained on this member.
     pub fn annotations(&self) -> &[SemanticAnnotation] {
         &self.annotations
     }

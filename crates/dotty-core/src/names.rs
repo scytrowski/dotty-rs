@@ -12,7 +12,9 @@ use crate::ids::{NameId, checked_index};
 /// The two namespaces Scala names live in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Namespace {
+    /// Term namespace for values, methods, objects, and term references.
     Term,
+    /// Type namespace for classes, type parameters, aliases, and type references.
     Type,
 }
 
@@ -27,22 +29,28 @@ pub struct Name {
 }
 
 impl Name {
+    /// Pairs an interned text identity with its namespace. The caller must resolve the ID through
+    /// the interner that allocated it.
     pub const fn new(text: NameId, namespace: Namespace) -> Self {
         Self { text, namespace }
     }
 
+    /// Returns the text ID, to be resolved through the interner that allocated it.
     pub const fn text(self) -> NameId {
         self.text
     }
 
+    /// Returns the namespace that distinguishes otherwise identical term and type names.
     pub const fn namespace(self) -> Namespace {
         self.namespace
     }
 
+    /// Returns whether this name belongs to the term namespace.
     pub const fn is_term(self) -> bool {
         matches!(self.namespace, Namespace::Term)
     }
 
+    /// Returns whether this name belongs to the type namespace.
     pub const fn is_type(self) -> bool {
         matches!(self.namespace, Namespace::Type)
     }
@@ -62,10 +70,12 @@ pub fn is_variable_pattern_name(spelling: &str) -> bool {
 pub struct TermName(Name);
 
 impl TermName {
+    /// Wraps an interned text identity in the term namespace.
     pub const fn new(text: NameId) -> Self {
         Self(Name::new(text, Namespace::Term))
     }
 
+    /// Borrows the underlying namespace-aware name without changing its text identity.
     pub const fn as_name(&self) -> &Name {
         &self.0
     }
@@ -76,10 +86,12 @@ impl TermName {
 pub struct TypeName(Name);
 
 impl TypeName {
+    /// Wraps an interned text identity in the type namespace.
     pub const fn new(text: NameId) -> Self {
         Self(Name::new(text, Namespace::Type))
     }
 
+    /// Borrows the underlying namespace-aware name without changing its text identity.
     pub const fn as_name(&self) -> &Name {
         &self.0
     }
@@ -98,6 +110,7 @@ pub struct NameInterner {
 }
 
 impl NameInterner {
+    /// Creates an empty text interner for one compilation session.
     pub fn new() -> Self {
         Self::default()
     }
@@ -127,9 +140,11 @@ impl NameInterner {
 
     /// Resolves a previously interned [`NameId`] back to its text.
     ///
-    /// Panics if `id` was not produced by this interner — an `id` from a
-    /// different `NameInterner` is a compiler-internal bug, not recoverable
-    /// input (see `docs/dotty-core-design.md`, "Error handling policy").
+    /// # Panics
+    ///
+    /// Panics if the index is outside this interner. The caller must use the
+    /// interner that allocated the ID: a foreign ID with the same index cannot
+    /// be detected and can resolve to unrelated text.
     pub fn resolve(&self, id: NameId) -> &str {
         &self.strings[id.index() as usize]
     }
