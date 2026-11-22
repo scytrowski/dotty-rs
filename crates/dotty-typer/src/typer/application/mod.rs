@@ -1018,7 +1018,7 @@ impl SourceTyper<'_> {
             && application_kind == ApplyKind::Regular
             && !is_constructor_application
         {
-            self.trailing_source_defaults(
+            self.trailing_ordinary_defaults(
                 &mut function,
                 &method,
                 argument_trees.len(),

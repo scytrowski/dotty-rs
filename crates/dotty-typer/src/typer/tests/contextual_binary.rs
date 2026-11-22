@@ -598,6 +598,11 @@ fn assert_binary_ambiguity(text: &str, name: &str) {
     let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
         panic!()
     };
+    let site = match &parsed.ast.get(rhs).kind {
+        // In choose(), evidence is requested by the selected function before ().
+        TreeKind::Apply(call) if call.args.is_empty() => call.function,
+        _ => rhs,
+    };
     let candidates = def
         .value_param_clauses
         .last()
@@ -614,7 +619,7 @@ fn assert_binary_ambiguity(text: &str, name: &str) {
         let error = typer.type_method_definition(tree).unwrap_err();
         assert!(
             matches!(&error, TyperError::AmbiguousContextualArgument { tree_index, candidates: found, .. }
-                if *tree_index == rhs.index() && *found == candidates),
+                if *tree_index == site.index() && *found == candidates),
             "{error:?}"
         );
         assert_eq!(typer.store().checkpoint(), before);
@@ -926,4 +931,126 @@ fn assert_applied_pair_call(
     };
     assert!(receiver.args.is_empty());
     assert_eq!(reference(receiver.function), reader);
+}
+
+#[test]
+fn binary_ordinary_default_after_using_replays_the_seed_and_receiver() {
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(APPLIED_PAIR_CLIENT);
+    let reader = method_symbol(&parsed, &store, &index, source, "reader");
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages)
+        .with_resolver(Box::new(contextual_fixture_resolver(defs, &packages)));
+    for name in ["stableChoice", "appliedChoice", "writtenChoice"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+            panic!()
+        };
+        let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+            panic!()
+        };
+        let seed = index
+            .symbol_at(source, def.value_param_clauses.last().unwrap()[0])
+            .unwrap();
+        typer
+            .type_method_definition(tree)
+            .unwrap_or_else(|err| panic!("{name}: {err:?}"));
+        let ast = typer.typed_ast();
+        let reference = |tree| {
+            typer
+                .store
+                .types
+                .get(ast.get(tree).ty)
+                .reference_symbol()
+                .unwrap()
+        };
+        let root = typer.typed_index.get(source, rhs).unwrap();
+        let (call, receiver) = if name == "appliedChoice" {
+            let TreeKind::Block(block) = &ast.get(root).kind else {
+                panic!("receiver temporary")
+            };
+            let [temp] = block.stats.as_slice() else {
+                panic!("only receiver needs sharing")
+            };
+            let TreeKind::ValDef(value) = &ast.get(*temp).kind else {
+                panic!()
+            };
+            let TreeKind::Apply(init) = &ast.get(value.rhs.unwrap()).kind else {
+                panic!()
+            };
+            assert_eq!(reference(init.function), reader);
+            (
+                block.expr,
+                typer.typed_index.synthetic_definition_symbol(*temp),
+            )
+        } else if name == "stableChoice" {
+            (root, index.symbol_at(source, def.value_param_clauses[0][0]))
+        } else {
+            (root, None)
+        };
+        let TreeKind::Apply(ordinary) = &ast.get(call).kind else {
+            panic!("choose(seed)(value)")
+        };
+        let [value] = ordinary.args.as_slice() else {
+            panic!()
+        };
+        let TreeKind::Apply(target) = &ast.get(ordinary.function).kind else {
+            panic!()
+        };
+        assert_eq!(reference(target.args[0]), seed);
+        let TreeKind::Select(member) = &ast.get(target.function).kind else {
+            panic!()
+        };
+        assert_eq!(typer.store.names.resolve(member.name.text()), "choose");
+        if name == "writtenChoice" {
+            assert!(matches!(ast.get(*value).kind, TreeKind::Literal(_)));
+            assert_eq!(target.kind, ApplyKind::Using);
+            let TreeKind::Apply(init) = &ast.get(member.qualifier).kind else {
+                panic!()
+            };
+            assert_eq!(reference(init.function), reader);
+            continue;
+        }
+        let TreeKind::Apply(getter) = &ast.get(*value).kind else {
+            panic!("choose default getter")
+        };
+        let TreeKind::Select(selected) = &ast.get(getter.function).kind else {
+            panic!()
+        };
+        assert_eq!(getter.args, target.args);
+        assert_eq!(selected.qualifier, member.qualifier);
+        assert_eq!(Some(reference(selected.qualifier)), receiver);
+        let getter_id = reference(getter.function);
+        assert_eq!(
+            typer.store.default_getter(reference(target.function), 1),
+            Some(getter_id)
+        );
+        assert!(matches!(
+            typer.store.symbols.get(getter_id).origin,
+            SymbolOrigin::Tasty(_)
+        ));
+    }
+}
+
+#[test]
+fn binary_ordinary_default_needs_the_earlier_contextual_seed() {
+    let text =
+        include_str!("../../../tests/fixtures/contextual-arguments/AppliedPairAmbiguous.scala");
+    assert_binary_ambiguity(text, "ambiguousSeed");
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "missingSeed");
+    let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
+        panic!()
+    };
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages)
+        .with_resolver(Box::new(contextual_fixture_resolver(defs, &packages)));
+    let before = typer.store.checkpoint();
+    let TreeKind::Apply(call) = &parsed.ast.get(rhs).kind else {
+        panic!()
+    };
+    let err = typer.type_method_definition(tree).unwrap_err();
+    assert!(
+        matches!(err, TyperError::MissingContextualArgument { tree_index, .. } if tree_index == call.function.index()),
+        "{err:?}"
+    );
+    assert_eq!(typer.store.checkpoint(), before);
+    assert!(typer.typed_index.is_empty());
 }

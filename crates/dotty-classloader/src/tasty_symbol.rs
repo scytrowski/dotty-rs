@@ -4,7 +4,7 @@ use dotty_classfile::access_flags::{
     ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC,
     ACC_SYNTHETIC, ClassAccessFlags, FieldAccessFlags, MethodAccessFlags,
 };
-use dotty_core::{SymbolFlags, SymbolKind};
+use dotty_core::{MethodKind, SymbolFlags, SymbolKind};
 use dotty_tasty::tasty::{
     ABSTRACT_TAG, APPLIEDTPT_TAG, APPLIEDTYPE_TAG, ARTIFACT_TAG, AppliedTypeNode, ApplyNode,
     AstError, BYNAMETPT_TAG, CASEACCESSOR_TAG, CONTRAVARIANT_TAG, COVARIANT_TAG, DEFDEF_TAG,
@@ -3014,7 +3014,6 @@ fn contextual_flags(tail: &[DefinitionTail<'_>]) -> SymbolFlags {
 fn contextual_clauses(
     items: &[dotty_tasty::tasty::DefDefHeaderItem<'_>],
 ) -> Result<Option<Vec<(dotty_core::MethodKind, usize)>>, TastyDecodeError> {
-    use dotty_core::MethodKind;
     use dotty_tasty::tasty::DefDefHeaderItem;
     let mut clauses = Vec::new();
     let mut open = false;
@@ -3074,17 +3073,39 @@ fn decode_members(
     let address_index = file.ast_address_index()?;
 
     let mut incomplete_methods = HashSet::new();
-    let default_sites: HashMap<_, _> = dotty_tasty::tasty::template_default_getters(
-        file.names(),
-        stats.iter().filter_map(|tree| match tree {
-            RawTree::LengthNode(node) if node.tag == DEFDEF_TAG => Some(node),
-            _ => None,
-        }),
-    )?
-    .into_iter()
-    .filter(|site| site.contextual)
-    .map(|site| (site.getter, (site.method, site.ordinal)))
-    .collect();
+    let definitions = stats.iter().filter_map(|tree| match tree {
+        RawTree::LengthNode(node) if node.tag == DEFDEF_TAG => Some(node),
+        _ => None,
+    });
+    let sites = dotty_tasty::tasty::template_default_getters(file.names(), definitions.clone())?;
+    // Ordinary defaults in the supported subset replay the immediately preceding
+    // contextual clause. Preserve wire ordinals, including empty clause boundaries.
+    let ordinary_targets: HashSet<_> = sites
+        .iter()
+        .filter(|s| !s.contextual)
+        .map(|s| s.method)
+        .collect();
+    let mut after_contextual = HashSet::new();
+    for target in definitions.filter(|node| ordinary_targets.contains(&node.offset)) {
+        let header = target.decode_defdef_body()?;
+        if let Some(clauses) = contextual_clauses(&header.header_items)? {
+            let mut start = 0;
+            let mut previous = MethodKind::Plain;
+            for (kind, len) in clauses {
+                if kind == MethodKind::Plain && previous != MethodKind::Plain {
+                    after_contextual
+                        .extend((start..start + len).map(|ordinal| (target.offset, ordinal)));
+                }
+                start += len;
+                previous = kind;
+            }
+        }
+    }
+    let default_sites: HashMap<_, _> = sites
+        .into_iter()
+        .filter(|site| site.contextual || after_contextual.contains(&(site.method, site.ordinal)))
+        .map(|site| (site.getter, (site.method, site.ordinal)))
+        .collect();
 
     for stat in stats {
         let RawTree::LengthNode(node) = stat else {

@@ -9,3 +9,6 @@ class AppliedPairClient:
   def fallback(): Int = reader().pick(left(), right())
   def supplied(using n: Int): Int = reader().pick(left(), right())
   def explicit(using a: Int, b: Int): Int = reader().pick(left(), right())(using b)
+  def stableChoice(r: PairReader)(using seed: Int): Int = r.choose()
+  def appliedChoice(using seed: Int): Int = reader().choose()
+  def writtenChoice(using seed: Int): Int = reader().choose(using seed)(7)
