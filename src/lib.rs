@@ -49,6 +49,9 @@ pub use member_signature::{MemberSignatureError, try_complete_member_signature};
 mod source_parse;
 pub use source_parse::{DetachedSource, ParsedSource, SyntaxDiagnostic, parse_source};
 
+mod call_diagnostic;
+pub use call_diagnostic::CallDiagnostic;
+
 mod source_diagnostic;
 pub use source_diagnostic::SourceDiagnostic;
 /// Report returned by typer diagnostics.

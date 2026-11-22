@@ -218,7 +218,7 @@ fn exercise(encoding: &str, take_column: usize) {
         3,
         json!([{
             "range":range(3, 24, 29), "severity":1, "source":"dotty",
-            "message":"Expected Int, found Boolean"
+            "code":"typer.application_argument_type_mismatch", "message":"Expected Int, found Boolean"
         }]),
     );
     client.definition(take_column, 2, BOOL_METHOD);
@@ -273,7 +273,7 @@ fn inferred_field_reports_one_call_error_and_clears_it_in_either_file_order() {
             2,
             json!([{
                 "range": range(0, start, start + "provider.value(1)".len()),
-                "severity":1, "source":"dotty", "message":"Expected 0 arguments, got 1"
+                "severity":1, "source":"dotty", "code":"typer.application_arity_mismatch", "message":"Expected 0 arguments, got 1"
             }]),
         );
         let arg = start + "provider.value(".len();
@@ -311,7 +311,7 @@ fn parent_argument_diagnostic_tracks_an_unsaved_type_edit_in_either_file_order()
             2,
             json!([{
                 "range": range(0, argument, argument + "start".len()),
-                "severity": 1, "source": "dotty", "message": "Expected Int, found Boolean"
+                "severity": 1, "source": "dotty", "code":"typer.application_argument_type_mismatch", "message": "Expected Int, found Boolean"
             }]),
         );
         let annotation = initial.find("Boolean").unwrap();
@@ -449,7 +449,7 @@ fn implicit_clause_warning_survives_repair_of_an_independent_error() {
         });
         let error = json!({
             "range": range(4, boolean, boolean + 5), "severity": 1, "source": "dotty",
-            "message": "Expected Int, found Boolean"
+            "code":"typer.application_argument_type_mismatch", "message": "Expected Int, found Boolean"
         });
         client.open(uri, text);
         client.diagnostics(uri, 1, json!([warning, error]));

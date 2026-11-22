@@ -113,6 +113,10 @@ impl SourceDiagnostic {
         error: &TyperError,
         ast_for: impl FnOnce(SourceId) -> Option<&'a AstArena<Untyped>>,
     ) -> Self {
+        Self::typer_at(error, crate::typer_error_span_with(error, ast_for))
+    }
+
+    pub(crate) fn typer_at(error: &TyperError, location: Option<SourceSpan>) -> Self {
         let message = match error {
             TyperError::ApplicationArgumentTypeMismatch {
                 expected_description,
@@ -131,7 +135,10 @@ impl SourceDiagnostic {
             }
             _ => error.to_string(),
         };
-        Self::error(message, crate::typer_error_span_with(error, ast_for))
+        Self {
+            code: error.call_error_code(),
+            ..Self::error(message, location)
+        }
     }
 }
 
