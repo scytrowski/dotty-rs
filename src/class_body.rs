@@ -28,6 +28,31 @@ pub enum ClassBodyError {
 }
 
 impl ClassBodyError {
+    /// Retains an owned call failure with its canonical declaring member. Supply the
+    /// original untyped arena for the requested source, or `None` if unavailable.
+    /// Returns the original phase error intact for every other failure.
+    pub fn into_call_diagnostic<'a>(
+        self,
+        ast_for: impl FnOnce(SourceId) -> Option<&'a AstArena<Untyped>>,
+    ) -> Result<crate::CallDiagnostic, Self> {
+        let Self::Member {
+            class,
+            member,
+            error,
+        } = self
+        else {
+            return Err(self);
+        };
+        let (ClassMember::Field(decl) | ClassMember::Method(decl)) = member;
+        crate::CallDiagnostic::from_typer(error, Some(decl.symbol), ast_for).map_err(|error| {
+            Self::Member {
+                class,
+                member,
+                error,
+            }
+        })
+    }
+
     /// Formats this failure after typing, including after a member rollback.
     /// Supply the original untyped arena for the requested source, or `None` if unavailable.
     /// Location follows [`crate::typer_error_span_with`]. An invalid class has no source site.

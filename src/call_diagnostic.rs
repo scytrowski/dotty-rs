@@ -285,3 +285,103 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod member_tests {
+    use super::*;
+    use crate::core::{NameInterner, SemanticStore, SymbolKind, Type};
+    use crate::source_declarations::{ClassMember, Declaration};
+    use crate::{ClassBodyError, MemberSignatureError, SourceDeclaration};
+
+    #[test]
+    fn phase_retries_match_only_permanent_types_after_rollback() {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        let source = SourceId::from_index(7);
+        let parsed = crate::parse_source(
+            source,
+            "class A { def f() = take(false, false) }",
+            Default::default(),
+        )
+        .unwrap()
+        .bind(&mut NameInterner::new());
+        let ast = &parsed.syntax.ast;
+        let find = |predicate: fn(&TreeKind<Untyped>) -> bool| {
+            ast.iter().find(|(_, t)| predicate(&t.kind)).unwrap().0
+        };
+        let tree = find(|k| matches!(k, TreeKind::DefDef(_)));
+        let call = find(|k| matches!(k, TreeKind::Apply(_)));
+        let member = defs.object_class;
+        let class = defs.any_class;
+        let lookup = |id| (id == source).then_some(ast);
+        let mismatch = |argument_index, actual, expected, actual_description: &str| {
+            TyperError::ApplicationArgumentTypeMismatch {
+                source,
+                tree_index: call.index(),
+                argument_index,
+                expected,
+                actual,
+                actual_description: actual_description.into(),
+                expected_description: "Int".into(),
+            }
+        };
+        let signature = |error| {
+            MemberSignatureError::Typing {
+                member,
+                declaration: SourceDeclaration {
+                    source,
+                    class,
+                    kind: SymbolKind::Method,
+                },
+                error,
+            }
+            .into_call_diagnostic(lookup)
+            .unwrap()
+        };
+        let body = |error| {
+            ClassBodyError::Member {
+                class,
+                member: ClassMember::Method(Declaration {
+                    tree,
+                    symbol: member,
+                }),
+                error,
+            }
+            .into_call_diagnostic(lookup)
+            .unwrap()
+        };
+
+        let error = || mismatch(0, defs.boolean, defs.int, "Boolean");
+        let first = signature(error());
+        let key = first.identity(&defs).unwrap();
+        assert_eq!(first.member(), Some(member));
+        assert_eq!(body(error()).identity(&defs), Some(key));
+        for other in [
+            mismatch(1, defs.boolean, defs.int, "Boolean"),
+            mismatch(0, defs.byte, defs.int, "Byte"),
+            mismatch(0, defs.boolean, defs.long, "Boolean"),
+        ] {
+            assert_ne!(body(other).identity(&defs).unwrap(), key);
+        }
+
+        let before = store.checkpoint();
+        let slot = store.types.alloc(Type::JavaArray { element: defs.int });
+        let error = mismatch(0, slot, defs.int, "Array[Int]");
+        store.rollback_to(before);
+        let reused = store.types.alloc(Type::JavaArray { element: defs.byte });
+        assert_eq!(slot, reused);
+        let original = signature(error);
+        let later = body(mismatch(0, reused, defs.int, "Array[Byte]"));
+        assert_eq!(original.identity(&defs), None);
+        assert_eq!(later.identity(&defs), None);
+        drop(store);
+        assert_eq!(original.render().message, "Expected Int, found Array[Int]");
+        assert_eq!(later.render().message, "Expected Int, found Array[Byte]");
+        assert!(
+            matches!(ClassBodyError::InvalidClass(class).into_call_diagnostic(|_| unreachable!()), Err(ClassBodyError::InvalidClass(id)) if id == class)
+        );
+        assert!(
+            matches!(MemberSignatureError::InvalidMember(member).into_call_diagnostic(|_| unreachable!()), Err(MemberSignatureError::InvalidMember(id)) if id == member)
+        );
+    }
+}

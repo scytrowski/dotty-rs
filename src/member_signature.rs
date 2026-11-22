@@ -27,6 +27,30 @@ pub enum MemberSignatureError {
 }
 
 impl MemberSignatureError {
+    /// Retains an owned call failure with its canonical declaring member. Supply the
+    /// original untyped arena for the requested source, or `None` if unavailable.
+    /// Returns the original phase error intact for every other failure.
+    pub fn into_call_diagnostic<'a>(
+        self,
+        ast_for: impl FnOnce(SourceId) -> Option<&'a AstArena<Untyped>>,
+    ) -> Result<crate::CallDiagnostic, Self> {
+        let Self::Typing {
+            member,
+            declaration,
+            error,
+        } = self
+        else {
+            return Err(self);
+        };
+        crate::CallDiagnostic::from_typer(error, Some(member), ast_for).map_err(|error| {
+            Self::Typing {
+                member,
+                declaration,
+                error,
+            }
+        })
+    }
+
     /// Reports this failure after a signature attempt, using the original untyped arena
     /// for the requested source. Missing locations follow [`crate::typer_error_span_with`].
     /// An invalid member has no source site.
