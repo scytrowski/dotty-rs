@@ -760,19 +760,36 @@ fn assert_pair_default(text: &str, method_name: &str, target_name: &str) {
     let TreeKind::Block(block) = &ast.get(bindings.get(source, rhs).unwrap()).kind else {
         panic!("expected shared operands")
     };
-    let [receiver, left, right] = block.stats.as_slice() else {
-        panic!("expected exactly three operand definitions")
+    let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+        panic!("client method")
     };
-    let [receiver_temp, left_temp, right_temp] =
-        [*receiver, *left, *right].map(|stat| bindings.synthetic_definition_symbol(stat).unwrap());
-    for ((stat, operand), method) in block.stats.iter().zip(source_operands).zip(source_methods) {
+    let stable_receiver = def
+        .value_param_clauses
+        .first()
+        .and_then(|params| params.first())
+        .map(|p| index.symbol_at(source, *p).unwrap());
+    let (receiver_temp, argument_stats) = match (stable_receiver, block.stats.as_slice()) {
+        (Some(parameter), [_, _]) => (parameter, block.stats.as_slice()),
+        (None, [stat, rest @ ..]) => (bindings.synthetic_definition_symbol(*stat).unwrap(), rest),
+        _ => panic!("expected exactly one binding per effectful operand"),
+    };
+    let [left, right] = argument_stats else {
+        panic!("expected two argument bindings")
+    };
+    let [left_temp, right_temp] =
+        [*left, *right].map(|stat| bindings.synthetic_definition_symbol(stat).unwrap());
+    let operands = source_operands
+        .into_iter()
+        .zip(source_methods)
+        .skip(usize::from(stable_receiver.is_some()));
+    for (stat, (operand, method)) in block.stats.iter().zip(operands) {
         let TreeKind::ValDef(shared) = &ast.get(*stat).kind else {
             panic!("expected temporary")
         };
         let init = shared.rhs.unwrap();
         assert_eq!(bindings.get(source, operand), Some(init));
         let function = if !matches!(parsed.ast.get(operand).kind, TreeKind::Apply(_)) {
-            assert_eq!(stat, receiver);
+            assert_eq!(operand, selected.qualifier);
             assert!(matches!(
                 ast.get(init).kind,
                 TreeKind::Ident(_) | TreeKind::Select(_)
@@ -842,7 +859,7 @@ const APPLIED_PAIR_CLIENT: &str =
 
 #[test]
 fn explicit_binary_call_selects_pick_on_the_applied_reader() {
-    assert_applied_pair_call(
+    assert_pair_call(
         APPLIED_PAIR_CLIENT,
         "direct",
         "pick",
@@ -853,14 +870,14 @@ fn explicit_binary_call_selects_pick_on_the_applied_reader() {
 
 #[test]
 fn binary_pick_uses_the_inferred_or_written_witness_on_an_applied_reader() {
-    assert_applied_pair_call(
+    assert_pair_call(
         APPLIED_PAIR_CLIENT,
         "supplied",
         "pick",
         ApplyKind::Regular,
         Some(0),
     );
-    assert_applied_pair_call(
+    assert_pair_call(
         APPLIED_PAIR_CLIENT,
         "explicit",
         "pick",
@@ -869,13 +886,7 @@ fn binary_pick_uses_the_inferred_or_written_witness_on_an_applied_reader() {
     );
 }
 
-fn assert_applied_pair_call(
-    text: &str,
-    name: &str,
-    target: &str,
-    kind: ApplyKind,
-    witness: Option<usize>,
-) {
+fn assert_pair_call(text: &str, name: &str, target: &str, kind: ApplyKind, witness: Option<usize>) {
     let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
     let reader = method_symbol(&parsed, &store, &index, source, "reader");
     let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, name);
@@ -926,11 +937,21 @@ fn assert_applied_pair_call(
     let member = typer.store.symbols.get(reference(ordinary.function));
     assert_eq!(typer.store.names.resolve(member.name.text()), target);
     assert!(matches!(member.origin, SymbolOrigin::Tasty(_)));
-    let TreeKind::Apply(receiver) = &ast.get(pick.qualifier).kind else {
-        panic!("reader()")
+    let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+        panic!("client method")
     };
-    assert!(receiver.args.is_empty());
-    assert_eq!(reference(receiver.function), reader);
+    if def.value_param_clauses.len() == 2 {
+        let parameter = index
+            .symbol_at(source, def.value_param_clauses[0][0])
+            .unwrap();
+        assert_eq!(reference(pick.qualifier), parameter);
+    } else {
+        let TreeKind::Apply(receiver) = &ast.get(pick.qualifier).kind else {
+            panic!("reader()")
+        };
+        assert!(receiver.args.is_empty());
+        assert_eq!(reference(receiver.function), reader);
+    }
 }
 
 #[test]
@@ -1053,4 +1074,32 @@ fn binary_ordinary_default_needs_the_earlier_contextual_seed() {
     );
     assert_eq!(typer.store.checkpoint(), before);
     assert!(typer.typed_index.is_empty());
+}
+
+#[test]
+fn binary_legacy_defaults_share_only_the_effectful_operands() {
+    for name in ["legacyFallback", "legacyStableFallback"] {
+        assert_pair_default(APPLIED_PAIR_CLIENT, name, "legacy");
+    }
+}
+
+#[test]
+fn binary_legacy_calls_use_the_inferred_or_explicit_witness() {
+    for (name, kind, ordinal) in [
+        ("legacySupplied", ApplyKind::Regular, 0),
+        ("legacyStableSupplied", ApplyKind::Regular, 0),
+        ("legacyExplicit", ApplyKind::Regular, 1),
+        ("legacyStableExplicit", ApplyKind::Using, 1),
+    ] {
+        assert_pair_call(APPLIED_PAIR_CLIENT, name, "legacy", kind, Some(ordinal));
+    }
+}
+
+#[test]
+fn ambiguous_binary_legacy_evidence_prevents_the_default_on_both_receivers() {
+    let text =
+        include_str!("../../../tests/fixtures/contextual-arguments/AppliedPairAmbiguous.scala");
+    for name in ["legacyAmbiguous", "legacyStableAmbiguous"] {
+        assert_binary_ambiguity(text, name);
+    }
 }
