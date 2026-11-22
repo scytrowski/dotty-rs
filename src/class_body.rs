@@ -4,12 +4,12 @@ use std::fmt;
 
 use crate::TypingDiagnostic;
 use crate::core::{
-    AstArena, Definitions, Diagnostic, NoResolver, Packages, SemanticStore, SourceId,
-    SourceSemanticIndex, SourceTypedIndex, SymbolId, SymbolResolver, Typed, Untyped,
+    AstArena, Definitions, NoResolver, Packages, SemanticStore, SourceId, SourceSemanticIndex,
+    SourceTypedIndex, SymbolId, SymbolResolver, Typed, Untyped,
 };
 use crate::jvm_class_plan::TypedClassBody;
 use crate::source_declarations::{ClassMember, SourceClass};
-use crate::typer::{SourceTyper, TyperError};
+use crate::typer::{SourceTyper, TyperDiagnostic, TyperError};
 
 /// Failure to type a named class or one of its declared members.
 #[derive(Debug)]
@@ -125,8 +125,9 @@ pub struct ClassBodyCheck {
     /// A complete body, or the errors that prevented it from being fully typed.
     pub body: Result<TypedClassBody, Vec<ClassBodyError>>,
     /// Diagnostics emitted by committed typing operations, with their source file.
-    /// Their ranges are byte offsets into that file, in emission order.
-    pub diagnostics: Vec<(SourceId, Diagnostic)>,
+    /// Their ranges are byte offsets into that file, in emission order. Match
+    /// the payload or use [`crate::SourceDiagnostic::from_typer_warning`] for presentation.
+    pub diagnostics: Vec<(SourceId, TyperDiagnostic)>,
     partial_bindings: Option<SourceTypedIndex>,
 }
 
@@ -193,7 +194,7 @@ fn visit_class_body<E>(
     arena: &mut AstArena<Typed>,
     resolver: impl SymbolResolver,
     collect_errors: impl FnOnce(ClassBodyError, &mut dyn Iterator<Item = ClassBodyError>) -> E,
-    diagnostics: Option<&mut Vec<(SourceId, Diagnostic)>>,
+    diagnostics: Option<&mut Vec<(SourceId, TyperDiagnostic)>>,
     partial_bindings: Option<&mut Option<SourceTypedIndex>>,
 ) -> Result<TypedClassBody, E> {
     let Some(source) = class.body_source(ast, index, store) else {
@@ -229,12 +230,7 @@ fn visit_class_body<E>(
         .next()
         .map(|first| collect_errors(first, &mut failures));
     if let Some(diagnostics) = diagnostics {
-        diagnostics.extend(
-            typer
-                .take_diagnostics()
-                .into_iter()
-                .map(|item| (source, item)),
-        );
+        diagnostics.extend(typer.take_diagnostics().into_iter().map(|d| (source, d)));
     }
     if let Some(errors) = errors {
         if let Some(bindings) = partial_bindings {

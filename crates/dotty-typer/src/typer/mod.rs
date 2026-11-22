@@ -47,7 +47,7 @@ use context::{ExpressionScopeFrame, next_expression_scope_owner};
 pub use error::{
     ExtractorMethodShapeIssue, ExtractorPatternArgumentIssue, ExtractorProductIssue,
     ExtractorResultMemberIssue, FieldInitializerContextIssue, PatternKind,
-    TuplePatternResolutionIssue, TypeArgumentBoundSide, TyperError,
+    TuplePatternResolutionIssue, TypeArgumentBoundSide, TyperDiagnostic, TyperError, TyperWarning,
 };
 pub use source_function::{
     MAX_SOURCE_FUNCTION_ARITY, SourceFunctionFamily, SourceFunctionKind, SourceFunctionPurity,
@@ -156,7 +156,7 @@ pub struct SourceTyper<'a> {
     import_qualifier_cache: HashMap<ImportQualifierCacheKey, SymbolId>,
     import_member_cache: HashMap<ImportMemberCacheKey, SymbolId>,
     semantic_transaction_depth: usize,
-    diagnostics: Vec<dotty_core::Diagnostic>,
+    diagnostics: Vec<TyperDiagnostic>,
     typed_arena: AstArena<Typed>,
     typed_index: SourceTypedIndex,
     generated_factory_bodies: HashMap<SymbolId, TreeId<Typed>>,
@@ -934,12 +934,12 @@ impl<'a> SourceTyper<'a> {
     }
 
     /// Diagnostics emitted by successful typing operations in this source session.
-    pub fn diagnostics(&self) -> &[dotty_core::Diagnostic] {
+    pub fn diagnostics(&self) -> &[TyperDiagnostic] {
         &self.diagnostics
     }
 
     /// Moves out the diagnostics committed since the previous call in emission order.
-    pub fn take_diagnostics(&mut self) -> Vec<dotty_core::Diagnostic> {
+    pub fn take_diagnostics(&mut self) -> Vec<TyperDiagnostic> {
         std::mem::take(&mut self.diagnostics)
     }
 
@@ -39186,10 +39186,16 @@ mod tests {
         let [warning] = typer.diagnostics() else {
             panic!("expected one migration warning")
         };
-        assert_eq!(warning.severity(), dotty_core::DiagnosticSeverity::Warning);
+        assert_eq!(warning.issue(), &TyperWarning::ImplicitClauseWithoutUsing);
         assert_eq!(
-            warning.span().start() as usize,
-            source_text.rfind('1').unwrap()
+            warning.issue().code(),
+            "typer.implicit_clause_without_using"
+        );
+        assert_eq!(warning.severity(), dotty_core::DiagnosticSeverity::Warning);
+        let start = source_text.rfind('1').unwrap() as u32;
+        assert_eq!(
+            warning.span(),
+            dotty_core::TextRange::new(start, start + 1).unwrap()
         );
         let emitted = warning.clone();
         assert_eq!(typer.take_diagnostics(), [emitted]);

@@ -46,6 +46,11 @@ marker stays on the literal. Inserting the equals sign clears the document.
 Reopening the comment produces a lexer diagnostic even when parsing is clean.
 The test checks the document version and exact UTF-8 and UTF-16 positions.
 
+For a positional call to a legacy implicit clause, analysis retains the typed
+warning until publication. The stdio test checks its stable code, warning
+severity and argument range alongside an independent argument type error. After
+the type error is repaired, editing `f(1)` to `f(using 1)` clears the warning.
+
 For a quick interoperability check with Neovim 0.10+, run from this directory:
 
 ```sh

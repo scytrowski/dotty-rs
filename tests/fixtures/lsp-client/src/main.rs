@@ -1,4 +1,5 @@
 use crossbeam_channel::{Receiver, Sender, select, unbounded};
+use dotty::SourceDiagnostic;
 use dotty::core::{DiagnosticSeverity, DocumentText, PositionEncoding, TextRange};
 use dotty_lsp::analysis::{Document, Documents, FileResult, Problem, analyze};
 use lsp_server::{Connection, Message, Notification, Request, Response};
@@ -138,11 +139,17 @@ impl Workspace {
                 let doc = &self.docs[uri];
                 let mut diagnostics = Vec::new();
                 for diagnostic in &file.syntax_diagnostics {
-                    let problem = Problem::from(diagnostic.render());
+                    let problem = diagnostic.render();
                     publish_problem(conn, uri, &doc.text, enc, &problem, &mut diagnostics)?;
                 }
                 for problem in &file.problems {
-                    publish_problem(conn, uri, &doc.text, enc, problem, &mut diagnostics)?;
+                    let report = match problem {
+                        Problem::Reported(report) => report,
+                        Problem::TyperWarning { source, diagnostic } => {
+                            &SourceDiagnostic::from_typer_warning(*source, diagnostic)
+                        }
+                    };
+                    publish_problem(conn, uri, &doc.text, enc, report, &mut diagnostics)?;
                 }
                 notify(conn, uri, Some(doc.version), diagnostics)?;
             }
@@ -156,7 +163,7 @@ fn publish_problem(
     uri: &str,
     text: &DocumentText,
     enc: PositionEncoding,
-    problem: &Problem,
+    problem: &SourceDiagnostic,
     diagnostics: &mut Vec<Value>,
 ) -> Result<(), Box<dyn Error>> {
     let severity = match problem.severity {
@@ -164,7 +171,10 @@ fn publish_problem(
         DiagnosticSeverity::Warning => 2,
         DiagnosticSeverity::Note => 3,
     };
-    if let Some(range) = problem.range.and_then(|r| wire_range(text, r, enc)) {
+    if let Some(range) = problem
+        .location
+        .and_then(|s| wire_range(text, s.span().range(), enc))
+    {
         let mut diagnostic = json!({
             "range": range, "severity": severity,
             "source": "dotty", "message": problem.message
@@ -332,12 +342,12 @@ mod tests {
         let open = json!({"textDocument":{"uri":uri,"version":1,"text":"class A {}"}});
         assert!(ws.changed("textDocument/didOpen", &open, enc));
         let file = FileResult {
-            problems: vec![dotty_lsp::analysis::Problem {
+            problems: vec![Problem::Reported(SourceDiagnostic {
                 code: None,
-                range: None,
+                location: None,
                 message: "Expected Int, found Boolean".into(),
                 severity: DiagnosticSeverity::Error,
-            }],
+            })],
             ..FileResult::default()
         };
         assert!(ws.accept((ws.revision, [(uri.into(), file)].into())));

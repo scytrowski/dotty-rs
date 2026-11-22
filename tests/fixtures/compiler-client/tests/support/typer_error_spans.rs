@@ -176,6 +176,7 @@ fn cross_file_diagnostics_track_two_unsaved_edits_in_utf16() {
 #[test]
 fn migration_warning_survives_a_sibling_error_and_tracks_source_edits() {
     use dotty::core::NoResolver;
+    use dotty::typer::TyperWarning;
 
     let check = |text: &str, warning: bool, bad_argument: bool| {
         let (mut store, defs, packages, unit) = named(text);
@@ -192,6 +193,13 @@ fn migration_warning_survives_a_sibling_error_and_tracks_source_edits() {
             NoResolver,
         );
 
+        let implicit_clause_warning_count = report
+            .diagnostics
+            .iter()
+            .filter(|(_, d)| matches!(d.issue(), TyperWarning::ImplicitClauseWithoutUsing))
+            .count();
+        assert_eq!(implicit_clause_warning_count, usize::from(warning));
+
         if warning {
             let [(source, diagnostic)] = report.diagnostics.as_slice() else {
                 panic!("expected one warning: {:?}", report.diagnostics)
@@ -199,8 +207,8 @@ fn migration_warning_survives_a_sibling_error_and_tracks_source_edits() {
             assert_eq!(*source, unit.source);
             assert_eq!(diagnostic.severity(), DiagnosticSeverity::Warning);
             assert_eq!(
-                diagnostic.message(),
-                "Implicit parameters should be provided with a `using` clause."
+                diagnostic.issue().code(),
+                "typer.implicit_clause_without_using"
             );
             let start = (text.find("f(1)").unwrap() + 2) as u32;
             assert_eq!(diagnostic.span(), TextRange::new(start, start + 1).unwrap());
@@ -232,6 +240,7 @@ fn migration_warning_survives_a_sibling_error_and_tracks_source_edits() {
 
     let text = "class C { def f(implicit x: Int): Int = x; def only(n: Int): Int = n; def use(): Int = f(1); def bad(): Int = only(false) }";
     check(text, true, true);
+    check(&text.replace("f(1)", "f(using 1)"), false, true);
     let fixed = text.replace("false", "42");
     check(&fixed, true, false);
     let explicit = fixed.replace("f(1)", "f(using 1)");

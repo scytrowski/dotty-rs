@@ -4,6 +4,25 @@ use std::fmt;
 
 use super::*;
 
+/// A non-fatal issue emitted by a committed typing operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TyperWarning {
+    /// Positional arguments were passed to a legacy implicit parameter clause.
+    ImplicitClauseWithoutUsing,
+}
+
+impl TyperWarning {
+    /// Stable identifier for classification independently of presentation.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::ImplicitClauseWithoutUsing => "typer.implicit_clause_without_using",
+        }
+    }
+}
+
+/// A warning payload with the severity and byte range assigned by the typer.
+pub type TyperDiagnostic = dotty_core::Diagnostic<TyperWarning>;
+
 /// Stable source-shape category for an unsupported pattern root.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PatternKind {

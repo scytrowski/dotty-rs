@@ -428,3 +428,35 @@ fn numeric_edits_update_the_message_and_range_for_the_same_code() {
         client.shutdown();
     }
 }
+
+#[test]
+fn implicit_clause_warning_survives_repair_of_an_independent_error() {
+    let uri = "file:///fixture/C.scala";
+    let text = concat!(
+        "class C {\n",
+        "  def f(implicit x: Int): Int = x\n",
+        "  def only(n: Int): Int = n\n",
+        "  def use(): Int = /* 😀 */ f(1)\n",
+        "  def bad(): Int = /* 😀 */ only(false)\n",
+        "}",
+    );
+    for (encoding, one, boolean) in [("utf-8", 32, 35), ("utf-16", 30, 33)] {
+        let mut client = Client::start(encoding, vec![]);
+        let warning = json!({
+            "range": range(3, one, one + 1), "severity": 2, "source": "dotty",
+            "code": "typer.implicit_clause_without_using",
+            "message": "Implicit parameters should be provided with a `using` clause."
+        });
+        let error = json!({
+            "range": range(4, boolean, boolean + 5), "severity": 1, "source": "dotty",
+            "message": "Expected Int, found Boolean"
+        });
+        client.open(uri, text);
+        client.diagnostics(uri, 1, json!([warning, error]));
+        client.edit(uri, 2, range(4, boolean, boolean + 5), "42");
+        client.diagnostics(uri, 2, json!([warning]));
+        client.edit(uri, 3, range(3, one, one), "using ");
+        client.diagnostics(uri, 3, json!([]));
+        client.shutdown();
+    }
+}
