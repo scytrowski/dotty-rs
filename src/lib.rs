@@ -44,7 +44,9 @@ pub use class_field_signatures::{
 };
 
 mod signature_dependencies;
-pub use signature_dependencies::{SignatureDependencies, SignaturePhase};
+pub use signature_dependencies::{
+    SignatureBlockage, SignatureCycle, SignatureDependencies, SignaturePhase,
+};
 
 mod member_signature;
 pub use member_signature::{MemberSignatureError, try_complete_member_signature};
