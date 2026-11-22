@@ -12,6 +12,7 @@ general source compiler, compiler session/driver, or source-compilation CLI.
 | Parse a source and collect typed lexer/parser diagnostics | [`parse_source`], [`DetachedSource::bind`], [`ParsedSource`], [`SyntaxDiagnostic`] |
 | Control scanning and parsing separately | [`lexer::ContextualScanner`], [`parser::parse_compilation_unit`], [`parser::DetachedParse`] |
 | Name a bound file and inspect its declarations | [`ParsedSource::name`], [`NamedSource`], [`NamedSource::into_classes`] |
+| Resolve source symbols and attempt signatures across files | [`NamedClassBatch`], [`NamedClassBatch::declaration`], [`NamedClassBatch::try_complete_member_signature`] |
 | Prepare direct-call navigation for an ordinary class file | [`NamedClassSource::navigation`], [`SourceFileCalls::definition_at`] |
 | Complete signatures and type expressions/methods | [`typer::SourceTyper`], [`try_complete_member_signature`], [`check_class_body`] |
 | Plan source methods and classes for the JVM | [`jvm_method_plan`], [`jvm_class_plan`], [`jvm`] |
@@ -91,6 +92,68 @@ binds and eagerly renders them as `ParsedSource<SourceDiagnostic>`.
 message, and optional location. Codes can be absent for typer/adapter failures;
 message wording is for presentation. Keep the original source text when
 converting byte ranges to line/column coordinates for an editor.
+
+## Follow a signature dependency into another source file
+
+A [`NamedClassBatch`] borrows named files from one session and owns one
+declaration index. File order comes from the input iterator. IDs can be sparse.
+The batch leaves the store available for typing and the call-navigation data
+lazy. Build a fresh batch when replacing the files for a new analysis session.
+
+This client asks for a field in `B.scala`. The typer identifies the field it
+needs from `A.scala`, so the client can complete that declaration and retry.
+The same lookup supplies the original AST for a diagnostic in either file.
+
+```rust
+use dotty::core::{AstArena, Definitions, Packages, SemanticStore, SourceId, Typed};
+use dotty::jvm_class_plan::ClassHeaderBindings;
+use dotty::typer::{SignatureCompletion, SourceTyper};
+use dotty::{NamedClassBatch, parse_source};
+
+let mut store = SemanticStore::new();
+let defs = Definitions::bootstrap(&mut store);
+let mut packages = Packages::new();
+let mut files = Vec::new();
+for (id, name, text) in [
+    (42, "B.scala", "class B(a: A) { val answer = a.seed }"),
+    (7, "A.scala", "class A { val seed = 40 }"),
+] {
+    files.push(parse_source(SourceId::from_index(id), text, Default::default())?
+        .bind(&mut store.names)
+        .name(name, &mut store, &mut packages)?
+        .into_classes(&store)?);
+}
+let batch = NamedClassBatch::new(&files, &store)?;
+let mut arena = AstArena::<Typed>::new();
+let mut bindings = ClassHeaderBindings::default();
+for (file, class) in batch.classes() {
+    SourceTyper::new(file.ast(), file.source(), file.index(), &mut store, defs, &packages)
+        .complete_symbol(class.constructor)?;
+}
+for (_, class) in batch.classes() {
+    let outcome = batch.try_complete_class_header(
+        class.symbol, &mut store, defs, &packages, &mut arena, &mut bindings,
+    )?;
+    assert!(matches!(outcome, SignatureCompletion::Complete(_)));
+}
+
+let answer = files[0].classes()[0].fields().next().unwrap().symbol;
+let mut attempt = |symbol| batch.try_complete_member_signature(symbol, &mut store, defs, &packages);
+let SignatureCompletion::BlockedOn(seed) = attempt(answer)? else {
+    return Err("expected a dependency on A.seed".into());
+};
+let (file, declaration) = batch.declaration(seed).ok_or("missing provider")?;
+assert_eq!(file.source(), SourceId::from_index(7));
+assert_eq!(declaration.class, files[1].classes()[0].symbol);
+assert_eq!(attempt(seed)?, SignatureCompletion::Complete(defs.int));
+assert_eq!(attempt(answer)?, SignatureCompletion::Complete(defs.int));
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Clients choose the order of attempts and which failures to report. Use
+[`SignatureDependencies`] to track multiple waiters and cycles. All semantic
+IDs, including supplied symbols, must come from the store used to name the
+files. Preserve the same typed arena and header bindings for later planning.
 
 ## Type named methods and retain a call error
 
