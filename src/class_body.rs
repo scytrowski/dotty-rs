@@ -28,6 +28,31 @@ pub enum ClassBodyError {
 }
 
 impl ClassBodyError {
+    /// Retains an owned call failure with its canonical declaring member. Supply the
+    /// original untyped arena for the requested source, or `None` if unavailable.
+    /// Returns the original phase error intact for every other failure.
+    pub fn into_call_diagnostic<'a>(
+        self,
+        ast_for: impl FnOnce(SourceId) -> Option<&'a AstArena<Untyped>>,
+    ) -> Result<crate::CallDiagnostic, Self> {
+        let Self::Member {
+            class,
+            member,
+            error,
+        } = self
+        else {
+            return Err(self);
+        };
+        let (ClassMember::Field(decl) | ClassMember::Method(decl)) = member;
+        crate::CallDiagnostic::from_typer(error, Some(decl.symbol), ast_for).map_err(|error| {
+            Self::Member {
+                class,
+                member,
+                error,
+            }
+        })
+    }
+
     /// Formats this failure after typing, including after a member rollback.
     /// Supply the original untyped arena for the requested source, or `None` if unavailable.
     /// Location follows [`crate::typer_error_span_with`]. An invalid class has no source site.
@@ -254,7 +279,7 @@ mod tests {
     use crate::source_declarations::source_classes;
     use crate::{SourceDeclarationIndex, try_complete_member_signature};
 
-    fn check_call_diagnostic(text: &str, selected: &str, message: &str) {
+    fn check_call_diagnostic(text: &str, selected: &str, code: &str, message: &str) {
         let source = SourceId::from_index(7);
         let mut store = SemanticStore::new();
         let defs = Definitions::bootstrap(&mut store);
@@ -328,7 +353,7 @@ mod tests {
             });
             assert_eq!(signature.diagnostic(|_| ast), diagnostic);
             let _: &crate::SourceDiagnostic = &diagnostic;
-            assert_eq!(diagnostic.code, None);
+            assert_eq!(diagnostic.code, Some(code));
             assert_eq!(diagnostic.message, message);
             assert_eq!(diagnostic.severity, DiagnosticSeverity::Error);
             assert_eq!(
@@ -343,6 +368,7 @@ mod tests {
         check_call_diagnostic(
             "class A { def only(n: Int): Int = n; def bad() = only(false) }",
             "false",
+            "typer.application_argument_type_mismatch",
             "Expected Int, found Boolean",
         );
     }
@@ -352,6 +378,7 @@ mod tests {
         check_call_diagnostic(
             "class A { def value(): Int = 7; def bad() = this.value(1) }",
             "this.value(1)",
+            "typer.application_arity_mismatch",
             "Expected 0 arguments, got 1",
         );
     }

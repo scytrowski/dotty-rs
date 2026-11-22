@@ -11,7 +11,7 @@ use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_
 use dotty::source_declarations::{ClassMember, SourceClass, source_classes};
 use dotty::typer::{SignatureCompletion, SourceTyper, TyperDiagnostic, TyperError};
 use dotty::{
-    ClassBodyError, SourceDeclarationIndex, SourceDiagnostic, SourceFileCalls, SyntaxDiagnostic,
+    CallDiagnostic, SourceDeclarationIndex, SourceDiagnostic, SourceFileCalls, SyntaxDiagnostic,
 };
 
 #[derive(Clone)]
@@ -22,8 +22,8 @@ pub struct Document {
 
 pub type Documents = BTreeMap<String, Document>;
 
-#[derive(PartialEq, Eq)]
 pub enum Problem {
+    Call(CallDiagnostic),
     Reported(SourceDiagnostic),
     TyperWarning {
         source: SourceId,
@@ -42,6 +42,17 @@ fn typing_problem(owner_file: usize, diagnostic: SourceDiagnostic) -> (usize, Pr
         .location
         .map_or(owner_file, |span| span.source().index() as usize);
     (file, diagnostic.into())
+}
+
+fn call_problem<E>(
+    owner_file: usize,
+    result: Result<CallDiagnostic, E>,
+    fallback: impl FnOnce(E) -> SourceDiagnostic,
+) -> (usize, Problem) {
+    match result {
+        Ok(call) => (call.source().index() as usize, Problem::Call(call)),
+        Err(error) => typing_problem(owner_file, fallback(error)),
+    }
 }
 
 pub struct Link {
@@ -194,8 +205,12 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
     let mut classes = Vec::new();
     let mut ranges = HashMap::new();
     let ast_for = |id: SourceId| units.get(&(id.index() as usize)).map(|unit| &unit.ast);
-    let typer_problem = |file, error: &TyperError| {
-        typing_problem(file, SourceDiagnostic::from_typer(error, ast_for))
+    let typer_problem = |file, error: TyperError| {
+        call_problem(
+            file,
+            CallDiagnostic::from_typer(error, None, ast_for),
+            |error| SourceDiagnostic::from_typer(&error, ast_for),
+        )
     };
     for (&i, u) in &units {
         let mut typer = SourceTyper::new(&u.ast, u.source, &u.index, &mut store, defs, &packages);
@@ -206,7 +221,7 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
                 Ok(_) => classes.push((i, c.symbol)),
                 Err(e) => {
                     unavailable.insert(c.symbol);
-                    let (file, problem) = typer_problem(i, &e);
+                    let (file, problem) = typer_problem(i, e);
                     results[file].problems.push(problem);
                 }
             }
@@ -231,7 +246,7 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
         |i, symbol, e| {
             unavailable.insert(symbol);
             if let Some(error) = e {
-                let (file, problem) = typer_problem(i, &error);
+                let (file, problem) = typer_problem(i, error);
                 results[file].problems.push(problem);
             } else {
                 results[i].error(ranges[&symbol], "Unresolved signature dependency".into());
@@ -253,7 +268,7 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
             }
         }
     }
-    let mut signature_problems = HashMap::new();
+    let mut signature_calls = HashSet::new();
     complete(
         members,
         |i, s| {
@@ -270,8 +285,14 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
         },
         |i, symbol, error| {
             if let Some(error) = error {
-                let (file, problem) = typing_problem(i, error.diagnostic(ast_for));
-                signature_problems.insert(symbol, (file, results[file].problems.len()));
+                let (file, problem) = call_problem(i, error.into_call_diagnostic(ast_for), |e| {
+                    e.diagnostic(ast_for)
+                });
+                if let Problem::Call(call) = &problem
+                    && let Some(key) = call.identity(&defs)
+                {
+                    signature_calls.insert(key);
+                }
                 results[file].problems.push(problem);
             } else {
                 results[i].error(ranges[&symbol], "Unresolved signature dependency".into());
@@ -292,17 +313,16 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
                     .problems
                     .push(Problem::TyperWarning { source, diagnostic });
             }
-            if let Err(errors) = &check.body {
-                for error in errors {
-                    let (file, problem) = typing_problem(i, error.diagnostic(ast_for));
-                    // Body checking can retry a failed signature. Suppress only its own repeated report.
-                    if let ClassBodyError::Member {
-                        member: ClassMember::Field(d) | ClassMember::Method(d),
-                        ..
-                    } = error
-                        && let Some(&(previous_file, index)) = signature_problems.get(&d.symbol)
-                        && previous_file == file
-                        && results[file].problems[index] == problem
+            if let Err(errors) = &mut check.body {
+                for error in errors.drain(..) {
+                    let (file, problem) =
+                        call_problem(i, error.into_call_diagnostic(ast_for), |e| {
+                            e.diagnostic(ast_for)
+                        });
+                    if let Problem::Call(call) = &problem
+                        && call
+                            .identity(&defs)
+                            .is_some_and(|key| signature_calls.contains(&key))
                     {
                         continue;
                     }
@@ -423,12 +443,19 @@ mod tests {
         let problems = &files[uri].problems;
         assert_eq!(problems.len(), 2);
         for (problem, call) in problems.iter().zip(["value(1)", "value(2)"]) {
-            let Problem::Reported(problem) = problem else {
+            let Problem::Call(problem) = problem else {
                 panic!("expected an error")
             };
-            let range = problem.location.unwrap().span().range();
+            let range = problem.location().unwrap().span().range();
             assert_eq!(&text[range.start() as usize..range.end() as usize], call);
-            assert_eq!(problem.message, "Expected 0 arguments, got 1");
+            assert!(matches!(
+                problem.error(),
+                TyperError::ApplicationArityMismatch {
+                    expected: 0,
+                    actual: 1,
+                    ..
+                }
+            ));
         }
     }
 
@@ -451,10 +478,10 @@ mod tests {
         let files = analyze(&docs);
         let caller = &files["file:///B.scala"];
         assert_eq!(caller.problems.len(), 1);
-        let Problem::Reported(d) = &caller.problems[0] else {
+        let Problem::Call(d) = &caller.problems[0] else {
             panic!("expected a type error")
         };
-        let range = d.location.expect("argument position").span().range();
+        let range = d.location().expect("argument position").span().range();
         assert_eq!(&b[range.start() as usize..range.end() as usize], "x");
         assert_eq!(caller.links.len(), 1);
         let l = &caller.links[0];

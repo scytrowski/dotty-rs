@@ -1820,13 +1820,13 @@ pub enum TyperError {
         tree_index: u32,
         /// Zero-based position in the corresponding ordered parameter, argument, or clause list.
         argument_index: usize,
-        /// Session IDs at the point of failure. Rollback can invalidate or reuse their slots.
+        /// Argument type at failure. Rollback can invalidate or reuse this slot.
         actual: TypeId,
-        /// Required semantic type identity in the caller’s type arena.
+        /// Required type at failure, with the same rollback restrictions as `actual`.
         expected: TypeId,
-        /// Short type descriptions captured before rollback, owned by this error.
+        /// Owned argument type description captured before rollback.
         actual_description: Box<str>,
-        /// Human-readable description of the required grammar form.
+        /// Owned parameter type description captured before rollback.
         expected_description: Box<str>,
     },
     /// The supported conformance relation cannot decide an argument comparison.

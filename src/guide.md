@@ -91,12 +91,12 @@ message, and optional location. Codes can be absent for typer/adapter failures;
 message wording is for presentation. Keep the original source text when
 converting byte ranges to line/column coordinates for an editor.
 
-## Name declarations and type a method
+## Type named methods and retain a call error
 
 Bootstrap primitive definitions once per semantic store. Parse into that store's
 interner, name the source, and preserve the returned source semantic index.
-This example types a single concrete method, including its signature and body.
-It does not compile the whole class or emit binary artifacts.
+The example types a successful call, inspects its warning, then checks a
+sibling method and retains its rejected argument for later reporting.
 
 ```rust
 use dotty::core::{Definitions, Packages, SemanticStore, SourceId, TreeKind};
@@ -104,18 +104,15 @@ use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_
 use dotty::parse_source;
 use dotty::parser::ParserFeatures;
 use dotty::source_declarations::source_classes;
-use dotty::typer::{SourceTyper, TyperWarning};
-use dotty::SourceDiagnostic;
+use dotty::typer::{SourceTyper, TyperError, TyperWarning};
+use dotty::{CallDiagnostic, SourceDiagnostic};
 
 let source = SourceId::from_index(0);
 let mut store = SemanticStore::new();
 let definitions = Definitions::bootstrap(&mut store);
 let mut packages = Packages::new();
-let parsed = parse_source(
-    source,
-    "class Answer { def f(implicit n: Int): Int = n; def value: Int = f(42) }",
-    ParserFeatures::default(),
-)?
+let text = "class Answer { def f(implicit n: Int): Int = n; def value: Int = f(42); def bad: Int = f(false) }";
+let parsed = parse_source(source, text, ParserFeatures::default())?
 .bind(&mut store.names);
 if !parsed.diagnostics.is_empty() {
     return Err("handle syntax diagnostics before naming".into());
@@ -140,6 +137,7 @@ let class = classes.first().ok_or("expected a supported source class")?;
 let mut methods = class.methods();
 let f = methods.next().ok_or("expected f")?;
 let value = methods.next().ok_or("expected value")?;
+let bad = methods.next().ok_or("expected bad")?;
 let mut typer = SourceTyper::new(
     &syntax.ast, source, &index, &mut store, definitions, &packages,
 );
@@ -150,8 +148,30 @@ let [warning] = typer.diagnostics() else { return Err("expected one warning".int
 assert_eq!(warning.issue(), &TyperWarning::ImplicitClauseWithoutUsing);
 let report = SourceDiagnostic::from_typer_warning(source, warning);
 assert_eq!(report.code, Some("typer.implicit_clause_without_using"));
+
+let failure = typer.type_method_definition(bad.tree).expect_err("Boolean passed to f");
+let call = CallDiagnostic::from_typer(failure, Some(bad.symbol), |id| {
+    (id == source).then_some(&syntax.ast)
+})?;
+assert!(matches!(call.error(), TyperError::ApplicationArgumentTypeMismatch {
+    argument_index: 0, ..
+}));
+assert!(call.identity(&definitions).is_some());
+let range = call.location().ok_or("expected an argument position")?.span().range();
+assert_eq!(&text[range.start() as usize..range.end() as usize], "false");
+let report = call.render();
+assert_eq!(report.code, Some("typer.application_argument_type_mismatch"));
+assert_eq!(report.message, "Expected Int, found Boolean");
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
+
+[`MemberSignatureError::into_call_diagnostic`] and
+[`ClassBodyError::into_call_diagnostic`] supply the enclosing member automatically.
+Both return the original wrapper on an unsupported error. Keep matching
+[`CallErrorIdentity`] keys only within the current analysis of unchanged files.
+Discard the keys on reanalysis. If a key is unavailable, keep the report.
+An absent AST removes the location and key, while the payload, source and code
+remain available.
 
 For supported ordinary class bodies, [`type_class_body`] retains the exact
 source-to-typed bindings required by [`jvm_class_plan::JvmClassPlanner`].

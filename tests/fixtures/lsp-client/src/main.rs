@@ -145,6 +145,7 @@ impl Workspace {
                 for problem in &file.problems {
                     let report = match problem {
                         Problem::Reported(report) => report,
+                        Problem::Call(call) => &call.render(),
                         Problem::TyperWarning { source, diagnostic } => {
                             &SourceDiagnostic::from_typer_warning(*source, diagnostic)
                         }

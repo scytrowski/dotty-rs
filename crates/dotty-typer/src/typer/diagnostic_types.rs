@@ -4,6 +4,18 @@ use super::{
 };
 
 impl TyperError {
+    /// Stable diagnostic code for ordinary call arity and argument-type failures.
+    /// Other failures, including explicit type-argument errors, return `None`.
+    pub fn call_error_code(&self) -> Option<&'static str> {
+        match self {
+            Self::ApplicationArityMismatch { .. } => Some("typer.application_arity_mismatch"),
+            Self::ApplicationArgumentTypeMismatch { .. } => {
+                Some("typer.application_argument_type_mismatch")
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn argument_type_mismatch(
         store: &SemanticStore,
         source: SourceId,
@@ -120,6 +132,45 @@ fn describe(store: &SemanticStore, ty: TypeId, remaining: &mut usize) -> String 
 mod tests {
     use super::*;
     use dotty_core::Definitions;
+
+    #[test]
+    fn call_error_codes_identify_categories_independently_of_payload() {
+        let mut store = SemanticStore::new();
+        let defs = Definitions::bootstrap(&mut store);
+        for index in [0, 3] {
+            let source = SourceId::from_index(index);
+            let arity = TyperError::ApplicationArityMismatch {
+                source,
+                tree_index: index,
+                expected: index as usize,
+                actual: 1,
+            };
+            let mismatch = TyperError::argument_type_mismatch(
+                &store,
+                source,
+                index,
+                index as usize,
+                defs.boolean,
+                defs.int,
+            );
+            assert_eq!(
+                arity.call_error_code(),
+                Some("typer.application_arity_mismatch")
+            );
+            assert_eq!(
+                mismatch.call_error_code(),
+                Some("typer.application_argument_type_mismatch")
+            );
+            assert_eq!(
+                TyperError::UsingApplicationDeferred {
+                    source,
+                    tree_index: index
+                }
+                .call_error_code(),
+                None
+            );
+        }
+    }
 
     #[test]
     fn descriptions_abbreviate_wide_applications_at_the_node_limit() {
