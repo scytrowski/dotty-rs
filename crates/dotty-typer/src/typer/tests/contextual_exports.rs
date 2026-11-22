@@ -263,3 +263,80 @@ fn typed_given_selector_and_star_preserve_the_exported_evidence_kind() {
         );
     }
 }
+
+#[test]
+fn polymorphic_export_passes_its_own_type_and_witness_to_the_original_method() {
+    let (parsed, mut store, packages, defs, index, source) = unit(CLIENT);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let root = client_result(&mut typer, &parsed, "conditional").unwrap();
+    let call = evidence(&typer, root);
+    let TreeKind::Apply(app) = &typer.typed_ast().get(call).kind else {
+        panic!("provider application")
+    };
+    let leaf = reference(&typer, app.args[0]);
+    let TreeKind::TypeApply(tapp) = &typer.typed_ast().get(app.function).kind else {
+        panic!("inferred type")
+    };
+    assert_eq!(
+        typer.typed_ast().get(tapp.args[0]).ty,
+        typer.definitions.int
+    );
+    let provider = reference(&typer, tapp.function);
+    assert_eq!(
+        typer.store.symbols.owner(provider),
+        typer.store.symbols.owner(leaf)
+    );
+    assert_eq!(
+        typer
+            .store
+            .types
+            .get(typer.store.export_target(leaf).unwrap())
+            .reference_symbol(),
+        Some(val_symbol(&parsed, typer.store(), &index, source, "ints").0)
+    );
+    let original = method_definition_and_rhs(&parsed, typer.store(), &index, source, "boxed").0;
+    assert_ne!(
+        typer.store.symbols.info(provider),
+        typer.store.symbols.info(original)
+    );
+    let def = typer.type_export_forwarder_definition(provider).unwrap();
+    let TreeKind::DefDef(def) = &typer.typed_ast().get(def).kind else {
+        panic!()
+    };
+    let type_param = typer
+        .typed_index
+        .synthetic_definition_symbol(def.type_params[0])
+        .unwrap();
+    let parameter = typer
+        .typed_index
+        .synthetic_definition_symbol(def.value_param_clauses[0][0])
+        .unwrap();
+    assert_eq!(typer.store.symbols.owner(type_param), Some(provider));
+    assert_eq!(typer.store.symbols.owner(parameter), Some(provider));
+    let TreeKind::Apply(delegate) = &typer.typed_ast().get(def.rhs.unwrap()).kind else {
+        panic!()
+    };
+    assert_eq!(reference(&typer, delegate.args[0]), parameter);
+    let TreeKind::TypeApply(ta) = &typer.typed_ast().get(delegate.function).kind else {
+        panic!()
+    };
+    assert_eq!(reference(&typer, ta.args[0]), type_param);
+    assert_eq!(reference(&typer, ta.function), original);
+}
+
+#[test]
+fn conditional_export_requires_an_unambiguous_dependency_at_the_call_site() {
+    let (parsed, mut store, packages, defs, index, source) = unit(ERRORS);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let checkpoint = typer.store.checkpoint();
+    assert!(matches!(
+        client_result(&mut typer, &parsed, "missingDependency"),
+        Err(TyperError::MissingContextualArgument { .. })
+    ));
+    let error = client_result(&mut typer, &parsed, "ambiguousDependency").unwrap_err();
+    assert!(
+        matches!(error,TyperError::AmbiguousContextualArgument{ref candidates,..} if candidates.len()==2),
+        "{error:?}"
+    );
+    assert_eq!(typer.store.checkpoint(), checkpoint);
+}
