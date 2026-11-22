@@ -690,10 +690,21 @@ fn binary_contextual_default_rejects_a_mismatched_getter_signature_before_insert
 
 #[test]
 fn binary_pick_default_reuses_the_receiver_and_both_arguments_in_source_order() {
-    let (parsed, mut store, packages, defs, index, source) = parse_and_name(include_str!(
-        "../../../tests/fixtures/contextual-arguments/BinaryPairClient.scala"
-    ));
-    let (run, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "run");
+    assert_pair_default(
+        include_str!("../../../tests/fixtures/contextual-arguments/BinaryPairClient.scala"),
+        "run",
+        "pick",
+    );
+}
+
+#[test]
+fn binary_pick_default_shares_the_applied_reader_before_its_arguments() {
+    assert_pair_default(APPLIED_PAIR_CLIENT, "fallback", "pick");
+}
+
+fn assert_pair_default(text: &str, method_name: &str, target_name: &str) {
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let (run, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, method_name);
     let source_methods = ["reader", "left", "right"]
         .map(|name| method_symbol(&parsed, &store, &index, source, name));
     let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(run) else {
@@ -737,7 +748,8 @@ fn binary_pick_default_reuses_the_receiver_and_both_arguments_in_source_order() 
         };
         let init = shared.rhs.unwrap();
         assert_eq!(bindings.get(source, operand), Some(init));
-        let function = if *stat == *receiver {
+        let function = if !matches!(parsed.ast.get(operand).kind, TreeKind::Apply(_)) {
+            assert_eq!(stat, receiver);
             assert!(matches!(
                 ast.get(init).kind,
                 TreeKind::Ident(_) | TreeKind::Select(_)
@@ -788,9 +800,12 @@ fn binary_pick_default_reuses_the_receiver_and_both_arguments_in_source_order() 
     assert_eq!(store.symbols.get(target).origin, symbol.origin);
     assert_eq!(
         store.names.resolve(store.symbols.get(target).name.text()),
-        "pick"
+        target_name
     );
-    assert_eq!(store.names.resolve(symbol.name.text()), "pick$default$3");
+    assert_eq!(
+        store.names.resolve(symbol.name.text()),
+        format!("{target_name}$default$3")
+    );
     let SymbolInfo::Complete(qualified) = store.symbols.get(receiver_temp).info else {
         panic!("expected typed receiver")
     };
