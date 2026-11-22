@@ -2488,3 +2488,56 @@ fn field_planning_rejects_qualified_and_modified_fields() {
         );
     }
 }
+
+#[test]
+fn waiter_identifies_provider_with_original_bad_call_report() {
+    let mut store = SemanticStore::new();
+    let defs = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let text = "class Provider { def value(): Int = 7; val seed = value(1) }";
+    let units = field_signature_units(CONSUMER_OF_SEED, text, false, &mut store, &mut packages);
+    let sources = SignatureSources::new(&units, &store);
+    super::complete_headers(&sources, &mut store, defs, &packages, &mut |_, _| {}).unwrap();
+    let answer = units[0].classes[0].fields().next().unwrap().symbol;
+    let seed = units[1].classes[0].fields().next().unwrap().symbol;
+    let mut graph = dotty::SignatureDependencies::new(dotty::SignaturePhase::Members);
+    let mut attempt = |file: usize, symbol| {
+        let u = &units[file];
+        dotty::try_complete_member_signature(
+            symbol,
+            &sources.declarations,
+            &u.ast,
+            &u.index,
+            &mut store,
+            defs,
+            &packages,
+        )
+    };
+    graph.record(answer, attempt(0, answer).unwrap());
+    let failure = attempt(1, seed).unwrap_err();
+    graph.record_failure(seed);
+    assert_eq!(
+        graph.blockages([answer]),
+        [(answer, dotty::SignatureBlockage::Failed(seed))]
+    );
+    let report = failure
+        .into_call_diagnostic(|id| sources.by_source.get(&id).map(|u| &u.ast))
+        .unwrap();
+    assert!(matches!(
+        report.error(),
+        dotty::typer::TyperError::ApplicationArityMismatch {
+            expected: 0,
+            actual: 1,
+            ..
+        }
+    ));
+    assert_eq!(report.code(), "typer.application_arity_mismatch");
+    assert_eq!(report.member(), Some(seed));
+    let span = report.location().unwrap();
+    assert_eq!(span.source(), units[1].source);
+    let range = span.span().range();
+    assert_eq!(
+        &text[range.start() as usize..range.end() as usize],
+        "value(1)"
+    );
+}

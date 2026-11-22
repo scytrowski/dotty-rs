@@ -1,7 +1,10 @@
 //! Dependencies observed during a single source signature completion phase.
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
-use crate::core::SymbolId;
+use crate::core::{SemanticStore, SourceSpan, SymbolId, SymbolOrigin};
 use crate::typer::SignatureCompletion;
 
 /// Which declarations are being completed in this pass.
@@ -26,6 +29,35 @@ impl SignatureCycle {
         self.phase
     }
 
+    /// Stable diagnostic code for this phase, independent of path or spelling.
+    pub fn code(&self) -> &'static str {
+        match self.phase {
+            SignaturePhase::Headers => "signature.header_cycle",
+            SignaturePhase::Members => "signature.member_cycle",
+        }
+    }
+
+    /// Participants once each in path order, paired with their original declaration
+    /// positions when available. Supply the same naming store. A missing position
+    /// or a position from a different source leaves the symbol unlocated.
+    pub fn declarations<'a>(
+        &'a self,
+        store: &'a SemanticStore,
+    ) -> impl Iterator<Item = (SymbolId, Option<SourceSpan>)> + 'a {
+        self.path[..self.path.len() - 1].iter().map(|&id| {
+            let position = store
+                .symbols
+                .contains(id)
+                .then(|| store.symbols.get(id))
+                .and_then(|symbol| {
+                    symbol
+                        .position
+                        .filter(|p| symbol.origin == SymbolOrigin::Source(p.source()))
+                });
+            (id, position)
+        })
+    }
+
     /// Closed path in dependency order. The first and last symbols are equal.
     /// A traversal beginning outside the cycle omits its leading path.
     pub fn path(&self) -> &[SymbolId] {
@@ -38,6 +70,9 @@ impl SignatureCycle {
 pub enum SignatureBlockage {
     /// The chain ends at a provider with no recorded outgoing edge or failure.
     Pending(SymbolId),
+    /// The provider whose attempt failed. Look up its original phase error in
+    /// the caller's reports. Every transitive waiter refers to that same symbol.
+    Failed(SymbolId),
     /// This declaration participates in the closed path.
     CycleMember(Arc<SignatureCycle>),
     /// This declaration is outside the cycle but transitively needs a participant.
@@ -50,6 +85,7 @@ pub enum SignatureBlockage {
 #[derive(Debug)]
 pub struct SignatureDependencies {
     phase: SignaturePhase,
+    failed: HashSet<SymbolId>,
     waiting: HashMap<SymbolId, SymbolId>,
     waiters: HashMap<SymbolId, Vec<SymbolId>>,
 }
@@ -59,6 +95,7 @@ impl SignatureDependencies {
     pub fn new(phase: SignaturePhase) -> Self {
         Self {
             phase,
+            failed: HashSet::new(),
             waiting: HashMap::new(),
             waiters: HashMap::new(),
         }
@@ -79,6 +116,7 @@ impl SignatureDependencies {
     /// When a provider completes, returns its direct waiters once in registration
     /// order and clears their edges. The caller decides when to retry them.
     pub fn record(&mut self, symbol: SymbolId, outcome: SignatureCompletion) -> Vec<SymbolId> {
+        self.failed.remove(&symbol);
         if let SignatureCompletion::BlockedOn(provider) = outcome
             && self.waiting_on(symbol) == Some(provider)
         {
@@ -99,6 +137,14 @@ impl SignatureDependencies {
                 ready
             }
         }
+    }
+
+    /// Marks a directly rejected attempt. Keep its original phase error under
+    /// this symbol. Dependents remain blocked and can identify the provider via
+    /// [`Self::blockages`]. A subsequent attempt replaces this failure state.
+    pub fn record_failure(&mut self, symbol: SymbolId) {
+        self.detach(symbol);
+        self.failed.insert(symbol);
     }
 
     /// Classifies still-blocked roots in input order, omitting roots without a wait.
@@ -137,7 +183,11 @@ impl SignatureDependencies {
                 };
             }
             let Some(next) = self.waiting_on(node) else {
-                break SignatureBlockage::Pending(node);
+                break if self.failed.contains(&node) {
+                    SignatureBlockage::Failed(node)
+                } else {
+                    SignatureBlockage::Pending(node)
+                };
             };
             if let Some(start) = active.insert(node, path.len()) {
                 let mut closed = path.split_off(start);
@@ -177,6 +227,32 @@ mod tests {
     use super::*;
     use crate::core::{Definitions, SemanticStore};
     use SignatureCompletion::{BlockedOn, Complete};
+
+    #[test]
+    fn failed_provider_is_distinct_from_pending_and_can_be_retried() {
+        let d = Definitions::bootstrap(&mut SemanticStore::new());
+        let (leaf, mid, bad) = (d.any_class, d.object_class, d.null_class);
+        let mut graph = SignatureDependencies::new(SignaturePhase::Members);
+        graph.record(leaf, BlockedOn(mid));
+        graph.record(mid, BlockedOn(bad));
+        assert_eq!(
+            graph.blockages([leaf]),
+            [(leaf, SignatureBlockage::Pending(bad))]
+        );
+        graph.record_failure(bad);
+        assert_eq!(
+            graph.blockages([leaf, mid]),
+            [
+                (leaf, SignatureBlockage::Failed(bad)),
+                (mid, SignatureBlockage::Failed(bad))
+            ]
+        );
+        assert_eq!(graph.record(bad, Complete(d.int)), [mid]);
+        assert_eq!(
+            graph.blockages([leaf]),
+            [(leaf, SignatureBlockage::Pending(mid))]
+        );
+    }
 
     #[test]
     fn reports_only_cycle_participants_and_shares_the_closed_path() {
