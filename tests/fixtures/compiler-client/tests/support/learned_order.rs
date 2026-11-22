@@ -1,5 +1,5 @@
 //! Replay the previous session's completion order as a file scheduling hint.
-use super::super::{NamedUnit, SignatureCompletion, TyperError, complete_signatures_in_order};
+use super::super::{NamedUnit, SignatureCompletion, complete_signatures_in_order};
 use super::{
     Layout, Timings, compile_timed, compile_with_signatures, dependent_sources, inputs, name_units,
     parsing,
@@ -170,7 +170,7 @@ fn failed_signature_pass_preserves_history_and_cycle_diagnostic() {
         .complete(&files, &units, &mut store, defs, &packages, || {})
         .unwrap_err();
     assert!(
-        matches!(error, crate::SignatureError::Typing(TyperError::RecursiveInferredMethodResult {symbol}) if symbol == units[1].method_symbol()),
+        matches!(error, crate::SignatureError::Cycle(ref cycle) if cycle.path()[0] == units[1].method_symbol()),
         "{error:?}"
     );
     assert!(

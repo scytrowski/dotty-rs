@@ -1225,10 +1225,20 @@ fn public_field_cycle_reports_the_closed_symbol_path_in_either_order() {
         let first = units[0].classes[0].fields().next().unwrap().symbol;
         let second = units[1].classes[0].fields().next().unwrap().symbol;
         let error = complete_signatures(&units, &mut store, defs, &packages).unwrap_err();
-        let super::SignatureError::MemberCycle(path) = error else {
+        let super::SignatureError::Cycle(cycle) = error else {
             panic!("expected a field cycle, got {error:?}")
         };
-        assert_eq!(path, [first, second, first]);
+        assert_eq!(cycle.code(), "signature.member_cycle");
+        assert_eq!(cycle.path(), [first, second, first]);
+        let locations: Vec<_> = cycle.declarations(&store).collect();
+        assert_eq!(
+            locations,
+            [
+                (first, store.symbols.get(first).position),
+                (second, store.symbols.get(second).position)
+            ]
+        );
+        assert!(locations.iter().all(|(_, position)| position.is_some()));
         for field in [first, second] {
             assert_eq!(store.symbols.info(field), &SymbolInfo::Missing);
         }
@@ -1976,12 +1986,22 @@ fn header_cycle_reports_only_the_active_cycle_and_leaves_headers_incomplete() {
             &mut packages,
         );
         let error = complete_signatures(&units, &mut store, defs, &packages).unwrap_err();
-        let super::SignatureError::HeaderCycle(path) = error else {
+        let super::SignatureError::Cycle(cycle) = error else {
             panic!("expected a cycle, got {error:?}");
         };
         let first = units[cycle_start].classes[0].symbol;
         let second = units[cycle_start + 1].classes[0].symbol;
-        assert_eq!(path, [first, second, first]);
+        assert_eq!(cycle.code(), "signature.header_cycle");
+        assert_eq!(cycle.path(), [first, second, first]);
+        let locations: Vec<_> = cycle.declarations(&store).collect();
+        assert_eq!(
+            locations,
+            [
+                (first, store.symbols.get(first).position),
+                (second, store.symbols.get(second).position)
+            ]
+        );
+        assert!(locations.iter().all(|(_, position)| position.is_some()));
         for (_, class) in super::named_classes(&units) {
             assert_eq!(
                 store.symbols.info(class.symbol),

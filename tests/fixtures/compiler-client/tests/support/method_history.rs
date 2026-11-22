@@ -1,6 +1,6 @@
 //! Compare three caller-owned schedules over consecutive, fresh semantic sessions.
 use super::super::{
-    Input, LearnedOrder, NamedUnit, SignatureCompletion, Timings, TyperError, compile_timed,
+    Input, LearnedOrder, NamedUnit, SignatureCompletion, Timings, compile_timed,
     compile_with_signatures, inputs, name_units, parsing,
 };
 use super::{Graph, sources};
@@ -270,7 +270,7 @@ fn introduced_cycle_reports_reentered_method_and_preserves_each_history() {
             .complete(&files, &units, &mut store, defs, &packages, || {})
             .unwrap_err();
         assert!(
-            matches!(err, crate::SignatureError::Typing(TyperError::RecursiveInferredMethodResult { symbol }) if symbol == units[expected].method_symbol()),
+            matches!(err, crate::SignatureError::Cycle(ref cycle) if cycle.path()[0] == units[expected].method_symbol()),
             "{err:?}"
         );
         assert!(
