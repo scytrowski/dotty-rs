@@ -106,3 +106,74 @@ fn partial_and_full_clauses_keep_the_written_values_and_the_selected_seed() {
         });
     }
 }
+
+fn shared_operands<const N: usize>(
+    typer: &SourceTyper<'_>,
+    root: TreeId<Typed>,
+    methods: [&str; N],
+) -> (TreeId<Typed>, [SymbolId; N]) {
+    let ast = typer.typed_ast();
+    let TreeKind::Block(block) = &ast.get(root).kind else {
+        panic!("expected operand bindings")
+    };
+    assert_eq!(block.stats.len(), N);
+    let temporaries = std::array::from_fn(|i| {
+        let stat = block.stats[i];
+        let TreeKind::ValDef(value) = &ast.get(stat).kind else {
+            panic!("operand definition")
+        };
+        let init = application(ast, value.rhs.unwrap());
+        assert!(init.args.is_empty());
+        let method = reference(typer, init.function);
+        assert!(typer.index.definition_of(method).is_some());
+        assert_eq!(
+            typer
+                .store
+                .names
+                .resolve(typer.store.symbols.get(method).name.text()),
+            methods[i]
+        );
+        typer.typed_index.synthetic_definition_symbol(stat).unwrap()
+    });
+    (block.expr, temporaries)
+}
+
+#[test]
+fn both_defaults_replay_the_same_stable_prefix_in_formal_order() {
+    with_client("both", |typer, root, params| {
+        let ast = typer.typed_ast();
+        let outer = application(ast, root);
+        let [y, z] = outer.args.as_slice() else {
+            panic!("two defaults")
+        };
+        assert_getter(typer, outer.function, *y, 2);
+        assert_getter(typer, outer.function, *z, 3);
+        let x = application(ast, outer.function);
+        let seed = application(ast, x.function);
+        assert_int(ast, x.args[0], 3);
+        assert_eq!(reference(typer, seed.args[0]), params[1]);
+    });
+}
+
+#[test]
+fn both_defaults_share_the_applied_receiver_written_seed_and_argument() {
+    with_client("effects", |typer, root, _| {
+        let ast = typer.typed_ast();
+        let (expr, [receiver, seed, x]) = shared_operands(typer, root, ["reader", "seed", "next"]);
+        let outer = application(ast, expr);
+        let [y, z] = outer.args.as_slice() else {
+            panic!("two defaults")
+        };
+        assert_getter(typer, outer.function, *y, 2);
+        assert_getter(typer, outer.function, *z, 3);
+        let ordinary = application(ast, outer.function);
+        let contextual = application(ast, ordinary.function);
+        let TreeKind::Select(selected) = &ast.get(contextual.function).kind else {
+            panic!("fold")
+        };
+        assert_eq!(contextual.kind, ApplyKind::Using);
+        assert_eq!(reference(typer, selected.qualifier), receiver);
+        assert_eq!(reference(typer, contextual.args[0]), seed);
+        assert_eq!(reference(typer, ordinary.args[0]), x);
+    });
+}
