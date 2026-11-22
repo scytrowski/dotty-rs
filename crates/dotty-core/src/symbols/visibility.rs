@@ -23,8 +23,11 @@ use crate::ids::SymbolId;
 /// boundary symbol).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Visibility {
+    /// Accessible without a private or protected restriction.
     Public,
+    /// Private access, optionally qualified by an enclosing scope.
     Private,
+    /// Protected access, optionally qualified by an enclosing scope.
     Protected,
     /// Package-private (JVM's "no access modifier"): visible only within
     /// the given package symbol.

@@ -8,16 +8,27 @@ use super::*;
 /// rebinding body. Local bindings must come from that session's SourceTyper.
 #[derive(Clone, Copy)]
 pub struct MutableLocalReferenceReassignmentProofInput<'session> {
+    /// Source identity shared by parsing, naming, and typing.
     pub source_id: SourceId,
+    /// Canonical untyped definition of the method being validated.
     pub method_tree: TreeId<Untyped>,
+    /// Canonical symbol, name, and type stores borrowed from the same session.
     pub store: &'session SemanticStore,
+    /// Primitive definitions bootstrapped in the supplied semantic store.
     pub definitions: &'session Definitions,
+    /// Original untyped arena containing the source roots in this proof.
     pub source_ast: &'session AstArena<Untyped>,
+    /// Exact typed arena containing the mapped roots in this proof.
     pub typed_ast: &'session TypedAst,
+    /// Canonical declaration and scope bindings from naming this source.
     pub source_index: &'session SourceSemanticIndex,
+    /// Exact source-to-typed mappings produced in this session.
     pub source_typed_index: &'session SourceTypedIndex,
+    /// Typer bindings for the two original locals, in source order; missing entries are rejected.
     pub original_bindings: [Option<TypedLocalBinding>; 2],
+    /// Typer-produced selected-local binding; absence is rejected by validation.
     pub selected_binding: Option<TypedLocalBinding>,
+    /// Complete JVM planning unit borrowing the same semantic and typed stores.
     pub jvm_unit: &'session JvmCompilationUnit<'session>,
 }
 
@@ -69,54 +80,71 @@ pub struct ValidatedMutableLocalReferenceReassignmentProof<'session> {
 }
 
 impl ValidatedMutableLocalReferenceReassignmentProof<'_> {
+    /// Source identity shared by parsing, naming, and typing.
     pub const fn source_id(&self) -> SourceId {
         self.source_id
     }
+    /// Canonical owning class of the validated method.
     pub const fn owner(&self) -> SymbolId {
         self.owner
     }
+    /// Canonical method symbol retained by this proof.
     pub const fn method(&self) -> SymbolId {
         self.method
     }
+    /// Canonical lexical scope containing the validated local declaration.
     pub const fn scope(&self) -> dotty_core::ScopeId {
         self.scope
     }
+    /// Original source root for the enclosing method-body block.
     pub const fn source_block(&self) -> TreeId<Untyped> {
         self.source_block
     }
+    /// Exact mapped typed root for the enclosing method-body block.
     pub const fn typed_block(&self) -> TreeId<Typed> {
         self.typed_block
     }
+    /// Original source roots for the retained local declarations in source order.
     pub const fn source_declarations(&self) -> [TreeId<Untyped>; 3] {
         self.source_declarations
     }
+    /// Exact mapped typed roots for the retained local declarations in source order.
     pub const fn typed_declarations(&self) -> [TreeId<Typed>; 3] {
         self.typed_declarations
     }
+    /// Original source roots for the retained local initializer roots in source order.
     pub const fn source_initializers(&self) -> [TreeId<Untyped>; 3] {
         self.source_initializers
     }
+    /// Exact mapped typed roots for the retained local initializer roots in source order.
     pub const fn typed_initializers(&self) -> [TreeId<Typed>; 3] {
         self.typed_initializers
     }
+    /// Original source root for the reference reassignment expression.
     pub const fn source_assignment(&self) -> TreeId<Untyped> {
         self.source_assignment
     }
+    /// Exact mapped typed root for the reference reassignment expression.
     pub const fn typed_assignment(&self) -> TreeId<Typed> {
         self.typed_assignment
     }
+    /// Original source root for the local reference on the left of the assignment.
     pub const fn source_assignment_lhs(&self) -> TreeId<Untyped> {
         self.source_assignment_lhs
     }
+    /// Exact mapped typed root for the local reference on the left of the assignment.
     pub const fn typed_assignment_lhs(&self) -> TreeId<Typed> {
         self.typed_assignment_lhs
     }
+    /// Original source root for the original local reference on the right of the assignment.
     pub const fn source_assignment_rhs(&self) -> TreeId<Untyped> {
         self.source_assignment_rhs
     }
+    /// Exact mapped typed root for the original local reference on the right of the assignment.
     pub const fn typed_assignment_rhs(&self) -> TreeId<Typed> {
         self.typed_assignment_rhs
     }
+    /// Canonical selected local whose uses are authenticated by this proof.
     pub const fn selected(&self) -> SymbolId {
         self.selected
     }
@@ -125,48 +153,63 @@ impl ValidatedMutableLocalReferenceReassignmentProof<'_> {
     pub const fn initializer_target(&self) -> SymbolId {
         self.initializer_target
     }
+    /// Original local symbol assigned to the selected mutable reference.
     pub const fn assigned_target(&self) -> SymbolId {
         self.assigned_target
     }
+    /// Canonical Counter class shared by the validated reference types.
     pub const fn counter(&self) -> SymbolId {
         self.counter
     }
+    /// Semantic type of the validated local reference.
     pub const fn local_type(&self) -> TypeId {
         self.local_type
     }
+    /// Original source root for the validated Counter.set application.
     pub const fn source_setter(&self) -> TreeId<Untyped> {
         self.source_setter
     }
+    /// Exact mapped typed root for the validated Counter.set application.
     pub const fn typed_setter(&self) -> TreeId<Typed> {
         self.typed_setter
     }
+    /// Original source root for the selected local reference receiving the Counter.set call.
     pub const fn source_setter_receiver(&self) -> TreeId<Untyped> {
         self.source_setter_receiver
     }
+    /// Exact mapped typed root for the selected local reference receiving the Counter.set call.
     pub const fn typed_setter_receiver(&self) -> TreeId<Typed> {
         self.typed_setter_receiver
     }
+    /// Original source root for the argument of the validated Counter.set call.
     pub const fn source_setter_argument(&self) -> TreeId<Untyped> {
         self.source_setter_argument
     }
+    /// Exact mapped typed root for the argument of the validated Counter.set call.
     pub const fn typed_setter_argument(&self) -> TreeId<Typed> {
         self.typed_setter_argument
     }
+    /// Canonical Counter.set method invoked through the selected reference.
     pub const fn setter_method(&self) -> SymbolId {
         self.setter_method
     }
+    /// Original source root for the final Pair constructor application.
     pub const fn source_pair_result(&self) -> TreeId<Untyped> {
         self.source_pair_result
     }
+    /// Exact mapped typed root for the final Pair constructor application.
     pub const fn typed_pair_result(&self) -> TreeId<Typed> {
         self.typed_pair_result
     }
+    /// Original source roots for the arguments of the final Pair construction in source order.
     pub const fn source_pair_arguments(&self) -> [TreeId<Untyped>; 2] {
         self.source_pair_arguments
     }
+    /// Exact mapped typed roots for the arguments of the final Pair construction in source order.
     pub const fn typed_pair_arguments(&self) -> [TreeId<Typed>; 2] {
         self.typed_pair_arguments
     }
+    /// The two original initialized local symbols in source order.
     pub const fn original_locals(&self) -> [SymbolId; 2] {
         self.original_locals
     }

@@ -27,7 +27,12 @@ pub enum SpanError {
     /// `range.start() <= point <= range.end()` — **inclusive of `end`**,
     /// even though [`TextRange`] itself is the half-open `[start, end)`.
     /// See [`Span::new`] for why the upper bound is not tightened to `<`.
-    PointOutOfRange { point: u32, range: TextRange },
+    PointOutOfRange {
+        /// Rejected distinguished byte offset, which lies outside the allowed span boundary.
+        point: u32,
+        /// Source byte range involved in the check.
+        range: TextRange,
+    },
 }
 
 impl fmt::Display for SpanError {
@@ -77,10 +82,12 @@ impl Span {
         Self { range, point: None }
     }
 
+    /// Returns the span's half-open byte range without its distinguished point.
     pub const fn range(self) -> TextRange {
         self.range
     }
 
+    /// Returns the optional distinguished byte offset, rather than the whole range.
     pub const fn point(self) -> Option<u32> {
         self.point
     }
@@ -94,14 +101,18 @@ pub struct SourceSpan {
 }
 
 impl SourceSpan {
+    /// Pairs a source identity with an already-validated span. The caller must ensure that the
+    /// span addresses that source buffer.
     pub const fn new(source: SourceId, span: Span) -> Self {
         Self { source, span }
     }
 
+    /// Returns the source buffer identity associated with this span.
     pub const fn source(self) -> SourceId {
         self.source
     }
 
+    /// Returns the byte span and its optional distinguished point.
     pub const fn span(self) -> Span {
         self.span
     }

@@ -3,22 +3,39 @@ use crate::reader::{ReadError, Reader};
 use crate::writer::Writer;
 use std::fmt;
 
+/// Wire tag for the JVM `UTF8` constant-pool entry.
 pub const CONSTANT_UTF8_TAG: u8 = 1;
+/// Wire tag for the JVM `INTEGER` constant-pool entry.
 pub const CONSTANT_INTEGER_TAG: u8 = 3;
+/// Wire tag for the JVM `FLOAT` constant-pool entry.
 pub const CONSTANT_FLOAT_TAG: u8 = 4;
+/// Wire tag for the JVM `LONG` constant-pool entry.
 pub const CONSTANT_LONG_TAG: u8 = 5;
+/// Wire tag for the JVM `DOUBLE` constant-pool entry.
 pub const CONSTANT_DOUBLE_TAG: u8 = 6;
+/// Wire tag for the JVM `CLASS` constant-pool entry.
 pub const CONSTANT_CLASS_TAG: u8 = 7;
+/// Wire tag for the JVM `STRING` constant-pool entry.
 pub const CONSTANT_STRING_TAG: u8 = 8;
+/// Wire tag for the JVM `FIELDREF` constant-pool entry.
 pub const CONSTANT_FIELDREF_TAG: u8 = 9;
+/// Wire tag for the JVM `METHODREF` constant-pool entry.
 pub const CONSTANT_METHODREF_TAG: u8 = 10;
+/// Wire tag for the JVM `INTERFACE_METHODREF` constant-pool entry.
 pub const CONSTANT_INTERFACE_METHODREF_TAG: u8 = 11;
+/// Wire tag for the JVM `NAME_AND_TYPE` constant-pool entry.
 pub const CONSTANT_NAME_AND_TYPE_TAG: u8 = 12;
+/// Wire tag for the JVM `METHOD_HANDLE` constant-pool entry.
 pub const CONSTANT_METHOD_HANDLE_TAG: u8 = 15;
+/// Wire tag for the JVM `METHOD_TYPE` constant-pool entry.
 pub const CONSTANT_METHOD_TYPE_TAG: u8 = 16;
+/// Wire tag for the JVM `DYNAMIC` constant-pool entry.
 pub const CONSTANT_DYNAMIC_TAG: u8 = 17;
+/// Wire tag for the JVM `INVOKE_DYNAMIC` constant-pool entry.
 pub const CONSTANT_INVOKE_DYNAMIC_TAG: u8 = 18;
+/// Wire tag for the JVM `MODULE` constant-pool entry.
 pub const CONSTANT_MODULE_TAG: u8 = 19;
+/// Wire tag for the JVM `PACKAGE` constant-pool entry.
 pub const CONSTANT_PACKAGE_TAG: u8 = 20;
 
 /// A 1-based index into a [`ConstantPool`]. Index `0` is always invalid.
@@ -33,14 +50,23 @@ pub struct BootstrapMethodIndex(pub u16);
 /// The kind of a `CONSTANT_MethodHandle_info` reference (JVMS §4.4.8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MethodHandleKind {
+    /// Read an instance field through a method handle.
     GetField,
+    /// Read a static field through a method handle.
     GetStatic,
+    /// Write an instance field through a method handle.
     PutField,
+    /// Write a static field through a method handle.
     PutStatic,
+    /// Invoke an instance method with virtual dispatch.
     InvokeVirtual,
+    /// Invoke a static method.
     InvokeStatic,
+    /// Invoke an instance method using special invocation rules.
     InvokeSpecial,
+    /// Invoke a constructor and produce the new instance.
     NewInvokeSpecial,
+    /// Invoke an interface method.
     InvokeInterface,
 }
 
@@ -64,53 +90,90 @@ impl MethodHandleKind {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// One tagged constant-pool payload; references remain symbolic pool indices until resolved.
 pub enum ConstantPoolEntry {
+    /// Decoded modified UTF-8 text.
     Utf8(String),
+    /// Signed 32-bit integer constant.
     Integer(i32),
+    /// Single-precision floating-point constant.
     Float(f32),
+    /// Signed 64-bit integer constant occupying two pool slots.
     Long(i64),
+    /// Double-precision constant occupying two pool slots.
     Double(f64),
+    /// Symbolic class or array type name.
     Class {
+        /// UTF-8 pool entry holding a JVM internal class name or array descriptor.
         name_index: ConstantPoolIndex,
     },
+    /// String constant referring to a UTF-8 entry.
     String {
+        /// Constant-pool UTF-8 entry containing the string contents.
         string_index: ConstantPoolIndex,
     },
+    /// Symbolic class field reference.
     Fieldref {
+        /// Constant-pool class entry.
         class_index: ConstantPoolIndex,
+        /// Constant-pool name-and-type entry for this reference.
         name_and_type_index: ConstantPoolIndex,
     },
+    /// Symbolic class method reference.
     Methodref {
+        /// Constant-pool class entry.
         class_index: ConstantPoolIndex,
+        /// Constant-pool name-and-type entry for this reference.
         name_and_type_index: ConstantPoolIndex,
     },
+    /// Symbolic interface method reference.
     InterfaceMethodref {
+        /// Constant-pool class entry.
         class_index: ConstantPoolIndex,
+        /// Constant-pool name-and-type entry for this reference.
         name_and_type_index: ConstantPoolIndex,
     },
+    /// Member name and descriptor pair.
     NameAndType {
+        /// Constant-pool UTF-8 entry containing the name.
         name_index: ConstantPoolIndex,
+        /// Constant-pool UTF-8 entry containing the JVM descriptor.
         descriptor_index: ConstantPoolIndex,
     },
+    /// Symbolic method handle with an invocation or field-access kind.
     MethodHandle {
+        /// Method-handle invocation category or referenced semantic kind.
         reference_kind: MethodHandleKind,
+        /// Constant-pool field or method entry targeted by this method handle.
         reference_index: ConstantPoolIndex,
     },
+    /// Method descriptor used as a method-type constant.
     MethodType {
+        /// Constant-pool UTF-8 entry containing the JVM descriptor.
         descriptor_index: ConstantPoolIndex,
     },
+    /// Dynamically computed constant with a bootstrap-method index.
     Dynamic {
+        /// Zero-based index into the BootstrapMethods attribute.
         bootstrap_method_attr_index: BootstrapMethodIndex,
+        /// Constant-pool name-and-type entry for this reference.
         name_and_type_index: ConstantPoolIndex,
     },
+    /// Dynamic call site with a bootstrap-method index.
     InvokeDynamic {
+        /// Zero-based index into the BootstrapMethods attribute.
         bootstrap_method_attr_index: BootstrapMethodIndex,
+        /// Constant-pool name-and-type entry for this reference.
         name_and_type_index: ConstantPoolIndex,
     },
+    /// Module name used by JPMS metadata.
     Module {
+        /// UTF-8 pool entry holding the encoded module name.
         name_index: ConstantPoolIndex,
     },
+    /// Package name used by JPMS metadata.
     Package {
+        /// UTF-8 pool entry holding the slash-separated package name.
         name_index: ConstantPoolIndex,
     },
 }
@@ -125,12 +188,31 @@ pub struct ConstantPool {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Structural failure while decoding the constant-pool table.
 pub enum ConstantPoolError {
+    /// The bounded binary reader rejected the constant-pool payload.
     Read(ReadError),
+    /// The declared pool count omits the mandatory unused slot zero.
     ZeroCount,
-    MissingReservedSlot { index: u16 },
-    UnknownTag { index: u16, tag: u8 },
-    InvalidMethodHandleReferenceKind { index: u16, kind: u8 },
+    /// A Long or Double constant has no required second slot.
+    MissingReservedSlot {
+        /// One-based JVM constant-pool slot involved in this failure.
+        index: u16,
+    },
+    /// A constant-pool entry uses an unrecognized wire tag.
+    UnknownTag {
+        /// One-based JVM constant-pool slot involved in this failure.
+        index: u16,
+        /// Wire-format tag identifying the decoded entry or node kind.
+        tag: u8,
+    },
+    /// A method handle uses a reference-kind byte outside the valid range.
+    InvalidMethodHandleReferenceKind {
+        /// One-based JVM constant-pool slot involved in this failure.
+        index: u16,
+        /// Structural or semantic category of the item.
+        kind: u8,
+    },
 }
 
 impl fmt::Display for ConstantPoolError {
@@ -166,13 +248,21 @@ impl From<ReadError> for ConstantPoolError {
 /// report what a reference *should* have resolved to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
+    /// Requires a `Utf8` constant-pool entry.
     Utf8,
+    /// Requires a `Class` constant-pool entry.
     Class,
+    /// Requires a `NameAndType` constant-pool entry.
     NameAndType,
+    /// Requires a `MethodHandle` constant-pool entry.
     MethodHandle,
+    /// Requires a `Integer` constant-pool entry.
     Integer,
+    /// Requires a `Long` constant-pool entry.
     Long,
+    /// Requires a `Float` constant-pool entry.
     Float,
+    /// Requires a `Double` constant-pool entry.
     Double,
     /// One of the "loadable constant" tags (JVMS §4.4): `Integer`, `Float`,
     /// `Long`, `Double`, `String`, `Class`, `MethodHandle`, `MethodType`, or
@@ -212,11 +302,16 @@ impl fmt::Display for EntryKind {
 /// shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolRefError {
+    /// The reference is zero, out of range, or targets a reserved slot.
     InvalidIndex {
+        /// One-based JVM constant-pool slot involved in this failure.
         index: ConstantPoolIndex,
     },
+    /// The referenced pool entry does not have the required entry kind.
     WrongKind {
+        /// One-based JVM constant-pool slot involved in this failure.
         index: ConstantPoolIndex,
+        /// Constant-pool entry kind required by this reference.
         expected: EntryKind,
     },
     /// Nested `Code`/`Record` attribute lists exceed their encoder/validator depth limit.
@@ -267,6 +362,10 @@ impl PoolRefError {
 }
 
 impl ConstantPool {
+    /// Constructs a pool from physical slots starting at JVM index one; do not include slot zero.
+    /// Represent the reserved slot after each Long or Double as None. This constructor does not
+    /// validate references or slot layout; encoding and checked queries can reject malformed
+    /// entries.
     pub fn from_entries(entries: Vec<Option<ConstantPoolEntry>>) -> Self {
         Self { entries }
     }
@@ -519,6 +618,8 @@ impl ConstantPool {
         }
     }
 
+    /// Returns the entry at a one-based JVM index, or None for zero, an out-of-range index, or the
+    /// reserved second slot of a Long or Double.
     pub fn get(&self, index: ConstantPoolIndex) -> Option<&ConstantPoolEntry> {
         let position = usize::from(index.0).checked_sub(1)?;
         self.entries.get(position)?.as_ref()

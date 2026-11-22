@@ -48,8 +48,11 @@ impl SourceCallNames {
 /// Result of parsing one source compilation unit.
 #[derive(Debug)]
 pub struct ParseResult {
+    /// Owned syntax arena or structural AST produced by the operation.
     pub ast: AstArena<Untyped>,
+    /// Root of the parsed compilation unit in its untyped arena.
     pub root: TreeId<Untyped>,
+    /// Recoverable diagnostics collected while constructing the AST.
     pub diagnostics: Vec<ParseDiagnostic>,
     /// Direct call names in this source arena.
     pub call_names: SourceCallNames,

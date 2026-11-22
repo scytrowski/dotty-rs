@@ -17,8 +17,11 @@ pub enum MemberSignatureError {
     InvalidMember(SymbolId),
     /// The typer rejected the member in its declaring class and source.
     Typing {
+        /// Declaration or member rejected by the current completion or typing operation.
         member: SymbolId,
+        /// Canonical source declaration associated with the failed member completion.
         declaration: SourceDeclaration,
+        /// Underlying typed failure reported by the delegated compiler phase.
         error: TyperError,
     },
 }

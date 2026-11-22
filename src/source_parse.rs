@@ -15,10 +15,14 @@ pub struct DetachedSource {
 /// Names in parser diagnostics refer to the interner used to bind this file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SyntaxDiagnostic {
+    /// A raw lexer or contextual scanner issue with the identity of its source file.
     Lexer {
+        /// File whose UTF-8 byte ranges are used by the lexer diagnostic.
         source: SourceId,
+        /// Original typed lexer payload, retained before rendering a message.
         diagnostic: LexerDiagnostic,
     },
+    /// An original parser issue whose names are bound to the session interner.
     Parser(ParseDiagnostic),
 }
 
@@ -42,6 +46,9 @@ impl SyntaxDiagnostic {
 }
 
 /// A compilation unit with session-bound names and all its syntax diagnostics.
+///
+/// [`DetachedSource::bind`] retains typed [`SyntaxDiagnostic`] payloads;
+/// [`DetachedSource::into_session`] returns rendered [`SourceDiagnostic`] reports.
 #[derive(Debug)]
 pub struct ParsedSource<D = SourceDiagnostic> {
     /// The original parser result, including its structured parser issues.

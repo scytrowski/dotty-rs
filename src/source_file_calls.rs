@@ -11,8 +11,11 @@ use crate::source_declarations::{DeclarationError, SourceClass};
 /// A source definition and the written token to select inside it, in UTF-8 bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SourceMethodTarget {
+    /// Identity of the original source file in this session.
     pub source: SourceId,
+    /// UTF-8 byte range of the complete source method definition.
     pub declaration: TextRange,
+    /// UTF-8 byte range of the written method name token.
     pub name: TextRange,
 }
 

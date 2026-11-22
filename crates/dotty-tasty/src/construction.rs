@@ -115,7 +115,12 @@ pub enum AstBuildError {
     /// Child edges contain a cycle.
     Cycle(AstLabel),
     /// A reference has an invalid tag, target kind, or sharing direction.
-    InvalidReference { tag: u8, target: AstLabel },
+    InvalidReference {
+        /// Wire-format tag identifying the decoded entry or node kind.
+        tag: u8,
+        /// Binding or control-flow destination selected by this node.
+        target: AstLabel,
+    },
     /// A configured budget was exceeded.
     Limit(&'static str),
     /// The wire address/length arithmetic overflowed.

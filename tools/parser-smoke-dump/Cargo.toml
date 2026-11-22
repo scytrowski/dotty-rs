@@ -9,3 +9,6 @@ publish = false
 dotty-core.workspace = true
 dotty-lexer.workspace = true
 dotty-parser.workspace = true
+
+[lints]
+workspace = true

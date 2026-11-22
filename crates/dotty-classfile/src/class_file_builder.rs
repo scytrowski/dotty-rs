@@ -97,15 +97,26 @@ pub enum ClassFileBuildError {
     InvalidMemberName,
     /// The requested class-file version is outside the crate's supported
     /// non-preview range.
-    UnsupportedVersion { major: u16, minor: u16 },
+    UnsupportedVersion {
+        /// Class-file major version number.
+        major: u16,
+        /// Class-file minor version number.
+        minor: u16,
+    },
     /// An interface method reference requires class-file version 52 or newer.
-    InterfaceMethodReferenceRequiresVersion { major: u16 },
+    InterfaceMethodReferenceRequiresVersion {
+        /// Class-file major version number.
+        major: u16,
+    },
     /// A field or method descriptor failed the existing descriptor parser.
     InvalidDescriptor(DescriptorError),
     /// A method descriptor exceeds the JVMS 255 parameter-slot limit.
     TooManyParameterSlots,
     /// Automatic branched-code generation requires class-file major version 65 or newer.
-    BranchingRequiresVersion { major: u16 },
+    BranchingRequiresVersion {
+        /// Class-file major version number.
+        major: u16,
+    },
     /// A generic signature failed the existing signature parser.
     InvalidSignature(SignatureError),
     /// Class, field, or method flags contain a combination forbidden by the
@@ -149,7 +160,10 @@ pub enum ClassFileBuildError {
     /// A concrete method must have raw code before class encoding.
     MissingCode,
     /// Raw method code must have a length in the JVM range 1..=65535.
-    InvalidCodeLength { length: usize },
+    InvalidCodeLength {
+        /// Requested payload length in bytes.
+        length: usize,
+    },
     /// A symbolic code builder operation used an invalid local or pool index.
     CodeBuilder(CodeBuilderError),
     /// Bytecode assembly rejected a generated instruction sequence.

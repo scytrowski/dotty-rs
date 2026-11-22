@@ -19,3 +19,6 @@ dotty-core.workspace = true
 [dev-dependencies]
 dotty-parser.workspace = true
 dotty-lexer.workspace = true
+
+[lints]
+workspace = true

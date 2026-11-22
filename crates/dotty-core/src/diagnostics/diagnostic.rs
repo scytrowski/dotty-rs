@@ -3,8 +3,11 @@ use crate::source::TextRange;
 /// Diagnostic severity reported by a frontend component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticSeverity {
+    /// A failure that prevents accepting the affected input.
     Error,
+    /// A non-fatal issue reported to the caller.
     Warning,
+    /// Supplementary information accompanying a diagnostic.
     Note,
 }
 

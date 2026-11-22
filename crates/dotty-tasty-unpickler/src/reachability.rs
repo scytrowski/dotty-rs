@@ -94,8 +94,11 @@ pub enum IdentityOutcome {
 /// [`IdentityOutcome`].
 #[derive(Debug, Clone, Copy)]
 pub struct IdentityNode {
+    /// Byte address in the TASTy AST section for this node or reference.
     pub address: u32,
+    /// Wire-format tag identifying the decoded entry or node kind.
     pub tag: u8,
+    /// Result of the identity-resolution operation.
     pub outcome: IdentityOutcome,
 }
 

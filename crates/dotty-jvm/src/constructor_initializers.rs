@@ -139,6 +139,7 @@ pub enum JvmConstructorInitializerInstruction {
         field: SymbolId,
         /// Validated field name and descriptor from class metadata.
         name: String,
+        /// Erased JVM descriptor used for member identity or validation.
         descriptor: String,
     },
     /// Store the completed initializer result to its canonical field.
@@ -147,6 +148,7 @@ pub enum JvmConstructorInitializerInstruction {
         field: SymbolId,
         /// Validated field name and descriptor from class metadata.
         name: String,
+        /// Erased JVM descriptor used for member identity or validation.
         descriptor: String,
     },
 }

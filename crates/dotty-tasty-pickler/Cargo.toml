@@ -22,3 +22,6 @@ dotty-lexer.workspace = true
 dotty-parser.workspace = true
 dotty-namer.workspace = true
 dotty-typer.workspace = true
+
+[lints]
+workspace = true

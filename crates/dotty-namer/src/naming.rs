@@ -24,66 +24,119 @@ use crate::{NamerDiagnostic, NamerIssue, VisibilityAccess};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NamerError {
     /// A compilation-unit root must be a package definition.
-    RootIsNotPackage { tree_index: u32 },
+    RootIsNotPackage {
+        /// Zero-based index of the relevant tree in the original untyped source arena.
+        tree_index: u32,
+    },
     /// A definition tree was assigned more than one semantic symbol.
-    DuplicateSourceTreeSymbol { source: SourceId, tree_index: u32 },
+    DuplicateSourceTreeSymbol {
+        /// Source buffer identity in the current compilation session.
+        source: SourceId,
+        /// Zero-based index of the relevant tree in the original untyped source arena.
+        tree_index: u32,
+    },
     /// A source tree was assigned more than one derived symbol for one owner.
     DuplicateDerivedSourceTreeSymbol {
+        /// Semantic owner of the declaration; ownership is distinct from lookup scope.
         owner: SymbolId,
+        /// Source buffer identity in the current compilation session.
         source: SourceId,
+        /// Zero-based index of the relevant tree in the original untyped source arena.
         tree_index: u32,
     },
     /// Generated case-class method provenance could not be registered.
-    GeneratedCaseClassMethodIndex { error: SourceSemanticIndexError },
+    GeneratedCaseClassMethodIndex {
+        /// Underlying typed failure; inspect it for the more specific cause.
+        error: SourceSemanticIndexError,
+    },
     /// A semantic symbol was assigned conflicting canonical/derived source definitions.
     ConflictingSourceProvenance {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Previously recorded value retained by the failed operation.
         existing: SourceDefinition,
+        /// New value rejected because it conflicts with the existing entry.
         attempted: SourceDefinition,
     },
     /// An extension method was assigned prefix-clause metadata more than once.
-    DuplicateExtensionPrefixClauses { method: SymbolId },
+    DuplicateExtensionPrefixClauses {
+        /// Method declaration identity being inspected in the supplied session.
+        method: SymbolId,
+    },
     /// An export source tree was registered more than once.
-    DuplicateSourceExportSite { source: SourceId, tree_index: u32 },
+    DuplicateSourceExportSite {
+        /// Source buffer identity in the current compilation session.
+        source: SourceId,
+        /// Zero-based index of the relevant tree in the original untyped source arena.
+        tree_index: u32,
+    },
     /// A semantic owner was assigned more than one declaration scope.
-    DuplicateDeclarationScope { symbol: SymbolId },
+    DuplicateDeclarationScope {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+    },
     /// The file and package disagree with an existing wrapper registration.
-    ConflictingSourcePackageWrapper { source: SourceId, package: SymbolId },
+    ConflictingSourcePackageWrapper {
+        /// Source buffer identity in the current compilation session.
+        source: SourceId,
+        /// Package identity or path associated with this declaration.
+        package: SymbolId,
+    },
     /// A declaration symbol was assigned two different source contexts.
     DuplicateDeclarationContext {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Previously recorded value retained by the failed operation.
         existing: SourceContextId,
+        /// New value rejected because it conflicts with the existing entry.
         attempted: SourceContextId,
     },
     /// A source field was assigned more than one initializer context.
-    DuplicateFieldInitializerContext { field: SymbolId },
+    DuplicateFieldInitializerContext {
+        /// Field declaration identity being inspected in the supplied session.
+        field: SymbolId,
+    },
     /// A tree did not have the shape required by a naming routine.
     MalformedAstShape {
+        /// Zero-based index of the relevant tree in the original untyped source arena.
         tree_index: u32,
+        /// Required textual value used by this validation rule.
         expected: &'static str,
     },
     /// A case class uses a constructor shape not supported by generated apply synthesis.
     UnsupportedCaseClassCompanionShape {
+        /// Zero-based index of the relevant tree in the original untyped source arena.
         tree_index: u32,
+        /// Detailed reason for rejecting this input or dependency.
         reason: &'static str,
     },
     /// A qualified source visibility does not name an enclosing access boundary.
     InvalidVisibilityQualifier {
+        /// Zero-based index of the relevant tree in the original untyped source arena.
         tree_index: u32,
+        /// Optional source location; absent for nodes without source provenance.
         position: Option<SourceSpan>,
+        /// Qualifier of the selected member or reference.
         qualifier: dotty_core::Name,
+        /// Whether this access restriction is protected rather than private.
         protected: bool,
     },
     /// An anonymous given's type could not be reduced to a stable source name.
     UnsupportedGivenNameShape {
+        /// Zero-based index of the relevant tree in the original untyped source arena.
         tree_index: u32,
+        /// Optional source location; absent for nodes without source provenance.
         position: Option<SourceSpan>,
+        /// Zero-based index of the relevant tree in the original untyped source arena.
         unsupported_tree_index: u32,
+        /// Category outside the supported implementation subset.
         unsupported_kind: &'static str,
     },
     /// A structural anonymous given has no parent type from which to invent a name.
     AnonymousGivenWithoutParents {
+        /// Zero-based index of the relevant tree in the original untyped source arena.
         tree_index: u32,
+        /// Optional source location; absent for nodes without source provenance.
         position: Option<SourceSpan>,
     },
 }

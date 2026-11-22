@@ -4,6 +4,16 @@
 //! This crate deliberately does not depend on the parser implementation. It
 //! accepts phase-indexed trees from `dotty-core`, so parser clients can pass
 //! their arena without exposing parser-private types to naming.
+//!
+//! [`name_compilation_unit_with_diagnostics`] separates confirmed source
+//! rejections from structural [`NamerError`]s and returns a canonical source
+//! semantic index on success. Naming enters declarations but leaves signature
+//! and expression completion to the typer. Failures roll back the naming
+//! transaction; retain the original AST, source identity, packages, and store
+//! together for subsequent phases.
+
+#![deny(missing_docs)]
+#![doc = include_str!("guide.md")]
 
 mod diagnostics;
 mod naming;

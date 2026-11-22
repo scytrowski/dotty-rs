@@ -33,24 +33,43 @@ macro_rules! flag_bits {
 }
 
 flag_bits! {
+    /// Declaration has no complete concrete implementation.
     ABSTRACT = 0;
+    /// Declaration cannot be extended or overridden.
     FINAL = 1;
+    /// Direct subclasses are restricted by the source declaration.
     SEALED = 2;
+    /// Declaration participates in case-class or case-member semantics.
     CASE = 3;
+    /// Declaration carries the legacy implicit marker.
     IMPLICIT = 4;
+    /// Declaration supplies a contextual given value.
     GIVEN = 5;
+    /// Value initialization is deferred until use.
     LAZY = 6;
+    /// Storage can be reassigned after initialization.
     MUTABLE = 7;
+    /// Definition carries inline semantics.
     INLINE = 8;
+    /// Inline definition retains transparent result typing.
     TRANSPARENT = 9;
+    /// Type alias has opaque visibility semantics.
     OPAQUE = 10;
+    /// Method belongs to an extension declaration.
     EXTENSION = 11;
+    /// Member is static in its binary representation.
     STATIC = 12;
+    /// Declaration was introduced by compiler synthesis.
     SYNTHETIC = 13;
+    /// Declaration originates from Java metadata.
     JAVA_DEFINED = 14;
+    /// Declaration is erased from runtime execution.
     ERASED = 15;
+    /// Declaration explicitly overrides an inherited member.
     OVERRIDE = 16;
+    /// Declaration represents an enum or enum case identity.
     ENUM = 17;
+    /// Member was introduced through an export.
     EXPORTED = 18;
     /// The case-class companion's generated `apply` was deliberately omitted
     /// because this source subset cannot represent its constructor shape.
@@ -58,6 +77,7 @@ flag_bits! {
 }
 
 impl SymbolFlags {
+    /// Empty flag set with no declaration properties enabled.
     pub const EMPTY: Self = Self(0);
 
     /// Whether every bit set in `other` is also set in `self`.
@@ -65,18 +85,22 @@ impl SymbolFlags {
         self.0 & other.0 == other.0
     }
 
+    /// Returns the set containing every flag present in either input.
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
 
+    /// Returns the set containing only flags present in both inputs.
     pub const fn intersection(self, other: Self) -> Self {
         Self(self.0 & other.0)
     }
 
+    /// Returns the flags present in this set and absent from the other set.
     pub const fn difference(self, other: Self) -> Self {
         Self(self.0 & !other.0)
     }
 
+    /// Returns whether no symbol flags are set.
     pub const fn is_empty(self) -> bool {
         self.0 == 0
     }

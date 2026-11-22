@@ -19,7 +19,9 @@ use std::time::Instant;
 /// callers must not sum inclusive values as though they were disjoint.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ResolverPhaseProfile {
+    /// Number of invocations recorded for this resolver phase.
     pub calls: u64,
+    /// Accumulated elapsed time for this phase, in nanoseconds.
     pub elapsed_ns: u128,
     /// Time attributed to this phase after subtracting explicitly timed child
     /// intervals. Phases without a measured child have `exclusive_ns == elapsed_ns`.
@@ -32,36 +34,67 @@ pub struct ResolverPhaseProfile {
 /// per-request strings across a resolver transaction.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ClasspathResolverProfile {
+    /// Total member-lookup requests.
     pub member_lookups: u64,
+    /// Member-lookup requests that selected a declaration.
     pub member_successes: u64,
+    /// Member-lookup requests returning no matching declaration.
     pub member_misses: u64,
+    /// Member-lookup requests returning a typed failure.
     pub member_errors: u64,
+    /// Number of resolver transactions rolled back after failure.
     pub rollbacks: u64,
+    /// Member-lookup count and elapsed time including nested work.
     pub member_lookup_inclusive: ResolverPhaseProfile,
+    /// Count and time spent classifying selection prefixes.
     pub prefix_classification: ResolverPhaseProfile,
+    /// Count and time spent validating cached module entries.
     pub module_cache_validation: ResolverPhaseProfile,
+    /// Count and elapsed time spent resolving selection targets.
     pub target_resolution: ResolverPhaseProfile,
+    /// Count and elapsed time spent selecting member declarations.
     pub declaration_selection: ResolverPhaseProfile,
+    /// Count and elapsed time spent selecting package terms.
     pub package_term_selection: ResolverPhaseProfile,
+    /// Count and elapsed time spent resolving module identities.
     pub module_identity_resolution: ResolverPhaseProfile,
+    /// Count and elapsed time spent completing module signatures.
     pub module_completion: ResolverPhaseProfile,
+    /// Count and elapsed time spent completing class signatures.
     pub class_completion: ResolverPhaseProfile,
+    /// Class-loading time nested inside class completion, in nanoseconds.
     pub class_completion_nested_classload_ns: u128,
+    /// Count and time spent validating retained module snapshots.
     pub module_snapshot_validation: ResolverPhaseProfile,
+    /// Count and time spent locating classpath resources.
     pub classpath_resource_lookup: ResolverPhaseProfile,
+    /// Count and elapsed time spent decoding class files.
     pub classfile_decode: ResolverPhaseProfile,
+    /// Count and elapsed time spent decoding TASTy files.
     pub tasty_decode: ResolverPhaseProfile,
+    /// Count and time spent recording resolver transaction state.
     pub transaction_bookkeeping: ResolverPhaseProfile,
+    /// Count and elapsed time spent rolling back failed transactions.
     pub rollback: ResolverPhaseProfile,
+    /// Count and elapsed time spent loading classes including nested dependencies.
     pub class_loading_inclusive: ResolverPhaseProfile,
+    /// Requests answered by a cached missing-member result.
     pub negative_member_cache_hits: u64,
+    /// Requests answered by a validated cached module result.
     pub positive_module_cache_hits: u64,
+    /// Module requests requiring a fresh cache entry.
     pub module_cache_misses: u64,
+    /// Number of module signature-completion attempts.
     pub module_completion_attempts: u64,
+    /// Number of module signature-completion successful completions.
     pub module_completion_successes: u64,
+    /// Number of module signature-completion failed completions.
     pub module_completion_errors: u64,
+    /// Number of class signature-completion attempts.
     pub class_completion_attempts: u64,
+    /// Number of class signature-completion successful completions.
     pub class_completion_successes: u64,
+    /// Number of class signature-completion failed completions.
     pub class_completion_errors: u64,
 }
 
@@ -86,6 +119,8 @@ enum ResolverProfilePhase {
 }
 
 impl ClasspathResolverProfile {
+    /// Adds counters and timing totals from another profile. Inclusive parent and child timings
+    /// still overlap and must not be summed as independent phases.
     pub fn merge(&mut self, other: &Self) {
         self.member_lookups += other.member_lookups;
         self.member_successes += other.member_successes;
@@ -345,6 +380,9 @@ pub struct ClasspathSymbolResolver<E: ClassPathEntry> {
 }
 
 impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
+    /// Creates a resolver over the classpath and retained loading session. Definitions and every
+    /// later supplied store must belong to that same canonical compilation session; construction
+    /// does not load artifacts.
     pub fn new(class_path: E, definitions: Definitions, session: LoadingSession) -> Self {
         Self {
             class_path: Some(class_path),

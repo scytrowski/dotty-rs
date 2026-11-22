@@ -220,8 +220,9 @@ independent of the JVM adapters; see the
 [dependency boundaries](docs/frontend-platform-boundaries.md).
 
 Generate local API documentation from the repository root with
-`cargo doc --workspace --no-deps --locked`. The root library's entry page is
-`target/doc/dotty/index.html`.
+`cargo doc --workspace --no-deps --all-features --locked`. The root library's entry page is
+`target/doc/dotty/index.html` and includes the [API guide](src/guide.md), with
+executable examples and session/failure contracts.
 
 ## Build and validate
 
@@ -233,8 +234,9 @@ repository root, run the Rust CI checks:
 cargo fmt --all -- --check
 python3 tools/check-frontend-boundaries.py
 cargo clippy --workspace --all-targets --locked -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
 cargo test --workspace --all-targets --locked
+cargo test --workspace --doc --all-features --locked
 git diff --check
 ```
 

@@ -33,7 +33,9 @@ pub enum ClassOrigin {
 /// and this crate's module doc comment: `.tasty` is preferred).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClassFormat {
+    /// JVM class-file artifact.
     Class,
+    /// Scala TASTy artifact.
     Tasty,
 }
 
@@ -82,6 +84,8 @@ impl ClassPathResourceProfile {
 }
 
 impl ClassResource {
+    /// Owns selected artifact bytes together with their format and concrete classpath origin; no
+    /// binary decoding is performed.
     pub fn new(bytes: Vec<u8>, format: ClassFormat, origin: ClassOrigin) -> Self {
         Self {
             bytes: bytes.into(),
@@ -90,14 +94,17 @@ impl ClassResource {
         }
     }
 
+    /// Borrows the owned resource bytes selected by this classpath entry.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
 
+    /// Returns whether these resource bytes are a class file or TASTy file.
     pub fn format(&self) -> ClassFormat {
         self.format
     }
 
+    /// Borrows the concrete classpath origin of the selected resource.
     pub fn origin(&self) -> &ClassOrigin {
         &self.origin
     }
@@ -122,6 +129,7 @@ enum ClassPathErrorSource {
 }
 
 impl ClassPathError {
+    /// Wraps an underlying I/O failure as a classpath error.
     pub fn new(source: io::Error) -> Self {
         Self {
             source: ClassPathErrorSource::Io(source),
@@ -267,6 +275,8 @@ pub struct DirectoryClassPath {
 }
 
 impl DirectoryClassPath {
+    /// Creates a filesystem classpath entry rooted at the supplied directory; resource lookup
+    /// performs the I/O later.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
@@ -443,6 +453,7 @@ pub struct CompositeClassPath {
 }
 
 impl CompositeClassPath {
+    /// Creates a composite classpath preserving entry order. Lookup precedence follows this order.
     pub fn new(entries: Vec<Box<dyn ClassPathEntry>>) -> Self {
         Self { entries }
     }

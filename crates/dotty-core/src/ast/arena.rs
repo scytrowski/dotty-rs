@@ -25,10 +25,17 @@ impl<P: AstPhase> Default for AstArena<P> {
 }
 
 impl<P: AstPhase> AstArena<P> {
+    /// Creates an empty arena for one phase of one compilation session.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Appends a tree and returns its phase-specific identity. Child IDs must refer to this same
+    /// arena; allocation does not validate them.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the next index does not fit in the repository's 32-bit ID space.
     pub fn alloc(&mut self, tree: Tree<P>) -> TreeId<P> {
         let id = TreeId::new(checked_index(self.nodes.len()));
         self.nodes.push(tree);
@@ -50,8 +57,12 @@ impl<P: AstPhase> AstArena<P> {
         self.nodes.truncate(checkpoint.0);
     }
 
-    /// Panics if `id` was not allocated by this arena — see
-    /// `docs/dotty-core-design.md`, "Error handling policy."
+    /// Returns the tree for an ID from this session.
+    ///
+    /// # Panics
+    ///
+    /// Panics for an out-of-range index. IDs from another arena with the same
+    /// index cannot be detected and violate the caller’s session contract.
     pub fn get(&self, id: TreeId<P>) -> &Tree<P> {
         &self.nodes[id.index() as usize]
     }
@@ -61,6 +72,13 @@ impl<P: AstPhase> AstArena<P> {
         self.nodes.get(id.index() as usize)
     }
 
+    /// Borrows a tree for in-place mutation. Preserve same-arena child references and phase
+    /// invariants.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the index is outside this arena. Same-slot IDs from another arena cannot be
+    /// detected.
     pub fn get_mut(&mut self, id: TreeId<P>) -> &mut Tree<P> {
         &mut self.nodes[id.index() as usize]
     }

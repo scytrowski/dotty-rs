@@ -23,6 +23,8 @@ pub struct JmodClassPath {
 }
 
 impl JmodClassPath {
+    /// Opens a JMOD archive, checks its magic, and indexes resources beneath the classes prefix.
+    /// Returns ClassPathError for I/O, invalid magic, or malformed archive structure.
     pub fn new(path: impl Into<PathBuf>) -> Result<Self, ClassPathError> {
         let path = path.into();
         let mut file = std::fs::File::open(&path)?;

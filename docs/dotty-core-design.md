@@ -1,11 +1,19 @@
 # dotty-core Design
 
-Status: design document for the shared compiler foundation. The semantic model
-and the shared source, diagnostics, and token contracts are implemented in
-`dotty-core`; this document describes the intended boundaries for everything
-built on top of them. It is self-contained: every type referenced below has
-its authoritative definition in this file, not in chat history or prior
-drafts.
+Status: shared compiler foundation implemented and used by the source frontend,
+binary adapters, semantic TASTy producer, and JVM backend.
+
+For the current public API, start with the [usage guide](../crates/dotty-core/src/guide.md)
+and the rustdoc on definitions in `crates/dotty-core/src`. The implementation and
+focused regression tests are authoritative for exact signatures and behavior.
+
+Sections 1–2 below describe the current component boundaries. Sections 3–17
+retain the original foundation design and review rationale, including historical
+pseudocode, milestone descriptions, and proposed follow-ups. References there to
+future namer, typer, or binary adapters record that earlier development stage;
+those components now exist. They are not a current feature checklist or a
+replacement for the API documentation. Compatibility reports likewise apply
+only to their recorded revisions.
 
 Revision note: this revision applies a partner review of the first draft.
 Every change below is either a **blocker fix** (the prior draft was
@@ -24,134 +32,65 @@ marked `[MAJOR 1, extended]`.
 
 ## 1. Scope and goal
 
-Today the workspace has a shared frontend foundation (`dotty-core`), a lexer
-pipeline (`dotty-lexer`), the initial source parser infrastructure
-(`dotty-parser`), and two independent binary codecs (`dotty-tasty`,
-`dotty-classfile`). There is still no namer, typer, or typed AST pipeline.
+`dotty-core` owns the shared source locations, diagnostic and token contracts,
+names, typed IDs, symbol tables, scopes, semantic types, annotations, source
+semantic indexes, and phase-indexed ASTs. The workspace has a lexer, incremental
+parser, namer, signature and expression typer, structural binary codecs,
+semantic TASTy adapters, classpath loader, and bounded JVM backend. Each accepts
+an explicit supported subset; the workspace is not a complete Scala compiler.
 
-`[MINOR 3]` The four future consumers do not all need the same slice of the
-model, and the introduction should not imply they do:
+The source parser needs syntax trees, positions, tokens, and names. Naming,
+typing, class loading, semantic unpickling, and semantic pickling share the
+symbol/type/scope model. Typed trees refer to the same canonical semantic store
+through `TypeId`; adapters must not create competing identity models.
 
-- The **source parser** needs only the shared syntax-tree and name model:
-  `NameInterner`, `Span`/`SourceSpan`, `AstArena<Untyped>`. It has no reason
-  to touch `SymbolTable`, `TypeArena`, or `ScopeArena`.
-- The **classfile loader**, **TASTy semantic unpickler**, **namer**, and
-  **typer** need the full shared semantic model (symbols, types, scopes),
-  because they are the components that give syntax trees meaning.
+Keep session state together:
 
-They belong in one foundational crate because typed trees are exactly the
-place where the syntax layer (owned by the parser) and the semantic layer
-(owned by everything else) connect — a `Tree<Typed>` node carries a `TypeId`
-inline. Building the semantic model four times, once per consumer, would
-duplicate the hardest part of the compiler and guarantee the four copies
-drift apart.
+- `SemanticStore` owns names, symbols, types, scopes, annotations, binary origins,
+  and default-getter relations.
+- `AstArena<Untyped>` owns original source syntax; `AstArena<Typed>` owns typed
+  trees. Their IDs are phase-specific and arena-relative.
+- `Packages` owns the canonical package registry. Share it across source units
+  and binary loading handoffs according to the adapter's session contract.
+- `SourceSemanticIndex` records naming provenance and lexical contexts;
+  `SourceTypedIndex` preserves exact source-to-typed bindings.
+- `Definitions::bootstrap` creates builtins once per store. Rebuilding a second
+  set in that store does not establish interchangeable identities.
 
-`dotty-core` is a new crate that gives all of them one shared model:
+A same-slot ID from a foreign arena can pass a range check. Callers must retain
+session provenance rather than reconstruct identities from names or allocation
+order. Store checkpoints undo allocations and recorded default-getter additions;
+changes to pre-existing symbols or scopes require the calling phase's journal.
+Separate AST arenas and the package registry have their own rollback mechanisms.
 
-```text
-                             ┌─────────────────────┐
-                             │      dotty-core      │
-                             │  Symbol / Type / AST │
-                             └─────────┬────────────┘
-                                       │
-          ┌────────────────────────────┼────────────────────────────┐
-          │                            │                            │
-          ▼                            ▼                            ▼
-   source frontend              classfile loader             TASTy adapter
-   (dotty-lexer + parser)       (dotty-classfile               (dotty-tasty
-                               today: raw only)               today: raw only)
-          │                            │                            │
-          └────────────────────────────┼────────────────────────────┘
-                                       │
-                                       ▼
-                                  SemanticStore
-                                       │
-                                       ▼
-                                     typer
-                                       │
-                                       ▼
-                                   Typed AST
-```
+## 2. Current dependency boundaries
 
-`dotty-core` itself must stay foundational: it owns shared source, diagnostic,
-token, symbol, type, and tree contracts, but knows nothing about the concrete
-lexer implementation, JVM classfiles, TASTy's wire format, or type inference.
-Those stay in their own crates and depend on `dotty-core`, never the other way
-around.
+| Component | Shared model and production boundary |
+| --- | --- |
+| `dotty-lexer` | Uses core source and token contracts. |
+| `dotty-parser` | Uses core `TokenSource` and untyped AST; independent of the concrete lexer in production. |
+| `dotty-namer` | Enters shared AST declarations and populates the core source semantic index. |
+| `dotty-typer` | Consumes shared named semantics and the core resolver port; does not depend on the namer implementation in production. |
+| `dotty-tasty`, `dotty-classfile` | Independent structural codecs with no core symbol/type model. |
+| `dotty-tasty-unpickler` | Projects structural TASTy into core semantics. |
+| `dotty-classloader` | Owns classpath/JDK discovery and binary loading into shared semantics. |
+| `dotty-tasty-pickler` | Borrows canonical source/typed plans; production dependencies are core and the TASTy codec. |
+| `dotty-jvm` | Lowers already-typed plans; production dependencies are core and the class-file codec. |
+| `dotty-jvm-tasty-contract` | Checks the bounded overlap of validated JVM/TASTy plans and actual paired artifacts. |
+| Root `dotty-rs` / library `dotty` | Exposes component libraries and bounded integration helpers. |
 
-This mirrors, at the semantic layer, the layering principle AGENTS.md already
-states for `dotty-tasty`: "Keep the binary, raw AST, structured AST, and
-file-level APIs deliberately separated." `dotty-core` is the structured
-*semantic* layer that source, classfile, and TASTy structured/raw layers will
-eventually project onto.
+Core remains foundational. It does not depend on the source frontend, either
+codec, classpath loading, semantic TASTy adapters, or JVM lowering. Binary
+names, descriptors, bytecode, and JMOD paths remain in platform adapters. The
+production/build dependency closures of core, lexer, parser, namer, and typer
+remain independent of the JVM adapters. Test-only adapter dependencies are
+allowed. See [frontend platform boundaries](frontend-platform-boundaries.md)
+and `tools/check-frontend-boundaries.py` for the enforced dependency direction.
 
-## 2. Where this sits in the existing workspace
-
-Current workspace members and their dependency edges:
-
-```text
-dotty-core     (shared source, diagnostics, token, and semantic contracts)
-dotty-lexer    -> dotty-core
-dotty-parser   -> dotty-core
-dotty-classfile (no deps; raw ClassFile/ConstantPool/etc. type skeleton only)
-dotty-tasty    (no deps; raw + structured wire-format codec)
-dotty (root)   -> dotty-tasty, dotty-classfile (facade re-exporting `tasty`, `classfile`)
-```
-
-`dotty-parser` is an incremental Scala 3.9.0 source parser with an expression
-pipeline from explicit/context-function literals and `Expr1` through
-operator/simple expressions, an initial source-level pattern grammar, the
-first case/match clause layer, and source-level definition metadata including
-annotations and supported modifiers. The rest
-of the Scala grammar is added incrementally; full grammar coverage, namer,
-typer, and compiler orchestration remain future work. The parser boundary and
-`AstArena<Untyped>` ownership are established. See
-[`docs/parser-design-3.9.0.md`](parser-design-3.9.0.md) for its current scope.
-
-`[MAJOR 6]` The prior draft left it open whether classfile/TASTy semantic
-adapters live inside the future `dotty-typer` crate or in a dedicated module.
-They must not live in the typer: the typer consumes an already-populated
-`SemanticStore` and must not know how a `.class` or `.tasty` file is decoded,
-the same way it must not know how source text is lexed. `dotty-core` slots in
-with a dedicated adapter/loader layer between the binary codecs and
-everything that consumes `dotty-core`:
-
-```text
-                         dotty-core
-                       ▲      ▲      ▲
-                       │      │      │
-                (future)   dotty-tasty   dotty-classfile
-                dotty-parser       │          │
-                       │            ▼          ▼
-                       │    dotty-tasty-sema  dotty-classfile-sema
-                       │            │          │
-                       └────────────┴────┬─────┘
-                                         ▼
-                                  (future) dotty-typer
-                                         │
-                                         ▼
-                                  (future) dotty-compiler
-```
-
-Binary semantic adapters do not belong to the typer implementation, and they
-do not belong inside `dotty-tasty`/`dotty-classfile` either (see below). The
-exact crate/module packaging of the adapter layer is left open (§16); the
-constraint that matters now is the dependency shape, not the file layout.
-
-The former standalone source, diagnostics, and token crates are now modules of
-`dotty-core`. This gives all frontend components one source-position model,
-diagnostic range type, and parser-facing token contract without conversion
-boundaries between sibling crates.
-
-`dotty-tasty` and `dotty-classfile` do not depend on `dotty-core` today, and
-should not gain that dependency as part of this design. Both are
-  described in their own docs (`tasty-api.md`,
-  `docs/classfile-format-jdk25.md`) as binary/structural codecs with no
-  symbol or type knowledge. The semantic adapters that map their structured
-  output onto `dotty-core::Symbol`/`Type` are new code living in the
-  dedicated adapter layer above, never inside the codec crates themselves —
-  this keeps `dotty-tasty` and `dotty-classfile` independently useful as pure
-  codecs, which is an explicit non-goal to disturb.
+JVM class emission and semantic TASTy production are separate paths. The former
+emits class-file major version 65; the latter emits TASTy 28.9.0. A successful
+structural decode, semantic projection, or Rust round trip does not by itself
+prove JVM verification or Scala consumer interoperability.
 
 ## 3. Crate layout
 

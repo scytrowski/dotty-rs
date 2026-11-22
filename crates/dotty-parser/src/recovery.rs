@@ -3,10 +3,15 @@ use dotty_core::{HardKeyword, Punctuation, TokenKind};
 /// Token synchronization contexts used by parser recovery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecoverySet {
+    /// Resume at a statement separator or enclosing statement boundary.
     Statement,
+    /// Resume at a value argument separator or closing delimiter.
     Argument,
+    /// Resume at a type argument separator or closing bracket.
     TypeArgument,
+    /// Resume at the next case clause or enclosing match boundary.
     Case,
+    /// Resume at a for-comprehension enumerator boundary.
     Enumerator,
 }
 

@@ -15,8 +15,16 @@ use crate::names::Name;
 /// `this`, not a type name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VisibilitySyntax {
-    Private { qualifier: Option<Name> },
-    Protected { qualifier: Option<Name> },
+    /// Source private visibility, with an optional enclosing qualifier.
+    Private {
+        /// Optional enclosing access qualifier, including the special this name where supported.
+        qualifier: Option<Name>,
+    },
+    /// Source protected visibility, with an optional enclosing qualifier.
+    Protected {
+        /// Optional enclosing access qualifier, including the special this name where supported.
+        qualifier: Option<Name>,
+    },
 }
 
 /// One source-level modifier keyword.
@@ -60,24 +68,43 @@ pub enum Modifier {
     PrivateLocal,
     /// Source definition produced by extension-method syntax.
     Extension,
+    /// Source marker for an abstract declaration without a complete implementation.
     Abstract,
+    /// Source marker for a declaration that cannot be overridden or extended.
     Final,
+    /// Source marker for a declaration restricting direct subclasses.
     Sealed,
+    /// Source marker for a case class or case member marker.
     Case,
+    /// Source marker for a mutable variable or parameter accessor.
     Var,
+    /// Source marker for an update modifier retained by the source parser.
     Update,
+    /// Source marker for a legacy implicit declaration.
     Implicit,
+    /// Source marker for a contextual given declaration.
     Given,
+    /// Source marker for an impure function marker.
     Impure,
+    /// Source marker for a lazily initialized value.
     Lazy,
+    /// Source marker for an explicit override declaration.
     Override,
+    /// Source marker for an inline definition.
     Inline,
+    /// Source marker for a transparent inline definition.
     Transparent,
+    /// Source marker for an opaque type alias.
     Opaque,
+    /// Source marker for a class explicitly open to extension.
     Open,
+    /// Source marker for a declaration usable with infix syntax.
     Infix,
+    /// Source marker for a tracked parameter marker.
     Tracked,
+    /// Source marker for an into type marker.
     Into,
+    /// Source marker for a parameter or declaration erased from runtime execution.
     Erased,
 }
 
@@ -89,10 +116,13 @@ pub enum Modifier {
 /// into an untyped arena — see `docs/dotty-core-design.md` §7, `[MAJOR 2]`.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Modifiers {
+    /// Source or semantic visibility of the declaration.
     pub visibility: Option<VisibilitySyntax>,
     /// Byte range of the written qualifier token in the declaration's source.
     pub visibility_qualifier_range: Option<crate::TextRange>,
+    /// Source modifiers retained on this syntax node.
     pub modifiers: Vec<Modifier>,
+    /// Annotations attached to this item, preserving their recorded order.
     pub annotations: Vec<TreeId<Untyped>>,
 }
 
