@@ -180,6 +180,82 @@ Neither helper is a general Scala compiler. An external [`core::SymbolResolver`]
 can provide symbols not already in the source session; classpath/JDK discovery
 belongs in [`classloader`], not in the source frontend.
 
+## Follow signature dependencies between source files
+
+Use [`SignatureDependencies`] with the outcomes of [`try_complete_class_header`]
+or [`try_complete_member_signature`]. Keep one tracker per phase for one set of
+named files. Record attempts in observation order. The tracker borrows no
+arenas, owns no worker threads, and leaves the choice of the next file to the
+client. Drop it on edits or renaming, since a fresh session can reuse symbol IDs.
+
+This example tries `Leaf` before `Base`, then inspects a separate two-file cycle.
+
+```rust
+use dotty::{SignatureBlockage, SignatureDependencies, SignaturePhase, try_complete_class_header};
+use dotty::core::{AstArena, Definitions, Packages, SemanticStore, SourceId};
+use dotty::jvm_class_plan::ClassHeaderBindings;
+use dotty::typer::{SignatureCompletion, SourceTyper};
+
+let files = [
+    ("Leaf.scala", "class Leaf(x: Int) extends Base(x)"),
+    ("Base.scala", "class Base(x: Int)"),
+    ("A.scala", "class A(x: Int) extends B(x)"),
+    ("B.scala", "class B(x: Int) extends A(x)"),
+];
+# let mut store = SemanticStore::new();
+# let defs = Definitions::bootstrap(&mut store);
+# let mut packages = Packages::new();
+# let mut units = Vec::new();
+# for (i, (filename, text)) in files.into_iter().enumerate() {
+#     let source = SourceId::from_index(i as u32);
+#     let parsed = dotty::parse_source(source, text, Default::default())?.bind(&mut store.names);
+#     assert!(parsed.diagnostics.is_empty());
+#     let syntax = parsed.syntax;
+#     let index = dotty::namer::name_compilation_unit(&syntax.ast, syntax.root, source, filename, &mut store, &mut packages)?;
+#     let mut classes = dotty::source_declarations::source_classes(&syntax.ast, syntax.root, source, &index, &store)?;
+#     units.push((source, syntax.ast, index, classes.pop().ok_or("expected a class")?));
+# }
+# for (source, ast, index, class) in &units {
+#     SourceTyper::new(ast, *source, index, &mut store, defs, &packages).complete_symbol(class.constructor)?;
+# }
+# let mut arena = AstArena::new();
+# let mut bindings = ClassHeaderBindings::default();
+// Each index selects the declaring file of one class in the batch.
+let mut attempt = |file: usize| {
+    let (_, ast, index, class) = &units[file];
+    try_complete_class_header(class.symbol, ast, index, &mut store, defs, &packages,
+        &mut arena, &mut bindings, |dep| units.iter().any(|u| u.3.symbol == dep))
+};
+let mut headers = SignatureDependencies::new(SignaturePhase::Headers);
+let [leaf, base, a, b] = [0, 1, 2, 3].map(|i| units[i].3.symbol);
+
+let outcome = attempt(0)?;
+assert_eq!(outcome, SignatureCompletion::BlockedOn(base));
+assert!(headers.record(leaf, outcome).is_empty());
+assert_eq!(headers.record(base, attempt(1)?), [leaf]);
+let retry = attempt(0)?;
+assert!(matches!(retry, SignatureCompletion::Complete(_)));
+headers.record(leaf, retry);
+
+headers.record(a, attempt(2)?);
+headers.record(b, attempt(3)?);
+let blocked = headers.blockages([a, b]);
+let SignatureBlockage::CycleMember(cycle) = &blocked[0].1 else {
+    return Err("expected a header cycle".into());
+};
+assert_eq!(cycle.path(), [a, b, a]);
+assert_eq!(cycle.code(), "signature.header_cycle");
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+When an attempt returns an error, keep the original phase error under the
+attempted symbol and call [`SignatureDependencies::record_failure`]. A waiter
+can then identify that symbol through [`SignatureBlockage::Failed`]. At the end
+of a pass, query all waiting roots together to share traversal of common
+paths. Only [`SignatureBlockage::CycleMember`] identifies a declaration taking
+part in a cycle. [`SignatureCycle::declarations`] provides the optional source
+position of each participant for reporting.
+
 ## Preserve one-session identity and failure contracts
 
 - Keep all names, symbols, types, scopes, source indexes and typed roots in the
