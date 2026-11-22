@@ -945,6 +945,9 @@ impl SourceTyper<'_> {
                     {
                         return Ok(*result);
                     }
+                    if self.store.export_target(symbol) == Some(info) {
+                        return self.widen_expression_type_journaled(info, info_journal, depth + 1);
+                    }
                     Ok(info)
                 } else {
                     let super_type = match self.store.types.try_get(prefix) {
@@ -1032,6 +1035,14 @@ impl SourceTyper<'_> {
                         // symbol identity intact and limit this adaptation to
                         // the authenticated builtin selected on canonical Int.
                         return Ok(*result);
+                    }
+                    // A stable exported value has the singleton result of its delegate.
+                    if self.store.export_target(symbol) == Some(member_type) {
+                        return self.widen_expression_type_journaled(
+                            member_type,
+                            info_journal,
+                            depth + 1,
+                        );
                     }
                     Ok(member_type)
                 }

@@ -11,6 +11,7 @@ pub(super) use conversions::{
     ConversionGoal, ConversionOperand, ConversionTarget, ConversionUse, MemberConversionGoal,
 };
 mod defaults;
+mod exports;
 mod extension;
 pub(super) use extension::{ExtensionCall, ExtensionLookup};
 mod opaque;

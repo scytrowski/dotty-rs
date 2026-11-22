@@ -456,6 +456,9 @@ impl SourceTyper<'_> {
                 )?;
             }
         }
+        if kind == SymbolKind::ModuleClass {
+            self.enter_contextual_exports(symbol, declarations, info_journal)?;
+        }
         Ok(info)
     }
 
