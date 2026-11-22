@@ -325,7 +325,8 @@ pub(crate) struct DecodedTastyMethod {
     pub name: String,
     pub flags: MethodAccessFlags,
     pub contextual_flags: SymbolFlags,
-    pub contextual_clauses: Option<Vec<(dotty_core::MethodKind, usize)>>,
+    /// Wire clause boundaries for contextual methods and their linked getters.
+    pub term_clauses: Option<Vec<(MethodKind, usize)>>,
     /// Exact flattened term parameter address selected by a singleton result.
     pub singleton_result_parameter: Option<usize>,
     /// Method-local type parameters, in their TASTy header order. Type
@@ -3010,14 +3011,13 @@ fn contextual_flags(tail: &[DefinitionTail<'_>]) -> SymbolFlags {
     symbol_flags(tail).intersection(SymbolFlags::GIVEN | SymbolFlags::IMPLICIT)
 }
 
-/// Preserve the wire order and boundaries whenever any clause supplies context.
-fn contextual_clauses(
+/// Read ordered term clauses, including explicit empty clauses.
+fn term_clauses(
     items: &[dotty_tasty::tasty::DefDefHeaderItem<'_>],
-) -> Result<Option<Vec<(dotty_core::MethodKind, usize)>>, TastyDecodeError> {
+) -> Result<Vec<(MethodKind, usize)>, TastyDecodeError> {
     use dotty_tasty::tasty::DefDefHeaderItem;
     let mut clauses = Vec::new();
     let mut open = false;
-    let mut contextual = false;
     for item in items {
         match item {
             DefDefHeaderItem::Parameter(param @ ParameterNode::TermParam { .. }) => {
@@ -3030,7 +3030,6 @@ fn contextual_clauses(
                     } else {
                         MethodKind::Plain
                     };
-                    contextual |= kind != MethodKind::Plain;
                     clauses.push((kind, 0));
                     open = true;
                 }
@@ -3043,7 +3042,7 @@ fn contextual_clauses(
             _ => open = false,
         }
     }
-    Ok(contextual.then_some(clauses))
+    Ok(clauses)
 }
 
 /// Reconstructs every `ValDef`/`DefDef` directly in `stats` (a class's
@@ -3078,32 +3077,32 @@ fn decode_members(
         _ => None,
     });
     let sites = dotty_tasty::tasty::template_default_getters(file.names(), definitions.clone())?;
-    // Ordinary defaults in the supported subset replay the immediately preceding
-    // contextual clause. Preserve wire ordinals, including empty clause boundaries.
+    // Ordinary defaults may replay a contextual argument across intervening clauses.
     let ordinary_targets: HashSet<_> = sites
         .iter()
         .filter(|s| !s.contextual)
         .map(|s| s.method)
         .collect();
-    let mut after_contextual = HashSet::new();
+    let mut first_after_context = HashMap::new();
     for target in definitions.filter(|node| ordinary_targets.contains(&node.offset)) {
         let header = target.decode_defdef_body()?;
-        if let Some(clauses) = contextual_clauses(&header.header_items)? {
-            let mut start = 0;
-            let mut previous = MethodKind::Plain;
-            for (kind, len) in clauses {
-                if kind == MethodKind::Plain && previous != MethodKind::Plain {
-                    after_contextual
-                        .extend((start..start + len).map(|ordinal| (target.offset, ordinal)));
-                }
-                start += len;
-                previous = kind;
+        let mut ordinal = 0;
+        for (kind, len) in term_clauses(&header.header_items)? {
+            ordinal += len;
+            if kind != MethodKind::Plain {
+                first_after_context.insert(target.offset, ordinal);
+                break;
             }
         }
     }
     let default_sites: HashMap<_, _> = sites
         .into_iter()
-        .filter(|site| site.contextual || after_contextual.contains(&(site.method, site.ordinal)))
+        .filter(|site| {
+            site.contextual
+                || first_after_context
+                    .get(&site.method)
+                    .is_some_and(|&first| site.ordinal >= first)
+        })
         .map(|site| (site.getter, (site.method, site.ordinal)))
         .collect();
 
@@ -3279,10 +3278,12 @@ fn decode_members(
                         0,
                     )
                 };
-                let has_term_clause = body
-                    .parameters()
-                    .any(|parameter| matches!(parameter, ParameterNode::TermParam { .. }))
-                    || body.clauses().any(|tag| tag == EMPTYCLAUSE_TAG);
+                let clauses = term_clauses(&body.header_items)?;
+                let has_term_clause = !clauses.is_empty();
+                // A getter for a trailing implicit may copy only ordinary clauses.
+                // A getter with no term clauses keeps its parameterless result type.
+                let preserve_clauses = (default_for.is_some() && has_term_clause)
+                    || clauses.iter().any(|(kind, _)| *kind != MethodKind::Plain);
 
                 methods.push(DecodedTastyMethod {
                     offset: node.offset,
@@ -3295,7 +3296,7 @@ fn decode_members(
                             | SymbolFlags::INLINE
                             | SymbolFlags::TRANSPARENT,
                     ),
-                    contextual_clauses: contextual_clauses(&body.header_items)?,
+                    term_clauses: preserve_clauses.then_some(clauses),
                     singleton_result_parameter,
                     type_parameters,
                     parameters: decoded_parameters,
@@ -5271,6 +5272,44 @@ fn render_member_name(file: &TastyFile<'_>, reference: u32) -> Option<String> {
 mod tests {
     use super::*;
     use dotty_tasty::tasty::{AstChildNode, SimpleTerm, Writer};
+
+    #[test]
+    fn binary_ordinary_getters_after_context_retain_the_target_and_parameter_ordinal() {
+        let bytes = include_bytes!(
+            "../../dotty-typer/tests/fixtures/contextual-arguments/binary/defaults/ClauseReader.tasty"
+        );
+        let reader = decode(bytes, &BinaryName::from_internal("defaults/ClauseReader")).unwrap();
+        let method = |name: &str| reader.methods.iter().find(|m| m.name == name).unwrap();
+        let fold = method("fold");
+        for (ordinal, param, name) in [(2, "y", "fold$default$3"), (3, "z", "fold$default$4")] {
+            assert_eq!(fold.parameters[ordinal].name, param);
+            assert_eq!(method(name).default_for, Some((fold.offset, ordinal)));
+        }
+        let plain = method("startsPlain");
+        assert!(
+            !reader
+                .methods
+                .iter()
+                .any(|m| m.default_for == Some((plain.offset, 0)))
+        );
+    }
+
+    #[test]
+    fn binary_legacy_default_getter_keeps_both_ordinary_parameter_lists() {
+        let bytes = include_bytes!(
+            "../../dotty-typer/tests/fixtures/contextual-arguments/binary/defaults/ClauseReader.tasty"
+        );
+        let reader = decode(bytes, &BinaryName::from_internal("defaults/ClauseReader")).unwrap();
+        let getter = reader
+            .methods
+            .iter()
+            .find(|m| m.name == "legacy$default$3")
+            .unwrap();
+        assert_eq!(
+            getter.term_clauses.as_deref(),
+            Some([(MethodKind::Plain, 1); 2].as_slice())
+        );
+    }
 
     #[test]
     fn scala_default_getter_result_recognizes_the_unchecked_variance_marker() {

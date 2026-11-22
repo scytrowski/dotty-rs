@@ -7971,9 +7971,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             )
         };
 
-        let method_type = if let Some(clauses) = &method.contextual_clauses {
+        let method_type = if let Some(clauses) = &method.term_clauses {
             if clauses.iter().map(|(_, n)| n).sum::<usize>() != params.len() {
-                self.unresolved_tasty_type("incomplete contextual parameter clause")
+                self.unresolved_tasty_type("incomplete TASTy parameter clause")
             } else {
                 let mut inner = result;
                 for (depth, &(kind, count)) in clauses.iter().rev().enumerate() {

@@ -105,8 +105,19 @@ both candidates and rolls back the failed application.
 For `choose(using seed: Int)(value: Int = seed)` from a TASTy library,
 `r.choose()` passes the same selected seed to `choose` and `choose$default$2`.
 An applied receiver is evaluated once. A missing or ambiguous seed fails
-at the first clause. Binary ordinary defaults are supported in the clause
-immediately following a contextual clause.
+at the first clause.
+
+Earlier evidence can also pass through intervening ordinary and empty clauses.
+For `fold(using seed: Int)(x: Int)(y: Int = seed, z: Int = x)`,
+`r.fold(3)(7)` calls only `fold$default$4`. Omitting both values calls getters
+3 and 4 in parameter order. With `reader().fold(using seed())(next())()`,
+the typed tree evaluates the receiver, seed and earlier argument once, in that
+order. Both getters replay those same values. An empty clause contributes an
+application with zero arguments and leaves the flattened parameter ordinal
+unchanged. A later `using` still searches at its own call site. For a legacy
+`legacy(x: Int)(y: Int)(implicit n: Int = y)`, a missing witness calls
+`legacy$default$3(x)(y)` with the two original clause boundaries.
+
 The default getter of a method with a context bound takes the method type
 parameters and the preceding term clauses. Witnesses merged into the defaulted
 parameter’s own clause contribute to its ordinal only. In

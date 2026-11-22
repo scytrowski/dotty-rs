@@ -195,14 +195,13 @@ impl SourceTyper<'_> {
         };
         let mut preceding = 0usize;
         let mut current = 0;
-        let mut follows_contextual = false;
+        let mut has_earlier_context = false;
         for _ in 0..crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
             match self.store.types.try_get(signature)? {
                 Type::Poly(poly) => signature = poly.result,
                 Type::Method(parameters) if current == clause => {
-                    // Ordinary binary defaults are supported immediately after a
-                    // contextual clause, whose arguments the getter must replay.
-                    if parameters.kind == MethodKind::Plain && !follows_contextual {
+                    // The getter may replay the witness across ordinary or empty clauses.
+                    if parameters.kind == MethodKind::Plain && !has_earlier_context {
                         return None;
                     }
                     parameters.params.get(ordinal)?;
@@ -211,7 +210,7 @@ impl SourceTyper<'_> {
                         .default_getter(method, preceding.checked_add(ordinal)?);
                 }
                 Type::Method(parameters) => {
-                    follows_contextual = parameters.kind != MethodKind::Plain;
+                    has_earlier_context |= parameters.kind != MethodKind::Plain;
                     preceding = preceding.checked_add(parameters.params.len())?;
                     current += 1;
                     signature = parameters.result;
