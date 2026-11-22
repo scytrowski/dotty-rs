@@ -76,6 +76,14 @@ fn declaration_index_routes_identically_named_fields_to_their_own_class_and_file
         })
         .collect();
     assert_ne!(seeds[0], seeds[1]);
+    let mut dependencies = dotty::SignatureDependencies::new(dotty::SignaturePhase::Members);
+    let blocked = dotty::typer::SignatureCompletion::BlockedOn;
+    dependencies.record(seeds[0], blocked(seeds[1]));
+    dependencies.record(seeds[1], blocked(seeds[0]));
+    assert_eq!(dependencies.waiting_on(seeds[0]), Some(seeds[1]));
+    dependencies.record(seeds[0], blocked(seeds[0]));
+    assert_eq!(dependencies.waiting_on(seeds[0]), Some(seeds[0]));
+    assert_eq!(dependencies.waiting_on(seeds[1]), Some(seeds[0]));
 }
 
 #[test]
