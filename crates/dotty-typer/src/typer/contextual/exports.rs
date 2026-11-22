@@ -39,7 +39,7 @@ impl SourceTyper<'_> {
             let module = self.source_module_class_of_object(object)?;
             let members = self.synthetic_module_scope(module)?;
             for selector in &export.selectors {
-                if selector.renamed.is_some() || selector.bound.is_some() {
+                if selector.bound.is_some() {
                     continue;
                 }
                 let targets = self
@@ -56,7 +56,20 @@ impl SourceTyper<'_> {
                     {
                         continue;
                     }
-                    let name = entry.name;
+                    let name = if let Some(rename) = selector.renamed {
+                        let TreeKind::Ident(ident) = &self.arena.get(rename).kind else {
+                            return Err(TyperError::MalformedSourceImport {
+                                source: self.source,
+                                import_tree_index: site.tree.index(),
+                            });
+                        };
+                        if !ident.backquoted && self.store.names.resolve(ident.name.text()) == "_" {
+                            continue;
+                        }
+                        ident.name
+                    } else {
+                        entry.name
+                    };
                     let prefix =
                         self.term_reference_type(object, None, owner, site.tree.index(), journal)?;
                     let result = self.term_reference_type(

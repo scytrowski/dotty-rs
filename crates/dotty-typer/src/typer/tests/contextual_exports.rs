@@ -115,3 +115,57 @@ fn failed_export_use_removes_its_entry_from_the_existing_module_scope() {
         assert!(typer.store.scopes.get(scope).lookup(&name).is_none());
     }
 }
+
+fn client_result(
+    typer: &mut SourceTyper<'_>,
+    parsed: &dotty_parser::ParseResult,
+    name: &str,
+) -> Result<TreeId<Typed>, TyperError> {
+    let (method, rhs) =
+        method_definition_and_rhs(parsed, typer.store(), typer.index, typer.source, name);
+    let Some(SourceDefinition::Canonical { tree, .. }) = typer.index.definition_of(method) else {
+        panic!("client method")
+    };
+    typer.type_method_definition(tree)?;
+    let typed = typer.typed_index.get(typer.source, rhs).unwrap();
+    Ok(match &typer.typed_ast().get(typed).kind {
+        TreeKind::Block(block) => block.expr,
+        _ => typed,
+    })
+}
+
+fn evidence(typer: &SourceTyper<'_>, root: TreeId<Typed>) -> TreeId<Typed> {
+    let TreeKind::Apply(call) = &typer.typed_ast().get(root).kind else {
+        panic!("contextual call")
+    };
+    let [arg] = call.args.as_slice() else {
+        panic!("one witness")
+    };
+    *arg
+}
+
+#[test]
+fn renamed_export_is_the_same_member_for_direct_selection_and_given_search() {
+    let (parsed, mut store, packages, defs, index, source) = unit(CLIENT);
+    let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages);
+    let call = client_result(&mut typer, &parsed, "renamed").unwrap();
+    let actual = reference(&typer, evidence(&typer, call));
+    let direct = client_result(&mut typer, &parsed, "aliasSelection").unwrap();
+    assert_eq!(reference(&typer, direct), actual);
+    assert_eq!(
+        typer
+            .store
+            .names
+            .resolve(typer.store.symbols.get(actual).name.text()),
+        "selected"
+    );
+    let target = typer.store.export_target(actual).unwrap();
+    assert_eq!(
+        typer.store.types.get(target).reference_symbol(),
+        Some(val_symbol(&parsed, typer.store(), &index, source, "ints").0)
+    );
+    let owner = typer.store.symbols.owner(actual).unwrap();
+    let scope = index.scope_of(owner).unwrap();
+    let original = *dotty_core::TermName::new(typer.store.names.intern("ints")).as_name();
+    assert!(typer.store.scopes.get(scope).lookup(&original).is_none());
+}
