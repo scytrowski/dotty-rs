@@ -138,6 +138,39 @@ def main():
             "        val y$1: Int = this.right()",
             "$1$.pick(x$1, y$1)(using $1$.pick$default$3(x$1, y$1))",
         ), classpath)
+        check_typer_output(toolchain, client_output, "AppliedPairClient.scala", 0, (
+            "this.reader().pick(1, 2)(using 9)",
+            "val $1$: defaults.PairReader = this.reader()\n"
+            "        val x$1: Int = this.left()\n"
+            "        val y$1: Int = this.right()\n"
+            "        $1$.pick(x$1, y$1)(using $1$.pick$default$3(x$1, y$1))",
+            "this.reader().pick(this.left(), this.right())(n)",
+            "this.reader().pick(this.left(), this.right())(using b)",
+            "r.choose(seed)(r.choose$default$2(seed))",
+            "val $2$: defaults.PairReader = this.reader()\n"
+            "        $2$.choose(seed)($2$.choose$default$2(seed))",
+            "this.reader().choose(using seed)(7)",
+            "val $3$: defaults.PairReader = this.reader()\n"
+            "        val x$2: Int = this.left()\n"
+            "        val y$2: Int = this.right()\n"
+            "        $3$.legacy(x$2, y$2)(using $3$.legacy$default$3(x$2, y$2))",
+            "val x$3: Int = this.left()\n"
+            "        val y$3: Int = this.right()\n"
+            "        r.legacy(x$3, y$3)(using r.legacy$default$3(x$3, y$3))",
+            "this.reader().legacy(this.left(), this.right())(n)",
+            "r.legacy(this.left(), this.right())(n)",
+            "this.reader().legacy(this.left(), this.right())(b)",
+            "r.legacy(this.left(), this.right())(using b)",
+            "Implicit parameters should be provided with a `using` clause",
+        ), classpath)
+        ambiguous = "both parameter b and parameter a match type Int of parameter"
+        check_typer_output(toolchain, client_output, "AppliedPairAmbiguous.scala", 1, (
+            "[E172]", "5 errors found", f"{ambiguous} n of method pick",
+            "No given instance of type Int was found for parameter seed of method choose",
+            f"{ambiguous} seed of method choose", f"{ambiguous} n of method legacy",
+            "this.reader().legacy(1, 2)(\n        /* ambiguous:",
+            "r.legacy(1, 2)(\n        /* ambiguous:",
+        ), classpath)
         check_typer_output(toolchain, client_output, "BinaryDefaultsAmbiguous.scala", 1, (
             "[E172]", "Ambiguous given instances", "of parameter n of method offset",
         ), classpath)

@@ -95,11 +95,18 @@ For the separately compiled `PairReader.pick(x: Int, y: Int)(using n: Int = y)`,
 the typed client evaluates the parameterless method `reader`, then `left()`
 and `right()`, into three temporaries. Both `pick` and `pick$default$3`
 select the same receiver and take the same two argument symbols in source
-order. Calling `reader().pick(...)` when `reader` has an explicit empty
-clause still encounters the typer’s selection-prefix restriction for a
-method result whose class comes from TASTy.
-A legacy `implicit` clause also falls back only for missing evidence. Ambiguity
-retains both candidates and rolls back the failed application.
+order. The same sharing applies to `reader().pick(...)` when the result of
+the call has the exact type of a top-level class loaded from Scala TASTy.
+A stable receiver parameter needs no temporary. A supplied witness or an
+explicit argument bypasses the getter. The separately compiled legacy
+`legacy(x, y)(implicit n: Int = y)` follows the same rules. Ambiguity retains
+both candidates and rolls back the failed application.
+
+For `choose(using seed: Int)(value: Int = seed)` from a TASTy library,
+`r.choose()` passes the same selected seed to `choose` and `choose$default$2`.
+An applied receiver is evaluated once. A missing or ambiguous seed fails
+at the first clause. Binary ordinary defaults are supported in the clause
+immediately following a contextual clause.
 The default getter of a method with a context bound takes the method type
 parameters and the preceding term clauses. Witnesses merged into the defaulted
 parameter’s own clause contribute to its ordinal only. In

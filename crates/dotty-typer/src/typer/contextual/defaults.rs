@@ -59,11 +59,9 @@ impl SourceTyper<'_> {
         Ok((args, kind))
     }
 
-    /// Fill trailing ordinary arguments whose source getter replays earlier
-    /// clauses. Binary getter replay is currently supported for contextual
-    /// parameters only.
+    /// Fill omitted trailing arguments using the selected getter and its earlier clauses.
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::typer) fn trailing_source_defaults(
+    pub(in crate::typer) fn trailing_ordinary_defaults(
         &mut self,
         function: &mut TreeId<Typed>,
         method: &MethodType,
@@ -75,15 +73,14 @@ impl SourceTyper<'_> {
     ) -> Result<Vec<TreeId<Typed>>, TyperError> {
         let mut arguments = Vec::new();
         for (ordinal, parameter) in method.params.iter().enumerate().skip(supplied) {
-            let call = self
-                .default_call(*function, ordinal, parameter.ty)
-                .filter(|call| self.index.definition_of(call.getter).is_some())
-                .ok_or(TyperError::ApplicationArityMismatch {
+            let call = self.default_call(*function, ordinal, parameter.ty).ok_or(
+                TyperError::ApplicationArityMismatch {
                     source: self.source,
                     tree_index,
                     expected: method.params.len(),
                     actual: supplied,
-                })?;
+                },
+            )?;
             arguments.push(
                 self.apply_default_getter(call, function, shared, context, tree_index, journal)?,
             );
@@ -198,16 +195,23 @@ impl SourceTyper<'_> {
         };
         let mut preceding = 0usize;
         let mut current = 0;
+        let mut follows_contextual = false;
         for _ in 0..crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
             match self.store.types.try_get(signature)? {
                 Type::Poly(poly) => signature = poly.result,
                 Type::Method(parameters) if current == clause => {
+                    // Ordinary binary defaults are supported immediately after a
+                    // contextual clause, whose arguments the getter must replay.
+                    if parameters.kind == MethodKind::Plain && !follows_contextual {
+                        return None;
+                    }
                     parameters.params.get(ordinal)?;
                     return self
                         .store
                         .default_getter(method, preceding.checked_add(ordinal)?);
                 }
                 Type::Method(parameters) => {
+                    follows_contextual = parameters.kind != MethodKind::Plain;
                     preceding = preceding.checked_add(parameters.params.len())?;
                     current += 1;
                     signature = parameters.result;

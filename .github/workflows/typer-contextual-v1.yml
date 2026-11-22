@@ -71,6 +71,12 @@ jobs:
       - name: Run contextual argument acceptance audit
         run: python3 crates/dotty-typer/tests/fixtures/contextual-v1/check.py --require-parity
 
+      - name: Check binary contextual calls in the Rust typer
+        run: cargo test --locked -p dotty-typer --lib typer::tests::contextual_binary
+
+      - name: Compare contextual argument fixtures and binary clients with Scala 3.9.0
+        run: python3 crates/dotty-typer/tests/fixtures/contextual-arguments/check.py
+
       - name: Check contextual consumer selections in the Rust typer
         run: cargo test --locked -p dotty-typer --lib typer::tests::contextual_consumers
 

@@ -96,8 +96,10 @@ resolution.
 
 ### Implemented
 
-- The loader links a Scala 3.9 contextual default getter to the marked parameter
-  of its sibling method using the structural TASTy name and parameter ordinal. Its result
+- The loader links a Scala 3.9 default getter to the marked parameter of its sibling
+  method using the structural TASTy name and parameter ordinal. This covers
+  contextual parameters and ordinary parameters in the clause immediately
+  following a contextual clause. The getter result
   can carry the compiler's `scala.annotation.unchecked.uncheckedVariance`
   annotation. The member decoder checks the marker constructor and uses the
   underlying result type for calls. Other annotated getter results remain
