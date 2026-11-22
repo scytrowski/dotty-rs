@@ -9,9 +9,13 @@ use crate::writer::Writer;
 /// A `method_info` structure (JVMS §4.6).
 #[derive(Debug, Clone, PartialEq)]
 pub struct MethodInfo<'a> {
+    /// Raw or typed JVM access flags; interpretation depends on the enclosing item.
     pub access_flags: MethodAccessFlags,
+    /// Constant-pool UTF-8 entry containing the name.
     pub name_index: ConstantPoolIndex,
+    /// Constant-pool UTF-8 entry containing the JVM descriptor.
     pub descriptor_index: ConstantPoolIndex,
+    /// Attributes in their original class-file order, including opaque payloads.
     pub attributes: Vec<Attribute<'a>>,
 }
 
@@ -31,6 +35,9 @@ impl<'a> MethodInfo<'a> {
         Ok(writer.into_bytes())
     }
 
+    /// Decodes one member record and its attributes from the current reader position. Attribute
+    /// payloads borrow the input buffer. Returns AttributeError on malformed or truncated data;
+    /// the reader may already have advanced. Resolve and validate member references separately.
     pub fn decode(
         reader: &mut Reader<'a>,
         constant_pool: &ConstantPool,

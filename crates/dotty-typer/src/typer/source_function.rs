@@ -39,11 +39,14 @@ pub enum SourceFunctionPurity {
 /// The semantic family selected by source function syntax.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SourceFunctionFamily {
+    /// Structural or semantic category of the item.
     pub kind: SourceFunctionKind,
+    /// Source purity marker retained for this function.
     pub purity: SourceFunctionPurity,
 }
 
 impl SourceFunctionFamily {
+    /// Combines the parsed function kind and purity marker without changing or inferring either.
     pub const fn new(kind: SourceFunctionKind, purity: SourceFunctionPurity) -> Self {
         Self { kind, purity }
     }

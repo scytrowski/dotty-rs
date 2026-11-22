@@ -39,66 +39,85 @@ pub struct ValidatedImmutableLocalCounterSetCallsAfterAliasProof<'session> {
 }
 
 impl<'session> ValidatedImmutableLocalCounterSetCallsProof<'session> {
+    /// Validated evidence for the two original local initializers.
     pub const fn initializer_pair(&self) -> &ValidatedImmutableLocalInitializerPairProof<'session> {
         &self.initializer_pair
     }
+    /// Authenticated calls in their original source order.
     pub const fn calls(&self) -> &[ValidatedImmutableLocalCounterSetCallProof<'session>; 2] {
         &self.calls
     }
 }
 
 impl<'session> ValidatedImmutableLocalCounterSetCallsAfterAliasProof<'session> {
+    /// Validated immutable alias established before the retained calls.
     pub const fn alias(&self) -> &ValidatedImmutableLocalReferenceAliasProof<'session> {
         &self.alias
     }
+    /// Authenticated calls in their original source order.
     pub const fn calls(&self) -> &[ValidatedImmutableLocalCounterSetCallProof<'session>; 2] {
         &self.calls
     }
 }
 
 impl<'session> ValidatedImmutableLocalCounterSetCallProof<'session> {
+    /// Validated evidence for the two original local initializers.
     pub const fn initializer_pair(&self) -> &ValidatedImmutableLocalInitializerPairProof<'session> {
         &self.initializer_pair
     }
+    /// Original source root for the validated local-receiver method application.
     pub const fn source_call(&self) -> TreeId<Untyped> {
         self.source_call
     }
+    /// Exact mapped typed root for the validated local-receiver method application.
     pub const fn typed_call(&self) -> TreeId<Typed> {
         self.typed_call
     }
+    /// Original source root for the selected constructor or method callee.
     pub const fn source_select(&self) -> TreeId<Untyped> {
         self.source_select
     }
+    /// Exact mapped typed root for the selected constructor or method callee.
     pub const fn typed_select(&self) -> TreeId<Typed> {
         self.typed_select
     }
+    /// Original source root for the explicit receiver expression.
     pub const fn source_receiver(&self) -> TreeId<Untyped> {
         self.source_receiver
     }
+    /// Exact mapped typed root for the explicit receiver expression.
     pub const fn typed_receiver(&self) -> TreeId<Typed> {
         self.typed_receiver
     }
+    /// Original source root for the argument expression checked by this proof.
     pub const fn source_argument(&self) -> TreeId<Untyped> {
         self.source_argument
     }
+    /// Exact mapped typed root for the argument expression checked by this proof.
     pub const fn typed_argument(&self) -> TreeId<Typed> {
         self.typed_argument
     }
+    /// Canonical method symbol retained by this proof.
     pub const fn method(&self) -> SymbolId {
         self.method
     }
+    /// Canonical local symbol used as the call receiver.
     pub const fn receiver(&self) -> SymbolId {
         self.receiver
     }
+    /// Canonical original formal symbol represented by this argument proof.
     pub const fn formal(&self) -> SymbolId {
         self.formal
     }
+    /// Semantic type of the validated call argument.
     pub const fn argument_type(&self) -> TypeId {
         self.argument_type
     }
+    /// Semantic result type validated for the represented expression.
     pub const fn result_type(&self) -> TypeId {
         self.result_type
     }
+    /// Lexical scope owning the receiver local.
     pub const fn receiver_scope(&self) -> dotty_core::ScopeId {
         self.receiver_scope
     }

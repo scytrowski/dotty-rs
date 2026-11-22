@@ -45,8 +45,11 @@ pub struct RawLexer<'source> {
 /// diagnostic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RawLexerError {
+    /// Cursor construction or movement rejected the source offset.
     Cursor(CursorError),
+    /// Source text validation or slicing failed.
     Source(SourceTextError),
+    /// The requested source byte range is invalid.
     Range(TextRangeError),
 }
 

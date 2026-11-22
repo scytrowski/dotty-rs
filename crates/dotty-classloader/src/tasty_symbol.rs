@@ -248,6 +248,7 @@ pub struct UnresolvedParentReference {
     /// candidate. This is evidence about the encoded owner, not proof that
     /// the alias target exists on the classpath.
     pub alias_owner: Option<String>,
+    /// Optional alternate source-visible name for this entry.
     pub alias_name: Option<String>,
     /// Bounded normalized rendering of the raw parent tree's wire tag shape.
     pub raw_tree: String,

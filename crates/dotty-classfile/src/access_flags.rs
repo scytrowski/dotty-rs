@@ -1,21 +1,45 @@
+//! JVM access-flag bits and context-specific wrappers.
+//!
+//! Numeric flag values overlap across class, field, and method contexts.
+//! Use the wrapper for the kind of declaration being inspected.
+
+/// Publicly accessible class or member.
 pub const ACC_PUBLIC: u16 = 0x0001;
+/// Private member access.
 pub const ACC_PRIVATE: u16 = 0x0002;
+/// Protected member access.
 pub const ACC_PROTECTED: u16 = 0x0004;
+/// Static field or method.
 pub const ACC_STATIC: u16 = 0x0008;
+/// Class or member cannot be extended, overridden, or reassigned as applicable.
 pub const ACC_FINAL: u16 = 0x0010;
+/// Class uses the JVM superclass invocation semantics selected by ACC_SUPER.
 pub const ACC_SUPER: u16 = 0x0020;
+/// Method acquires its monitor during invocation.
 pub const ACC_SYNCHRONIZED: u16 = 0x0020;
+/// Field uses volatile memory-access semantics.
 pub const ACC_VOLATILE: u16 = 0x0040;
+/// Compiler-generated bridge method.
 pub const ACC_BRIDGE: u16 = 0x0040;
+/// Field is excluded from default Java serialization.
 pub const ACC_TRANSIENT: u16 = 0x0080;
+/// Method declares a variable-arity trailing parameter.
 pub const ACC_VARARGS: u16 = 0x0080;
+/// Method implementation is native rather than bytecode.
 pub const ACC_NATIVE: u16 = 0x0100;
+/// Class-file declaration is an interface.
 pub const ACC_INTERFACE: u16 = 0x0200;
+/// Class or method is abstract.
 pub const ACC_ABSTRACT: u16 = 0x0400;
+/// Method carries the historical strict floating-point flag.
 pub const ACC_STRICT: u16 = 0x0800;
+/// Declaration was generated rather than explicitly declared in source.
 pub const ACC_SYNTHETIC: u16 = 0x1000;
+/// Interface is an annotation type.
 pub const ACC_ANNOTATION: u16 = 0x2000;
+/// Class or field represents an enumeration declaration or constant.
 pub const ACC_ENUM: u16 = 0x4000;
+/// Class file is a module descriptor.
 pub const ACC_MODULE: u16 = 0x8000;
 
 /// Class/interface `access_flags` (JVMS §4.1, Table 4.1-A).
@@ -23,42 +47,53 @@ pub const ACC_MODULE: u16 = 0x8000;
 pub struct ClassAccessFlags(pub u16);
 
 impl ClassAccessFlags {
+    /// Returns whether every bit in the supplied mask is set. The mask must use flags for this
+    /// wrapper’s class, field, or method context.
     pub fn contains(self, flag: u16) -> bool {
         self.0 & flag == flag
     }
 
+    /// Returns whether this declaration carries the `ACC_PUBLIC` flag.
     pub fn is_public(self) -> bool {
         self.contains(ACC_PUBLIC)
     }
 
+    /// Returns whether this declaration carries the `ACC_FINAL` flag.
     pub fn is_final(self) -> bool {
         self.contains(ACC_FINAL)
     }
 
+    /// Returns whether this declaration carries the `ACC_SUPER` flag.
     pub fn is_super(self) -> bool {
         self.contains(ACC_SUPER)
     }
 
+    /// Returns whether this declaration carries the `ACC_INTERFACE` flag.
     pub fn is_interface(self) -> bool {
         self.contains(ACC_INTERFACE)
     }
 
+    /// Returns whether this declaration carries the `ACC_ABSTRACT` flag.
     pub fn is_abstract(self) -> bool {
         self.contains(ACC_ABSTRACT)
     }
 
+    /// Returns whether this declaration carries the `ACC_SYNTHETIC` flag.
     pub fn is_synthetic(self) -> bool {
         self.contains(ACC_SYNTHETIC)
     }
 
+    /// Returns whether this declaration carries the `ACC_ANNOTATION` flag.
     pub fn is_annotation(self) -> bool {
         self.contains(ACC_ANNOTATION)
     }
 
+    /// Returns whether this declaration carries the `ACC_ENUM` flag.
     pub fn is_enum(self) -> bool {
         self.contains(ACC_ENUM)
     }
 
+    /// Returns whether this declaration carries the `ACC_MODULE` flag.
     pub fn is_module(self) -> bool {
         self.contains(ACC_MODULE)
     }
@@ -69,42 +104,53 @@ impl ClassAccessFlags {
 pub struct FieldAccessFlags(pub u16);
 
 impl FieldAccessFlags {
+    /// Returns whether every bit in the supplied mask is set. The mask must use flags for this
+    /// wrapper’s class, field, or method context.
     pub fn contains(self, flag: u16) -> bool {
         self.0 & flag == flag
     }
 
+    /// Returns whether this declaration carries the `ACC_PUBLIC` flag.
     pub fn is_public(self) -> bool {
         self.contains(ACC_PUBLIC)
     }
 
+    /// Returns whether this declaration carries the `ACC_PRIVATE` flag.
     pub fn is_private(self) -> bool {
         self.contains(ACC_PRIVATE)
     }
 
+    /// Returns whether this declaration carries the `ACC_PROTECTED` flag.
     pub fn is_protected(self) -> bool {
         self.contains(ACC_PROTECTED)
     }
 
+    /// Returns whether this declaration carries the `ACC_STATIC` flag.
     pub fn is_static(self) -> bool {
         self.contains(ACC_STATIC)
     }
 
+    /// Returns whether this declaration carries the `ACC_FINAL` flag.
     pub fn is_final(self) -> bool {
         self.contains(ACC_FINAL)
     }
 
+    /// Returns whether this declaration carries the `ACC_VOLATILE` flag.
     pub fn is_volatile(self) -> bool {
         self.contains(ACC_VOLATILE)
     }
 
+    /// Returns whether this declaration carries the `ACC_TRANSIENT` flag.
     pub fn is_transient(self) -> bool {
         self.contains(ACC_TRANSIENT)
     }
 
+    /// Returns whether this declaration carries the `ACC_SYNTHETIC` flag.
     pub fn is_synthetic(self) -> bool {
         self.contains(ACC_SYNTHETIC)
     }
 
+    /// Returns whether this declaration carries the `ACC_ENUM` flag.
     pub fn is_enum(self) -> bool {
         self.contains(ACC_ENUM)
     }
@@ -115,54 +161,68 @@ impl FieldAccessFlags {
 pub struct MethodAccessFlags(pub u16);
 
 impl MethodAccessFlags {
+    /// Returns whether every bit in the supplied mask is set. The mask must use flags for this
+    /// wrapper’s class, field, or method context.
     pub fn contains(self, flag: u16) -> bool {
         self.0 & flag == flag
     }
 
+    /// Returns whether this declaration carries the `ACC_PUBLIC` flag.
     pub fn is_public(self) -> bool {
         self.contains(ACC_PUBLIC)
     }
 
+    /// Returns whether this declaration carries the `ACC_PRIVATE` flag.
     pub fn is_private(self) -> bool {
         self.contains(ACC_PRIVATE)
     }
 
+    /// Returns whether this declaration carries the `ACC_PROTECTED` flag.
     pub fn is_protected(self) -> bool {
         self.contains(ACC_PROTECTED)
     }
 
+    /// Returns whether this declaration carries the `ACC_STATIC` flag.
     pub fn is_static(self) -> bool {
         self.contains(ACC_STATIC)
     }
 
+    /// Returns whether this declaration carries the `ACC_FINAL` flag.
     pub fn is_final(self) -> bool {
         self.contains(ACC_FINAL)
     }
 
+    /// Returns whether this declaration carries the `ACC_SYNCHRONIZED` flag.
     pub fn is_synchronized(self) -> bool {
         self.contains(ACC_SYNCHRONIZED)
     }
 
+    /// Returns whether this declaration carries the `ACC_BRIDGE` flag.
     pub fn is_bridge(self) -> bool {
         self.contains(ACC_BRIDGE)
     }
 
+    /// Returns whether this declaration carries the `ACC_VARARGS` flag.
     pub fn is_varargs(self) -> bool {
         self.contains(ACC_VARARGS)
     }
 
+    /// Returns whether this declaration carries the `ACC_NATIVE` flag.
     pub fn is_native(self) -> bool {
         self.contains(ACC_NATIVE)
     }
 
+    /// Returns whether this declaration carries the `ACC_ABSTRACT` flag.
     pub fn is_abstract(self) -> bool {
         self.contains(ACC_ABSTRACT)
     }
 
+    /// Returns whether this declaration carries the `ACC_STRICT` flag.
     pub fn is_strict(self) -> bool {
         self.contains(ACC_STRICT)
     }
 
+    /// Returns whether this declaration carries the `ACC_SYNTHETIC` flag.
     pub fn is_synthetic(self) -> bool {
         self.contains(ACC_SYNTHETIC)
     }

@@ -17,7 +17,12 @@ const MAX_CONSTANT_POOL_COUNT: usize = u16::MAX as usize;
 pub enum ConstantPoolBuildError {
     /// The requested entry and its prerequisites would exceed the `u2`
     /// `constant_pool_count` limit, which includes slot zero.
-    CountOverflow { count: usize, max: u16 },
+    CountOverflow {
+        /// Number of entries encountered by the rejected operation.
+        count: usize,
+        /// Largest representable or accepted value for this field.
+        max: u16,
+    },
     /// A UTF8 value cannot be represented by the JVM modified UTF-8 format.
     InvalidUtf8(EncodeError),
     /// An internally constructed pool failed the existing encoder's

@@ -11,10 +11,17 @@ pub struct SymbolTable {
 }
 
 impl SymbolTable {
+    /// Creates an empty canonical symbol table for one compilation session.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Appends a declaration and returns its stable table-local identity. Ownership, name, and
+    /// signature relationships must be valid in the same session.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the next identity exceeds the 32-bit ID space.
     pub fn alloc(&mut self, symbol: Symbol) -> SymbolId {
         let id = SymbolId::new(checked_index(self.symbols.len()));
         self.symbols.push(symbol);
@@ -31,8 +38,12 @@ impl SymbolTable {
         self.symbols.truncate(len);
     }
 
-    /// Panics if `id` was not allocated by this table — see
-    /// `docs/dotty-core-design.md`, "Error handling policy."
+    /// Returns the symbol for an ID from this session.
+    ///
+    /// # Panics
+    ///
+    /// Panics for an out-of-range index. IDs from another arena with the same
+    /// index cannot be detected and violate the caller’s session contract.
     pub fn get(&self, id: SymbolId) -> &Symbol {
         &self.symbols[id.index() as usize]
     }
@@ -42,18 +53,40 @@ impl SymbolTable {
         (id.index() as usize) < self.symbols.len()
     }
 
+    /// Borrows a symbol for in-place mutation; callers must preserve ownership and completion
+    /// invariants.
+    ///
+    /// # Panics
+    ///
+    /// Panics for an out-of-range index. A same-slot ID from another table cannot be detected.
     pub fn get_mut(&mut self, id: SymbolId) -> &mut Symbol {
         &mut self.symbols[id.index() as usize]
     }
 
+    /// Returns the declaration's semantic owner, independently of lookup-scope membership.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the symbol index is outside this table.
     pub fn owner(&self, id: SymbolId) -> Option<SymbolId> {
         self.get(id).owner
     }
 
+    /// Borrows the declaration's current signature-completion state.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the symbol index is outside this table.
     pub fn info(&self, id: SymbolId) -> &SymbolInfo {
         &self.get(id).info
     }
 
+    /// Replaces the signature-completion state without validating the supplied type or completer.
+    /// All referenced identities must belong to this session.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the symbol index is outside this table.
     pub fn set_info(&mut self, id: SymbolId, info: SymbolInfo) {
         self.get_mut(id).info = info;
     }

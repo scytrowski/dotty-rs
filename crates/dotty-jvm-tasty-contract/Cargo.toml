@@ -19,3 +19,6 @@ dotty-classfile.workspace = true
 dotty-jvm.workspace = true
 dotty-tasty-pickler.workspace = true
 dotty-tasty.workspace = true
+
+[lints]
+workspace = true

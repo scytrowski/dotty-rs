@@ -9,8 +9,11 @@ use crate::{ExpressionIssue, ParseIssue, ParseKind, Parser, PatternIssue, TypeIs
 /// Operand/operator state used by Dotty-style infix reduction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OpInfo {
+    /// Operand of the prefix or postfix operator.
     pub operand: TreeId<Untyped>,
+    /// Operator spelling or canonical name used by the operation.
     pub operator: Name,
+    /// Byte offset at which the input or cursor check failed.
     pub offset: u32,
 }
 

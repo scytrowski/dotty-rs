@@ -5,8 +5,11 @@ use super::{TokenKind, TokenValue};
 /// A parser-facing token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
+    /// Parser-facing token category after contextual scanning.
     pub kind: TokenKind,
+    /// Half-open UTF-8 byte range in the originating source buffer.
     pub span: TextRange,
+    /// Parser-facing payload associated with this token, or TokenValue::None.
     pub value: TokenValue,
 }
 

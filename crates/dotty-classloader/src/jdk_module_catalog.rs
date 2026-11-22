@@ -157,45 +157,70 @@ impl JdkModuleCatalog {
 pub enum JdkModuleCatalogError {
     /// Reading the module-info entry failed in the JMOD archive.
     Archive {
+        /// Provenance of this declaration, artifact, or argument binding.
         origin: ClassOrigin,
+        /// Underlying classpath, decoding, or dependency failure.
         source: ClassPathError,
     },
     /// The JMOD has no `classes/module-info.class` entry.
-    MissingDescriptor { origin: ClassOrigin },
+    MissingDescriptor {
+        /// Provenance of this declaration, artifact, or argument binding.
+        origin: ClassOrigin,
+    },
     /// The module-info entry is not a structurally decodable class file.
     InvalidClassFile {
+        /// Provenance of this declaration, artifact, or argument binding.
         origin: ClassOrigin,
+        /// Underlying classpath, decoding, or dependency failure.
         source: ClassFileError,
     },
     /// The class file decoded successfully but did not consume the full entry.
     TrailingClassFileBytes {
+        /// Provenance of this declaration, artifact, or argument binding.
         origin: ClassOrigin,
+        /// Number of bytes still available in the bounded reader.
         remaining: usize,
     },
     /// The class file is not a valid JPMS module descriptor.
     InvalidDescriptor {
+        /// Provenance of this declaration, artifact, or argument binding.
         origin: ClassOrigin,
+        /// Underlying classpath, decoding, or dependency failure.
         source: ModuleDescriptorError,
     },
     /// A projected constant-pool index did not resolve to its expected kind.
     InvalidReference {
+        /// Provenance of this declaration, artifact, or argument binding.
         origin: ClassOrigin,
+        /// Underlying classpath, decoding, or dependency failure.
         source: PoolRefError,
     },
     /// The validator accepted a descriptor with no typed `Module` attribute.
-    MissingModuleAttribute { origin: ClassOrigin },
+    MissingModuleAttribute {
+        /// Provenance of this declaration, artifact, or argument binding.
+        origin: ClassOrigin,
+    },
     /// The JMOD path is not a UTF-8 filename that can be compared to a module.
-    InvalidJmodFilename { origin: ClassOrigin },
+    InvalidJmodFilename {
+        /// Provenance of this declaration, artifact, or argument binding.
+        origin: ClassOrigin,
+    },
     /// The JMOD filename stem differs from the authoritative descriptor name.
     ModuleNameMismatch {
+        /// Provenance of this declaration, artifact, or argument binding.
         origin: ClassOrigin,
+        /// Source or artifact filename used by this operation.
         filename: String,
+        /// Name obtained from the class-file descriptor.
         descriptor_name: String,
     },
     /// More than one JMOD declares the same module name.
     DuplicateModuleName {
+        /// Recorded name spelling used by the enclosing declaration or validation rule.
         name: String,
+        /// Classpath origin of the first artifact claiming this identity.
         first_origin: ClassOrigin,
+        /// Classpath origin of the conflicting artifact.
         duplicate_origin: ClassOrigin,
     },
 }

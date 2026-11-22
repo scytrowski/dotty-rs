@@ -179,13 +179,25 @@ pub enum CodeElement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodeSequenceError {
     /// A label belongs to another sequence.
-    ForeignLabel { label: LabelId },
+    ForeignLabel {
+        /// Symbolic bytecode label involved in the branch or binding failure.
+        label: LabelId,
+    },
     /// A label was bound more than once.
-    DuplicateLabelDefinition { label: LabelId },
+    DuplicateLabelDefinition {
+        /// Symbolic bytecode label involved in the branch or binding failure.
+        label: LabelId,
+    },
     /// A branch refers to a label that was never bound.
-    UnboundLabel { label: LabelId },
+    UnboundLabel {
+        /// Symbolic bytecode label involved in the branch or binding failure.
+        label: LabelId,
+    },
     /// A branch target is the position after the final instruction.
-    BranchToTerminalEnd { label: LabelId },
+    BranchToTerminalEnd {
+        /// Symbolic bytecode label involved in the branch or binding failure.
+        label: LabelId,
+    },
     /// The sequence has exhausted its available local label indexes.
     LabelIdExhausted,
 }

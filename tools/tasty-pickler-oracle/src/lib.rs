@@ -1,6 +1,8 @@
 //! Structural inspection of independently generated, small Scala 3.9 fixtures.
 //! This tooling uses the existing codec; it neither types source nor pickles semantics.
 
+#![deny(missing_docs)]
+
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -8,7 +10,9 @@ use std::error::Error;
 use dotty_tasty::tasty::*;
 use serde_json::{Value, json};
 
+/// Fallible result used by the private Scala pickler-oracle support library.
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
+/// Maximum file size accepted by the private pickler-oracle fixture reader, in bytes.
 pub const MAX_FILE_BYTES: usize = 1024 * 1024;
 
 fn tag_name(tag: u8) -> String {

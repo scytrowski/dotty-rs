@@ -28,9 +28,17 @@ impl fmt::Debug for CodeLabel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodeBuilderError {
     /// A local index does not fit the JVM's `u16` instruction operand.
-    LocalIndexOutOfRange { index: usize },
+    LocalIndexOutOfRange {
+        /// Index into the enclosing table or parameter list, using that structure’s indexing
+        /// convention.
+        index: usize,
+    },
     /// An interned constant-pool index cannot be used as an instruction operand.
-    InvalidConstantPoolIndex { index: u16 },
+    InvalidConstantPoolIndex {
+        /// Index into the enclosing table or parameter list, using that structure’s indexing
+        /// convention.
+        index: u16,
+    },
     /// A symbolic owner or member name is not a valid JVM name.
     InvalidName,
     /// A symbolic field or method descriptor is malformed.
@@ -38,13 +46,25 @@ pub enum CodeBuilderError {
     /// An invoked method descriptor exceeds the JVM's 255 parameter-slot limit.
     TooManyParameterSlots,
     /// A branch or label operation used a label owned by another builder.
-    ForeignLabel { label: usize },
+    ForeignLabel {
+        /// Symbolic bytecode label involved in the branch or binding failure.
+        label: usize,
+    },
     /// A branch targets a label that was allocated but never marked.
-    UnboundLabel { label: usize },
+    UnboundLabel {
+        /// Symbolic bytecode label involved in the branch or binding failure.
+        label: usize,
+    },
     /// A label was marked more than once.
-    DuplicateLabel { label: usize },
+    DuplicateLabel {
+        /// Symbolic bytecode label involved in the branch or binding failure.
+        label: usize,
+    },
     /// A branch targets the position after the final executable instruction.
-    BranchToTerminalEnd { label: usize },
+    BranchToTerminalEnd {
+        /// Symbolic bytecode label involved in the branch or binding failure.
+        label: usize,
+    },
     /// The builder exhausted its label identifiers.
     LabelIdExhausted,
 }

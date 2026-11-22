@@ -12,9 +12,23 @@ pub struct Cursor<'source> {
 /// Failure while moving a source cursor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorError {
-    SourceTooLong { byte_len: usize },
-    InvalidOffset { offset: u32, byte_len: u32 },
-    NotUtf8Boundary { offset: u32 },
+    /// The source buffer cannot be addressed with 32-bit byte offsets.
+    SourceTooLong {
+        /// Length of the source buffer in UTF-8 bytes.
+        byte_len: usize,
+    },
+    /// The requested cursor offset exceeds the applicable source boundary.
+    InvalidOffset {
+        /// Byte offset at which the input or cursor check failed.
+        offset: u32,
+        /// Length of the source buffer in UTF-8 bytes.
+        byte_len: u32,
+    },
+    /// The requested cursor offset splits a UTF-8 scalar.
+    NotUtf8Boundary {
+        /// Byte offset at which the input or cursor check failed.
+        offset: u32,
+    },
 }
 
 impl fmt::Display for CursorError {

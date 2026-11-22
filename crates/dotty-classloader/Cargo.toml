@@ -21,3 +21,6 @@ dotty-core.workspace = true
 crc32fast = "1.5.2"
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
 unicode-ident = "1.0.24"
+
+[lints]
+workspace = true

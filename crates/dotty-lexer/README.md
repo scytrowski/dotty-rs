@@ -14,3 +14,5 @@ Published archives contain production sources and package documentation.
 Regression tests, binary fixtures and Scala oracle tools are maintained in the
 repository. Licensed under Apache-2.0; the complete license is included in the
 published package.
+
+See the [API usage guide](src/guide.md) for runnable examples and caller contracts.

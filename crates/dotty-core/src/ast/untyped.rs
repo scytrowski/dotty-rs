@@ -9,14 +9,18 @@ use crate::names::{Name, TermName, TypeName};
 /// One parser-level entry in a template's `uses` clause.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UseRef {
+    /// Source path syntax named by this uses-clause entry.
     pub reference: TreeId<Untyped>,
+    /// Whether this use reference carries the initially marker.
     pub initially: bool,
 }
 
 /// Syntax-only metadata attached to an untyped template.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct UntypedTemplateMetadata {
+    /// Derived type syntax in source order.
     pub derives: Vec<TreeId<Untyped>>,
+    /// Use-clause entries or service references in declaration order.
     pub uses: Vec<UseRef>,
 }
 
@@ -25,15 +29,20 @@ pub struct UntypedTemplateMetadata {
 /// recovery produce a structurally valid untyped tree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorNodeKind {
+    /// Recovery placeholder where an expression was required.
     MissingExpression,
+    /// Recovery placeholder where type syntax was required.
     MissingType,
+    /// Recovery placeholder where a pattern was required.
     MissingPattern,
+    /// Recovery placeholder for a token invalid in this grammar position.
     UnexpectedToken,
 }
 
 /// A minimal placeholder inserted by parser recovery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ErrorNode {
+    /// Grammar form missing or rejected during parser recovery.
     pub kind: ErrorNodeKind,
 }
 
@@ -41,15 +50,20 @@ pub struct ErrorNode {
 /// `ValDef` + module-class `TypeDef` pair.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModuleDef {
+    /// Interned name in the term namespace; resolve its text through the session interner.
     pub name: TermName,
+    /// Template tree defining the object body and parents.
     pub template: TreeId<Untyped>,
+    /// Source modifiers and visibility before semantic lowering.
     pub metadata: Modifiers,
 }
 
 /// `(params) => body`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Function {
+    /// Original value-parameter declaration trees in source order.
     pub params: Vec<TreeId<Untyped>>,
+    /// Original function body before typing and closure lowering.
     pub body: TreeId<Untyped>,
 }
 
@@ -61,9 +75,13 @@ pub struct Function {
 /// whole function type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FunctionWithMods {
+    /// Parameter type syntax in source order, aligned with erased_params.
     pub params: Vec<TreeId<Untyped>>,
+    /// Result type syntax of the source function type.
     pub result: TreeId<Untyped>,
+    /// Source modifiers retained on this syntax node.
     pub modifiers: Modifiers,
+    /// Per-parameter erasure flags, aligned with the parameter list.
     pub erased_params: Vec<bool>,
 }
 
@@ -71,62 +89,79 @@ pub struct FunctionWithMods {
 /// corresponding to Dotty's `untpd.CapturesAndResult` node.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CapturesAndResult {
+    /// Capture references attached to the function result.
     pub captures: Vec<TreeId<Untyped>>,
+    /// Function result type syntax to which the capture references attach.
     pub result: TreeId<Untyped>,
 }
 
 /// `[type_params] => body`, a polymorphic function literal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PolyFunction {
+    /// Type parameter declarations in source or signature order.
     pub type_params: Vec<TreeId<Untyped>>,
+    /// Body tree or ordered body statements belonging to this node.
     pub body: TreeId<Untyped>,
 }
 
 /// `left op right`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InfixOp {
+    /// Left operand of the enclosing relation or syntax node.
     pub left: TreeId<Untyped>,
+    /// Interned operator name.
     pub op: Name,
+    /// Right operand of the enclosing relation or syntax node.
     pub right: TreeId<Untyped>,
 }
 
 /// `op operand`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PrefixOp {
+    /// Interned operator name.
     pub op: Name,
+    /// Operand of the prefix or postfix operator.
     pub operand: TreeId<Untyped>,
 }
 
 /// `operand op` (legacy postfix syntax).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PostfixOp {
+    /// Operand of the prefix or postfix operator.
     pub operand: TreeId<Untyped>,
+    /// Interned operator name.
     pub op: Name,
 }
 
 /// `(inner)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Parens {
+    /// Expression inside the explicit parentheses.
     pub inner: TreeId<Untyped>,
 }
 
 /// `(a, b, ...)`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tuple {
+    /// Elements in their original source or annotation order.
     pub elements: Vec<TreeId<Untyped>>,
 }
 
 /// `for (enums) yield body`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ForYield {
+    /// For-comprehension enumerators in source order.
     pub enums: Vec<TreeId<Untyped>>,
+    /// Body tree or ordered body statements belonging to this node.
     pub body: TreeId<Untyped>,
 }
 
 /// `for (enums) do body`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ForDo {
+    /// For-comprehension enumerators in source order.
     pub enums: Vec<TreeId<Untyped>>,
+    /// Body tree or ordered body statements belonging to this node.
     pub body: TreeId<Untyped>,
 }
 
@@ -138,34 +173,48 @@ pub struct ForDo {
 /// lowering.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GenCheckMode {
+    /// Do not insert a generator pattern check.
     Ignore,
+    /// Generator whose pattern has already been filtered.
     Filtered,
+    /// Require an irrefutable generator pattern.
     Check,
+    /// Check the pattern and retain filtering behavior.
     CheckAndFilter,
+    /// Filter this generator pattern during desugaring.
     FilterNow,
+    /// Retain an explicit filtering requirement for this pattern.
     FilterAlways,
 }
 
 /// `pattern <- expr`, a for-comprehension generator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GenFrom {
+    /// Pattern tested or bound by this construct.
     pub pattern: TreeId<Untyped>,
+    /// Collection or source expression supplying elements to this generator.
     pub expr: TreeId<Untyped>,
+    /// Pattern-checking and filtering mode for this generator.
     pub check_mode: GenCheckMode,
 }
 
 /// `pattern = expr`, a for-comprehension alias binding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GenAlias {
+    /// Pattern tested or bound by this construct.
     pub pattern: TreeId<Untyped>,
+    /// Value expression bound by this enumerator alias.
     pub expr: TreeId<Untyped>,
 }
 
 /// `mods val (a, b) [= rhs]`, a pattern definition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PatDef {
+    /// Source modifiers retained on this syntax node.
     pub modifiers: Modifiers,
+    /// Patterns in their original source order.
     pub patterns: Vec<TreeId<Untyped>>,
+    /// Type syntax attached to this expression or declaration.
     pub tpt: TreeId<Untyped>,
     /// The optional RHS preserves parser-level declarations such as `val x: A`.
     pub rhs: Option<TreeId<Untyped>>,
@@ -174,14 +223,18 @@ pub struct PatDef {
 /// `extension (params) { methods }`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExtensionMethods {
+    /// Parameter syntax grouped into clauses, in source order.
     pub param_clauses: Vec<Vec<TreeId<Untyped>>>,
+    /// Declared methods in source or class-file order.
     pub methods: Vec<TreeId<Untyped>>,
 }
 
 /// `prefix"...${expr}..."`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InterpolatedString {
+    /// Interned name of the selected string interpolator.
     pub prefix: Name,
+    /// Literal string parts and embedded expression trees in source order.
     pub parts: Vec<TreeId<Untyped>>,
 }
 
@@ -195,7 +248,9 @@ pub struct InterpolatedString {
 /// Mirrors real Dotty's `untpd.ContextBounds(bounds: TypeBoundsTree, cxBounds: List[Tree])`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContextBounds {
+    /// Ordinary lower/upper bounds tree, retained separately from context bounds.
     pub bounds: TreeId<Untyped>,
+    /// Context-bound syntax attached to this parameter.
     pub context_bounds: Vec<TreeId<Untyped>>,
 }
 
@@ -206,8 +261,11 @@ pub struct ContextBounds {
 /// nodes in source order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ContextBoundTypeTree {
+    /// Bound type or syntax constraining this declaration.
     pub bound: TreeId<Untyped>,
+    /// Type parameter name to which this context bound applies.
     pub parameter: TypeName,
+    /// Optional explicit witness name introduced by an as clause.
     pub name: Option<TermName>,
 }
 
@@ -218,8 +276,11 @@ pub struct ContextBoundTypeTree {
 /// parser's decimal and exponent forms before typing chooses a numeric type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NumberKind {
+    /// Whole-number spelling with its source radix, before numeric type selection.
     Whole(u32),
+    /// Numeric spelling containing a decimal point.
     Decimal,
+    /// Unsuffixed exponent-form numeric spelling, before numeric type selection.
     Floating,
 }
 
@@ -228,13 +289,16 @@ pub enum NumberKind {
 /// (see `AGENTS.md`); `text` is the literal exactly as written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NumberLiteral {
+    /// Interned numeric literal spelling exactly as written, before overflow checking.
     pub text: NameId,
+    /// Numeric lexical form and, for whole numbers, source radix.
     pub kind: NumberKind,
 }
 
 /// `throw expr`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Throw {
+    /// Exception expression thrown by this source construct.
     pub expr: TreeId<Untyped>,
 }
 
@@ -245,8 +309,11 @@ pub struct Throw {
 /// step, not to source parsing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ParsedTry {
+    /// Expression evaluated or described by this node.
     pub expr: TreeId<Untyped>,
+    /// Optional parsed exception handler expression.
     pub handler: Option<TreeId<Untyped>>,
+    /// Optional finally expression evaluated after the protected body.
     pub finalizer: Option<TreeId<Untyped>>,
 }
 
@@ -256,8 +323,11 @@ pub struct ParsedTry {
 /// in the untyped tree without widening the shared typed `If` contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InlineIf {
+    /// Condition expression controlling this construct.
     pub cond: TreeId<Untyped>,
+    /// Expression evaluated when the condition is true.
     pub then_branch: TreeId<Untyped>,
+    /// Expression evaluated when the condition is false.
     pub else_branch: TreeId<Untyped>,
 }
 
@@ -267,13 +337,16 @@ pub struct InlineIf {
 /// source syntax for later inline handling and is therefore untyped-only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InlineMatch {
+    /// Scrutinee expression or member selector for this construct.
     pub selector: TreeId<Untyped>,
+    /// Case clauses in matching order.
     pub cases: Vec<TreeId<Untyped>>,
 }
 
 /// `macro expr`, before the macro implementation is expanded or desugared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MacroTree {
+    /// Source expression retained inside the macro form.
     pub expr: TreeId<Untyped>,
 }
 
@@ -281,45 +354,71 @@ pub struct MacroTree {
 /// `untpd`-only node types; it is not arbitrary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UntypedNode {
+    /// Parser-recovery placeholder; consult the separate diagnostics.
     Error(ErrorNode),
 
+    /// Object declaration before module-value and module-class desugaring.
     ModuleDef(ModuleDef),
 
+    /// Function literal with ordered parameters and a body.
     Function(Function),
+    /// Function type retaining source modifiers and positional erased parameters.
     FunctionWithMods(FunctionWithMods),
+    /// Capture-set references attached to a function result.
     CapturesAndResult(CapturesAndResult),
+    /// Polymorphic function literal with type parameters.
     PolyFunction(PolyFunction),
 
+    /// Source infix operation before application desugaring.
     InfixOp(InfixOp),
+    /// Source prefix operation before application desugaring.
     PrefixOp(PrefixOp),
+    /// Source postfix operation before application desugaring.
     PostfixOp(PostfixOp),
 
+    /// Explicitly parenthesized source tree.
     Parens(Parens),
+    /// Tuple syntax before tuple construction or type desugaring.
     Tuple(Tuple),
 
+    /// For-comprehension producing a result value.
     ForYield(ForYield),
+    /// For-comprehension executed for effects.
     ForDo(ForDo),
 
+    /// Generator pattern and source expression with its checking mode.
     GenFrom(GenFrom),
+    /// Value alias within a for-comprehension.
     GenAlias(GenAlias),
 
+    /// Pattern-based value or variable definition before expansion.
     PatDef(PatDef),
 
+    /// Extension parameter clauses and member definitions.
     ExtensionMethods(ExtensionMethods),
 
+    /// Interpolator prefix and ordered string parts and holes.
     InterpolatedString(InterpolatedString),
 
+    /// Context-bound syntax associated with a type parameter.
     ContextBounds(ContextBounds),
+    /// One context-bound type and its optional witness name.
     ContextBoundTypeTree(ContextBoundTypeTree),
 
+    /// Numeric spelling retained before semantic constant interpretation.
     Number(NumberLiteral),
 
+    /// Source throw expression.
     Throw(Throw),
 
+    /// Conditional carrying the inline source marker.
     InlineIf(InlineIf),
+    /// Pattern match carrying the inline source marker.
     InlineMatch(InlineMatch),
+    /// Source macro syntax retained before later processing.
     MacroTree(MacroTree),
 
+    /// Try expression whose handler has not yet been normalized to case clauses.
     ParsedTry(ParsedTry),
 }
 

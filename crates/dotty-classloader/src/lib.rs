@@ -7,6 +7,9 @@
 //! `dotty-tasty-unpickler`. The current TASTy semantic resolver handoff is
 //! described in `docs/tasty-semantic-unpickler.md`.
 
+#![deny(missing_docs)]
+#![doc = include_str!("guide.md")]
+
 mod annotation;
 mod binary_name;
 mod class_path;

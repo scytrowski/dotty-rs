@@ -18,8 +18,11 @@ pub enum ClassBodyError {
     InvalidClass(SymbolId),
     /// The typer rejected this field initializer or method definition.
     Member {
+        /// Canonical class symbol associated with this plan or failure.
         class: SymbolId,
+        /// Declaration or member rejected by the current completion or typing operation.
         member: ClassMember,
+        /// Underlying typed failure reported by the delegated compiler phase.
         error: TyperError,
     },
 }

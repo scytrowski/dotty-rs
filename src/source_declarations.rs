@@ -9,21 +9,27 @@ use std::fmt;
 /// A canonical declaration tree and its symbol in the naming session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Declaration {
+    /// Canonical symbol entered for this declaration by the namer.
     pub symbol: SymbolId,
+    /// Original untyped definition tree bound to the symbol.
     pub tree: TreeId<Untyped>,
 }
 
 /// An initialized field or concrete method in the class body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClassMember {
+    /// An initialized source field in the class body.
     Field(Declaration),
+    /// A concrete source method in the class body.
     Method(Declaration),
 }
 
 /// IDs from a named class, in source order. All IDs refer to the caller's session.
 #[derive(Debug)]
 pub struct SourceClass {
+    /// Canonical class symbol entered by the namer.
     pub symbol: SymbolId,
+    /// Original untyped class definition tree bound to the symbol.
     pub tree: TreeId<Untyped>,
     /// Primary constructor symbol.
     pub constructor: SymbolId,
@@ -83,12 +89,16 @@ impl SourceClass {
 pub enum DeclarationError {
     /// A declaration or statement outside the supported source subset.
     Unsupported {
+        /// Identity of the original source file in this session.
         source: SourceId,
+        /// Source tree associated with the rejected declaration or binding.
         tree: TreeId<Untyped>,
     },
     /// A tree, symbol or owner is inconsistent with the naming inputs.
     InvalidBinding {
+        /// Identity of the original source file in this session.
         source: SourceId,
+        /// Source tree associated with the rejected declaration or binding.
         tree: TreeId<Untyped>,
     },
 }

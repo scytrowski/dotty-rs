@@ -13,18 +13,29 @@ pub struct Reader<'a> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Failure reading a bounded class-file byte region or decoding modified UTF-8.
 pub enum ReadError {
+    /// The requested reader range is reversed or exceeds the input buffer.
     InvalidRange {
+        /// Inclusive start offset of the requested range.
         start: usize,
+        /// Exclusive end offset of the requested range.
         end: usize,
+        /// Length of the collection being indexed.
         len: usize,
     },
+    /// The requested read exceeds the bounded input remaining.
     UnexpectedEof {
+        /// Byte offset at which the input or cursor check failed.
         offset: usize,
+        /// Number of bytes required to complete the read.
         needed: usize,
+        /// Number of bytes still available in the bounded reader.
         remaining: usize,
     },
+    /// The encoded string is not valid class-file modified UTF-8.
     InvalidModifiedUtf8 {
+        /// Byte offset at which the input or cursor check failed.
         offset: usize,
     },
 }
@@ -56,6 +67,7 @@ impl fmt::Display for ReadError {
 impl std::error::Error for ReadError {}
 
 impl<'a> Reader<'a> {
+    /// Creates a reader spanning the complete borrowed input, initially at byte zero.
     pub fn new(bytes: &'a [u8]) -> Self {
         Self {
             bytes,
@@ -64,6 +76,8 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// Creates a reader over the half-open byte range start..end. Rejects reversed ranges and
+    /// ranges beyond the buffer; positions remain relative to the original buffer.
     pub fn with_range(bytes: &'a [u8], start: usize, end: usize) -> Result<Self, ReadError> {
         if start > end || end > bytes.len() {
             return Err(ReadError::InvalidRange {
@@ -80,10 +94,12 @@ impl<'a> Reader<'a> {
         })
     }
 
+    /// Returns the current byte offset in the original input buffer.
     pub fn position(&self) -> usize {
         self.offset
     }
 
+    /// Returns the number of readable bytes before this reader's limit.
     pub fn remaining(&self) -> usize {
         self.limit - self.offset
     }
@@ -101,10 +117,13 @@ impl<'a> Reader<'a> {
         self.table_capacity(count.min(8), min_row_bytes)
     }
 
+    /// Returns whether the cursor has reached this reader's limit.
     pub fn is_at_end(&self) -> bool {
         self.offset == self.limit
     }
 
+    /// Borrows the next length bytes and advances on success. Returns UnexpectedEof without
+    /// advancing if the requested range overflows or exceeds this reader's limit.
     pub fn read_bytes(&mut self, length: usize) -> Result<&'a [u8], ReadError> {
         let end = self
             .offset
@@ -128,6 +147,9 @@ impl<'a> Reader<'a> {
         Ok(bytes)
     }
 
+    /// Reserves the next length bytes as an independent bounded reader and advances this reader
+    /// past them. A rejected range leaves this reader unchanged; the child reports offsets in the
+    /// original input buffer.
     pub fn read_sub_reader(&mut self, length: usize) -> Result<Reader<'a>, ReadError> {
         let start = self.offset;
         let end = start.checked_add(length).ok_or(ReadError::UnexpectedEof {
@@ -152,15 +174,21 @@ impl<'a> Reader<'a> {
         })
     }
 
+    /// Reads one unsigned byte, advancing on success. A short input returns UnexpectedEof without
+    /// advancing.
     pub fn read_u8(&mut self) -> Result<u8, ReadError> {
         Ok(self.read_bytes(1)?[0])
     }
 
+    /// Reads an unsigned 16-bit big-endian integer. A short input returns UnexpectedEof without
+    /// advancing.
     pub fn read_u16(&mut self) -> Result<u16, ReadError> {
         let bytes = self.read_bytes(2)?;
         Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
     }
 
+    /// Reads an unsigned 32-bit big-endian integer. A short input returns UnexpectedEof without
+    /// advancing.
     pub fn read_u32(&mut self) -> Result<u32, ReadError> {
         let bytes = self.read_bytes(4)?;
         Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))

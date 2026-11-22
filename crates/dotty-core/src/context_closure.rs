@@ -9,13 +9,22 @@ use crate::{
 /// Exact declarations and types retained by a unary contextual closure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CheckedUnaryContextClosure {
+    /// Typed declaration tree supplying this binding.
     pub definition: TreeId<Typed>,
+    /// Exact typed parameter declaration retained by this closure proof.
     pub parameter_tree: TreeId<Typed>,
+    /// Body tree or ordered body statements belonging to this node.
     pub body: TreeId<Typed>,
+    /// Method declaration identity being inspected in the supplied session.
     pub method: SymbolId,
+    /// Parameter identity in the canonical session symbol table.
     pub parameter: SymbolId,
+    /// Constructor declaration identity being inspected in the supplied session.
     pub constructor: SymbolId,
+    /// Input type passed to normalization or the enclosing operation.
     pub input: TypeId,
+    /// Result type in the same arena; further parameter clauses are represented by nested callable
+    /// types.
     pub result: TypeId,
 }
 

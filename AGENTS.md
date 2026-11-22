@@ -212,6 +212,48 @@ The project intentionally implements Scala semantics incrementally.
 
 Every behavior change must have regression coverage at the lowest useful layer.
 
+### Public API documentation
+
+Every item exposed to library consumers must have meaningful rustdoc, including
+public modules, types, traits, functions, methods, enum variants, and fields.
+Document the definition in its owning crate; a documented re-export does not
+replace documentation of the underlying API. Keep crate introductions and
+examples consistent with the implemented behavior when changing a public API.
+
+Explain caller obligations, session/arena identity, ownership and lifetimes,
+ordering requirements, supported subsets, errors, limits, and rollback or
+partial-mutation behavior where relevant. Document panics when an API can panic
+on a caller contract violation. Describe the actual contract rather than merely
+repeating an item's name. Keep unsupported behavior explicit.
+
+Use runnable rustdoc examples for supported workflows and test them with
+`cargo test --workspace --doc --all-features --locked`. Use self-contained inputs
+so examples also work from published packages; do not depend on repository-only fixtures,
+external JDKs, or a Scala checkout. Use `no_run` only when execution requires an
+external resource, explain why, and avoid `ignore` for examples that can be
+compiled and tested.
+
+Every published library denies `missing_docs` in its `src/lib.rs`, including
+component crates that define APIs re-exported by the root facade. The private
+pickler-oracle support library follows the same rule. The library-scoped lint
+does not impose crate documentation on integration-test harnesses. Keep this
+strict policy: document new and changed public items in their owning crate;
+do not silence missing documentation with broad allowances or hide
+consumer-facing APIs to satisfy the check.
+
+Each component's `src/guide.md` is included in its crate-level rustdoc and in
+published source archives. Keep these guides and package README links current.
+Preserve self-contained, runnable examples for component workflows, including
+error handling and the boundaries between structural, semantic, JVM, and Scala
+interoperability guarantees.
+
+Cargo also supports `missing_docs = "deny"` under `[lints.rust]` (or inherited
+workspace lints), applying it to every target in the opted-in package. The
+shared `[workspace.lints.rustdoc]` policy rejects broken and private intra-doc
+links for every workspace package through `[lints] workspace = true`. These lints
+check presence and link validity; reviewers must still verify documentation
+accuracy and usefulness.
+
 ### Focused tests first
 
 - Add a small unit test for the exact new behavior or bug before relying on a
@@ -259,9 +301,9 @@ reviewable behavior change.
 ## Required checks
 
 Use the toolchain pinned by `rust-toolchain.toml` (currently Rust 1.98.1 with
-rustfmt and Clippy) for local checks. The general Rust CI job currently installs
-stable; the JVM job explicitly invokes `+stable`. Python 3 is required for the
-frontend boundary guard.
+rustfmt and Clippy) for local checks. The general Rust CI job installs that
+pinned toolchain; the JVM job explicitly invokes `+stable`. Python 3 is required for the frontend
+boundary guard.
 
 The general CI job in `.github/workflows/ci.yml` enforces:
 
@@ -269,8 +311,9 @@ The general CI job in `.github/workflows/ci.yml` enforces:
 cargo fmt --all -- --check
 python3 tools/check-frontend-boundaries.py
 cargo clippy --workspace --all-targets --locked -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
 cargo test --workspace --all-targets --locked
+cargo test --workspace --doc --all-features --locked
 git diff --check
 ```
 

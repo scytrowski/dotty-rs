@@ -196,9 +196,17 @@ impl TryFrom<u16> for ConstantPoolIndexOperand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperandError {
     /// The requested local index does not fit the JVM's `u16` operand.
-    LocalIndexOutOfRange { index: usize },
+    LocalIndexOutOfRange {
+        /// Index into the enclosing table or parameter list, using that structure’s indexing
+        /// convention.
+        index: usize,
+    },
     /// Constant-pool index zero or 65535 cannot identify an entry.
-    InvalidConstantPoolIndex { index: u16 },
+    InvalidConstantPoolIndex {
+        /// Index into the enclosing table or parameter list, using that structure’s indexing
+        /// convention.
+        index: u16,
+    },
 }
 
 impl fmt::Display for OperandError {

@@ -11,6 +11,9 @@
 //! `docs/tasty-semantic-unpickler.md` for the compatibility gate and the
 //! supported/deferred boundary.
 
+#![deny(missing_docs)]
+#![doc = include_str!("guide.md")]
+
 mod annotated;
 mod ast_view;
 mod binders;

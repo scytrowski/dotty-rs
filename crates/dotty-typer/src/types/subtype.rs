@@ -26,52 +26,109 @@ pub enum TypeRelationError {
     /// Alias/proxy normalization failed before nominal rules could be applied.
     Normalization(TypeNormalizeError),
     /// A type shape lies outside the relation supported by this typer slice.
-    UnsupportedType { found: TypeId, expected: TypeId },
+    UnsupportedType {
+        /// Observed semantic type identity in the caller’s type arena.
+        found: TypeId,
+        /// Required semantic type identity in the caller’s type arena.
+        expected: TypeId,
+    },
     /// Resolving the canonical Java String type failed while relating a string
     /// constant to another type.
-    StringTypeResolution { error: ResolutionError },
+    StringTypeResolution {
+        /// Underlying typed failure; inspect it for the more specific cause.
+        error: ResolutionError,
+    },
     /// A class symbol referenced by a nominal type is not in the store.
-    UnknownClassSymbol { symbol: SymbolId },
+    UnknownClassSymbol {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+    },
     /// A nominal type reference targets a symbol that is not class-like or a
     /// type parameter.
-    NonClassLikeSymbol { symbol: SymbolId, kind: SymbolKind },
+    NonClassLikeSymbol {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+        /// Stable declaration category, independent of flags and visibility.
+        kind: SymbolKind,
+    },
     /// The class info needed to inspect parent declarations is not complete.
     ClassInfoUnavailable {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Completion state observed when a completed signature was required.
         state: SymbolInfoState,
     },
     /// A completed class points outside the type arena.
-    InvalidClassInfoType { symbol: SymbolId, info: TypeId },
+    InvalidClassInfoType {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+        /// Recorded signature or completion state of the canonical declaration.
+        info: TypeId,
+    },
     /// A completed class points at something other than `Type::ClassInfo`.
-    ClassInfoNotClassInfo { symbol: SymbolId, info: TypeId },
+    ClassInfoNotClassInfo {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+        /// Recorded signature or completion state of the canonical declaration.
+        info: TypeId,
+    },
     /// ClassInfo records an identity different from its owning symbol.
     MalformedClassInfoIdentity {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Class identity actually recorded in the class-info type.
         recorded_class: SymbolId,
     },
     /// ClassInfo points at a declaration scope outside the scope arena.
-    InvalidDeclarationScope { symbol: SymbolId, scope: ScopeId },
+    InvalidDeclarationScope {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+        /// Lookup-scope identity in the canonical session scope arena.
+        scope: ScopeId,
+    },
     /// A current source class's completed info does not use its named scope.
     MalformedClassInfoDeclarations {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Lookup scope containing the class declarations.
         declarations: ScopeId,
+        /// Required session scope identity, when an enclosing scope is expected.
         expected: Option<ScopeId>,
     },
     /// A class declaration scope contains a symbol outside the symbol arena.
     InvalidClassDeclarationSymbol {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Declaration identity or syntax node involved in this check.
         declaration: SymbolId,
     },
     /// A parent entry does not designate a class-like type.
-    MalformedParentType { ty: TypeId },
+    MalformedParentType {
+        /// Semantic type identity in the same session type arena.
+        ty: TypeId,
+    },
     /// A source class's parent view could not be instantiated.
-    ParentTypeAdaptation { symbol: SymbolId, error: TyperError },
+    ParentTypeAdaptation {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+        /// Underlying typed failure; inspect it for the more specific cause.
+        error: TyperError,
+    },
     /// An external applied generic class has no modeled parameter order.
-    ExternalGenericInstantiationDeferred { class: SymbolId },
+    ExternalGenericInstantiationDeferred {
+        /// Class declaration identity being inspected in the supplied session.
+        class: SymbolId,
+    },
     /// A class's canonical ordered parameter metadata is missing or malformed.
-    ClassTypeParameterMetadataUnavailable { class: SymbolId },
+    ClassTypeParameterMetadataUnavailable {
+        /// Class declaration identity being inspected in the supplied session.
+        class: SymbolId,
+    },
     /// A parent graph revisits a class along one inheritance path.
-    InheritanceCycle { symbol: SymbolId },
+    InheritanceCycle {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
+        symbol: SymbolId,
+    },
     /// The nominal inheritance path exceeds [`MAX_TYPE_RELATION_DEPTH`].
     TooDeep,
     /// The graph contains more distinct instantiated parent views than the

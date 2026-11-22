@@ -10,7 +10,13 @@ pub struct TextRange {
 /// Failure while constructing a source range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextRangeError {
-    EndBeforeStart { start: u32, end: u32 },
+    /// The exclusive end offset precedes the inclusive start.
+    EndBeforeStart {
+        /// Inclusive start offset of the requested range.
+        start: u32,
+        /// Exclusive end offset of the requested range.
+        end: u32,
+    },
 }
 
 impl fmt::Display for TextRangeError {

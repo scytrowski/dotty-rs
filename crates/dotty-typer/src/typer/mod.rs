@@ -71,26 +71,42 @@ pub use subtype::{
 pub enum OverloadRejection {
     /// This call's `ApplyKind` does not consume the candidate's current clause.
     ApplicationKindMismatch {
+        /// Ordinary or explicit contextual application syntax.
         application_kind: ApplyKind,
+        /// Ordinary, implicit, or contextual method-clause kind.
         method_kind: MethodKind,
     },
+    /// The argument count does not match this candidate's parameter clause.
     WrongArity {
+        /// Required argument or parameter count.
         expected: usize,
+        /// Observed argument or parameter count.
         actual: usize,
     },
+    /// An argument does not conform to this candidate's parameter type.
     ArgumentNonConformance {
+        /// Zero-based position in the corresponding ordered parameter, argument, or clause list.
         argument_index: usize,
+        /// Observed semantic type identity in the caller’s type arena.
         actual: TypeId,
+        /// Required semantic type identity in the caller’s type arena.
         expected: TypeId,
     },
+    /// Supported inference could not determine this candidate's type arguments.
     TypeArgumentInferenceFailure {
+        /// Zero-based position in the corresponding ordered parameter, argument, or clause list.
         parameter_index: Option<usize>,
     },
+    /// An inferred or explicit type argument violates a declared bound.
     TypeArgumentBoundViolation {
+        /// Zero-based position in the corresponding ordered parameter, argument, or clause list.
         parameter_index: usize,
+        /// Bound or producer side to which this failure applies.
         side: TypeArgumentBoundSide,
     },
+    /// The candidate has no complete callable signature.
     IncompleteSignature,
+    /// Evaluating this candidate requires unsupported typing semantics.
     UnsupportedSemantics,
 }
 

@@ -13,9 +13,13 @@ use dotty_classfile::access_flags::ClassAccessFlags;
 /// reference, not a supertype cycle.
 #[derive(Debug, Clone)]
 pub struct InnerClassEntry {
+    /// Reference to the nested class.
     pub inner_class: ClassRef,
+    /// Reference to the enclosing class, when present.
     pub outer_class: Option<ClassRef>,
+    /// Simple nested-class name, absent for anonymous classes.
     pub inner_name: Option<String>,
+    /// Raw or typed JVM access flags; interpretation depends on the enclosing item.
     pub access_flags: ClassAccessFlags,
 }
 
@@ -31,6 +35,8 @@ pub struct InnerClassEntry {
 /// not a type link worth its own semantic model.
 #[derive(Debug, Clone)]
 pub struct EnclosingMethodRef {
+    /// Symbolic or resolved reference to the class.
     pub class: ClassRef,
+    /// Enclosing method name and descriptor, absent for class-level context.
     pub method: Option<(String, String)>,
 }

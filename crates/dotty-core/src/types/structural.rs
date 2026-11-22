@@ -34,7 +34,12 @@ pub const MAX_STRUCTURAL_DEPTH: usize = 256;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StructuralMemberLookup {
     /// The nearest enclosing refinement of `name`; its info, as stored.
-    Found { name: Name, info: TypeId },
+    Found {
+        /// Interned text identity and term/type namespace of the declaration or reference.
+        name: Name,
+        /// Recorded signature or completion state of the canonical declaration.
+        info: TypeId,
+    },
     /// No refinement in the graph names `name`.
     NotFound,
 }
@@ -43,9 +48,15 @@ pub enum StructuralMemberLookup {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StructuralLookupError {
     /// A type on the path is a binder slot that has not been filled yet.
-    Unfilled { ty: TypeId },
+    Unfilled {
+        /// Semantic type identity in the same session type arena.
+        ty: TypeId,
+    },
     /// A `RecThis` names a binder that is not a `Recursive`.
-    InvalidBinder { rec_this: TypeId },
+    InvalidBinder {
+        /// Recursive self reference in the current type binder.
+        rec_this: TypeId,
+    },
     /// The path is longer than [`MAX_STRUCTURAL_DEPTH`].
     TooDeep,
 }

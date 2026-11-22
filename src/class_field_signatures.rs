@@ -18,7 +18,9 @@ pub enum ClassFieldSignatureCompletion {
     Complete,
     /// This field needs the signature of a method or public field in another source of the batch.
     BlockedOn {
+        /// Canonical field symbol associated with this plan or failure.
         field: SymbolId,
+        /// Canonical member whose signature must be completed before retrying this field.
         dependency: SymbolId,
     },
 }
@@ -30,8 +32,11 @@ pub enum ClassFieldSignatureError {
     InvalidClass(SymbolId),
     /// The typer rejected this field in its declaring class.
     Field {
+        /// Canonical class symbol associated with this plan or failure.
         class: SymbolId,
+        /// Canonical field symbol associated with this plan or failure.
         field: SymbolId,
+        /// Underlying typed failure reported by the delegated compiler phase.
         error: TyperError,
     },
 }

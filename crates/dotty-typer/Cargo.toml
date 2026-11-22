@@ -24,3 +24,6 @@ dotty-lexer.workspace = true
 dotty-parser.workspace = true
 dotty-tasty.workspace = true
 dotty-tasty-unpickler.workspace = true
+
+[lints]
+workspace = true

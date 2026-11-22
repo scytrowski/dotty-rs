@@ -23,8 +23,11 @@ use super::{SourceMetadata, ValidationLimits};
 /// clause order; they are never inferred from names or derived class accessors.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrimaryConstructorInputPlan {
+    /// Declaration identity involved in the operation, relative to the caller’s symbol table.
     pub symbol: SymbolId,
+    /// Exact source tree root in the canonical session arena.
     pub source_tree: TreeId<Untyped>,
+    /// Canonical parameter symbols grouped by source clause, preserving order.
     pub parameter_clauses: Vec<Vec<SymbolId>>,
 }
 
@@ -32,9 +35,13 @@ pub struct PrimaryConstructorInputPlan {
 /// frontend. Semantic facts are read from the canonical symbol and source tree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ClassFieldPicklePlan {
+    /// Declaration identity involved in the operation, relative to the caller’s symbol table.
     pub symbol: SymbolId,
+    /// Exact source tree root in the canonical session arena.
     pub source_tree: TreeId<Untyped>,
+    /// Exact typed initializer root in the canonical session arena.
     pub typed_initializer: TreeId<Typed>,
+    /// Declared field type in the canonical type arena.
     pub declared_type: TypeId,
 }
 
@@ -51,15 +58,19 @@ pub struct DistinctReferenceMethodParameter {
 }
 
 impl DistinctReferenceMethodParameter {
+    /// Returns the original parameter identity in the validated session.
     pub fn symbol(&self) -> SymbolId {
         self.symbol
     }
+    /// Returns the original source parameter declaration root.
     pub fn source_tree(&self) -> TreeId<Untyped> {
         self.source_tree
     }
+    /// Returns the canonical semantic type of this validated parameter.
     pub fn ty(&self) -> TypeId {
         self.ty
     }
+    /// Returns the planned class identity designated by the parameter type.
     pub fn class(&self) -> SymbolId {
         self.class
     }
@@ -83,30 +94,43 @@ pub struct DistinctReferenceMethodSignature {
 }
 
 impl DistinctReferenceMethodSignature {
+    /// Returns the canonical method whose signature was validated.
     pub fn method(&self) -> SymbolId {
         self.method
     }
+    /// Returns the first original method formal. Successful validation guarantees at least one
+    /// parameter; use parameters for the full ordered list.
     pub fn parameter(&self) -> SymbolId {
         self.parameters[0].symbol
     }
+    /// Returns the canonical class type of the first formal. All formals in this proof share that
+    /// class.
     pub fn parameter_class(&self) -> SymbolId {
         self.parameters[0].class
     }
+    /// Returns the distinct planned class designated by the result type.
     pub fn result_class(&self) -> SymbolId {
         self.result_class
     }
+    /// Returns the canonical semantic type of the first formal.
     pub fn parameter_type(&self) -> TypeId {
         self.parameters[0].ty
     }
+    /// Borrows all original formal parameters in declaration order.
     pub fn parameters(&self) -> &[DistinctReferenceMethodParameter] {
         &self.parameters
     }
+    /// Returns the validated canonical result type.
     pub fn result_type(&self) -> TypeId {
         self.result_type
     }
+    /// Returns the original source RHS retained by the signature proof; the proof does not
+    /// validate its body semantics.
     pub fn source_rhs(&self) -> TreeId<Untyped> {
         self.source_rhs
     }
+    /// Returns the exact typed RHS paired with the source RHS; the signature proof alone does not
+    /// establish body support.
     pub fn typed_rhs(&self) -> TreeId<Typed> {
         self.typed_rhs
     }
@@ -201,9 +225,13 @@ impl ValidatedSameBatchReferenceField<'_, '_> {
 /// declaration scope is checked as a set and is never used to create order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClassMemberPicklePlan {
+    /// Field declaration and its exact typed initializer.
     Field(ClassFieldPicklePlan),
+    /// Method declaration and its exact typed body.
     Method {
+        /// Declaration identity involved in the operation, relative to the caller’s symbol table.
         symbol: SymbolId,
+        /// Exact source tree root in the canonical session arena.
         source_tree: TreeId<Untyped>,
     },
 }
@@ -213,16 +241,27 @@ pub enum ClassMemberPicklePlan {
 /// subsequent field and constructor emission increments while preserving the
 /// existing output path byte-for-byte.
 pub struct ClassStatePicklePlan<'a> {
+    /// Borrowed canonical semantic store; all plan identities must belong to it.
     pub store: &'a SemanticStore,
+    /// Builtin identities bootstrapped in the same semantic store.
     pub definitions: &'a Definitions,
+    /// Original untyped arena for the exact source compilation session.
     pub source_ast: &'a AstArena<Untyped>,
+    /// Typed arena paired with the original source arena.
     pub typed_ast: &'a AstArena<Typed>,
+    /// Canonical naming index for these source trees and symbols.
     pub source_index: &'a SourceSemanticIndex,
+    /// Source-to-typed binding evidence from the same frontend session.
     pub typed_bindings: &'a dyn SourceTypedBindings,
+    /// Source buffer identity and normalized relative path supplied by the producer.
     pub source: SourceMetadata,
+    /// Class declaration identity being inspected in the supplied session.
     pub class: SymbolId,
+    /// Original source class declaration root in the session arena.
     pub class_tree: TreeId<Untyped>,
+    /// Canonical constructor identity, source tree, and ordered input clauses.
     pub constructor: PrimaryConstructorInputPlan,
+    /// Fields and methods in original declaration order.
     pub members: &'a [ClassMemberPicklePlan],
 }
 
@@ -2233,6 +2272,7 @@ pub struct ValidatedClassStatePlan<'p, 'a> {
 }
 
 impl<'p, 'a> ValidatedClassStatePlan<'p, 'a> {
+    /// Borrows the original class-state plan retained by this validation receipt.
     pub fn plan(&self) -> &'p ClassStatePicklePlan<'a> {
         self.plan
     }
@@ -2713,6 +2753,9 @@ impl ClassStatePicklePlan<'_> {
         self.validate_with_limits(ValidationLimits::default())
     }
 
+    /// Validates class-state identities, source order, bindings, supported initializers, and
+    /// explicit work limits. Neither success nor failure mutates the semantic store or arenas;
+    /// rejection returns PickleError without artifacts.
     pub fn validate_with_limits(
         &self,
         limits: ValidationLimits,
