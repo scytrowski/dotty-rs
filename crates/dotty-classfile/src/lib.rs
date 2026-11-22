@@ -1,4 +1,4 @@
-//! JVM class-file reading and low-level binary-writing APIs.
+//! JVM class-file codecs, symbolic bytecode construction, and bounded analysis.
 //!
 //! Reference format: the class file format produced and consumed by JDK 26
 //! (class file major version 70), the current compatibility ceiling for
@@ -15,7 +15,7 @@
 //! `Module`, `ModulePackages`, and `ModuleMainClass` forms, plus opaque
 //! attributes. [`class_file::ClassFile::validate_module_descriptor`] applies
 //! explicit JPMS descriptor checks; no module graph is resolved. Bytecode
-//! remains byte-for-byte opaque, and recursive
+//! is preserved as raw bytes by this file-level codec, and recursive
 //! annotation values and nested Code/Record attributes are bounded by
 //! explicit depth limits.
 //! [`constant_pool_builder::ConstantPoolBuilder`] constructs a new basic
@@ -26,8 +26,10 @@
 //! interns symbolic references during final encoding, and keeps raw method
 //! code opaque without claiming JVM verifier correctness.
 //! [`writer::Writer`] provides primitive JVM-format writes and checked length
-//! prefixes. The crate does not perform semantic JVM verification or generate
-//! JVM code from Scala programs.
+//! prefixes. The separate [`bytecode`] APIs assemble symbolic instructions
+//! and analyze supported stack/local and control-flow states. Those bounded
+//! checks do not replace verification by an external JVM. This crate does not
+//! parse or type Scala source; source-to-JVM lowering belongs to `dotty-jvm`.
 
 pub mod access_flags;
 pub mod attribute;

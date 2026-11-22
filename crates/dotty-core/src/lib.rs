@@ -7,9 +7,12 @@
 //! TASTy's wire format, or type inference — see `docs/dotty-core-design.md`
 //! for the full design and the boundary with those crates.
 //!
-//! This crate is under active construction; the identity, name,
-//! source-position, type, symbol/scope, and AST phase layers exist so far.
-//! The parser and typer that will consume this crate do not exist yet.
+//! The source frontend, TASTy adapters, classpath loader, and bounded JVM
+//! backend consume this shared model. Start with [`SemanticStore`], bootstrap
+//! [`Definitions`] once, and retain canonical source/typed bindings when
+//! handing trees to later phases. IDs are arena-relative: callers must not mix
+//! same-slot IDs from independently allocated sessions. Unsupported semantics
+//! remain the responsibility of the consuming phase, not this foundational crate.
 
 pub mod ast;
 mod context_closure;

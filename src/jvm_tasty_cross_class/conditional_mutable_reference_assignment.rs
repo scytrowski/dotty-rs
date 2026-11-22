@@ -9,16 +9,27 @@ use dotty_core::ast::Modifier;
 /// assignment body. Local bindings must come from that session's SourceTyper.
 #[derive(Clone, Copy)]
 pub struct ConditionalMutableReferenceAssignmentProofInput<'session> {
+    /// Source identity shared by parsing, naming, and typing.
     pub source_id: SourceId,
+    /// Canonical untyped definition of the method being validated.
     pub method_tree: TreeId<Untyped>,
+    /// Canonical symbol, name, and type stores borrowed from the same session.
     pub store: &'session SemanticStore,
+    /// Primitive definitions bootstrapped in the supplied semantic store.
     pub definitions: &'session Definitions,
+    /// Original untyped arena containing the source roots in this proof.
     pub source_ast: &'session AstArena<Untyped>,
+    /// Exact typed arena containing the mapped roots in this proof.
     pub typed_ast: &'session TypedAst,
+    /// Canonical declaration and scope bindings from naming this source.
     pub source_index: &'session SourceSemanticIndex,
+    /// Exact source-to-typed mappings produced in this session.
     pub source_typed_index: &'session SourceTypedIndex,
+    /// Typer bindings for the two original locals, in source order; missing entries are rejected.
     pub original_bindings: [Option<TypedLocalBinding>; 2],
+    /// Typer-produced selected-local binding; absence is rejected by validation.
     pub selected_binding: Option<TypedLocalBinding>,
+    /// Complete JVM planning unit borrowing the same semantic and typed stores.
     pub jvm_unit: &'session JvmCompilationUnit<'session>,
 }
 
@@ -80,33 +91,43 @@ impl ValidatedConditionalMutableReferenceAssignmentProof<'_> {
         }
     }
 
+    /// Source identity shared by parsing, naming, and typing.
     pub const fn source_id(&self) -> SourceId {
         self.source_id
     }
+    /// Canonical owning class of the validated method.
     pub const fn owner(&self) -> SymbolId {
         self.owner
     }
+    /// Canonical method symbol retained by this proof.
     pub const fn method(&self) -> SymbolId {
         self.method
     }
+    /// Canonical lexical scope containing the validated local declaration.
     pub const fn scope(&self) -> dotty_core::ScopeId {
         self.scope
     }
+    /// Original source root for the conditional expression selecting or reassigning the reference.
     pub const fn source_if(&self) -> TreeId<Untyped> {
         self.source_if
     }
+    /// Exact mapped typed root for the conditional expression selecting or reassigning the reference.
     pub const fn typed_if(&self) -> TreeId<Typed> {
         self.typed_if
     }
+    /// Original source roots for the then and else reference assignments, in that order.
     pub const fn source_assignments(&self) -> [TreeId<Untyped>; 2] {
         self.source_assignments
     }
+    /// Exact mapped typed roots for the then and else reference assignments, in that order.
     pub const fn typed_assignments(&self) -> [TreeId<Typed>; 2] {
         self.typed_assignments
     }
+    /// Canonical selected local whose uses are authenticated by this proof.
     pub const fn selected(&self) -> SymbolId {
         self.selected
     }
+    /// Original local symbols read by the then and else assignments, respectively.
     pub const fn rhs_locals(&self) -> [SymbolId; 2] {
         self.rhs_locals
     }

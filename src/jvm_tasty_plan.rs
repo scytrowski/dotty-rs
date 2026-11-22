@@ -101,21 +101,35 @@ pub fn mutable_local_reference_assignment_binding(
 /// source. The debug-form payload retains the stage's exact diagnostic data.
 #[derive(Debug)]
 pub enum PairedPlanError {
+    /// Source text could not be represented by the frontend source model.
     SourceText(String),
+    /// Scanning failed or produced diagnostics outside the admitted source shape.
     Lexing(String),
+    /// Parsing produced diagnostics outside the admitted source shape.
     Parsing(String),
+    /// Declaration entry rejected the source batch.
     Naming(String),
+    /// The source is outside the explicitly supported paired-planning subset.
     UnsupportedSourceShape(&'static str),
+    /// Signature completion or expression typing rejected the source.
     Typer(TyperError),
+    /// The JVM backend rejected the canonical compilation plan.
     Jvm(dotty_jvm::JvmCodegenError),
+    /// Semantic TASTy plan validation or projection failed.
     Tasty(PickleError),
+    /// The JVM and semantic TASTy plans disagree on canonical identities or ABI.
     Contract(JvmTastyContractError),
     /// A batch member was rejected at a specific source declaration and
     /// planning phase. The batch API never returns earlier successful plans.
     BatchClass {
+        /// Zero-based class index in the ordered planning batch.
         class_index: usize,
+        /// Phase-local declaration location: class-tree arena index during class
+        /// planning, or zero-based body-member ordinal during member planning.
         declaration_index: usize,
+        /// Compiler or validation phase that rejected this batch.
         phase: &'static str,
+        /// Owned diagnostic description retained after the failed planning attempt.
         reason: String,
     },
     /// A source unit cannot be represented by the bounded batch planner.
@@ -123,7 +137,9 @@ pub enum PairedPlanError {
     /// A validation failure applies to the complete source batch rather than
     /// to one class plan, so it cannot be attributed to a class receipt.
     BatchUnit {
+        /// Compiler or validation phase that rejected this batch.
         phase: &'static str,
+        /// Owned diagnostic description retained after the failed planning attempt.
         reason: String,
     },
 }
@@ -156,6 +172,7 @@ pub struct PairedJvmTastyClassPlan<'session> {
     pub source_member_order: Vec<SymbolId>,
     /// Relative artifact paths intended by the validated plans.
     pub classfile_path: String,
+    /// Relative .tasty sidecar path associated with the JVM class.
     pub tasty_path: String,
 }
 

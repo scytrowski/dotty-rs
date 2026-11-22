@@ -12,9 +12,11 @@
 //! its validating variants for read-only inspection. Use [`TastyFileBuilder`]
 //! and the owned encoded section types when constructing a new file. Raw
 //! nodes and sections remain available when a semantic interpretation is not
-//! implemented. The codec targets TASTy 3.9.0 (format 28.9.0); compatibility
+//! implemented. The codec targets Scala 3.9.0 (TASTy format 28.9.0); compatibility
 //! with another format must be requested explicitly through the compatible
-//! APIs.
+//! APIs. Structural validity is distinct from semantic completion or proof
+//! that a Scala compiler can consume a newly produced file. Semantic unpickling
+//! and pickling are separate adapter crates.
 
 /// Raw and structured AST nodes, tags, references, and AST indexes.
 pub mod ast;

@@ -212,6 +212,42 @@ The project intentionally implements Scala semantics incrementally.
 
 Every behavior change must have regression coverage at the lowest useful layer.
 
+### Public API documentation
+
+Every item exposed to library consumers must have meaningful rustdoc, including
+public modules, types, traits, functions, methods, enum variants, and fields.
+Document the definition in its owning crate; a documented re-export does not
+replace documentation of the underlying API. Keep crate introductions and
+examples consistent with the implemented behavior when changing a public API.
+
+Explain caller obligations, session/arena identity, ownership and lifetimes,
+ordering requirements, supported subsets, errors, limits, and rollback or
+partial-mutation behavior where relevant. Document panics when an API can panic
+on a caller contract violation. Describe the actual contract rather than merely
+repeating an item's name. Keep unsupported behavior explicit.
+
+Use runnable rustdoc examples for supported workflows and test them with
+`cargo test --workspace --doc --locked`. Use self-contained inputs so examples
+also work from published packages; do not depend on repository-only fixtures,
+external JDKs, or a Scala checkout. Use `no_run` only when execution requires an
+external resource, explain why, and avoid `ignore` for examples that can be
+compiled and tested.
+
+The root library denies `missing_docs` in `src/lib.rs`, so its own undocumented
+public items fail compilation without applying that lint to integration-test
+harnesses. This lint does not check definitions re-exported from other crates;
+component crates still have legacy gaps and need their own strict policy as
+documentation is completed. Preserve this enforcement, document new component
+APIs even where legacy documentation is incomplete, and extend strict linting
+as those components are completed. Do not silence missing documentation with
+broad lint allowances or hide consumer-facing APIs to satisfy the check.
+
+Cargo also supports `missing_docs = "deny"` under `[lints.rust]` (or inherited
+workspace lints), applying it to every target in the opted-in package. The
+shared `[workspace.lints.rustdoc]` policy rejects broken and private intra-doc
+links for inheriting packages. These lints check presence and link validity;
+reviewers must still verify documentation accuracy and usefulness.
+
 ### Focused tests first
 
 - Add a small unit test for the exact new behavior or bug before relying on a
@@ -271,6 +307,7 @@ python3 tools/check-frontend-boundaries.py
 cargo clippy --workspace --all-targets --locked -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 cargo test --workspace --all-targets --locked
+cargo test --workspace --doc --locked
 git diff --check
 ```
 

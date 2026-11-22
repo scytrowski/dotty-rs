@@ -221,7 +221,8 @@ independent of the JVM adapters; see the
 
 Generate local API documentation from the repository root with
 `cargo doc --workspace --no-deps --locked`. The root library's entry page is
-`target/doc/dotty/index.html`.
+`target/doc/dotty/index.html` and includes the [API guide](src/guide.md), with
+executable examples and session/failure contracts.
 
 ## Build and validate
 
@@ -235,6 +236,7 @@ python3 tools/check-frontend-boundaries.py
 cargo clippy --workspace --all-targets --locked -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 cargo test --workspace --all-targets --locked
+cargo test --workspace --doc --locked
 git diff --check
 ```
 
