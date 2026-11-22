@@ -5,6 +5,7 @@ use crate::namer::{
     name_compilation_unit_with_diagnostics,
 };
 use crate::parser::ParseResult;
+use crate::source_declarations::{DeclarationError, SourceClass, source_classes};
 use crate::{ParsedSource, SyntaxDiagnostic};
 
 /// Typed outcome of a file that could not enter naming successfully.
@@ -97,7 +98,72 @@ pub struct NamedSource {
     diagnostics: Vec<NamerDiagnostic>,
 }
 
+/// An ordinary-class projection of one named file, in source declaration order.
+#[derive(Debug)]
+pub struct NamedClassSource {
+    named: NamedSource,
+    classes: Vec<SourceClass>,
+}
+
+impl NamedClassSource {
+    /// Original syntax and naming bindings used to build this projection.
+    pub fn named(&self) -> &NamedSource {
+        &self.named
+    }
+
+    /// Top-level ordinary classes in this unit and their canonical members.
+    pub fn classes(&self) -> &[SourceClass] {
+        &self.classes
+    }
+}
+
+/// A rejected ordinary-class projection. Naming has already committed successfully.
+#[derive(Debug)]
+pub struct ClassProjectionError {
+    /// Original typed rejection and its declaration tree.
+    pub error: DeclarationError,
+    /// Complete named file, still usable through its original index and syntax.
+    pub named: Box<NamedSource>,
+}
+
+impl std::fmt::Display for ClassProjectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for ClassProjectionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
 impl NamedSource {
+    /// Projects ordinary top-level classes with the same session's store, using
+    /// [`source_classes`]. On rejection the error returns this entire named unit.
+    /// Projection reads the store and preserves all committed naming state.
+    pub fn into_classes(
+        self,
+        store: &SemanticStore,
+    ) -> Result<NamedClassSource, ClassProjectionError> {
+        match source_classes(
+            &self.syntax.ast,
+            self.syntax.root,
+            self.source(),
+            &self.index,
+            store,
+        ) {
+            Ok(classes) => Ok(NamedClassSource {
+                named: self,
+                classes,
+            }),
+            Err(error) => Err(ClassProjectionError {
+                error,
+                named: Box::new(self),
+            }),
+        }
+    }
+
     /// Source ID captured by the parser, including for a file without calls.
     pub fn source(&self) -> SourceId {
         self.syntax.call_names.source()
@@ -124,6 +190,52 @@ mod tests {
     use super::*;
     use crate::core::{Packages, SemanticStore, TreeKind};
 
+    #[test]
+    fn trait_rejection_returns_the_named_file_and_exact_declaration_site() {
+        let mut store = SemanticStore::new();
+        let mut packages = Packages::new();
+        let source = SourceId::from_index(9);
+        let name = |store: &mut SemanticStore, packages: &mut Packages, source, text: &str| {
+            crate::parse_source(source, text, Default::default())
+                .unwrap()
+                .bind(&mut store.names)
+                .name("Api.scala", store, packages)
+                .unwrap()
+        };
+        let text = "package demo\ntrait T";
+        let unit = name(&mut store, &mut packages, source, text);
+        let checkpoint = store.checkpoint();
+        let failure = unit.into_classes(&store).unwrap_err();
+        let DeclarationError::Unsupported { tree, source: id } = failure.error else {
+            panic!("expected unsupported trait")
+        };
+        assert_eq!(id, source);
+        let named = failure.named;
+        let symbol = named.index().symbol_at(source, tree).unwrap();
+        assert_eq!(
+            store.symbols.get(symbol).kind,
+            crate::core::SymbolKind::Trait
+        );
+        assert_eq!(store.checkpoint(), checkpoint);
+        let span = failure.error.location(&named.syntax().ast).unwrap();
+        let range = span.span().range();
+        assert_eq!(
+            &text[range.start() as usize..range.end() as usize],
+            "trait T"
+        );
+        let mut other = name(
+            &mut store,
+            &mut packages,
+            SourceId::from_index(10),
+            "package demo\nclass U",
+        );
+        assert_eq!(failure.error.location(&other.syntax().ast), None);
+        other.index = Box::default();
+        assert!(matches!(
+            other.into_classes(&store).unwrap_err().error,
+            DeclarationError::InvalidBinding { .. }
+        ));
+    }
     #[test]
     fn syntax_and_naming_rejections_preserve_their_payloads_and_session() {
         let mut store = SemanticStore::new();

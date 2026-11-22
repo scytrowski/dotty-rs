@@ -52,7 +52,7 @@ mod member_signature;
 pub use member_signature::{MemberSignatureError, try_complete_member_signature};
 
 mod named_source;
-pub use named_source::{NameSourceError, NamedSource};
+pub use named_source::{ClassProjectionError, NameSourceError, NamedClassSource, NamedSource};
 
 mod source_parse;
 pub use source_parse::{DetachedSource, ParsedSource, SyntaxDiagnostic, parse_source};
