@@ -255,3 +255,43 @@ fn missing_and_ambiguous_searches_report_their_own_clause_and_rollback() {
         }
     }
 }
+
+#[test]
+fn legacy_getter_preserves_two_distinct_ordinary_clauses() {
+    with_client("legacyFallback", |typer, root, _| {
+        let ast = typer.typed_ast();
+        let (call, [receiver, x, y]) = shared_operands(typer, root, ["reader", "next", "next"]);
+        assert_ne!(x, y);
+        let last = application(ast, call);
+        assert_eq!(last.kind, ApplyKind::Using);
+        assert_getter(typer, last.function, last.args[0], 2);
+        let second = application(ast, last.function);
+        let first = application(ast, second.function);
+        let TreeKind::Select(sel) = &ast.get(first.function).kind else {
+            panic!("legacy")
+        };
+        assert_eq!(reference(typer, sel.qualifier), receiver);
+        assert_eq!(reference(typer, first.args[0]), x);
+        assert_eq!(reference(typer, second.args[0]), y);
+    });
+}
+
+#[test]
+fn legacy_evidence_can_be_inferred_or_written_and_ambiguity_blocks_the_getter() {
+    for (name, kind, witness) in [
+        ("legacySupplied", ApplyKind::Regular, 1),
+        ("legacyExplicit", ApplyKind::Using, 2),
+    ] {
+        with_client(name, |typer, root, params| {
+            let ast = typer.typed_ast();
+            let last = application(ast, root);
+            assert_eq!(last.kind, kind);
+            assert_eq!(reference(typer, last.args[0]), params[witness]);
+            let second = application(ast, last.function);
+            let first = application(ast, second.function);
+            assert_int(ast, first.args[0], 1);
+            assert_int(ast, second.args[0], 2);
+        });
+    }
+    assert_binary_ambiguity(ERRORS, "legacyAmbiguous");
+}

@@ -325,7 +325,8 @@ pub(crate) struct DecodedTastyMethod {
     pub name: String,
     pub flags: MethodAccessFlags,
     pub contextual_flags: SymbolFlags,
-    pub contextual_clauses: Option<Vec<(dotty_core::MethodKind, usize)>>,
+    /// Wire clause boundaries for contextual methods and their linked getters.
+    pub term_clauses: Option<Vec<(MethodKind, usize)>>,
     /// Exact flattened term parameter address selected by a singleton result.
     pub singleton_result_parameter: Option<usize>,
     /// Method-local type parameters, in their TASTy header order. Type
@@ -3010,14 +3011,13 @@ fn contextual_flags(tail: &[DefinitionTail<'_>]) -> SymbolFlags {
     symbol_flags(tail).intersection(SymbolFlags::GIVEN | SymbolFlags::IMPLICIT)
 }
 
-/// Preserve the wire order and boundaries whenever any clause supplies context.
-fn contextual_clauses(
+/// Read ordered term clauses, including explicit empty clauses.
+fn term_clauses(
     items: &[dotty_tasty::tasty::DefDefHeaderItem<'_>],
-) -> Result<Option<Vec<(dotty_core::MethodKind, usize)>>, TastyDecodeError> {
+) -> Result<Vec<(MethodKind, usize)>, TastyDecodeError> {
     use dotty_tasty::tasty::DefDefHeaderItem;
     let mut clauses = Vec::new();
     let mut open = false;
-    let mut contextual = false;
     for item in items {
         match item {
             DefDefHeaderItem::Parameter(param @ ParameterNode::TermParam { .. }) => {
@@ -3030,7 +3030,6 @@ fn contextual_clauses(
                     } else {
                         MethodKind::Plain
                     };
-                    contextual |= kind != MethodKind::Plain;
                     clauses.push((kind, 0));
                     open = true;
                 }
@@ -3043,7 +3042,7 @@ fn contextual_clauses(
             _ => open = false,
         }
     }
-    Ok(contextual.then_some(clauses))
+    Ok(clauses)
 }
 
 /// Reconstructs every `ValDef`/`DefDef` directly in `stats` (a class's
@@ -3087,14 +3086,12 @@ fn decode_members(
     let mut first_after_context = HashMap::new();
     for target in definitions.filter(|node| ordinary_targets.contains(&node.offset)) {
         let header = target.decode_defdef_body()?;
-        if let Some(clauses) = contextual_clauses(&header.header_items)? {
-            let mut ordinal = 0;
-            for (kind, len) in clauses {
-                ordinal += len;
-                if kind != MethodKind::Plain {
-                    first_after_context.insert(target.offset, ordinal);
-                    break;
-                }
+        let mut ordinal = 0;
+        for (kind, len) in term_clauses(&header.header_items)? {
+            ordinal += len;
+            if kind != MethodKind::Plain {
+                first_after_context.insert(target.offset, ordinal);
+                break;
             }
         }
     }
@@ -3281,10 +3278,12 @@ fn decode_members(
                         0,
                     )
                 };
-                let has_term_clause = body
-                    .parameters()
-                    .any(|parameter| matches!(parameter, ParameterNode::TermParam { .. }))
-                    || body.clauses().any(|tag| tag == EMPTYCLAUSE_TAG);
+                let clauses = term_clauses(&body.header_items)?;
+                let has_term_clause = !clauses.is_empty();
+                // A getter for a trailing implicit may copy only ordinary clauses.
+                // A getter with no term clauses keeps its parameterless result type.
+                let preserve_clauses = (default_for.is_some() && has_term_clause)
+                    || clauses.iter().any(|(kind, _)| *kind != MethodKind::Plain);
 
                 methods.push(DecodedTastyMethod {
                     offset: node.offset,
@@ -3297,7 +3296,7 @@ fn decode_members(
                             | SymbolFlags::INLINE
                             | SymbolFlags::TRANSPARENT,
                     ),
-                    contextual_clauses: contextual_clauses(&body.header_items)?,
+                    term_clauses: preserve_clauses.then_some(clauses),
                     singleton_result_parameter,
                     type_parameters,
                     parameters: decoded_parameters,
@@ -5292,6 +5291,23 @@ mod tests {
                 .methods
                 .iter()
                 .any(|m| m.default_for == Some((plain.offset, 0)))
+        );
+    }
+
+    #[test]
+    fn binary_legacy_default_getter_keeps_both_ordinary_parameter_lists() {
+        let bytes = include_bytes!(
+            "../../dotty-typer/tests/fixtures/contextual-arguments/binary/defaults/ClauseReader.tasty"
+        );
+        let reader = decode(bytes, &BinaryName::from_internal("defaults/ClauseReader")).unwrap();
+        let getter = reader
+            .methods
+            .iter()
+            .find(|m| m.name == "legacy$default$3")
+            .unwrap();
+        assert_eq!(
+            getter.term_clauses.as_deref(),
+            Some([(MethodKind::Plain, 1); 2].as_slice())
         );
     }
 

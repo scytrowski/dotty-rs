@@ -10,3 +10,6 @@ class ClauseClient:
   def next(): Int = 1
   def effects(): Int = reader().fold(using seed())(next())()
   def empty(r: ClauseReader)(using n: Int, flag: Boolean): Int = r.finish(3)()()
+  def legacyFallback(): Int = reader().legacy(next())(next())
+  def legacySupplied(r: ClauseReader)(using n: Int): Int = r.legacy(1)(2)
+  def legacyExplicit(r: ClauseReader)(using a: Int, b: Int): Int = r.legacy(1)(2)(using b)
