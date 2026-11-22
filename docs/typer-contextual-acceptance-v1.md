@@ -86,7 +86,10 @@ with `--require-parity` on pull requests targeting `main` and pushes to
 `main` that change the frontend or its audit dependencies. It can also be
 started manually in GitHub Actions. The same job also compares the contextual
 consumer fixtures with the pinned compiler, including extension overload groups
-in both declaration orders, explicit `using` and inherited overloads. These
+in both declaration orders, explicit `using` and inherited overloads. The
+contextual argument fixtures check binary defaults by rebuilding the library,
+comparing its TASTy bytes, and compiling separate positive and negative clients.
+Rust tests check the identity and evaluation order of the typed operands. These
 controls are reported separately from the eleven v1 observations.
 
 Use JDK 21, a checkout of the revision above and the cached artifacts specified
