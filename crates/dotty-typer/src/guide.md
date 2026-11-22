@@ -51,6 +51,13 @@ remain. Preserve the exact typed arena and source-to-typed bindings for later
 backend or pickler planning. A same-slot foreign arena ID cannot be
 authenticated by range checks.
 
+For a rejected term application, match [`TyperError::ApplicationArityMismatch`]
+to inspect the argument counts or [`TyperError::ApplicationArgumentTypeMismatch`]
+to inspect the zero-based argument index. Both expose stable categories through
+[`TyperError::call_error_code`]. An argument type mismatch owns its expected and
+actual type descriptions at the point of failure. Use those for presentation
+after rollback, since the failed attempt's type slots may have been reused.
+
 Read committed warnings with [`SourceTyper::diagnostics`] or drain them with
 [`SourceTyper::take_diagnostics`]. Match the [`TyperWarning`] payload to
 classify a warning. Its range is measured in UTF-8 bytes in the typer’s source

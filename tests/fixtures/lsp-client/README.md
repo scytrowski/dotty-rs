@@ -21,10 +21,14 @@ diagnostic. The test runs with UTF-8 and UTF-16 positions and an emoji before
 the call. A second scenario checks an inferred field in Consumer.scala against
 a method in Provider.scala in both file orders. Signature and body checking
 report one error at `provider.value(1)`. Editing it to `provider.value()`
-clears the diagnostic. The fixture gets these reports from
-`MemberSignatureError::diagnostic` and `ClassBodyError::diagnostic`.
-For a header error in `extends Base(start)`, the fixture uses
-`TypingDiagnostic::from_typer`. A protocol test checks that the marker on the
+clears the diagnostic. The fixture obtains owned call errors through
+`MemberSignatureError::into_call_diagnostic` and `ClassBodyError::into_call_diagnostic`.
+Within one analysis it suppresses a body retry when the signature already
+produced the same `CallErrorIdentity`. It publishes the code and formats the
+message when sending diagnostics. Two inferred fields with matching bad calls
+retain independent markers as each field is repaired.
+For a header error in `extends Base(start)`, it retains the raw typer failure
+through `CallDiagnostic::from_typer`. A protocol test checks that the marker on the
 parent argument clears after an unsaved edit to the constructor parameter type.
 When no source range is available, it sends the message to the editor log
 and leaves the document free of a marker for that error.
