@@ -4,6 +4,14 @@ This report measures the source parser after the parser backlog through issue
 #193. It is an evidence-based gate for the implemented parser subset, not a
 claim of complete Scala 3.9 grammar support.
 
+The baseline and final counts below belong to the recorded revisions. Later
+sections add focused increments and follow-up evidence; the initial corpus
+totals are not a measurement of the release branch. Use the
+[parser design](parser-design-3.9.0.md),
+[runnable guide](../crates/dotty-parser/src/guide.md) and focused tests for the
+current parser contract. See the [documentation map](README.md) for how to read
+versioned reports.
+
 ## Reproduction and corpus
 
 Run from the dotty-rs checkout, with the pinned Scala 3.9.0 checkout available

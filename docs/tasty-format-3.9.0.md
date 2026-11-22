@@ -4,7 +4,14 @@ Status: working document for the Rust implementation.
 
 Normative source: [`TastyFormat.scala` from Scala 3.9.0](https://github.com/scala/scala3/blob/3.9.0/tasty/src/dotty/tools/tasty/TastyFormat.scala).
 
-This document describes the wire format. It is not yet a complete specification of the semantic Scala symbol model. Full compatibility will also require the implementations of `TastyReader`, the writer/serializer, and the compiler unpickler.
+This document describes the wire format implemented by `dotty-tasty`, not the
+Scala semantic symbol model. The workspace already includes structural reading
+and writing, [semantic unpickling](tasty-semantic-unpickler.md) and a
+[bounded semantic pickler](tasty-pickler-design.md). Their compatibility
+guarantees are separate: valid wire data alone does not establish semantic
+completion or acceptance by Scala. Start with the [public API](tasty-api.md)
+and [runnable codec guide](../crates/dotty-tasty/src/guide.md); the
+[documentation map](README.md) describes versioned evidence and validation.
 
 ## 1. Format model
 
@@ -475,8 +482,8 @@ The generic traversal stops at category-5 payloads.
 When a caller already knows the absolute start of a bounded payload,
 `RawTree::decode_with_base_offset()` and
 `RawTree::decode_with_max_depth_and_base_offset()` preserve that base in every
-decoded tree offset. This is the low-level primitive used by the future global
-nested-node index. `RawTree::nodes()` and `RawTree::visit_nodes()` expose those
+decoded tree offset. The file-level `TastyFile::ast_address_index()` supplies
+the global nested-node index. `RawTree::nodes()` and `RawTree::visit_nodes()` expose those
 visible `(tag, offset)` pairs in wire order, stopping at category-5 payload
 boundaries.
 
@@ -1091,17 +1098,17 @@ construction time can use `parse_and_validate_scala_3_9`. The
 `*_with_max_ast_index_depth` variants apply an explicit AST nesting limit while
 performing that eager validation.
 
-## 15. Implementation plan
+## 15. Implementation boundaries
 
-The first five stages below are implemented for the Scala 3.9.0 compatibility
-target. The checklist records the current boundary of this crate: it provides
-lossless wire and structural APIs, while a Scala semantic model remains a
-separate future layer.
+Stages 1–6 below are implemented for the Scala 3.9.0 compatibility target.
+The checklist records the boundary of this crate: it provides lossless wire
+and structural APIs. Semantic projection and production are implemented in
+separate crates, with their own supported subsets and validation gates.
 
-The workspace is named `dotty-rs`; the root `dotty` package is the public
-facade, while the implementation package is `dotty-tasty` under `crates/`.
-TASTy APIs are available under `dotty::tasty`, leaving the top-level namespace
-available for future compiler components.
+The root Cargo package is `dotty-rs`, exposing the Rust library `dotty`; the
+implementation package is `dotty-tasty` under `crates/`. Structural TASTy APIs
+are available under `dotty::tasty`. The facade also exposes source frontend,
+semantic adapter and JVM backend modules.
 
 ### Stage 1: container — complete
 
@@ -1159,9 +1166,16 @@ guessing their grammar.
 
 ### Stage 7: semantic model — separate scope
 
-- resolve names, symbols, types, and owners into a Scala-facing semantic API;
-- keep this layer separate from the TASTy wire/structural crate;
-- define explicit compatibility and fallback behavior for compiler evolution.
+- `dotty-core` owns the canonical names, symbols, types, scopes and shared AST;
+- `dotty-tasty-unpickler` projects supported decoded definitions and types into
+  that model and uses a caller-provided resolver for external references;
+- `dotty-tasty-pickler` validates borrowed semantic plans and emits supported
+  TASTy forms without assembling or rerunning the source frontend.
+
+These components exist; their bounded semantic support is not implied by the
+codec's complete assigned-tag coverage. The unpickler does not reconstruct
+typed method bodies, and a structural round trip does not prove Scala consumer
+compatibility for newly produced artifacts.
 
 ## 16. Points to confirm with Scala-generated fixtures
 
@@ -1179,10 +1193,12 @@ wire-level tests:
   `TARGETSIGNED` has dedicated structural tests, but is not emitted by the
   currently pinned local fixture corpus.
 
-The remaining compatibility work is not a wire-format assumption audit: it is
-the separate semantic symbol/type model described in Stage 7, plus validation
-that structured re-encoding is accepted by the Scala compiler.
+Semantic support and independent Scala acceptance are evaluated separately
+from these wire-format checks. See the [unpickler contract](tasty-semantic-unpickler.md),
+[testing strategy](testing-strategy.md) and
+[Rust-produced interoperability gate](tasty-pickler-interoperability.md) for
+their recorded scopes and evidence.
 
 The fixture suite should also round-trip every top-level AST through the
-structured encoder once its corresponding semantic node is supported. Raw
+structured encoder when its corresponding structured node is supported. Raw
 fallback nodes may remain opaque, but their bytes must still be preserved.

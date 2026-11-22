@@ -1,12 +1,16 @@
 # `dotty-parser` design for Scala 3.9.0
 
 Status: incremental parser implementation. This document describes the
-boundary and the deliberately small current grammar increment; it is not a
-promise of full Scala grammar coverage.
+shared token/AST boundary and supported grammar increments; it does not claim
+full Scala grammar coverage. Start with the
+[parser guide](../crates/dotty-parser/src/guide.md) for runnable usage and the
+[documentation map](README.md) for validation and compatibility evidence.
 
-The compatibility target is Scala 3.9.0 and TASTy format 28.9.0. Versioned
-parser behavior must be compared with the pinned Scala release rather than
-inferred from a newer compiler.
+The source-language target is Scala 3.9.0, pinned to revision
+`777528f19a58e794c9954a42f433373472ec57f8`. The parser does not read or emit
+TASTy; the semantic pickler's 28.9.0 output is a separate compatibility
+surface. Versioned parser behavior must be compared with the pinned Scala
+release rather than inferred from a newer compiler.
 
 ## Boundary and dependency direction
 
@@ -22,12 +26,13 @@ SourceText + dotty-core::TokenSource
              AstArena<Untyped>
 ```
 
-`dotty-parser` depends on `dotty-core` only. It does not depend on
-`dotty-lexer`, symbols, scopes, types, class loading, TASTy decoding, or
-typer state. The concrete lexer is replaceable because the parser consumes
-the shared `TokenSource` contract. Parser unit tests therefore use in-memory
-token sources; the differential tool may combine the real lexer and parser as
-a development-only integration.
+The parser's only production dependency is `dotty-core`. Parsing consumes its
+source, token, name and untyped AST contracts rather than performing symbol
+resolution, type checking, class loading or TASTy decoding. The concrete lexer
+is replaceable because the parser consumes the shared `TokenSource` contract.
+Parser unit tests use in-memory token sources; `dotty-lexer` is a dev dependency
+for the runnable guide, and integration tooling combines the real lexer and
+parser outside the production boundary.
 
 ## Parser state and ownership
 

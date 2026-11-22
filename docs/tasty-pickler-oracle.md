@@ -6,6 +6,12 @@ wire structure and the remaining metadata decision in the
 [pickler design](tasty-pickler-design.md). It does not implement a semantic pickler
 or change the source frontend, semantic store, JVM backend, or TASTy codec.
 
+The semantic pickler is now implemented in `dotty-tasty-pickler`. This document
+explains its independent Scala fixture/oracle infrastructure; the
+[interoperability gate](tasty-pickler-interoperability.md) separately checks
+actual Rust-produced bytes. Recorded generation runtimes and results apply to
+their named runs; see the [documentation map](README.md) for current CI tooling.
+
 ## Pinned inputs and fixture inventory
 
 The compiler is Scala **3.9.0**, source revision
@@ -104,7 +110,8 @@ program. It accepts only the bounded Answer shape with the expected provenance
 annotation, checks retained node addresses do not move, and validates the result.
 It retains the original name table and header UUID, with some now-unused names.
 It is not a fresh-label allocator, general AST editor, or proof of semantic
-pickling. Fresh Rust-generated output still requires #1194/#1195 validation.
+pickling. Fresh Rust-generated output is checked separately by the
+[producer interoperability gate](tasty-pickler-interoperability.md).
 
 ## Snapshots and comparison rules
 

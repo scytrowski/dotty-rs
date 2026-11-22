@@ -8,6 +8,12 @@ complete decode, trailing-byte check, constant-pool/reference validation, and
 representative attributes, descriptors, and generic signatures for each
 release.
 
+The filename is retained for existing links; the documented decoder ceiling
+is JDK 26. This is distinct from `dotty-jvm`, which currently emits class-file
+major 65 (Java 21). See the [class-file guide](../crates/dotty-classfile/src/guide.md),
+[encoder/verification contract](classfile-encoder.md) and
+[documentation map](README.md) for the separate API and validation surfaces.
+
 Normative sources: [Chapter 4, "The `class` File Format", Java Virtual Machine
 Specification, SE 26](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-4.html),
 with [Java Virtual Machine Specification, SE 21](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-4.html),

@@ -3,6 +3,11 @@
 This document describes the supported public surface of `dotty-tasty`, which
 is re-exported by the root crate as `dotty::tasty`.
 
+The [component guide](../crates/dotty-tasty/src/guide.md) is included in
+crate-level rustdoc and tested as a doctest. See the
+[documentation map](README.md) for semantic adapters and the guarantees they
+establish independently of this codec.
+
 ## Compatibility target
 
 The codec targets Scala 3.9.0 and TASTy format `28.9.0`. The default
@@ -33,15 +38,29 @@ encoded data and are suitable for programmatic construction.
 ## Typical read path
 
 ```rust
-use dotty::tasty::TastyFile;
+use dotty::tasty::{
+    EncodedSection, Header, NameTableBuilder, RawName, TastyFile, TastyFileBuilder,
+};
 
-let file = TastyFile::parse_and_validate_scala_3_9(bytes)?;
-let names = file.names();
-let asts = file.asts()?;
+let mut names = NameTableBuilder::new();
+let asts = names.intern(RawName::Utf8("ASTs".into()))?;
+let header = Header {
+    major_version: 28, minor_version: 9, experimental_version: 0,
+    tooling_version: "dotty-tasty example".into(), uuid: [0; 16],
+};
+let bytes = TastyFileBuilder::new(header, names.finish()?)
+    .with_section(EncodedSection::raw(asts, Vec::new()))
+    .encode_validated()?;
+let file = TastyFile::parse_and_validate_scala_3_9(&bytes)?;
 let encoded = file.encode()?;
 assert_eq!(encoded, bytes);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
+
+This constructs an empty structural container in memory. It demonstrates byte
+preservation and needs no repository fixture; it is not a Scala compilation
+unit or semantic producer output. The input bytes must outlive the borrowed
+file view.
 
 Use `parse` when validation is intentionally deferred. The
 `parse_and_validate_*` variants validate headers, name references, section
@@ -58,7 +77,9 @@ references, and AST references before returning the file view.
   access if a node is opaque or unsupported.
 - `TastyFile::encode_structured_relocated` re-encodes structured nodes and
   relocates AST references when node sizes change. Its guarantee is structural
-  and semantic compatibility, not byte identity.
+  preservation with relocated references, not byte identity or a general
+  Scala interoperability proof. The [testing strategy](testing-strategy.md)
+  distinguishes the additional corpus-specific semantic checks.
 - `TastyFile::encode_structured_relocated_with_identities` accepts reordered
   siblings. Build an `AstNodeIdentityMap` from the original address of every
   visible node in edited wire order. For example, if two adjacent subtrees

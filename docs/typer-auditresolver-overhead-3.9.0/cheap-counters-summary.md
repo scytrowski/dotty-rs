@@ -9,7 +9,7 @@ This focused profile is serial and opt-in. Times below describe the selected man
 - Host: `AMD Ryzen 9 7940HS w/ Radeon 780M Graphics`, 30582380 kB memory; build profile `test`; Cargo/test concurrency fixed at 1
 - Manifest files: 4; profiled method observations per run: 6; repetitions: 2
 - Exact audit integration-test binary prebuilt outside measured samples in 33 ms; measured invocations that rebuild are rejected.
-- Timing mode: `cheap_counters`; root method limit per file: `2`. Exact method identities/outcomes and match-probe selection are in [`methods.tsv`](methods.tsv), [`method-outcomes.tsv`](method-outcomes.tsv), and [`match-probes.tsv`](match-probes.tsv). A/B counters are in [`cheap-resolver.tsv`](cheap-resolver.tsv); full-mode wrapper, rollback, and classpath data are in [`audit-wrapper.tsv`](audit-wrapper.tsv), [`rollback.tsv`](rollback.tsv), and [`classpath-resources.tsv`](classpath-resources.tsv).
+- Timing mode: `cheap_counters`; root method limit per file: `2`. Exact method identities/outcomes and match-probe selection are in [`method-outcomes.tsv`](method-outcomes.tsv) and [`match-probes.tsv`](match-probes.tsv). A/B counters are in [`cheap-resolver.tsv`](cheap-resolver.tsv); full-mode wrapper, rollback, and classpath data are in [`audit-wrapper.tsv`](audit-wrapper.tsv), [`rollback.tsv`](rollback.tsv), and [`classpath-resources.tsv`](classpath-resources.tsv).
 - Cargo target cache by repetition: 1=warm, 2=warm. `cold` means no compiled local_definition_audit test binary existed in the selected target directory.
 - Input page-cache measurements: 1=warm-read-through (warmup 14 ms; resident bytes before/after setup unknown/122241024), 2=warm-read-through (warmup 14 ms; resident bytes before/after setup unknown/122241024). Warm mode reads the selected Scala sources, pinned Scala JARs, and JDK jmods before each sample, then records residency with `fincore`. Cold mode evicts only these selected inputs with POSIX_FADV_DONTNEED; it does not clear the system-wide cache.
 - `runner_overhead_ms` is cargo wall time minus the test's measured audit setup and source loop. It includes Cargo/test startup, sampler overhead, and test-side log emission. Captured bytes plus the Python log read/write times are recorded in `run-timings.tsv`; the cost of emitting each diagnostic line remains inside the process timing.
@@ -22,7 +22,7 @@ This focused profile is serial and opt-in. Times below describe the selected man
 
 ## Repetition timings
 
-See [`run-timings.tsv`](run-timings.tsv).
+See [`cheap-counters-run-timings.tsv`](cheap-counters-run-timings.tsv).
 
 Median / p95 selected-file wall time: 3818 / 4220 ms. Across repetitions, source typer setup plus method typing took 11799 ms; profile report generation took about 2 ms (semantic-to-profile-report ratio 5899.50:1).
 
@@ -109,7 +109,7 @@ Match selector and case typing run in a separate SourceTyper pass. These resolve
 
 - Rollback/checkpoint-range metrics: not captured.
 - Match-pass classpath responses: not captured.
-- Per-file phase and resolver rows: [`match-phases.tsv`](match-phases.tsv), [`match-resolver.tsv`](match-resolver.tsv), and [`match-resolver-wrappers.tsv`](match-resolver-wrappers.tsv).
+- The generated `match-phases.tsv` and `match-resolver.tsv` files are not checked in. Retained per-file wrapper observations are in [`match-resolver-wrappers.tsv`](match-resolver-wrappers.tsv).
 
 ## Classpath load counts
 
