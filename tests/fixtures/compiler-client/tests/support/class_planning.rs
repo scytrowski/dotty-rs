@@ -2,6 +2,7 @@
 use super::{
     NamedUnit, SignatureSources, class_plans, complete_signatures, name_units, parsing, type_bodies,
 };
+use crate::FixtureMethods;
 use dotty::core::{Definitions, Packages, SemanticStore, SourceId, TreeKind};
 use dotty::jvm_class_plan::{ClassPlanError, JvmClassPlanner};
 use dotty::jvm_method_plan::JvmMethodPlanner;
@@ -52,13 +53,13 @@ fn declaration_index_routes_identically_named_fields_to_their_own_class_and_file
     let (store, _, _, units) = body_units(VALID_B);
     let index = SourceDeclarationIndex::from_classes(
         &store,
-        units.iter().rev().flat_map(|unit| &unit.classes),
+        units.iter().rev().flat_map(|unit| unit.classes()),
     )
     .unwrap();
     let seeds: Vec<_> = units
         .iter()
         .map(|unit| {
-            let class = &unit.classes[0];
+            let class = &unit.classes()[0];
             let seed = class.fields().next().unwrap().symbol;
             assert_eq!(
                 store.names.resolve(store.symbols.get(seed).name.text()),
@@ -67,7 +68,7 @@ fn declaration_index_routes_identically_named_fields_to_their_own_class_and_file
             assert_eq!(
                 index.get(seed),
                 Some(SourceDeclaration {
-                    source: unit.source,
+                    source: unit.source(),
                     class: class.symbol,
                     kind: SymbolKind::Field,
                 })
@@ -96,11 +97,15 @@ fn member_signature_rejects_the_other_seed_before_and_after_completion() {
     let sources = SignatureSources::new(&units, &store);
     super::complete_headers(&sources, &mut store, defs, &packages, &mut |_, _| {}).unwrap();
     let (a, b) = (&units[0], &units[1]);
-    let seed = a.classes[0].fields().next().unwrap().symbol;
-    let other = b.classes[0].fields().next().unwrap().symbol;
+    let seed = a.classes()[0].fields().next().unwrap().symbol;
+    let other = b.classes()[0].fields().next().unwrap().symbol;
     for expected in [SymbolInfo::Missing, SymbolInfo::Complete(defs.int)] {
         let checkpoint = store.checkpoint();
-        for (ast, index) in [(&b.ast, &b.index), (&b.ast, &a.index), (&a.ast, &b.index)] {
+        for (ast, index) in [
+            (b.ast(), b.index()),
+            (b.ast(), a.index()),
+            (a.ast(), b.index()),
+        ] {
             let error = try_complete_member_signature(
                 seed,
                 &sources.declarations,
@@ -123,8 +128,8 @@ fn member_signature_rejects_the_other_seed_before_and_after_completion() {
             try_complete_member_signature(
                 seed,
                 &sources.declarations,
-                &a.ast,
-                &a.index,
+                a.ast(),
+                a.index(),
                 &mut store,
                 defs,
                 &packages
@@ -174,7 +179,7 @@ fn assert_error_text(
     let span = sources
         .error_span(error)
         .expect("source position for typer error");
-    assert_eq!(span.source(), unit.source);
+    assert_eq!(span.source(), unit.source());
     assert_eq!(
         dotty::core::SourceText::new(text)
             .unwrap()
@@ -197,7 +202,7 @@ fn name_error_at_last_use(text: &str, spelling: &str) -> dotty::typer::TyperErro
         .error_span(&error)
         .unwrap_or_else(|| panic!("missing position for {error:?}"));
     let start = text.rfind(spelling).unwrap() as u32;
-    assert_eq!(span.source(), unit.source);
+    assert_eq!(span.source(), unit.source());
     assert_eq!(
         span.span().range(),
         dotty::core::TextRange::new(start, start + spelling.len() as u32).unwrap()
@@ -259,9 +264,9 @@ fn field_and_local_value_errors_locate_the_initializer() {
         let units = std::slice::from_ref(&unit);
         complete_signatures(units, &mut store, defs, &packages).unwrap();
         let error = dotty::type_class_body(
-            &unit.classes[0],
-            &unit.ast,
-            &unit.index,
+            &unit.classes()[0],
+            unit.ast(),
+            unit.index(),
             &mut store,
             defs,
             &packages,
@@ -298,12 +303,12 @@ fn method_error_keeps_a_executable_and_b_unpublished() {
     let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
     let (mut output, mut bodies) = type_bodies(&units[..1], &mut store, defs, &packages, headers);
     let unit = &units[1];
-    let b = &unit.classes[0];
+    let b = &unit.classes()[0];
     let method = b.methods().next().unwrap();
     let error = dotty::type_class_body(
         b,
-        &unit.ast,
-        &unit.index,
+        unit.ast(),
+        unit.index(),
         &mut store,
         defs,
         &packages,
@@ -335,7 +340,7 @@ fn method_error_keeps_a_executable_and_b_unpublished() {
         text,
         "true",
     );
-    assert_eq!(dotty::typer_error_span(&error, &units[0].ast), None);
+    assert_eq!(dotty::typer_error_span(&error, units[0].ast()), None);
     assert_eq!(
         bodies.get(b.symbol).unwrap_err(),
         ClassPlanError::MissingClassBody(b.symbol)
@@ -350,7 +355,7 @@ fn method_error_keeps_a_executable_and_b_unpublished() {
     let artifact = plan
         .prepare_emission(&defs)
         .unwrap()
-        .emit_class(units[0].classes[0].symbol)
+        .emit_class(units[0].classes()[0].symbol)
         .unwrap();
     assert_eq!(
         super::run_java_client("surviving-body", "SurvivingClassClient", &[artifact]).trim(),
@@ -367,12 +372,12 @@ fn class_body_checks_interleaved_members_and_keeps_successes_after_a_failure() {
     );
     let mut headers =
         complete_signatures(std::slice::from_ref(&unit), &mut store, defs, &packages).unwrap();
-    let class = &unit.classes[0];
+    let class = &unit.classes()[0];
     let before = headers.arena.checkpoint();
     let first = dotty::type_class_body(
         class,
-        &unit.ast,
-        &unit.index,
+        unit.ast(),
+        unit.index(),
         &mut store,
         defs,
         &packages,
@@ -384,8 +389,8 @@ fn class_body_checks_interleaved_members_and_keeps_successes_after_a_failure() {
 
     let errors = dotty::check_class_body(
         class,
-        &unit.ast,
-        &unit.index,
+        unit.ast(),
+        unit.index(),
         &mut store,
         defs,
         &packages,
@@ -428,18 +433,34 @@ fn class_body_checks_interleaved_members_and_keeps_successes_after_a_failure() {
     assert_eq!(typed_methods, ["good"]);
 }
 
+// These two regressions deliberately corrupt a caller-owned declaration view.
+fn editable_classes(
+    unit: &NamedUnit,
+    store: &SemanticStore,
+) -> Vec<dotty::source_declarations::SourceClass> {
+    dotty::source_declarations::source_classes(
+        unit.ast(),
+        unit.named().syntax().root,
+        unit.source(),
+        unit.index(),
+        store,
+    )
+    .unwrap()
+}
+
 #[test]
 fn type_class_body_rejects_substituted_member_before_typing() {
-    let (mut store, defs, packages, mut unit) =
+    let (mut store, defs, packages, unit) =
         named("class A { def value(): Int = 40 }; class B { def value(): Int = 7 }");
-    unit.classes[0].members[0] = unit.classes[1].members[0];
-    let a = &unit.classes[0];
+    let mut classes = editable_classes(&unit, &store);
+    classes[0].members[0] = classes[1].members[0];
+    let a = &classes[0];
     let mut arena = dotty::core::AstArena::new();
     let before = arena.checkpoint();
     let error = dotty::type_class_body(
         a,
-        &unit.ast,
-        &unit.index,
+        unit.ast(),
+        unit.index(),
         &mut store,
         defs,
         &packages,
@@ -450,8 +471,8 @@ fn type_class_body_rejects_substituted_member_before_typing() {
     assert_eq!(arena.checkpoint(), before);
     let report = dotty::check_class_body(
         a,
-        &unit.ast,
-        &unit.index,
+        unit.ast(),
+        unit.index(),
         &mut store,
         defs,
         &packages,
@@ -472,8 +493,8 @@ fn planning_requires_b_and_recording_a_twice_preserves_the_first_body() {
     let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
     let (mut output, mut bodies) = type_bodies(&units[..1], &mut store, defs, &packages, headers);
     let unit = &units[0];
-    let a = &unit.classes[0];
-    let b = &units[1].classes[0];
+    let a = &unit.classes()[0];
+    let b = &units[1].classes()[0];
     assert_eq!(
         class_plans(&units, &bodies, &output, &store),
         Err(ClassPlanError::MissingClassBody(b.symbol))
@@ -481,9 +502,9 @@ fn planning_requires_b_and_recording_a_twice_preserves_the_first_body() {
 
     // A second output for A has no method mapping. Replacing the first would break planning.
     let typer = dotty::typer::SourceTyper::new_with_typed_ast(
-        &unit.ast,
-        unit.source,
-        &unit.index,
+        unit.ast(),
+        unit.source(),
+        unit.index(),
         &mut store,
         defs,
         &packages,
@@ -512,11 +533,11 @@ fn deferred_plans_keep_each_class_body_and_locals_after_extending_the_arena() {
     );
     let mut arena = AstArena::new();
     let mut bodies = Vec::new();
-    for class in &unit.classes {
+    for class in unit.classes() {
         let mut typer = SourceTyper::new_with_typed_ast(
-            &unit.ast,
-            unit.source,
-            &unit.index,
+            unit.ast(),
+            unit.source(),
+            unit.index(),
             &mut store,
             defs,
             &packages,
@@ -537,10 +558,10 @@ fn deferred_plans_keep_each_class_body_and_locals_after_extending_the_arena() {
         bodies.push((body, field, initializer, methods));
     }
 
-    let planner = JvmClassPlanner::new(&store, &unit.ast, &unit.index);
+    let planner = JvmClassPlanner::new(&store, unit.ast(), unit.index());
     for (i, (body, field, initializer, methods)) in bodies.iter().enumerate().rev() {
         let plan = planner
-            .plan_typed_class(&unit.classes[i], &arena, body)
+            .plan_typed_class(&unit.classes()[i], &arena, body)
             .unwrap();
         assert_eq!(
             (plan.fields[0].field, plan.fields[0].initializer),
@@ -560,7 +581,7 @@ fn deferred_plans_keep_each_class_body_and_locals_after_extending_the_arena() {
             assert_eq!(local.mutable, i == 1);
         }
     }
-    let [a, b] = &unit.classes[..] else {
+    let [a, b] = unit.classes() else {
         panic!("expected two classes")
     };
     assert_eq!(
@@ -578,7 +599,7 @@ fn typed_class_requires_canonical_method_mappings_even_with_matching_class_label
     use dotty::jvm_method_plan::MethodPlanError;
     let (mut store, defs, packages, unit) =
         named("class A { def value(): Int = 40 }; class B { def value(): Int = 7 }");
-    let [a, b] = &unit.classes[..] else {
+    let [a, b] = unit.classes() else {
         panic!("expected two classes")
     };
     let mut typer = unit.typer(&mut store, defs, &packages);
@@ -587,7 +608,7 @@ fn typed_class_requires_canonical_method_mappings_even_with_matching_class_label
         .unwrap();
     let (arena, mislabeled) = TypedClassBody::from_output(a, typer.into_typed_output());
     assert_eq!(
-        JvmClassPlanner::new(&store, &unit.ast, &unit.index).plan_typed_class(
+        JvmClassPlanner::new(&store, unit.ast(), unit.index()).plan_typed_class(
             a,
             &arena,
             &mislabeled
@@ -603,13 +624,13 @@ fn class_plans_require_exact_methods_and_restore_source_order() {
     let (mut store, defs, packages, unit) = named(
         "class A { def value(): Int = 17; def other(): Int = 5 }\nclass B { def value(): Int = 42 }",
     );
-    let class = unit.classes[0].symbol;
+    let class = unit.classes()[0].symbol;
     let mut typer = unit.typer(&mut store, defs, &packages);
     for method in unit.methods() {
         typer.type_method_definition(method.tree).unwrap();
     }
     let output = typer.into_typed_output();
-    let method_planner = JvmMethodPlanner::new(&store, &unit.ast, &unit.index, &output);
+    let method_planner = JvmMethodPlanner::new(&store, unit.ast(), unit.index(), &output);
     let plans: Vec<_> = unit
         .method_symbols()
         .map(|method| method_planner.plan(method).unwrap())
@@ -617,7 +638,7 @@ fn class_plans_require_exact_methods_and_restore_source_order() {
     let [first, second, foreign] = &plans[..] else {
         panic!("expected three methods")
     };
-    let planner = JvmClassPlanner::new(&store, &unit.ast, &unit.index);
+    let planner = JvmClassPlanner::new(&store, unit.ast(), unit.index());
 
     assert_eq!(
         planner.plan(class, [foreign.clone(), second.clone()]),
@@ -821,7 +842,7 @@ fn field_signature_retries_foreign_method_and_infers_int_in_both_orders() {
         );
         let consumer = &units[usize::from(provider_first)];
         let provider = &units[usize::from(!provider_first)];
-        let class = &consumer.classes[0];
+        let class = &consumer.classes()[0];
         let fields: Vec<_> = class.fields().collect();
         let answer = fields[1].symbol;
         let value = provider.method_symbol();
@@ -836,8 +857,8 @@ fn field_signature_retries_foreign_method_and_infers_int_in_both_orders() {
         let attempt = |store: &mut SemanticStore, schedule_value: bool| {
             dotty::try_complete_class_field_signatures(
                 class.symbol,
-                &consumer.ast,
-                &consumer.index,
+                consumer.ast(),
+                consumer.index(),
                 store,
                 defs,
                 &packages,
@@ -915,9 +936,9 @@ fn field_method_field_chain_infers_int_and_executes_in_both_file_orders() {
         } else {
             (&units[2], &units[0])
         };
-        let answer = caller.classes[0].fields().next().unwrap().symbol;
+        let answer = caller.classes()[0].fields().next().unwrap().symbol;
         let value = units[1].method_symbol();
-        let seed = leaves.classes[0].fields().next().unwrap().symbol;
+        let seed = leaves.classes()[0].fields().next().unwrap().symbol;
         let mut edges = Vec::new();
         let headers = super::complete_signatures_in_order(
             &units,
@@ -1085,12 +1106,12 @@ fn public_field_dependency_infers_both_signatures_in_either_file_order() {
             &mut store,
             &mut packages,
         );
-        let answer = units[usize::from(provider_first)].classes[0]
+        let answer = units[usize::from(provider_first)].classes()[0]
             .fields()
             .next()
             .unwrap()
             .symbol;
-        let seed = units[usize::from(!provider_first)].classes[0]
+        let seed = units[usize::from(!provider_first)].classes()[0]
             .fields()
             .next()
             .unwrap()
@@ -1142,13 +1163,13 @@ fn public_field_dependency_outside_the_batch_keeps_the_original_error() {
     )
     .unwrap();
     let consumer = &units[0];
-    let class = &consumer.classes[0];
+    let class = &consumer.classes()[0];
     let answer = class.fields().next().unwrap().symbol;
-    let seed = units[1].classes[0].fields().next().unwrap().symbol;
+    let seed = units[1].classes()[0].fields().next().unwrap().symbol;
     let error = dotty::try_complete_class_field_signatures(
         class.symbol,
-        &consumer.ast,
-        &consumer.index,
+        consumer.ast(),
+        consumer.index(),
         &mut store,
         defs,
         &packages,
@@ -1165,8 +1186,8 @@ fn public_field_dependency_outside_the_batch_keeps_the_original_error() {
     let error = dotty::try_complete_member_signature(
         answer,
         &batch,
-        &consumer.ast,
-        &consumer.index,
+        consumer.ast(),
+        consumer.index(),
         &mut store,
         defs,
         &packages,
@@ -1199,7 +1220,7 @@ fn public_field_dependency_completes_only_the_requested_provider_field() {
     // answer needs seed. Starting the entire Provider class here would revisit answer via echo.
     complete_signatures(&units, &mut store, defs, &packages).unwrap();
     for unit in &units {
-        for field in unit.classes[0].fields() {
+        for field in unit.classes()[0].fields() {
             assert_eq!(
                 store.symbols.info(field.symbol),
                 &SymbolInfo::Complete(defs.int)
@@ -1222,8 +1243,8 @@ fn public_field_cycle_reports_the_closed_symbol_path_in_either_order() {
             &mut store,
             &mut packages,
         );
-        let first = units[0].classes[0].fields().next().unwrap().symbol;
-        let second = units[1].classes[0].fields().next().unwrap().symbol;
+        let first = units[0].classes()[0].fields().next().unwrap().symbol;
+        let second = units[1].classes()[0].fields().next().unwrap().symbol;
         let error = complete_signatures(&units, &mut store, defs, &packages).unwrap_err();
         let super::SignatureError::Cycle(cycle) = error else {
             panic!("expected a field cycle, got {error:?}")
@@ -1266,9 +1287,9 @@ fn wrong_second_method_argument_points_to_true_in_both_file_orders() {
             panic!("expected a member signature error, got {error:?}");
         };
         let sources = SignatureSources::new(&units, &store);
-        let diagnostic = failure.diagnostic(|id| sources.by_source.get(&id).map(|u| &u.ast));
+        let diagnostic = failure.diagnostic(|id| sources.by_source.get(&id).map(|u| u.ast()));
         assert_eq!(diagnostic.message, "Expected Int, found Boolean");
-        assert_eq!(failure.diagnostic(|_| Some(&provider.ast)).location, None);
+        assert_eq!(failure.diagnostic(|_| Some(provider.ast())).location, None);
         let dotty::MemberSignatureError::Typing { member, error, .. } = failure else {
             panic!("expected a member typing error");
         };
@@ -1280,7 +1301,7 @@ fn wrong_second_method_argument_points_to_true_in_both_file_orders() {
             "{error:?}"
         );
         let span = diagnostic.location.unwrap();
-        assert_eq!(span.source(), consumer.source);
+        assert_eq!(span.source(), consumer.source());
         assert_eq!(
             dotty::core::SourceText::new(text)
                 .unwrap()
@@ -1288,7 +1309,7 @@ fn wrong_second_method_argument_points_to_true_in_both_file_orders() {
                 .unwrap(),
             "true"
         );
-        assert_eq!(dotty::typer_error_span(&error, &provider.ast), None);
+        assert_eq!(dotty::typer_error_span(&error, provider.ast()), None);
     }
 }
 
@@ -1323,17 +1344,17 @@ fn field_scheduler_reports_the_bad_call_in_consumer_in_both_orders() {
         let sources = SignatureSources::new(&units, &store);
         let consumer = sources.by_source[&consumer_file.0];
         let provider = sources.by_source[&provider_file.0];
-        let class = &consumer.classes[0];
+        let class = &consumer.classes()[0];
         let answer = class.fields().next().unwrap();
         let value = provider.method_symbol();
-        let TreeKind::ValDef(def) = &consumer.ast.get(answer.tree).kind else {
+        let TreeKind::ValDef(def) = &consumer.ast().get(answer.tree).kind else {
             panic!("expected answer field")
         };
         let rhs = def.rhs.unwrap();
         // Both files have a positioned node in the slot reported for the failed call.
         assert_eq!(
-            provider.ast.get(rhs).position.unwrap().source(),
-            provider.source
+            provider.ast().get(rhs).position.unwrap().source(),
+            provider.source()
         );
 
         let mut edges = Vec::new();
@@ -1354,7 +1375,7 @@ fn field_scheduler_reports_the_bad_call_in_consumer_in_both_orders() {
         let super::SignatureError::Member(failure) = error else {
             panic!("unexpected signature error for answer: {error:?}");
         };
-        let ast_for = |id| sources.by_source.get(&id).map(|u| &u.ast);
+        let ast_for = |id| sources.by_source.get(&id).map(|u| u.ast());
         let diagnostic = failure.diagnostic(ast_for);
         assert_eq!(diagnostic.severity, dotty::core::DiagnosticSeverity::Error);
         let span = diagnostic.location.expect("source of the failed call");
@@ -1374,7 +1395,7 @@ fn field_scheduler_reports_the_bad_call_in_consumer_in_both_orders() {
                 "Expected 0 arguments, got 1"
             )
         );
-        for ast in [Some(&provider.ast), None] {
+        for ast in [Some(provider.ast()), None] {
             let unlocated = failure.diagnostic(|_| ast);
             assert_eq!(unlocated.location, None);
             assert_eq!(unlocated.message, diagnostic.message);
@@ -1391,7 +1412,7 @@ fn field_scheduler_reports_the_bad_call_in_consumer_in_both_orders() {
             declaration,
             dotty::SourceDeclaration {
                 class: class.symbol,
-                source: consumer.source,
+                source: consumer.source(),
                 kind: dotty::core::SymbolKind::Field,
             }
         );
@@ -1424,8 +1445,8 @@ fn field_scheduler_reports_the_bad_call_in_consumer_in_both_orders() {
             else {
                 panic!("expected a call arity error: {error:?}")
             };
-            assert_eq!((*source, *tree_index), (consumer.source, rhs.index()));
-            assert_eq!(dotty::typer_error_span(&error, &provider.ast), None);
+            assert_eq!((*source, *tree_index), (consumer.source(), rhs.index()));
+            assert_eq!(dotty::typer_error_span(&error, provider.ast()), None);
             assert_eq!((*expected, *actual), (0, 1));
             assert_eq!(sources.error_span(&error), Some(span));
         }
@@ -1470,7 +1491,7 @@ fn assert_substituted_field_root_is_rejected(source: &str, target: usize) {
 
     let (mut store, defs, packages, unit) = named(source);
     complete_signatures(std::slice::from_ref(&unit), &mut store, defs, &packages).unwrap();
-    let class = &unit.classes[0];
+    let class = &unit.classes()[0];
     let mut typer = unit.typer(&mut store, defs, &packages);
     let fields: Vec<_> = class
         .fields()
@@ -1485,7 +1506,7 @@ fn assert_substituted_field_root_is_rejected(source: &str, target: usize) {
         typer.type_method_definition(method.tree).unwrap();
     }
     let output = typer.into_typed_output();
-    let planner = JvmMethodPlanner::new(&store, &unit.ast, &unit.index, &output);
+    let planner = JvmMethodPlanner::new(&store, unit.ast(), unit.index(), &output);
     let methods = class
         .methods()
         .map(|method| planner.plan(method.symbol).unwrap());
@@ -1503,7 +1524,7 @@ fn assert_substituted_field_root_is_rejected(source: &str, target: usize) {
     inputs[target].root = actual;
     let field = inputs[target].field;
     assert_eq!(
-        JvmClassPlanner::new(&store, &unit.ast, &unit.index).plan_with_fields(
+        JvmClassPlanner::new(&store, unit.ast(), unit.index()).plan_with_fields(
             class.symbol,
             methods,
             &output.typed_ast,
@@ -1528,9 +1549,9 @@ fn class_planner_rejects_nonordinary_parameters_and_multiple_lists() {
         "class C(using x: Int)",
     ] {
         let (store, _, _, unit) = named(source);
-        let class = unit.classes[0].symbol;
+        let class = unit.classes()[0].symbol;
         assert_eq!(
-            JvmClassPlanner::new(&store, &unit.ast, &unit.index).plan(class, []),
+            JvmClassPlanner::new(&store, unit.ast(), unit.index()).plan(class, []),
             Err(ClassPlanError::ConstructorParameters(class)),
             "{source}"
         );
@@ -1540,8 +1561,8 @@ fn class_planner_rejects_nonordinary_parameters_and_multiple_lists() {
 #[test]
 fn method_only_class_plan_preserves_constructor_formal_identity_and_order() {
     let (store, _, _, unit) = named("class Pair(z: Int, val a: Int, var b: Int)");
-    let class = &unit.classes[0];
-    let plan = JvmClassPlanner::new(&store, &unit.ast, &unit.index)
+    let class = &unit.classes()[0];
+    let plan = JvmClassPlanner::new(&store, unit.ast(), unit.index())
         .plan(class.symbol, [])
         .unwrap();
     let dotty::jvm::JvmClassInitializationPlan::PrimaryConstructor(constructor) =
@@ -1586,18 +1607,18 @@ fn method_only_class_plan_preserves_constructor_formal_identity_and_order() {
 fn class_planner_identifies_the_parameter_with_a_default() {
     for prefix in ["", "val ", "var "] {
         let (store, _, _, unit) = named(&format!("class C(x: Int, {prefix}y: Int = 3)"));
-        let class = &unit.classes[0];
+        let class = &unit.classes()[0];
         let Some(dotty::core::SourceDefinition::Canonical { tree, .. }) =
-            unit.index.definition_of(class.constructor)
+            unit.index().definition_of(class.constructor)
         else {
             panic!("expected a canonical constructor");
         };
-        let TreeKind::DefDef(constructor) = &unit.ast.get(tree).kind else {
+        let TreeKind::DefDef(constructor) = &unit.ast().get(tree).kind else {
             panic!("expected a constructor")
         };
         let parameter = constructor.value_param_clauses[0][1];
         assert_eq!(
-            JvmClassPlanner::new(&store, &unit.ast, &unit.index).plan(class.symbol, []),
+            JvmClassPlanner::new(&store, unit.ast(), unit.index()).plan(class.symbol, []),
             Err(ClassPlanError::DefaultConstructorParameter {
                 class: class.symbol,
                 tree: parameter
@@ -1620,8 +1641,10 @@ fn class_planner_rejects_template_initializer() {
         .pop()
         .unwrap()
         .bind(&mut store.names);
-    let (parsed, index) =
-        super::name_source(source, files[0].1, parsed, &mut store, &mut Packages::new()).unwrap();
+    let named = parsed
+        .name(files[0].1, &mut store, &mut Packages::new())
+        .unwrap();
+    let (parsed, index) = (named.syntax(), named.index());
     let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
         panic!("expected package")
     };
@@ -1632,7 +1655,7 @@ fn class_planner_rejects_template_initializer() {
         .find_map(|(id, node)| matches!(node.kind, TreeKind::Apply(_)).then_some(id))
         .unwrap();
     assert_eq!(
-        JvmClassPlanner::new(&store, &parsed.ast, &index).plan(class, []),
+        JvmClassPlanner::new(&store, &parsed.ast, index).plan(class, []),
         Err(ClassPlanError::UnsupportedStatement { class, tree })
     );
 }
@@ -1640,8 +1663,8 @@ fn class_planner_rejects_template_initializer() {
 #[test]
 fn class_planner_requires_a_public_constructor() {
     let (store, _, _, unit) = named("class A()\nclass B private ()");
-    let planner = JvmClassPlanner::new(&store, &unit.ast, &unit.index);
-    let [plain, private] = unit.classes.as_slice() else {
+    let planner = JvmClassPlanner::new(&store, unit.ast(), unit.index());
+    let [plain, private] = unit.classes() else {
         panic!("expected two classes")
     };
     let plan = planner.plan(plain.symbol, []).unwrap();
@@ -1662,8 +1685,8 @@ fn class_planner_rejects_parent_arguments_even_after_type_resolution() {
         named("class Base(x: Int)\nclass Derived(start: Int) extends Base(1)");
     let headers =
         complete_signatures(std::slice::from_ref(&unit), &mut store, defs, &packages).unwrap();
-    let child = unit.classes[1].symbol;
-    let planner = JvmClassPlanner::new(&store, &unit.ast, &unit.index);
+    let child = unit.classes()[1].symbol;
+    let planner = JvmClassPlanner::new(&store, unit.ast(), unit.index());
     assert_eq!(
         planner.plan(child, []),
         Err(ClassPlanError::UnsupportedTemplate(child))
@@ -1847,9 +1870,9 @@ fn header_chain_follows_dependencies_and_executes_in_both_file_orders() {
             },
         )
         .unwrap();
-        let first = units[0].classes[0].symbol;
-        let mid = units[1].classes[0].symbol;
-        let last = units[2].classes[0].symbol;
+        let first = units[0].classes()[0].symbol;
+        let mid = units[1].classes()[0].symbol;
+        let last = units[2].classes()[0].symbol;
         if files[0].0 == leaf.0 {
             assert_eq!(
                 attempts,
@@ -1900,10 +1923,10 @@ class Base(seed: Int) { private val initial = seed; def read(): Int = initial }"
             &mut store,
             &mut packages,
         );
-        let [leaf, mid] = units[derived_index].classes.as_slice() else {
+        let [leaf, mid] = units[derived_index].classes() else {
             panic!("expected Leaf and Mid in one file")
         };
-        let base = units[1 - derived_index].classes[0].symbol;
+        let base = units[1 - derived_index].classes()[0].symbol;
         let mut attempts = Vec::new();
         let headers = super::complete_signatures_in_order(
             &units,
@@ -1936,7 +1959,7 @@ class Base(seed: Int) { private val initial = seed; def read(): Int = initial }"
         let classes = super::named_classes(&units)
             .rev()
             .map(|(unit, class)| {
-                JvmClassPlanner::new(&store, &unit.ast, &unit.index)
+                JvmClassPlanner::new(&store, unit.ast(), unit.index())
                     .with_header_bindings(&output.arena, &output.bindings)
                     .plan_typed_class(class, &output.arena, bodies.get(class.symbol).unwrap())
                     .unwrap()
@@ -1989,8 +2012,8 @@ fn header_cycle_reports_only_the_active_cycle_and_leaves_headers_incomplete() {
         let super::SignatureError::Cycle(cycle) = error else {
             panic!("expected a cycle, got {error:?}");
         };
-        let first = units[cycle_start].classes[0].symbol;
-        let second = units[cycle_start + 1].classes[0].symbol;
+        let first = units[cycle_start].classes()[0].symbol;
+        let second = units[cycle_start + 1].classes()[0].symbol;
         assert_eq!(cycle.code(), "signature.header_cycle");
         assert_eq!(cycle.path(), [first, second, first]);
         let locations: Vec<_> = cycle.declarations(&store).collect();
@@ -2035,8 +2058,8 @@ fn wrong_parent_argument_reports_the_same_error_in_both_file_orders() {
             &mut store,
             &mut packages,
         );
-        let child = &units[child_index].classes[0];
-        let parent = units[parent_index].classes[0].symbol;
+        let child = &units[child_index].classes()[0];
+        let parent = units[parent_index].classes()[0].symbol;
         let mut blocked = Vec::new();
         let sources = SignatureSources::new(&units, &store);
         let error = super::complete_headers(
@@ -2067,7 +2090,7 @@ fn wrong_parent_argument_reports_the_same_error_in_both_file_orders() {
             "{error:?}"
         );
         let diagnostic = dotty::TypingDiagnostic::from_typer(&error, |id| {
-            sources.by_source.get(&id).map(|u| &u.ast)
+            sources.by_source.get(&id).map(|u| u.ast())
         });
         assert_eq!(diagnostic.message, "Expected Int, found Boolean");
         assert_eq!(diagnostic.severity, dotty::core::DiagnosticSeverity::Error);
@@ -2080,7 +2103,7 @@ fn wrong_parent_argument_reports_the_same_error_in_both_file_orders() {
             span.span().range(),
             dotty::core::TextRange::new(start, start + 5).unwrap()
         );
-        for ast in [Some(&units[parent_index].ast), None] {
+        for ast in [Some(units[parent_index].ast()), None] {
             let unlocated = dotty::TypingDiagnostic::from_typer(&error, |_| ast);
             assert_eq!(unlocated.location, None);
             assert_eq!(unlocated.message, diagnostic.message);
@@ -2098,13 +2121,13 @@ fn header_attempt_checks_class_identity_even_for_completed_symbols() {
     let mut headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
     let a = &units[0];
     let b = &units[1];
-    let class = &a.classes[0];
+    let class = &a.classes()[0];
     let before = headers.arena.checkpoint();
     let mut attempt = |symbol, ast| {
         dotty::try_complete_class_header(
             symbol,
             ast,
-            &a.index,
+            a.index(),
             &mut store,
             defs,
             &packages,
@@ -2113,13 +2136,13 @@ fn header_attempt_checks_class_identity_even_for_completed_symbols() {
             |_| false,
         )
     };
-    let error = attempt(class.symbol, &b.ast).unwrap_err();
+    let error = attempt(class.symbol, b.ast()).unwrap_err();
     assert!(
         matches!(error, dotty::typer::TyperError::MalformedSourceAst { source, tree_index, symbol, .. }
-        if source == a.source && tree_index == class.tree.index() && symbol == class.symbol)
+        if source == a.source() && tree_index == class.tree.index() && symbol == class.symbol)
     );
     let method = class.methods().next().unwrap();
-    let error = attempt(method.symbol, &a.ast).unwrap_err();
+    let error = attempt(method.symbol, a.ast()).unwrap_err();
     assert!(
         matches!(error, dotty::typer::TyperError::SymbolSourceKindMismatch { symbol, kind: dotty::core::SymbolKind::Method, .. } if symbol == method.symbol)
     );
@@ -2156,23 +2179,23 @@ fn failed_header_preserves_good_parent_call_for_execution() {
     );
     let mut headers = complete_signatures(&units[..2], &mut store, defs, &packages).unwrap();
     let good = &units[1];
-    let good_parent = good.classes[0].parents[0];
-    let good_root = headers.bindings.get(good.source, good_parent).unwrap();
+    let good_parent = good.classes()[0].parents[0];
+    let good_root = headers.bindings.get(good.source(), good_parent).unwrap();
     let bad = &units[2];
-    let class = &bad.classes[0];
+    let class = &bad.classes()[0];
     bad.typer(&mut store, defs, &packages)
         .complete_symbol(class.constructor)
         .unwrap();
     let parent = class.parents[0];
-    let TreeKind::Apply(call) = &bad.ast.get(parent).kind else {
+    let TreeKind::Apply(call) = &bad.ast().get(parent).kind else {
         panic!("expected Base(start)")
     };
     let argument = call.args[0];
     let before = headers.arena.checkpoint();
     let error = dotty::try_complete_class_header(
         class.symbol,
-        &bad.ast,
-        &bad.index,
+        bad.ast(),
+        bad.index(),
         &mut store,
         defs,
         &packages,
@@ -2192,7 +2215,7 @@ fn failed_header_preserves_good_parent_call_for_execution() {
     else {
         panic!("unexpected error for Bad: {error:?}")
     };
-    assert_eq!(source, bad.source);
+    assert_eq!(source, bad.source());
     assert_eq!(tree_index, parent.index());
     assert_eq!(argument_index, 0);
     assert_eq!((actual, expected), (defs.boolean, defs.int));
@@ -2201,10 +2224,10 @@ fn failed_header_preserves_good_parent_call_for_execution() {
         &dotty::core::SymbolInfo::Missing
     );
     assert_eq!(headers.arena.checkpoint(), before);
-    assert_eq!(headers.bindings.get(bad.source, parent), None);
-    assert_eq!(headers.bindings.get(bad.source, argument), None);
+    assert_eq!(headers.bindings.get(bad.source(), parent), None);
+    assert_eq!(headers.bindings.get(bad.source(), argument), None);
     assert_eq!(
-        headers.bindings.get(good.source, good_parent),
+        headers.bindings.get(good.source(), good_parent),
         Some(good_root)
     );
 
@@ -2232,11 +2255,15 @@ class Second(start: Int) extends Base(start)",
     );
     let mut headers =
         complete_signatures(std::slice::from_ref(&unit), &mut store, defs, &packages).unwrap();
-    let [_, first, second] = unit.classes.as_slice() else {
+    let [_, first, second] = unit.classes() else {
         panic!("expected three classes")
     };
-    let typed_call =
-        |class: &super::SourceClass| headers.bindings.get(unit.source, class.parents[0]).unwrap();
+    let typed_call = |class: &super::SourceClass| {
+        headers
+            .bindings
+            .get(unit.source(), class.parents[0])
+            .unwrap()
+    };
     let first_call = typed_call(first);
     let second_call = typed_call(second);
     let argument = |call| {
@@ -2262,7 +2289,7 @@ class Second(start: Int) extends Base(start)",
     let original = argument(first_call);
     let foreign = argument(second_call);
     assert_ne!(original, foreign);
-    let planner = JvmClassPlanner::new(&store, &unit.ast, &unit.index);
+    let planner = JvmClassPlanner::new(&store, unit.ast(), unit.index());
     let bindings = &headers.bindings;
     planner
         .with_header_bindings(&headers.arena, bindings)
@@ -2273,7 +2300,7 @@ class Second(start: Int) extends Base(start)",
     };
     app.args[0] = foreign;
     assert_eq!(
-        JvmClassPlanner::new(&store, &unit.ast, &unit.index)
+        JvmClassPlanner::new(&store, unit.ast(), unit.index())
             .with_header_bindings(&headers.arena, bindings)
             .plan(first.symbol, []),
         Err(ClassPlanError::InvalidParentApplication {
@@ -2306,11 +2333,11 @@ fn parent_constructor_must_belong_to_its_declaring_source() {
     );
     let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
     let unit = &units[1];
-    let child = &unit.classes[0];
-    let constructor = units[0].classes[0].constructor;
+    let child = &unit.classes()[0];
+    let constructor = units[0].classes()[0].constructor;
     store.symbols.get_mut(constructor).origin = dotty::core::SymbolOrigin::Source(derived);
     assert_eq!(
-        JvmClassPlanner::new(&store, &unit.ast, &unit.index)
+        JvmClassPlanner::new(&store, unit.ast(), unit.index())
             .with_header_bindings(&headers.arena, &headers.bindings)
             .plan(child.symbol, []),
         Err(ClassPlanError::InvalidParentApplication {
@@ -2327,11 +2354,11 @@ fn private_field_initializers_follow_declarations_and_reject_same_type_substitut
     let (mut store, defs, packages, unit) = named(
         "class Pair { private val base: Int = 40; private val answer: Int = base + 2 }\nclass Other { private val base: Int = 1 }",
     );
-    let class = unit.classes[0].symbol;
+    let class = unit.classes()[0].symbol;
     let mut typer = unit.typer(&mut store, defs, &packages);
     let mut roots = Vec::new();
     for field in unit
-        .classes
+        .classes()
         .iter()
         .flat_map(|class| class.fields())
         .map(|d| d.symbol)
@@ -2348,7 +2375,7 @@ fn private_field_initializers_follow_declarations_and_reject_same_type_substitut
         root,
         index: &index,
     };
-    let planner = JvmClassPlanner::new(&store, &unit.ast, &unit.index);
+    let planner = JvmClassPlanner::new(&store, unit.ast(), unit.index());
     let empty_index = dotty::core::SourceTypedIndex::new();
     assert_eq!(
         planner.plan_with_fields(
@@ -2402,11 +2429,23 @@ fn private_fields_encode_mutability_and_keep_per_instance_state_on_jdk21() {
     use dotty::classfile::{ACC_FINAL, ACC_PRIVATE, ClassFile, FieldAccessFlags, Reader};
 
     let (mut store, defs, packages, unit) = named(include_str!("../../Counter.scala"));
-    let mut units = [unit];
+    let units = [unit];
     let headers = complete_signatures(&units, &mut store, defs, &packages).unwrap();
     let (output, bindings) = type_bodies(&units, &mut store, defs, &packages, headers);
-    units[0].classes[0].members.reverse();
-    let classes = class_plans(&units, &bindings, &output, &store).unwrap();
+    let unit = &units[0];
+    let mut view = editable_classes(unit, &store);
+    view[0].members.reverse();
+    let planner = JvmClassPlanner::new(&store, unit.ast(), unit.index())
+        .with_header_bindings(&output.arena, &output.bindings);
+    let classes = vec![
+        planner
+            .plan_typed_class(
+                &view[0],
+                &output.arena,
+                bindings.get(view[0].symbol).unwrap(),
+            )
+            .unwrap(),
+    ];
     let class = classes[0].class;
     let unit = dotty::jvm::JvmCompilationUnit {
         store: &store,
@@ -2455,16 +2494,16 @@ fn field_planning_rejects_a_mutability_mismatch_between_source_and_symbol() {
 
     for (keyword, flags) in [("val", SymbolFlags::MUTABLE), ("var", SymbolFlags::EMPTY)] {
         let (mut store, _, _, unit) = named(&format!("class C {{ private {keyword} n: Int = 1 }}"));
-        let class = &unit.classes[0];
+        let class = &unit.classes()[0];
         let field = class.fields().next().unwrap().symbol;
         store.symbols.get_mut(field).flags = flags;
         let Some(dotty::core::SourceDefinition::Canonical { tree, .. }) =
-            unit.index.definition_of(field)
+            unit.index().definition_of(field)
         else {
             panic!("expected field declaration")
         };
         assert_eq!(
-            JvmClassPlanner::new(&store, &unit.ast, &unit.index).plan_with_fields(
+            JvmClassPlanner::new(&store, unit.ast(), unit.index()).plan_with_fields(
                 class.symbol,
                 [],
                 &dotty::core::AstArena::new(),
@@ -2489,10 +2528,10 @@ fn field_planning_rejects_qualified_and_modified_fields() {
         "private lazy val n: Int = 1",
     ] {
         let (store, _, _, unit) = named(&format!("class C {{ {declaration} }}"));
-        let class = &unit.classes[0];
+        let class = &unit.classes()[0];
         let field = class.fields().next().unwrap().symbol;
         let Some(dotty::core::SourceDefinition::Canonical { tree, .. }) =
-            unit.index.definition_of(field)
+            unit.index().definition_of(field)
         else {
             panic!("expected field declaration")
         };
@@ -2500,7 +2539,7 @@ fn field_planning_rejects_qualified_and_modified_fields() {
             class: class.symbol,
             tree,
         });
-        let planner = JvmClassPlanner::new(&store, &unit.ast, &unit.index);
+        let planner = JvmClassPlanner::new(&store, unit.ast(), unit.index());
         assert_eq!(
             planner.plan_with_fields(class.symbol, [], &dotty::core::AstArena::new(), []),
             expected,
@@ -2518,16 +2557,16 @@ fn waiter_identifies_provider_with_original_bad_call_report() {
     let units = field_signature_units(CONSUMER_OF_SEED, text, false, &mut store, &mut packages);
     let sources = SignatureSources::new(&units, &store);
     super::complete_headers(&sources, &mut store, defs, &packages, &mut |_, _| {}).unwrap();
-    let answer = units[0].classes[0].fields().next().unwrap().symbol;
-    let seed = units[1].classes[0].fields().next().unwrap().symbol;
+    let answer = units[0].classes()[0].fields().next().unwrap().symbol;
+    let seed = units[1].classes()[0].fields().next().unwrap().symbol;
     let mut graph = dotty::SignatureDependencies::new(dotty::SignaturePhase::Members);
     let mut attempt = |file: usize, symbol| {
         let u = &units[file];
         dotty::try_complete_member_signature(
             symbol,
             &sources.declarations,
-            &u.ast,
-            &u.index,
+            u.ast(),
+            u.index(),
             &mut store,
             defs,
             &packages,
@@ -2541,7 +2580,7 @@ fn waiter_identifies_provider_with_original_bad_call_report() {
         [(answer, dotty::SignatureBlockage::Failed(seed))]
     );
     let report = failure
-        .into_call_diagnostic(|id| sources.by_source.get(&id).map(|u| &u.ast))
+        .into_call_diagnostic(|id| sources.by_source.get(&id).map(|u| u.ast()))
         .unwrap();
     assert!(matches!(
         report.error(),
@@ -2554,7 +2593,7 @@ fn waiter_identifies_provider_with_original_bad_call_report() {
     assert_eq!(report.code(), "typer.application_arity_mismatch");
     assert_eq!(report.member(), Some(seed));
     let span = report.location().unwrap();
-    assert_eq!(span.source(), units[1].source);
+    assert_eq!(span.source(), units[1].source());
     let range = span.span().range();
     assert_eq!(
         &text[range.start() as usize..range.end() as usize],

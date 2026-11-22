@@ -121,6 +121,21 @@ impl NamedClassSource {
             .map_err(|e| *e)
     }
 
+    /// File ID used by the typer for the declarations in this view.
+    pub fn source(&self) -> SourceId {
+        self.named.source()
+    }
+
+    /// Original untyped tree arena for this view's class, field and method IDs.
+    pub fn ast(&self) -> &crate::core::AstArena<crate::core::Untyped> {
+        &self.named.syntax.ast
+    }
+
+    /// Semantic bindings corresponding to [`Self::ast`].
+    pub fn index(&self) -> &SourceSemanticIndex {
+        self.named.index()
+    }
+
     /// Original syntax and naming bindings used to build this projection.
     pub fn named(&self) -> &NamedSource {
         &self.named

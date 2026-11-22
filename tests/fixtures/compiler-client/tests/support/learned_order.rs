@@ -4,6 +4,7 @@ use super::{
     Layout, Timings, compile_timed, compile_with_signatures, dependent_sources, inputs, name_units,
     parsing,
 };
+use crate::FixtureMethods;
 use dotty::core::{Definitions, Packages, SemanticStore, SourceId, SymbolInfo, Type};
 use dotty::jvm::GeneratedClass;
 use std::collections::{HashMap, HashSet};
