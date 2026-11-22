@@ -575,17 +575,33 @@ fn binary_contextual_defaults_replay_the_selected_receiver_and_evaluated_argumen
 
 #[test]
 fn binary_contextual_default_preserves_ambiguity_and_rolls_back_binary_loading() {
-    let (parsed, mut store, packages, defs, index, source) = parse_and_name(include_str!(
-        "../../../tests/fixtures/contextual-arguments/BinaryDefaultsAmbiguous.scala"
-    ));
-    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "ambiguous");
+    assert_binary_ambiguity(
+        include_str!("../../../tests/fixtures/contextual-arguments/BinaryDefaultsAmbiguous.scala"),
+        "ambiguous",
+    );
+}
+
+#[test]
+fn ambiguous_evidence_on_an_applied_reader_prevents_the_default() {
+    assert_binary_ambiguity(
+        include_str!("../../../tests/fixtures/contextual-arguments/AppliedPairAmbiguous.scala"),
+        "ambiguous",
+    );
+}
+
+fn assert_binary_ambiguity(text: &str, name: &str) {
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, name);
     let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
         panic!()
     };
     let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
         panic!()
     };
-    let candidates = def.value_param_clauses[1]
+    let candidates = def
+        .value_param_clauses
+        .last()
+        .unwrap()
         .iter()
         .map(|p| index.symbol_at(source, *p).unwrap())
         .collect::<Vec<_>>();
@@ -593,6 +609,7 @@ fn binary_contextual_default_preserves_ambiguity_and_rolls_back_binary_loading()
     let mut typer = SourceTyper::new(&parsed.ast, source, &index, &mut store, defs, &packages)
         .with_resolver(Box::new(resolver));
     let before = typer.store().checkpoint();
+    let trees = typer.typed_arena.checkpoint();
     for _ in 0..2 {
         let error = typer.type_method_definition(tree).unwrap_err();
         assert!(
@@ -601,7 +618,8 @@ fn binary_contextual_default_preserves_ambiguity_and_rolls_back_binary_loading()
             "{error:?}"
         );
         assert_eq!(typer.store().checkpoint(), before);
-        assert!(typer.typed_index.get(source, rhs).is_none());
+        assert_eq!(typer.typed_arena.checkpoint(), trees);
+        assert!(typer.typed_index.is_empty());
     }
 }
 
@@ -819,9 +837,43 @@ const APPLIED_PAIR_CLIENT: &str =
 
 #[test]
 fn explicit_binary_call_selects_pick_on_the_applied_reader() {
-    let (parsed, mut store, packages, defs, index, source) = parse_and_name(APPLIED_PAIR_CLIENT);
+    assert_applied_pair_call(
+        APPLIED_PAIR_CLIENT,
+        "direct",
+        "pick",
+        ApplyKind::Using,
+        None,
+    );
+}
+
+#[test]
+fn binary_pick_uses_the_inferred_or_written_witness_on_an_applied_reader() {
+    assert_applied_pair_call(
+        APPLIED_PAIR_CLIENT,
+        "supplied",
+        "pick",
+        ApplyKind::Regular,
+        Some(0),
+    );
+    assert_applied_pair_call(
+        APPLIED_PAIR_CLIENT,
+        "explicit",
+        "pick",
+        ApplyKind::Using,
+        Some(1),
+    );
+}
+
+fn assert_applied_pair_call(
+    text: &str,
+    name: &str,
+    target: &str,
+    kind: ApplyKind,
+    witness: Option<usize>,
+) {
+    let (parsed, mut store, packages, defs, index, source) = parse_and_name(text);
     let reader = method_symbol(&parsed, &store, &index, source, "reader");
-    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "direct");
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, name);
     let Some(SourceDefinition::Canonical { tree, .. }) = index.definition_of(method) else {
         panic!()
     };
@@ -833,7 +885,7 @@ fn explicit_binary_call_selects_pick_on_the_applied_reader() {
     let TreeKind::Apply(using) = &ast.get(root).kind else {
         panic!("explicit using")
     };
-    assert_eq!(using.kind, ApplyKind::Using);
+    assert_eq!(using.kind, kind);
     assert_eq!(
         typer.store.types.get(ast.get(root).ty).reference_symbol(),
         typer.store.types.get(defs.int).reference_symbol()
@@ -852,8 +904,22 @@ fn explicit_binary_call_selects_pick_on_the_applied_reader() {
             .reference_symbol()
             .unwrap()
     };
+    let [evidence] = using.args.as_slice() else {
+        panic!("one contextual argument")
+    };
+    if let Some(ordinal) = witness {
+        let TreeKind::DefDef(def) = &parsed.ast.get(tree).kind else {
+            panic!()
+        };
+        let symbol = index
+            .symbol_at(source, def.value_param_clauses.last().unwrap()[ordinal])
+            .unwrap();
+        assert_eq!(reference(*evidence), symbol);
+    } else {
+        assert!(matches!(ast.get(*evidence).kind, TreeKind::Literal(_)));
+    }
     let member = typer.store.symbols.get(reference(ordinary.function));
-    assert_eq!(typer.store.names.resolve(member.name.text()), "pick");
+    assert_eq!(typer.store.names.resolve(member.name.text()), target);
     assert!(matches!(member.origin, SymbolOrigin::Tasty(_)));
     let TreeKind::Apply(receiver) = &ast.get(pick.qualifier).kind else {
         panic!("reader()")

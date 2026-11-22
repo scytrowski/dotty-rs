@@ -7,3 +7,5 @@ class AppliedPairClient:
   def left(): Int = 13
   def right(): Int = 29
   def fallback(): Int = reader().pick(left(), right())
+  def supplied(using n: Int): Int = reader().pick(left(), right())
+  def explicit(using a: Int, b: Int): Int = reader().pick(left(), right())(using b)
