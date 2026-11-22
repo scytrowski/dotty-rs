@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::core::{
     AstArena, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex, SymbolId,
     SymbolOrigin, TextRange, TreeKind, Typed, Untyped,
 };
 use crate::jvm_class_plan::TypedClassBodies;
-use crate::parser::SourceCallNames;
+use crate::parser::{ParseResult, SourceCallNames};
 use crate::source_declarations::{DeclarationError, SourceClass};
 
 /// A source definition and the written token to select inside it, in UTF-8 bytes.
@@ -19,10 +19,25 @@ pub struct SourceMethodTarget {
     pub name: TextRange,
 }
 
+#[derive(Debug)]
+enum CallNames {
+    Owned(SourceCallNames),
+    Parsed(Arc<ParseResult>),
+}
+
+impl CallNames {
+    fn tokens(&self) -> &SourceCallNames {
+        match self {
+            Self::Owned(names) => names,
+            Self::Parsed(parse) => &parse.call_names,
+        }
+    }
+}
+
 /// Direct call names and the ranges of their top-level classes in one named source file.
 #[derive(Debug)]
 pub struct SourceFileCalls {
-    names: SourceCallNames,
+    names: CallNames,
     classes: Vec<(TextRange, SymbolId)>,
     targets: HashMap<SymbolId, SourceMethodTarget>,
 }
@@ -38,7 +53,30 @@ impl SourceFileCalls {
         index: &SourceSemanticIndex,
         classes: &[SourceClass],
     ) -> Result<Self, DeclarationError> {
-        let source = names.source();
+        Self::build(CallNames::Owned(names), ast, index, classes)
+    }
+
+    pub(crate) fn from_parse(
+        parse: &Arc<ParseResult>,
+        index: &SourceSemanticIndex,
+        classes: &[SourceClass],
+    ) -> Result<Self, DeclarationError> {
+        Self::build(
+            CallNames::Parsed(Arc::clone(parse)),
+            &parse.ast,
+            index,
+            classes,
+        )
+    }
+
+    fn build(
+        names: CallNames,
+        ast: &AstArena<Untyped>,
+        index: &SourceSemanticIndex,
+        classes: &[SourceClass],
+    ) -> Result<Self, DeclarationError> {
+        let tokens = names.tokens();
+        let source = tokens.source();
         let mut ranges = Vec::with_capacity(classes.len());
         let mut targets = HashMap::new();
         let mut previous_end = 0;
@@ -63,7 +101,7 @@ impl SourceFileCalls {
                 return Err(invalid);
             }
             for method in class.methods() {
-                if let Some(name) = names.method_name(method.tree) {
+                if let Some(name) = tokens.method_name(method.tree) {
                     let tree = method.tree;
                     let invalid = DeclarationError::InvalidBinding { source, tree };
                     if index.definition_of(method.symbol)
@@ -107,7 +145,7 @@ impl SourceFileCalls {
 
     /// The original call names, usable for syntax-only lookup.
     pub fn call_names(&self) -> &SourceCallNames {
-        &self.names
+        self.names.tokens()
     }
 
     fn class_at(&self, offset: u32) -> Option<SymbolId> {
@@ -128,8 +166,8 @@ impl SourceFileCalls {
         store: &SemanticStore,
         check: impl FnOnce(SymbolId) -> Option<&'a crate::ClassBodyCheck>,
     ) -> Option<SymbolId> {
-        let call = self.names.call_at(offset)?;
-        if ast.try_get(call)?.position?.source() != self.names.source() {
+        let call = self.call_names().call_at(offset)?;
+        if ast.try_get(call)?.position?.source() != self.call_names().source() {
             return None;
         }
         let bindings = check(self.class_at(offset)?)?.bindings()?;
@@ -171,7 +209,7 @@ impl SourceFileCalls {
         store: &SemanticStore,
     ) -> Option<SymbolId> {
         let body = bodies.get(self.class_at(offset)?).ok()?;
-        body.selected_method_at(offset, &self.names, ast, typed_ast, store)
+        body.selected_method_at(offset, self.call_names(), ast, typed_ast, store)
     }
 }
 

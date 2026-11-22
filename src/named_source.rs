@@ -6,7 +6,8 @@ use crate::namer::{
 };
 use crate::parser::ParseResult;
 use crate::source_declarations::{DeclarationError, SourceClass, source_classes};
-use crate::{ParsedSource, SyntaxDiagnostic};
+use crate::{ParsedSource, SourceFileCalls, SyntaxDiagnostic};
+use std::sync::{Arc, OnceLock};
 
 /// Typed outcome of a file that could not enter naming successfully.
 #[derive(Debug)]
@@ -77,7 +78,7 @@ impl ParsedSource<SyntaxDiagnostic> {
             packages,
         ) {
             Ok(NamingOutcome::Named { index, diagnostics }) => Ok(NamedSource {
-                syntax,
+                syntax: Arc::new(syntax),
                 index,
                 diagnostics,
             }),
@@ -93,7 +94,7 @@ impl ParsedSource<SyntaxDiagnostic> {
 /// Symbol and name IDs belong to the store used to bind and name this file.
 #[derive(Debug)]
 pub struct NamedSource {
-    syntax: ParseResult,
+    syntax: Arc<ParseResult>,
     index: Box<SourceSemanticIndex>,
     diagnostics: Vec<NamerDiagnostic>,
 }
@@ -103,9 +104,23 @@ pub struct NamedSource {
 pub struct NamedClassSource {
     named: NamedSource,
     classes: Vec<SourceClass>,
+    navigation: OnceLock<Result<SourceFileCalls, DeclarationError>>,
 }
 
 impl NamedClassSource {
+    /// Prepares direct-call navigation on first use and reuses the same index on
+    /// subsequent queries. Shares the original parsed tokens and AST. Signature
+    /// completion and class planning can skip this operation entirely.
+    /// Inconsistent bindings or positions yield [`DeclarationError::InvalidBinding`].
+    pub fn navigation(&self) -> Result<&SourceFileCalls, DeclarationError> {
+        self.navigation
+            .get_or_init(|| {
+                SourceFileCalls::from_parse(&self.named.syntax, self.named.index(), self.classes())
+            })
+            .as_ref()
+            .map_err(|e| *e)
+    }
+
     /// Original syntax and naming bindings used to build this projection.
     pub fn named(&self) -> &NamedSource {
         &self.named
@@ -156,6 +171,7 @@ impl NamedSource {
             Ok(classes) => Ok(NamedClassSource {
                 named: self,
                 classes,
+                navigation: OnceLock::new(),
             }),
             Err(error) => Err(ClassProjectionError {
                 error,
@@ -189,6 +205,34 @@ impl NamedSource {
 mod tests {
     use super::*;
     use crate::core::{Packages, SemanticStore, TreeKind};
+
+    #[test]
+    fn navigation_is_lazy_and_shares_original_overload_name_tokens() {
+        let text = "class A { def take(n: Int): Int = n; def take(b: Boolean): Int = 7 }";
+        let mut store = SemanticStore::new();
+        let unit = crate::parse_source(SourceId::from_index(2), text, Default::default())
+            .unwrap()
+            .bind(&mut store.names)
+            .name("A.scala", &mut store, &mut Packages::new())
+            .unwrap()
+            .into_classes(&store)
+            .unwrap();
+        assert!(unit.navigation.get().is_none());
+        let calls = unit.navigation().unwrap();
+        assert!(std::ptr::eq(calls, unit.navigation().unwrap()));
+        assert!(std::ptr::eq(
+            calls.call_names(),
+            &unit.named().syntax().call_names
+        ));
+        for (m, offset) in unit.classes()[0]
+            .methods()
+            .zip([text.find("take").unwrap(), text.rfind("take").unwrap()])
+        {
+            let span = calls.call_names().method_name(m.tree).unwrap();
+            assert_eq!(span.start() as usize, offset);
+            assert_eq!(span.end() as usize, offset + 4);
+        }
+    }
 
     #[test]
     fn trait_rejection_returns_the_named_file_and_exact_declaration_site() {
