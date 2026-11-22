@@ -33,6 +33,11 @@ parent argument clears after an unsaved edit to the constructor parameter type.
 When no source range is available, it sends the message to the editor log
 and leaves the document free of a marker for that error.
 
+The fixture records header and member dependencies separately. Completion wakes
+direct waiters, and diagnostics for a cycle point to each participating
+declaration. A stdio regression repairs a cross-file inheritance cycle and
+keeps an independent call error in the same document through the edit.
+
 The field-declaration scenario opens `private[Missing] val hidden: Int 1`.
 It checks for one parser report at the literal. Inserting `=` exposes the
 naming report at `Missing`, and removing the qualifier clears the document.

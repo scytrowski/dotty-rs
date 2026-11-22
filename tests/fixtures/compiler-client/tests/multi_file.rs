@@ -367,8 +367,7 @@ enum SignatureError {
     Typing(TyperError),
     Field(dotty::ClassFieldSignatureError),
     Member(dotty::MemberSignatureError),
-    HeaderCycle(Vec<SymbolId>),
-    MemberCycle(Vec<SymbolId>),
+    Cycle(std::sync::Arc<dotty::SignatureCycle>),
 }
 
 impl From<TyperError> for SignatureError {
@@ -403,6 +402,35 @@ impl<'a> SignatureSources<'a> {
     }
 }
 
+// Follow the provider immediately. The facade supplies the exact symbols to retry.
+fn follow_signature(
+    root: SymbolId,
+    phase: dotty::SignaturePhase,
+    first_dependency: Option<SymbolId>,
+    mut attempt: impl FnMut(SymbolId) -> Result<SignatureCompletion, SignatureError>,
+) -> Result<(), SignatureError> {
+    let mut dependencies = dotty::SignatureDependencies::new(phase);
+    let mut ready = vec![root];
+    let mut initial = first_dependency.map(SignatureCompletion::BlockedOn);
+    while let Some(symbol) = ready.pop() {
+        let outcome = match initial.take() {
+            Some(observed) => observed,
+            None => attempt(symbol)?,
+        };
+        ready.extend(dependencies.record(symbol, outcome).into_iter().rev());
+        if let SignatureCompletion::BlockedOn(provider) = outcome {
+            if dependencies.waiting_on(provider).is_some()
+                && let Some((_, dotty::SignatureBlockage::CycleMember(cycle))) =
+                    dependencies.blockages([provider]).pop()
+            {
+                return Err(SignatureError::Cycle(cycle));
+            }
+            ready.push(provider);
+        }
+    }
+    Ok(())
+}
+
 fn complete_headers(
     sources: &SignatureSources,
     store: &mut SemanticStore,
@@ -418,50 +446,37 @@ fn complete_headers(
         }
     }
     let mut headers = TypedHeaders::default();
-    let mut path = Vec::new();
-    let mut active = HashMap::new();
     for (_, root) in named_classes(sources.units) {
         if matches!(store.symbols.info(root.symbol), SymbolInfo::Complete(_)) {
             continue;
         }
-        path.push(root.symbol);
-        active.insert(root.symbol, 0);
-        while let Some(&symbol) = path.last() {
-            let header = sources.declarations.get(symbol).expect("indexed class");
-            let unit = sources.by_source[&header.source];
-            let completion = dotty::try_complete_class_header(
-                symbol,
-                &unit.ast,
-                &unit.index,
-                store,
-                definitions,
-                packages,
-                &mut headers.arena,
-                &mut headers.bindings,
-                |dep| {
-                    sources
-                        .declarations
-                        .get(dep)
-                        .is_some_and(|d| d.kind == SymbolKind::Class)
-                },
-            )?;
-            observe(symbol, completion);
-            match completion {
-                SignatureCompletion::Complete(_) => {
-                    path.pop();
-                    active.remove(&symbol);
-                }
-                SignatureCompletion::BlockedOn(parent) => {
-                    if let Some(&start) = active.get(&parent) {
-                        let mut cycle = path[start..].to_vec();
-                        cycle.push(parent);
-                        return Err(SignatureError::HeaderCycle(cycle));
-                    }
-                    active.insert(parent, path.len());
-                    path.push(parent);
-                }
-            }
-        }
+        follow_signature(
+            root.symbol,
+            dotty::SignaturePhase::Headers,
+            None,
+            |symbol| {
+                let header = sources.declarations.get(symbol).expect("indexed class");
+                let unit = sources.by_source[&header.source];
+                let completion = dotty::try_complete_class_header(
+                    symbol,
+                    &unit.ast,
+                    &unit.index,
+                    store,
+                    definitions,
+                    packages,
+                    &mut headers.arena,
+                    &mut headers.bindings,
+                    |dep| {
+                        sources
+                            .declarations
+                            .get(dep)
+                            .is_some_and(|d| d.kind == SymbolKind::Class)
+                    },
+                )?;
+                observe(symbol, completion);
+                Ok(completion)
+            },
+        )?;
     }
     Ok(headers)
 }
@@ -519,7 +534,8 @@ fn complete_methods_in_order(
         {
             observe(field, SignatureCompletion::BlockedOn(dependency));
             complete_member_path(
-                &[field, dependency],
+                field,
+                Some(dependency),
                 &sources,
                 store,
                 definitions,
@@ -531,7 +547,8 @@ fn complete_methods_in_order(
     for symbol in roots {
         if !matches!(store.symbols.info(symbol), SymbolInfo::Complete(_)) {
             complete_member_path(
-                &[symbol],
+                symbol,
+                None,
                 &sources,
                 store,
                 definitions,
@@ -544,56 +561,35 @@ fn complete_methods_in_order(
 }
 
 fn complete_member_path(
-    path: &[SymbolId],
+    root: SymbolId,
+    first_dependency: Option<SymbolId>,
     sources: &SignatureSources,
     store: &mut SemanticStore,
     definitions: Definitions,
     packages: &Packages,
     observe: &mut impl FnMut(SymbolId, SignatureCompletion),
 ) -> Result<(), SignatureError> {
-    let mut pending = path.to_vec();
-    let mut active: HashMap<_, _> = path.iter().enumerate().map(|(i, &id)| (id, i)).collect();
-    while let Some(&symbol) = pending.last() {
-        let member = sources.declarations.get(symbol).expect("indexed member");
-        let unit = sources.by_source[&member.source];
-        let completion = dotty::try_complete_member_signature(
-            symbol,
-            &sources.declarations,
-            &unit.ast,
-            &unit.index,
-            store,
-            definitions,
-            packages,
-        )
-        .map_err(SignatureError::Member)?;
-        observe(symbol, completion);
-        match completion {
-            SignatureCompletion::Complete(_) => {
-                pending.pop();
-                active.remove(&symbol);
-            }
-            SignatureCompletion::BlockedOn(dependency) => {
-                if let Some(start) = active.insert(dependency, pending.len()) {
-                    let cycle = &pending[start..];
-                    if cycle.iter().any(|&id| {
-                        sources
-                            .declarations
-                            .get(id)
-                            .is_some_and(|d| d.kind == SymbolKind::Field)
-                    }) {
-                        let mut path = cycle.to_vec();
-                        path.push(dependency);
-                        return Err(SignatureError::MemberCycle(path));
-                    }
-                    return Err(
-                        TyperError::RecursiveInferredMethodResult { symbol: dependency }.into(),
-                    );
-                }
-                pending.push(dependency);
-            }
-        }
-    }
-    Ok(())
+    follow_signature(
+        root,
+        dotty::SignaturePhase::Members,
+        first_dependency,
+        |symbol| {
+            let member = sources.declarations.get(symbol).expect("indexed member");
+            let unit = sources.by_source[&member.source];
+            let completion = dotty::try_complete_member_signature(
+                symbol,
+                &sources.declarations,
+                &unit.ast,
+                &unit.index,
+                store,
+                definitions,
+                packages,
+            )
+            .map_err(SignatureError::Member)?;
+            observe(symbol, completion);
+            Ok(completion)
+        },
+    )
 }
 
 fn with_plan<R>(
@@ -1313,7 +1309,8 @@ fn cross_file_call_failures_survive_retries_and_leave_the_provider_executable() 
         for unit in &units {
             for member in unit.method_symbols() {
                 let result = complete_member_path(
-                    &[member],
+                    member,
+                    None,
                     &sources,
                     &mut store,
                     defs,
@@ -1442,7 +1439,7 @@ fn cross_file_inference_cycle_reports_the_reentered_method_and_rolls_back() {
             )
             .unwrap_err();
             assert!(
-                matches!(error, SignatureError::Typing(TyperError::RecursiveInferredMethodResult { symbol }) if symbol == units[first].method_symbol()),
+                matches!(error, SignatureError::Cycle(ref cycle) if cycle.path() == [units[first].method_symbol(), units[1-first].method_symbol(), units[first].method_symbol()]),
                 "{error:?}"
             );
             for unit in &units {
