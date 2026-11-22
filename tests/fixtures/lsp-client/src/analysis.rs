@@ -4,15 +4,16 @@ use std::sync::Arc;
 
 use dotty::core::{
     AstArena, Definitions, DiagnosticSeverity, DocumentText, NoResolver, Packages, SemanticStore,
-    SourceId, SourceSemanticIndex, SourceSpan, SymbolId, TextRange, Typed, Untyped,
+    SourceId, SourceSpan, SymbolId, TextRange, Typed,
 };
 use dotty::jvm_class_plan::ClassHeaderBindings;
-use dotty::namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
-use dotty::source_declarations::{ClassMember, SourceClass, source_classes};
+use dotty::namer::{NamerDiagnostic, NamerError};
+use dotty::source_declarations::{ClassMember, DeclarationError};
 use dotty::typer::{SignatureCompletion, SourceTyper, TyperDiagnostic, TyperError};
 use dotty::{
-    CallDiagnostic, ClassBodyError, SignatureBlockage, SignatureCycle, SignatureDependencies,
-    SignaturePhase, SourceDeclarationIndex, SourceDiagnostic, SourceFileCalls, SyntaxDiagnostic,
+    CallDiagnostic, ClassBodyError, NameSourceError, NamedClassSource, SignatureBlockage,
+    SignatureCycle, SignatureDependencies, SignaturePhase, SourceDeclarationIndex,
+    SourceDiagnostic, SyntaxDiagnostic,
 };
 
 #[derive(Clone)]
@@ -25,6 +26,13 @@ pub type Documents = BTreeMap<String, Document>;
 
 pub enum Problem {
     Call(CallDiagnostic),
+    Scan(dotty::lexer::RawLexerError),
+    Naming(NamerDiagnostic),
+    NamerFailure(NamerError),
+    Declaration {
+        error: DeclarationError,
+        location: Option<SourceSpan>,
+    },
     Cycle {
         cycle: Arc<SignatureCycle>,
         location: Option<SourceSpan>,
@@ -90,14 +98,6 @@ impl FileResult {
     }
 }
 
-struct Unit {
-    source: SourceId,
-    ast: AstArena<Untyped>,
-    index: SourceSemanticIndex,
-    classes: Vec<SourceClass>,
-    calls: SourceFileCalls,
-}
-
 fn name(
     text: &str,
     source: SourceId,
@@ -105,52 +105,40 @@ fn name(
     store: &mut SemanticStore,
     packages: &mut Packages,
     result: &mut FileResult,
-) -> Option<Unit> {
+) -> Option<NamedClassSource> {
     let parsed = dotty::parse_source(source, text, Default::default())
-        .map_err(|e| result.error(None, e.to_string()))
+        .map_err(|error| result.problems.push(Problem::Scan(error)))
         .ok()?
         .bind(&mut store.names);
-    if !parsed.diagnostics.is_empty() {
-        result.syntax_diagnostics = parsed.diagnostics;
-        return None;
-    }
-    let parsed = parsed.syntax;
-    let named = name_compilation_unit_with_diagnostics(
-        &parsed.ast,
-        parsed.root,
-        source,
-        filename,
-        SourceParseStatus::Clean,
-        store,
-        packages,
-    );
-    let (index, diagnostics) = match named {
-        Ok(NamingOutcome::Named { index, diagnostics }) => (Some(index), diagnostics),
-        Ok(NamingOutcome::Rejected { diagnostics }) => (None, diagnostics),
-        Err(error) => {
-            result.error(None, error.to_string());
+    let named = match parsed.name(filename, store, packages) {
+        Ok(named) => named,
+        Err(NameSourceError::Syntax(recovered)) => {
+            result.syntax_diagnostics = recovered.diagnostics;
+            return None;
+        }
+        Err(NameSourceError::Rejected(issues)) => {
+            result
+                .problems
+                .extend(issues.into_iter().map(Problem::Naming));
+            return None;
+        }
+        Err(NameSourceError::Namer { error, .. }) => {
+            result.problems.push(Problem::NamerFailure(error));
             return None;
         }
     };
-    result.problems.extend(
-        diagnostics
-            .iter()
-            .map(|d| SourceDiagnostic::from_namer(d).into()),
-    );
-    let index = *index?;
-    let classes = source_classes(&parsed.ast, parsed.root, source, &index, store)
-        .map_err(|e| result.error(None, e.to_string()))
-        .ok()?;
-    let calls = SourceFileCalls::new(parsed.call_names, &parsed.ast, &index, &classes)
-        .map_err(|e| result.error(None, e.to_string()))
-        .ok()?;
-    Some(Unit {
-        source,
-        ast: parsed.ast,
-        index,
-        classes,
-        calls,
-    })
+    result
+        .problems
+        .extend(named.diagnostics().iter().cloned().map(Problem::Naming));
+    named
+        .into_classes(store)
+        .map_err(|failure| {
+            result.problems.push(Problem::Declaration {
+                error: failure.error,
+                location: failure.error.location(&failure.named.syntax().ast),
+            });
+        })
+        .ok()
 }
 
 // Seed every eligible declaration once. Subsequent attempts come from completed providers.
@@ -233,23 +221,24 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
             units.insert(i, unit);
         }
     }
-    let declarations =
-        match SourceDeclarationIndex::from_classes(&store, units.values().flat_map(|u| &u.classes))
-        {
-            Ok(d) => d,
-            Err(e) => {
-                for f in &mut results {
-                    f.error(None, e.to_string());
-                }
-                return uris.into_iter().zip(results).collect();
+    let declarations = match SourceDeclarationIndex::from_classes(
+        &store,
+        units.values().flat_map(NamedClassSource::classes),
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            for f in &mut results {
+                f.error(None, e.to_string());
             }
-        };
+            return uris.into_iter().zip(results).collect();
+        }
+    };
     let mut arena = AstArena::<Typed>::new();
     let mut bindings = ClassHeaderBindings::default();
     let mut unavailable = HashSet::new();
     let mut classes = Vec::new();
     let mut headers = SignatureDependencies::new(SignaturePhase::Headers);
-    let ast_for = |id: SourceId| units.get(&(id.index() as usize)).map(|unit| &unit.ast);
+    let ast_for = |id: SourceId| units.get(&(id.index() as usize)).map(|unit| unit.ast());
     let typer_problem = |file, error: TyperError| {
         call_problem(
             file,
@@ -258,8 +247,9 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
         )
     };
     for (&i, u) in &units {
-        let mut typer = SourceTyper::new(&u.ast, u.source, &u.index, &mut store, defs, &packages);
-        for c in &u.classes {
+        let mut typer =
+            SourceTyper::new(u.ast(), u.source(), u.index(), &mut store, defs, &packages);
+        for c in u.classes() {
             match typer.complete_symbol(c.constructor) {
                 Ok(_) => classes.push((i, c.symbol)),
                 Err(e) => {
@@ -278,8 +268,8 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
             let u = &units[&i];
             dotty::try_complete_class_header(
                 symbol,
-                &u.ast,
-                &u.index,
+                u.ast(),
+                u.index(),
                 &mut store,
                 defs,
                 &packages,
@@ -303,7 +293,7 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
     report_blockages(&headers, &classes, &declarations, &store, &mut results);
     let mut members = Vec::new();
     for (&i, u) in &units {
-        for c in &u.classes {
+        for c in u.classes() {
             if unavailable.contains(&c.symbol) {
                 continue;
             }
@@ -325,8 +315,8 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
             dotty::try_complete_member_signature(
                 s,
                 &declarations,
-                &u.ast,
-                &u.index,
+                u.ast(),
+                u.index(),
                 &mut store,
                 defs,
                 &packages,
@@ -347,12 +337,19 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
     report_blockages(&signatures, &members, &declarations, &store, &mut results);
     let mut checks = HashMap::new();
     for (&i, u) in &units {
-        for c in &u.classes {
+        for c in u.classes() {
             if unavailable.contains(&c.symbol) {
                 continue;
             }
             let mut check = dotty::check_class_body(
-                c, &u.ast, &u.index, &mut store, defs, &packages, &mut arena, NoResolver,
+                c,
+                u.ast(),
+                u.index(),
+                &mut store,
+                defs,
+                &packages,
+                &mut arena,
+                NoResolver,
             );
             for (source, diagnostic) in check.diagnostics.drain(..) {
                 results[source.index() as usize]
@@ -387,14 +384,28 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
         }
     }
     for (&i, u) in &units {
-        for (origin, _) in u.calls.call_names().iter() {
-            if let Some(t) = u.calls.definition_at(
+        let calls = match u.navigation() {
+            Ok(calls) => calls,
+            Err(error) => {
+                results[i].problems.push(Problem::Declaration {
+                    error,
+                    location: error.location(u.ast()),
+                });
+                continue;
+            }
+        };
+        for (origin, _) in calls.call_names().iter() {
+            if let Some(t) = calls.definition_at(
                 origin.start(),
-                &u.ast,
+                u.ast(),
                 &arena,
                 &store,
                 |s| checks.get(&s),
-                |id| units.get(&(id.index() as usize)).map(|x| &x.calls),
+                |id| {
+                    units
+                        .get(&(id.index() as usize))
+                        .and_then(|x| x.navigation().ok())
+                },
             ) {
                 results[i].links.push(Link {
                     origin,
@@ -411,6 +422,47 @@ pub fn analyze(docs: &Documents) -> BTreeMap<String, FileResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn naming_and_projection_rejections_remain_typed_until_publication() {
+        let files = [
+            ("A.scala", "class A { private[Missing] val x = 1 }"),
+            ("T.scala", "/* 😀 */ trait T"),
+        ]
+        .into_iter()
+        .map(|(uri, text)| {
+            (
+                uri.to_owned(),
+                Document {
+                    version: 1,
+                    text: Arc::new(DocumentText::new(text.into()).unwrap()),
+                },
+            )
+        })
+        .collect();
+        let results = analyze(&files);
+        let [Problem::Naming(d)] = results["A.scala"].problems.as_slice() else {
+            panic!("expected a namer diagnostic")
+        };
+        assert!(
+            matches!(d.issue(),dotty::namer::NamerIssue::InvalidVisibilityQualifier {qualifier,..} if qualifier == "Missing")
+        );
+        let [
+            Problem::Declaration {
+                error: DeclarationError::Unsupported { source, .. },
+                location: Some(span),
+            },
+        ] = results["T.scala"].problems.as_slice()
+        else {
+            panic!("expected a located projection failure")
+        };
+        assert_eq!(*source, span.source());
+        let range = span.span().range();
+        assert_eq!(
+            &files["T.scala"].text.as_str()[range.start() as usize..range.end() as usize],
+            "trait T"
+        );
+    }
 
     #[test]
     fn downstream_fields_share_the_provider_cause_while_siblings_are_checked() {

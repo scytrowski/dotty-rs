@@ -146,6 +146,31 @@ impl Workspace {
                     let report = match problem {
                         Problem::Reported(report) => report,
                         Problem::Call(call) => &call.render(),
+                        Problem::Naming(d) => &SourceDiagnostic::from_namer(d),
+                        Problem::Scan(error) => &unlocated_error(error),
+                        Problem::NamerFailure(error) => &unlocated_error(error),
+                        Problem::Declaration { error, location } => {
+                            let (code, message) = match error {
+                                dotty::source_declarations::DeclarationError::Unsupported {
+                                    ..
+                                } => (
+                                    "declaration.unsupported",
+                                    "Unsupported declaration in the ordinary-class view",
+                                ),
+                                dotty::source_declarations::DeclarationError::InvalidBinding {
+                                    ..
+                                } => (
+                                    "declaration.invalid_binding",
+                                    "Inconsistent source declaration binding",
+                                ),
+                            };
+                            &SourceDiagnostic {
+                                code: Some(code),
+                                message: message.into(),
+                                location: *location,
+                                severity: DiagnosticSeverity::Error,
+                            }
+                        }
                         Problem::Cycle { cycle, location } => &SourceDiagnostic {
                             code: Some(cycle.code()),
                             location: *location,
@@ -174,6 +199,15 @@ impl Workspace {
             }
         }
         Ok(())
+    }
+}
+
+fn unlocated_error(error: &dyn Error) -> SourceDiagnostic {
+    SourceDiagnostic {
+        code: None,
+        location: None,
+        severity: DiagnosticSeverity::Error,
+        message: error.to_string(),
     }
 }
 
